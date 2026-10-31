@@ -6,6 +6,36 @@ open Bap
 
 private def reg (name : String) : Var := ⟨name, .imm 64, 0, false⟩
 
+/-- The configuration that the tests run under. All that they check of an emulator holds under each. -/
+private initialize tuningRef : IO.Ref (Option (Nat × Nat × Nat)) ← IO.mkRef none
+
+/-- The change to a configuration that makes it the one the tests run under. -/
+private def tuned : IO (Bap.Emu.Config → Bap.Emu.Config) := do
+  match ← tuningRef.get with
+  | none => pure id
+  | some (hotThreshold, cacheLimit, rangeLimit) =>
+    pure fun config => { config with hotThreshold, cacheLimit, rangeLimit }
+
+/-- Whether the tests run on the machine with neither ranges nor an interpreted start, whose counters some of them look at. -/
+private initialize stepwise : IO.Ref Bool ← IO.mkRef false
+
+namespace Tuned
+
+def riscv64 (code : ByteArray) (base entry : Nat) : IO Bap.Emu.Emu := do Bap.Emu.riscv64 code base entry (adjust := ← tuned)
+def riscv32 (code : ByteArray) (base entry : Nat) : IO Bap.Emu.Emu := do Bap.Emu.riscv32 code base entry (adjust := ← tuned)
+def x86_64 (code : ByteArray) (base entry : Nat) : IO Bap.Emu.Emu := do Bap.Emu.x86_64 code base entry (adjust := ← tuned)
+def aarch64 (code : ByteArray) (base entry : Nat) : IO Bap.Emu.Emu := do Bap.Emu.aarch64 code base entry (adjust := ← tuned)
+def mips64 (code : ByteArray) (base entry : Nat) (release6 : Bool := false) : IO Bap.Emu.Emu := do
+  Bap.Emu.mips64 code base entry release6 (adjust := ← tuned)
+def mips32 (code : ByteArray) (base entry : Nat) (release6 : Bool := false) : IO Bap.Emu.Emu := do
+  Bap.Emu.mips32 code base entry release6 (adjust := ← tuned)
+
+end Tuned
+
+/-- What a test says about the counters of the engine, which depend on how it is tuned. -/
+private def onStepwise (check : IO Unit) : IO Unit := do
+  if ← stepwise.get then check
+
 private def shellStreams (commands : List String) : IO (IO.FS.Stream × IO.FS.Stream × IO.Ref String) := do
   let lines ← IO.mkRef commands
   let text ← IO.mkRef ""
@@ -35,7 +65,7 @@ private def shellStreams (commands : List String) : IO (IO.FS.Stream × IO.FS.St
 private def testDiff : IO Unit := do
   let code := (← LLVM.assemble "riscv64" "addi a0, a0, 1") ++
     (← LLVM.assemble "riscv64" "addi a0, a0, 1")
-  let emu ← Bap.Emu.riscv64 code 0 0
+  let emu ← Tuned.riscv64 code 0 0
   let saved ← Bap.Emu.snapshot emu
   Bap.Emu.save emu "native/build/emu-diff.sexp"
   Bap.Emu.write emu 0 (ByteArray.mk #[0, 0])
@@ -59,7 +89,7 @@ private def testDiff : IO Unit := do
 private def testLiveProject : IO Unit := do
   let original := (← LLVM.assemble "riscv64" "addi a0, a0, 1") ++
     (← LLVM.assemble "riscv64" "addi a0, a0, 1")
-  let emu ← Bap.Emu.riscv64 original 0 0
+  let emu ← Tuned.riscv64 original 0 0
   Bap.Emu.map emu ⟨0x1000, ByteArray.mk #[1, 2, 3, 4], ⟨true, false, false⟩⟩
   let patched ← LLVM.assemble "riscv64" "addi a0, a0, 2"
   Bap.Emu.write emu 0 patched
@@ -76,7 +106,13 @@ private def testLiveProject : IO Unit := do
     | some insn => assertTrue "Emu live project decodes patched instruction" ((insn.asm.splitOn "2").length > 1)
     | none => throw <| IO.userError "Emu live project lost patched instruction"
   | _, _ => throw <| IO.userError "Emu live project is incomplete"
-  match Bap.Plugin.analyze Bap.Plugin.defaultRegistry project with
+  let summarize : Bap.Project.Pass := {
+    name := "summarize"
+    run := fun project =>
+      let instructions := project.disasm.map (fun disasm => disasm.instructions.length) |>.getD 0
+      .ok (project.set "instructions" (toString instructions) |>.set "status" "analyzed")
+  }
+  match Bap.Project.runPasses [summarize] project with
   | .error error => throw <| IO.userError s!"live project analysis failed: {repr error}"
   | .ok analyzed =>
     assertEqual "Emu live project analysis instruction count" (some "2") (analyzed.get "instructions")
@@ -107,7 +143,7 @@ private def testDelaySlots : IO Unit := do
   assertEqual "Emu MIPS delay slot assembly" "addiu $4, $4, 0x1" slotInsn.asm
   let targetInsn ← Target.LLVMLift.decodeMIPS 0 12 code
   assertEqual "Emu MIPS branch target assembly" "addiu $5, $5, 0x1" targetInsn.asm
-  let emu ← Bap.Emu.mips64 code 0 0
+  let emu ← Tuned.mips64 code 0 0
   Bap.Emu.setReg emu r2 (.bits (BitVec.ofNat 64 1))
   Bap.Emu.setReg emu r3 (.bits (BitVec.ofNat 64 1))
   Bap.Emu.setReg emu r4 (.bits (BitVec.ofNat 64 0))
@@ -144,7 +180,7 @@ private def testDelaySlots : IO Unit := do
     (← LLVM.assemble "mips64" "addiu $4, $4, 1") ++
     (← LLVM.assemble "mips64" "addiu $4, $4, 100") ++
     (← LLVM.assemble "mips64" "addiu $5, $5, 1")
-  let likelyEmu ← Bap.Emu.mips64 likelyCode 0 0
+  let likelyEmu ← Tuned.mips64 likelyCode 0 0
   Bap.Emu.setReg likelyEmu r2 (.bits (BitVec.ofNat 64 1))
   Bap.Emu.setReg likelyEmu r3 (.bits (BitVec.ofNat 64 2))
   Bap.Emu.setReg likelyEmu r4 (.bits (BitVec.ofNat 64 0))
@@ -192,7 +228,7 @@ private def testThreads : IO Unit := do
   let code := (← LLVM.assemble "riscv64" "addi a0, a0, 1") ++
     (← LLVM.assemble "riscv64" "sw a0, 0(a1)") ++
     (← LLVM.assemble "riscv64" "addi a0, a0, 1")
-  let emu ← Bap.Emu.riscv64 code 0 0
+  let emu ← Tuned.riscv64 code 0 0
   Bap.Emu.map emu ⟨0x1000, ByteArray.mk (List.replicate 4 0).toArray, ⟨true, true, false⟩⟩
   let output := reg "X10"
   let pointer := reg "X11"
@@ -260,7 +296,7 @@ private def testThreads : IO Unit := do
   let third ← Bap.Emu.spawnThread emu 0 7
   assertEqual "Emu checkpoint preserves next thread ID" 3 third
   let parallelCode := (← LLVM.assemble "riscv64" "addi a0, a0, 1") ++ (← LLVM.assemble "riscv64" "jal 0")
-  let parallelEmu ← Bap.Emu.riscv64 parallelCode 0 0
+  let parallelEmu ← Tuned.riscv64 parallelCode 0 0
   Bap.Emu.setReg parallelEmu output (.bits (BitVec.ofNat 64 0))
   let parallelSecond ← Bap.Emu.spawnThread parallelEmu 0 10
   let parallelSteps ← Bap.Emu.runPreemptiveParallel parallelEmu 1
@@ -269,7 +305,7 @@ private def testThreads : IO Unit := do
     (.ok (← Bap.Emu.threadReg parallelEmu 1 output))
   assertBits "Emu parallel scheduler preserves second thread" (BitVec.ofNat 64 11)
     (.ok (← Bap.Emu.threadReg parallelEmu parallelSecond output))
-  let contextEmu ← Bap.Emu.riscv64 parallelCode 0 0
+  let contextEmu ← Tuned.riscv64 parallelCode 0 0
   Bap.Emu.setReg contextEmu output (.bits (BitVec.ofNat 64 0))
   let contextSecond ← Bap.Emu.spawnThread contextEmu 0 10
   let contextEvents ← IO.mkRef []
@@ -284,7 +320,7 @@ private def testThreads : IO Unit := do
   assertEqual "Emu context hooks observe the active worker" [(1, 1), (contextSecond, 11)] sortedEvents
   assertTrue "Emu context hooks stop each active worker"
     ((← Bap.Emu.threads contextEmu).all fun thread => thread.stopped)
-  let syscallContextEmu ← Bap.Emu.riscv64 ((← LLVM.assemble "riscv64" "addi a0, a0, 1") ++
+  let syscallContextEmu ← Tuned.riscv64 ((← LLVM.assemble "riscv64" "addi a0, a0, 1") ++
     (← LLVM.assemble "riscv64" "ecall")) 0 0
   Bap.Emu.setReg syscallContextEmu output (.bits (BitVec.ofNat 64 0))
   Bap.Emu.setReg syscallContextEmu (reg "X17") (.bits (BitVec.ofNat 64 39))
@@ -307,7 +343,7 @@ private def testThreads : IO Unit := do
     ((← Bap.Emu.threads syscallContextEmu).all fun thread => thread.stopped)
   let parallelMemoryCode := (← LLVM.assemble "riscv64" "addi a0, a0, 1") ++
     (← LLVM.assemble "riscv64" "sw a0, 0(a1)") ++ (← LLVM.assemble "riscv64" "jal 0")
-  let parallelMemoryEmu ← Bap.Emu.riscv64 parallelMemoryCode 0 0
+  let parallelMemoryEmu ← Tuned.riscv64 parallelMemoryCode 0 0
   Bap.Emu.map parallelMemoryEmu ⟨0x1000, ByteArray.mk (List.replicate 8 0).toArray, ⟨true, true, false⟩⟩
   Bap.Emu.setReg parallelMemoryEmu output (.bits (BitVec.ofNat 64 0))
   Bap.Emu.setReg parallelMemoryEmu pointer (.bits (BitVec.ofNat 64 0x1000))
@@ -414,7 +450,7 @@ private def regionAudit : IO Unit := do
   assertBits "Emu runs execute-only code" (BitVec.ofNat 64 1) (.ok (← Bap.Emu.reg executeOnly a0))
   expectThrow "Emu execute-only memory is not readable" (Bap.Emu.read executeOnly 0 4)
   -- Protection applies to the requested bytes only.
-  let emu ← Bap.Emu.riscv64 code 0 0
+  let emu ← Tuned.riscv64 code 0 0
   Bap.Emu.map emu ⟨0x1000, zeros 0x30, rw⟩
   Bap.Emu.map emu ⟨0x1030, zeros 0x10, rw⟩
   Bap.Emu.write emu 0x1014 (ByteArray.mk #[7])
@@ -427,7 +463,7 @@ private def regionAudit : IO Unit := do
   expectThrow "Emu protect crosses adjacent regions" (Bap.Emu.write emu 0x1030 (ByteArray.mk #[1]))
   expectThrow "Emu protect refuses an unmapped range" (Bap.Emu.protect emu 0x1038 0x10 ro)
   -- Regions stay inside the address space.
-  let narrow ← Bap.Emu.riscv32 code 0 0
+  let narrow ← Tuned.riscv32 code 0 0
   expectThrow "Emu map refuses a region past the address space" (Bap.Emu.map narrow ⟨2 ^ 32 - 2, zeros 4, rw⟩)
   Bap.Emu.map narrow ⟨2 ^ 32 - 4, zeros 4, rw⟩
   -- An overlay replaces a region and nothing else.
@@ -435,7 +471,7 @@ private def regionAudit : IO Unit := do
   Bap.Emu.overlay emu ⟨0x1030, ByteArray.mk (List.replicate 8 9).toArray, rw⟩
   -- Accesses that straddle a watched range are seen.
   let store ← LLVM.assemble "riscv64" "sw a1, 0(a0)"
-  let watching ← Bap.Emu.riscv64 store 0 0
+  let watching ← Tuned.riscv64 store 0 0
   let wide := BitVec.ofNat 64 0x2000
   Bap.Emu.map watching ⟨0x2000, zeros 8, rw⟩
   Bap.Emu.setReg watching a0 (.bits wide)
@@ -445,7 +481,7 @@ private def regionAudit : IO Unit := do
   let _ ← Bap.Emu.step watching
   assertEqual "Emu write hook sees an access straddling its range" 1 (← hits.get)
   -- A failed step leaves forked processes their memory.
-  let forked ← Bap.Emu.riscv64 store 0 0
+  let forked ← Tuned.riscv64 store 0 0
   Bap.Emu.setReg forked a0 (.bits (BitVec.ofNat 64 0x9000))
   Bap.Emu.setReg forked ⟨"X11", .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 1))
   let child ← Bap.Emu.forkThread forked 0
@@ -453,7 +489,7 @@ private def regionAudit : IO Unit := do
   expectThrow "Emu faulting store fails" (Bap.Emu.step forked)
   assertEqual "Emu fault keeps forked process memory" 1 (← forked.processMemory.get).size
   -- A call does not disturb a pending delay slot.
-  let calling ← Bap.Emu.riscv64 ((← LLVM.assemble "riscv64" "addi a0, a0, 1") ++ (← LLVM.assemble "riscv64" "ret")) 0 0
+  let calling ← Tuned.riscv64 ((← LLVM.assemble "riscv64" "addi a0, a0, 1") ++ (← LLVM.assemble "riscv64" "ret")) 0 0
   Bap.Emu.setReg calling a0 (.bits (BitVec.ofNat 64 0))
   calling.pendingRef.set (some ⟨0x40, 0x44⟩)
   calling.skipCode.set (some 0x48)
@@ -462,7 +498,7 @@ private def regionAudit : IO Unit := do
   assertEqual "Emu call preserves a skipped hook" (some 0x48) (← calling.skipCode.get)
   -- A failing parallel worker rolls the round back only after every worker has finished.
   let spinning ← LLVM.assemble "riscv64" "addi a0, a0, 1"
-  let failing ← Bap.Emu.riscv64 spinning 0 0
+  let failing ← Tuned.riscv64 spinning 0 0
   Bap.Emu.setReg failing a0 (.bits (BitVec.ofNat 64 0))
   let _ ← Bap.Emu.spawnThread failing 0x7000 0
   expectThrow "Emu parallel round reports a worker failure" (Bap.Emu.runPreemptiveParallel failing 1)
@@ -508,7 +544,7 @@ private def coreRegressions : IO Unit := do
   -- A special nobody serves in a slot is a precise exception (advance_unhandled).
   let slotCall := (ByteArray.mk #[0x10, 0x43, 0x00, 0x02]) ++ (← LLVM.assemble "mips64" "syscall") ++
     (← LLVM.assemble "mips64" "addiu $4, $4, 100") ++ (← LLVM.assemble "mips64" "addiu $5, $5, 1")
-  let slotEmu ← Bap.Emu.mips64 slotCall 0 0
+  let slotEmu ← Tuned.mips64 slotCall 0 0
   for name in ["R2", "R3"] do Bap.Emu.setReg slotEmu (reg name) (bits 1)
   for name in ["R4", "R5", "R6", "R7", "R8", "R9"] do Bap.Emu.setReg slotEmu (reg name) (bits 0)
   let _ ← Bap.Emu.run slotEmu 5
@@ -518,21 +554,21 @@ private def coreRegressions : IO Unit := do
   let _ ← Bap.Emu.run slotEmu 1
   assertEqual "Emu served slot special completes the branch" 12 (← Bap.Emu.pc slotEmu)
   -- Faults name the thread that took them.
-  let faulting ← Bap.Emu.riscv64 (← rv "lw a0, 0(a1)") 0 0
+  let faulting ← Tuned.riscv64 (← rv "lw a0, 0(a1)") 0 0
   Bap.Emu.setReg faulting a1 (bits 0x9000)
   let second ← Bap.Emu.spawnThread faulting 0 0
   Bap.Emu.switchThread faulting second
   expectThrow "Emu second thread faults" (Bap.Emu.step faulting)
   assertEqual "Emu fault names its thread" (some second) ((← Bap.Emu.failure faulting).map (·.thread))
   -- A hook that moves the pc keeps the instruction from running (afterHooks_redirect).
-  let moving ← Bap.Emu.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "addi a0, a0, 2") ++ (← rv "addi a0, a0, 4")) 0 0
+  let moving ← Tuned.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "addi a0, a0, 2") ++ (← rv "addi a0, a0, 4")) 0 0
   Bap.Emu.setReg moving a0 (bits 0)
   let _ ← Bap.Emu.onCodeWith moving (0, 0) fun current _ => Bap.Emu.setPc current 8
   let _ ← Bap.Emu.run moving 2
   assertEqual "Emu hook redirect reaches the new pc" 12 (← Bap.Emu.pc moving)
   assertBits "Emu hook redirect skips the instruction" (BitVec.ofNat 64 4) (.ok (← Bap.Emu.reg moving a0))
   -- So does a syscall hook that moves the pc (commit_redirect).
-  let longjmp ← Bap.Emu.riscv64 ((← rv "ecall") ++ (← rv "addi a0, a0, 2") ++ (← rv "addi a0, a0, 4")) 0 0
+  let longjmp ← Tuned.riscv64 ((← rv "ecall") ++ (← rv "addi a0, a0, 2") ++ (← rv "addi a0, a0, 4")) 0 0
   Bap.Emu.setReg longjmp a0 (bits 0)
   (List.range 6).forM fun index => Bap.Emu.setReg longjmp (reg s!"X{11 + index}") (bits 0)
   Bap.Emu.setReg longjmp (reg "X17") (bits 1)
@@ -542,7 +578,7 @@ private def coreRegressions : IO Unit := do
   let _ ← Bap.Emu.run longjmp 1
   assertEqual "Emu handler moves the pc" 8 (← Bap.Emu.pc longjmp)
   -- A thread that a hook creates during a parallel round survives it (mergeRound_new_thread).
-  let spawning ← Bap.Emu.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "jal 0")) 0 0
+  let spawning ← Tuned.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "jal 0")) 0 0
   Bap.Emu.setReg spawning a0 (bits 0)
   let _ ← Bap.Emu.spawnThread spawning 0 0
   let spawned ← IO.mkRef false
@@ -554,7 +590,7 @@ private def coreRegressions : IO Unit := do
   assertEqual "Emu parallel round keeps a thread a hook spawned" [1, 2, 3] ((← Bap.Emu.threads spawning).map (·.id))
   -- Sequentially scheduled forks have memories of their own (SpaceMachine.isolation).
   let store := (← rv "addi a0, a0, 1") ++ (← rv "sb a0, 0(a1)") ++ (← rv "jal -8")
-  let forking ← Bap.Emu.riscv64 store 0 0
+  let forking ← Tuned.riscv64 store 0 0
   Bap.Emu.map forking ⟨0x1000, zeros 8, rw⟩
   Bap.Emu.setReg forking a0 (bits 0)
   Bap.Emu.setReg forking a1 (bits 0x1000)
@@ -574,7 +610,7 @@ private def coreRegressions : IO Unit := do
   Bap.Emu.switchThread forking 1
   assertEqual "Emu preemption stores to the parent's memory" 2 (← Bap.Emu.read forking 0x1000 1)[0]!.toNat
   -- The state of a thread of the shared address space follows it, also behind a process (parkShared).
-  let sharing ← Bap.Emu.riscv64 store 0 0
+  let sharing ← Tuned.riscv64 store 0 0
   Bap.Emu.map sharing ⟨0x1000, zeros 8, rw⟩
   Bap.Emu.setReg sharing a0 (bits 0)
   Bap.Emu.setReg sharing a1 (bits 0x1000)
@@ -593,7 +629,7 @@ private def coreRegressions : IO Unit := do
       (Bap.Memory.readRegion memory 0x1000 1)[0]!.toNat
   | _ => throw <| IO.userError "memory variable is missing"
   -- A failed parallel round keeps what earlier rounds wrote (the exact rollback).
-  let round ← Bap.Emu.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "sb a0, 0(a1)") ++ (← rv "lb a3, 0(a2)") ++ (← rv "jal -12")) 0 0
+  let round ← Tuned.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "sb a0, 0(a1)") ++ (← rv "lb a3, 0(a2)") ++ (← rv "jal -12")) 0 0
   Bap.Emu.map round ⟨0x1000, zeros 8, rw⟩
   Bap.Emu.setReg round a0 (bits 0)
   Bap.Emu.setReg round a1 (bits 0x1000)
@@ -608,14 +644,14 @@ private def coreRegressions : IO Unit := do
   assertEqual "Emu failed round keeps earlier writes" written.toNat (← Bap.Emu.read round 0x1000 1)[0]!.toNat
   assertEqual "Emu failed round reports the fault" (some 0x9000) ((← Bap.Emu.failure round).map (·.address))
   -- A breakpoint stops the worker that hits it.
-  let breaking ← Bap.Emu.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "addi a0, a0, 1") ++ (← rv "jal 0")) 0 0
+  let breaking ← Tuned.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "addi a0, a0, 1") ++ (← rv "jal 0")) 0 0
   Bap.Emu.setReg breaking a0 (bits 0)
   let _ ← Bap.Emu.spawnThread breaking 0 0
   let _ ← Bap.Emu.addBreakpoint breaking 4
   let _ ← Bap.Emu.runPreemptiveParallel breaking 10
   assertEqual "Emu breakpoint stops parallel workers" [⟨1, 4, true⟩, ⟨2, 4, true⟩] (← Bap.Emu.threads breaking)
   -- A stopped current thread does not hold up the only active one of a parallel round.
-  let blocked ← Bap.Emu.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "jal 0")) 0 0
+  let blocked ← Tuned.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "jal 0")) 0 0
   Bap.Emu.setReg blocked a0 (bits 0)
   let blockedSecond ← Bap.Emu.spawnThread blocked 0 0
   Bap.Emu.stop blocked
@@ -625,7 +661,7 @@ private def coreRegressions : IO Unit := do
   let code := (← rv "addi a0, a0, 1") ++ (← rv "addi a0, a0, 1")
   let hits ← IO.mkRef 0
   let fresh : IO Bap.Emu.Emu := do
-    let emu ← Bap.Emu.riscv64 code 0 0
+    let emu ← Tuned.riscv64 code 0 0
     Bap.Emu.setReg emu a0 (bits 0)
     hits.set 0
     let _ ← Bap.Emu.onCode emu (0, 0) fun _ => do
@@ -659,7 +695,7 @@ private def coreRegressions : IO Unit := do
   let _ ← Bap.Emu.runPreemptiveParallel afterParallel 1
   assertEqual "Emu parallel workers cause no re-fire" 1 (← hits.get)
   -- A fault retries its instruction without firing its hooks again (rollback_no_pending).
-  let retry ← Bap.Emu.riscv64 (← rv "lw a0, 0(a1)") 0 0
+  let retry ← Tuned.riscv64 (← rv "lw a0, 0(a1)") 0 0
   Bap.Emu.setReg retry a1 (bits 0x9000)
   let retries ← IO.mkRef 0
   let _ ← Bap.Emu.onCode retry (0, 0) fun _ => retries.modify (· + 1)
@@ -669,7 +705,7 @@ private def coreRegressions : IO Unit := do
   assertEqual "Emu retry after a fault causes no re-fire" 1 (← retries.get)
   assertEqual "Emu retry runs the instruction" 4 (← Bap.Emu.pc retry)
   -- An unhandled special stops once; resuming retries it without firing hooks again.
-  let special ← Bap.Emu.riscv64 (← rv "ecall") 0 0
+  let special ← Tuned.riscv64 (← rv "ecall") 0 0
   let specials ← IO.mkRef 0
   let _ ← Bap.Emu.onCode special (0, 0) fun _ => specials.modify (· + 1)
   let _ ← Bap.Emu.step special
@@ -677,7 +713,7 @@ private def coreRegressions : IO Unit := do
   let _ ← Bap.Emu.step special
   assertEqual "Emu unhandled special causes no re-fire" 1 (← specials.get)
   -- A rolled back trace holds only instructions that completed.
-  let traced ← Bap.Emu.riscv64 ((← rv "sw a0, 0(a2)") ++ (← rv "lw a0, 0(a1)")) 0 0
+  let traced ← Tuned.riscv64 ((← rv "sw a0, 0(a2)") ++ (← rv "lw a0, 0(a1)")) 0 0
   Bap.Emu.map traced ⟨0x1000, zeros 8, rw⟩
   Bap.Emu.setReg traced a0 (bits 0)
   Bap.Emu.setReg traced a1 (bits 0x9000)
@@ -709,7 +745,7 @@ private def coreRegressions : IO Unit := do
   assertEqual "Emu compiled range causes no re-fire" 1 (← rangeHits.get)
   assertEqual "Emu compiled range resumes" [0, 4, 8] ((← Bap.Emu.tracePcs ranging).take 3)
   -- A process that a hook forks in a parallel round has its memory in its state too.
-  let forkingRound ← Bap.Emu.riscv64 ((← rv "sb a0, 0(a1)") ++ (← rv "addi a0, a0, 1") ++ (← rv "jal -8")) 0 0
+  let forkingRound ← Tuned.riscv64 ((← rv "sb a0, 0(a1)") ++ (← rv "addi a0, a0, 1") ++ (← rv "jal -8")) 0 0
   Bap.Emu.map forkingRound ⟨0x1000, zeros 8, rw⟩
   Bap.Emu.setReg forkingRound a0 (bits 5)
   Bap.Emu.setReg forkingRound a1 (bits 0x1000)
@@ -730,7 +766,7 @@ private def coreRegressions : IO Unit := do
   | _ => throw <| IO.userError "memory variable is missing"
   assertEqual "Emu fork in a round reads its native memory" 5 (← Bap.Emu.read forkingRound 0x1000 1)[0]!.toNat
   -- Hooks fire in the order of their registration, whatever their kind.
-  let ordered ← Bap.Emu.riscv64 (← rv "sw a0, 0(a1)") 0 0
+  let ordered ← Tuned.riscv64 (← rv "sw a0, 0(a1)") 0 0
   Bap.Emu.map ordered ⟨0x1000, zeros 8, rw⟩
   Bap.Emu.setReg ordered a0 (bits 0)
   Bap.Emu.setReg ordered a1 (bits 0x1000)
@@ -742,7 +778,7 @@ private def coreRegressions : IO Unit := do
   let _ ← Bap.Emu.step ordered
   assertEqual "Emu hooks fire in registration order" [1, 2, 3, 4] (← order.get)
   -- A fork keeps its memory across a failed step of its own, and a checkpoint keeps both memories.
-  let failing ← Bap.Emu.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "sb a0, 0(a1)") ++ (← rv "lb a3, 0(a2)") ++ (← rv "jal -12")) 0 0
+  let failing ← Tuned.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "sb a0, 0(a1)") ++ (← rv "lb a3, 0(a2)") ++ (← rv "jal -12")) 0 0
   Bap.Emu.map failing ⟨0x1000, zeros 8, rw⟩
   Bap.Emu.setReg failing a0 (bits 0)
   Bap.Emu.setReg failing a1 (bits 0x1000)
@@ -771,7 +807,7 @@ private def runEmulator : IO Unit := do
   assertEqual "Emu test code size" 12 code.size
   let thirdInsn ← Target.LLVMLift.decodeRISCV 8 8 (code.extract 8 12)
   assertEqual "Emu third instruction size" 4 thirdInsn.size
-  let emu ← Bap.Emu.riscv64 code 0 0
+  let emu ← Tuned.riscv64 code 0 0
   let input := reg "X11"
   let output := reg "X10"
   Bap.Emu.setReg emu input (.bits (BitVec.ofNat 64 4))
@@ -897,7 +933,7 @@ private def runEmulator : IO Unit := do
   let memoryCode := (← LLVM.assemble "riscv64" "addi a0, x0, 42") ++
     (← LLVM.assemble "riscv64" "sw a0, 0(a1)") ++
     (← LLVM.assemble "riscv64" "lw a2, 0(a1)")
-  let memoryEmu ← Bap.Emu.riscv64 memoryCode 0 0
+  let memoryEmu ← Tuned.riscv64 memoryCode 0 0
   Bap.Emu.map memoryEmu ⟨0x1000, ByteArray.mk (List.replicate 4 0).toArray, ⟨true, true, false⟩⟩
   Bap.Emu.setReg memoryEmu input (.bits (BitVec.ofNat 64 0x1000))
   let memoryEvents ← IO.mkRef []
@@ -917,7 +953,7 @@ private def runEmulator : IO Unit := do
     (← memoryEvents.get).reverse
   assertEqual "Emu memory hooks filter ranges" 0 (← missedWrites.get)
   assertBits "Emu hooked load result" (BitVec.ofNat 64 42) (.ok (← Bap.Emu.reg memoryEmu (reg "X12")))
-  assertEqual "Emu memory hooks retain native execution" 3 (← Bap.Primus.Lifted.stats memoryEmu.engine).nativeRuns
+  onStepwise <| assertEqual "Emu memory hooks retain native execution" 3 (← Bap.Primus.Lifted.stats memoryEmu.engine).nativeRuns
   match ← Bap.Emu.traceAccesses memoryEmu with
   | [written, loaded] =>
     assertEqual "Emu memory trace write record"
@@ -936,7 +972,7 @@ private def runEmulator : IO Unit := do
   let _ ← Bap.Emu.run memoryEmu 1
   assertEqual "Emu removed memory hooks do not refire" 2 (← memoryEvents.get).length
 
-  let ringEmu ← Bap.Emu.riscv64 memoryCode 0 0
+  let ringEmu ← Tuned.riscv64 memoryCode 0 0
   Bap.Emu.map ringEmu ⟨0x1000, ByteArray.mk (List.replicate 4 0).toArray, ⟨true, true, false⟩⟩
   Bap.Emu.setReg ringEmu input (.bits (BitVec.ofNat 64 0x1000))
   Bap.Emu.traceStartAccesses ringEmu 1
@@ -954,7 +990,7 @@ private def runEmulator : IO Unit := do
   assertEqual "Emu watched trace count excludes misses" 0 (← Bap.Emu.traceAccessesCount ringEmu)
   assertEqual "Emu watched trace still records PCs" [0, 4, 8] (← Bap.Emu.traceStop ringEmu)
 
-  let readFaultEmu ← Bap.Emu.riscv64 (← LLVM.assemble "riscv64" "lw a0, 0(a1)") 0 0
+  let readFaultEmu ← Tuned.riscv64 (← LLVM.assemble "riscv64" "lw a0, 0(a1)") 0 0
   Bap.Emu.setReg readFaultEmu input (.bits (BitVec.ofNat 64 0x9000))
   Bap.Emu.setReg readFaultEmu output (.bits (BitVec.ofNat 64 7))
   let readFaulted ← try
@@ -971,7 +1007,7 @@ private def runEmulator : IO Unit := do
         (0, 0x9000, Bap.Emu.MemoryOperation.read, 1) (fault.pc, fault.address, fault.operation, fault.thread)
   | none => throw <| IO.userError "Emu guest read fault was not recorded"
 
-  let pushEmu ← Bap.Emu.x86_64 (← LLVM.assemble "x86_64" "pushq %rax") 0 0
+  let pushEmu ← Tuned.x86_64 (← LLVM.assemble "x86_64" "pushq %rax") 0 0
   Bap.Emu.map pushEmu ⟨0x1ff0, ByteArray.mk (List.replicate 32 0).toArray, ⟨true, false, false⟩⟩
   Bap.Emu.setReg pushEmu (reg "RSP") (.bits (BitVec.ofNat 64 0x2004))
   Bap.Emu.setReg pushEmu (reg "RAX") (.bits (BitVec.ofNat 64 42))
@@ -996,23 +1032,23 @@ private def runEmulator : IO Unit := do
     word + patched[index]!.toNat * 256 ^ index
   let smcCode := (← LLVM.assemble "riscv64" "addi a0, x0, 40") ++
     (← LLVM.assemble "riscv64" "sw a1, 0(a2)") ++ (← LLVM.assemble "riscv64" "jal -8")
-  let smcEmu ← Bap.Emu.riscv64 smcCode 0 0
+  let smcEmu ← Tuned.riscv64 smcCode 0 0
   Bap.Emu.setReg smcEmu input (.bits (BitVec.ofNat 64 patchWord))
   Bap.Emu.setReg smcEmu (reg "X12") (.bits (BitVec.ofNat 64 0))
   let _ ← Bap.Emu.run smcEmu 2
   assertTrue "Emu guest store updates mapped code" (patched == (← Bap.Emu.read smcEmu 0 4))
-  assertEqual "Emu guest code write preserves unrelated JIT blocks" 1 (← smcEmu.engine.cache.get).size
+  onStepwise <| assertEqual "Emu guest code write preserves unrelated JIT blocks" 1 (← smcEmu.engine.cache.get).size
   let _ ← Bap.Emu.run smcEmu 1
   assertEqual "Emu self-modifying test returns to entry" 0 (← Bap.Emu.pc smcEmu)
   let _ ← Bap.Emu.run smcEmu 1
   assertBits "Emu guest code write invalidates native lift" (BitVec.ofNat 64 42)
     (.ok (← Bap.Emu.reg smcEmu output))
-  assertEqual "Emu guest code write lifts the patched instruction again" 4
+  onStepwise <| assertEqual "Emu guest code write lifts the patched instruction again" 4
     (← Bap.Primus.Lifted.stats smcEmu.engine).lifts
 
   let x86Code := (← LLVM.assemble "x86_64" "movq $40, %rax") ++
     (← LLVM.assemble "x86_64" "addq $2, %rax")
-  let x86Emu ← Bap.Emu.x86_64 x86Code 0 0
+  let x86Emu ← Tuned.x86_64 x86Code 0 0
   let x86Steps ← Bap.Emu.run x86Emu 2
   assertEqual "Emu x86-64 instruction count" 2 x86Steps
   let x86Result ← Bap.Emu.reg x86Emu (reg "RAX")
@@ -1020,13 +1056,13 @@ private def runEmulator : IO Unit := do
 
   let armCode := (← LLVM.assemble "aarch64" "movz x0, 40") ++
     (← LLVM.assemble "aarch64" "add x0, x0, 2")
-  let armEmu ← Bap.Emu.aarch64 armCode 0 0
+  let armEmu ← Tuned.aarch64 armCode 0 0
   let armSteps ← Bap.Emu.run armEmu 2
   assertEqual "Emu AArch64 instruction count" 2 armSteps
   let armResult ← Bap.Emu.reg armEmu (reg "X0")
   assertBits "Emu AArch64 result" (BitVec.ofNat 64 42) (.ok armResult)
 
-  let syscallEmu ← Bap.Emu.riscv64 ((← LLVM.assemble "riscv64" "ecall") ++
+  let syscallEmu ← Tuned.riscv64 ((← LLVM.assemble "riscv64" "ecall") ++
     (← LLVM.assemble "riscv64" "addi a0, a0, 1")) 0 0
   Bap.Emu.setReg syscallEmu (reg "X17") (.bits (BitVec.ofNat 64 39))
   (List.range 6).forM fun index =>
@@ -1054,7 +1090,7 @@ private def runEmulator : IO Unit := do
   assertEqual "Emu unhandled syscall preserves PC" 0 (← Bap.Emu.pc syscallEmu)
   assertTrue "Emu unhandled syscall sets stopped state" (← Bap.Emu.stopped syscallEmu)
 
-  let x86SyscallEmu ← Bap.Emu.x86_64 ((← LLVM.assemble "x86_64" "syscall") ++
+  let x86SyscallEmu ← Tuned.x86_64 ((← LLVM.assemble "x86_64" "syscall") ++
     (← LLVM.assemble "x86_64" "addq $1, %rax")) 0 0
   Bap.Emu.setReg x86SyscallEmu (reg "RAX") (.bits (BitVec.ofNat 64 39))
   (["RDI", "RSI", "RDX", "R10", "R8", "R9"]).zip [1, 2, 3, 4, 5, 6] |>.forM fun binding =>
@@ -1070,7 +1106,7 @@ private def runEmulator : IO Unit := do
     (.ok (← Bap.Emu.reg x86SyscallEmu (reg "RAX")))
   Bap.Emu.removeHook x86SyscallEmu x86SyscallHook
 
-  let armSyscallEmu ← Bap.Emu.aarch64 ((← LLVM.assemble "aarch64" "svc #0") ++
+  let armSyscallEmu ← Tuned.aarch64 ((← LLVM.assemble "aarch64" "svc #0") ++
     (← LLVM.assemble "aarch64" "add x0, x0, 1")) 0 0
   Bap.Emu.setReg armSyscallEmu (reg "X8") (.bits (BitVec.ofNat 64 64))
   (List.range 6).forM fun index =>
@@ -1086,7 +1122,7 @@ private def runEmulator : IO Unit := do
     (.ok (← Bap.Emu.reg armSyscallEmu (reg "X0")))
   Bap.Emu.removeHook armSyscallEmu armSyscallHook
 
-  let intrinsicEmu ← Bap.Emu.x86_64 ((← LLVM.assemble "x86_64" "hlt") ++
+  let intrinsicEmu ← Tuned.x86_64 ((← LLVM.assemble "x86_64" "hlt") ++
     (← LLVM.assemble "x86_64" "addq $1, %rax")) 0 0
   Bap.Emu.setReg intrinsicEmu (reg "RAX") (.bits (BitVec.ofNat 64 40))
   let missedIntrinsics ← IO.mkRef 0
@@ -1112,7 +1148,7 @@ private def runEmulator : IO Unit := do
   assertEqual "Emu unhandled intrinsic stops" 0 defaultIntrinsicSteps
   assertEqual "Emu unhandled intrinsic preserves PC" 0 (← Bap.Emu.pc intrinsicEmu)
 
-  let wildcardEmu ← Bap.Emu.riscv64 ((← LLVM.assemble "riscv64" "ecall") ++
+  let wildcardEmu ← Tuned.riscv64 ((← LLVM.assemble "riscv64" "ecall") ++
     (← LLVM.assemble "riscv64" "addi a0, a0, 1")) 0 0
   let wildcardHook ← Bap.Emu.onIntrinsic wildcardEmu "*" fun _ => do
     Bap.Emu.setReg wildcardEmu output (.bits (BitVec.ofNat 64 100))
@@ -1123,7 +1159,7 @@ private def runEmulator : IO Unit := do
     (.ok (← Bap.Emu.reg wildcardEmu output))
   Bap.Emu.removeHook wildcardEmu wildcardHook
 
-  let breakEmu ← Bap.Emu.riscv64 ((← LLVM.assemble "riscv64" "addi a0, a0, 1") ++
+  let breakEmu ← Tuned.riscv64 ((← LLVM.assemble "riscv64" "addi a0, a0, 1") ++
     (← LLVM.assemble "riscv64" "addi a0, a0, 1")) 0 0
   Bap.Emu.setReg breakEmu output (.bits (BitVec.ofNat 64 40))
   let _ ← Bap.Emu.addBreakpoint breakEmu 4
@@ -1151,7 +1187,7 @@ private def runEmulator : IO Unit := do
     let digits := String.ofList (Nat.toDigits 16 byte.toNat)
     if digits.length < 2 then "0" ++ digits else digits
   let patchText := String.intercalate " " patchWords
-  let shellEmu ← Bap.Emu.riscv64 shellCode 0 0
+  let shellEmu ← Tuned.riscv64 shellCode 0 0
   let (shellInput, shellOutput, shellText) ← shellStreams [
     "help", "pc", "set X10 40", "reg X10", "snap", "step", "restore", "reg X10",
     "write 0 " ++ patchText, "x 0 4", "save native/build/emu-shell-checkpoint.sexp",
@@ -1168,7 +1204,7 @@ private def runEmulator : IO Unit := do
   assertEqual "Emu shell deletes breakpoints" [] (← Bap.Emu.breakpoints shellEmu)
   assertTrue "Emu shell leaves resumed program running" !(← Bap.Emu.stopped shellEmu)
   -- The registers of the debugger have the widths of their target, and values that do not fit are refused.
-  let narrowShell ← Bap.Emu.riscv32 shellCode 0 0
+  let narrowShell ← Tuned.riscv32 shellCode 0 0
   let (narrowInput, narrowOutput, narrowText) ← shellStreams [
     "set X10 7", "reg X10", "set X10 0x1ffffffff", "reg X10", "x 0 99999999999", "x 0x 1", "set X11 0x", "regs", "q"
   ]
@@ -1289,7 +1325,7 @@ private def rangeRegressions : IO Unit := do
   let _ ← Bap.Emu.run patching 3
   assertBits "Emu range sees the code it wrote" (BitVec.ofNat 64 9) (.ok (← Bap.Emu.reg patching a3))
   -- A memory set through its variable is what the next access reads, native memory or not.
-  let replaced ← Bap.Emu.riscv64 (← rv "lb a0, 0(a1)") 0 0
+  let replaced ← Tuned.riscv64 (← rv "lb a0, 0(a1)") 0 0
   Bap.Emu.map replaced ⟨0x1000, zeros 8, rw⟩
   Bap.Emu.setReg replaced a1 (bits 0x1000)
   Bap.Emu.setReg replaced a0 (bits 0)
@@ -1439,20 +1475,92 @@ private def wrapRegressions : IO Unit := do
   let a0 : Var := ⟨"X10", .imm 32, 0, false⟩
   let a1 : Var := ⟨"X11", .imm 32, 0, false⟩
   let bits (value : Nat) : Value := .bits (BitVec.ofNat 32 value)
-  let emu ← Bap.Emu.riscv32 code 0 0
+  let emu ← Tuned.riscv32 code 0 0
   Bap.Emu.map emu ⟨0xfffff000, ByteArray.mk (List.replicate 4096 1).toArray, ⟨true, true, false⟩⟩
   Bap.Emu.setReg emu a0 (bits 0)
   Bap.Emu.setReg emu a1 (bits 0xffffff00)
   let _ ← Bap.Emu.step emu
   assertBits "Emu 32-bit load in range" (BitVec.ofNat 32 0x01010101) (.ok (← Bap.Emu.reg emu a0))
-  assertEqual "Emu 32-bit load runs natively" 1 (← Primus.Lifted.stats emu.engine).nativeRuns
+  onStepwise <| assertEqual "Emu 32-bit load runs natively" 1 (← Primus.Lifted.stats emu.engine).nativeRuns
   Bap.Emu.setPc emu 0
   Bap.Emu.setReg emu a1 (bits 0xfffffffe)
   expectThrow "Emu 32-bit load that passes the end faults" (Bap.Emu.step emu)
   let some fault := ← Bap.Emu.failure emu | throw <| IO.userError "the load recorded no fault"
   assertEqual "Emu 32-bit load faults at the end of the space" (2 ^ 32) fault.address
 
-def run : IO Unit := do
+/-- A hook of an access inside a compiled range takes the step back, so that it sees and leaves exactly what single steps do,
+at any fuel, and accesses that no hook watches do not slow the range down. -/
+private def accessHookRanges : IO Unit := do
+  let rv (source : String) : IO ByteArray := LLVM.assemble "riscv64" source
+  let word (value : Nat) : Value := .bits (BitVec.ofNat 64 value)
+  let code := (← rv "addi a0, a0, 1") ++ (← rv "sd a0, 0(a4)") ++ (← rv "ld a1, 8(a4)") ++ (← rv "add a2, a2, a1") ++
+    (← rv "bne a0, a3, -16") ++ (← rv "ld a5, 0(a6)") ++ (← rv "jal 0")
+  let fresh (hotThreshold rangeLimit : Nat) (faultAt : Nat) : IO Bap.Emu.Emu := do
+    let emu ← Bap.Emu.riscv64 code 0 0
+      (adjust := fun config => { config with hotThreshold, rangeLimit })
+    Bap.Emu.map emu ⟨0x1000, ByteArray.mk (List.replicate 32 1).toArray, ⟨true, true, false⟩⟩
+    for name in ["X10", "X11", "X12", "X15"] do Bap.Emu.setReg emu (reg name) (word 0)
+    Bap.Emu.setReg emu (reg "X13") (word 12)
+    Bap.Emu.setReg emu (reg "X14") (word 0x1000)
+    Bap.Emu.setReg emu (reg "X16") (word faultAt)
+    pure emu
+  let regValue (emu : Bap.Emu.Emu) (name : String) : IO Nat := do
+    match ← Bap.Emu.reg emu (reg name) with
+    | .bits value => pure value.toNat
+    | _ => throw <| IO.userError s!"{name} is not a word"
+  /- What a run does, as hooks and afterwards see it. -/
+  let trial (hotThreshold rangeLimit fuel faultAt : Nat) : IO (List (Nat × Nat × Nat) × List Nat × Bool) := do
+    let emu ← fresh hotThreshold rangeLimit faultAt
+    let log ← IO.mkRef ([] : List (Nat × Nat × Nat))
+    let note (kind : Nat) : IO Unit := do
+      let pc ← Bap.Emu.pc emu
+      let value ← regValue emu "X10"
+      log.modify ((kind, pc, value) :: ·)
+    let _ ← Bap.Emu.onRead emu (0x1008, 0x100f) fun _ _ => note 0
+    let _ ← Bap.Emu.onWrite emu (0x1000, 0x1007) fun _ _ _ => note 1
+    let _ ← Bap.Emu.onCode emu (12, 12) fun _ => note 2
+    let failed ← try
+        let _ ← Bap.Emu.run emu fuel
+        pure false
+      catch _ => pure true
+    let registers ← ["X10", "X11", "X12", "X15"].mapM (regValue emu)
+    pure (← log.get, (← Bap.Emu.pc emu) :: registers, failed)
+  for fuel in [1, 2, 3, 4, 5, 7, 11, 16, 26, 40, 59, 60, 61, 62, 70] do
+    let expected ← trial 1 1 fuel 0x1000
+    assertEqual s!"Emu hooks in a range see what single steps see, fuel {fuel}" expected (← trial 1 16 fuel 0x1000)
+    assertEqual s!"Emu hooks past the threshold see what single steps see, fuel {fuel}" expected (← trial 16 16 fuel 0x1000)
+  -- And a fault after them, in the same range.
+  for fuel in [58, 61, 70] do
+    let expected ← trial 1 1 fuel 0x9000
+    assertEqual s!"Emu fault after hooks in a range is the same, fuel {fuel}" expected (← trial 1 16 fuel 0x9000)
+  -- A step after a run that a hook stopped is one instruction.
+  let halted ← fresh 1 16 0x1000
+  let _ ← Bap.Emu.onCode halted (12, 12) fun _ => Bap.Emu.stop halted
+  let _ ← Bap.Emu.run halted 40
+  assertEqual "Emu run stops at the hook" 12 (← Bap.Emu.pc halted)
+  Bap.Emu.resume halted
+  let _ ← Bap.Emu.step halted
+  assertEqual "Emu step after a stopped run is one instruction" 16 (← Bap.Emu.pc halted)
+  -- Hooks that nothing touches leave the ranges alone.
+  let far ← fresh 1 16 0x1000
+  let farHits ← IO.mkRef 0
+  let _ ← Bap.Emu.onRead far (0x1018, 0x101f) fun _ _ => farHits.modify (· + 1)
+  let _ ← Bap.Emu.onWrite far (0x1018, 0x101f) fun _ _ _ => farHits.modify (· + 1)
+  assertEqual "Emu range under hooks elsewhere runs all of it" 60 (← Bap.Emu.run far 60)
+  assertEqual "Emu hooks elsewhere do not fire" 0 (← farHits.get)
+  assertTrue "Emu range keeps chaining under hooks elsewhere" ((← Primus.Lifted.stats far.engine).nativeRuns < 10)
+  -- A hook that is hit takes its steps out of the range, and removing it brings them back.
+  let hit ← fresh 1 16 0x1000
+  let hits ← IO.mkRef 0
+  let hook ← Bap.Emu.onRead hit (0x1008, 0x100f) fun _ _ => hits.modify (· + 1)
+  let _ ← Bap.Emu.run hit 30
+  assertEqual "Emu hit hook fires once per load" 6 (← hits.get)
+  assertTrue "Emu steps that met the hook are single steps" !(← hit.watchedSteps.get).isEmpty
+  Bap.Emu.removeHook hit hook
+  assertTrue "Emu removing a hook lets its steps chain again" (← hit.watchedSteps.get).isEmpty
+
+private def allEmulatorTests : IO Unit := do
+  accessHookRanges
   rangeRegressions
   parallelReadThrough
   wrapRegressions
@@ -1460,5 +1568,15 @@ def run : IO Unit := do
   regionAudit
   coreRegressions
   runEmulator
+
+/-- The tests of the emulator, on the machine as it comes, on one that compiles everything at once, and on one that does not
+chain, so that they say the same of native code, ranges and the interpreter. -/
+def run : IO Unit := do
+  allEmulatorTests
+  tuningRef.set (some (1, 4096, 16))
+  allEmulatorTests
+  tuningRef.set (some (1, 128, 1))
+  stepwise.set true
+  allEmulatorTests
 
 end Bap.Tests.Emu

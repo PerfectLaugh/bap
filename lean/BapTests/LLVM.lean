@@ -1052,9 +1052,50 @@ private def testArmMultipleAgree : IO Unit := do
         | .error error => throw <| IO.userError error
       assertEqual s!"{decoded.opcode} does the same in both, ZF={flag}" (← observe first) (← observe second)
 
+private def testThumbMultipleAgree : IO Unit := do
+  let thumb ← Target.LLVMLift.thumbEnvironment
+  let context : Primus.Semantics.Context := { bits := 32, memory := thumbMemVar }
+  let operand : LLVM.Operand → Primus.Semantics.Value
+    | .reg name => .register (if name.isEmpty || name = "NoRegister" then "Nil" else name) 32 32
+    | .imm value => .bil 32 (.int (BitVec.ofInt 32 value))
+  let names := (List.range 13).map (s!"R{·}") ++ ["SP", "LR", "PC"]
+  let initial : IO Bil.Env := do
+    let mut memory := Memory.empty 32
+    for index in List.range 0x100 do
+      let address := 0x1000 + index * 4
+      match Memory.write memory (BitVec.ofNat 32 address) (BitVec.ofNat 32 (0xa0000000 + address * 3)) .little 4 with
+      | .ok updated => memory := updated
+      | .error error => throw <| IO.userError error
+    pure ((thumbMemVar, .memory memory) :: bit "ZF" 0 :: bit "NF" 0 :: bit "CF" 0 :: bit "VF" 0 ::
+      (List.range names.length |>.zip names).map fun (index, name) => word32 name (0x1200 + index * 16))
+  let observe (state : Bil.State × Bil.Effect) : IO (List Nat × Option Nat) := do
+    let registers ← names.mapM fun name =>
+      match Bil.lookup state.1.env ⟨name, .imm 32, 0, false⟩ with
+      | .ok (.bits value) => pure value.toNat
+      | _ => throw <| IO.userError s!"{name} is not a register"
+    let cells ← (List.range 0x100).mapM fun index => do
+      let address := 0x1000 + index * 4
+      pure (((← readByte (width := 32) state.1 thumbMemVar address) +
+        (← readByte (width := 32) state.1 thumbMemVar (address + 3)) * 256))
+    pure (registers ++ cells, match state.2 with | .jump target => some target.toNat | _ => none)
+  -- tPOP, tPUSH, tLDMIA with and without writeback, tSTMIA_UPD
+  let table : List (List Nat) := [[0x06, 0xbc], [0x06, 0xbd], [0x06, 0xb4], [0x06, 0xb5], [0x0e, 0xc9], [0x06, 0xc9], [0x06, 0xc1], [0xff, 0xbc], [0xff, 0xb4]]
+  for encoding in table do
+    let data := bytes encoding
+    let decoded ← LLVM.disassemble "thumbv7" data 0
+    let lifted ← Target.LLVMLift.decodeThumbWith thumb 0 0 data
+    let semantics ← Primus.Semantics.liftWith thumb { context with nextPc := 2 } decoded.opcode (decoded.operands.map operand)
+    let env ← initial
+    let first ← executeEffect lifted env
+    let second ← match Bil.run semantics { env := env } with
+      | .ok result => pure result
+      | .error error => throw <| IO.userError error
+    assertEqual s!"{decoded.opcode} does the same in both" (← observe first) (← observe second)
+
 def run : IO Unit := do
   testStatusRegisters
   testArmMultipleAgree
+  testThumbMultipleAgree
   testX86Repeat
   testX86Registers
   testArmVfpRegisters
@@ -1561,7 +1602,7 @@ def run : IO Unit := do
   let actualOpcode := LLVM.mcOpcode mcDecoded.instruction
   assertEqual "MCInst uses a numeric opcode" expectedOpcode actualOpcode
   assertTrue "MCInst opcode has numeric Primus semantics" (riscvEnvironment.opcodes.get? actualOpcode).isSome
-  match riscvEnvironment.opcodes.get? actualOpcode with
+  match (riscvEnvironment.opcodes.get? actualOpcode).map Thunk.get with
   | some (.compiled ..) => assertTrue "RISC-V ADDI uses compiled Primus semantics" true
   | _ => throw <| IO.userError "RISC-V ADDI did not compile to Lean"
   let mcOperands ← LLVM.mcOperands mcDecoded.instruction
@@ -1577,14 +1618,14 @@ def run : IO Unit := do
   let expected32Opcode ← LLVM.opcodeId "riscv32" "ADDI"
   let actual32Opcode := LLVM.mcOpcode mc32Decoded.instruction
   assertEqual "RISC-V 32 uses a numeric opcode" expected32Opcode actual32Opcode
-  match riscv32Environment.opcodes.get? actual32Opcode with
+  match (riscv32Environment.opcodes.get? actual32Opcode).map Thunk.get with
   | some (.compiled ..) => assertTrue "RISC-V 32 ADDI uses compiled Primus semantics" true
   | _ => throw <| IO.userError "RISC-V 32 ADDI did not compile to Lean"
 
   let armMCBytes ← LLVM.assemble "aarch64" "add x0, x0, x1"
   let armMCDecoded ← LLVM.disassembleMC "aarch64" armMCBytes
   let armOpcode := LLVM.mcOpcode armMCDecoded.instruction
-  match aarch64Environment.opcodes.get? armOpcode with
+  match (aarch64Environment.opcodes.get? armOpcode).map Thunk.get with
   | some (.compiled ..) => assertTrue "AArch64 ADD uses compiled MCInst semantics" true
   | _ => throw <| IO.userError "AArch64 ADD did not compile to Lean"
 

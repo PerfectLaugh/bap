@@ -8,6 +8,7 @@ import Bap.Primus.Lifted
 import Bap.Primus.Memory
 import Bap.Emu.Core
 import Std.Sync.Mutex
+import Std.Data.HashSet
 
 namespace Bap.Emu
 
@@ -26,9 +27,13 @@ structure Config where
   endian : Endian := .little
   syscallAbi : SyscallAbi := .riscv
   delayPolicy : DelayPolicy := .none
-  hotThreshold : Nat := 1
-  cacheLimit : Nat := 128
-  rangeLimit : Nat := 1
+  /-- How many times an instruction runs in the interpreter, which takes microseconds, before it is compiled, which takes
+  hundreds of them: most of a program runs a few times at most. -/
+  hotThreshold : Nat := 16
+  cacheLimit : Nat := 4096
+  /-- How many blocks a compiled range holds. 16 runs tight loops whole, and the cost of compiling a range grows faster than its
+  size. A step of 1 has no ranges. -/
+  rangeLimit : Nat := 16
   jitCooldown : Nat := 0
 
 abbrev HookId := Nat
@@ -135,6 +140,13 @@ structure Emu where
   rangeQuiet : IO.Ref Bool
   /-- How many instructions the next step may run after its first, for `run`: a step on its own runs one. -/
   budget : IO.Ref Nat
+  /-- Whether the step that just failed did so to run again as one instruction, at a hook of an access. -/
+  restarting : IO.Ref Bool
+  /-- The address of the running step until it reaches a code site. -/
+  rangeStart : IO.Ref (Option Nat)
+  /-- The addresses whose steps met a hook of an access, which run as one instruction from then on. Nothing else depends on
+  it: which steps chain changes how fast the emulator runs and not what it does. -/
+  watchedSteps : IO.Ref (Std.HashSet Nat)
 
 /-- Compiled ranges chain blocks along their branches, which leaves delay slots out. -/
 private def rangeLimitOf (config : Config) : Nat :=
@@ -209,6 +221,9 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     lastBudget := ← IO.mkRef 0
     rangeQuiet := ← IO.mkRef false
     budget := ← IO.mkRef 0
+    restarting := ← IO.mkRef false
+    rangeStart := ← IO.mkRef none
+    watchedSteps := ← IO.mkRef {}
   }
 
 private def saveCurrentThread (emu : Emu) : IO Unit := do
@@ -487,6 +502,7 @@ def removeHook (emu : Emu) (id : HookId) : IO Unit := do
   emu.hooks.modify fun hooks => hooks.filter fun hook => hook.id != id
   emu.readHooks.modify fun hooks => hooks.filter fun hook => hook.id != id
   emu.writeHooks.modify fun hooks => hooks.filter fun hook => hook.id != id
+  emu.watchedSteps.set {}
   emu.syscallHooks.modify fun hooks => hooks.filter fun hook => hook.id != id
   emu.intrinsicHooks.modify fun hooks => hooks.filter fun hook => hook.id != id
   emu.breakpointsRef.modify fun breakpoints => breakpoints.filter fun breakpoint => breakpoint.1 != id
@@ -495,6 +511,7 @@ def clearHooks (emu : Emu) : IO Unit := do
   emu.hooks.set []
   emu.readHooks.set []
   emu.writeHooks.set []
+  emu.watchedSteps.set {}
   emu.syscallHooks.set []
   emu.intrinsicHooks.set []
   emu.breakpointsRef.set []
@@ -643,6 +660,12 @@ private def observeRangeCode (emu : Emu) (address : Nat) : IO Bool := do
   let dirty := (← emu.engine.dirtyCode.get).isSome
   let late := (← emu.rangeQuiet.get) && !(← rangeIsQuiet emu)
   let hooked := !(hooksForCode (·.first) (·.last) (← emu.hooks.get) address).isEmpty
+  -- A range that ends at its first site has done no good: where it starts, the step runs its one instruction by itself.
+  match ← emu.rangeStart.get with
+  | some start =>
+    emu.rangeStart.set none
+    if hooked then emu.watchedSteps.modify (·.insert start)
+  | none => pure ()
   if rangeSiteStops dirty late hooked then return true
   recordTrace emu address
   pure false
@@ -660,16 +683,22 @@ private def notifyMemory (emu : Emu) (write : Bool) (address size value : Nat) :
     let operation := if write then MemoryOperation.write else MemoryOperation.read
     recordFault emu operation (address + offset)
     throw <| IO.userError s!"Emu {repr operation} fault at {address + offset}"
+  let takeBack (hit : Bool) : IO Unit := do
+    if accessRestarts hit (← emu.lastBudget.get) emu.engine.deferMemorySync then
+      emu.restarting.set true
+      throw <| IO.userError s!"Emu step restarts at the watched access at {address}"
   let hooks : IO Unit :=
     if write then do
       match emu.journal with
       | some journal => journal.modify (journalWrite · address size)
       | none => pure ()
-      (hooksForAccess (·.first) (·.last) (← emu.writeHooks.get) address size).forM fun hook =>
-        serialize emu <| hook.action address size value
+      let hit := hooksForAccess (·.first) (·.last) (← emu.writeHooks.get) address size
+      takeBack !hit.isEmpty
+      hit.forM fun hook => serialize emu <| hook.action address size value
     else do
-      (hooksForAccess (·.first) (·.last) (← emu.readHooks.get) address size).forM fun hook =>
-        serialize emu <| hook.action address size
+      let hit := hooksForAccess (·.first) (·.last) (← emu.readHooks.get) address size
+      takeBack !hit.isEmpty
+      hit.forM fun hook => serialize emu <| hook.action address size
   notifyAccess mapped write address size fault
     (Primus.Lifted.markDirtyRange emu.engine address (address + size - 1))
     (recordAccess emu write address size value) hooks
@@ -1214,8 +1243,10 @@ private def executeBlock (emu : Emu) (address : Nat) : IO (Nat × Bil.Effect) :=
   emu.rangeQuiet.set quiet
   let allowed ← emu.budget.get
   emu.budget.set 0
-  let budget := rangeBudgetOf allowed !((← emu.readHooks.get).isEmpty && (← emu.writeHooks.get).isEmpty)
+  let budget := rangeBudgetOf allowed (accessesWatched ((← emu.watchedSteps.get).contains address)
+    emu.engine.deferMemorySync !((← emu.readHooks.get).isEmpty && (← emu.writeHooks.get).isEmpty))
   emu.lastBudget.set budget
+  emu.rangeStart.set (some address)
   let result ← Primus.Lifted.runBlockObserved emu.engine (fetch emu) (lift emu) state address
     (some (notifyMemory emu)) (some (observeRangeCode emu)) (!quiet) budget
   Primus.Lifted.flushDirtyRange emu.engine
@@ -1247,8 +1278,21 @@ private def executeBlock (emu : Emu) (address : Nat) : IO (Nat × Bil.Effect) :=
       | some fault => emu.lastFault.set (some { fault with pc })
       | none => pure ())
 
-def step (emu : Emu) : IO Bool :=
+/-- One instruction, whatever a run that a hook stopped had left for its next step. -/
+def step (emu : Emu) : IO Bool := do
+  emu.budget.set 0
   stepM (ε := IO.Error) (stepOps emu)
+
+/-- After a failed step, whether it was one that ran into a hook of an access. It has rolled back to its start, with the code
+hooks of its address fired and not to fire again, and its address runs one instruction at a time from now on. -/
+private def rangeRestart (emu : Emu) : IO Bool := do
+  if ← emu.restarting.get then
+    emu.restarting.set false
+    let address ← emu.pc.get
+    emu.watchedSteps.modify (·.insert address)
+    pure true
+  else
+    pure false
 
 /-- Up to `maxSteps` instructions. Those of a compiled range count as well, and it stops where they run out. A fault in a
 range leaves everything as single steps do. A worker of a parallel round leaves that to the rollback of its round. -/
@@ -1256,9 +1300,11 @@ def run (emu : Emu) (maxSteps : Nat := 100000) : IO Nat :=
   if rangeLimitOf emu.config ≤ 1 then
     runM (stepM (ε := IO.Error) (stepOps emu)) maxSteps 0
   else
-    runPreciseM (runChainedM (stepM (ε := IO.Error) (stepOps emu)) emu.budget.set emu.engine.chained.get maxSteps maxSteps 0)
+    runPreciseM (runChainedM (restartM (stepM (ε := IO.Error) (stepOps emu)) (rangeRestart emu)) emu.budget.set emu.engine.chained.get maxSteps maxSteps 0)
       (stepM (ε := IO.Error) (stepOps emu))
-      (do pure ((← emu.lastBudget.get) != 0 && !emu.engine.deferMemorySync))
+      (do
+        emu.budget.set 0
+        pure ((← emu.lastBudget.get) != 0 && !emu.engine.deferMemorySync))
       (maxSteps + 1)
 
 private def switchNextThread (emu : Emu) : IO Bool := do
@@ -1316,6 +1362,8 @@ private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared :
     lastBudget := ← IO.mkRef 0
     rangeQuiet := ← IO.mkRef false
     budget := ← IO.mkRef 0
+    restarting := ← IO.mkRef false
+    rangeStart := ← IO.mkRef none
   }
 
 /-- `memory` with the bytes of `native` at the written ranges. -/
@@ -1523,7 +1571,7 @@ def riscv64Decoders : IO (Nat → IO Disasm.Disassembler) := do
   pure fun base => pure
     { name := "riscv64-llvm-primus", decode := decodeAt (Target.LLVMLift.decodeRISCVWith environment) base }
 
-def riscv64 (code : ByteArray) (base entry : Nat) : IO Emu := do
+def riscv64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
   let decoders ← riscv64Decoders
   let disassembler ← decoders base
   let config : Config := {
@@ -1533,9 +1581,9 @@ def riscv64 (code : ByteArray) (base entry : Nat) : IO Emu := do
     endian := .little
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create config [region] {} entry
+  create (adjust config) [region] {} entry
 
-def riscv32 (code : ByteArray) (base entry : Nat) : IO Emu := do
+def riscv32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
   let environment ← Target.LLVMLift.riscv32Environment
   let decoders (base : Nat) : IO Disasm.Disassembler := pure
     { name := "riscv32-llvm-primus", decode := decodeAt (Target.LLVMLift.decodeRISCV32With environment) base }
@@ -1547,9 +1595,9 @@ def riscv32 (code : ByteArray) (base entry : Nat) : IO Emu := do
     endian := .little
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create config [region] {} entry
+  create (adjust config) [region] {} entry
 
-def x86_64 (code : ByteArray) (base entry : Nat) : IO Emu := do
+def x86_64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
   let disassembler ← Target.X86.disassembler base
   let config : Config := {
     disassembler
@@ -1559,9 +1607,9 @@ def x86_64 (code : ByteArray) (base entry : Nat) : IO Emu := do
     syscallAbi := .x86_64
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create config [region] {} entry
+  create (adjust config) [region] {} entry
 
-def aarch64 (code : ByteArray) (base entry : Nat) : IO Emu := do
+def aarch64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
   let disassembler ← Target.AArch64.disassembler base
   let config : Config := {
     disassembler
@@ -1571,9 +1619,9 @@ def aarch64 (code : ByteArray) (base entry : Nat) : IO Emu := do
     syscallAbi := .aarch64
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create config [region] {} entry
+  create (adjust config) [region] {} entry
 
-def mips64 (code : ByteArray) (base entry : Nat) (release6 : Bool := false) : IO Emu := do
+def mips64 (code : ByteArray) (base entry : Nat) (release6 : Bool := false) (adjust : Config → Config := id) : IO Emu := do
   let environment ← Target.LLVMLift.mipsEnvironment
   let decoders (base : Nat) : IO Disasm.Disassembler := pure {
     name := "mips64-llvm-primus"
@@ -1590,9 +1638,9 @@ def mips64 (code : ByteArray) (base entry : Nat) (release6 : Bool := false) : IO
     delayPolicy := .mips release6
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create config [region] {} entry
+  create (adjust config) [region] {} entry
 
-def mips32 (code : ByteArray) (base entry : Nat) (release6 : Bool := false) : IO Emu := do
+def mips32 (code : ByteArray) (base entry : Nat) (release6 : Bool := false) (adjust : Config → Config := id) : IO Emu := do
   let environment ← Target.LLVMLift.mips32Environment
   let decoders (base : Nat) : IO Disasm.Disassembler := pure {
     name := "mips-llvm-primus"
@@ -1609,6 +1657,6 @@ def mips32 (code : ByteArray) (base entry : Nat) (release6 : Bool := false) : IO
     delayPolicy := .mips release6
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create config [region] {} entry
+  create (adjust config) [region] {} entry
 
 end Bap.Emu

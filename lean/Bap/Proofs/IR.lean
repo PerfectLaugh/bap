@@ -3,7 +3,7 @@ import Bap.IR.Optimize
 import Bap.IR.Wire
 import Bap.Proofs.Graph
 import Bap.Proofs.Bil
-import Bap.Proofs.Liveness
+import Bap.IR.LiveFacts
 
 namespace Bap.Proofs.IR
 

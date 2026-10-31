@@ -25,7 +25,9 @@ are about the flows on the model, and Lean sees no more of `IO`, `Task` and `@[e
    the model keeps, what hooks did to the outside. That `save` takes all that `Snapshot` has is by reading `snapshotBlock`.
 3. **What a step of a range is on these references.** `lowerGraph_correct` is about the program and the slots that go in and come out. That
    `executeBlock` passes them along, on the cells, and so that a range meets `RangeLaws`, is by reading it; its decisions are the proved
-   `rangeSiteStops` and `rangeBudgetOf`.
+   `rangeSiteStops`, `rangeBudgetOf`, `accessesWatched` and `accessRestarts`. That a step taken back at a hook of an access meets `RestartLaws`
+   is `stepExecute_error` for its rollback, and by reading `rangeRestart` for what it adds, the set of addresses that run one instruction at a time,
+   which decides how far steps chain and nothing else.
 4. **The parallel round.** `roundM` is proved on the model. `IO.asTask` runs the workers, `IO.wait` waits for them all,
    and the mutex of `serialize` gives hooks one at a time. Between the workers only the native memory is shared, by
    obligation 10 of `Bap.Jit`.
@@ -294,7 +296,7 @@ and `chained` how many it did, so that the instructions, and not the steps, are 
 /-- `run` with precise faults: when a step that may have chained fails, it has rolled back to where it started, which is
 not where the fault was. Then `again`, if it says that it did chain, and single steps from there on, the first to fail being the fault itself,
 which leaves everything as single steps do. This costs nothing on the way to a fault. Nothing that a range ran is
-observed, which `rangeSiteStops` and `rangeBudgetOf` see to, so that running it again is not seen either. -/
+observed, which `rangeSiteStops`, `rangeBudgetOf` and `accessRestarts` see to, so that running it again is not seen either. -/
 @[specialize] def runPreciseM {m : Type → Type} {ε : Type} [Monad m] [MonadExcept ε m] (chained : m Nat) (single again : m Bool) (bound : Nat) :
     m Nat :=
   tryCatch chained fun error => do
@@ -302,13 +304,27 @@ observed, which `rangeSiteStops` and `rangeBudgetOf` see to, so that running it 
       let _ ← runM single bound 0
     throw error
 
+/-- A step that can be taken back: when it fails because `restart` says that it ran into what it must not see, it has rolled
+back as any failed step does, and it runs again. `restart` also sees to it that the second run is a single step. -/
+@[specialize] def restartM {m : Type → Type} {ε : Type} [Monad m] [MonadExcept ε m] (step : m Bool) (restart : m Bool) : m Bool :=
+  tryCatch step fun error => do
+    if ← restart then step else throw error
+
 /-- Whether a code site inside a range ends the run before its block: code that was written, a hook that arrived while nothing
 observed the sites, or a hook of the block. Hooks read the state, which only the step that starts at the block has up to date. -/
 def rangeSiteStops (dirty late hooked : Bool) : Bool := dirty || late || hooked
 
 /-- How many blocks a step may chain. A hook of an access runs in the middle of a block and reads the state, which is
-that of a step's start, so that with one a step is one instruction. -/
+that of a step's start, so that a step that may meet one is one instruction. -/
 def rangeBudgetOf (budget : Nat) (accessesWatched : Bool) : Nat := if accessesWatched then 0 else budget
+
+/-- Whether a step that may chain blocks may meet a hook of an access: the step started at an address where one did, or it
+cannot be taken back, which a worker of a parallel round can't, and there are hooks. -/
+def accessesWatched (restarted deferred hasHooks : Bool) : Bool := restarted || (deferred && hasHooks)
+
+/-- Whether an access has to take back the step it is in. Its hooks read the state, which is that of the step's start, so that
+they only run in a step that runs one instruction. Other accesses, those that no hook watches, go on at full speed. -/
+def accessRestarts (hit : Bool) (budget : Nat) (deferred : Bool) : Bool := hit && budget != 0 && !deferred
 
 /-! ### Memory accesses -/
 

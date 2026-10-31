@@ -1,7 +1,6 @@
-import Bap.Proofs.Graph
+import Bap.Graph.Facts
 import Std.Data.HashMap
 import Std.Data.HashSet
-import Lean.Elab.Command
 
 /-! Faster algorithms for graphs over `Nat`, proved to give the very lists of the definitions in
 `Bap.Graph.Basic`, which stay the specification: `Bap.IR.Cfg` makes the compiler use these. -/
@@ -10,18 +9,18 @@ namespace Bap.Graph.Fast
 
 open Std
 
-open Lean Elab Command in
-/-- `open_private Mod in Ns : a b` names private declarations `Ns.a`, `Ns.b` of module `Mod`
-as `a`, `b` for the rest of the current scope. -/
-local elab "open_private " mod:ident " in " ns:ident " : " names:ident* : command => do
-  for name in names do
-    let target := (Name.mkNum (`_private ++ mod.getId) 0) ++ (ns.getId ++ name.getId)
-    unless (← getEnv).contains target do
-      throwErrorAt name "no private declaration {target}"
-    modifyScope fun scope =>
-      { scope with openDecls := .explicit name.getId target :: scope.openDecls }
-
-open_private Bap.Graph.Basic in Bap.Graph : closure closureStep frontierWalk
+local macro "closure" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.Graph.Basic) 0 ++ `Bap.Graph.closure)
+local macro "closureStep" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.Graph.Basic) 0 ++ `Bap.Graph.closureStep)
+local macro "frontierWalk" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.Graph.Basic) 0 ++ `Bap.Graph.frontierWalk)
+local macro "unfold_closureStep" : tactic =>
+  `(tactic| simp only [$(Lean.mkIdent (.num (`_private ++ `Bap.Graph.Basic) 0 ++ `Bap.Graph.closureStep)):ident])
+local macro "unfold_reachLoop_closure" : tactic =>
+  `(tactic| simp only [$(Lean.mkIdent `reachLoop):ident, $(Lean.mkIdent (.num (`_private ++ `Bap.Graph.Basic) 0 ++ `Bap.Graph.closure)):ident])
+local macro "unfold_walk_frontierWalk" : tactic =>
+  `(tactic| simp only [$(Lean.mkIdent `walk):ident, $(Lean.mkIdent (.num (`_private ++ `Bap.Graph.Basic) 0 ++ `Bap.Graph.frontierWalk)):ident, $(Lean.mkIdent `assocTable_get):ident])
 
 /-! ### Tables -/
 
@@ -154,7 +153,7 @@ private theorem reachLoop_eq (graph : Graph Nat) (fuel : Nat) (seen waiting : Li
   | zero => rfl
   | succ fuel ih =>
     have hstep : closureStep graph seen = seen ++ waiting.filter hits.contains := by
-      simp only [closureStep]
+      unfold_closureStep
       congr 1
       rw [hw, List.filter_filter]
       apply List.filter_congr
@@ -168,7 +167,7 @@ private theorem reachLoop_eq (graph : Graph Nat) (fuel : Nat) (seen waiting : Li
       · rintro ⟨hx, hc⟩
         obtain ⟨y, hy, he⟩ := this.1 hc
         exact ⟨hx, y, he, by simpa using hy⟩
-    simp only [reachLoop, closure]
+    unfold_reachLoop_closure
     rw [hstep]
     split
     · rename_i hnil
@@ -233,6 +232,17 @@ def reachable (graph : Graph Nat) (start : Nat) : List Nat := reachableFrom grap
 
 theorem reachable_eq (graph : Graph Nat) (start : Nat) : reachable graph start = Bap.Graph.reachable graph start :=
   reachableFrom_eq graph [start]
+
+/-- `reachable`, for many starts in a graph, with what doesn't change between them already in tables. -/
+def reachableWith (graph : Graph Nat) (table : HashMap Nat (List Nat)) (nodes : HashSet Nat) (start : Nat) : List Nat :=
+  let begin := dedup ([start].filter nodes.contains)
+  let started : HashSet Nat := HashSet.ofList begin
+  let hits := begin.foldl (fun hits node => hits.insertMany (table.getD node [])) ({} : HashSet Nat)
+  reachLoop graph table (graph.nodes.length + 1) begin (graph.nodes.filter fun node => !started.contains node) hits
+
+theorem reachableWith_eq (graph : Graph Nat) (start : Nat) :
+    reachableWith graph (successorTable graph) (HashSet.ofList graph.nodes) start = Bap.Graph.reachable graph start :=
+  reachable_eq graph start
 
 /-! ### Dominators -/
 
@@ -456,6 +466,60 @@ private theorem select_eq (pos : Nat → Nat) {l : List Nat} {index : Nat} {row 
           · have := h1 _ h
             omega) hrest
 
+/-- `select` of `elements` from the start, reading each position of the row and not all the others. -/
+private def pick (elements : Array Nat) (row : List Nat) : List Nat := row.filterMap fun r => elements[r]?
+
+private theorem filterMap_congr_mem {α β : Type} {f g : α → Option β} {l : List α} (h : ∀ x ∈ l, f x = g x) :
+    l.filterMap f = l.filterMap g := by
+  induction l with
+  | nil => rfl
+  | cons a as ih =>
+    simp only [List.filterMap_cons, h a List.mem_cons_self, ih fun x hx => h x (List.mem_cons_of_mem _ hx)]
+
+private theorem select_eq_filterMap (l : List Nat) {index : Nat} {row : List Nat} (hrow : Sorted row) (hge : ∀ r ∈ row, index ≤ r) :
+    select index l row = row.filterMap fun r => l[r - index]? := by
+  induction l generalizing index row with
+  | nil =>
+    simp only [select]
+    induction row with
+    | nil => rfl
+    | cons r rs _ => simp
+  | cons x xs ih =>
+    cases row with
+    | nil => rfl
+    | cons r rs =>
+      have hr := hge r List.mem_cons_self
+      simp only [select]
+      obtain ⟨hlt, hrs⟩ := List.pairwise_cons.1 hrow
+      split
+      · rename_i he
+        subst he
+        rw [ih hrs fun y hy => hlt y hy]
+        simp only [List.filterMap_cons, Nat.sub_self, List.getElem?_cons_zero]
+        congr 1
+        apply filterMap_congr_mem
+        intro y hy
+        have := hlt y hy
+        have hs : y - index = (y - (index + 1)) + 1 := by omega
+        rw [hs, List.getElem?_cons_succ]
+      · rename_i hne
+        have hall : ∀ y ∈ r :: rs, index + 1 ≤ y := by
+          intro y hy
+          rcases List.mem_cons.1 hy with rfl | hy
+          · omega
+          · have := hlt y hy
+            omega
+        rw [ih hrow hall]
+        apply filterMap_congr_mem
+        intro y hy
+        have := hall y hy
+        have hs : y - index = (y - (index + 1)) + 1 := by omega
+        rw [hs, List.getElem?_cons_succ]
+
+private theorem pick_eq (l : List Nat) {row : List Nat} (hrow : Sorted row) : pick l.toArray row = select 0 l row := by
+  rw [select_eq_filterMap l hrow (fun _ _ => Nat.zero_le _)]
+  simp [pick]
+
 /-- The dominators a block has from its predecessors so far: the ones not known yet don't restrict it. -/
 private def meet (table : HashMap Nat (List Nat)) (preds : List Nat) : Option (List Nat) :=
   match preds.filterMap table.get? with
@@ -484,10 +548,11 @@ private def domLoop (pos : HashMap Nat Nat) (preds : HashMap Nat (List Nat)) (st
 /-- The sets are a fixpoint, with every predecessor taken into account. -/
 private def domCheck (pos : HashMap Nat Nat) (preds : HashMap Nat (List Nat)) (start : Nat) (nodes : List Nat)
     (table : HashMap Nat (List Nat)) : Bool :=
+  let member : HashSet Nat := HashSet.ofList nodes
   nodes.all fun node =>
     if node = start then table.get? node == some [pos.getD node 0]
     else
-      (preds.getD node []).all (fun pred => !nodes.contains pred || table.contains pred) &&
+      (preds.getD node []).all (fun pred => !member.contains pred || table.contains pred) &&
       match meet table (preds.getD node []) with
       | none => false
       | some common => table.get? node == some (insertSorted (pos.getD node 0) common)
@@ -505,10 +570,11 @@ def dominators (graph : Graph Nat) (start : Nat) : List (Nat × List Nat) :=
   let pos := posTable 0 unique {}
   let preds := predecessorTable graph
   let table := domTable pos preds start unique
+  let elements := unique.toArray
   if domCheck pos preds start unique table then
     nodes.map fun node =>
       (node, if node = start then [start] else
-        node :: (select 0 unique ((table.get? node).getD [])).filter (· != node))
+        node :: (pick elements ((table.get? node).getD [])).filter (· != node))
   else
     Bap.Graph.dominators graph start
 
@@ -785,7 +851,7 @@ theorem dominators_eq (graph : Graph Nat) (start : Nat) :
         · exact ⟨_, by simpa using hm⟩
       obtain ⟨hreach, hsorted, hcomplete⟩ := hholds node row hrow
       simp only [hrow, Option.getD_some]
-      rw [select_eq (posT.getD · 0) hsorted (fun _ _ => Nat.zero_le _) (fun k hk => by simpa using hposAt k hk), List.filter_filter]
+      rw [pick_eq _ hsorted, select_eq (posT.getD · 0) hsorted (fun _ _ => Nat.zero_le _) (fun k hk => by simpa using hposAt k hk), List.filter_filter]
       apply List.filter_congr
       intro d hd
       by_cases hdn : d = node
@@ -869,7 +935,7 @@ private theorem walk_eq (graph : Graph Nat) (idom : List (Nat × Nat)) (stop : O
   induction fuel generalizing runner result with
   | zero => rfl
   | succ fuel ih =>
-    simp only [walk, frontierWalk, assocTable_get]
+    unfold_walk_frontierWalk
     split
     · rfl
     · split <;> simp_all

@@ -871,6 +871,17 @@ private def runFieldChecks : IO Unit := do
       ("R_390_12 is unsigned", 22, 64, 2, 4095, false), ("R_390_12 of 4096", 22, 64, 2, 4096, true),
       ("R_RISCV_HI20 of the top of a 32-bit word wraps", 243, 32, 26, 2 ^ 31 - 1, false)] do
     assertEqual s!"{name}" expected (outOfRange (oneRelocation machine width typ value))
+  -- what loses its low bits is reported, for each relocation, and what doesn't is not
+  let misaligned (input : ElfLinker.Input) : Bool :=
+    (ElfLinker.link input).warnings.any (·.endsWith "needs a value aligned to 4")
+  assertEqual "R_AARCH64_CALL26 to a word" false (misaligned (oneRelocation 183 64 0x11b 0x2000))
+  assertEqual "R_AARCH64_CALL26 off a word" true (misaligned (oneRelocation 183 64 0x11b 0x2002))
+  assertEqual "R_AARCH64_LDST32 of a word" false (misaligned (oneRelocation 183 64 0x11d 0x2000))
+  assertEqual "R_AARCH64_LDST32 off a word" true (misaligned (oneRelocation 183 64 0x11d 0x2001))
+  assertEqual "R_AARCH64_ADD_ABS_LO12 has no alignment" false (misaligned (oneRelocation 183 64 0x115 0x2001))
+  assertEqual "R_PPC64_ADDR16_DS off a word" true (misaligned (oneRelocation 21 64 56 0x2001))
+  assertEqual "R_X86_64_PC32 has no alignment" false (misaligned (oneRelocation 62 64 2 0x2001))
+  assertTrue "R_RISCV_JAL to an odd address is reported" ((ElfLinker.link (oneRelocation 243 64 17 0x2001)).warnings.any (·.endsWith "needs a value aligned to 2"))
   assertEqual "R_X86_64_8 of -128" false (outOfRange (oneRelocation 62 64 14 0 (addend := -128)))
   assertEqual "R_X86_64_8 of -129" true (outOfRange (oneRelocation 62 64 14 0 (addend := -129)))
   assertEqual "R_X86_64_32 of -1" true (outOfRange (oneRelocation 62 64 10 0 (addend := -1)))

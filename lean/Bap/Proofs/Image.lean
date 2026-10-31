@@ -3422,12 +3422,12 @@ theorem link_memory_size (input : Input) : input.data.size ≤ (link input).memo
 
 /-- **The check of a field is what warns, and the only thing that does**: it leaves all but the warnings as they are. -/
 theorem checkField_run (env : Env) (site : Site) (state : LinkState) :
-    checkField env site state = .ok () (if fieldFits env state site then state else
-      { state with warnings := s!"relocation of type {site.rel.typ} at {site.p} is out of range of its field" :: state.warnings }) := by
-  have : checkField env site state = (if !fieldFits env state site then
-      warn s!"relocation of type {site.rel.typ} at {site.p} is out of range of its field" else (pure () : LinkM Unit)) state := rfl
+    checkField env site state = .ok () (if fieldOk env state site then state else
+      { state with warnings := fieldProblem env state site :: state.warnings }) := by
+  have : checkField env site state = (if !fieldOk env state site then
+      warn (fieldProblem env state site) else (pure () : LinkM Unit)) state := rfl
   rw [this]
-  cases fieldFits env state site <;> rfl
+  cases fieldOk env state site <;> rfl
 
 /-- **A relocation under the driver**: what its handler returns is stored if it is in bounds, and it warns exactly if it has to
 cut what it stores. -/
@@ -3437,17 +3437,17 @@ theorem applySite_store {env : Env} {apply : Site → Outcome} {site : Site} {st
     ∃ final, applySite env apply site state = .ok () final ∧
       final.memory = writes.foldl (init := after.memory) (fun memory w => writeNat memory w.little w.off w.n w.value) ∧
       final.mipsPending = after.mipsPending ∧
-      final.warnings = (if fieldFits env after site then after.warnings else
-        s!"relocation of type {site.rel.typ} at {site.p} is out of range of its field" :: after.warnings) := by
+      final.warnings = (if fieldOk env after site then after.warnings else
+        fieldProblem env after site :: after.warnings) := by
   unfold applySite
   rw [bind_ok h]
   dsimp only
   rw [bind_ok (checkField_run env site after)]
-  have hsize : (if fieldFits env after site then after else
-      { after with warnings := s!"relocation of type {site.rel.typ} at {site.p} is out of range of its field" :: after.warnings }).memory = after.memory := by
+  have hsize : (if fieldOk env after site then after else
+      { after with warnings := fieldProblem env after site :: after.warnings }).memory = after.memory := by
     split <;> rfl
-  generalize hmid : (if fieldFits env after site then after else
-      { after with warnings := s!"relocation of type {site.rel.typ} at {site.p} is out of range of its field" :: after.warnings }) = mid at hsize
+  generalize hmid : (if fieldOk env after site then after else
+      { after with warnings := fieldProblem env after site :: after.warnings }) = mid at hsize
   have hc := commit_run site writes mid
   rw [ite_eq_left (by
     simp only [List.all_eq_true, Bool.and_eq_true, decide_eq_true_eq, hsize]

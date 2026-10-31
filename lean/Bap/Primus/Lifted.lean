@@ -695,19 +695,68 @@ private def enterBlock (lowering : Lowering) (budget observed address : Nat) (gu
     else codeSite lowering address
   { lowering with ops := lowering.ops ++ [.add budget budget (UInt64.ofNat (2 ^ 64 - 1))] }
 
-/-- What each block has written on all ways to it, starting from the seed, where nothing is written. A way
-around a loop only ever removes what the first way wrote, so that this converges from above in as many rounds
-as the longest way without a cycle, which is at most one for each block. -/
-private def definitelyWritten (seed : Nat) (blocks : List Block) (edges : List (Nat × Nat))
-    (writes : Block → List Bap.Var) : Nat → List Bap.Var :=
-  let all := blocks.flatMap writes
-  let round (current : Nat → List Bap.Var) (address : Nat) : List Bap.Var :=
-    if address = seed then [] else
-      let before := edges.filter fun edge => edge.2 == address
-      before.foldl (init := all) fun kept edge =>
-        let reaching := current edge.1 ++ (blocks.find? fun block => block.address == edge.1).elim [] writes
-        kept.filter reaching.contains
-  (List.range blocks.length).foldl (init := fun _ => all) fun current _ address => round current address
+mutual
+  /-- Whether a statement can end in any other way than running off its end. -/
+  private def stmtLeaves : Bil.Stmt → Bool
+    | .move .. => false
+    | .ifElse _ yes no => programLeaves yes || programLeaves no
+    | .while _ body => programLeaves body
+    | _ => true
+
+  private def programLeaves : Bil.Program → Bool
+    | [] => false
+    | stmt :: rest => stmtLeaves stmt || programLeaves rest
+end
+
+mutual
+  /-- The variables that a statement has written at every end of it. -/
+  private def stmtWrites : Bil.Stmt → List Bap.Var
+    | .move dst _ => if (widthOf dst).isSome then [dst] else []
+    | .ifElse _ yes no => (programWrites yes).filter (programWrites no).contains
+    | _ => []
+
+  /-- The variables that a program has written at every end of it, however it ends: what follows a statement that can
+  leave does not count. -/
+  private def programWrites : Bil.Program → List Bap.Var
+    | [] => []
+    | stmt :: rest => stmtWrites stmt ++ if stmtLeaves stmt then [] else programWrites rest
+end
+
+/-- What a table of `definitelyWritten` says of a block. -/
+private def writtenAt (table : List (Nat × List Bap.Var)) (address : Nat) : List Bap.Var :=
+  (table.find? fun entry => entry.1 == address).elim [] Prod.snd
+
+/-- What the block at an address writes at every end of it. -/
+private def writesOf (blocks : List Block) (address : Nat) : List Bap.Var :=
+  (blocks.find? fun block => block.address == address).elim [] fun block => programWrites block.program
+
+/-- A round of `definitelyWritten`: what each block has written on all ways to it of one step more. -/
+private def writtenRound (seed : Nat) (blocks : List Block) (edges : List (Nat × Nat)) (all : List Bap.Var)
+    (current : List (Nat × List Bap.Var)) : List (Nat × List Bap.Var) :=
+  blocks.map fun block =>
+    (block.address,
+      if block.address = seed then [] else
+        (edges.filter fun edge => edge.2 == block.address).foldl (init := all) fun kept edge =>
+          let reaching := writtenAt current edge.1 ++ writesOf blocks edge.1
+          kept.filter reaching.contains)
+
+/-- Whether a table says only what holds on every way to a block: nothing at the seed, and along each edge only what
+its source has or writes. -/
+private def writtenStable (seed : Nat) (blocks : List Block) (edges : List (Nat × Nat))
+    (table : List (Nat × List Bap.Var)) : Bool :=
+  (writtenAt table seed).isEmpty &&
+    edges.all fun edge => (writtenAt table edge.2).all fun var =>
+      (writtenAt table edge.1).contains var || (writesOf blocks edge.1).contains var
+
+/-- What each block has written on all ways to it, starting from the seed, where nothing is written. A way around a
+loop only ever removes what the first way wrote, so that this converges from above in as many rounds as the longest
+way without a cycle, which is at most one for each block. A table that were not stable says nothing, which is always
+right: `writtenStable` is what its soundness rests on, not the number of rounds. -/
+private def definitelyWritten (seed : Nat) (blocks : List Block) (edges : List (Nat × Nat)) : List (Nat × List Bap.Var) :=
+  let all := (blocks.flatMap fun block => programWrites block.program).eraseDups
+  let table := (List.range blocks.length).foldl (init := blocks.map fun block => (block.address, all))
+    fun current _ => writtenRound seed blocks edges all current
+  if writtenStable seed blocks edges table then table else []
 
 /-- A flag for each of `outputs`, each with a slot of its own from `start` on. -/
 private def flagSlots (outputs : List (Bap.Var × Nat)) (start : Nat) : Nat × List (Nat × Nat) :=
@@ -761,7 +810,7 @@ private def opLabels (ops : List Jit.Op) : List Nat :=
 
 /-- What the proof of a whole range checks of what it lowered, rather than follows through every statement: blocks
 have an address each and it fits, a label is where it is once, operations stay in the slots allocated, which leaves
-the slots after them to the flags, what is moved to, if it is a variable's, is an output, and the control slots stay.
+the slots after them to the flags, an input has a slot, what is moved to, if it is a variable's, is an output, and the control slots stay.
 All hold of what lowering makes. A lowering that did not would stay out of native code. -/
 private def lowerGraphChecked (blocks : List Block) (initial lowering : Lowering) : Bool :=
   lowering.budget == initial.budget && lowering.observed == initial.observed &&
@@ -770,6 +819,7 @@ private def lowerGraphChecked (blocks : List Block) (initial lowering : Lowering
     decide (opLabels lowering.ops).Nodup &&
     lowering.ops.all (fun op => (opSlots op).all (· < lowering.nextSlot)) &&
     lowering.outputs.all lowering.layout.contains &&
+    lowering.inputs.all (fun var => lowering.layout.any fun binding => binding.1 == var) &&
     lowering.ops.all fun op =>
       match op with
       | .move dst _ => lowering.layout.all fun binding => binding.2 != dst || lowering.outputs.contains binding
@@ -868,14 +918,14 @@ private def graphPlan (blocks : List Block) (edges : List (Nat × Nat)) (wrapFau
   -- The label of a block heads the entry over an edge; a run starts in the seed without one.
   let alone (block : Block) := lowerStatements { wrapFaults } block.program
   let touches (block : Block) : Bool := (alone block).elim true fun lowered => lowered.1.memory.isSome
-  let writes (block : Block) : List Bap.Var := (alone block).elim [] fun lowered => lowered.1.written
+  let definite := definitelyWritten seed.address blocks edges
   { seed := seed.address
     labels := (List.range blocks.length).map fun index => (blocks[index]!.address, index)
     edges
     budget := initial.budget.getD 0
     observed := initial.observed.getD 0
     chained := !edges.isEmpty
-    definite := definitelyWritten seed.address blocks edges writes
+    definite := writtenAt definite
     guarded := fun block => !touches block && !(edges.any fun edge => edge.2 == block.address &&
       blocks.any fun other => other.address == edge.1 && touches other) }
 
@@ -999,7 +1049,9 @@ private def restoreRangeVersion (engine : Engine) (fetch : Fetch) (address : Nat
   find (versions.getD address [])
 
 private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
-    (address : Nat) (code : ByteArray) : IO CachedBlock := do
+    (address : Nat) (code : ByteArray) (budget : Nat) : IO CachedBlock := do
+  -- A run that may enter no other block has no use for a range: the block alone moves less in and out of native code.
+  if budget = 0 then return ← prepare engine lift address code
   match (← engine.ranges.get).get? address with
   | some entry =>
     engine.statistics.modify fun stats => { stats with cacheHits := stats.cacheHits + 1 }
@@ -1282,7 +1334,7 @@ def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bi
   engine.nativeCooldown.modify fun cooldown => if cooldown = 0 then 0 else cooldown - 1
   engine.chained.set 0
   let code ← fetch pc
-  let entry ← prepareGraph engine fetch lift pc code
+  let entry ← prepareGraph engine fetch lift pc code budget
   match entry.plan with
   | .interpreted program => runInterpreted engine entry.next pc program state observer
   | .native lowering program fallback =>

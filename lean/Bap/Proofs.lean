@@ -14,7 +14,6 @@ import Bap.Primus.Scheduler
 import Bap.Analysis.Validate
 import Bap.Analysis.Slice
 import Bap.Project.Pass
-import Bap.Plugin.Basic
 import Bap.API
 import Bap.Crypto.KeyWrap
 import Bap.Symbolic.Memory
@@ -27,6 +26,7 @@ import Bap.Proofs.Bil
 import Bap.Proofs.Checkpoint
 import Bap.Proofs.Core
 import Bap.Proofs.Crypto
+import Bap.Proofs.CryptoVectors
 import Bap.Proofs.Decompile
 import Bap.Proofs.Disasm
 import Bap.Proofs.Emu
@@ -41,7 +41,6 @@ import Bap.Proofs.LinkerImage
 import Bap.Proofs.Jit
 import Bap.Proofs.Knowledge
 import Bap.Proofs.LLVM
-import Bap.Proofs.Plugin
 import Bap.Proofs.Primus
 import Bap.Proofs.Project
 import Bap.Proofs.Symbolic
@@ -202,17 +201,13 @@ theorem validate_empty_program :
 
 end Analyses
 
-namespace Plugins
+namespace Passes
 
 theorem runPasses_empty (project : Bap.Project.Project) :
     Bap.Project.runPasses [] project = .ok project := by
   rfl
 
-theorem defaultRegistry_has_summarize :
-    (Bap.Plugin.defaultRegistry.findPass "summarize").map Bap.Project.Pass.name = some "summarize" := by
-  decide +kernel
-
-end Plugins
+end Passes
 
 namespace CLI
 

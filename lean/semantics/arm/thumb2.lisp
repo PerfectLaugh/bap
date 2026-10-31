@@ -2,6 +2,7 @@
                   (bits 32)))
 
 (require thumb)
+(require thumb-multiple)
 (require arm-a32)
 (require arm-a32-mem)
 

@@ -2003,14 +2003,42 @@ theorem filter_belongs {selection : Selection} {targets : List T} {target : T}
     (h : target ∈ filter selection targets) : selection.parent.belongs target = true :=
   ((mem_filter _ _ _).1 h).2.2.1
 
+private theorem closest_spec (first : T) (rest : List T) :
+    closest first rest ∈ first :: rest ∧ ∀ target ∈ first :: rest, (closest first rest).family.length ≤ target.family.length := by
+  induction rest generalizing first with
+  | nil => simp [closest]
+  | cons head tail ih =>
+    simp only [closest, List.foldl_cons] at ih ⊢
+    split
+    · next hlt =>
+      obtain ⟨h1, h2⟩ := ih head
+      refine ⟨List.mem_cons_of_mem _ h1, fun target ht => ?_⟩
+      rcases List.mem_cons.1 ht with rfl | ht
+      · exact Nat.le_trans (h2 _ List.mem_cons_self) (Nat.le_of_lt hlt)
+      · exact h2 _ ht
+    · next hge =>
+      obtain ⟨h1, h2⟩ := ih first
+      refine ⟨?_, fun target ht => ?_⟩
+      · rcases List.mem_cons.1 h1 with h | h
+        · rw [h]; exact List.mem_cons_self
+        · exact List.mem_cons_of_mem _ (List.mem_cons_of_mem _ h)
+      · rcases List.mem_cons.1 ht with rfl | ht
+        · exact h2 _ List.mem_cons_self
+        · rcases List.mem_cons.1 ht with rfl | ht
+          · exact Nat.le_trans (h2 _ List.mem_cons_self) (Nat.le_of_not_lt hge)
+          · exact h2 _ (List.mem_cons_of_mem _ ht)
+
 theorem select_sound {selection : Selection} {targets : List T} {target : T}
     (h : select selection targets = some target) : target ∈ filter selection targets := by
   unfold select at h
   split at h
   · cases h; simp_all
-  · split at h
+  · next heq =>
+    split at h
     · cases h
-    · cases h; simp_all
+    · cases h
+      rw [heq]
+      exact (closest_spec _ _).1
   · cases h
 
 /-- A `unique` selection succeeds only when exactly one candidate survives. -/
@@ -2023,10 +2051,25 @@ theorem select_unique_iff {selection : Selection} (hunique : selection.unique = 
   · simp_all
   · simp_all
 
-theorem select_nonunique_eq_head {selection : Selection} (hunique : selection.unique = false)
-    (targets : List T) : select selection targets = (filter selection targets).head? := by
+/-- Without `unique`, there is a selection if there is a candidate, and none has fewer ancestors: so an ancestor goes before what descends
+from it, whichever came first in the registry. -/
+theorem select_nonunique_closest {selection : Selection} (hunique : selection.unique = false) {targets : List T} {target : T}
+    (hm : target ∈ filter selection targets) :
+    ∃ selected, select selection targets = some selected ∧ selected ∈ filter selection targets ∧ selected.family.length ≤ target.family.length := by
   unfold select
-  split <;> simp_all
+  split
+  · next heq =>
+    rw [heq] at hm ⊢
+    obtain rfl := List.mem_singleton.1 hm
+    exact ⟨_, rfl, by simp, Nat.le_refl _⟩
+  · next first rest hne heq =>
+    rw [heq] at hm ⊢
+    obtain ⟨h1, h2⟩ := closest_spec first rest
+    simp only [hunique, Bool.false_eq_true, ↓reduceIte]
+    exact ⟨_, rfl, h1, h2 _ hm⟩
+  · next heq =>
+    rw [heq] at hm
+    simp at hm
 
 /-! ### Registers -/
 
@@ -2148,12 +2191,12 @@ theorem hasRoles_append (target : T) (first second : List Role) (var : RV) :
   simp [Target.hasRoles, List.all_append]
 
 theorem var_sound {target : T} {name : String} {var : RV} (h : target.var name = some var) :
-    var ∈ target.vars ∧ var.name = name := by
+    var ∈ target.vars ∧ var.name.toLower = name.toLower := by
   have hp := List.find?_some h
   exact ⟨List.mem_of_find?_eq_some h, by simpa using hp⟩
 
 theorem var_isSome_iff (target : T) (name : String) :
-    (target.var name).isSome = true ↔ ∃ var ∈ target.vars, var.name = name := by
+    (target.var name).isSome = true ↔ ∃ var ∈ target.vars, var.name.toLower = name.toLower := by
   simp [Target.var, List.find?_isSome]
 
 /-! ### Aliases -/

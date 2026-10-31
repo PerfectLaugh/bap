@@ -146,7 +146,7 @@ private def blockInFast (blk : Blk) (out : List Bap.Var) : List Bap.Var :=
   let reads := blk.jmps.flatMap fun jmp => jmp.freeVars.filter fun var => !killed.contains var
   dedup (step.1 ++ reads ++ out.filter fun var => !killed.contains var)
 
-@[csimp] private theorem blockIn_eq_fast : @blockIn = @blockInFast := by
+private theorem blockIn_eq_fast : @blockIn = @blockInFast := by
   funext blk out
   simp only [blockIn, blockInFast, dedup_eq]
   generalize blk.defs.foldl (init := ([], blk.phis.map Phi.var)) (fun state defn =>
@@ -179,6 +179,59 @@ private def blockInFast (blk : Blk) (out : List Bap.Var) : List Bap.Var :=
       eraseDups_union _ _
     simp only [hj, ↓reduceIte, hsub]
     exact eraseDups_union _ _
+
+/-- `blockInFast`, not going over all that the block has assigned so far for each read. -/
+private def blockInTable (blk : Blk) (out : List Bap.Var) : List Bap.Var :=
+  let start : List (List Bap.Var) × Std.HashSet Bap.Var := ([], Std.HashSet.ofList (blk.phis.map Phi.var))
+  let step := blk.defs.foldl (init := start) fun state defn =>
+    ((Bil.freeVars defn.rhs).filter (fun var => !state.2.contains var) :: state.1, state.2.insert defn.var)
+  let killed := step.2
+  let reads := blk.jmps.flatMap fun jmp => jmp.freeVars.filter fun var => !killed.contains var
+  dedup (step.1.reverse.flatten ++ reads ++ out.filter fun var => !killed.contains var)
+
+private theorem blockInFold (defs : List Def) (input : List Bap.Var) (killed : List Bap.Var) (chunks : List (List Bap.Var))
+    (set : Std.HashSet Bap.Var) (hi : input = chunks.reverse.flatten) (hk : ∀ x, x ∈ killed ↔ set.contains x = true) :
+    let spec := defs.foldl (init := (input, killed)) fun state defn =>
+      let input := state.1 ++ (Bil.freeVars defn.rhs).filter fun var => var ∉ state.2
+      (input, defn.var :: state.2)
+    let fast := defs.foldl (init := (chunks, set)) fun state defn =>
+      ((Bil.freeVars defn.rhs).filter (fun var => !state.2.contains var) :: state.1, state.2.insert defn.var)
+    spec.1 = fast.1.reverse.flatten ∧ ∀ x, x ∈ spec.2 ↔ fast.2.contains x = true := by
+  induction defs generalizing input killed chunks set with
+  | nil => exact ⟨hi, hk⟩
+  | cons d ds ih =>
+    simp only [List.foldl_cons]
+    apply ih
+    · simp only [List.reverse_cons, List.flatten_append, List.flatten_cons, List.flatten_nil, List.append_nil, ← hi]
+      congr 1
+      apply List.filter_congr
+      intro x _
+      rw [Bool.eq_iff_iff]
+      simp only [decide_eq_true_eq, Bool.not_eq_true', hk x]
+      simp
+    · intro x
+      simp only [List.mem_cons, hk x, Std.HashSet.contains_insert, Bool.or_eq_true, beq_iff_eq]
+      grind
+
+private theorem blockInFast_eq_table : @blockInFast = @blockInTable := by
+  funext blk out
+  have h := blockInFold blk.defs [] (blk.phis.map Phi.var) [] (Std.HashSet.ofList (blk.phis.map Phi.var)) rfl
+    (fun x => by simp [Std.HashSet.contains_ofList])
+  simp only [blockInFast, blockInTable]
+  obtain ⟨h1, h2⟩ := h
+  rw [h1]
+  have hset : ∀ x, (Std.HashSet.ofList (blk.defs.foldl (init := (([] : List Bap.Var), blk.phis.map Phi.var)) (fun state defn =>
+      let input := state.1 ++ (Bil.freeVars defn.rhs).filter fun var => var ∉ state.2
+      (input, defn.var :: state.2))).2).contains x =
+      (blk.defs.foldl (init := (([] : List (List Bap.Var)), Std.HashSet.ofList (blk.phis.map Phi.var))) (fun state defn =>
+        ((Bil.freeVars defn.rhs).filter (fun var => !state.2.contains var) :: state.1, state.2.insert defn.var))).2.contains x := by
+    intro x
+    rw [Bool.eq_iff_iff, ← h2 x]
+    simp [Std.HashSet.contains_ofList]
+  simp only [hset]
+
+@[csimp] private theorem blockIn_eq_table : @blockIn = @blockInTable := by
+  rw [blockIn_eq_fast, blockInFast_eq_table]
 
 /-- `sameSets`, without comparing every pair of a row. -/
 private def sameSetsFast (keys : List Tid) (left right : List (Tid × List Bap.Var)) : Bool :=

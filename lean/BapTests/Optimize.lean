@@ -188,6 +188,31 @@ private def sameDeadCode (name : String) (sub : Sub) (protectedVars : List Var :
   let expected := Wire.printSub ((deadCodeBySpec protectedVars cfg (count + 1)).intoSub sub)
   assertEqual name (toString expected) (toString (Wire.printSub ((eliminateDeadCode cfg protectedVars).intoSub sub)))
 
+local macro "propagateAux" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.IR.Optimize) 0 ++ `Bap.IR.propagateAux)
+local macro "propagateFuel" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.IR.Optimize) 0 ++ `Bap.IR.propagateFuel)
+local macro "entryEnv" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.IR.Optimize) 0 ++ `Bap.IR.entryEnv)
+local macro "isSolved" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.IR.Optimize) 0 ++ `Bap.IR.isSolved)
+local macro "propagateBlock" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.IR.Optimize) 0 ++ `Bap.IR.propagateBlock)
+
+/-- `propagateConstants` as it reads: its lists, and a block rewritten for what it says of its constants. -/
+private def constantsBySpec (cfg : Cfg) : Cfg :=
+  let cfg := cfg.prune
+  let exits := propagateAux cfg (propagateFuel cfg) [] [cfg.start]
+  let solved := isSolved cfg exits
+  { cfg with blocks := cfg.blocks.map fun blk =>
+    (propagateBlock blk (if solved then entryEnv cfg exits blk.tid else [])).1
+  }
+
+private def sameConstants (name : String) (sub : Sub) : IO Unit :=
+  let cfg := Cfg.fromSub sub
+  assertEqual s!"constants of {name}" (toString (Wire.printSub ((constantsBySpec cfg).intoSub sub)))
+    (toString (Wire.printSub ((propagateConstants cfg).intoSub sub)))
+
 /-- From a real instruction sequence: a block per basic block and its moves, jumps by flow. -/
 private def stmtDefs : Nat → Bil.Program → List Def
   | _, [] => []
@@ -219,6 +244,10 @@ private def chainSub (length : Nat) : Sub :=
         else [goto (i * 10 + 1) (i + 2)] }⟩
 
 private def deadCodeFastPath : IO Unit := do
+  sameConstants "a sample" sample
+  sameConstants "a loop" loop
+  sameConstants "a chain" (chainSub 30)
+  sameConstants "the SSA of a chain" (toSsa (chainSub 30))
   sameDeadCode "dead code: a sample" sample
   sameDeadCode "dead code: a loop" loop
   sameDeadCode "dead code: an entry loop" entryLoop
@@ -250,6 +279,7 @@ private def deadCodeFastPath : IO Unit := do
       let data := image.data.extract text.offset (text.offset + min text.size 6000)
       let disasm ← Disasm.Linear.sweep (← Target.X86.disassembler text.addr) data text.addr
       let sub := subOfDisasm disasm
+      sameConstants "real code" sub
       sameDeadCode "dead code: real code" sub
       sameDeadCode "dead code: real code, protected" sub [reg "RAX"]
       sameDeadCode "dead code: real code in SSA" (toSsa sub)

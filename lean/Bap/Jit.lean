@@ -43,8 +43,8 @@ these. No theorem assumes anything of LLVM beyond them.
 and a whole range along its edges and back edges with its budget, code sites and flags (`lowerGraph_correct`, and `lowerGraph_single` for a
 block alone): it ends as the blocks do one at a time in the interpreter, with the same state, pc and count, on the terms above. The proof assumes
 nothing of the graph: `lowerGraphChecked` checks at compile time what it does not follow through every statement, and a lowering
-that failed the check would stay out of native code. `lowerGraph_correct` leaves out what the interpreter has no result for, an unbound
-variable that `encodeState` let pass or running out of its fuel, where it says nothing. `Bap.Emu.Core` lists what stays trusted around all of this. -/
+that failed the check would stay out of native code. The one thing `lowerGraph_correct` leaves out is the interpreter running out of its
+fuel: what lowers has a result otherwise, on a state that `encodeState` takes with its memory bound (`graph_progress`). `Bap.Emu.Core` lists what stays trusted around all of this. -/
 
 namespace Bap.Jit
 

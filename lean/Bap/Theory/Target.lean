@@ -195,8 +195,10 @@ def Target.belongs (ancestor target : Target) : Bool :=
 
 def Target.parents (target : Target) : List String := target.family
 
+/-- The variable of a name, which registers have whatever their case. -/
 def Target.var (target : Target) (name : String) : Option Var :=
-  target.vars.find? fun var => var.name = name
+  let name := name.toLower
+  target.vars.find? fun var => var.name.toLower = name
 
 def Target.hasRole (target : Target) (var : Var) (role : Role) : Bool :=
   target.regs.any fun group => role ∈ group.1 ∧ var ∈ group.2
@@ -523,10 +525,15 @@ def filter (selection : Selection) (targets : List Target) : List Target :=
     fieldMatches selection.strict .unknown target.filetype selection.filetype &&
     fieldMatches selection.strict "" target.options selection.options
 
+/-- The candidate with the fewest ancestors, the first of those: an ancestor comes before what descends from it, however they
+were registered. -/
+def closest (first : Target) (rest : List Target) : Target :=
+  rest.foldl (fun best target => if target.family.length < best.family.length then target else best) first
+
 def select (selection : Selection) (targets : List Target) : Option Target :=
   match filter selection targets with
   | [target] => some target
-  | target :: _ => if selection.unique then none else some target
+  | target :: rest => if selection.unique then none else some (closest target rest)
   | [] => none
 
 def register (target : Target) (registry : List Target) : List Target :=

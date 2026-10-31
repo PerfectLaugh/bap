@@ -1,4 +1,4 @@
-import Bap.Proofs.Liveness
+import Bap.IR.LiveFacts
 
 /-! What `Cfg.liveness` finds, one variable at a time, for those who only ask whether a variable is live in a block.
 
@@ -666,9 +666,12 @@ def refreshAux (blocks : Blocks) (preds : Preds) (seeds : VarTable) (blockCount 
   | [] => some live
   | x :: rest =>
     let start := seeds.getD x []
-    match flood blocks preds x (start.length + blockCount + 1) start with
-    | none => none
-    | some row => refreshAux blocks preds seeds blockCount (live.insert x row) rest
+    match start with
+    | [] => refreshAux blocks preds seeds blockCount (live.erase x) rest
+    | _ =>
+      match flood blocks preds x (start.length + blockCount + 1) start with
+      | none => none
+      | some row => refreshAux blocks preds seeds blockCount (live.insert x row) rest
 
 private theorem refreshAux_spec {cfg : Cfg} {blocks : Blocks} {preds : Preds} (h : Tables cfg blocks preds) {seeds : VarTable} {count : Nat}
     (vars : List Bap.Var) (hseeds : ∀ x ∈ vars, Seeds cfg x (seeds.getD x [])) (live : Live) (result : Live)
@@ -680,25 +683,14 @@ private theorem refreshAux_spec {cfg : Cfg} {blocks : Blocks} {preds : Preds} (h
     subst hr
     exact ⟨fun _ _ h => h, by simp⟩
   | cons a as ih =>
-    simp only [refreshAux] at hr
-    cases hf : flood blocks preds a ((seeds.getD a []).length + count + 1) (seeds.getD a []) with
-    | none =>
-      rw [hf] at hr
-      cases hr
-    | some row =>
-      rw [hf] at hr
-      dsimp only at hr
+    have hnext : ∀ live' : Live, RowOf cfg live' a → (∀ x, a ≠ x → ∀ t, isLive live' x t = isLive live x t) →
+        refreshAux blocks preds seeds count live' as = some result →
+        (∀ x, x ∉ a :: as → RowOf cfg live x → RowOf cfg result x) ∧ ∀ x ∈ a :: as, RowOf cfg result x := by
+      intro live' hrow hsame hr
       obtain ⟨h1, h2⟩ := ih (fun x hx => hseeds x (List.mem_cons_of_mem _ hx)) _ hr
-      have hrow : RowOf cfg (live.insert a row) a := by
-        intro t
-        rw [← flood_spec h (hseeds a List.mem_cons_self) hf t]
-        simp [isLive]
       refine ⟨fun x hx hl => h1 x (fun hm => hx (List.mem_cons_of_mem _ hm)) ?_, ?_⟩
       · intro t
-        rw [← hl t]
-        have hne : a ≠ x := fun e => hx (e ▸ List.mem_cons_self)
-        have hq : (a == x) = false := by simpa using hne
-        simp [isLive, Std.HashMap.getD_insert, hq]
+        rw [← hl t, hsame x (fun e => hx (e ▸ List.mem_cons_self)) t]
       · intro x hx
         by_cases hax : x = a
         · subst hax
@@ -706,6 +698,40 @@ private theorem refreshAux_spec {cfg : Cfg} {blocks : Blocks} {preds : Preds} (h
           · exact h2 x hmem
           · exact h1 x hmem hrow
         · exact h2 x (by simpa [hax] using hx)
+    simp only [refreshAux] at hr
+    cases hstart : seeds.getD a [] with
+    | nil =>
+      rw [hstart] at hr
+      dsimp only at hr
+      have hf : flood blocks preds a (0 + count + 1) [] = some {} := by
+        simp [flood, floodAux, seedRow]
+      refine hnext _ ?_ ?_ hr
+      · intro t
+        have hseed := hseeds a List.mem_cons_self
+        rw [hstart] at hseed
+        rw [← flood_spec h hseed hf t]
+        simp [isLive]
+      · intro x hx t
+        simp only [isLive, Std.HashMap.getD_erase]
+        simp [hx]
+    | cons first others =>
+      rw [hstart] at hr
+      dsimp only at hr
+      rw [← hstart] at hr
+      cases hf : flood blocks preds a ((seeds.getD a []).length + count + 1) (seeds.getD a []) with
+      | none =>
+        rw [hf] at hr
+        cases hr
+      | some row =>
+        rw [hf] at hr
+        dsimp only at hr
+        refine hnext _ ?_ ?_ hr
+        · intro t
+          rw [← flood_spec h (hseeds a List.mem_cons_self) hf t]
+          simp [isLive]
+        · intro x hx t
+          have hq : (a == x) = false := by simpa using hx
+          simp [isLive, Std.HashMap.getD_insert, hq]
 
 /-- Rows for `affected`, from the blocks in the table. -/
 def refresh (blocks : Blocks) (preds : Preds) (reach : Row) (sites : VarTable) (blockCount : Nat) (live : Live)

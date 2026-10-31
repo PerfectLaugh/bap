@@ -216,7 +216,30 @@ private def ssaBySpec (sub : Sub) : Sub :=
   let (cfg, _) := renameBlock idom (cfg.blocks.length + 1) cfg.start cfg state
   { sub with blks := sub.blks.filterMap fun blk => cfg.block blk.tid }
 
-private def sameSsa (name : String) (sub : Sub) : IO Unit :=
+local macro "connectMissingStarts" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.IR.Cfg) 0 ++ `Bap.IR.connectMissingStarts)
+local macro "connectMissingExits" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.IR.Cfg) 0 ++ `Bap.IR.connectMissingExits)
+
+/-- `Cfg.connected` as it reads. -/
+private def connectedBySpec (sub : Sub) : Cfg :=
+  let base := Cfg.fromSub sub
+  let actual := sub.blks.map Blk.tid
+  let roots := actual.head?.toList ++ actual.filter fun tid => (base.predecessors tid).isEmpty
+  let leaves := actual.filter fun tid => (base.successors tid).isEmpty
+  let cfg : Cfg := {
+    start := pseudoStart
+    blocks := ⟨pseudoStart, [], [], []⟩ :: base.blocks ++ [⟨pseudoExit, [], [], []⟩]
+    graph := {
+      nodes := pseudoStart :: actual ++ [pseudoExit]
+      edges := base.graph.edges ++ roots.map (pseudoStart, ·) ++ leaves.map (·, pseudoExit)
+    }
+  }
+  let cfg := connectMissingStarts actual cfg (actual.length + 1)
+  connectMissingExits actual cfg (actual.length + 1)
+
+private def sameSsa (name : String) (sub : Sub) : IO Unit := do
+  assertEqual s!"graph of {name}" (toString (repr (connectedBySpec sub).graph)) (toString (repr (Cfg.connected sub).graph))
   assertEqual s!"SSA of {name}" (toString (Wire.printSub (ssaBySpec sub))) (toString (Wire.printSub (toSsa sub)))
 
 private def moves : Bil.Program → List Def
@@ -237,6 +260,12 @@ private def ssaFastPath : IO Unit := do
     ⟨3, [], [⟨6, y, .var x⟩], []⟩,
     ⟨3, [], [⟨7, x, .var y⟩], []⟩]⟩
   sameSsa "blocks with the same tid" sameTids
+  -- a name in force that a `let` captures, a `let` that shadows one, and reads around them
+  let captured : Sub := ⟨1, "let", [], [
+    ⟨1, [], [⟨1, x, .var y⟩, ⟨2, y, .letIn (x.version 1) (.var x) (.bin .add (.var x) (.var (x.version 1)))⟩,
+      ⟨3, x, .letIn x (.var y) (.var x)⟩], [⟨4, some (.letIn y (.var x) (.var y)), .goto (.direct 2)⟩, ⟨5, none, .goto (.direct 2)⟩]⟩,
+    ⟨2, [], [⟨6, y, .letIn (x.version 2) (.var y) (.var x)⟩], [⟨7, none, .ret (.indirect (.var y))⟩]⟩]⟩
+  sameSsa "lets" captured
   let path := "/bin/ls"
   if ← System.FilePath.pathExists path then
     let image ← Image.load path

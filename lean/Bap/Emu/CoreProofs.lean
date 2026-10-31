@@ -5,7 +5,7 @@ import Bap.Proofs.Core
 
 /-! Proofs about the pure core of emulator execution. `IO.Ref`s are opaque, so the generic flows of
 `Bap.Emu.Core` run here on a model: a state monad over `Machine`, whose fields stand for the references
-of an emulator. `Bap.Emu.step` is `stepM` itself (`stepOps` only says which reference is which), so what
+of an emulator. `Bap.Emu.step` is `stepM` after it clears the budget of a stopped run (`stepOps` only says which reference is which), so what
 holds of `stepM` for arbitrary hooks and blocks holds of the code that runs, given that references behave
 as state and that native code computes the semantics of its BIL (see `Bap.Jit`). -/
 
@@ -2303,5 +2303,146 @@ theorem rangeSiteStops_quiet : rangeSiteStops false false false = false := rfl
 theorem rangeBudgetOf_watched (budget : Nat) : rangeBudgetOf budget true = 0 := rfl
 
 theorem rangeBudgetOf_unwatched (budget : Nat) : rangeBudgetOf budget false = budget := rfl
+
+/-! ### Steps that are taken back -/
+
+/-- A step at an address that met a hook runs one instruction, as does any step of a worker while there are hooks. -/
+theorem accessesWatched_restarted (deferred hasHooks : Bool) : accessesWatched true deferred hasHooks = true := rfl
+
+theorem accessesWatched_deferred (restarted : Bool) : accessesWatched restarted true true = true := by
+  simp [accessesWatched]
+
+/-- Without hooks, nothing limits a step. -/
+theorem accessesWatched_none (deferred : Bool) : accessesWatched false deferred false = false := by
+  simp [accessesWatched]
+
+/-- An access that no hook watches takes nothing back. -/
+theorem accessRestarts_miss (budget : Nat) (deferred : Bool) : accessRestarts false budget deferred = false := rfl
+
+/-- In a step of one instruction, hooks fire: it is not taken back, and neither is a worker, which fires them where they are. -/
+theorem accessRestarts_single (hit deferred : Bool) : accessRestarts hit 0 deferred = false := by
+  simp [accessRestarts]
+
+theorem accessRestarts_deferred (hit : Bool) (budget : Nat) : accessRestarts hit budget true = false := by
+  simp [accessRestarts]
+
+/-- So a hook only ever runs in a step of one instruction, of a thread that can be rolled back: whenever a hook is hit in
+a step that may chain, the step is taken back before the hook runs. -/
+theorem accessRestarts_chained {budget : Nat} (h : budget ≠ 0) : accessRestarts true budget false = true := by
+  simp [accessRestarts, h]
+
+section Restart
+
+variable {ε σ : Type}
+
+/-- What `restart` must do: tell whether the step is to run again, change nothing that single steps see, and leave a state for
+which the step, when told to run again, is as good as from where it started. `stepExecute_error` gives that for a failed step of the emulator. -/
+structure RestartLaws (step single : EStateM ε σ Bool) (restart : EStateM ε σ Bool) : Prop where
+  restart_ok : ∀ state, ∃ again next, restart state = .ok again next ∧ (again = false → next = state)
+  taken_back : ∀ state error failed next, step state = .error error failed → restart failed = .ok true next →
+    ∀ count faultError final, FaultsIn single count state faultError final → FaultsIn single count next faultError final
+
+private theorem restartM_run (step restart : EStateM ε σ Bool) (state : σ) :
+    (restartM step restart : EStateM ε σ Bool) state =
+      match step state with
+      | .ok value next => .ok value next
+      | .error error failed =>
+        match restart failed with
+        | .ok true next => step next
+        | .ok false next => .error error next
+        | .error error next => .error error next := by
+  unfold restartM
+  show EStateM.tryCatch step _ state = _
+  simp only [EStateM.tryCatch]
+  cases step state with
+  | ok value next => rfl
+  | error error failed =>
+    show EStateM.bind restart _ failed = _
+    simp only [EStateM.bind]
+    cases restart failed with
+    | ok again next => cases again <;> rfl
+    | error error next => rfl
+
+/-- A step that is not told to run again is the step. -/
+theorem restartM_ok {step restart : EStateM ε σ Bool} {state next : σ} {value : Bool} (h : step state = .ok value next) :
+    (restartM step restart : EStateM ε σ Bool) state = .ok value next := by
+  rw [restartM_run, h]
+
+theorem restartM_error {step restart : EStateM ε σ Bool} {state failed next : σ} {error : ε} (h : step state = .error error failed)
+    (hr : restart failed = .ok false next) : (restartM step restart : EStateM ε σ Bool) state = .error error next := by
+  rw [restartM_run, h]
+  simp only [hr]
+
+/-- A step that is told to run again is its run from where the failure left it. -/
+theorem restartM_again {step restart : EStateM ε σ Bool} {state failed next : σ} {error : ε} (h : step state = .error error failed)
+    (hr : restart failed = .ok true next) : (restartM step restart : EStateM ε σ Bool) state = step next := by
+  rw [restartM_run, h]
+  simp only [hr]
+
+/-- **Taking a step back keeps all that ranges promise.** If a step that may run a range meets `RangeLaws`, so does the step that runs
+again from a hook of an access, so that `runPreciseM_fault` holds of it, and for the same reason: all that ran before the
+hook was rolled back, and nothing saw it. -/
+theorem rangeLaws_restartM {step single again restart : EStateM ε σ Bool} {allow : Nat → EStateM ε σ Unit} {chained : EStateM ε σ Nat}
+    (laws : RangeLaws step single again allow chained) (hr : RestartLaws step single restart) :
+    RangeLaws (restartM step restart) single again allow chained where
+  allow_ok := laws.allow_ok
+  chained_ok := laws.chained_ok
+  ran := by
+    intro state next count hs hc k error final hk
+    cases h1 : step state with
+    | ok value mid =>
+      rw [restartM_ok h1] at hs
+      injection hs with hv hm
+      subst hv
+      subst hm
+      exact laws.ran state mid count h1 hc k error final hk
+    | error e failed =>
+      obtain ⟨go, r, h2, _⟩ := hr.restart_ok failed
+      cases go with
+      | false =>
+        rw [restartM_error h1 h2] at hs
+        cases hs
+      | true =>
+        rw [restartM_again h1 h2] at hs
+        exact laws.ran r next count hs hc k error final (hr.taken_back state e failed r h1 h2 k error final hk)
+  halted := by
+    intro state next k error final hs hk
+    cases h1 : step state with
+    | ok value mid =>
+      rw [restartM_ok h1] at hs
+      injection hs with hv hm
+      subst hv
+      subst hm
+      exact laws.halted state mid k error final h1 hk
+    | error e failed =>
+      obtain ⟨go, r, h2, _⟩ := hr.restart_ok failed
+      cases go with
+      | false =>
+        rw [restartM_error h1 h2] at hs
+        cases hs
+      | true =>
+        rw [restartM_again h1 h2] at hs
+        exact laws.halted r next k error final hs (hr.taken_back state e failed r h1 h2 k error final hk)
+  failed := by
+    intro state e r k error final hs hk
+    cases h1 : step state with
+    | ok value mid =>
+      rw [restartM_ok h1] at hs
+      cases hs
+    | error e1 failed =>
+      obtain ⟨go, r1, h2, hkeep⟩ := hr.restart_ok failed
+      cases go with
+      | false =>
+        rw [restartM_error h1 h2] at hs
+        injection hs with he hrr
+        subst he
+        subst hrr
+        rw [hkeep rfl]
+        exact laws.failed state e1 failed k error final h1 hk
+      | true =>
+        rw [restartM_again h1 h2] at hs
+        exact laws.failed r1 e r k error final hs (hr.taken_back state e1 failed r1 h1 h2 k error final hk)
+
+end Restart
 
 end Bap.Emu

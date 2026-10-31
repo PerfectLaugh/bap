@@ -5,7 +5,6 @@ namespace Bap.Project
 structure Pass where
   name : String
   dependencies : List String := []
-  autorun : Bool := false
   runonce : Bool := true
   run : Project → Except String Project
 
@@ -13,7 +12,6 @@ inductive PassError where
   | missingDependency (pass dependency : String)
   | cycle (pass : String)
   | runtime (pass message : String)
-  | unknownPass (name : String)
   deriving Repr
 
 private def runPass (pass : Pass) (project : Project) : Except PassError Project := do

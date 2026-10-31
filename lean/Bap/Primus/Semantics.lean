@@ -5,6 +5,7 @@ import Bap.Bil.Eval
 import Bap.LLVM
 import Bap.Primus.Literal
 import Std.Data.HashMap
+import Std.Data.HashSet
 
 namespace Bap.Primus.Semantics
 
@@ -14,11 +15,13 @@ mutual
   inductive CExp where
     | value (value : Value)
     | local (slot : Nat)
-    | global (slot : Nat)
+    | global (name : String)
     | primitive (operation : Nat) (args : List CExp)
     | apply (callable : CExp) (args : List CExp)
     | ifElse (condition : CExp) (yes no : List CExp)
     | letIn (value body : CExp)
+    /-- What `case` selects from: the bodies with their labels, and the last without one is the fallback. -/
+    | caseOf (key : CExp) (arms : List (Option Sexp × CExp))
     | sequence (forms : List CExp)
 
   inductive Callable where
@@ -46,7 +49,11 @@ abbrev Globals := List (String × Value)
 structure Environment where
   globals : Globals
   operations : Std.HashMap String Callable
-  opcodes : Std.HashMap Nat Callable := {}
+  /-- What the instructions are, by the number of their LLVM opcode. They are compiled when they are first lifted: a
+  program runs few of the thousands of instructions that a target has. -/
+  opcodes : Std.HashMap Nat (Thunk Callable) := {}
+  /-- The same, by name, for the targets whose decoder gives names, and for the opcode that LLVM has no number for. -/
+  instructions : Std.HashMap String (Thunk Callable) := {}
   registers : Std.HashMap Nat Value := {}
   signExtendedOpcodes : List Nat := []
   relativeOpcodes : List Nat := []
@@ -61,12 +68,15 @@ def ofGlobals (globals : Globals) : Environment :=
     | _ => result.erase binding.1
   { globals, operations }
 
-def ofMachine (globals : Globals) (opcodes : List (Nat × Callable))
+def ofMachine (globals : Globals) (opcodes : List (Nat × Thunk Callable))
     (registers : List (Nat × Value)) : Environment :=
   let base := ofGlobals globals
   { base with
     opcodes := opcodes.reverse.foldl (init := {}) fun result binding => result.insert binding.1 binding.2
     registers := registers.reverse.foldl (init := {}) fun result binding => result.insert binding.1 binding.2 }
+
+def withRegisters (environment : Environment) (registers : List (Nat × Value)) : Environment :=
+  { environment with registers := registers.reverse.foldl (init := {}) fun result binding => result.insert binding.1 binding.2 }
 
 end Environment
 
@@ -84,6 +94,8 @@ structure State where
   operations : Std.HashMap String Callable := {}
   code : Bil.Program := []
   nextTemp : Nat := 0
+  /-- The names of `globals`, which says whether a new definition has an older binding to take out of them. -/
+  defined : Std.HashSet String := {}
 
 private def indexGlobals (globals : Globals) : Std.HashMap String Callable :=
   globals.reverse.foldl (init := ({} : Std.HashMap String Callable)) fun result binding =>
@@ -91,7 +103,7 @@ private def indexGlobals (globals : Globals) : Std.HashMap String Callable :=
     | .callable callable => result.insert binding.1 callable
     | _ => result.erase binding.1
 
-private def primitiveNames : List String :=
+def primitiveNames : List String :=
   ["+", "-", "*", "/", "s/", "mod", "=", "/=", "<", "<=", ">", ">=", "not", "list",
     "cons", "car", "cdr", "length", "null?", "list?", "logand", "logor", "logxor",
     "bitand", "bitor", "bitxor", "lnot", "lshift", "rshift", "arshift", "extract",
@@ -112,6 +124,23 @@ private def lookup (name : String) (locals : Locals) (globals : Globals) : Excep
     if primitiveName = "replicate" then .ok (.callable (.primitive "replicate"))
     else
       match Assoc.get name globals with
+      | some value => .ok value
+      | none =>
+        if primitiveNames.contains primitiveName then .ok (.callable (.primitive primitiveName))
+        else .error s!"unknown Primus symbol {name}"
+
+/-- What a list of definitions says about a name. -/
+abbrev namesOf (globals : Globals) : String → Option Value := fun name => Assoc.get name globals
+
+/-- `lookup`, for a compiler that has the definitions in a table. -/
+private def lookupIn (names : String → Option Value) (name : String) (locals : Locals) : Except String Value :=
+  let primitiveName := if name.startsWith "core:" then (name.drop 5).toString else name
+  match Assoc.get name locals with
+  | some value => .ok value
+  | none =>
+    if primitiveName = "replicate" then .ok (.callable (.primitive "replicate"))
+    else
+      match names name with
       | some value => .ok value
       | none =>
         if primitiveNames.contains primitiveName then .ok (.callable (.primitive primitiveName))
@@ -910,7 +939,7 @@ private def definitionBody (body : List Sexp) : List Sexp :=
   | _ => body
 
 /-- Whether evaluating `form` may assign the `let` variable `name`, seeing through macros. -/
-private def assignsLocal (globals : Globals) (name : String) : Nat → Sexp → Bool
+private def assignsLocal (names : String → Option Value) (name : String) : Nat → Sexp → Bool
   | 0, _ => true
   | _ + 1, .atom _ => false
   | fuel + 1, .list (.atom operator :: operands) =>
@@ -919,15 +948,15 @@ private def assignsLocal (globals : Globals) (name : String) : Nat → Sexp → 
       | "set", .atom target :: _ | "set$", .atom target :: _ | "set-symbol-value", .atom target :: _ => target = name
       | _, _ => false
     assigned ||
-      (match Assoc.get operator globals with
+      (match names operator with
        | some (.callable callable) =>
          match resolveMacro operands (macroCandidates callable) with
          | some (_, body, bindings) =>
-           (substituteList bindings body).attach.any fun form => assignsLocal globals name fuel form.1
+           (substituteList bindings body).attach.any fun form => assignsLocal names name fuel form.1
          | none => false
        | _ => false) ||
-      operands.attach.any fun form => assignsLocal globals name fuel form.1
-  | fuel + 1, .list items => items.attach.any fun form => assignsLocal globals name fuel form.1
+      operands.attach.any fun form => assignsLocal names name fuel form.1
+  | fuel + 1, .list items => items.attach.any fun form => assignsLocal names name fuel form.1
 
 /-- The target of an assignment or an `unquote` may be named by a symbol. -/
 private def resolveSymbol (state : State) : List Value → List Value
@@ -973,6 +1002,20 @@ private def caseMatches (key : Value) (form : Sexp) : Except String Bool := do
       | .symbol actual | .register actual _ _ => pure (actual = expected)
       | _ => .error "invalid Primus case key"
   | _ => .error "invalid Primus case label"
+
+/-- The body that the key of a `case` selects among the labels and bodies. -/
+private def selectForm (key : Value) : List Sexp → Except String (List Sexp)
+  | [] => .error "Primus case has no matching branch"
+  | [fallback] => .ok [fallback]
+  | label :: body :: rest => do
+    if ← caseMatches key label then .ok [body] else selectForm key rest
+
+/-- `selectForm` on compiled bodies. -/
+private def selectArm (key : Value) : List (Option Sexp × CExp) → Except String CExp
+  | [] => .error "Primus case has no matching branch"
+  | (none, body) :: _ => .ok body
+  | (some label, body) :: rest => do
+    if ← caseMatches key label then .ok body else selectArm key rest
 
 mutual
   private def evalSequence (fuel : Nat) (locals : Locals) (context : Context)
@@ -1115,7 +1158,7 @@ mutual
           match binding with
           | .list [.atom name, value] =>
             let (value, state) ← eval fuel current.1 context current.2 value
-            if (bindings ++ body).any (assignsLocal state.globals name 64) then
+            if (bindings ++ body).any (assignsLocal (namesOf state.globals) name 64) then
               let (value, state) ← bindAssignable context state value
               .ok ((name, value) :: current.1, state)
             else
@@ -1128,12 +1171,7 @@ mutual
         .ok (.callable (.function params (definitionBody body) locals), state)
       | .list (.atom "case" :: key :: branches) =>
         let (key, state) ← eval fuel locals context state key
-        let rec select : List Sexp → Except String (List Sexp)
-          | [] => .error "Primus case has no matching branch"
-          | [fallback] => .ok [fallback]
-          | label :: body :: rest => do
-            if ← caseMatches key label then .ok [body] else select rest
-        evalSequence fuel locals context state (← select branches)
+        evalSequence fuel locals context state (← selectForm key branches)
       | .list (.atom operator :: operands) =>
         let expansion ← match ← lookupState operator locals state with
           | .callable callable =>
@@ -1208,10 +1246,13 @@ mutual
         match locals[slot]? with
         | some binding => .ok (binding.2, state)
         | none => .error "compiled Primus local slot is out of range"
-      | .global slot =>
-        match state.globals[slot]? with
-        | some binding => .ok (binding.2, state)
-        | none => .error "compiled Primus global slot is out of range"
+      | .global name =>
+        match state.operations.get? name with
+        | some callable => .ok (.callable callable, state)
+        | none =>
+          match Assoc.get name state.globals with
+          | some value => .ok (value, state)
+          | none => .error s!"compiled Primus global {name} is not defined"
       | .primitive operation operands =>
         let (args, state) ← evalCompiledList fuel locals context state operands
         let args := if operation = 38 || operation = 39 || operation = 40 then resolveSymbol state args else args
@@ -1227,6 +1268,9 @@ mutual
         let (value, state) := freeze context state value
         evalCompiled fuel (("", value) :: locals) context state body
       | .sequence forms => evalCompiledSequence fuel locals context state forms
+      | .caseOf key arms =>
+        let (key, state) ← evalCompiled fuel locals context state key
+        evalCompiled fuel locals context state (← selectArm key arms)
 end
 
 private def primitiveIndex (name : String) : Option Nat := primitiveNames.findIdx? (· == name)
@@ -1240,7 +1284,7 @@ private def isSymbol (atom : String) : Bool :=
   | _ => false
 
 mutual
-  private def compileExp (globals : Globals) (locals : List String) : Nat → Sexp → Option CExp
+  private def compileExp (names : String → Option Value) (locals : List String) : Nat → Sexp → Option CExp
     | 0, _ => none
     | fuel + 1, form =>
       match form with
@@ -1257,28 +1301,36 @@ mutual
             | none =>
               -- the name of the built-in, which no definition hides
               if (if atom.startsWith "core:" then (atom.drop 5).toString else atom) = "replicate" then none
-              else (globals.findIdx? fun binding => binding.1 == atom).map .global
+              else
+                match names atom with
+                | none => none
+                | some (.callable _) => some (.global atom)
+                -- a register or a parameter, which compiling definitions leaves as it is
+                | some value => some (.value value)
       | .list [] => some (.value (.list []))
       | .list [.atom "quote", value] => some (.value (quotedValue value))
       | .list [.atom "replicate", _, _] | .list [.atom "core:replicate", _, _] => none
       | .list [.atom "clz", value] => do
-        let value ← compileExp globals locals fuel value
+        let value ← compileExp names locals fuel value
         some (.primitive 63 [value])
       | .list [.atom "if", test, yes, no] => do
-        let test ← compileExp globals locals fuel test
-        let yes ← compileExp globals locals fuel yes
-        let no ← compileExp globals locals fuel no
+        let test ← compileExp names locals fuel test
+        let yes ← compileExp names locals fuel yes
+        let no ← compileExp names locals fuel no
         some (.ifElse test [yes] [no])
       | .list (.atom "when" :: test :: body) => do
-        let test ← compileExp globals locals fuel test
-        some (.ifElse test (← compileSequence globals locals fuel body) [])
+        let test ← compileExp names locals fuel test
+        some (.ifElse test (← compileSequence names locals fuel body) [])
       | .list (.atom "unless" :: test :: body) => do
-        let test ← compileExp globals locals fuel test
-        some (.ifElse test [] (← compileSequence globals locals fuel body))
+        let test ← compileExp names locals fuel test
+        some (.ifElse test [] (← compileSequence names locals fuel body))
       | .list (.atom "progn" :: body) | .list (.atom "prog" :: body) =>
-        .sequence <$> compileSequence globals locals fuel body
+        .sequence <$> compileSequence names locals fuel body
       | .list (.atom "let" :: .list bindings :: body) =>
-        compileBindings globals locals bindings fuel bindings body
+        compileBindings names locals bindings fuel bindings body
+      | .list (.atom "case" :: key :: branches) => do
+        let key ← compileExp names locals fuel key
+        some (.caseOf key (← compileCases names locals fuel branches))
       | .list (.atom "quote" :: _) | .list (.atom "sizeof" :: _) | .list (.atom "assert-msg" :: _)
       | .list (.atom "replicate" :: _) | .list (.atom "core:replicate" :: _)
       | .list (.atom "lambda" :: _) | .list (.atom "case" :: _) | .list (.atom "while" :: _)
@@ -1287,73 +1339,109 @@ mutual
         let visible := locals.map fun name => (name, Value.unit)
         -- a literal does not name a function, whatever a definition says
         if operator = "true" || operator = "false" || operator.startsWith ":" || !isSymbol operator then none else
-        match lookup operator visible globals with
+        match lookupIn names operator visible with
         | .ok (.callable (.primitive name)) => do
           let operation ← primitiveIndex name
           if !compilablePrimitive operation then none
-          let args ← operands.mapM (compileExp globals locals fuel)
+          let args ← operands.mapM (compileExp names locals fuel)
           some (.primitive operation args)
         | .ok (.callable callable) => do
           -- a macro of a compiled function is expanded here, once
           match macroExpansion callable operands with
-          | .ok (some expanded) => .sequence <$> compileSequence globals locals fuel expanded
+          | .ok (some expanded) => .sequence <$> compileSequence names locals fuel expanded
           | .ok none =>
-            let callable ← compileExp globals locals fuel (.atom operator)
-            let args ← operands.mapM (compileExp globals locals fuel)
+            let callable ← compileExp names locals fuel (.atom operator)
+            let args ← operands.mapM (compileExp names locals fuel)
             some (.apply callable args)
           | .error _ => none
         | _ => do
-          let callable ← compileExp globals locals fuel (.atom operator)
-          let args ← operands.mapM (compileExp globals locals fuel)
+          let callable ← compileExp names locals fuel (.atom operator)
+          let args ← operands.mapM (compileExp names locals fuel)
           some (.apply callable args)
       | .list (operator :: operands) => do
-        let callable ← compileExp globals locals fuel operator
-        let args ← operands.mapM (compileExp globals locals fuel)
+        let callable ← compileExp names locals fuel operator
+        let args ← operands.mapM (compileExp names locals fuel)
         some (.apply callable args)
+  termination_by fuel _ => (fuel, 0)
 
-  private def compileSequence (globals : Globals) (locals : List String) (fuel : Nat)
+  private def compileSequence (names : String → Option Value) (locals : List String) (fuel : Nat)
       (forms : List Sexp) : Option (List CExp) :=
-    forms.mapM (compileExp globals locals fuel)
+    forms.mapM (compileExp names locals fuel)
+  termination_by (fuel, 1)
 
-  private def compileBindings (globals : Globals) (locals : List String) (all : List Sexp) :
+  private def compileCases (names : String → Option Value) (locals : List String) :
+      Nat → List Sexp → Option (List (Option Sexp × CExp))
+    | 0, _ => none
+    | _ + 1, [] => some []
+    | fuel + 1, [fallback] => do
+      some [(none, ← compileExp names locals fuel fallback)]
+    | fuel + 1, label :: body :: rest => do
+      let body ← compileExp names locals fuel body
+      some ((some label, body) :: (← compileCases names locals fuel rest))
+  termination_by fuel _ => (fuel, 0)
+
+  private def compileBindings (names : String → Option Value) (locals : List String) (all : List Sexp) :
       Nat → List Sexp → List Sexp → Option CExp
     | 0, _, _ => none
     | fuel + 1, bindings, body =>
       match bindings with
-      | [] => .sequence <$> compileSequence globals locals fuel body
+      | [] => .sequence <$> compileSequence names locals fuel body
       | .list [.atom name, value] :: rest => do
         -- Compiled locals are immutable slots, so assigned ones stay with the interpreter.
-        if (all ++ body).any (assignsLocal globals name 64) then none
-        let value ← compileExp globals locals fuel value
-        .letIn value <$> compileBindings globals (name :: locals) all fuel rest body
+        if (all ++ body).any (assignsLocal names name 64) then none
+        let value ← compileExp names locals fuel value
+        .letIn value <$> compileBindings names (name :: locals) all fuel rest body
       | _ => none
+  termination_by fuel _ _ => (fuel, 0)
 end
 
-private def compileFunction (globals : Globals) : Callable → Callable
+private def compileFunction (names : String → Option Value) : Callable → Callable
   | callable@(.function params body env) =>
     let locals := params ++ env.map Prod.fst
-    match body.mapM (compileExp globals locals 1000) with
+    match body.mapM (compileExp names locals 1000) with
     | some body => .compiled params body env
     | none => callable
   | callable => callable
 
-private def compileCallable (globals : Globals) : Callable → Callable
-  | .overloads candidates => .overloads (candidates.map (compileFunction globals))
-  | callable => compileFunction globals callable
+private def compileCallable (names : String → Option Value) : Callable → Callable
+  | .overloads candidates => .overloads (candidates.map (compileFunction names))
+  | callable => compileFunction names callable
 
-private def compileValue (globals : Globals) (value : Value) : Value :=
+private def compileValue (names : String → Option Value) (value : Value) : Value :=
   match value with
-  | .callable callable => .callable (compileCallable globals callable)
+  | .callable callable => .callable (compileCallable names callable)
   | _ => value
 
-def compileGlobals (globals : Globals) : Globals :=
-  globals.map fun binding => (binding.1, compileValue globals binding.2)
+/-- The first binding of each name, which is what `Assoc.get` finds. -/
+def globalsTable (globals : Globals) : Std.HashMap String Value :=
+  globals.reverse.foldl (init := {}) fun table binding => table.insert binding.1 binding.2
 
+/-- What a target needs of its definitions: `eager` compiled and each of `lazy` with its compilation put off until it is
+first looked at. All compile against `table`. `lazy` are the instructions, which nothing calls. -/
+def compilePartly (eager : Globals) (lazy : List (String × Callable)) (table : Std.HashMap String Value) :
+    Globals × List (String × Thunk Callable) :=
+  let names := fun name => table.get? name
+  (eager.map (fun binding => (binding.1, compileValue names binding.2)),
+    lazy.map fun binding => (binding.1, Thunk.mk fun _ => compileCallable names binding.2))
+
+/-- The definitions compiled against themselves. The compiler asks for a name at every call, so it asks a table. -/
+def compileGlobals (globals : Globals) : Globals :=
+  let table := globalsTable globals
+  globals.map fun binding => (binding.1, compileValue (fun name => table.get? name) binding.2)
+
+/-- `Assoc.put`, without the walk over all definitions when the name has no binding. -/
+private def putDefinition (state : State) (name : String) (value : Value) : Globals :=
+  if state.defined.contains name then Assoc.put name value state.globals else (name, value) :: state.globals
+
+/-- A new definition. A file has thousands of them, so this looks at no list: `operations` holds the functions of
+`globals` and `defined` their names, which `Indexed` in `Bap.Proofs.Primus` says, and `define_spec` proves that this
+is `addDefinition` of what `Assoc.get` finds, and `Assoc.put`. -/
 private def define (state : State) (name : String) (callable : Callable) : State :=
-  let callable := addDefinition callable (Assoc.get name state.globals)
+  let callable := addDefinition callable ((state.operations.get? name).map .callable)
   { state with
-    globals := Assoc.put name (.callable callable) state.globals
-    operations := state.operations.insert name callable }
+    globals := putDefinition state name (.callable callable)
+    operations := state.operations.insert name callable
+    defined := state.defined.insert name }
 
 /-- A form of a source file. Only here definitions extend the globals, as upstream reads them with the
 parser, so evaluating a form leaves the globals as they are. Methods handle the signals of the machine
@@ -1370,20 +1458,33 @@ private def evalTopLevel (context : Context) (state : State) (form : Sexp) : Exc
     else .ok (define state name (.macro params (definitionBody body)))
   | .list (.atom "defparameter" :: .atom name :: value :: _) =>
     let (value, state) ← eval 100000 [] context state value
-    .ok { state with globals := Assoc.put name value state.globals }
+    .ok { state with
+      globals := Assoc.put name value state.globals
+      -- it shadows the function of that name, as in `ofGlobals`
+      operations := match value with
+        | .callable callable => state.operations.insert name callable
+        | _ => state.operations.erase name
+      defined := state.defined.insert name }
   | .list (.atom "defmethod" :: _) => .ok state
   | form =>
     let (_, state) ← eval 100000 [] context state form
     .ok state
 
-def evalForms (context : Context) (globals : Globals) (forms : List Sexp) :
-    Except String State := do
+private def evalFormsIn (context : Context) (state : State) (forms : List Sexp) : Except String State := do
   let forms := forms.filter fun form => match form with
     | .list (.atom kind :: _) =>
       kind != "declare" && kind != "defpackage" && kind != "in-package" && kind != "require"
     | _ => true
   forms.forM checkLiterals
-  forms.foldlM (evalTopLevel context) { globals := globals, operations := indexGlobals globals }
+  forms.foldlM (evalTopLevel context) state
+
+/-- The state of top-level forms on `globals`. -/
+private def topLevelState (globals : Globals) : State :=
+  { globals, operations := indexGlobals globals
+    defined := globals.foldl (init := {}) fun names binding => names.insert binding.1 }
+
+def evalForms (context : Context) (globals : Globals) (forms : List Sexp) : Except String State :=
+  evalFormsIn context (topLevelState globals) forms
 
 private def readForms (path : String) : IO (List Sexp) := do
   let source ← IO.FS.readFile path
@@ -1411,8 +1512,9 @@ private def loadFiles (directories : List String) (visited : List String)
       let forms ← readForms path.toString
       let requirements := forms.filterMap requiredName
       let (visited, state) ← loadFiles directories (name :: visited) context state fuel requirements
-      let state ← match evalForms context state.globals forms with
-        | .ok loaded => pure { globals := loaded.globals, code := state.code ++ loaded.code }
+      -- Each file starts with its own code and temporaries, on the definitions of the ones before it.
+      let state ← match evalFormsIn context { state with code := [], nextTemp := 0 } forms with
+        | .ok loaded => pure { loaded with code := state.code ++ loaded.code }
         | .error error => throw <| IO.userError s!"{path}: {error}"
       loadFiles directories visited context state fuel rest
 
@@ -1431,12 +1533,15 @@ def load (directories : List String) (entry : String) (context : Context) : IO G
 
 def liftWith (environment : Environment) (context : Context) (opcode : String)
     (operands : List Value) : IO Bil.Program := do
-  let callable ← match environment.operations.get? opcode with
-    | some callable => pure (.callable callable)
+  let callable ← match environment.instructions.get? opcode with
+    | some callable => pure (.callable callable.get)
     | none =>
-      match Assoc.get opcode environment.globals with
-      | some callable => pure callable
-      | none => throw <| IO.userError s!"Primus semantics has no definition for {opcode}"
+      match environment.operations.get? opcode with
+      | some callable => pure (.callable callable)
+      | none =>
+        match Assoc.get opcode environment.globals with
+        | some callable => pure callable
+        | none => throw <| IO.userError s!"Primus semantics has no definition for {opcode}"
   match apply 100000 context { globals := environment.globals, operations := environment.operations } callable operands with
   | .ok (_, state) => pure state.code
   | .error error => throw <| IO.userError s!"{opcode}: {error}"
@@ -1455,7 +1560,7 @@ def machineOperand (environment : Environment) (context : Context) : LLVM.MCOper
 def liftMC (environment : Environment) (context : Context) (opcode : Nat)
     (operands : List Value) : IO Bil.Program := do
   let callable ← match environment.opcodes.get? opcode with
-    | some callable => pure callable
+    | some callable => pure callable.get
     | none => throw <| IO.userError s!"Primus semantics has no definition for LLVM opcode {opcode}"
   match apply 100000 context { globals := environment.globals, operations := environment.operations } (.callable callable) operands with
   | .ok (_, state) => pure state.code

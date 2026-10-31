@@ -732,7 +732,7 @@ theorem relaxTls_shape (input : Input) :
 theorem applyOne_applies {tables : Tables} {apply : Site → Outcome} {rel : Rel} {st : LinkState} {site : Site} {after : LinkState}
     (hsite : siteOf tables false rel st = .ok (some site) after)
     (hclean : (stateOf (applyOne tables apply rel st)).warnings = []) :
-    ∃ writes mid, apply site after = .ok (some writes) mid ∧ fieldFits tables.env mid site = true ∧
+    ∃ writes mid, apply site after = .ok (some writes) mid ∧ fieldOk tables.env mid site = true ∧
       (site, writes) ∈ (stateOf (applyOne tables apply rel st)).applied := by
   unfold applyOne at hclean ⊢
   rw [guard_run, bind_ok hsite] at hclean ⊢
@@ -749,8 +749,8 @@ theorem applyOne_applies {tables : Tables} {apply : Site → Outcome} {rel : Rel
     | some writes =>
       dsimp only at hclean ⊢
       rw [bind_ok (checkField_run tables.env site mid)] at hclean ⊢
-      have hfits : fieldFits tables.env mid site = true := by
-        cases hf : fieldFits tables.env mid site with
+      have hfits : fieldOk tables.env mid site = true := by
+        cases hf : fieldOk tables.env mid site with
         | true => rfl
         | false =>
           exfalso
@@ -769,7 +769,7 @@ theorem applyOne_applies {tables : Tables} {apply : Site → Outcome} {rel : Rel
             · rw [ite_eq_right hall]
               simp
           exact hw _ (by simp) hclean
-      generalize (if fieldFits tables.env mid site = true then mid else _ : LinkState) = checked at hclean ⊢
+      generalize (if fieldOk tables.env mid site = true then mid else _ : LinkState) = checked at hclean ⊢
       have hc := commit_run site writes checked
       change commit site writes checked = _ at hc
       rw [hc] at hclean ⊢
@@ -785,7 +785,7 @@ what `relocate_image` tells. -/
 theorem relocate_applies_all {tables : Tables} {apply : Site → Outcome} (hh : handler tables.env = some apply) (state : LinkState)
     (hclean : (stateOf (relocate tables state)).warnings = []) {rel : Rel} (hrel : rel ∈ tables.input.relocations) {site : Site}
     {st after : LinkState} (hsite : siteOf tables false rel st = .ok (some site) after) :
-    ∃ writes state' mid, apply site state' = .ok (some writes) mid ∧ fieldFits tables.env mid site = true ∧
+    ∃ writes state' mid, apply site state' = .ok (some writes) mid ∧ fieldOk tables.env mid site = true ∧
       (site, writes) ∈ (stateOf (relocate tables state)).applied := by
   obtain ⟨pre, post, hsplit⟩ := List.append_of_mem hrel
   have hany : ∀ s : LinkState, siteOf tables false rel s = .ok (some site) s := by
@@ -939,5 +939,320 @@ theorem withThunkSection_sections (input : Input) (at' size : Nat) :
       input.sections.toList.take (at' + 1) ++ ⟨".thunks", 1, shfAlloc + shfExecinstr, input.data.size, size, 16⟩ ::
         input.sections.toList.drop (at' + 1) := by
   simp [withThunkSection]
+
+/-! ### Thunks in the layout they end up in -/
+
+/-- What the thunks of a pass so far say: a known thunk has a symbol in its section, one for each word of the thunks. -/
+structure ThunkInv (secIndex : Nat) (state : ThunkState) : Prop where
+  known : ∀ key offset, (key, offset) ∈ state.known → ∃ sym, state.newSyms[offset / 4]? = some sym ∧ sym.shndx = secIndex ∧ sym.extended = false ∧
+    sym.value = offset + (if key.2.2 then 1 else 0)
+  sizes : state.bytes.length = 4 * state.newSyms.length
+
+/-- A branch that a pass sent to its thunk. -/
+def SentToThunk (tables : Tables) (data : ByteArray) (state : ThunkState) (branch : Rel) : Prop :=
+  ∃ rel kind site offset key, thunkKind tables.input.machine rel.typ = some kind ∧
+    siteOf tables false rel { memory := data } = .ok (some site) { memory := data } ∧
+    (key, offset) ∈ state.known ∧ key.2.2 = kind.thumb ∧
+    branch = { rel with symbol := state.symbols + offset / 4, addend := kind.bias, isExplicit := true } ∧
+    sext (field ((state.base + offset : Int) + kind.bias - site.p) 0 kind.bits : Nat) kind.bits = (state.base + offset : Int) + kind.bias - site.p
+
+private theorem thunkCode_length {machine : Nat} {little : Bool} {kind : ThunkKind} {secIndex offset symbol : Nat} {addend : Int} :
+    ∃ n, (thunkCode machine little kind secIndex offset symbol addend).1.length = 4 * (n + 1) := by
+  unfold thunkCode
+  dsimp only
+  split
+  · split
+    · exact ⟨2, by simp [thumbThunk, bytesOf]⟩
+    · exact ⟨1, by simp [armThunk, bytesOf]⟩
+  · exact ⟨3, by simp [aarch64Thunk, bytesOf]⟩
+
+private theorem thunkOffset_known {state : ThunkState} {key : Nat × Int × Bool} (h : thunkIsNew state key = false) :
+    (key, thunkOffset state key) ∈ state.known := by
+  simp only [thunkIsNew, Option.isNone_eq_false_iff, Option.isSome_iff_exists] at h
+  obtain ⟨entry, he⟩ := h
+  have hmem := List.mem_of_find?_eq_some he
+  have hkey : entry.1 = key := by simpa using List.find?_some he
+  simp only [thunkOffset, he, Option.map_some, Option.getD_some]
+  rw [← hkey]
+  exact hmem
+
+private theorem thunkOffset_new {state : ThunkState} {key : Nat × Int × Bool} (h : thunkIsNew state key = true) :
+    thunkOffset state key = state.bytes.length := by
+  simp only [thunkIsNew, Option.isNone_iff_eq_none] at h
+  simp [thunkOffset, h]
+
+/-- A step of a pass keeps what it says, and a branch it leaves is the one it had or one it sent to its thunk. -/
+theorem thunkStep_inv {tables : Tables} {data : ByteArray} {secIndex : Nat} {state : ThunkState} {rel : Rel} (hi : ThunkInv secIndex state) :
+    let next := thunkStep tables data secIndex state rel
+    ThunkInv secIndex next ∧ next.symbols = state.symbols ∧ next.base = state.base ∧ (∀ entry ∈ state.known, entry ∈ next.known) ∧
+      (∃ branch, next.rels = branch :: state.rels ∧ (branch = rel ∨ SentToThunk tables data next branch)) := by
+  dsimp only
+  unfold thunkStep
+  dsimp only
+  have hkeep : ThunkInv secIndex { state with rels := rel :: state.rels } := ⟨hi.known, hi.sizes⟩
+  split
+  · exact ⟨hkeep, rfl, rfl, fun _ h => h, _, rfl, .inl rfl⟩
+  · next kind hk =>
+    split
+    · next site after hsite =>
+      have hafter : after = { memory := data } := siteOf_after hsite
+      subst hafter
+      split
+      · split
+        · next hfit =>
+          have hfits := (fits_signed_iff (thunkKind_bits hk) _).mp hfit
+          split
+          · next hnew =>
+            generalize hkey : (rel.symbol, thunkTargetAddend tables data site kind, kind.thumb) = key at *
+            obtain ⟨n, hn⟩ := thunkCode_length (machine := tables.input.machine) (little := tables.env.little) (kind := kind) (secIndex := secIndex)
+              (offset := thunkOffset state key) (symbol := rel.symbol) (addend := thunkTargetAddend tables data site kind)
+            generalize thunkCode tables.input.machine tables.env.little kind secIndex (thunkOffset state key) rel.symbol (thunkTargetAddend tables data site kind) = pair at hn ⊢
+            obtain ⟨code, thunkRels⟩ := pair
+            dsimp only at hn ⊢
+            have hoff := thunkOffset_new hnew
+            have hthumb : key.2.2 = kind.thumb := by rw [← hkey]
+            have hindex : thunkOffset state key / 4 = state.newSyms.length := by
+              rw [hoff, hi.sizes]
+              omega
+            refine ⟨⟨?_, ?_⟩, rfl, rfl, fun _ h => List.mem_cons_of_mem _ h, _, rfl, .inr ⟨rel, kind, site, thunkOffset state key, key, hk, hsite, List.mem_cons_self, hthumb, rfl, hfits⟩⟩
+            · intro key' offset' hmem
+              rcases List.mem_cons.1 hmem with he | hmem
+              · obtain ⟨h1, h2⟩ := Prod.mk.inj he
+                rw [h2, h1]
+                refine ⟨⟨s!"__thunk_{site.sym.name}_{thunkOffset state key}", secIndex, false, thunkOffset state key + (if kind.thumb then 1 else 0), code.length, sttFunc, stbLocal, 0⟩, ?_, rfl, rfl, ?_⟩
+                · rw [hindex]
+                  simp
+                · rw [hthumb]
+              · obtain ⟨sym, h1, h2, h3, h4⟩ := hi.known key' offset' hmem
+                obtain ⟨hlt, _⟩ := List.getElem?_eq_some_iff.1 h1
+                exact ⟨sym, by rw [List.getElem?_append_left hlt]; exact h1, h2, h3, h4⟩
+            · simp only [List.length_append, List.length_cons, List.length_map, List.length_range, hn, hi.sizes]
+              have : 4 * (n + 1) / 4 = n + 1 := by omega
+              rw [this]
+              omega
+          · next hold =>
+            have hnotnew : thunkIsNew state (rel.symbol, thunkTargetAddend tables data site kind, kind.thumb) = false := by simpa using hold
+            exact ⟨⟨hi.known, hi.sizes⟩, rfl, rfl, fun _ h => h, _, rfl, .inr ⟨rel, kind, site, _, _, hk, hsite, thunkOffset_known hnotnew, rfl, rfl, hfits⟩⟩
+        · exact ⟨hkeep, rfl, rfl, fun _ h => h, _, rfl, .inl rfl⟩
+      · exact ⟨hkeep, rfl, rfl, fun _ h => h, _, rfl, .inl rfl⟩
+    · exact ⟨hkeep, rfl, rfl, fun _ h => h, _, rfl, .inl rfl⟩
+
+private theorem SentToThunk.later {tables : Tables} {data : ByteArray} {a b : ThunkState} {branch : Rel} (h : SentToThunk tables data a branch)
+    (hs : b.symbols = a.symbols) (hb : b.base = a.base) (hk : ∀ entry ∈ a.known, entry ∈ b.known) : SentToThunk tables data b branch := by
+  obtain ⟨rel, kind, site, offset, key, h1, h2, h3, h4, h5, h6⟩ := h
+  exact ⟨rel, kind, site, offset, key, h1, h2, hk _ h3, h4, by rw [hs]; exact h5, by rw [hb]; exact h6⟩
+
+/-- A pass over relocations: what it leaves is what it had, or a branch it sent to its thunk. -/
+theorem thunkPass_fold {tables : Tables} {data : ByteArray} {secIndex : Nat} (rels : List Rel) (init : ThunkState) (hi : ThunkInv secIndex init)
+    {all : List Rel} (hrels : rels ⊆ all) (hold : ∀ branch ∈ init.rels, branch ∈ all ∨ SentToThunk tables data init branch) :
+    let done := rels.foldl (thunkStep tables data secIndex) init
+    ThunkInv secIndex done ∧ done.symbols = init.symbols ∧ done.base = init.base ∧ ∀ branch ∈ done.rels, branch ∈ all ∨ SentToThunk tables data done branch := by
+  induction rels generalizing init with
+  | nil => exact ⟨hi, rfl, rfl, hold⟩
+  | cons rel rest ih =>
+    obtain ⟨h1, h2, h3, h4, branch, h5, h6⟩ := thunkStep_inv (tables := tables) (data := data) (rel := rel) (secIndex := secIndex) hi
+    simp only [List.foldl_cons]
+    refine (fun ⟨g1, g2, g3, g4⟩ => ⟨g1, g2.trans h2, g3.trans h3, g4⟩) (ih _ h1 (fun _ hm => hrels (List.mem_cons_of_mem _ hm)) (fun b hb => ?_))
+    rw [h5] at hb
+    rcases List.mem_cons.1 hb with rfl | hb
+    · rcases h6 with rfl | h6
+      · exact .inl (hrels List.mem_cons_self)
+      · exact .inr h6
+    · rcases hold b hb with hm | hs
+      · exact .inl hm
+      · exact .inr (hs.later h2 h3 h4)
+
+private theorem placeSection_addrs (layout : Layout) (sec : ElfLinker.Section) :
+    (placeSection layout sec).addrs.size = layout.addrs.size + 1 ∧ (∀ i, i < layout.addrs.size → (placeSection layout sec).addrs[i]? = layout.addrs[i]?) ∧
+      (hasFlag sec.flags shfAlloc = true → ∃ a, (placeSection layout sec).addrs[layout.addrs.size]? = some (some a)) := by
+  unfold placeSection
+  split
+  · refine ⟨by simp, fun i hi => ?_, fun _ => ⟨alignUp layout.cursor sec.align, by simp⟩⟩
+    simp [Array.getElem?_push, Nat.ne_of_lt hi]
+  · next hf =>
+    refine ⟨by simp, fun i hi => ?_, fun h => absurd h hf⟩
+    simp [Array.getElem?_push, Nat.ne_of_lt hi]
+
+/-- An allocated section has an address. -/
+theorem layoutSections_addr (sections : List ElfLinker.Section) (base : Nat) {i : Nat} {sec : ElfLinker.Section} (hs : sections[i]? = some sec)
+    (hf : hasFlag sec.flags shfAlloc = true) : ∃ a, ((layoutSections sections base).addrs[i]?) = some (some a) := by
+  have key : ∀ (rest : List ElfLinker.Section) (init : Layout),
+      (rest.foldl placeSection init).addrs.size = init.addrs.size + rest.length ∧
+      (∀ j, j < init.addrs.size → (rest.foldl placeSection init).addrs[j]? = init.addrs[j]?) ∧
+      ∀ j, rest[j]? = some sec → ∃ a, (rest.foldl placeSection init).addrs[init.addrs.size + j]? = some (some a) := by
+    intro rest
+    induction rest with
+    | nil => intro init; simp
+    | cons head tail ih =>
+      intro init
+      obtain ⟨p1, p2, p3⟩ := placeSection_addrs init head
+      obtain ⟨g1, g2, g3⟩ := ih (placeSection init head)
+      simp only [List.foldl_cons]
+      refine ⟨by rw [g1, p1]; simp only [List.length_cons]; omega, fun j hj => ?_, fun j hj => ?_⟩
+      · rw [g2 j (by omega), p2 j hj]
+      · cases j with
+        | zero =>
+          obtain rfl : head = sec := by simpa using hj
+          obtain ⟨a, ha⟩ := p3 hf
+          exact ⟨a, by rw [g2 _ (by omega)]; simpa using ha⟩
+        | succ j =>
+          obtain ⟨a, ha⟩ := g3 j (by simpa using hj)
+          exact ⟨a, by rw [p1] at ha; rw [← ha]; congr 1; omega⟩
+  obtain ⟨_, _, h3⟩ := key sections { cursor := base }
+  obtain ⟨a, ha⟩ := h3 i hs
+  exact ⟨a, by simpa [layoutSections] using ha⟩
+
+private theorem thunkKind_machine {machine typ : Nat} {kind : ThunkKind} (h : thunkKind machine typ = some kind) : machine = 183 ∨ machine = 40 := by
+  unfold thunkKind at h
+  split at h <;> first | (cases h; simp) | cases h
+
+/-- **A branch sent to its thunk reaches it in the layout of the file that comes out.** The file is laid out where the pass worked out the
+branch, as the thunks only add bytes and symbols after what's there: the place of the branch is the one it had, and its symbol is the one of
+its thunk, at the offset of the thunk in its section, with the bit of its instruction set, and the distance is in the range of its field. -/
+theorem thunk_reaches_layout {input : Input} {at' reserved : Nat} (hat : at' < input.sections.size) (hsmall : at' + 1 < shnLoreserve) (padding : ByteArray)
+    {branch : Rel} (hb : branch ∈ (thunkPass input at' reserved).rels) :
+    let laid := withThunkSection input at' reserved
+    let done := thunkPass input at' reserved
+    let output : Input := { laid with
+      data := padding
+      symbols := laid.symbols ++ done.newSyms.toArray
+      relocations := done.rels.reverse ++ done.newRels }
+    let tables := layoutTables output
+    tables.addrs = (layoutTables laid).addrs ∧
+    (branch ∈ laid.relocations ∨ ∃ kind address offset thumb sec placeBase sym,
+      (tables.addrs[at' + 1]?).join = some address ∧ thunkKind input.machine branch.typ = some kind ∧ branch.addend = kind.bias ∧ branch.isExplicit = true ∧
+      relocatedSection tables branch.target = some (sec, placeBase) ∧
+      tables.input.symbols[branch.symbol]? = some sym ∧
+      resolveBranchTarget tables branch sym = some (address + offset + thumb) ∧ thumb = (if kind.thumb then 1 else 0) ∧
+      sext (field ((address + offset : Int) + kind.bias - (placeBase + branch.offset : Nat)) 0 kind.bits : Nat) kind.bits =
+        (address + offset : Int) + kind.bias - (placeBase + branch.offset : Nat)) := by
+  intro laid done output tables
+  refine ⟨rfl, ?_⟩
+  have hpass : ThunkInv (at' + 1) done ∧ done.symbols = laid.symbols.size ∧ done.base = (((layoutTables laid).addrs[at' + 1]?).join).getD 0 ∧
+      ∀ branch ∈ done.rels, branch ∈ laid.relocations ∨ SentToThunk (layoutTables laid) laid.data done branch :=
+    thunkPass_fold (all := laid.relocations) laid.relocations
+      { base := ((((layoutTables laid).addrs)[at' + 1]?).join).getD 0, symbols := laid.symbols.size } ⟨by simp, by simp⟩ (fun _ h => h) (by simp)
+  obtain ⟨g1, g2, g3, g4⟩ := hpass
+  rcases g4 branch hb with hm | hsent
+  · exact .inl hm
+  right
+  obtain ⟨rel, kind, site, offset, key, hk, hsite, hkn, hth, hbr, hfit⟩ := hsent
+  obtain ⟨sec, placeBase, s, hrs, _, _, hs⟩ := siteOf_some hsite
+  obtain ⟨sym, hsym1, hsym2, hsym3, hsym4⟩ := g1.known key offset hkn
+  have hsec : laid.sections.toList[at' + 1]? = some ⟨".thunks", 1, shfAlloc + shfExecinstr, input.data.size, reserved, 16⟩ := by
+    have hl : (input.sections.toList.take (at' + 1)).length = at' + 1 := by
+      simp only [List.length_take, Array.length_toList]
+      omega
+    rw [show laid.sections.toList = _ from withThunkSection_sections input at' reserved, List.getElem?_append_right (by omega), hl]
+    simp
+  obtain ⟨address, haddr⟩ := layoutSections_addr laid.sections.toList laid.base hsec (by show hasFlag (shfAlloc + shfExecinstr) shfAlloc = true; decide)
+  have htaddr : tables.addrs[at' + 1]? = some (some address) := haddr
+  have hbase : done.base = address := by
+    rw [g3]
+    show (((layoutSections laid.sections.toList laid.base).addrs[at' + 1]?).join).getD 0 = address
+    rw [haddr]
+    rfl
+  have hsyms : done.symbols = laid.symbols.size := g2
+  have hmachine : input.machine = 183 ∨ input.machine = 40 := thunkKind_machine hk
+  have hshn : at' + 1 ≠ shnUndef ∧ at' + 1 ≠ shnAbs ∧ at' + 1 ≠ shnCommon ∧ ¬ shnLoreserve ≤ at' + 1 := by
+    simp only [shnUndef, shnAbs, shnCommon, shnLoreserve] at hsmall ⊢
+    omega
+  have hsymAt : tables.input.symbols[done.symbols + offset / 4]? = some sym := by
+    show (laid.symbols ++ done.newSyms.toArray)[done.symbols + offset / 4]? = some sym
+    rw [hsyms, Array.getElem?_append_right (Nat.le_add_right _ _), Nat.add_sub_cancel_left]
+    simpa using hsym1
+  have hres : resolveBranchTarget tables { rel with symbol := done.symbols + offset / 4, addend := kind.bias, isExplicit := true } sym =
+      some (address + offset + (if kind.thumb then 1 else 0)) := by
+    have hnot : ∀ shn, at' + 1 ≠ shn → special sym shn = false := by
+      intro shn hne
+      simp [special, hsym2, hsym3, hne]
+    have hppc : (tables.input.machine == emPpc64) = false := by
+      show (input.machine == emPpc64) = false
+      rcases hmachine with h | h <;> simp [h, emPpc64]
+    simp only [resolveBranchTarget, hppc, Bool.false_and, Bool.false_eq_true, ↓reduceIte, resolve, hnot _ hshn.1, hnot _ hshn.2.1, hnot _ hshn.2.2.1, hsym2, hsym3]
+    simp only [Bool.not_false, Bool.true_and, hshn.2.2.2, decide_false, Bool.false_eq_true, ↓reduceIte, htaddr, Option.join_some, Option.map_some, Nat.add_zero, hsym4, hth]
+    congr 1
+    omega
+  refine ⟨kind, address, offset, _, sec, placeBase, sym, by rw [htaddr]; rfl, ?_, ?_, ?_, ?_, ?_, ?_, rfl, ?_⟩
+  · rw [hbr]; exact hk
+  · rw [hbr]
+  · rw [hbr]
+  · rw [hbr]
+    exact hrs
+  · rw [hbr]
+    exact hsymAt
+  · rw [hbr]
+    exact hres
+  · rw [hbr]
+    have hp : site.p = placeBase + rel.offset := by rw [hs]
+    rw [hp, hbase] at hfit
+    exact hfit
+
+/-- What comes out of `addThunks`: the file as it was, or the file of a pass that its branches go through `thunk_reaches_layout` for. -/
+theorem addThunks_cases (input : Input) :
+    addThunks input = input ∨ ∃ at' reserved, at' < input.sections.size ∧
+      addThunks input = { withThunkSection input at' reserved with
+        data := input.data ++ ByteArray.mk (((thunkPass input at' reserved).bytes ++ List.replicate (reserved - (thunkPass input at' reserved).bytes.length) 0).map UInt8.ofNat).toArray
+        symbols := (withThunkSection input at' reserved).symbols ++ (thunkPass input at' reserved).newSyms.toArray
+        relocations := (thunkPass input at' reserved).rels.reverse ++ (thunkPass input at' reserved).newRels } := by
+  unfold addThunks
+  split
+  · exact .inl rfl
+  · next at' hfirst =>
+    have hat : at' < input.sections.size := by
+      simp only [firstThunked, Option.map_eq_some_iff] at hfirst
+      obtain ⟨rel, hf, rfl⟩ := hfirst
+      have hfound := List.find?_some hf
+      split at hfound
+      · next site _ hsite =>
+        obtain ⟨sec, _, _, hrs, _⟩ := siteOf_some hsite
+        simp only [relocatedSection, bind, Option.bind_eq_some_iff] at hrs
+        obtain ⟨sec', hsec', _⟩ := hrs
+        exact (Array.getElem?_eq_some_iff.1 hsec').1
+      · cases hfound
+    dsimp only
+    split
+    · split
+      · exact .inl rfl
+      · exact .inr ⟨at', _, hat, rfl⟩
+    · split
+      · exact .inl rfl
+      · exact .inr ⟨at', _, hat, rfl⟩
+
+/-! ### Misalignment -/
+
+/-- **`aligned` is exact**: a relocation is aligned when, and only when, its table asks for an alignment that its value has. -/
+theorem aligned_iff (env : Env) (state : LinkState) (site : Site) :
+    aligned env state site = true ↔ ∀ alignment value, alignCheck env state site = some (alignment, value) → value % (alignment : Int) = 0 := by
+  unfold aligned
+  cases alignCheck env state site with
+  | none => simp
+  | some x =>
+    obtain ⟨n, v⟩ := x
+    simp
+
+/-- **A relocation warns exactly if it can't store what it says**, once, for its range if that is what's wrong, and else for its alignment. -/
+theorem checkField_warnings (env : Env) (site : Site) (state : LinkState) :
+    (stateOf (checkField env site state)).warnings =
+      if fieldFits env state site = true ∧ aligned env state site = true then state.warnings else fieldProblem env state site :: state.warnings := by
+  rw [checkField_run]
+  simp only [stateOf, fieldOk, Bool.and_eq_true]
+  split <;> rfl
+
+/-- What it warns of. -/
+theorem fieldProblem_alignment {env : Env} {state : LinkState} {site : Site} (hf : fieldFits env state site = true) {alignment : Nat} {value : Int}
+    (ha : alignCheck env state site = some (alignment, value)) :
+    fieldProblem env state site = s!"relocation of type {site.rel.typ} at {site.p} needs a value aligned to {alignment}" := by
+  simp [fieldProblem, hf, ha]
+
+/-- What an alignment is for: a field that drops `k` low bits gives back its value only if they are 0. -/
+theorem aligned_keeps_value (value : Int) (k : Nat) : (value >>> k) * (2 : Int) ^ k = value ↔ value % (((2 ^ k : Nat)) : Int) = 0 := by
+  have hp : ((2 : Int) ^ k) = ((2 ^ k : Nat) : Int) := by simp
+  rw [Int.shiftRight_eq_div_pow, hp]
+  constructor
+  · intro h
+    exact Int.emod_eq_zero_of_dvd ⟨_, by rw [Int.mul_comm]; exact h.symm⟩
+  · intro h
+    exact Int.ediv_mul_cancel (Int.dvd_of_emod_eq_zero h)
 
 end Bap.Proofs.Linker

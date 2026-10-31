@@ -35,19 +35,138 @@ def stronglyConnected (callgraph : Callgraph) : List (List Nat) :=
       (current.1.filter fun candidate => !component.contains candidate, current.2 ++ [component])
   components.2
 
+/-- The edges the other way. -/
+private def reverseGraph (graph : Graph.Graph Nat) : Graph.Graph Nat :=
+  { graph with edges := graph.edges.map fun edge => (edge.2, edge.1) }
+
+private theorem reaches_trans {g : Graph.Graph Nat} {a b c : Nat} (h1 : Bap.Proofs.Graph.Reaches g [a] b)
+    (h2 : Bap.Proofs.Graph.Reaches g [b] c) : Bap.Proofs.Graph.Reaches g [a] c := by
+  induction h2 with
+  | seed hs _ =>
+    rw [List.mem_singleton] at hs
+    exact hs ▸ h1
+  | step _ he hn ih => exact .step ih he hn
+
+private theorem reaches_reverse {g : Graph.Graph Nat} {a b : Nat} (h : Bap.Proofs.Graph.Reaches g [a] b) :
+    Bap.Proofs.Graph.Reaches (reverseGraph g) [b] a := by
+  induction h with
+  | seed hs hn =>
+    rw [List.mem_singleton] at hs
+    subst hs
+    exact .seed List.mem_cons_self hn
+  | @step x y h0 he hn ih =>
+    have hedge : (y, x) ∈ (reverseGraph g).edges := List.mem_map.2 ⟨(x, y), he, rfl⟩
+    exact reaches_trans (.step (.seed List.mem_cons_self hn) hedge h0.mem_nodes) ih
+
+private theorem reverse_reverse (g : Graph.Graph Nat) : reverseGraph (reverseGraph g) = g := by
+  cases g with
+  | mk nodes edges =>
+    simp only [reverseGraph, List.map_map]
+    congr 1
+    have : ((fun edge : Nat × Nat => (edge.2, edge.1)) ∘ fun edge : Nat × Nat => (edge.2, edge.1)) = id := by
+      funext edge
+      rfl
+    rw [this, List.map_id]
+
+/-- For nodes of the graph: what reaches a node is what the other way it reaches. -/
+private theorem reaches_iff (g : Graph.Graph Nat) (c node : Nat) :
+    node ∈ Graph.reachable g c ↔ c ∈ Graph.reachable (reverseGraph g) node := by
+  simp only [Graph.reachable, Bap.Proofs.Graph.mem_reachableFrom_iff]
+  constructor
+  · exact reaches_reverse
+  · intro h
+    have := reaches_reverse h
+    rwa [reverse_reverse] at this
+
+/-- `stronglyConnected`, going over the graph once from each component and once the other way, and not from each node of it. -/
 private def stronglyConnectedFast (callgraph : Callgraph) : List (List Nat) :=
-  let components := callgraph.graph.nodes.foldl (init := (callgraph.graph.nodes, [])) fun current node =>
-    if !current.1.contains node then current
+  let graph := callgraph.graph
+  let backward := reverseGraph graph
+  let nodes : Std.HashSet Nat := Std.HashSet.ofList graph.nodes
+  let forwardTable := Graph.Fast.successorTable graph
+  let backwardTable := Graph.Fast.successorTable backward
+  let state := graph.nodes.foldl (init := (({} : Std.HashSet Nat), ([] : List (List Nat)))) fun current node =>
+    if current.1.contains node then current
     else
-      let forward := Graph.Fast.reachable callgraph.graph node
-      let component := forward.filter fun candidate =>
-        (Graph.Fast.reachable callgraph.graph candidate).contains node
-      (current.1.filter fun candidate => !component.contains candidate, current.2 ++ [component])
-  components.2
+      let reaching : Std.HashSet Nat := Std.HashSet.ofList (Graph.Fast.reachableWith backward backwardTable nodes node)
+      let component := (Graph.Fast.reachableWith graph forwardTable nodes node).filter reaching.contains
+      (current.1.insertMany component, component :: current.2)
+  state.2.reverse
 
 @[csimp] private theorem stronglyConnected_eq_fast : @stronglyConnected = @stronglyConnectedFast := by
   funext callgraph
-  simp only [stronglyConnected, stronglyConnectedFast, Graph.Fast.reachable_eq]
+  simp only [stronglyConnected, stronglyConnectedFast]
+  generalize callgraph.graph = graph
+  have hfw : Graph.Fast.reachableWith graph (Graph.Fast.successorTable graph) (Std.HashSet.ofList graph.nodes) =
+      Graph.reachable graph := funext (Graph.Fast.reachableWith_eq graph)
+  have hbw : Graph.Fast.reachableWith (reverseGraph graph) (Graph.Fast.successorTable (reverseGraph graph)) (Std.HashSet.ofList graph.nodes) =
+      Graph.reachable (reverseGraph graph) := funext (Graph.Fast.reachableWith_eq (reverseGraph graph))
+  simp only [hfw, hbw]
+  have key : ∀ (rest : List Nat) (list : List Nat) (comps : List (List Nat)) (set : Std.HashSet Nat) (acc : List (List Nat)),
+      (∀ n ∈ rest, n ∈ list ↔ set.contains n = false) → comps = acc.reverse →
+      (rest.foldl (init := (list, comps)) fun current node =>
+        if !current.1.contains node then current
+        else
+          let forward := Graph.reachable graph node
+          let component := forward.filter fun candidate => (Graph.reachable graph candidate).contains node
+          (current.1.filter fun candidate => !component.contains candidate, current.2 ++ [component])).2 =
+      (rest.foldl (init := (set, acc)) fun current node =>
+        if current.1.contains node then current
+        else
+          let reaching : Std.HashSet Nat := Std.HashSet.ofList (Graph.reachable (reverseGraph graph) node)
+          let component := (Graph.reachable graph node).filter reaching.contains
+          (current.1.insertMany component, component :: current.2)).2.reverse := by
+    intro rest
+    induction rest with
+    | nil => intro _ _ _ _ _ h; exact h
+    | cons n ns ih =>
+      intro list comps set acc hmem hc
+      simp only [List.foldl_cons]
+      by_cases hset : set.contains n = true
+      · have hn : n ∉ list := fun hm => by
+          have := (hmem n List.mem_cons_self).1 hm
+          rw [hset] at this
+          cases this
+        have hl : (!list.contains n) = true := by simpa using hn
+        simp only [hl, hset, ↓reduceIte]
+        exact ih _ _ _ _ (fun m hm => hmem m (List.mem_cons_of_mem _ hm)) hc
+      · have hn : n ∈ list := (hmem n List.mem_cons_self).2 (by simpa using hset)
+        have hl : ¬ (!list.contains n) = true := by simpa using hn
+        have hcomp : ((Graph.reachable graph n).filter fun candidate => (Graph.reachable graph candidate).contains n) =
+            (Graph.reachable graph n).filter (Std.HashSet.ofList (Graph.reachable (reverseGraph graph) n)).contains := by
+          apply List.filter_congr
+          intro c _
+          rw [Bool.eq_iff_iff]
+          simp only [List.contains_eq_mem, decide_eq_true_eq, Std.HashSet.contains_ofList]
+          exact reaches_iff graph c n
+        simp only [hl, hset, hcomp]
+        apply ih
+        · intro m hm
+          have hold := hmem m (List.mem_cons_of_mem _ hm)
+          simp only [List.mem_filter, hold, Std.HashSet.contains_insertMany_list, Bool.or_eq_false_iff, Bool.not_eq_true',
+            List.contains_eq_mem, decide_eq_false_iff_not]
+        · simp [hc]
+  exact key _ _ _ _ _ (by simp) rfl
+
+/-- `create`, without comparing every pair of what it lists. -/
+private def createFast (index : Xrefs.Index) : Callgraph := {
+  graph := {
+    nodes := Graph.Fast.dedup (index.functions.map Image.Symbol.addr ++
+      index.xrefs.filterMap fun xref => match xref.kind with
+        | .call => some xref.target
+        | _ => none)
+    edges := Graph.Fast.dedup (index.xrefs.filterMap fun xref =>
+      if xref.kind = .call then
+        (Xrefs.functionOf index xref.source).map fun caller => (caller.addr, xref.target)
+      else
+        none)
+  }
+  functions := index.functions
+}
+
+@[csimp] private theorem create_eq_fast : @create = @createFast := by
+  funext index
+  simp only [create, createFast, Graph.Fast.dedup_eq]
 
 def recursiveFunctions (callgraph : Callgraph) : List Nat :=
   let components := stronglyConnected callgraph

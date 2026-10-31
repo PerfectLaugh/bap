@@ -4,18 +4,54 @@ namespace Bap.Tests.Project
 
 open Bap
 open Bap.Project
-open Bap.Plugin
+
+private def summarize : Pass := {
+  name := "summarize"
+  run := fun project =>
+    let instructions := project.disasm.map (fun disasm => disasm.instructions.length) |>.getD 0
+    .ok (project.set "instructions" (toString instructions))
+}
+
+private def report : Pass := {
+  name := "report"
+  dependencies := ["summarize"]
+  run := fun project =>
+    let blocks := project.disasm.map (fun disasm => disasm.blocks.length) |>.getD 0
+    .ok (project.set "blocks" (toString blocks) |>.set "status" "analyzed")
+}
 
 private def recordingPass (name : String) (dependencies : List String := []) : Pass := {
   name := name
   dependencies := dependencies
-  autorun := true
   run := fun project =>
     let trace := (project.get "trace").getD ""
     .ok (project.set "trace" (trace ++ name))
 }
 
+/-- `stronglyConnected` as it reads. -/
+private def componentsBySpec (callgraph : Analysis.Callgraph.Callgraph) : List (List Nat) :=
+  let components := callgraph.graph.nodes.foldl (init := (callgraph.graph.nodes, [])) fun current node =>
+    if !current.1.contains node then current
+    else
+      let forward := Graph.reachable callgraph.graph node
+      let component := forward.filter fun candidate =>
+        (Graph.reachable callgraph.graph candidate).contains node
+      (current.1.filter fun candidate => !component.contains candidate, current.2 ++ [component])
+  components.2
+
+private def componentsFastPath : IO Unit := do
+  let graphs : List (Graph.Graph Nat) := [
+    {},
+    { nodes := [1, 2, 3], edges := [(1, 2), (2, 1), (3, 3), (9, 1), (1, 9)] },
+    { nodes := (List.range 40).reverse, edges := (List.range 40).flatMap fun i => [(i, (i * 7 + 3) % 40), (i, (i * i + 1) % 40)] },
+    { nodes := [5, 5, 6, 7], edges := [(5, 6), (6, 5), (6, 7), (6, 7)] },
+    { nodes := List.range 60, edges := (List.range 59).map fun i => (i, i + 1) }]
+  for graph in graphs do
+    let callgraph : Analysis.Callgraph.Callgraph := { graph := graph }
+    assertEqual "strongly connected components" (componentsBySpec callgraph) (Analysis.Callgraph.stronglyConnected callgraph)
+
 def run : IO Unit := do
+  componentsFastPath
   let a := recordingPass "a"
   let b := recordingPass "b" ["a"]
   let c := recordingPass "c" ["b"]
@@ -46,15 +82,12 @@ def run : IO Unit := do
   | .ok _ => throw <| IO.userError "pass runtime error ignored"
   let project ← Project.load "/bin/echo"
   assertTrue "project is disassembled" project.disassembled
-  match analyze defaultRegistry project with
-  | .error error => throw <| IO.userError s!"default analysis failed: {repr error}"
+  match runPasses [report, summarize] project with
+  | .error error => throw <| IO.userError s!"analysis failed: {repr error}"
   | .ok analyzed =>
     assertEqual "default instruction summary" (some "13") (analyzed.get "instructions")
     assertEqual "default block summary" (some "2") (analyzed.get "blocks")
     assertEqual "default analysis status" (some "analyzed") (analyzed.get "status")
-  match analyze defaultRegistry project ["report"] with
-  | .error error => throw <| IO.userError s!"selected analysis failed: {repr error}"
-  | .ok analyzed => assertEqual "selected pass includes dependencies" (some "13") (analyzed.get "instructions")
   let mem : Var := ⟨"mem", .mem 64 8, 0, false⟩
   let rax : Var := ⟨"RAX", .imm 64, 0, false⟩
   let target : Bil.Exp := .int (BitVec.ofNat 64 0x2000)
@@ -236,8 +269,27 @@ def run : IO Unit := do
     (Analysis.Slice.backward unknownOther [.memOf memOne 0x3000 1]).sites
   assertEqual "an unknown store to this memory is a site" [0]
     (Analysis.Slice.backward unknownOther [.memOf memTwo 0x3000 1]).sites
-  assertTrue "an unknown store to this memory leaves it incomplete"
-    !(Analysis.Slice.backward unknownOther [.memOf memTwo 0x3000 1]).complete
+  assertTrue "a site writes the same at an address that agrees, wherever it is"
+    (Analysis.Slice.backward unknownOther [.memOf memTwo 0x3000 1]).complete
+  -- value analysis: slots of a stack pointer, through the casts of the lifters and its adjustments
+  let stackPointer : Var := ⟨"RSP", .imm 64, 0, false⟩
+  let word (value : Nat) : Bil.Exp := .int (BitVec.ofNat 64 value)
+  let slot (offset : Nat) : Bil.Exp :=
+    .cast .low 64 (.bin .add (.cast .unsigned 64 (.var stackPointer)) (.cast .unsigned 64 (word offset)))
+  let slots : List Disasm.Insn := [
+    { address := 0, size := 1, asm := "", bil := [.move memOne (.store (.var memOne) (slot 8) (.var rax) .little 8)] },
+    { address := 1, size := 1, asm := "", bil := [.move memOne (.store (.var memOne) (slot 16) (word 1) .little 8)] },
+    { address := 2, size := 1, asm := "", bil := [.move rax (.load (.var memOne) (slot 8) .little 8)] }]
+  let slotSlice := Analysis.Slice.backward slots [.reg rax]
+  assertEqual "a store to another stack slot is no site" [0, 2] slotSlice.sites
+  assertTrue "stack slots leave a slice complete" slotSlice.complete
+  let index : Var := ⟨"RCX", .imm 64, 0, false⟩
+  let indexed : List Disasm.Insn := [
+    { address := 0, size := 1, asm := "", bil := [.move memOne (.store (.var memOne) (slot 8) (word 1) .little 8)] },
+    { address := 1, size := 1, asm := "", bil := [.move rax (.load (.var memOne) (.bin .add (.var index) (.var stackPointer)) .little 8)] }]
+  let indexedSlice := Analysis.Slice.backward indexed [.reg rax]
+  assertEqual "a read at an address that is not known needs every store" [0, 1] indexedSlice.sites
+  assertTrue "and is no reason to give up" indexedSlice.complete
   let partialDynamic := Analysis.DynamicSlice.backward xrefProject 0x1000 [0x1008] [.mem 0x3000 8]
   assertEqual "dynamic slice keeps traced site" [0x1008] partialDynamic.sites
   assertEqual "dynamic slice reports missing producer" [0x1004] partialDynamic.gaps
@@ -307,7 +359,7 @@ def run : IO Unit := do
     [⟨0, 4, "", .normal, none, [.move mem (.store (.var mem) (.int (BitVec.ofNat 64 (2 ^ 64 - 2))) (.var rax) .little 8)]⟩]
     [.mem 0 4]
   assertEqual "backward slice includes a store that wraps onto a location" [0] wrapping.sites
-  assertTrue "backward slice with a wrapping store is incomplete" !wrapping.complete
+  assertTrue "a store that wraps is the same store in both runs" wrapping.complete
   let afterExit := Analysis.Slice.backward
     [⟨0, 4, "", .normal, none, [.move rax (.int (BitVec.ofNat 64 5))]⟩,
      ⟨4, 4, "", .normal, none, [.jmp (.int (BitVec.ofNat 64 0x20)), .move rax (.int (BitVec.ofNat 64 6))]⟩]
@@ -327,7 +379,7 @@ def run : IO Unit := do
   assertEqual "backward slice keeps a partly overwritten location" [Analysis.Slice.Location.memOf mem 0x3000 4] partialStore.live
   let dynamicStore := Analysis.Slice.backward [insn 0 [store (.var rax) 8]] [.mem 0x3000 4]
   assertEqual "backward slice includes stores that may alias" [0] dynamicStore.sites
-  assertTrue "backward slice with a dynamic store is incomplete" !dynamicStore.complete
+  assertTrue "a dynamic store is a site that writes the same" dynamicStore.complete
   let branching : Project.Project := { xrefProject with
     disasm := some { entry := 0x1000, instructions := instructions.dropLast ++ [⟨0x100c, 4, "jcc", .conditionalJump, some 0x1004, []⟩] } }
   let branchingSlice := Analysis.Slice.backwardProject branching 0x1000 [.mem 0x3000 8]
@@ -380,30 +432,5 @@ def run : IO Unit := do
       assertEqual "text round trip keeps nested code"
         (some [toString (Bil.Wire.printProgram nestedCode)])
         (restored.disasm.map fun disasm => disasm.instructions.map fun insn => toString (Bil.Wire.printProgram insn.bil))
-  match analyze defaultRegistry project ["no-such-pass"] with
-  | .error (.unknownPass "no-such-pass") => IO.println "ok: unknown pass name rejected"
-  | .error error => throw <| IO.userError s!"wrong unknown pass error: {repr error}"
-  | .ok _ => throw <| IO.userError "unknown pass name accepted"
-  let manual : Pass := { recordingPass "manual" with autorun := false }
-  let automatic := recordingPass "automatic" ["manual"]
-  let manualRegistry := Registry.register ⟨"manual", [manual, automatic]⟩ {}
-  match analyze manualRegistry {} with
-  | .ok done => assertEqual "autorun pass runs its manual dependency" (some "manualautomatic") (done.get "trace")
-  | .error error => throw <| IO.userError s!"autorun dependency failed: {repr error}"
-  let cyclicRegistry := Registry.register ⟨"cyclic", [recordingPass "x" ["y"], recordingPass "y" ["x"]]⟩ {}
-  match analyze cyclicRegistry {} with
-  | .error (.cycle _) => IO.println "ok: registry cycle reported as a cycle"
-  | .error error => throw <| IO.userError s!"wrong registry cycle error: {repr error}"
-  | .ok _ => throw <| IO.userError "registry cycle accepted"
-  IO.FS.writeFile "native/build/plugin-test.scm"
-    "(plugin demo (pass marker (set origin plugin)) (pass detailed (deps marker) (set detail ok)))"
-  let registry ← Plugin.loadMany defaultRegistry ["native/build/plugin-test.scm"]
-  assertTrue "dynamic plugin pass is registered" (registry.findPass "detailed").isSome
-  match analyze registry project ["detailed"] with
-  | .error error => throw <| IO.userError s!"dynamic plugin analysis failed: {repr error}"
-  | .ok analyzed =>
-    assertEqual "dynamic plugin pass executes" (some "plugin") (analyzed.get "origin")
-    assertEqual "dynamic plugin dependency executes" (some "ok") (analyzed.get "detail")
-    assertTrue "dynamic plugin records pass history" (analyzed.passed.contains "marker")
 
 end Bap.Tests.Project

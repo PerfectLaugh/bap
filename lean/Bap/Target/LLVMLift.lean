@@ -455,50 +455,45 @@ private def operand (register : String → Primus.Semantics.Value)
   | .reg name => register name
   | .imm value => immediate opcode value
 
-/-- The names of the primitives of the semantics, all but the ones they handle before they look up a name. -/
+/-- The names of the primitives of the semantics, all but the one they handle before they look up a name. -/
 def semanticsPrimitives : List String :=
-  ["+", "-", "*", "/", "s/", "mod", "=", "/=", "<", "<=", ">", ">=", "not", "list",
-    "cons", "car", "cdr", "length", "null?", "list?", "logand", "logor", "logxor",
-    "bitand", "bitor", "bitxor", "lnot", "lshift", "rshift", "arshift", "extract",
-    "select", "concat", "cast-low", "cast-high", "cast-signed", "cast-unsigned",
-    "word-width", "set", "set$", "set-symbol-value", "alias-base-register", "symbol", "empty",
-    "load-bits", "load-byte", "load-hword", "load-word", "store-word", "store-byte", "exec-addr", "intrinsic",
-    "get-program-counter", "get-current-program-counter", "get-next-program-counter",
-    "is-zero", "non-zero", "neg", "s<", "s<=", "s>", "s>=", "signed-mod", "signed-rem",
-    "unquote", "symbol-concat", "cast-saturate", "x86-prefix",
-    "+.", "-.", "*.", "/.", "fsqrt", "fround", "fconvert", "cast-float", "cast-sfloat", "cast-int", "cast-sint",
-    "<.", ">.", ">=.", "=.", "is-nan", "is-inf", "is-fzero"]
+  Primus.Semantics.primitiveNames.filter (· != "replicate")
 
 /-- The primitives that no definition hides, as bindings, which is what a lookup of their names finds after the globals. -/
 private def primitiveGlobals (definitions : Primus.Semantics.Globals) : Primus.Semantics.Globals :=
   (semanticsPrimitives.filter fun name => (Assoc.get name definitions).isNone).map fun name =>
     (name, .callable (.primitive name))
 
-/-- The definitions of a target, compiled, and the ones of its LLVM opcodes by their numbers. The lookups of the
-semantics go along the list, and a lookup of a primitive goes to its end, so they are ordered by how often they are looked
-up: the primitives and the registers, the definitions that aren't instructions, which the others call, and last the
-instructions, which nothing calls. This doesn't change what a name resolves to, and it makes lifting 25 times faster on
-x86. `aliases` are the names that LLVM has for some definitions. -/
+/-- The definitions of a target, and the instructions by the numbers of their LLVM opcodes and by name. Those that aren't
+instructions, which the others call, are compiled, and each instruction is when it is first lifted. A lookup of a register
+goes along the list, so the primitives and the registers come first, and last the instructions, which nothing calls. This
+doesn't change what a name resolves to. `aliases` are the names that LLVM has for some definitions. -/
 private def compiledDefinitions (aliases : List (String × String)) (triple : String)
     (registers definitions : Primus.Semantics.Globals) :
-    IO (Primus.Semantics.Globals × List (Nat × Primus.Semantics.Callable)) := do
+    IO (Primus.Semantics.Environment) := do
   let numbered ← definitions.mapM fun binding => do
     match binding.2 with
     | .callable _ => pure (binding, ← LLVM.opcodeId? triple ((Assoc.get binding.1 aliases).getD binding.1))
     | _ => pure (binding, none)
   let (instructions, others) := numbered.partition fun entry => entry.2.isSome
   let registers := primitiveGlobals definitions ++ registers
-  let compiled := Primus.Semantics.compileGlobals (registers ++ others.map Prod.fst ++ instructions.map Prod.fst)
-  let opcodes := ((compiled.drop (registers.length + others.length)).zip instructions).filterMap fun entry =>
-    match entry.1.2, entry.2.2 with
-    | .callable callable, some opcode => some (opcode, callable)
+  let all := registers ++ others.map Prod.fst ++ instructions.map Prod.fst
+  let lazy := instructions.filterMap fun entry =>
+    match entry.1.2, entry.2 with
+    | .callable callable, some opcode => some ((entry.1.1, callable), opcode)
     | _, _ => none
-  pure (compiled, opcodes)
+  let (eager, thunks) := Primus.Semantics.compilePartly (registers ++ others.map Prod.fst) (lazy.map Prod.fst)
+    (Primus.Semantics.globalsTable all)
+  let opcodes := thunks.zip lazy |>.map fun entry => (entry.2.2, entry.1.2)
+  let environment := Primus.Semantics.Environment.ofMachine (eager ++ instructions.map Prod.fst) opcodes []
+  pure { environment with
+    instructions := thunks.reverse.foldl (init := {}) fun table binding => table.insert binding.1 binding.2 }
 
 /-- A target whose instructions are lifted by the names of their LLVM opcodes. -/
 private def makeEnvironment (triple : String) (registers definitions : Primus.Semantics.Globals) :
     IO Primus.Semantics.Environment := do
-  pure (.ofGlobals (← compiledDefinitions [] triple registers definitions).1)
+  let environment ← compiledDefinitions [] triple registers definitions
+  pure { environment with opcodes := {} }
 
 /-- The semantics take long to load and they are the same each time, so a program loads the ones of a target once. -/
 private def cached (cache : IO.Ref (Option Primus.Semantics.Environment)) (build : IO Primus.Semantics.Environment) :
@@ -521,7 +516,7 @@ private initialize aarch64Cache : IO.Ref (Option Primus.Semantics.Environment) �
 def aarch64Environment : IO Primus.Semantics.Environment := cached aarch64Cache do
   let context := semanticsContext 0 0
   let definitions ← Primus.Semantics.loadMany (← pluginDirectories "arm") ["aarch64"] context
-  let (compiled, opcodes) ← compiledDefinitions [] "aarch64" aarch64Globals definitions
+  let environment ← compiledDefinitions [] "aarch64" aarch64Globals definitions
   let names := (List.range 31).flatMap (fun n => [s!"X{n}", s!"W{n}"]) ++
     (List.range 32).flatMap (fun n => [s!"B{n}", s!"H{n}", s!"S{n}", s!"D{n}", s!"Q{n}"]) ++
     ["SP", "WSP", "XZR", "WZR"]
@@ -529,7 +524,7 @@ def aarch64Environment : IO Primus.Semantics.Environment := cached aarch64Cache 
     let llvmName := if name = "X29" then "FP" else if name = "X30" then "LR" else name
     let id ← LLVM.registerId "aarch64" llvmName
     pure (id, aarch64Register name)
-  pure (.ofMachine compiled opcodes registers)
+  pure (environment.withRegisters registers)
 
 private initialize x86Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
@@ -538,15 +533,14 @@ def x86Environment : IO Primus.Semantics.Environment := cached x86Cache do
   let definitions ← Primus.Semantics.loadMany (← pluginDirectories "x86")
     ["bits", "x86-64", "x86-bits", "x86-move", "x86-arith", "x86-control", "x86-shift", "x86-bmi", "x86-sse", "x86-simd",
       "x86-pcmpstr", "x86-sse-intrinsics"] context
-  let (compiled, opcodes) ← compiledDefinitions [("RETQ", "RET64"), ("NOP", "NOOP")] "x86_64" x86Globals definitions
+  let environment ← compiledDefinitions [("RETQ", "RET64"), ("NOP", "NOOP")] "x86_64" x86Globals definitions
   let registers ← LLVM.registerNames "x86_64"
   let registers := (0, x86Register "Nil") ::
     (registers.map fun binding => (binding.1, x86Register binding.2))
   let signExtendedOpcodes ← definitions.filterMapM fun binding =>
     if binding.1.endsWith "i32" then LLVM.opcodeId? "x86_64" binding.1 else pure none
   let relativeOpcodes ← x86RelativeOpcodes.filterMapM (LLVM.opcodeId? "x86_64")
-  let environment := Primus.Semantics.Environment.ofMachine compiled opcodes registers
-  pure { environment with signExtendedOpcodes, relativeOpcodes }
+  pure { environment.withRegisters registers with signExtendedOpcodes, relativeOpcodes }
 
 /-- The names that LLVM has for the formats of a floating point register, e.g., `F10_D`, which `fpr-name` of the
 semantics takes to the register. -/
@@ -562,23 +556,23 @@ private initialize riscvCache : IO.Ref (Option Primus.Semantics.Environment) ←
 def riscvEnvironment : IO Primus.Semantics.Environment := cached riscvCache do
   let context := semanticsContext 0 0
   let definitions ← Primus.Semantics.loadMany (← pluginDirectories "riscv") ["riscv"] context
-  let (compiled, opcodes) ← compiledDefinitions [] "riscv64" riscvGlobals definitions
+  let environment ← compiledDefinitions [] "riscv64" riscvGlobals definitions
   let registers ← (List.range 32).mapM fun n => do
     let id ← LLVM.registerId "riscv64" s!"X{n}"
     pure (id, riscvRegister s!"X{n}")
   let floats ← riscvFloatRegisters "riscv64"
-  pure (.ofMachine compiled opcodes (registers ++ floats))
+  pure (environment.withRegisters (registers ++ floats))
 
 private initialize powerpcCache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
 def powerpcEnvironment : IO Primus.Semantics.Environment := cached powerpcCache do
   let context := semanticsContext 0 0
   let definitions ← Primus.Semantics.loadMany (← pluginDirectories "powerpc") ["bits", "powerpc"] context
-  let (compiled, opcodes) ← compiledDefinitions [] "powerpc64le" powerpcGlobals definitions
+  let environment ← compiledDefinitions [] "powerpc64le" powerpcGlobals definitions
   let registers ← LLVM.registerNames "powerpc64le"
   let registers := (0, powerpcRegister "Nil") ::
     (registers.map fun binding => (binding.1, powerpcRegister binding.2))
-  pure (.ofMachine compiled opcodes registers)
+  pure (environment.withRegisters registers)
 
 private initialize mipsCache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
@@ -597,26 +591,25 @@ def x8632Environment : IO Primus.Semantics.Environment := cached x8632Cache do
   let definitions ← Primus.Semantics.loadMany (← pluginDirectories "x86")
     ["bits", "x86-32", "x86-bits", "x86-move", "x86-arith", "x86-control", "x86-shift", "x86-bmi", "x86-sse", "x86-simd",
       "x86-pcmpstr", "x86-sse-intrinsics"] context
-  let (compiled, opcodes) ← compiledDefinitions
+  let environment ← compiledDefinitions
     [("RETQ", "RET32"), ("RETL", "RET32"), ("NOP", "NOOP")] "i386" x8632Globals definitions
   let registers ← LLVM.registerNames "i386"
   let registers := (0, x8632Register "Nil") ::
     (registers.map fun binding => (binding.1, x8632Register binding.2))
   let relativeOpcodes ← x86RelativeOpcodes.filterMapM (LLVM.opcodeId? "i386")
-  let environment := Primus.Semantics.Environment.ofMachine compiled opcodes registers
-  pure { environment with relativeOpcodes }
+  pure { environment.withRegisters registers with relativeOpcodes }
 
 private initialize riscv32Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
 def riscv32Environment : IO Primus.Semantics.Environment := cached riscv32Cache do
   let context := arm32Context 0 0
   let definitions ← Primus.Semantics.loadMany (← pluginDirectories "riscv") ["riscv"] context
-  let (compiled, opcodes) ← compiledDefinitions [] "riscv32" riscv32Globals definitions
+  let environment ← compiledDefinitions [] "riscv32" riscv32Globals definitions
   let registers ← (List.range 32).mapM fun n => do
     let id ← LLVM.registerId "riscv32" s!"X{n}"
     pure (id, riscv32Register s!"X{n}")
   let floats ← riscvFloatRegisters "riscv32"
-  pure (.ofMachine compiled opcodes (registers ++ floats))
+  pure (environment.withRegisters (registers ++ floats))
 
 private initialize mips32Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
@@ -630,11 +623,11 @@ private initialize powerpc32Cache : IO.Ref (Option Primus.Semantics.Environment)
 def powerpc32Environment : IO Primus.Semantics.Environment := cached powerpc32Cache do
   let context := { arm32Context 0 0 with endian := .big }
   let definitions ← Primus.Semantics.loadMany (← pluginDirectories "powerpc") ["bits", "powerpc"] context
-  let (compiled, opcodes) ← compiledDefinitions [] "powerpc" powerpc32Globals definitions
+  let environment ← compiledDefinitions [] "powerpc" powerpc32Globals definitions
   let registers ← LLVM.registerNames "powerpc"
   let registers := (0, powerpc32Register "Nil") ::
     (registers.map fun binding => (binding.1, powerpc32Register binding.2))
-  pure (.ofMachine compiled opcodes registers)
+  pure (environment.withRegisters registers)
 
 private initialize arm32Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 

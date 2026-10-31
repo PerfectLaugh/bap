@@ -1,5 +1,6 @@
 import Bap.IR.Liveness
 import Bap.IR.LiveSets
+import Bap.IR.DenseDce
 import Bap.IR.Ssa
 
 namespace Bap.IR
@@ -39,6 +40,155 @@ private def propagateBlock (blk : Blk) (env : ConstEnv) : Blk × ConstEnv :=
     (state.1 ++ [{ defn with rhs := rhs }], env)
   let jmps := blk.jmps.map (Jmp.mapExp fun exp => Bil.simplifyExp (Bil.substitute (replacements env) exp))
   ({ blk with phis := phis, defs := defs, jmps := jmps }, env)
+
+/-- `Bil.substitute` of `replacements`: only what is read of the constants is made into expressions. -/
+private def substConst (env : ConstEnv) : Bil.Exp → Bil.Exp
+  | .int value => .int value
+  | .var var =>
+    match Assoc.get var env with
+    | some constant => constant.toExp
+    | none => .var var
+  | .load memory address endian size => .load (substConst env memory) (substConst env address) endian size
+  | .store memory address value endian size =>
+    .store (substConst env memory) (substConst env address) (substConst env value) endian size
+  | .bin op left right => .bin op (substConst env left) (substConst env right)
+  | .un op value => .un op (substConst env value)
+  | .cast kind width value => .cast kind width (substConst env value)
+  | .letIn var value body => Bil.substitute (replacements env) (.letIn var value body)
+  | .ite condition yes no => .ite (substConst env condition) (substConst env yes) (substConst env no)
+  | .extract high low value => .extract high low (substConst env value)
+  | .concat left right => .concat (substConst env left) (substConst env right)
+  | .unknown message typ => .unknown message typ
+
+private theorem get_replacements (env : ConstEnv) (var : Bap.Var) :
+    Assoc.get var (replacements env) = (Assoc.get var env).map Constant.toExp := by
+  induction env with
+  | nil => rfl
+  | cons head tail ih =>
+    obtain ⟨k, v⟩ := head
+    simp only [replacements, List.map_cons, Assoc.get, List.lookup_cons] at ih ⊢
+    cases var == k with
+    | true => rfl
+    | false => exact ih
+
+private theorem substConst_eq (env : ConstEnv) (exp : Bil.Exp) : substConst env exp = Bil.substitute (replacements env) exp := by
+  induction exp with
+  | int value => rfl
+  | var var =>
+    simp only [substConst, Bil.substitute, get_replacements]
+    cases Assoc.get var env <;> rfl
+  | load m a e s ihm iha => simp only [substConst, Bil.substitute, ihm, iha]
+  | store m a v e s ihm iha ihv => simp only [substConst, Bil.substitute, ihm, iha, ihv]
+  | bin op l r ihl ihr => simp only [substConst, Bil.substitute, ihl, ihr]
+  | un op v ih => simp only [substConst, Bil.substitute, ih]
+  | cast k w v ih => simp only [substConst, Bil.substitute, ih]
+  | ite c y n ihc ihy ihn => simp only [substConst, Bil.substitute, ihc, ihy, ihn]
+  | extract hi lo v ih => simp only [substConst, Bil.substitute, ih]
+  | concat l r ihl ihr => simp only [substConst, Bil.substitute, ihl, ihr]
+  | unknown m t => rfl
+  | letIn var value body _ _ => rfl
+
+/-- `Assoc.remove`, with nothing to copy if it isn't there. -/
+private def removeConst (var : Bap.Var) (env : ConstEnv) : ConstEnv :=
+  if env.any (·.1 == var) then Assoc.remove var env else env
+
+private theorem removeConst_eq (var : Bap.Var) (env : ConstEnv) : removeConst var env = Assoc.remove var env := by
+  unfold removeConst
+  split
+  · rfl
+  · rename_i h
+    symm
+    apply List.filter_eq_self.2
+    intro entry he
+    have : entry.1 ≠ var := fun e => h (List.any_eq_true.2 ⟨entry, he, by simp [e]⟩)
+    simpa using this
+
+/-- The constants after a definition. -/
+private def constStep (env : ConstEnv) (var : Bap.Var) (rhs : Bil.Exp) : ConstEnv :=
+  match Constant.ofExp rhs with
+  | some constant => Assoc.put var constant env
+  | none => removeConst var env
+
+/-- What `propagateBlock` says of its constants, without rewriting the block. -/
+private def propagateExit (blk : Blk) (env : ConstEnv) : ConstEnv :=
+  let phiVars := blk.phis.map Phi.var
+  let env : ConstEnv := if phiVars.isEmpty then env else env.filter fun entry => entry.1 ∉ phiVars
+  blk.defs.foldl (init := env) fun env defn => constStep env defn.var (Bil.simplifyExp (substConst env defn.rhs))
+
+private theorem propagateExit_eq (blk : Blk) (env : ConstEnv) : (propagateBlock blk env).2 = propagateExit blk env := by
+  have hf : ∀ (e : ConstEnv), (if (blk.phis.map Phi.var).isEmpty then e else e.filter fun entry => entry.1 ∉ blk.phis.map Phi.var) =
+      e.filter fun entry => entry.1 ∉ blk.phis.map Phi.var := by
+    intro e
+    split
+    · rename_i h
+      have hnil : blk.phis.map Phi.var = [] := by simpa using h
+      rw [hnil]
+      exact (List.filter_eq_self.2 (by simp)).symm
+    · rfl
+  have key : ∀ (defs acc : List Def) (e : ConstEnv), (defs.foldl (init := (acc, e)) fun state defn =>
+        let rhs := Bil.simplifyExp (Bil.substitute (replacements state.2) defn.rhs)
+        let env := match Constant.ofExp rhs with
+          | some constant => Assoc.put defn.var constant state.2
+          | none => Assoc.remove defn.var state.2
+        (state.1 ++ [{ defn with rhs := rhs }], env)).2 =
+      defs.foldl (init := e) fun env defn => constStep env defn.var (Bil.simplifyExp (substConst env defn.rhs)) := by
+    intro defs
+    induction defs with
+    | nil => intro _ _; rfl
+    | cons d ds ih =>
+      intro acc e
+      simp only [List.foldl_cons]
+      rw [ih]
+      congr 1
+      simp only [constStep, removeConst_eq, substConst_eq]
+  simp only [propagateBlock, propagateExit, hf]
+  exact key _ _ _
+
+/-- `propagateBlock`, with its definitions in order at the end instead of each added at the end. -/
+private def propagateBlockFast (blk : Blk) (env : ConstEnv) : Blk × ConstEnv :=
+  let phiVars := blk.phis.map Phi.var
+  let env : ConstEnv := if phiVars.isEmpty then env else env.filter fun entry => entry.1 ∉ phiVars
+  let phis := blk.phis.map fun phi =>
+    { phi with values := phi.values.map fun input => (input.1, Bil.simplifyExp input.2) }
+  let (defs, env) := blk.defs.foldl (init := ([], env)) fun state defn =>
+    let rhs := Bil.simplifyExp (substConst state.2 defn.rhs)
+    ({ defn with rhs := rhs } :: state.1, constStep state.2 defn.var rhs)
+  let jmps := blk.jmps.map (Jmp.mapExp fun exp => Bil.simplifyExp (substConst env exp))
+  ({ blk with phis := phis, defs := defs.reverse, jmps := jmps }, env)
+
+@[csimp] private theorem propagateBlock_eq_fast : @propagateBlock = @propagateBlockFast := by
+  funext blk env
+  have hf : (if (blk.phis.map Phi.var).isEmpty then env else env.filter fun entry => entry.1 ∉ blk.phis.map Phi.var) =
+      env.filter fun entry => entry.1 ∉ blk.phis.map Phi.var := by
+    split
+    · rename_i h
+      have hnil : blk.phis.map Phi.var = [] := by simpa using h
+      rw [hnil]
+      exact (List.filter_eq_self.2 (by simp)).symm
+    · rfl
+  have key : ∀ (defs acc : List Def) (e : ConstEnv), (defs.foldl (init := (acc, e)) fun state defn =>
+        let rhs := Bil.simplifyExp (Bil.substitute (replacements state.2) defn.rhs)
+        let env := match Constant.ofExp rhs with
+          | some constant => Assoc.put defn.var constant state.2
+          | none => Assoc.remove defn.var state.2
+        (state.1 ++ [{ defn with rhs := rhs }], env)) =
+      let fast := defs.foldl (init := (acc.reverse, e)) fun state defn =>
+        let rhs := Bil.simplifyExp (substConst state.2 defn.rhs)
+        ({ defn with rhs := rhs } :: state.1, constStep state.2 defn.var rhs)
+      (fast.1.reverse, fast.2) := by
+    intro defs
+    induction defs with
+    | nil => intro acc e; simp
+    | cons d ds ih =>
+      intro acc e
+      simp only [List.foldl_cons]
+      rw [ih]
+      simp only [constStep, removeConst_eq, substConst_eq, List.reverse_append, List.reverse_cons, List.reverse_nil, List.nil_append, List.singleton_append]
+  simp only [propagateBlock, propagateBlockFast, hf]
+  have := key blk.defs [] (env.filter fun entry => entry.1 ∉ blk.phis.map Phi.var)
+  simp only [List.reverse_nil] at this
+  rw [this]
+  simp only [substConst_eq]
 
 /-- Constants known on entry: nothing at the start, whose entry state is unconstrained even when it
 has predecessors, otherwise the join over the predecessors analysed so far. -/
@@ -146,7 +296,7 @@ private def propagateAuxT (cfg : Cfg) (tables : PropTables) :
     match tables.blocks.get? tid with
     | none => propagateAuxT cfg tables fuel exits work
     | some blk =>
-      let env := (propagateBlock blk (entryEnvT cfg tables exits tid)).2
+      let env := propagateExit blk (entryEnvT cfg tables exits tid)
       if exits.get? tid = some env then
         propagateAuxT cfg tables fuel exits work
       else
@@ -157,7 +307,7 @@ private def propagateConstantsFast (cfg : Cfg) : Cfg :=
   let tables := propTablesOf cfg
   let exits := propagateAuxT cfg tables (propagateFuel cfg) {} [cfg.start]
   let solved := cfg.blocks.all fun blk =>
-    exits.get? blk.tid = some (propagateBlock blk (entryEnvT cfg tables exits blk.tid)).2
+    exits.get? blk.tid = some (propagateExit blk (entryEnvT cfg tables exits blk.tid))
   { cfg with blocks := cfg.blocks.map fun blk =>
     (propagateBlock blk (if solved then entryEnvT cfg tables exits blk.tid else [])).1
   }
@@ -229,7 +379,7 @@ private theorem propagateAux_same (cfg : Cfg) (fuel : Nat) (work : List Tid) {ex
     cases work with
     | nil => exact h
     | cons tid rest =>
-      simp only [propagateAux, propagateAuxT, prop_block]
+      simp only [propagateAux, propagateAuxT, prop_block, propagateExit_eq]
       cases hb : cfg.block tid with
       | none => exact ih _ h
       | some blk =>
@@ -248,7 +398,7 @@ private theorem propagateAux_same (cfg : Cfg) (fuel : Nat) (work : List Tid) {ex
     simp [Assoc.get]
   have hsame := propagateAux_same cfg.prune (propagateFuel cfg.prune) [cfg.prune.start] hempty
   have hentry := entryEnv_eq cfg.prune hsame
-  simp only [propagateConstants, propagateConstantsFast, isSolved, hentry, hsame _]
+  simp only [propagateConstants, propagateConstantsFast, isSolved, hentry, hsame _, propagateExit_eq]
 
 end FastPropagation
 
@@ -894,6 +1044,742 @@ private theorem dceLoop_eq {protectedVars : List Bap.Var} {protectedSet : Std.Ha
       · apply ih
         exact facts_next hset h hrows
 
+section Dense
+
+open Bap.IR.DenseDce
+
+private theorem scanDefsD_cons (d : DDef) (rest : List DDef) (live : Marks) :
+    scanDefsD (d :: rest) live =
+      if (scanDefsD rest live).2.1.contains d.var || d.effect then
+        (d :: (scanDefsD rest live).1, d.reads.foldl Marks.add ((scanDefsD rest live).2.1.remove d.var), (scanDefsD rest live).2.2)
+      else
+        ((scanDefsD rest live).1, (scanDefsD rest live).2.1, d.var :: d.reads ++ (scanDefsD rest live).2.2) := rfl
+
+private abbrev Rel (ids : Ids) (m : Marks) (S : Std.HashSet Bap.Var) : Prop :=
+  ∀ x, ids.contains x = true → (m.contains (idOf ids x) = true ↔ S.contains x = true)
+
+private theorem scanDefs_sim {ids : Ids} (hids : IdsWF ids) (defs : List Def)
+    (hdefs : ∀ d ∈ defs, ids.contains d.var = true ∧ ∀ y ∈ Bil.freeVars d.rhs, ids.contains y = true)
+    {m : Marks} {S : Std.HashSet Bap.Var} (hw : m.WF ids.size) (hrel : Rel ids m S) :
+    (scanDefsD (defs.map (denseDef hasSideEffect ids)) m).2.1.WF ids.size ∧
+      (scanDefsD (defs.map (denseDef hasSideEffect ids)) m).1 = (dceDefsDropped defs S).1.map (denseDef hasSideEffect ids) ∧
+      (scanDefsD (defs.map (denseDef hasSideEffect ids)) m).2.2 = (dceDefsDropped defs S).2.2.map (idOf ids) ∧
+      Rel ids (scanDefsD (defs.map (denseDef hasSideEffect ids)) m).2.1 (dceDefsDropped defs S).2.1 := by
+  induction defs with
+  | nil => exact ⟨hw, rfl, rfl, hrel⟩
+  | cons d ds ih =>
+    obtain ⟨hdv, hdr⟩ := hdefs d List.mem_cons_self
+    obtain ⟨i1, i2, i3, i4⟩ := ih fun e he => hdefs e (List.mem_cons_of_mem _ he)
+    rw [List.map_cons, scanDefsD_cons, dceDefsDropped_cons]
+    have hcond : ((scanDefsD (ds.map (denseDef hasSideEffect ids)) m).2.1.contains (denseDef hasSideEffect ids d).var || (denseDef hasSideEffect ids d).effect) =
+        ((dceDefsDropped ds S).2.1.contains d.var || hasSideEffect d.rhs) := by
+      have := i4 d.var hdv
+      simp only [denseDef]
+      rw [Bool.eq_iff_iff, Bool.or_eq_true, Bool.or_eq_true, this]
+    rw [hcond]
+    have hlt : ∀ y ∈ (denseDef hasSideEffect ids d).reads, y < ids.size := by
+      intro y hy
+      obtain ⟨z, hz, rfl⟩ := List.mem_map.1 hy
+      exact hids.lt z (hdr z hz)
+    split
+    · refine ⟨(i1.remove _).foldl_add _, ?_, i3, ?_⟩
+      · simp [i2]
+      · intro x hx
+        have hvl : (denseDef hasSideEffect ids d).var < ids.size := hids.lt _ hdv
+        dsimp only
+        rw [Marks.contains_foldl_add (i1.remove _) hlt, Marks.contains_remove i1 hvl, i4 x hx,
+          Std.HashSet.contains_insertMany_list, Std.HashSet.contains_erase]
+        have hmem : idOf ids x ∈ (denseDef hasSideEffect ids d).reads ↔ x ∈ Bil.freeVars d.rhs := by
+          simp only [denseDef, List.mem_map]
+          exact ⟨fun ⟨y, hy, he⟩ => hids.inj y x (hdr y hy) hx he ▸ hy, fun hy => ⟨x, hy, rfl⟩⟩
+        have hne : idOf ids x ≠ (denseDef hasSideEffect ids d).var ↔ x ≠ d.var :=
+          not_congr ⟨fun he => hids.inj x d.var hx hdv he, fun he => he ▸ rfl⟩
+        rw [hmem, hne]
+        simp only [Bool.or_eq_true, Bool.and_eq_true, List.contains_eq_mem, decide_eq_true_eq, ne_eq]
+        grind
+    · refine ⟨i1, i2, ?_, i4⟩
+      simp [i3, denseDef]
+
+/-- What is live at the end of a block as far as the scan of its definitions goes. -/
+private def endSpec (protectedVars : List Bap.Var) (cfg : Cfg) (blk : Blk) (x : Bap.Var) : Bool :=
+  decide (x ∈ protectedVars) || decide (x ∈ liveOut cfg blk.tid)
+
+private def endSet (protectedVars : List Bap.Var) (cfg : Cfg) (blk : Blk) : Std.HashSet Bap.Var :=
+  Std.HashSet.ofList ((assigned blk).filter (endSpec protectedVars cfg blk) ++ blk.jmps.flatMap Jmp.freeVars)
+
+private theorem scan_fst (protectedVars : List Bap.Var) (cfg : Cfg) (blk : Blk) :
+    (scanWith (endSet protectedVars cfg blk) blk).1 = dceBlock (liveAtEnd protectedVars cfg blk) blk := by
+  apply scanBlock_fst (endSpec protectedVars cfg blk)
+  intro x _
+  simp only [liveAtEnd, endSpec, List.mem_append, Bool.or_eq_true, decide_eq_true_eq]
+  grind
+
+private theorem named_phi {ids : Ids} {blk : Blk} (h : ∀ y ∈ vocabulary blk, ids.contains y = true) {p : Phi} (hp : p ∈ blk.phis) :
+    ids.contains p.var = true := h _ (by
+  simp only [vocabulary, List.mem_append, List.mem_map]
+  exact Or.inl (Or.inl (Or.inl ⟨p, hp, rfl⟩)))
+
+private theorem named_input {ids : Ids} {blk : Blk} (h : ∀ y ∈ vocabulary blk, ids.contains y = true) {p : Phi} (hp : p ∈ blk.phis)
+    {input : Tid × Bil.Exp} (hi : input ∈ p.values) {y : Bap.Var} (hy : y ∈ Bil.freeVars input.2) : ids.contains y = true := h _ (by
+  simp only [vocabulary, List.mem_append, List.mem_flatMap]
+  exact Or.inl (Or.inl (Or.inr ⟨p, hp, input, hi, hy⟩)))
+
+private theorem named_def {ids : Ids} {blk : Blk} (h : ∀ y ∈ vocabulary blk, ids.contains y = true) {d : Def} (hd : d ∈ blk.defs) :
+    ids.contains d.var = true ∧ ∀ y ∈ Bil.freeVars d.rhs, ids.contains y = true :=
+  ⟨h _ (by
+    simp only [vocabulary, List.mem_append, List.mem_flatMap, List.mem_cons]
+    exact Or.inl (Or.inr ⟨d, hd, Or.inl rfl⟩)), fun y hy => h _ (by
+    simp only [vocabulary, List.mem_append, List.mem_flatMap, List.mem_cons]
+    exact Or.inl (Or.inr ⟨d, hd, Or.inr hy⟩))⟩
+
+private theorem named_jmp {ids : Ids} {blk : Blk} (h : ∀ y ∈ vocabulary blk, ids.contains y = true) {y : Bap.Var}
+    (hy : y ∈ blk.jmps.flatMap Jmp.freeVars) : ids.contains y = true := h _ (by
+  simp only [vocabulary, List.mem_append]
+  exact Or.inr hy)
+
+/-- What `liveD` has marked. -/
+private theorem liveD_rel {ids : Ids} (hids : IdsWF ids) {blk : Blk} (hn : ∀ y ∈ vocabulary blk, ids.contains y = true)
+    (query : Nat → Bool) (spec : Bap.Var → Bool) (hq : ∀ x ∈ assigned blk, query (idOf ids x) = spec x) {m : Marks} (hw : m.WF ids.size) :
+    (liveD query (denseBlk hasSideEffect ids blk) m).WF ids.size ∧
+      Rel ids (liveD query (denseBlk hasSideEffect ids blk) m) (Std.HashSet.ofList ((assigned blk).filter spec ++ blk.jmps.flatMap Jmp.freeVars)) := by
+  have hdefs : ∀ (l : List Def) (mm : Marks), mm.WF ids.size → (∀ d ∈ l, d ∈ blk.defs) →
+      ((l.map (denseDef hasSideEffect ids)).foldl (fun live defn => if query defn.var then live.add defn.var else live) mm).WF ids.size ∧
+      ∀ x, ids.contains x = true → ((((l.map (denseDef hasSideEffect ids)).foldl (fun live defn => if query defn.var then live.add defn.var else live) mm).contains (idOf ids x) = true) ↔
+        mm.contains (idOf ids x) = true ∨ (∃ d ∈ l, d.var = x) ∧ spec x = true) := by
+    intro l
+    induction l with
+    | nil => intro mm h _; exact ⟨h, by simp⟩
+    | cons d ds ih =>
+      intro mm h hsub
+      simp only [List.map_cons, List.foldl_cons]
+      have hdn := (named_def hn (hsub d List.mem_cons_self)).1
+      have hqd : query (denseDef hasSideEffect ids d).var = spec d.var :=
+        hq d.var (by simp only [assigned, List.mem_append, List.mem_map]; exact Or.inl ⟨d, hsub d List.mem_cons_self, rfl⟩)
+      rw [hqd]
+      split
+      · rename_i hs
+        obtain ⟨a1, a2⟩ := ih (mm.add _) (h.add _) fun e he => hsub e (List.mem_cons_of_mem _ he)
+        refine ⟨a1, fun x hx => ?_⟩
+        have hvl : (denseDef hasSideEffect ids d).var < ids.size := hids.lt _ hdn
+        rw [a2 x hx, Marks.contains_add h hvl]
+        have heq : idOf ids x = (denseDef hasSideEffect ids d).var ↔ x = d.var :=
+          ⟨fun he => hids.inj x d.var hx hdn he, fun he => he ▸ rfl⟩
+        rw [heq]
+        simp only [List.mem_cons, exists_eq_or_imp]
+        constructor
+        · rintro ((he | he) | ⟨he, hsx⟩)
+          · exact Or.inr ⟨Or.inl he.symm, he ▸ hs⟩
+          · exact Or.inl he
+          · exact Or.inr ⟨Or.inr he, hsx⟩
+        · rintro (he | ⟨he | he, hsx⟩)
+          · exact Or.inl (Or.inr he)
+          · exact Or.inl (Or.inl he.symm)
+          · exact Or.inr ⟨he, hsx⟩
+      · rename_i hs
+        obtain ⟨a1, a2⟩ := ih mm h fun e he => hsub e (List.mem_cons_of_mem _ he)
+        refine ⟨a1, fun x hx => ?_⟩
+        rw [a2 x hx]
+        simp only [List.mem_cons, exists_eq_or_imp]
+        constructor
+        · rintro (he | ⟨he, hsx⟩)
+          · exact Or.inl he
+          · exact Or.inr ⟨Or.inr he, hsx⟩
+        · rintro (he | ⟨he | he, hsx⟩)
+          · exact Or.inl he
+          · exact (hs (he ▸ hsx)).elim
+          · exact Or.inr ⟨he, hsx⟩
+  have hphis : ∀ (l : List Phi) (mm : Marks), mm.WF ids.size → (∀ p ∈ l, p ∈ blk.phis) →
+      ((l.map (densePhi ids)).foldl (fun live phi => if query phi.var then live.add phi.var else live) mm).WF ids.size ∧
+      ∀ x, ids.contains x = true → ((((l.map (densePhi ids)).foldl (fun live phi => if query phi.var then live.add phi.var else live) mm).contains (idOf ids x) = true) ↔
+        mm.contains (idOf ids x) = true ∨ (∃ p ∈ l, p.var = x) ∧ spec x = true) := by
+    intro l
+    induction l with
+    | nil => intro mm h _; exact ⟨h, by simp⟩
+    | cons d ds ih =>
+      intro mm h hsub
+      simp only [List.map_cons, List.foldl_cons]
+      have hdn := named_phi hn (hsub d List.mem_cons_self)
+      have hqd : query (densePhi ids d).var = spec d.var :=
+        hq d.var (by simp only [assigned, List.mem_append, List.mem_map]; exact Or.inr ⟨d, hsub d List.mem_cons_self, rfl⟩)
+      rw [hqd]
+      split
+      · rename_i hs
+        obtain ⟨a1, a2⟩ := ih (mm.add _) (h.add _) fun e he => hsub e (List.mem_cons_of_mem _ he)
+        refine ⟨a1, fun x hx => ?_⟩
+        have hvl : (densePhi ids d).var < ids.size := hids.lt _ hdn
+        rw [a2 x hx, Marks.contains_add h hvl]
+        have heq : idOf ids x = (densePhi ids d).var ↔ x = d.var :=
+          ⟨fun he => hids.inj x d.var hx hdn he, fun he => he ▸ rfl⟩
+        rw [heq]
+        simp only [List.mem_cons, exists_eq_or_imp]
+        constructor
+        · rintro ((he | he) | ⟨he, hsx⟩)
+          · exact Or.inr ⟨Or.inl he.symm, he ▸ hs⟩
+          · exact Or.inl he
+          · exact Or.inr ⟨Or.inr he, hsx⟩
+        · rintro (he | ⟨he | he, hsx⟩)
+          · exact Or.inl (Or.inr he)
+          · exact Or.inl (Or.inl he.symm)
+          · exact Or.inr ⟨he, hsx⟩
+      · rename_i hs
+        obtain ⟨a1, a2⟩ := ih mm h fun e he => hsub e (List.mem_cons_of_mem _ he)
+        refine ⟨a1, fun x hx => ?_⟩
+        rw [a2 x hx]
+        simp only [List.mem_cons, exists_eq_or_imp]
+        constructor
+        · rintro (he | ⟨he, hsx⟩)
+          · exact Or.inl he
+          · exact Or.inr ⟨Or.inr he, hsx⟩
+        · rintro (he | ⟨he | he, hsx⟩)
+          · exact Or.inl he
+          · exact (hs (he ▸ hsx)).elim
+          · exact Or.inr ⟨he, hsx⟩
+  obtain ⟨d1, d2⟩ := hdefs blk.defs m.clear hw.clear fun _ h => h
+  obtain ⟨p1, p2⟩ := hphis blk.phis _ d1 fun _ h => h
+  have hjlt : ∀ y ∈ (blk.jmps.flatMap Jmp.freeVars).map (idOf ids), y < ids.size := by
+    intro y hy
+    obtain ⟨z, hz, rfl⟩ := List.mem_map.1 hy
+    exact hids.lt z (named_jmp hn hz)
+  simp only [liveD, denseBlk]
+  refine ⟨p1.foldl_add _, fun x hx => ?_⟩
+  rw [Marks.contains_foldl_add p1 hjlt, p2 x hx, d2 x hx, Marks.contains_clear hw]
+  have hj : idOf ids x ∈ (blk.jmps.flatMap Jmp.freeVars).map (idOf ids) ↔ x ∈ blk.jmps.flatMap Jmp.freeVars := by
+    simp only [List.mem_map]
+    exact ⟨fun ⟨y, hy, he⟩ => hids.inj y x (named_jmp hn hy) hx he ▸ hy, fun hy => ⟨x, hy, rfl⟩⟩
+  rw [hj]
+  simp only [Std.HashSet.contains_ofList, List.contains_eq_mem, decide_eq_true_eq, List.mem_append, List.mem_filter, assigned, List.mem_map]
+  simp only [Bool.false_eq_true, false_or]
+  clear d1 d2 p1 p2 hdefs hphis hjlt hj hq
+  generalize (∃ a, a ∈ blk.defs ∧ a.var = x) = A
+  generalize (∃ a, a ∈ blk.phis ∧ a.var = x) = B
+  generalize (x ∈ blk.jmps.flatMap Jmp.freeVars) = C
+  generalize (spec x = true) = D
+  clear hn hx hw hids
+  grind
+
+private theorem phiReadsD_lt {ids : Ids} (hids : IdsWF ids) {blk : Blk} (hn : ∀ y ∈ vocabulary blk, ids.contains y = true) (source : Tid) :
+    ∀ y ∈ phiReadsD source (denseBlk hasSideEffect ids blk), y < ids.size := by
+  intro y hy
+  simp only [phiReadsD, denseBlk, List.mem_flatMap, List.mem_map] at hy
+  obtain ⟨_, ⟨p, hp, rfl⟩, hm⟩ := hy
+  simp only [densePhi] at hm
+  have hlook : ∀ (values : List (Tid × Bil.Exp)), (∀ input ∈ values, input ∈ p.values) →
+      y ∈ (Assoc.get source (values.map fun input => (input.1, (Bil.freeVars input.2).map (idOf ids)))).getD [] → y < ids.size := by
+    intro values
+    induction values with
+    | nil => simp [Assoc.get]
+    | cons head tail ih =>
+      intro hsub
+      simp only [List.map_cons, Assoc.get, List.lookup_cons]
+      cases source == head.1 with
+      | true =>
+        intro hmem
+        simp only [Option.getD_some, List.mem_map] at hmem
+        obtain ⟨z, hz, rfl⟩ := hmem
+        exact hids.lt z (named_input hn hp (hsub head List.mem_cons_self) hz)
+      | false =>
+        exact ih fun e he => hsub e (List.mem_cons_of_mem _ he)
+  exact hlook p.values (fun _ h => h) hm
+
+private theorem readsD_spec {ids : Ids} {blocks : Array DBlk} (tid : Tid) (succs : List Nat)
+    (hlt : ∀ s ∈ succs, ∀ y ∈ phiReadsD tid (blkAt blocks s), y < ids.size) {reads : Marks} (hw : reads.WF ids.size) (y : Nat) :
+    (readsD blocks tid succs reads).WF ids.size ∧
+      ((readsD blocks tid succs reads).contains y = true ↔ ∃ s ∈ succs, y ∈ phiReadsD tid (blkAt blocks s)) := by
+  have key : ∀ (l : List Nat) (m : Marks), m.WF ids.size → (∀ s ∈ l, ∀ y ∈ phiReadsD tid (blkAt blocks s), y < ids.size) →
+      (l.foldl (fun reads s => (phiReadsD tid (blkAt blocks s)).foldl Marks.add reads) m).WF ids.size ∧
+      ((l.foldl (fun reads s => (phiReadsD tid (blkAt blocks s)).foldl Marks.add reads) m).contains y = true ↔
+        m.contains y = true ∨ ∃ s ∈ l, y ∈ phiReadsD tid (blkAt blocks s)) := by
+    intro l
+    induction l with
+    | nil => intro m h _; simp [h]
+    | cons a as ih =>
+      intro m h hl
+      simp only [List.foldl_cons]
+      obtain ⟨a1, a2⟩ := ih _ (h.foldl_add (phiReadsD tid (blkAt blocks a))) fun s hs => hl s (List.mem_cons_of_mem _ hs)
+      refine ⟨a1, ?_⟩
+      rw [a2, Marks.contains_foldl_add h (hl a List.mem_cons_self)]
+      simp only [List.mem_cons, exists_eq_or_imp]
+      grind
+  obtain ⟨h1, h2⟩ := key succs reads.clear hw.clear hlt
+  refine ⟨h1, ?_⟩
+  simp only [readsD]
+  rw [h2, Marks.contains_clear hw]
+  simp
+
+/-- A scan of a block, whatever the marks were. -/
+private theorem scanD_spec {ids : Ids} {blocks : Array DBlk} {cfg : Cfg} {g : Graphs} {ps : List Bap.Var} {n : Nat} {rows : Array DenseDce.Row}
+    (hm : Mirror hasSideEffect ids blocks cfg) (hg : GraphsOK g ids cfg ps n)
+    (hrows : ∀ x, ids.contains x = true → RowsOK ids cfg rows x) {i : Nat} {blk : Blk} (hi : At cfg i blk) {reads live : Marks}
+    (hr : reads.WF ids.size) (hl : live.WF ids.size) :
+    let result := scanD g blocks rows i (denseBlk hasSideEffect ids blk) reads live
+    result.1 = denseBlk hasSideEffect ids (scanWith (endSet ps cfg blk) blk).1 ∧
+      result.2.1 = (scanWith (endSet ps cfg blk) blk).2.map (idOf ids) ∧ result.2.2.1.WF ids.size ∧ result.2.2.2.WF ids.size := by
+  have hids := hm.wf
+  have hnamed : ∀ {j b}, At cfg j b → ∀ y ∈ vocabulary b, ids.contains y = true := fun hj => hm.named _ hj.mem
+  have hn := hnamed hi
+  have hat : ∀ {j}, j < n → ∃ b, At cfg j b := by
+    intro j hj
+    have hl : j < cfg.blocks.length := hg.count ▸ hj
+    exact ⟨cfg.blocks[j], by simp only [At]; simp [hl]⟩
+  have htid : g.tids.getD i 0 = blk.tid := hg.tids i blk hi
+  generalize hsuccs : (if g.reach.getD i false then g.succs.getD i [] else []) = succs
+  have hsin : ∀ s ∈ succs, s < n := by
+    intro s hs
+    rw [← hsuccs] at hs
+    split at hs
+    · exact hg.succs_in i s hs
+    · simp at hs
+  have hrlt : ∀ s ∈ succs, ∀ y ∈ phiReadsD (g.tids.getD i 0) (blkAt blocks s), y < ids.size := by
+    intro s hs y hy
+    obtain ⟨c, hc⟩ := hat (hsin s hs)
+    rw [hm.blkAt hc] at hy
+    exact phiReadsD_lt hids (hnamed hc) _ y hy
+  have hreads := fun y => readsD_spec (blocks := blocks) (g.tids.getD i 0) succs hrlt hr y
+  have hrw : (readsD blocks (g.tids.getD i 0) succs reads).WF ids.size := (hreads 0).1
+  have hq : ∀ x ∈ assigned blk, queryD g blocks rows succs (readsD blocks (g.tids.getD i 0) succs reads) (idOf ids x) = endSpec ps cfg blk x := by
+    intro x hxa
+    have hx : ids.contains x = true := hn x (by
+      simp only [assigned, List.mem_append, List.mem_map] at hxa
+      rcases hxa with ⟨d, hd, rfl⟩ | ⟨p, hp, rfl⟩
+      · exact hn _ (by
+          simp only [vocabulary, List.mem_append, List.mem_flatMap, List.mem_cons]
+          exact Or.inl (Or.inr ⟨d, hd, Or.inl rfl⟩)) |> fun _ => by
+            simp only [vocabulary, List.mem_append, List.mem_flatMap, List.mem_cons]
+            exact Or.inl (Or.inr ⟨d, hd, Or.inl rfl⟩)
+      · simp only [vocabulary, List.mem_append, List.mem_map]
+        exact Or.inl (Or.inl (Or.inl ⟨p, hp, rfl⟩)))
+    have hedge : ∀ s c, At cfg s c → s ∈ succs → (idOf ids x ∈ phiReadsD (g.tids.getD i 0) (blkAt blocks s) ↔ x ∈ phiReads blk.tid c) := by
+      intro s c hc _
+      rw [hm.blkAt hc, htid, phiReadsD_dense hids (hnamed hc) _ hx]
+    rw [Bool.eq_iff_iff]
+    simp only [queryD, endSpec, Bool.or_eq_true, decide_eq_true_eq, hg.protect x hx, (hreads _).2, List.any_eq_true, Bool.and_eq_true, Bool.not_eq_true']
+    have hphiOf : ∀ s c, At cfg s c → (hasPhiD (blkAt blocks s) (idOf ids x) = false ↔ ∀ phi ∈ c.phis, phi.var ≠ x) := by
+      intro s c hc
+      rw [hm.blkAt hc, hasPhiD_dense hids (hnamed hc) hx, hasPhi_false_iff]
+    by_cases hreach : blk.tid ∈ cfg.reachable
+    · have hrb : g.reach.getD i false = true := (hg.reach i blk hi).2 hreach
+      have hsi : succs = g.succs.getD i [] := by
+        rw [← hsuccs, ite_eq_left hrb]
+      rw [mem_liveOut hreach (hg.block i blk hi)]
+      have main : ((∃ s ∈ succs, idOf ids x ∈ phiReadsD (g.tids.getD i 0) (blkAt blocks s)) ∨
+          ∃ s ∈ succs, (rows.getD (idOf ids x) (.short [])).contains s = true ∧ hasPhiD (blkAt blocks s) (idOf ids x) = false) ↔
+          ∃ τ ∈ cfg.successors blk.tid, EdgeNeed cfg (fun s => x ∈ liveIn cfg s) x blk.tid τ := by
+        constructor
+        · rintro (⟨s, hs, hread⟩ | ⟨s, hs, hrow, hp⟩)
+          · obtain ⟨c, hc⟩ := hat (hsin s hs)
+            exact ⟨c.tid, (hg.succs i blk s c hi hc).1 (hsi ▸ hs), c, hg.block s c hc, Or.inr ((hedge s c hc hs).1 hread)⟩
+          · obtain ⟨c, hc⟩ := hat (hsin s hs)
+            exact ⟨c.tid, (hg.succs i blk s c hi hc).1 (hsi ▸ hs), c, hg.block s c hc, Or.inl ⟨(hrows x hx s c hc).1 hrow, (hphiOf s c hc).1 hp⟩⟩
+        · rintro ⟨τ, hτ, c, hbs, hneed⟩
+          obtain ⟨s, hc, hct⟩ := hg.index τ c hbs
+          subst hct
+          have hs : s ∈ succs := hsi ▸ (hg.succs i blk s c hi hc).2 hτ
+          rcases hneed with ⟨hl', hp⟩ | hread
+          · exact Or.inr ⟨s, hs, (hrows x hx s c hc).2 hl', (hphiOf s c hc).2 hp⟩
+          · exact Or.inl ⟨s, hs, (hedge s c hc hs).2 hread⟩
+      rw [or_assoc, main]
+    · have hrb : ¬ g.reach.getD i false = true := fun h => hreach ((hg.reach i blk hi).1 h)
+      have hsi : succs = [] := by
+        rw [← hsuccs, ite_eq_right hrb]
+      rw [liveOut_unreachable hreach, hsi]
+      simp
+  obtain ⟨l1, l2⟩ := liveD_rel hids hn _ (endSpec ps cfg blk) hq hl
+  have hrel : Rel ids (liveD (queryD g blocks rows succs (readsD blocks (g.tids.getD i 0) succs reads)) (denseBlk hasSideEffect ids blk) live) (endSet ps cfg blk) := l2
+  obtain ⟨s1, s2, s3, s4⟩ := scanDefs_sim hids blk.defs (fun d hd => named_def hn hd) l1 hrel
+  simp only [scanD, endLive, hsuccs]
+  simp only [denseBlk] at s1 s2 s3 s4 l1 ⊢
+  generalize liveD _ _ live = lm at s1 s2 s3 s4
+  simp only [denseBlk] at *
+  generalize scanDefsD (blk.defs.map (denseDef hasSideEffect ids)) lm = res at s1 s2 s3 s4 ⊢
+  have hp : ∀ phi ∈ blk.phis, res.2.1.contains (densePhi ids phi).var = (dceDefsDropped blk.defs (endSet ps cfg blk)).2.1.contains phi.var := by
+    intro phi hphi
+    rw [Bool.eq_iff_iff]
+    exact s4 phi.var (named_phi hn hphi)
+  have hfilter : ((blk.phis.map (densePhi ids)).filter fun phi => res.2.1.contains phi.var) =
+      (blk.phis.filter fun phi => (dceDefsDropped blk.defs (endSet ps cfg blk)).2.1.contains phi.var).map (densePhi ids) := by
+    rw [List.filter_map]
+    congr 1
+    apply List.filter_congr
+    intro phi hphi
+    exact hp phi hphi
+  have hlost : ((blk.phis.map (densePhi ids)).filter fun phi => !res.2.1.contains phi.var) =
+      (blk.phis.filter fun phi => !(dceDefsDropped blk.defs (endSet ps cfg blk)).2.1.contains phi.var).map (densePhi ids) := by
+    rw [List.filter_map]
+    congr 1
+    apply List.filter_congr
+    intro phi hphi
+    simp only [Function.comp, hp phi hphi]
+  have hmention : ∀ phi : Phi, phiMentionsD (densePhi ids phi) = (phiMentions phi).map (idOf ids) := by
+    intro phi
+    simp only [phiMentionsD, densePhi, phiMentions, List.map_cons, List.map_flatMap, List.flatMap_map]
+  refine ⟨?_, ?_, (hreads 0).1, s1⟩
+  · simp only [scanWith, s2, hfilter]
+  · simp only [scanWith, s3, hlost, List.map_append, List.flatMap_map, List.map_flatMap, hmention]
+
+private abbrev sizes (blk : Blk) : Nat × Nat := (blk.defs.length, blk.phis.length)
+
+private theorem dropped_length (defs : List Def) (S : Std.HashSet Bap.Var) :
+    (dceDefsDropped defs S).1.length ≤ defs.length ∧ ((dceDefsDropped defs S).2.2 = [] ↔ (dceDefsDropped defs S).1.length = defs.length) := by
+  induction defs with
+  | nil => simp [dceDefsDropped]
+  | cons d ds ih =>
+    obtain ⟨h1, h2⟩ := ih
+    rw [dceDefsDropped_cons]
+    split
+    · simp only [List.length_cons]
+      exact ⟨by omega, by rw [h2]; omega⟩
+    · simp only [List.length_cons, List.cons_append, reduceCtorEq, false_iff]
+      exact ⟨by omega, by omega⟩
+
+private theorem phis_length (phis : List Phi) (keep : Phi → Bool) :
+    (phis.filter fun phi => !keep phi).flatMap phiMentions = [] ↔ (phis.filter keep).length = phis.length := by
+  induction phis with
+  | nil => simp
+  | cons p ps ih =>
+    have hle := List.length_filter_le keep ps
+    simp only [List.filter_cons]
+    by_cases hk : keep p = true
+    · simp only [hk, Bool.not_true, Bool.false_eq_true, ↓reduceIte, List.length_cons, Nat.add_right_cancel_iff]
+      exact ih
+    · simp only [hk, Bool.not_false, Bool.false_eq_true, ↓reduceIte, List.length_cons, List.flatMap_cons]
+      simp only [phiMentions, List.cons_append, reduceCtorEq, false_iff]
+      omega
+
+private theorem scan_sizes (S : Std.HashSet Bap.Var) (blk : Blk) :
+    (scanWith S blk).2 = [] ↔ sizes (scanWith S blk).1 = sizes blk := by
+  simp only [scanWith, List.append_eq_nil_iff, sizes, Prod.mk.injEq]
+  rw [(dropped_length blk.defs S).2, phis_length]
+
+/-- The blocks of `scanAll`, and what they have removed. -/
+private theorem scanAll_spec {ids : Ids} {blocks : Array DBlk} {cfg : Cfg} {g : Graphs} {ps : List Bap.Var} {n : Nat} {rows : Array DenseDce.Row}
+    (hm : Mirror hasSideEffect ids blocks cfg) (hg : GraphsOK g ids cfg ps n)
+    (hrows : ∀ x, ids.contains x = true → RowsOK ids cfg rows x) (dirty : List Nat) (hdirty : ∀ i ∈ dirty, i < n) (j : Nat) (y : Nat) :
+    ∀ (cur : Array DBlk) (acc : List Nat) (reads live : Marks), cur.size = n → reads.WF ids.size → live.WF ids.size →
+    let result := dirty.foldl (init := (cur, acc, reads, live)) fun state i =>
+      let r := scanD g blocks rows i (blkAt blocks i) state.2.2.1 state.2.2.2
+      (state.1.setIfInBounds i r.1, r.2.1 ++ state.2.1, r.2.2.1, r.2.2.2)
+    result.1.size = n ∧ result.2.2.1.WF ids.size ∧ result.2.2.2.WF ids.size ∧
+      (result.1[j]? = if j ∈ dirty then
+          (cfg.blocks[j]?).map fun b => denseBlk hasSideEffect ids (scanWith (endSet ps cfg b) b).1
+        else cur[j]?) ∧
+      (y ∈ result.2.1 ↔ y ∈ acc ∨ ∃ i ∈ dirty, ∃ b, At cfg i b ∧ y ∈ (scanWith (endSet ps cfg b) b).2.map (idOf ids)) := by
+  have hat : ∀ {i}, i < n → ∃ b, At cfg i b := by
+    intro i hi
+    have hl : i < cfg.blocks.length := hg.count ▸ hi
+    exact ⟨cfg.blocks[i], by simp only [At]; simp [hl]⟩
+  induction dirty with
+  | nil =>
+    intro cur acc reads live hc hr hl
+    simp [hc, hr, hl]
+  | cons i rest ih =>
+    intro cur acc reads live hc hr hl
+    simp only [List.foldl_cons]
+    obtain ⟨b, hb⟩ := hat (hdirty i List.mem_cons_self)
+    rw [hm.blkAt hb]
+    obtain ⟨r1, r2, r3, r4⟩ := scanD_spec (ps := ps) hm hg hrows hb hr hl
+    obtain ⟨a1, a2, a3, a4, a5⟩ := ih (fun q hq => hdirty q (List.mem_cons_of_mem _ hq)) (cur.setIfInBounds i _) (_ ++ acc) _ _ (by simpa using hc) r3 r4
+    refine ⟨a1, a2, a3, ?_, ?_⟩
+    · rw [a4, r1]
+      by_cases hjr : j ∈ rest
+      · simp [hjr]
+      · by_cases hji : j = i
+        · subst hji
+          have hlt : j < cur.size := hc ▸ hdirty j List.mem_cons_self
+          have hbj : cfg.blocks[j]? = some b := hb
+          simp [hjr, hlt, hbj]
+        · have hne : i ≠ j := fun e => hji e.symm
+          simp [hjr, hji, hne]
+    · rw [a5, List.mem_append, r2]
+      simp only [List.mem_cons, exists_eq_or_imp]
+      constructor
+      · rintro ((h | h) | h)
+        · exact Or.inr (Or.inl ⟨b, hb, h⟩)
+        · exact Or.inl h
+        · exact Or.inr (Or.inr h)
+      · rintro (h | ⟨c, hc', h⟩ | h)
+        · exact Or.inl (Or.inr h)
+        · have hcb : c = b := by
+            simp only [At] at hc' hb
+            rw [hc'] at hb
+            exact Option.some.inj hb
+          exact Or.inl (Or.inl (hcb ▸ h))
+        · exact Or.inr h
+
+private theorem scan_mentions {S : Std.HashSet Bap.Var} {blk : Blk} {x : Bap.Var} (h : x ∈ (scanWith S blk).2) : x ∈ vocabulary blk := by
+  have hdefs : ∀ (l : List Def) (T : Std.HashSet Bap.Var), x ∈ (dceDefsDropped l T).2.2 → ∃ d ∈ l, x = d.var ∨ x ∈ Bil.freeVars d.rhs := by
+    intro l T
+    induction l with
+    | nil => simp [dceDefsDropped]
+    | cons d ds ih =>
+      rw [dceDefsDropped_cons]
+      split
+      · intro hm
+        obtain ⟨e, he, hc⟩ := ih hm
+        exact ⟨e, List.mem_cons_of_mem _ he, hc⟩
+      · simp only [List.cons_append, List.mem_cons, List.mem_append]
+        rintro (he | he | he)
+        · exact ⟨d, Or.inl rfl, Or.inl he⟩
+        · exact ⟨d, Or.inl rfl, Or.inr he⟩
+        · obtain ⟨e, hee, hc⟩ := ih he
+          exact ⟨e, Or.inr hee, hc⟩
+  simp only [scanWith, List.mem_append, List.mem_flatMap, List.mem_filter, phiMentions, List.mem_cons] at h
+  simp only [vocabulary, List.mem_append, List.mem_flatMap, List.mem_map, List.mem_cons]
+  rcases h with h | ⟨p, ⟨hp, _⟩, h⟩
+  · obtain ⟨d, hd, hc⟩ := hdefs _ _ h
+    exact Or.inl (Or.inr ⟨d, hd, hc⟩)
+  · rcases h with rfl | ⟨input, hi, hy⟩
+    · exact Or.inl (Or.inl (Or.inl ⟨p, hp, rfl⟩))
+    · exact Or.inl (Or.inl (Or.inr ⟨p, hp, input, hi, hy⟩))
+
+private theorem graphs_next {g : Graphs} {ids : Ids} {cfg : Cfg} {ps : List Bap.Var} {n : Nat} (hg : GraphsOK g ids cfg ps n) (step : Blk → Blk)
+    (htid : ∀ b, (step b).tid = b.tid) (hv : ∀ b y, y ∈ vocabulary (step b) → y ∈ vocabulary b) (ha : ∀ b y, y ∈ assigned (step b) → y ∈ assigned b) :
+    GraphsOK g ids { cfg with blocks := cfg.blocks.map step } ps n := by
+  have hat : ∀ {i b}, At { cfg with blocks := cfg.blocks.map step } i b → ∃ c, At cfg i c ∧ b = step c := by
+    intro i b h
+    simp only [At, List.getElem?_map, Option.map_eq_some_iff] at h
+    obtain ⟨c, hc, rfl⟩ := h
+    exact ⟨c, hc, rfl⟩
+  have hunique : ∀ i j a b, At { cfg with blocks := cfg.blocks.map step } i a → At { cfg with blocks := cfg.blocks.map step } j b → a.tid = b.tid → i = j := by
+    intro i j a b ha' hb' he
+    obtain ⟨c, hc, rfl⟩ := hat ha'
+    obtain ⟨d, hd, rfl⟩ := hat hb'
+    rw [htid, htid] at he
+    exact hg.unique i j c d hc hd he
+  refine ⟨?_, ?_, ?_, hunique, by simpa using hg.count, hg.preds_in, ?_, hg.succs_in, ?_, ?_, ?_, hg.sites_in, ?_, hg.definers_in, hg.protect⟩
+  · intro i b h
+    obtain ⟨c, hc, rfl⟩ := hat h
+    rw [htid]
+    exact hg.tids i c hc
+  · intro i b h
+    exact block_of_unique (fun p q a b h1 h2 he => hunique p q a b h1 h2 he) h.mem
+  · intro t b h
+    have hsome : b.tid = t := by
+      simpa using List.find?_some h
+    obtain ⟨i, hi⟩ := exists_at (List.mem_of_find?_eq_some h)
+    exact ⟨i, hi, hsome⟩
+  · intro i b p c hb hc
+    obtain ⟨b', hb', rfl⟩ := hat hb
+    obtain ⟨c', hc', rfl⟩ := hat hc
+    rw [htid, htid]
+    exact hg.preds i b' p c' hb' hc'
+  · intro i b p c hb hc
+    obtain ⟨b', hb', rfl⟩ := hat hb
+    obtain ⟨c', hc', rfl⟩ := hat hc
+    rw [htid, htid]
+    exact hg.succs i b' p c' hb' hc'
+  · intro i b hb
+    obtain ⟨b', hb', rfl⟩ := hat hb
+    rw [htid]
+    exact hg.reach i b' hb'
+  · intro i b hb y hy
+    obtain ⟨b', hb', rfl⟩ := hat hb
+    exact hg.sites i b' hb' y (hv _ _ hy)
+  · intro i b hb y hy
+    obtain ⟨b', hb', rfl⟩ := hat hb
+    exact hg.definers i b' hb' y (ha _ _ hy)
+
+/-- What a state of `loopD` is. -/
+private structure DenseInv (ps : List Bap.Var) (base : Cfg) (g : Graphs) (ids : Ids) (n M : Nat) (cfg : Cfg) (blocks : Array DBlk)
+    (rows : Array DenseDce.Row) (affected dirty : List Nat) (kills seen reads live : Marks) : Prop where
+  mirror : Mirror hasSideEffect ids blocks cfg
+  graphs : GraphsOK g ids cfg ps n
+  start : cfg.start = base.start
+  graph : cfg.graph = base.graph
+  size : ids.size = rows.size
+  nM : n ≤ M
+  kills : kills.WF ids.size
+  seen : seen.WF M
+  reads : reads.WF ids.size
+  live : live.WF ids.size
+  old : ∀ x, ids.contains x = true → idOf ids x ∉ affected → RowsOK ids cfg rows x
+  names : ∀ y ∈ affected, ∃ x, ids.contains x = true ∧ idOf ids x = y
+  dirty_in : ∀ i ∈ dirty, i < n
+  stable : ∀ i b, At cfg i b → i ∉ dirty → dceBlock (liveAtEnd ps cfg b) b = b
+
+private theorem loopD_eq {ps : List Bap.Var} {base : Cfg} {g : Graphs} {ids : Ids} {n M : Nat} (fallback : Cfg → Nat → Cfg)
+    (hf : ∀ c f, fallback c f = dceAux ps c f) (fuel : Nat) {cfg : Cfg} {blocks : Array DBlk} {rows : Array DenseDce.Row} {affected dirty : List Nat}
+    {kills seen reads live : Marks} (h : DenseInv ps base g ids n M cfg blocks rows affected dirty kills seen reads live) :
+    loopD g (fun blocks fuel => fallback { base with blocks := blocks.toList.map DBlk.toBlk } fuel)
+      (fun blocks => { base with blocks := blocks.toList.map DBlk.toBlk }) fuel blocks rows affected dirty kills seen reads live = dceAux ps cfg fuel := by
+  have hofB : ∀ {c : Cfg} {bs : Array DBlk}, Mirror hasSideEffect ids bs c → c.start = base.start → c.graph = base.graph →
+      ({ base with blocks := bs.toList.map DBlk.toBlk } : Cfg) = c := by
+    intro c bs hm h1 h2
+    rw [hm.ofBlocks]
+    cases c
+    cases base
+    simp_all
+  induction fuel generalizing cfg blocks rows affected dirty kills seen reads live with
+  | zero =>
+    simp only [loopD]
+    rw [hofB h.mirror h.start h.graph]
+    rfl
+  | succ fuel ih =>
+    have hids := h.mirror.wf
+    rw [loopD]
+    cases hr : refreshD g blocks rows affected kills seen with
+    | none =>
+      simp only
+      rw [hf, hofB h.mirror h.start h.graph]
+    | some triple =>
+      obtain ⟨rows', kills', seen'⟩ := triple
+      obtain ⟨q1, q2, q3, q4⟩ := refreshD_spec h.mirror h.graphs h.nM h.size (h.size ▸ h.kills) h.seen h.old h.names hr
+      simp only
+      have hsize' : ids.size = rows'.size := by rw [q1, h.size]
+      have hk' : kills'.WF ids.size := h.size ▸ q2
+      have hblocks : blocks.size = n := by
+        have := congrArg List.length h.mirror.blocks
+        simp only [Array.length_toList, List.length_map] at this
+        rw [this, h.graphs.count]
+      let step : Blk → Blk := fun b => dceBlock (liveAtEnd ps cfg b) b
+      have hnext : dcePass ps cfg = { cfg with blocks := cfg.blocks.map step } := dcePass_eq_map _ _
+      have hspec := scanAll_spec (ps := ps) h.mirror h.graphs q4 dirty h.dirty_in
+      generalize hres : scanAll g blocks rows' dirty reads live = res
+      have hsp : ∀ j y, res.1.size = n ∧ res.2.2.1.WF ids.size ∧ res.2.2.2.WF ids.size ∧
+          (res.1[j]? = if j ∈ dirty then (cfg.blocks[j]?).map fun b => denseBlk hasSideEffect ids (scanWith (endSet ps cfg b) b).1 else blocks[j]?) ∧
+          (y ∈ res.2.1 ↔ y ∈ ([] : List Nat) ∨ ∃ i ∈ dirty, ∃ b, At cfg i b ∧ y ∈ (scanWith (endSet ps cfg b) b).2.map (idOf ids)) := by
+        intro j y
+        rw [← hres]
+        exact hspec j y blocks [] reads live hblocks h.reads h.live
+      have hdropped : ∀ y, y ∈ res.2.1 ↔ ∃ i ∈ dirty, ∃ b, At cfg i b ∧ y ∈ (scanWith (endSet ps cfg b) b).2.map (idOf ids) := by
+        intro y
+        have := (hsp 0 y).2.2.2.2
+        simpa using this
+      have hnamed : ∀ {j b}, At cfg j b → ∀ y ∈ vocabulary b, ids.contains y = true := fun hj => h.mirror.named _ hj.mem
+      have hsame : ∀ {i a b}, At cfg i a → At cfg i b → a = b := by
+        intro i a b ha hb
+        simp only [At] at ha hb
+        rw [ha] at hb
+        exact Option.some.inj hb
+      have hagree : ∀ x, ids.contains x = true → idOf ids x ∉ res.2.1 → ∀ blk ∈ cfg.blocks, Agree x blk (step blk) := by
+        intro x hx hn blk hblk
+        obtain ⟨i, hi⟩ := exists_at hblk
+        by_cases hd : i ∈ dirty
+        · have hnm : x ∉ (scanWith (endSet ps cfg blk) blk).2 := fun hm =>
+            hn ((hdropped _).2 ⟨i, hd, blk, hi, List.mem_map.2 ⟨x, hm, rfl⟩⟩)
+          have := scanWith_agree (endSet ps cfg blk) blk x hnm
+          rwa [scan_fst] at this
+        · show Agree x blk (dceBlock _ blk)
+          rw [h.stable i blk hi hd]
+          exact Agree.refl x blk
+      have hsizesAll : ∀ i b, At cfg i b → i ∈ dirty → ((scanWith (endSet ps cfg b) b).2 = [] ↔ sizes (step b) = sizes b) := by
+        intro i b _ _
+        rw [scan_sizes, scan_fst]
+      rw [dceAux_succ]
+      cases hdl : res.2.1 with
+      | nil =>
+        simp only
+        have hpos : (cfg.blocks.map fun blk => (blk.defs.length, blk.phis.length)) = ((dcePass ps cfg).blocks.map fun blk => (blk.defs.length, blk.phis.length)) := by
+          rw [hnext]
+          simp only [List.map_map]
+          apply List.map_congr_left
+          intro b hb
+          obtain ⟨i, hi⟩ := exists_at hb
+          by_cases hd : i ∈ dirty
+          · have hempty : (scanWith (endSet ps cfg b) b).2 = [] := by
+              cases he : (scanWith (endSet ps cfg b) b).2 with
+              | nil => rfl
+              | cons z zs =>
+                have hin := (hdropped (idOf ids z)).2 ⟨i, hd, b, hi, List.mem_map.2 ⟨z, by simp [he], rfl⟩⟩
+                rw [hdl] at hin
+                cases hin
+            exact ((hsizesAll i b hi hd).1 hempty).symm
+          · show sizes b = sizes (dceBlock _ b)
+            rw [h.stable i b hi hd]
+        rw [ite_eq_left hpos, hofB h.mirror h.start h.graph]
+      | cons first others =>
+        simp only
+        have hne : ¬ (cfg.blocks.map fun blk => (blk.defs.length, blk.phis.length)) = ((dcePass ps cfg).blocks.map fun blk => (blk.defs.length, blk.phis.length)) := by
+          intro heq
+          obtain ⟨i, hd, b, hi, hm⟩ := (hdropped first).1 (by simp [hdl])
+          have hne' : (scanWith (endSet ps cfg b) b).2 ≠ [] := by
+            intro he
+            simp [he] at hm
+          apply hne'
+          apply (hsizesAll i b hi hd).2
+          rw [hnext] at heq
+          have hg1 := congrArg (fun l => l[i]?) heq
+          simp only [List.getElem?_map, List.map_map] at hg1
+          have hbi : cfg.blocks[i]? = some b := hi
+          simp only [hbi, Option.map_some, Option.some.injEq, Function.comp] at hg1
+          exact hg1.symm
+        rw [ite_eq_right hne]
+        rw [← hdl]
+        have hsn : ∀ {l}, seen'.WF M → ∀ y, y ∈ (nodup seen' l).1 ↔ y ∈ l := fun hw y => mem_nodup hw _ y
+        apply ih
+        have hasg : ∀ b y, y ∈ assigned (step b) → y ∈ assigned b := by
+          intro b y hy
+          exact assigned_dceBlock hy
+        have hvoc : ∀ b y, y ∈ vocabulary (step b) → y ∈ vocabulary b := fun b y hy => vocabulary_dceBlock hy
+        have htid : ∀ b, (step b).tid = b.tid := fun _ => rfl
+        have hgn := graphs_next h.graphs step htid hvoc hasg
+        rw [hnext]
+        refine ⟨⟨?_, ?_, hids⟩, hgn, h.start, h.graph, hsize', h.nM, hk', nodup_wf (nodup_wf q3 _) _, (hsp 0 0).2.1, (hsp 0 0).2.2.1, ?_, ?_, ?_, ?_⟩
+        · apply List.ext_getElem?
+          intro j
+          have hj := (hsp j 0).2.2.2.1
+          simp only [Array.getElem?_toList, hj, List.getElem?_map]
+          by_cases hd : j ∈ dirty
+          · simp only [hd, ↓reduceIte]
+            cases hb : cfg.blocks[j]? with
+            | none => rfl
+            | some b =>
+              simp only [Option.map_some, scan_fst]
+              rfl
+          · simp only [hd, ↓reduceIte]
+            have hl : blocks[j]? = (cfg.blocks.map (denseBlk hasSideEffect ids))[j]? := by
+              rw [← h.mirror.blocks, Array.getElem?_toList]
+            rw [hl, List.getElem?_map]
+            cases hb : cfg.blocks[j]? with
+            | none => rfl
+            | some b =>
+              simp only [Option.map_some, Option.some.injEq]
+              have := h.stable j b hb hd
+              show denseBlk hasSideEffect ids b = denseBlk hasSideEffect ids (dceBlock _ b)
+              rw [this]
+        · intro b hb y hy
+          obtain ⟨c, hc, rfl⟩ := List.mem_map.1 hb
+          exact h.mirror.named c hc y (hvoc c y hy)
+        · intro x hx hn i b hb
+          simp only [At, List.getElem?_map, Option.map_eq_some_iff] at hb
+          obtain ⟨c, hc, rfl⟩ := hb
+          rw [q4 x hx i c hc]
+          have hn' : idOf ids x ∉ res.2.1 := fun hm => hn ((mem_nodup q3 _ _).2 hm)
+          obtain ⟨h1, h2⟩ := agree_next cfg step x htid (hagree x hx hn')
+          exact live_iff_of_agree cfg { cfg with blocks := cfg.blocks.map step } x rfl (fun _ => rfl) h1 h2 c.tid
+        · intro y hy
+          obtain ⟨i, _, b, hi, hm⟩ := (hdropped y).1 ((mem_nodup q3 _ _).1 hy)
+          obtain ⟨x, hx, rfl⟩ := List.mem_map.1 hm
+          exact ⟨x, hnamed hi x (scan_mentions hx), rfl⟩
+        · intro i hi
+          rw [mem_nodup (nodup_wf q3 _)] at hi
+          obtain ⟨a, _, ha⟩ := List.mem_flatMap.1 hi
+          exact h.graphs.definers_in a i ha
+        · intro i b hb hclean
+          simp only [At, List.getElem?_map, Option.map_eq_some_iff] at hb
+          obtain ⟨c, hc, rfl⟩ := hb
+          apply dceBlock_stable
+          intro y hy
+          have hyc : y ∈ assigned c := hasg c y hy
+          have hyn : ids.contains y = true := hnamed hc y (by
+            simp only [assigned, List.mem_append, List.mem_map] at hyc
+            simp only [vocabulary, List.mem_append, List.mem_flatMap, List.mem_map, List.mem_cons]
+            rcases hyc with ⟨d, hd, rfl⟩ | ⟨p, hp, rfl⟩
+            · exact Or.inl (Or.inr ⟨d, hd, Or.inl rfl⟩)
+            · exact Or.inl (Or.inl (Or.inl ⟨p, hp, rfl⟩)))
+          have hnd : idOf ids y ∉ res.2.1 := by
+            intro hm
+            apply hclean
+            rw [mem_nodup (nodup_wf q3 _), List.mem_flatMap]
+            exact ⟨_, (mem_nodup q3 _ _).2 hm, h.graphs.definers i c hc y hyc⟩
+          obtain ⟨h1, h2⟩ := agree_next cfg step y htid (hagree y hyn hnd)
+          have hout := liveOut_iff_of_agree cfg { cfg with blocks := cfg.blocks.map step } y rfl (fun _ => rfl) h1 h2 c.tid (h.graphs.block i c hc)
+          simp only [liveAtEnd, List.mem_append]
+          have hj : (step c).jmps = c.jmps := rfl
+          have ht : (step c).tid = c.tid := rfl
+          rw [hj, ht, hout]
+
+end Dense
+
 /-- `dceAux` from nothing known: all variables are to be solved, and all blocks to be looked at. -/
 private def dceAuxFast (protectedVars : List Bap.Var) (cfg : Cfg) (fuel : Nat) : Cfg :=
   let successors := Bap.Graph.Fast.successorTable cfg.graph
@@ -901,7 +1787,7 @@ private def dceAuxFast (protectedVars : List Bap.Var) (cfg : Cfg) (fuel : Nat) :
   dceLoop protectedVars (Std.HashSet.ofList protectedVars) (predsOf cfg successors) (Std.HashSet.ofList cfg.reachable)
     successors (tableOf vocabulary cfg.blocks) (tableOf assigned cfg.blocks) fuel cfg affected (Std.HashSet.ofList (cfg.blocks.map Blk.tid)) {}
 
-@[csimp] private theorem dceAux_eq_fast : @dceAux = @dceAuxFast := by
+private theorem dceAux_eq_fast : @dceAux = @dceAuxFast := by
   funext protectedVars cfg fuel
   have hsucc : ∀ t, Bap.Graph.Fast.dedup ((Bap.Graph.Fast.successorTable cfg.graph).getD t []) = cfg.successors t :=
     Bap.Graph.Fast.successors_eq cfg.graph
@@ -917,6 +1803,38 @@ private def dceAuxFast (protectedVars : List Bap.Var) (cfg : Cfg) (fuel : Nat) :
       exact ⟨blk, hb, rfl⟩
     rw [hc] at hclean
     cases hclean
+
+/-- `dceAux` with its variables as numbers. What has blocks with the same tid goes by `dceAuxFast`, as does what runs out of fuel. -/
+private def dceAuxDense (protectedVars : List Bap.Var) (cfg : Cfg) (fuel : Nat) : Cfg :=
+  Bap.IR.DenseDce.run hasSideEffect protectedVars cfg fuel (dceAuxFast protectedVars)
+
+@[csimp] private theorem dceAux_eq_dense : @dceAux = @dceAuxDense := by
+  funext ps cfg fuel
+  have hf : ∀ c f, dceAuxFast ps c f = dceAux ps c f := fun c f => by rw [dceAux_eq_fast]
+  simp only [dceAuxDense, Bap.IR.DenseDce.run]
+  by_cases hc : Bap.IR.DenseDce.indexChecks (DenseDce.indexOf 0 cfg.blocks {}) 0 cfg.blocks = true
+  · simp only [hc, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+    obtain ⟨p1, p2⟩ : DenseDce.IdsWF (DenseDce.internAll {} ps) ∧ ∀ y < (DenseDce.internAll {} ps).size,
+        ∃ x, (DenseDce.internAll {} ps).contains x = true ∧ DenseDce.idOf (DenseDce.internAll {} ps) x = y :=
+      ⟨DenseDce.internAll_wf DenseDce.idsWF_empty ps, DenseDce.internAll_onto DenseDce.idsWF_empty (by simp) ps⟩
+    obtain ⟨h1, h2, h3, h4⟩ := DenseDce.internBlocks_spec cfg.blocks _ p1 p2
+    have hps : ∀ x ∈ ps, (cfg.blocks.foldl DenseDce.internBlock (DenseDce.internAll {} ps)).contains x = true := fun x hx =>
+      h3 x ((DenseDce.contains_internAll _ _ _).2 (Or.inr hx))
+    generalize cfg.blocks.foldl DenseDce.internBlock (DenseDce.internAll {} ps) = ids at h1 h2 h3 h4 hps
+    symm
+    refine loopD_eq (ids := ids) (base := cfg) (n := cfg.blocks.length) (M := max ids.size cfg.blocks.length) (dceAuxFast ps) hf fuel ?_
+    refine ⟨⟨by simp, h4, h1⟩, DenseDce.graphsOf_ok h1 h4 hps hc, rfl, rfl, by simp, Nat.le_max_right _ _,
+      DenseDce.Marks.wf_empty _, DenseDce.Marks.wf_empty _, DenseDce.Marks.wf_empty _, DenseDce.Marks.wf_empty _, ?_, ?_, ?_, ?_⟩
+    · intro x hx hn
+      exact (hn (List.mem_range.2 (h1.lt x hx))).elim
+    · intro y hy
+      exact h2 y (List.mem_range.1 hy)
+    · intro i hi
+      exact List.mem_range.1 hi
+    · intro i b hb hn
+      have hbi : cfg.blocks[i]? = some b := hb
+      exact (hn (List.mem_range.2 (List.getElem?_eq_some_iff.1 hbi).1)).elim
+  · simp only [hc, Bool.not_false, ↓reduceIte, hf]
 
 end Incremental
 

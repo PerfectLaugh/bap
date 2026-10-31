@@ -211,7 +211,7 @@ def run : IO Unit := do
     (Decompile.program [.move narrow (int 32 0)])
   let z := reg "z"
   let tainted := Analysis.Taint.sourceVar {} x [1]
-  let tainted := Analysis.Taint.sourceMemory tainted 0x3000 [2]
+  let tainted := Analysis.Taint.sourceMemory tainted ⟨mem, 0x3000⟩ [2]
   let tainted := Analysis.Taint.run tainted [
     .move y (plus (.var x) (int 32 2)),
     .move z (.load (.var mem) (int 32 0x3000) .little 4),
@@ -219,7 +219,7 @@ def run : IO Unit := do
     .move result (.ite (.var x) (int 32 1) (int 32 2)),
     .move y (int 32 0)
   ]
-  assertEqual "taint propagates through memory" [2] (Analysis.Taint.labelsOfMemory tainted 0x4000)
+  assertEqual "taint propagates through memory" [2] (Analysis.Taint.labelsOfMemory tainted ⟨mem, 0x4000⟩)
   assertEqual "taint propagates through loads" [2] (Analysis.Taint.labelsOfVar tainted z)
   assertEqual "taint ite ignores condition" [] (Analysis.Taint.labelsOfVar tainted result)
   assertEqual "taint constant assignment sanitizes" [] (Analysis.Taint.labelsOfVar tainted y)
@@ -231,9 +231,28 @@ def run : IO Unit := do
   let byteVar (name : String) : Var := ⟨name, .imm 8, 0, false⟩
   let labelled := Analysis.Taint.sourceVar (Analysis.Taint.sourceVar {} (byteVar "a") [1]) (byteVar "b") [2]
   let afterStores := Analysis.Taint.run labelled [storeOf 0x10 (byteVar "a"), storeOf 0x20 (byteVar "b"), storeOf 0x10 (byteVar "b")]
-  assertEqual "a byte has the labels of its last store" [2] (Analysis.Taint.labelsOfMemory afterStores 0x10)
-  assertEqual "a byte stored once has its labels" [2] (Analysis.Taint.labelsOfMemory afterStores 0x20)
-  assertEqual "a byte not stored to has no labels" [] (Analysis.Taint.labelsOfMemory afterStores 0x30)
+  assertEqual "a byte has the labels of its last store" [2] (Analysis.Taint.labelsOfMemory afterStores ⟨cleanMem, 0x10⟩)
+  assertEqual "a byte stored once has its labels" [2] (Analysis.Taint.labelsOfMemory afterStores ⟨cleanMem, 0x20⟩)
+  assertEqual "a byte not stored to has no labels" [] (Analysis.Taint.labelsOfMemory afterStores ⟨cleanMem, 0x30⟩)
+  -- several memories: a store to one leaves the same address of another, and an assignment of a memory mixes them
+  let otherMem : Var := ⟨"other", .mem 64 8, 0, false⟩
+  let cleanByte : Var := ⟨"clean", .imm 8, 0, false⟩
+  let kept := Analysis.Taint.run labelled [
+    storeOf 0x10 (byteVar "a"),
+    .move otherMem (.store (.var otherMem) (wordAt 0x10) (.var cleanByte) .little 1),
+    .move z (.load (.var cleanMem) (wordAt 0x10) .little 1),
+    .move result (.load (.var otherMem) (wordAt 0x10) .little 1)
+  ]
+  assertEqual "a store to another memory keeps the labels of a byte" [1] (Analysis.Taint.labelsOfMemory kept ⟨cleanMem, 0x10⟩)
+  assertEqual "a store to another memory does not add them to its own byte" [] (Analysis.Taint.labelsOfMemory kept ⟨otherMem, 0x10⟩)
+  assertEqual "a load has the labels of its memory" [1] (Analysis.Taint.labelsOfVar kept z)
+  assertEqual "a load of another memory has not" [] (Analysis.Taint.labelsOfVar kept result)
+  let copied := Analysis.Taint.run labelled [
+    storeOf 0x10 (byteVar "a"),
+    .move otherMem (.var cleanMem),
+    .move z (.load (.var otherMem) (wordAt 0x10) .little 1)
+  ]
+  assertEqual "a copy of a memory has the labels of its bytes" [1] (Analysis.Taint.labelsOfVar copied z)
   let retainted := Analysis.Taint.sourceVar tainted y [3]
   assertEqual "taint source is reported" [3] (Analysis.Taint.labelsOfVar retainted y)
   assertEqual "taint clear removes labels" [] (Analysis.Taint.labelsOfVar (Analysis.Taint.clearVar retainted y) y)
@@ -315,16 +334,16 @@ def run : IO Unit := do
   let biggerLoop := Analysis.Taint.run bigger [.while (.var k) [.move x (.var y), .move y (.var z)]]
   assertTrue "taint stays monotone through loops"
     ((Analysis.Taint.labelsOfVar loopTaint x).all (Analysis.Taint.labelsOfVar biggerLoop x).contains)
-  let wideLoad := Analysis.Taint.run (Analysis.Taint.sourceMemory {} 0x3001 [2])
+  let wideLoad := Analysis.Taint.run (Analysis.Taint.sourceMemory {} ⟨mem, 0x3001⟩ [2])
     [.move z (.load (.var mem) (int 32 0x3000) .little 4)]
   assertEqual "taint load covers its width" [2] (Analysis.Taint.labelsOfVar wideLoad z)
   let wideStore := Analysis.Taint.run (Analysis.Taint.sourceVar {} x [1])
     [.move mem (.store (.var mem) (int 32 0x4000) (.var x) .little 4)]
-  assertEqual "taint store covers its width" [1] (Analysis.Taint.labelsOfMemory wideStore 0x4003)
+  assertEqual "taint store covers its width" [1] (Analysis.Taint.labelsOfMemory wideStore ⟨mem, 0x4003⟩)
   let dynamicStore := Analysis.Taint.run (Analysis.Taint.sourceVar {} x [1])
     [.move mem (.store (.var mem) (.var y) (.var x) .little 4)]
   assertEqual "taint of a dynamic store reaches every address" [1]
-    (Analysis.Taint.labelsOfMemory dynamicStore 0x5000)
+    (Analysis.Taint.labelsOfMemory dynamicStore ⟨mem, 0x5000⟩)
   let aliased : Memory 8 := ⟨(({} : Std.TreeMap Nat ByteArray).insert 0
     (ByteArray.mk (List.replicate 256 1).toArray)).insert 1 (ByteArray.mk (List.replicate 256 2).toArray)⟩
   let selfCompare := Analysis.Validate.compare [] [] [] { env := [(mem, .memory aliased)] }

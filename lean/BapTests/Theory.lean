@@ -198,6 +198,8 @@ def run : IO Unit := do
   assertEqual "unknown requirement accepts any property" (some child)
     (select { system := .unknown, unique := true } [child])
   assertEqual "selection never returns unknown" none (select {} [unknown])
+  assertEqual "selection prefers an ancestor, however registered" (some parent.name) ((select { parent := parent } [child, parent]).map (·.name))
+  assertEqual "selection prefers an ancestor, the other way" (some parent.name) ((select { parent := parent } [parent, child]).map (·.name))
   assertEqual "unknown has no system" SystemKind.unknown unknown.system
   assertEqual "unknown has no abi" Abi.unknown unknown.abi
   assertEqual "unknown has no fabi" Fabi.unknown unknown.fabi

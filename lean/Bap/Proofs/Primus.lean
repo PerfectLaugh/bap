@@ -1739,8 +1739,8 @@ section Semantics
 
 open Bap.Primus.Semantics
 realize_eq_defs Bap.Primus.Semantics Bap.Primus.Semantics eval evalList evalSequence evalConditional apply evalCompiled
-  evalCompiledList evalCompiledSequence evalCompiledConditional compileExp compileBindings
-open_private Bap.Primus.Semantics Bap.Primus.Semantics lookup lookupState primitiveNames primitiveIndex
+  evalCompiledList evalCompiledSequence evalCompiledConditional compileExp compileBindings evalTopLevel compileCases
+open_private Bap.Primus.Semantics Bap.Primus.Semantics lookup lookupIn lookupState primitiveIndex putDefinition topLevelState indexGlobals selectForm selectArm compileCases
   atomValue expectBil expectNat truth condition extend binary widthOf assignRegister assign emit
   substitute contextMatches definitionBody compilablePrimitive applyPrimitive applyPrimitiveIndex valueOnly unaryNot
   shift cast loadMemory storeMemory leadingZeros checkLiterals checkForms checkBody
@@ -2374,7 +2374,7 @@ theorem assignable_write (context : Context) (n width : Nat) {value : SV} {exp :
 
 /-- `let` gives a name assigned in its scope a variable of its own, directly or through a macro argument. -/
 theorem assignsLocal_set (globals : Globals) (name : String) (fuel : Nat) (value : Sexp) :
-    assignsLocal globals name (fuel + 1) (.list [.atom "set", .atom name, value]) = true := by
+    assignsLocal (namesOf globals) name (fuel + 1) (.list [.atom "set", .atom name, value]) = true := by
   rw [assignsLocal]
   simp
 
@@ -2443,7 +2443,7 @@ theorem eval_let_assignable (fuel : Nat) (locals : Locals) (context : Context) (
     {name : String} {form : Sexp} {body : List Sexp} {value : SV} {width : Nat} {exp : Bil.Exp}
     (hform : eval fuel locals context state form = .ok (value, after))
     (hvalue : expectBil context value = .ok (width, exp))
-    (hassigned : ([Sexp.list [.atom name, form]] ++ body).any (assignsLocal after.globals name 64) = true) :
+    (hassigned : ([Sexp.list [.atom name, form]] ++ body).any (assignsLocal (namesOf after.globals) name 64) = true) :
     eval (fuel + 1) locals context state (.list (.atom "let" :: .list [.list [.atom name, form]] :: body)) =
       evalSequence fuel ((name, .register s!"_primus_{after.nextTemp}" width width) :: locals) context
         { after with
@@ -2632,6 +2632,8 @@ theorem eval_family_fuel_succ (fuel : Nat) :
       · exact iCCond h
       · exact bind_mono (fun _ hv => iComp hv) (fun _ _ hb => iComp hb) h
       · exact iCSeq h
+      · exact bind_mono (fun _ hv => iComp hv) (fun _ _ hb =>
+          bind_mono (fun _ hs => hs) (fun _ _ hc => iComp hc) hb) h
 
 theorem eval_fuel_mono {fuel extra : Nat} {locals : Locals} {context : Context} {state : State} {form : Sexp}
     {result : SV × State} (h : eval fuel locals context state form = .ok result) :
@@ -3321,19 +3323,19 @@ theorem eval_arithmetic_sound {env : Bil.Env} {context : Context} {locals : Loca
 
 /-- Only code and temporaries change during evaluation. -/
 def Keeps (first second : State) : Prop :=
-  second.globals = first.globals ∧ second.operations = first.operations
+  second.globals = first.globals ∧ second.operations = first.operations ∧ second.defined = first.defined
 
-theorem Keeps.refl (state : State) : Keeps state state := ⟨rfl, rfl⟩
+theorem Keeps.refl (state : State) : Keeps state state := ⟨rfl, rfl, rfl⟩
 
 theorem Keeps.trans {a b c : State} (h1 : Keeps a b) (h2 : Keeps b c) : Keeps a c :=
-  ⟨h2.1.trans h1.1, h2.2.trans h1.2⟩
+  ⟨h2.1.trans h1.1, h2.2.1.trans h1.2.1, h2.2.2.trans h1.2.2⟩
 
-private theorem keeps_emit (state : State) (code : Bil.Program) : Keeps state (emit state code) := ⟨rfl, rfl⟩
+private theorem keeps_emit (state : State) (code : Bil.Program) : Keeps state (emit state code) := ⟨rfl, rfl, rfl⟩
 
 private theorem keeps_freezeBil (state : State) (width : Nat) (exp : Bil.Exp) :
     Keeps state (freezeBil state width exp).2 := by
   unfold freezeBil
-  split <;> exact ⟨rfl, rfl⟩
+  split <;> exact ⟨rfl, rfl, rfl⟩
 
 private theorem keeps_freeze (context : Context) (state : State) (value : SV) :
     Keeps state (freeze context state value).2 := by
@@ -3351,7 +3353,7 @@ private theorem keeps_bindAssignable {context : Context} {state after : State} {
   obtain ⟨_, _, h⟩ := bind_ok h
   simp only [Except.ok.injEq, Prod.mk.injEq] at h
   obtain ⟨_, rfl⟩ := h
-  exact ⟨rfl, rfl⟩
+  exact ⟨rfl, rfl, rfl⟩
 
 private theorem foldl_state_inv {α β : Type} {P : α → Prop} {f : α → β → Except String α}
     (hs : ∀ cur item r, P cur → f cur item = .ok r → P r) (items : List β) (init : α) {r : α}
@@ -3541,7 +3543,7 @@ theorem eval_family_keeps (fuel : Nat) :
           simp only [Except.ok.injEq, Prod.mk.injEq] at h
           obtain ⟨_, rfl⟩ := h
           have h3 := iSeq h2
-          exact ⟨h3.1.trans hk1.1, h3.2.trans hk1.2⟩
+          exact ⟨h3.1.trans hk1.1, h3.2.1.trans hk1.2.1, h3.2.2.trans hk1.2.2⟩
       · split at h <;> simp at h
       · obtain ⟨⟨l, s⟩, h1, h2⟩ := bind_ok h
         have hk1 : Keeps state s := by
@@ -3650,7 +3652,11 @@ theorem eval_family_keeps (fuel : Nat) :
         · simp only [Except.ok.injEq, Prod.mk.injEq] at h
           obtain ⟨_, rfl⟩ := h
           exact Keeps.refl _
-        · simp at h
+        · split at h
+          · simp only [Except.ok.injEq, Prod.mk.injEq] at h
+            obtain ⟨_, rfl⟩ := h
+            exact Keeps.refl _
+          · simp at h
       · obtain ⟨⟨_, s⟩, h1, h2⟩ := bind_ok h
         obtain ⟨⟨_, code⟩, h3, h4⟩ := bind_ok h2
         simp only [Except.ok.injEq, Prod.mk.injEq] at h4
@@ -3663,6 +3669,9 @@ theorem eval_family_keeps (fuel : Nat) :
       · obtain ⟨⟨v, s⟩, h1, h2⟩ := bind_ok h
         exact (iComp h1).trans ((keeps_freeze context s v).trans (iComp h2))
       · exact iCSeq h
+      · obtain ⟨⟨_, s⟩, h1, h2⟩ := bind_ok h
+        obtain ⟨_, _, h3⟩ := bind_ok h2
+        exact (iComp h1).trans (iComp h3)
 
 
 /-! ### Compiled code agrees with the interpreter -/
@@ -3774,7 +3783,7 @@ theorem Compat.keep {globals : Globals} {first second : State} (h : Compat globa
   definitions := hk.1.trans h.definitions
   index := by
     intro name
-    rw [hk.2, hk.1]
+    rw [hk.2.1, hk.1]
     exact h.index name
 
 /-- The names the code was compiled for and the values the two evaluators bind them to. -/
@@ -3784,8 +3793,8 @@ def Aligned (names : List String) (locals clocals : Locals) : Prop :=
 /-! Names. -/
 
 private theorem get_compileGlobals (globals table : Globals) (name : String) :
-    Assoc.get name (table.map fun binding => (binding.1, compileValue globals binding.2)) =
-      (Assoc.get name table).map (compileValue globals) := by
+    Assoc.get name (table.map fun binding => (binding.1, compileValue (namesOf globals) binding.2)) =
+      (Assoc.get name table).map (compileValue (namesOf globals)) := by
   induction table with
   | nil => rfl
   | cons head rest ih =>
@@ -3793,17 +3802,51 @@ private theorem get_compileGlobals (globals table : Globals) (name : String) :
     simp only [Assoc.get, List.map_cons, List.lookup_cons] at ih ⊢
     by_cases h : name == key <;> simp [h, ih]
 
+/-- The table the compiler asks has what the list has. -/
+theorem globalsTable_get (globals : Globals) (name : String) :
+    (globalsTable globals).get? name = Assoc.get name globals := by
+  simp only [globalsTable, Assoc.get]
+  induction globals with
+  | nil => simp
+  | cons head rest ih =>
+    obtain ⟨key, value⟩ := head
+    simp only [List.reverse_cons, List.foldl_append, List.foldl_cons, List.foldl_nil, List.lookup_cons]
+    by_cases hk : name = key
+    · subst hk
+      simp
+    · have hb : (name == key) = false := by simpa using hk
+      have hb' : (key == name) = false := by simpa using Ne.symm hk
+      simp only [hb]
+      simp only [Std.HashMap.get?_eq_getElem?] at ih ⊢
+      simp only [Std.HashMap.getElem?_insert, hb', Bool.false_eq_true, ↓reduceIte]
+      exact ih
+
+/-- `compileGlobals` is compilation against the list of definitions, whose table is only a way to ask it. -/
+theorem compileGlobals_spec (globals : Globals) :
+    compileGlobals globals = globals.map fun binding => (binding.1, compileValue (namesOf globals) binding.2) := by
+  have key : (fun name => (globalsTable globals).get? name) = namesOf globals :=
+    funext (globalsTable_get globals)
+  simp only [compileGlobals, key]
+
+private theorem get_compileGlobals' (globals : Globals) (name : String) :
+    Assoc.get name (compileGlobals globals) = (Assoc.get name globals).map (compileValue (namesOf globals)) := by
+  rw [compileGlobals_spec]
+  exact get_compileGlobals globals globals name
+
+theorem lookupIn_namesOf (globals : Globals) (name : String) (locals : Locals) :
+    lookupIn (namesOf globals) name locals = lookup name locals globals := rfl
+
 private theorem compileFunction_cases (globals : Globals) (params : List String) (body : List Sexp)
     (env : List (String × SV)) :
-    compileFunction globals (.function params body env) = .function params body env ∨
-      ∃ compiled, compileFunction globals (.function params body env) = .compiled params compiled env := by
+    compileFunction (namesOf globals) (.function params body env) = .function params body env ∨
+      ∃ compiled, compileFunction (namesOf globals) (.function params body env) = .compiled params compiled env := by
   simp only [compileFunction]
   split
   · exact Or.inr ⟨_, rfl⟩
   · exact Or.inl rfl
 
 private theorem macroCandidates_compile (globals : Globals) (callable : Callable) :
-    macroCandidates (compileCallable globals callable) = macroCandidates callable := by
+    macroCandidates (compileCallable (namesOf globals) callable) = macroCandidates callable := by
   cases callable with
   | overloads candidates =>
     simp only [compileCallable, macroCandidates]
@@ -3826,17 +3869,17 @@ private theorem macroCandidates_compile (globals : Globals) (callable : Callable
   | primitive n => rfl
 
 private theorem macroExpansion_compile (globals : Globals) (callable : Callable) (operands : List Sexp) :
-    macroExpansion (compileCallable globals callable) operands = macroExpansion callable operands := by
+    macroExpansion (compileCallable (namesOf globals) callable) operands = macroExpansion callable operands := by
   simp only [macroExpansion, macroCandidates_compile]
 
 /-- Which names assign a local does not depend on how the functions were compiled. -/
 theorem assignsLocal_compile (globals : Globals) (name : String) (fuel : Nat) (form : Sexp) :
-    assignsLocal (compileGlobals globals) name fuel form = assignsLocal globals name fuel form := by
+    assignsLocal (namesOf (compileGlobals globals)) name fuel form = assignsLocal (namesOf globals) name fuel form := by
   induction fuel generalizing form with
   | zero => simp [assignsLocal]
   | succ fuel ih =>
     have hget : ∀ operator, Assoc.get operator (compileGlobals globals) =
-        (Assoc.get operator globals).map (compileValue globals) := get_compileGlobals globals globals
+        (Assoc.get operator globals).map (compileValue (namesOf globals)) := get_compileGlobals' globals
     cases form with
     | atom a => simp [assignsLocal]
     | list items =>
@@ -3846,9 +3889,10 @@ theorem assignsLocal_compile (globals : Globals) (name : String) (fuel : Nat) (f
         cases head with
         | list inner => simp only [assignsLocal, ih]
         | atom operator =>
-          simp only [assignsLocal, hget, ih]
+          have hn : namesOf globals operator = Assoc.get operator globals := rfl
+          simp only [assignsLocal, hget, ih, hn]
           cases Assoc.get operator globals with
-          | none => rfl
+          | none => simp only [Option.map_none]
           | some value =>
             cases value <;> simp only [Option.map, compileValue, macroCandidates_compile]
 
@@ -3934,32 +3978,6 @@ private theorem local_none {atom : String} {names : List String} {locals clocals
     have hne : (atom == key) = false := by
       simp [Ne.symm hk]
     simpa [Assoc.get, List.lookup_cons, hne] using ih hrest
-
-private theorem global_slot {atom : String} {globals table : Globals} {slot : Nat}
-    (hs : table.findIdx? (fun binding => binding.1 == atom) = some slot) :
-    ∃ binding, (table.map fun binding => (binding.1, compileValue globals binding.2))[slot]? = some binding ∧
-      Assoc.get atom (table.map fun binding => (binding.1, compileValue globals binding.2)) = some binding.2 := by
-  induction table generalizing slot with
-  | nil => simp at hs
-  | cons head rest ih =>
-    obtain ⟨key, value⟩ := head
-    by_cases hk : key = atom
-    · subst hk
-      simp [List.findIdx?_cons] at hs
-      subst hs
-      exact ⟨_, rfl, by simp [Assoc.get]⟩
-    · have hb : (key == atom) = false := by simpa using hk
-      simp only [List.findIdx?_cons, hb] at hs
-      cases hrest : List.findIdx? (fun binding : String × SV => binding.1 == atom) rest with
-      | none => simp [hrest] at hs
-      | some inner =>
-        simp [hrest] at hs
-        subst hs
-        obtain ⟨b, hb1, hb2⟩ := ih hrest
-        refine ⟨b, by simpa using hb1, ?_⟩
-        have hne : (atom == key) = false := by
-          simp [Ne.symm hk]
-        simpa [Assoc.get, List.lookup_cons, hne] using hb2
 
 
 /-! Conditionals: the two evaluators have the same body, around their recursive calls. -/
@@ -4185,7 +4203,7 @@ theorem list_agrees {context : Context} {P : State → Prop} {clocals locals : L
 
 
 private theorem compat_clear {globals : Globals} {s : State} (h : Compat globals s) : Compat globals { s with code := [] } :=
-  h.keep ⟨rfl, rfl⟩
+  h.keep ⟨rfl, rfl, rfl⟩
 
 private theorem compat_eval {globals : Globals} {context : Context} {locals : Locals} {s after : State} {f : Nat}
     {form : Sexp} {v : SV} (h : Compat globals s) (he : eval f locals context s form = .ok (v, after)) :
@@ -4219,7 +4237,7 @@ def letStep (fuel : Nat) (context : Context) (bindings body : List Sexp) (curren
   match binding with
   | .list [.atom name, value] =>
     let (value, state) ← eval fuel current.1 context current.2 value
-    if (bindings ++ body).any (assignsLocal state.globals name 64) then
+    if (bindings ++ body).any (assignsLocal (namesOf state.globals) name 64) then
       let (value, state) ← bindAssignable context state value
       .ok ((name, value) :: current.1, state)
     else
@@ -4268,9 +4286,9 @@ private theorem lookup_visible_some {name : String} {names : List String} {local
 /-- A name resolves to the compiled form of what it resolves to in the definitions compiled from. -/
 private theorem lookup_compile (globals : Globals) (name : String) (locals : Locals)
     (hl : Assoc.get name locals = none) (visible : Locals) (hv : Assoc.get name visible = none) :
-    lookup name locals (compileGlobals globals) = (lookup name visible globals).map (compileValue globals) := by
-  have hget : Assoc.get name (compileGlobals globals) = (Assoc.get name globals).map (compileValue globals) :=
-    get_compileGlobals globals globals name
+    lookup name locals (compileGlobals globals) = (lookup name visible globals).map (compileValue (namesOf globals)) := by
+  have hget : Assoc.get name (compileGlobals globals) = (Assoc.get name globals).map (compileValue (namesOf globals)) :=
+    get_compileGlobals' globals name
   simp only [lookup, hl, hv, hget]
   generalize (if name.startsWith "core:" = true then (name.drop 5).toString else name) = primitive
   by_cases hr : primitive = "replicate"
@@ -4486,34 +4504,54 @@ private theorem except_bind_assoc {α β γ ε : Type} (a : Except ε α) (b : �
     (a >>= b) >>= c = a >>= fun x => b x >>= c := by
   cases a <;> rfl
 
+/-- The arms of a `case` and its labels and bodies select alike. -/
+def CaseAgrees (context : Context) (P : State → Prop) (clocals locals : Locals) (key : SV)
+    (arms : List (Option Sexp × CExp)) (branches : List Sexp) : Prop :=
+  (∃ e, selectArm key arms = .error e ∧ selectForm key branches = .error e) ∨
+    ∃ c body, selectArm key arms = .ok c ∧ selectForm key branches = .ok [body] ∧ FormAgrees context P clocals locals c body
+
+private theorem sequence_single (context : Context) (locals : Locals) (s : State) (body : Sexp) (r : SV × State) :
+    Succeeds (fun f => evalSequence f locals context s [body]) r ↔ Succeeds (fun f => eval f locals context s body) r := by
+  rw [succeeds_succ (evalSequence_mono context locals s [body])]
+  have h : ∀ f, evalSequence (f + 1) locals context s [body] = eval f locals context s body := by
+    intro f
+    rw [evalSequence.eq_def]
+  simp only [h]
+
 theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
-    (∀ {names locals clocals form c}, Aligned names locals clocals → compileExp globals names n form = some c →
+    (∀ {names locals clocals form c}, Aligned names locals clocals → compileExp (namesOf globals) names n form = some c →
       FormAgrees context (Compat globals) clocals locals c form) ∧
     (∀ {names locals clocals all bindings body c}, Aligned names locals clocals →
-      compileBindings globals names all n bindings body = some c → ∀ s, Compat globals s →
+      compileBindings (namesOf globals) names all n bindings body = some c → ∀ s, Compat globals s →
       SameResults (fun f => evalCompiled f clocals context s c)
         (fun f => bindings.foldlM (letStep f context all body) (locals, s) >>= fun x =>
-          evalSequence f x.1 context x.2 body)) := by
+          evalSequence f x.1 context x.2 body)) ∧
+    (∀ {names locals clocals branches arms}, Aligned names locals clocals →
+      compileCases (namesOf globals) names n branches = some arms → ∀ key,
+      CaseAgrees context (Compat globals) clocals locals key arms branches) := by
   induction n with
   | zero =>
-    refine ⟨?_, ?_⟩
+    refine ⟨?_, ?_, ?_⟩
     · intro names locals clocals form c _ h
       rw [compileExp.eq_def] at h
       simp at h
     · intro names locals clocals all bindings body c _ h
       rw [compileBindings.eq_def] at h
       simp at h
+    · intro names locals clocals branches arms _ h
+      rw [compileCases.eq_def] at h
+      simp at h
   | succ n ih =>
-    obtain ⟨ihE, ihB⟩ := ih
+    obtain ⟨ihE, ihB, ihC⟩ := ih
     have hkeep : ∀ {locals s f form v after}, Compat globals s → eval f locals context s form = .ok (v, after) →
         Compat globals after := fun hs he => compat_eval hs he
     have hseq : ∀ {names locals clocals forms cs}, Aligned names locals clocals →
-        compileSequence globals names n forms = some cs → ∀ s, Compat globals s →
+        compileSequence (namesOf globals) names n forms = some cs → ∀ s, Compat globals s →
         SameResults (fun f => evalCompiledSequence f clocals context s cs) (fun f => evalSequence f locals context s forms) := by
       intro names locals clocals forms cs ha h
       rw [compileSequence] at h
       exact sequence_agrees hkeep (mapM_related (fun form c hc => ihE ha hc) h)
-    refine ⟨?_, ?_⟩
+    refine ⟨?_, ?_, ?_⟩
     · intro names locals clocals form c ha h s hs r
       rw [succeeds_succ (evalCompiled_mono context clocals s c), succeeds_succ (eval_mono context locals s form)]
       rw [compileExp.eq_def] at h
@@ -4573,22 +4611,36 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
               · simp only [hrep, ↓reduceIte] at h
                 simp at h
               · simp only [hrep, ↓reduceIte] at h
-                cases hg : globals.findIdx? (fun binding => binding.1 == atom) with
+                have hget' : Assoc.get atom s.globals = (Assoc.get atom globals).map (compileValue (namesOf globals)) := by
+                  rw [hs.definitions]
+                  exact get_compileGlobals' globals atom
+                have hlook : ∀ {v : SV}, Assoc.get atom globals = some v →
+                    lookupState atom locals s = .ok (compileValue (namesOf globals) v) := by
+                  intro v hv
+                  rw [lookupState_compat hs]
+                  simp only [lookup, local_none ha hnone, hrep, ↓reduceIte, hget', hv, Option.map_some]
+                cases hg : Assoc.get atom globals with
                 | none => simp [hg] at h
-                | some slot =>
-                  simp only [hg, Option.map_some, Option.some.injEq] at h
-                  subst h
-                  obtain ⟨binding, hb, hget⟩ := global_slot (globals := globals) hg
-                  have hb' : s.globals[slot]? = some binding := by rw [hs.definitions]; exact hb
-                  have hget' : Assoc.get atom s.globals = some binding.2 := by rw [hs.definitions]; exact hget
-                  have hC : ∀ f, evalCompiled (f + 1) clocals context s (.global slot) = .ok (binding.2, s) := by
-                    intro f
-                    rw [evalCompiled.eq_def]
-                    simp only [hb']
-                  have hL : lookupState atom locals s = .ok binding.2 := by
-                    rw [lookupState_compat hs]
-                    simp only [lookup, local_none ha hnone, hrep, ↓reduceIte, hget']
-                  simp only [hC, hL]
+                | some gv =>
+                  simp only [hg] at h
+                  cases gv
+                  case callable callable =>
+                    simp only [Option.some.injEq] at h
+                    subst h
+                    have hindex : s.operations.get? atom = some (compileCallable (namesOf globals) callable) := by
+                      rw [hs.index atom, hget', hg]
+                      rfl
+                    have hC : ∀ f, evalCompiled (f + 1) clocals context s (.global atom) =
+                        .ok (.callable (compileCallable (namesOf globals) callable), s) := by
+                      intro f
+                      rw [evalCompiled.eq_def]
+                      simp only [hindex]
+                    simp only [hC, hlook hg, compileValue]
+                  all_goals
+                    simp only [Option.some.injEq] at h
+                    subst h
+                    rw [← hvalue]
+                    simp only [hlook hg, compileValue]
       · simp only [Option.some.injEq] at h
         subst h
         have hC : ∀ f, evalCompiled (f + 1) clocals context s (.value (.list [])) = .ok (.list [], s) := by
@@ -4740,6 +4792,44 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
         simp only [hE]
         rw [← succeeds_succ (evalCompiled_mono context clocals s c)]
         exact ihB ha h s hs r
+      · -- a case
+        rename_i key branches
+        obtain ⟨ck, hck, h⟩ := oget h
+        obtain ⟨arms, harms, h⟩ := oget h
+        simp only [Option.some.injEq] at h
+        subst h
+        have hE : ∀ f, eval (f + 1) locals context s (.list (.atom "case" :: key :: branches)) =
+            eval f locals context s key >>= fun x =>
+              selectForm x.1 branches >>= fun forms => evalSequence f locals context x.2 forms := by
+          intro f
+          rw [eval]
+        have hC : ∀ f, evalCompiled (f + 1) clocals context s (.caseOf ck arms) =
+            evalCompiled f clocals context s ck >>= fun x =>
+              selectArm x.1 arms >>= fun c => evalCompiled f clocals context x.2 c := by
+          intro f
+          rw [evalCompiled.eq_def]
+        simp only [hC, hE]
+        have mC : ∀ x : SV × State, FuelMono fun f =>
+            selectArm x.1 arms >>= fun c => evalCompiled f clocals context x.2 c :=
+          fun x => FuelMono.bind (FuelMono.const _) (fun c => evalCompiled_mono context clocals x.2 c)
+        have mE : ∀ x : SV × State, FuelMono fun f =>
+            selectForm x.1 branches >>= fun forms => evalSequence f locals context x.2 forms :=
+          fun x => FuelMono.bind (FuelMono.const _) (fun forms => evalSequence_mono context locals x.2 forms)
+        rw [succeeds_bind (evalCompiled_mono context clocals s ck) mC, succeeds_bind (eval_mono context locals s key) mE]
+        have hrest : ∀ x : SV × State, Compat globals x.2 → SameResults
+            (fun f => selectArm x.1 arms >>= fun c => evalCompiled f clocals context x.2 c)
+            (fun f => selectForm x.1 branches >>= fun forms => evalSequence f locals context x.2 forms) := by
+          intro x hx r
+          rcases ihC ha harms x.1 with ⟨e, h1, h2⟩ | ⟨c, body, h1, h2, h3⟩
+          · simp only [h1, h2, bind, Except.bind]
+          · simp only [h1, h2, bind, Except.bind]
+            exact (h3 x.2 hx r).trans (sequence_single context locals x.2 body r).symm
+        constructor
+        · rintro ⟨x, ⟨g, hg⟩, hr⟩
+          obtain ⟨g', hg'⟩ := (ihE ha hck s hs x).1 ⟨g, hg⟩
+          exact ⟨x, ⟨g', hg'⟩, (hrest x (compat_eval hs hg') r).1 hr⟩
+        · rintro ⟨x, ⟨g, hg⟩, hr⟩
+          exact ⟨x, (ihE ha hck s hs x).2 ⟨g, hg⟩, (hrest x (compat_eval hs hg) r).2 hr⟩
       · simp at h
       · simp at h
       · simp at h
@@ -4752,7 +4842,7 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
       · simp at h
       · simp at h
       · -- a call of a name
-        rename_i operator operands _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+        rename_i operator operands _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
         have hE : ∀ f, eval (f + 1) locals context s (.list (.atom operator :: operands)) = (do
             let expansion ← match ← lookupState operator locals s with
               | .callable callable =>
@@ -4788,12 +4878,12 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
             rw [eval]
             simp only [hcond, Bool.false_eq_true, ↓reduceIte, hlit, hv]
             rfl
-          have hargsAgree : ∀ {cargs}, operands.mapM (compileExp globals names n) = some cargs → ∀ s, Compat globals s →
+          have hargsAgree : ∀ {cargs}, operands.mapM (compileExp (namesOf globals) names n) = some cargs → ∀ s, Compat globals s →
               SameResults (fun f => evalCompiledList f clocals context s cargs) (fun f => evalList f locals context s operands) :=
             fun h => list_agrees hkeep (mapM_related (fun form c hc => ihE ha hc) h)
           -- the call itself, once no macro applies
-          have hcall : ∀ {catom cargs}, compileExp globals names n (.atom operator) = some catom →
-              operands.mapM (compileExp globals names n) = some cargs →
+          have hcall : ∀ {catom cargs}, compileExp (namesOf globals) names n (.atom operator) = some catom →
+              operands.mapM (compileExp (namesOf globals) names n) = some cargs →
               (match lookupState operator locals s with
                 | .error e => (.error e : Except String (Option (List Sexp)))
                 | .ok (.callable callable) =>
@@ -4829,10 +4919,11 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
             intro v hv
             simp only [lookup, lookup_visible_some ha hv]
           have hstate : Assoc.get operator locals = none → lookupState operator locals s =
-              (lookup operator (names.map fun name => (name, Value.unit)) globals).map (compileValue globals) := by
+              (lookup operator (names.map fun name => (name, Value.unit)) globals).map (compileValue (namesOf globals)) := by
             intro hl
             rw [lookupState_compat hs, hs.definitions]
             exact lookup_compile globals operator locals hl _ (lookup_visible ha hl)
+          simp only [lookupIn_namesOf] at h
           generalize hrv : lookup operator (names.map fun name => (name, Value.unit)) globals = rv at h hvisible hstate
           have hnotlocal : ∀ {w : Callable}, rv = .ok (.callable w) → Assoc.get operator locals = none := by
             intro w hw
@@ -4905,10 +4996,10 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
           · -- a definition
             rename_i callable hnotprim
             have hl := hnotlocal rfl
-            have hL : lookupState operator locals s = .ok (.callable (compileCallable globals callable)) := by
+            have hL : lookupState operator locals s = .ok (.callable (compileCallable (namesOf globals) callable)) := by
               rw [hstate hl]
               rfl
-            have hexp : macroExpansion (compileCallable globals callable) operands = macroExpansion callable operands :=
+            have hexp : macroExpansion (compileCallable (namesOf globals) callable) operands = macroExpansion callable operands :=
               macroExpansion_compile globals callable operands
             split at h
             · next expanded hmac =>
@@ -4971,24 +5062,19 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
                   · simp only [hrep, ↓reduceIte] at hca
                     simp at hca
                   · simp only [hrep, ↓reduceIte] at hca
-                    cases hfg : globals.findIdx? (fun binding => binding.1 == operator) with
-                    | none => simp [hfg] at hca
-                    | some slot =>
-                      obtain ⟨b, _, hb⟩ := global_slot (globals := globals) hfg
-                      have hget := get_compileGlobals globals globals operator
-                      rw [hget] at hb
-                      cases hgg : Assoc.get operator globals with
-                      | none => simp [hgg] at hb
-                      | some gv =>
-                        simp only [lookup, lookup_visible ha hl, hrep, ↓reduceIte, hgg] at hrv
-                        cases hrv
+                    simp only [lookup, lookup_visible ha hl, hrep, ↓reduceIte] at hrv
+                    cases hgg : Assoc.get operator globals with
+                    | none => simp [hgg] at hca
+                    | some gv =>
+                      simp only [hgg] at hrv
+                      cases hrv
               | ok v =>
-                have hL : lookupState operator locals s = .ok (compileValue globals v) := hs'
+                have hL : lookupState operator locals s = .ok (compileValue (namesOf globals) v) := hs'
                 cases v
                 case callable c => exact (hother _ rfl).elim
                 all_goals simp only [hL, compileValue]
       · -- a call of a value
-        rename_i operator operands _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+        rename_i operator operands _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
         obtain ⟨ca, hca, h⟩ := oget h
         obtain ⟨args, hargs, h⟩ := oget h
         simp only [Option.some.injEq] at h
@@ -5017,8 +5103,8 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
         exact hseq ha hb s hs r
       · -- a binding
         rename_i name value rest
-        have hany : (all ++ body).any (assignsLocal globals name 64) = false := by
-          cases hc : (all ++ body).any (assignsLocal globals name 64)
+        have hany : (all ++ body).any (assignsLocal (namesOf globals) name 64) = false := by
+          cases hc : (all ++ body).any (assignsLocal (namesOf globals) name 64)
           · rfl
           · simp [hc] at h
         simp only [hany, Bool.false_eq_true, ↓reduceIte] at h
@@ -5036,8 +5122,8 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
             letStep f context all body (locals, s) (.list [.atom name, value]) =
               .ok ((name, (freeze context x.2 x.1).1) :: locals, (freeze context x.2 x.1).2) := by
           intro f x hx hev
-          have hanyx : (all ++ body).any (assignsLocal x.2.globals name 64) = false := by
-            have hf : assignsLocal x.2.globals name 64 = assignsLocal globals name 64 := by
+          have hanyx : (all ++ body).any (assignsLocal (namesOf x.2.globals) name 64) = false := by
+            have hf : assignsLocal (namesOf x.2.globals) name 64 = assignsLocal (namesOf globals) name 64 := by
               rw [hx.definitions]
               funext form
               exact assignsLocal_compile globals name 64 form
@@ -5076,12 +5162,45 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
           subst hg3
           exact ⟨x, (hagreeV x).2 ⟨g, h1⟩, (hrestAgree x hcx r).2 hrest⟩
       · simp at h
+    · intro names locals clocals branches arms ha h key
+      rw [compileCases.eq_def] at h
+      cases branches with
+      | nil =>
+        simp only [Option.some.injEq] at h
+        subst h
+        exact Or.inl ⟨_, rfl, rfl⟩
+      | cons label more =>
+        cases more with
+        | nil =>
+          obtain ⟨c, hc, h⟩ := oget h
+          simp only [Option.some.injEq] at h
+          subst h
+          exact Or.inr ⟨c, label, by simp [selectArm], by simp [selectForm], ihE ha hc⟩
+        | cons body rest =>
+          obtain ⟨b, hb, h⟩ := oget h
+          obtain ⟨tail, ht, h⟩ := oget h
+          simp only [Option.some.injEq] at h
+          subst h
+          cases hm : caseMatches key label with
+          | error e => exact Or.inl ⟨e, by simp [selectArm, hm, bind, Except.bind], by simp [selectForm, hm, bind, Except.bind]⟩
+          | ok matched =>
+            cases matched with
+            | true =>
+              exact Or.inr ⟨b, body, by simp [selectArm, hm, bind, Except.bind],
+                by simp [selectForm, hm, bind, Except.bind], ihE ha hb⟩
+            | false =>
+              have ha1 : selectArm key ((some label, b) :: tail) = selectArm key tail := by
+                simp [selectArm, hm, bind, Except.bind]
+              have ha2 : selectForm key (label :: body :: rest) = selectForm key rest := by
+                simp [selectForm, hm, bind, Except.bind]
+              rw [CaseAgrees, ha1, ha2]
+              exact ihC ha ht key
 
 /-- Compiled code agrees with the interpreter: where a form compiles, the two evaluators have the same successes,
 with the same value and the same code, from any state with the definitions the form was compiled against. -/
 theorem evalCompiled_agrees_eval {globals : Globals} {context : Context} {names : List String} {locals clocals : Locals}
     {form : Sexp} {compiled : CExp} {fuel : Nat} (ha : Aligned names locals clocals)
-    (h : compileExp globals names fuel form = some compiled) {state : State} (hs : Compat globals state)
+    (h : compileExp (namesOf globals) names fuel form = some compiled) {state : State} (hs : Compat globals state)
     (result : SV × State) :
     (∃ f, evalCompiled f clocals context state compiled = .ok result) ↔ ∃ f, eval f locals context state form = .ok result :=
   (compile_agrees globals context fuel).1 ha h state hs result
@@ -5129,7 +5248,7 @@ theorem compat_ofGlobals (globals : Globals) : Compat globals (liftState globals
 /-- Compiled code agrees with the interpreter on what `lift` runs it on, without a hypothesis about the state. -/
 theorem evalCompiled_agrees_eval_ofGlobals {globals : Globals} {context : Context} {names : List String}
     {locals clocals : Locals} {form : Sexp} {compiled : CExp} {fuel : Nat} (ha : Aligned names locals clocals)
-    (h : compileExp globals names fuel form = some compiled) (result : SV × State) :
+    (h : compileExp (namesOf globals) names fuel form = some compiled) (result : SV × State) :
     (∃ f, evalCompiled f clocals context (liftState globals) compiled = .ok result) ↔
       ∃ f, eval f locals context (liftState globals) form = .ok result :=
   evalCompiled_agrees_eval ha h (compat_ofGlobals globals) result
@@ -5196,10 +5315,212 @@ theorem storeMemory_write {context : Context} {address value : SV} {addressExp v
 theorem evalTopLevel_defparameter {context : Context} {state after : State} {name : String} {form : Sexp}
     {rest : List Sexp} {value : SV} (h : eval 100000 [] context state form = .ok (value, after)) :
     evalTopLevel context state (.list (.atom "defparameter" :: .atom name :: form :: rest)) =
-      .ok { after with globals := Assoc.put name value after.globals } := by
+      .ok { after with
+        globals := Assoc.put name value after.globals
+        operations := match value with
+          | .callable callable => after.operations.insert name callable
+          | _ => after.operations.erase name
+        defined := after.defined.insert name } := by
   rw [evalTopLevel]
   · simp only [h, bind, Except.bind]
+    cases value <;> rfl
   all_goals (intros; simp_all)
+
+/-! ### Loading definitions
+
+A file holds thousands of definitions, and `define` looks at no list, which leaves it to `Indexed` that it does what
+the definitions in the list say. -/
+
+/-- What the tables of a state of top-level forms say about its definitions. -/
+structure Indexed (state : State) : Prop where
+  operations : ∀ name, state.operations.get? name =
+    match Assoc.get name state.globals with
+    | some (.callable callable) => some callable
+    | _ => none
+  defined : ∀ name, state.defined.contains name = (Assoc.get name state.globals).isSome
+
+private theorem get_put (globals : Globals) (key name : String) (value : SV) :
+    Assoc.get name (Assoc.put key value globals) = if name = key then some value else Assoc.get name globals := by
+  by_cases hk : name = key
+  · subst hk
+    simp
+  · simp only [hk, ↓reduceIte, Assoc.put, Assoc.get, List.lookup_cons]
+    have hne : (name == key) = false := by simpa using hk
+    simp only [hne]
+    induction globals with
+    | nil => rfl
+    | cons head rest ih =>
+      obtain ⟨other, v⟩ := head
+      by_cases ho : other = key
+      · subst ho
+        have hne' : (name == other) = false := by simpa using hk
+        simp [List.lookup_cons, hne', ih]
+      · have hb : (other != key) = true := by simpa using ho
+        simp only [List.filter_cons, hb, ↓reduceIte, List.lookup_cons]
+        cases name == other <;> simp [ih]
+
+private theorem filter_absent {globals : Globals} {name : String} (h : Assoc.get name globals = none) :
+    globals.filter (fun entry => entry.1 != name) = globals := by
+  induction globals with
+  | nil => rfl
+  | cons head rest ih =>
+    obtain ⟨other, v⟩ := head
+    simp only [Assoc.get, List.lookup_cons] at h ih
+    by_cases ho : name = other
+    · subst ho
+      simp at h
+    · have hb : (name == other) = false := by simpa using ho
+      have hb' : (other != name) = true := by simpa using Ne.symm ho
+      simp only [hb] at h
+      simp [hb', ih h]
+
+/-- `putDefinition` is `Assoc.put`. -/
+theorem putDefinition_spec {state : State} (h : Indexed state) (name : String) (value : SV) :
+    putDefinition state name value = Assoc.put name value state.globals := by
+  unfold putDefinition
+  by_cases hd : state.defined.contains name = true
+  · simp only [hd, ↓reduceIte]
+  · have hnone : Assoc.get name state.globals = none := by
+      have := h.defined name
+      rw [Bool.not_eq_true] at hd
+      rw [hd] at this
+      simpa using this.symm
+    have hf : state.defined.contains name = false := by simpa using hd
+    simp only [hf, Bool.false_eq_true, ↓reduceIte, Assoc.put, filter_absent hnone]
+
+private theorem addDefinition_index {state : State} (h : Indexed state) (name : String) (callable : Callable) :
+    addDefinition callable ((state.operations.get? name).map .callable) =
+      addDefinition callable (Assoc.get name state.globals) := by
+  rw [h.operations name]
+  cases Assoc.get name state.globals with
+  | none => rfl
+  | some value => cases value <;> rfl
+
+/-- A new definition, as if the lists were walked: what the definitions of the name were, and the list with the new one
+in front of them. -/
+theorem define_spec {state : State} (h : Indexed state) (name : String) (callable : Callable) :
+    define state name callable =
+      { state with
+        globals := Assoc.put name (.callable (addDefinition callable (Assoc.get name state.globals))) state.globals
+        operations := state.operations.insert name (addDefinition callable (Assoc.get name state.globals))
+        defined := state.defined.insert name } := by
+  simp only [define, addDefinition_index h, putDefinition_spec h]
+
+private theorem indexed_put {state : State} (h : Indexed state) (name : String) (value : SV)
+    (operations : Std.HashMap String Callable)
+    (hops : ∀ other, other ≠ name → operations.get? other = state.operations.get? other)
+    (hname : operations.get? name = match value with
+      | .callable callable => some callable
+      | _ => none)
+    (next : State) (hg : next.globals = Assoc.put name value state.globals) (ho : next.operations = operations)
+    (hd : next.defined = state.defined.insert name) : Indexed next where
+  operations := by
+    intro other
+    rw [ho, hg, get_put]
+    by_cases hk : other = name
+    · subst hk
+      simp only [↓reduceIte, hname]
+      cases value <;> rfl
+    · simp only [hk, ↓reduceIte, hops other hk, h.operations other]
+  defined := by
+    intro other
+    rw [hd, hg, get_put]
+    by_cases hk : other = name
+    · subst hk
+      simp
+    · have hne : (name == other) = false := by simpa using Ne.symm hk
+      simp only [Std.HashSet.contains_insert, hne, Bool.false_or, hk, ↓reduceIte, h.defined other]
+
+/-- `define` keeps the tables right. -/
+theorem define_indexed {state : State} (h : Indexed state) (name : String) (callable : Callable) :
+    Indexed (define state name callable) := by
+  rw [define_spec h]
+  refine indexed_put h name (.callable (addDefinition callable (Assoc.get name state.globals)))
+    (state.operations.insert name (addDefinition callable (Assoc.get name state.globals))) ?_ ?_ _ rfl rfl rfl
+  · intro other hk
+    have hne : (name == other) = false := by simpa using Ne.symm hk
+    simp only [Std.HashMap.get?_eq_getElem?, Std.HashMap.getElem?_insert, hne, Bool.false_eq_true, ↓reduceIte]
+  · simp
+
+theorem Indexed.keep {first second : State} (h : Indexed first) (hk : Keeps first second) : Indexed second where
+  operations := by
+    intro name
+    rw [hk.2.1, hk.1]
+    exact h.operations name
+  defined := by
+    intro name
+    rw [hk.2.2, hk.1]
+    exact h.defined name
+
+/-- The state that `evalForms` starts in has its tables right. -/
+theorem topLevelState_indexed (globals : Globals) : Indexed (topLevelState globals) where
+  operations := by
+    intro name
+    have := ofGlobals_operations globals name
+    simpa only [Environment.ofGlobals, topLevelState, indexGlobals] using this
+  defined := by
+    intro name
+    have key : ∀ (table : Globals) (seen : Std.HashSet String),
+        (table.foldl (fun names binding => names.insert binding.1) seen).contains name =
+          (seen.contains name || (Assoc.get name table).isSome) := by
+      intro table
+      induction table with
+      | nil => simp [Assoc.get]
+      | cons head rest ih =>
+        intro seen
+        obtain ⟨key, value⟩ := head
+        simp only [List.foldl_cons, ih, Assoc.get, List.lookup_cons, Std.HashSet.contains_insert]
+        by_cases hk : name = key
+        · subst hk
+          simp
+        · have hb : (name == key) = false := by simpa using hk
+          have hb' : (key == name) = false := by simpa using Ne.symm hk
+          simp [hb, hb']
+    simp only [topLevelState, key]
+    simp
+
+/-- A top-level form keeps the tables right, so that `define` stays what `define_spec` says through a whole load. -/
+theorem evalTopLevel_indexed {context : Context} {state after : State} {form : Sexp} (h : Indexed state)
+    (he : evalTopLevel context state form = .ok after) : Indexed after := by
+  have heval : ∀ {f : Nat} {s s' : State} {x : Sexp} {v : SV}, eval f [] context s x = .ok (v, s') → Keeps s s' :=
+    fun hx => (eval_family_keeps _).2.2.2.2.1 hx
+  rw [evalTopLevel.eq_def] at he
+  split at he
+  · obtain ⟨_, _, he⟩ := bind_ok he
+    split at he
+    · simp only [Except.ok.injEq] at he
+      subst he
+      exact h
+    · simp only [Except.ok.injEq] at he
+      subst he
+      exact define_indexed h _ _
+  · obtain ⟨_, _, he⟩ := bind_ok he
+    split at he
+    · simp only [Except.ok.injEq] at he
+      subst he
+      exact h
+    · simp only [Except.ok.injEq] at he
+      subst he
+      exact define_indexed h _ _
+  · rename_i name _ _
+    obtain ⟨⟨value, mid⟩, h1, he⟩ := bind_ok he
+    simp only [Except.ok.injEq] at he
+    subst he
+    have hm := h.keep (heval h1)
+    refine indexed_put hm name value _ ?_ ?_ _ rfl rfl rfl
+    · intro other hk
+      have hne : (name == other) = false := by simpa using Ne.symm hk
+      cases value <;>
+        simp only [Std.HashMap.get?_eq_getElem?, Std.HashMap.getElem?_insert, Std.HashMap.getElem?_erase, hne,
+          Bool.false_eq_true, ↓reduceIte]
+    · cases value <;> simp
+  · simp only [Except.ok.injEq] at he
+    subst he
+    exact h
+  · obtain ⟨⟨_, mid⟩, h1, he⟩ := bind_ok he
+    simp only [Except.ok.injEq] at he
+    subst he
+    exact h.keep (heval h1)
 
 private theorem mapM_symbolText (names : List String) :
     (names.map Value.symbol).mapM symbolText = .ok names := by

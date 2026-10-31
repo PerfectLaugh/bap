@@ -2,6 +2,7 @@ import Lean
 import Bap.Primus.Lifted
 import Bap.Proofs.Emu
 import Bap.Proofs.Primus
+import Bap.Proofs.JitProgress
 
 open Lean Elab Command in
 /-- Bring private declarations of module `mod`, namespace `ns`, into scope by short name. -/
@@ -2883,19 +2884,6 @@ theorem reachedOutputs_unflagged {lowering : Lowering} {slots : Array UInt64} {o
   intro _
   simp [hf, hz]
 
-/-- The seed of a range is where nothing is written yet. -/
-theorem definitelyWritten_seed (seed : Nat) (blocks : List Block) (edges : List (Nat × Nat)) (writes : Block → List Bap.Var) :
-    definitelyWritten seed blocks edges writes seed = [] := by
-  unfold definitelyWritten
-  cases hl : blocks.length with
-  | zero =>
-    have : blocks = [] := List.eq_nil_of_length_eq_zero hl
-    subst this
-    simp
-  | succ n =>
-    rw [List.range_succ, List.foldl_append]
-    simp
-
 /-- A cached block is found by its bytes: `sameBytes` is equality of them. -/
 theorem sameBytes_eq {left right : ByteArray} (h : sameBytes left right = true) : left = right := by
   simp only [sameBytes, Bool.and_eq_true, beq_iff_eq, Nat.all_eq_finRange_all, List.all_eq_true] at h
@@ -2915,39 +2903,6 @@ theorem peekByte_eq {width : Nat} (memory : Bap.Memory width) (address : Nat) (h
     peekByte memory address = Bap.Memory.readByte memory (BitVec.ofNat width address) := by
   simp only [peekByte, Bap.Memory.readByte, BitVec.toNat_ofNat, Nat.mod_eq_of_lt h]
   rfl
-
-/-- A closed target is the same value in every environment. -/
-private theorem closed_evalExp (exp : Bil.Exp) (env : Bil.Env) (h : closedTarget.closed exp = true) :
-    Bil.evalExp env exp = Bil.evalExp [] exp := by
-  induction exp with
-  | int value => rfl
-  | bin op left right ihl ihr =>
-    simp only [closedTarget.closed, Bool.and_eq_true] at h
-    rw [Bil.evalExp, Bil.evalExp, ihl h.1, ihr h.2]
-  | un op value ih =>
-    simp only [closedTarget.closed] at h
-    rw [Bil.evalExp, Bil.evalExp, ih h]
-  | cast kind width value ih =>
-    simp only [closedTarget.closed] at h
-    rw [Bil.evalExp, Bil.evalExp, ih h]
-  | _ => simp [closedTarget.closed] at h
-
-/-- A target that a range goes to directly is where the interpreter jumps, in whatever environment it runs. This is what
-makes a pc-relative branch an edge of the graph. -/
-theorem closedTarget_sound {target : Bil.Exp} {address : Nat} (h : closedTarget target = some address) (env : Bil.Env) :
-    ∃ (width : Nat) (value : BitVec width), Bil.evalExp env target = .ok (.bits value) ∧ width ≤ 64 ∧ value.toNat = address := by
-  unfold closedTarget at h
-  split at h
-  · next hc =>
-    split at h
-    · next width value he =>
-      split at h
-      · next hw =>
-        simp only [Option.some.injEq] at h
-        exact ⟨width, value, by rw [closed_evalExp _ _ hc, he], hw, h⟩
-      · simp at h
-    · simp at h
-  · simp at h
 
 /-- The way into a block of a range over an edge starts with the check of the budget, and leaving with no budget left
 sets the effect of a jump to the block, whose hooks are the next step's to fire. -/
@@ -2972,7 +2927,7 @@ open_private Bap.Primus.Lifted Bap.Primus.Lifted Lowering Lowering.ops Lowering.
   blockExit BlockExit BlockExit.direct BlockExit.branch BlockExit.other BlockExit.fall closedTarget graphEdgeOps freshLabel enterBlock codeSite GraphPlan GraphPlan.seed GraphPlan.labels GraphPlan.edges
   GraphPlan.budget GraphPlan.observed GraphPlan.chained GraphPlan.definite GraphPlan.guarded lowerEntry lowerExit lowerBlock lowerBlocks lowerGraph
   lowerGraphChecked leadingMoves opSlots opLabels flagOutputs encodeState syncState syncUpdates reachedOutputs slotBits withoutBindings atCodeStop
-  definitelyWritten flagged flagSlots withControl graphInitial graphPlan chainedCount nativeOutcome
+  definitelyWritten writtenAt flagged flagSlots withControl graphInitial graphPlan chainedCount nativeOutcome
 open_private Bap.Proofs.Primus Bap.Proofs.Primus obind pairwise_same lookup_bind_same lookup_bind_other bind_ok asBits_ok
 
 /-- What runs after one step, where a code site goes on unless its observer stops the run. -/
@@ -3312,52 +3267,6 @@ private theorem graphEdgeOps_sim {lowering : Lowering} {plan : GraphPlan} {sourc
     refine Or.inr ?_
     rw [← h]
     simp [jumpConstant, setEffect, heff]
-
-private theorem snoc_of_getLast? {α : Type} {items : List α} {last : α} (h : items.getLast? = some last) :
-    items = items.dropLast ++ [last] := by
-  obtain ⟨ys, rfl⟩ := List.getLast?_eq_some_iff.1 h
-  simp
-
-/-- `blockExit` goes by the last statement. -/
-private theorem blockExit_direct {block : Block} {target : Nat} (h : blockExit block = BlockExit.direct target) :
-    ∃ exp, block.program = block.program.dropLast ++ [.jmp exp] ∧ closedTarget exp = some target := by
-  unfold blockExit at h
-  split at h
-  · next exp hl =>
-    split at h
-    · next t ht =>
-      injection h with h
-      subst h
-      exact ⟨exp, snoc_of_getLast? hl, ht⟩
-    · cases h
-  all_goals first
-    | (split at h <;> cases h)
-    | cases h
-
-private theorem blockExit_branch {block : Block} {condition : Bil.Exp} {yes no : Nat} {falls : Bool}
-    (h : blockExit block = BlockExit.branch condition yes no falls) :
-    ∃ yesExp, closedTarget yesExp = some yes ∧
-      ((falls = true ∧ no = block.next ∧ block.program = block.program.dropLast ++ [.ifElse condition [.jmp yesExp] []]) ∨
-       (falls = false ∧ ∃ noExp, closedTarget noExp = some no ∧
-         block.program = block.program.dropLast ++ [.ifElse condition [.jmp yesExp] [.jmp noExp]])) := by
-  unfold blockExit at h
-  split at h
-  · split at h <;> cases h
-  · next cond yesExp hl =>
-    split at h
-    · next t ht =>
-      injection h with h1 h2 h3 h4
-      subst h1 h2 h3 h4
-      exact ⟨yesExp, ht, Or.inl ⟨rfl, rfl, snoc_of_getLast? hl⟩⟩
-    · cases h
-  · next cond yesExp noExp hl =>
-    split at h
-    · next t f ht hf =>
-      injection h with h1 h2 h3 h4
-      subst h1 h2 h3 h4
-      exact ⟨yesExp, ht, Or.inr ⟨rfl, noExp, hf, snoc_of_getLast? hl⟩⟩
-    · cases h
-  all_goals cases h
 
 /-- The jump to a closed target. -/
 private theorem exec_closed {fuel : Nat} {state : Bil.State} {exp : Bil.Exp} {target : Nat} {result : Bil.State × Bil.Effect}
@@ -4156,9 +4065,9 @@ private theorem decrement_toNat {slot : Word64} (h : slot ≠ 0) :
   rw [this]
   omega
 
-/-- The interpreter stopped before the run could tell where it ends: there, nothing is claimed. -/
-def InterpreterFails (blocks : List Block) (fuel budget : Nat) (cfg : Bil.State × Nat) : Prop :=
-  ∃ count, count ≤ budget ∧ ∃ reached error, stepBlocks blocks fuel count cfg = .ok reached ∧ stepBlock blocks fuel reached = .error error
+/-- The interpreter has no fuel left for a block on the way: `graph_progress` is why that is all that can stop it. -/
+def OutOfFuel (blocks : List Block) (fuel budget : Nat) (cfg : Bil.State × Nat) : Prop :=
+  ∃ count, count ≤ budget ∧ ∃ reached, stepBlocks blocks fuel count cfg = .ok reached ∧ stepBlock blocks fuel reached = .error fuelError
 
 /-- Where a run of a range ends: with `entered` blocks after the first, as many as the budget allows at most, and what the
 interpreter has after that many and one blocks, at the pc that it goes on with. -/
@@ -4176,28 +4085,45 @@ private theorem range_step {stops : Nat → Bool} {plan : GraphPlan} {low high e
     (hfits : ∀ block ∈ blocks, block.address < 2 ^ 64)
     (hfree : ∀ var, (var, effect) ∉ Lowering.layout global) (hbudgetFree : ∀ var, (var, GraphPlan.budget plan) ∉ Lowering.layout global)
     (hbud : GraphPlan.budget plan ≠ effect) (hbudgetLow : GraphPlan.budget plan < low) (heffLow : effect < low) (fuel budget : Nat)
+    (ready : Nat → Bil.Env → Prop)
+    (hready : ∀ block ∈ blocks, ∀ state, ready block.address state.env → Progress (Bil.execProgram fuel state block.program)
+      (fun result => ∀ target, (block.address, target) ∈ GraphPlan.edges plan → ready target result.1.env))
     (ih : ∀ b, b + 1 = budget → ∀ (block : Block), block ∈ blocks → blockAt blocks block.address = some block →
       ∀ (start : List Op), SegOK stops plan low high global program effect block start →
       ∀ (state : Bil.State) (machine : Machine), Agrees state.env machine global → machine.slots effect = 0 →
-      (machine.slots (GraphPlan.budget plan)).toNat = b →
-      InterpreterFails blocks fuel b (state, block.address) ∨ ExhaustsAt stops program (start, machine) effect ∨
+      (machine.slots (GraphPlan.budget plan)).toNat = b → ready block.address state.env →
+      OutOfFuel blocks fuel b (state, block.address) ∨ ExhaustsAt stops program (start, machine) effect ∨
         RangeEnds stops blocks fuel b (GraphPlan.budget plan) effect global program (start, machine) (state, block.address)) :
     ∀ (block : Block), block ∈ blocks → blockAt blocks block.address = some block →
       ∀ (start : List Op), SegOK stops plan low high global program effect block start →
       ∀ (state : Bil.State) (machine : Machine), Agrees state.env machine global → machine.slots effect = 0 →
-      (machine.slots (GraphPlan.budget plan)).toNat = budget →
-      InterpreterFails blocks fuel budget (state, block.address) ∨ ExhaustsAt stops program (start, machine) effect ∨
+      (machine.slots (GraphPlan.budget plan)).toNat = budget → ready block.address state.env →
+      OutOfFuel blocks fuel budget (state, block.address) ∨ ExhaustsAt stops program (start, machine) effect ∨
         RangeEnds stops blocks fuel budget (GraphPlan.budget plan) effect global program (start, machine) (state, block.address) := by
-  intro block hmem hat start seg state machine hag hz hb
+  intro block hmem hat start seg state machine hag hz hb hr0
   have hstep : ∀ result, Bil.execProgram fuel state block.program = .ok result →
       stepBlock blocks fuel (state, block.address) = .ok (result.1, nextPc block result.2) := by
     intro result he
     simp [stepBlock, hat, he]
   cases hex : Bil.execProgram fuel state block.program with
   | error error =>
-    refine Or.inl ⟨0, Nat.zero_le _, (state, block.address), error, rfl, ?_⟩
+    have herror : error = fuelError := by
+      rcases hready block hmem state hr0 with he | ⟨_, he, _⟩
+      · rw [hex] at he
+        simpa using he
+      · rw [hex] at he
+        cases he
+    subst herror
+    refine Or.inl ⟨0, Nat.zero_le _, (state, block.address), rfl, ?_⟩
     simp [stepBlock, hat, hex]
   | ok result =>
+    have hreadyNext : ∀ target, (block.address, target) ∈ GraphPlan.edges plan → ready target result.1.env := by
+      rcases hready block hmem state hr0 with he | ⟨_, he, hpost⟩
+      · rw [hex] at he
+        cases he
+      · rw [hex] at he
+        obtain rfl := Except.ok.inj he
+        exact hpost
     have hone : stepBlocks blocks fuel 1 (state, block.address) = .ok (result.1, nextPc block result.2) := by
       simp [stepBlocks, hstep result hex]
     rcases seg.1 fuel state result machine hag hz hex with hx | ⟨m1, hend, hag1, hf1, heff1⟩ | ⟨m1, label, rest, hrun, hedge, hag1, hf1⟩
@@ -4263,9 +4189,9 @@ private theorem range_step {stops : Nat → Bool} {plan : GraphPlan} {low high e
           rw [decrement_toNat hne, hbudget1, hb]
           simp
         have hstart := (hgoto.trans hr)
-        rcases ih b rfl target htmem (by rw [haddr]; exact hatT) startT segT result.1 m2 hag2 hz2 hb2 with hfail | hx | hends
-        · obtain ⟨count, hc, reached, error, h1, h2⟩ := hfail
-          refine Or.inl ⟨count + 1, by omega, reached, error, ?_, h2⟩
+        rcases ih b rfl target htmem (by rw [haddr]; exact hatT) startT segT result.1 m2 hag2 hz2 hb2 (hreadyNext _ (by rw [haddr]; exact hedge.1)) with hfail | hx | hends
+        · obtain ⟨count, hc, reached, h1, h2⟩ := hfail
+          refine Or.inl ⟨count + 1, by omega, reached, ?_, h2⟩
           simp only [stepBlocks, hstep result hex]
           rw [hpcT]
           exact h1
@@ -4279,27 +4205,30 @@ private theorem range_step {stops : Nat → Bool} {plan : GraphPlan} {low high e
           · rw [h4]
             omega
 
-/-- Blocks run one after the other along edges, with a budget: a run from the statements of a block, whose budget slot has `budget`, ends as
-many blocks later as `RangeEnds` says, unless a loop in it uses up its iterations or the interpreter has no result. -/
+/-- Blocks run one after the other along edges, with a budget: a run from the statements of a block, whose budget slot has `budget`, in an
+environment `ready` for it, ends as many blocks later as `RangeEnds` says, unless a loop in it uses up its iterations or the interpreter has no fuel. -/
 theorem range_core {stops : Nat → Bool} {plan : GraphPlan} {low high effect : Nat} {global : Lowering} {program : List Op} {blocks : List Block}
     (hseg : ∀ block ∈ blocks, ∃ start, SegOK stops plan low high global program effect block start)
     (hlabel : ∀ source target label, EdgeTo plan source target label → ∃ block ∈ blocks, block.address = target ∧
       blockAt blocks target = some block ∧ ∃ address, (GraphPlan.labels plan).find? (fun (address, _) => address = block.address) = some (address, label))
     (hfits : ∀ block ∈ blocks, block.address < 2 ^ 64)
     (hfree : ∀ var, (var, effect) ∉ Lowering.layout global) (hbudgetFree : ∀ var, (var, GraphPlan.budget plan) ∉ Lowering.layout global)
-    (hbe : GraphPlan.edges plan ≠ [] → GraphPlan.budget plan ≠ effect) (hbudgetLow : GraphPlan.budget plan < low) (heffLow : effect < low) (fuel : Nat) (budget : Nat) :
+    (hbe : GraphPlan.edges plan ≠ [] → GraphPlan.budget plan ≠ effect) (hbudgetLow : GraphPlan.budget plan < low) (heffLow : effect < low) (fuel : Nat) (budget : Nat)
+    (ready : Nat → Bil.Env → Prop)
+    (hready : ∀ block ∈ blocks, ∀ state, ready block.address state.env → Progress (Bil.execProgram fuel state block.program)
+      (fun result => ∀ target, (block.address, target) ∈ GraphPlan.edges plan → ready target result.1.env)) :
     GraphPlan.edges plan ≠ [] → ∀ (block : Block), block ∈ blocks → blockAt blocks block.address = some block →
       ∀ (start : List Op), SegOK stops plan low high global program effect block start →
       ∀ (state : Bil.State) (machine : Machine), Agrees state.env machine global → machine.slots effect = 0 →
-      (machine.slots (GraphPlan.budget plan)).toNat = budget →
-      InterpreterFails blocks fuel budget (state, block.address) ∨ ExhaustsAt stops program (start, machine) effect ∨
+      (machine.slots (GraphPlan.budget plan)).toNat = budget → ready block.address state.env →
+      OutOfFuel blocks fuel budget (state, block.address) ∨ ExhaustsAt stops program (start, machine) effect ∨
         RangeEnds stops blocks fuel budget (GraphPlan.budget plan) effect global program (start, machine) (state, block.address) := by
   intro hedges
   have hbud := hbe hedges
   induction budget with
-  | zero => exact range_step hseg hlabel hfits hfree hbudgetFree hbud hbudgetLow heffLow fuel 0 (fun _ h => by omega)
+  | zero => exact range_step hseg hlabel hfits hfree hbudgetFree hbud hbudgetLow heffLow fuel 0 ready hready (fun _ h => by omega)
   | succ budget ih =>
-    refine range_step hseg hlabel hfits hfree hbudgetFree hbud hbudgetLow heffLow fuel (budget + 1) ?_
+    refine range_step hseg hlabel hfits hfree hbudgetFree hbud hbudgetLow heffLow fuel (budget + 1) ready hready ?_
     intro b hb
     obtain rfl : b = budget := by omega
     exact ih
@@ -4840,19 +4769,22 @@ private structure Checked (blocks : List Block) (initial lowering : Lowering) : 
   labels : (labelsOf (Lowering.ops lowering)).Nodup
   slots : ∀ op ∈ Lowering.ops lowering, ∀ slot ∈ opSlots op, slot < Lowering.nextSlot lowering
   outputs : ∀ output ∈ Lowering.outputs lowering, output ∈ Lowering.layout lowering
+  inputs : ∀ var ∈ Lowering.inputs lowering, ∃ binding ∈ Lowering.layout lowering, binding.1 = var
   moves : ∀ dst src, Op.move dst src ∈ Lowering.ops lowering → ∀ binding ∈ Lowering.layout lowering, binding.2 = dst → binding ∈ Lowering.outputs lowering
 
 private theorem checked_of {blocks : List Block} {initial lowering : Lowering} (h : lowerGraphChecked blocks initial lowering = true) :
     Checked blocks initial lowering := by
   simp only [lowerGraphChecked, Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true, beq_iff_eq] at h
-  obtain ⟨⟨⟨⟨⟨⟨⟨h7, h8⟩, h1⟩, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩ := h
-  refine ⟨h7, h8, h1, ?_, by rw [← opLabels_eq]; exact h3, ?_, ?_, ?_⟩
+  obtain ⟨⟨⟨⟨⟨⟨⟨⟨h7, h8⟩, h1⟩, h2⟩, h3⟩, h4⟩, h5⟩, h9⟩, h6⟩ := h
+  refine ⟨h7, h8, h1, ?_, by rw [← opLabels_eq]; exact h3, ?_, ?_, ?_, ?_⟩
   · intro block hb
     exact h2 block hb
   · intro op hop slot hs
     simpa using h4 op hop slot hs
   · intro output ho
     simpa using h5 output ho
+  · intro var hv
+    simpa using h9 var hv
   · intro dst src hm binding hb hd
     have := h6 _ hm
     simp only [List.all_eq_true] at this
@@ -4899,7 +4831,9 @@ private theorem lowerGraph_parts {blocks : List Block} {edges : List (Nat × Nat
       GraphPlan.labels plan = (List.range blocks.length).map (fun index => (blocks[index]!.address, index)) ∧
       Lowering.ops initial = [.set 0 0] ∧ Lowering.layout initial = [] ∧ Lowering.effectSlot initial = some 0 ∧ 0 < Lowering.nextSlot initial ∧
       Lowering.flags initial = [] ∧
-      (edges ≠ [] → GraphPlan.budget plan = 1 ∧ Lowering.nextSlot initial = 3 ∧ Lowering.budget initial = some 1 ∧ Lowering.observed initial = some 2) := by
+      (edges ≠ [] → GraphPlan.budget plan = 1 ∧ Lowering.nextSlot initial = 3 ∧ Lowering.budget initial = some 1 ∧ Lowering.observed initial = some 2) ∧
+      GraphPlan.definite plan = writtenAt (definitelyWritten seed.address blocks edges) ∧ GraphPlan.chained plan = !edges.isEmpty ∧
+      Lowering.written initial = [] := by
   unfold lowerGraph at h
   cases blocks with
   | nil => simp at h
@@ -4911,7 +4845,7 @@ private theorem lowerGraph_parts {blocks : List Block} {edges : List (Nat × Nat
       simp only [Option.some.injEq] at h
       refine ⟨seed, rest, _, _, final, rfl, h.symm, h1, hc, rfl, rfl, rfl, ?_⟩
       cases edges with
-      | nil => simp [graphInitial, setEffect, temporary]
+      | nil => simp [graphInitial, graphPlan, setEffect, temporary]
       | cons e es => simp [graphInitial, graphPlan, setEffect, temporary]
     · rw [ite_eq_right hc] at h
       cases h
@@ -4930,6 +4864,43 @@ private theorem flagOutputs_parts (written : List Bap.Var) (final : Lowering) :
     Lowering.observed (flagOutputs written final) = Lowering.observed final ∧
     Lowering.inputs (flagOutputs written final) = Lowering.inputs final :=
   ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- The encoding of a state has found each input bound. -/
+private theorem encode_bound (env : Bil.Env) (inputs : List Bap.Var) (layout : List (Bap.Var × Nat)) (init : Array UInt64) (result : Array UInt64)
+    (h : layout.foldlM (init := init) (fun slots binding => do
+      let var := binding.1
+      match Bil.lookup env var with
+      | .ok value =>
+        let ⟨width, value⟩ ← Value.asBits value
+        match widthOf var with
+        | some expected =>
+          if width == expected then .ok (slots.set! binding.2 (immediate value))
+          else .error s!"variable {var.name} has width {width}, expected {expected}"
+        | none => .error s!"unsupported variable {var.name}"
+      | .error error =>
+        if inputs.contains var then .error error else .ok slots) = .ok result)
+    (binding : Bap.Var × Nat) (hb : binding ∈ layout) (hi : binding.1 ∈ inputs) : ∃ value, Bil.lookup env binding.1 = .ok value := by
+  induction layout generalizing init with
+  | nil => simp at hb
+  | cons head rest ih =>
+    simp only [List.foldlM_cons] at h
+    obtain ⟨mid, h1, h2⟩ := bind_ok h
+    rcases List.mem_cons.1 hb with rfl | hb
+    · cases hl : Bil.lookup env binding.1 with
+      | ok value => exact ⟨value, rfl⟩
+      | error e =>
+        simp only [hl] at h1
+        simp [hi] at h1
+    · exact ih _ h2 hb
+
+/-- An input with a slot has bits at the width of its variable, if the encoding of a state went through. -/
+private theorem encodeState_good {lowering : Lowering} {env : Bil.Env} {slots : Array UInt64} {var : Bap.Var} (wf : LayoutWF lowering)
+    (h : encodeState lowering env = .ok slots) (hi : var ∈ Lowering.inputs lowering) (hb : ∃ binding ∈ Lowering.layout lowering, binding.1 = var) :
+    Good env var := by
+  obtain ⟨binding, hb, rfl⟩ := hb
+  obtain ⟨value, hvalue⟩ := encode_bound env (Lowering.inputs lowering) (Lowering.layout lowering) _ slots h binding hb hi
+  obtain ⟨w, bits, rfl, hw, _⟩ := encodeState_holds wf h binding hb _ hvalue
+  exact ⟨w, hw, bits, hvalue⟩
 
 /-- What the encoding of a state gives to the slots. -/
 private theorem encodeState_slots {lowering : Lowering} {env : Bil.Env} {slots : Array UInt64} (wf : LayoutWF lowering)
@@ -4975,7 +4946,7 @@ private theorem stepBlocks_first {blocks : List Block} {fuel count : Nat} {state
 
 From the slots of `encodeState` and `withControl` with any budget, and any code observer `stops`, with a machine that holds them and the
 memory of the state, the program that `lowerGraph` makes for a graph has one of three ends. A loop in it uses up its iterations, which the
-runner turns into an error, or the interpreter has no result within the budget, about which nothing is claimed, or the run returns. Then it has
+runner turns into an error, or the interpreter has no fuel within the budget, the one thing that can stop it (`graph_progress`), or the run returns. Then it has
 entered `entered` blocks after its first, what `budget` minus its budget slot says, at most `budget`. It returns the pc where the interpreter
 goes on after `entered + 1` blocks, whichever way it left: over an edge with no budget left (that block not entered), at a code site that stopped it
 (likewise, with 3 in the effect slot), at an edge to a block that is not in the range, or at a jump out of a block's statements. Variables other than
@@ -4987,10 +4958,11 @@ theorem lowerGraph_correct {blocks : List Block} {edges : List (Nat × Nat)} {wr
     (henc : encodeState lowering state.env = .ok slots)
     (hslots : ∀ index, machine.slots index = ((withControl lowering slots budget observed).getD index 0).toBitVec)
     (hmem : ∀ var, Lowering.memory lowering = some var → ∀ (width : Nat) (cells : Bap.Memory width),
-      Bil.lookup state.env var = .ok (.memory cells) → MemoryInv machine width cells) :
+      Bil.lookup state.env var = .ok (.memory cells) → MemoryInv machine width cells)
+    (hbound : ∀ var, Lowering.memory lowering = some var → GoodMem state.env var) :
     Lowering.effectSlot lowering = some 0 ∧ Lowering.budget lowering = some 1 ∧ Lowering.observed lowering = some 2 ∧
     ∃ seed rest, blocks = seed :: rest ∧
-    (InterpreterFails blocks fuel budget (state, seed.address) ∨
+    (OutOfFuel blocks fuel budget (state, seed.address) ∨
       ExhaustsAt stops (Lowering.ops lowering) (Lowering.ops lowering, machine) 0 ∨
       ∃ entered, entered ≤ budget ∧ ∃ final pc m, stepBlocks blocks fuel (entered + 1) (state, seed.address) = .ok (final, pc) ∧
         EndsAt stops (Lowering.ops lowering) (Lowering.ops lowering, machine) pc m ∧
@@ -5000,11 +4972,11 @@ theorem lowerGraph_correct {blocks : List Block} {edges : List (Nat × Nat)} {wr
           ∀ var, Lowering.memory lowering ≠ some var → Bil.lookup (syncState lowering state out).env var = Bil.lookup final.env var) ∧
         (∀ var, Lowering.memory lowering = some var → ∀ (width : Nat) (cells : Bap.Memory width),
           Bil.lookup final.env var = .ok (.memory cells) → MemoryInv m width cells)) := by
-  obtain ⟨seed, rest, plan, initial, inner, hblocks, hl, hlower, hcheck, hplanEdges, hplanSeed, hplanLabels, hiops, hilayout, hieff, hinext, _, hichained⟩ :=
+  obtain ⟨seed, rest, plan, initial, inner, hblocks, hl, hlower, hcheck, hplanEdges, hplanSeed, hplanLabels, hiops, hilayout, hieff, hinext, _, hichained, hdefinite, hplanChained, _⟩ :=
     lowerGraph_parts h
   obtain ⟨hpb, hin3, hib, hio⟩ := hichained hedges
-  obtain ⟨fops, fflags, fnext, flayout, foutputs, fmemory, feffect, fbudget, fobserved, _⟩ := flagOutputs_parts (leadingMoves seed.program) inner
-  rw [← hl] at fops fflags fnext flayout foutputs fmemory feffect fbudget fobserved
+  obtain ⟨fops, fflags, fnext, flayout, foutputs, fmemory, feffect, fbudget, fobserved, finputs⟩ := flagOutputs_parts (leadingMoves seed.program) inner
+  rw [← hl] at fops fflags fnext flayout foutputs fmemory feffect fbudget fobserved finputs
   have chk := checked_of hcheck
   have wfi : LayoutWF initial := layoutWF_of_nil _ hilayout
   have hedgesP : GraphPlan.edges plan ≠ [] := by rw [hplanEdges]; exact hedges
@@ -5111,9 +5083,23 @@ theorem lowerGraph_correct {blocks : List Block} {edges : List (Nat × Nat)} {wr
     subst haddr
     exact ⟨block, hmemB, rfl, blockAt_of_mem chk.addresses hmemB, address, by rw [hplanLabels]; exact hfind⟩
   have hin3' : GraphPlan.budget plan < Lowering.nextSlot initial := by rw [hpb, hin3]; decide
+  have hchained : GraphPlan.chained plan = true := by
+    rw [hplanChained]
+    cases edges with
+    | nil => exact absurd rfl hedges
+    | cons _ _ => rfl
+  have hinputs : ∀ var ∈ Lowering.inputs inner, Good state.env var := by
+    intro var hv
+    exact encodeState_good wfL henc (by rw [finputs]; exact hv) (by rw [flayout]; exact chk.inputs var hv)
   have core := range_core all hlabel (fun b hb => (chk.fits b hb).1) (hsmall 0 (by decide))
-    (by rw [hpb]; exact hsmall 1 (by decide)) (fun _ => by rw [hpb]; decide) hin3' hinext fuel budget hedgesP
+    (by rw [hpb]; exact hsmall 1 (by decide)) (fun _ => by rw [hpb]; decide) hin3' hinext fuel budget
+    (GraphReady seed.address (seed :: rest) edges inner)
+    (fun block hb state ready => by
+      rw [hplanEdges]
+      exact graph_progress hlower hchained hdefinite chk.addresses hb fuel state ready)
+    hedgesP
     seed hseedMem hat start seg state _ hag1 hz1 (by rw [hpb]; exact hb1')
+    (graphReady_seed _ _ _ hinputs (fun var hv => hbound var (by rw [fmemory]; exact hv)))
   have hm0 : ∀ slot, m0.moved slot = true → ∃ src, Op.move slot src ∈ Lowering.ops inner := by
     intro slot hs
     simp [m0] at hs
@@ -5215,6 +5201,44 @@ theorem nativeOutcome_normal {lowering : Lowering} {following next : Nat} {state
     nativeOutcome lowering following next state slots = .ok ⟨state, next, next, .normal⟩ := by
   simp only [nativeOutcome, he, beq_iff_eq, h1, h2, ↓reduceIte]
 
+/-- **A block that compiled has a result in the interpreter, or has no fuel**, on a state that it encodes with its memory bound. So `lowerGraph_single`,
+which is about what has a result, leaves out no other error. -/
+theorem lowerGraph_single_progress {blocks : List Block} {wrapFaults : Bool} {lowering : Lowering}
+    (h : lowerGraph blocks [] wrapFaults = some lowering) (fuel : Nat) (state : Bil.State) {slots : Array UInt64}
+    (henc : encodeState lowering state.env = .ok slots) (hbound : ∀ var, Lowering.memory lowering = some var → GoodMem state.env var) :
+    ∃ seed rest, blocks = seed :: rest ∧ (Bil.execProgram fuel state seed.program = .error fuelError ∨ ∃ result, Bil.execProgram fuel state seed.program = .ok result) := by
+  obtain ⟨seed, rest, plan, initial, inner, hblocks, hl, hlower, hcheck, hplanEdges, _, _, _, hilayout, hieff, hinext, _, _, _, hplanChained, hiw⟩ :=
+    lowerGraph_parts h
+  obtain ⟨_, _, fnext, flayout, _, fmemory, _, _, _, finputs⟩ := flagOutputs_parts (leadingMoves seed.program) inner
+  rw [← hl] at fnext flayout fmemory finputs
+  have chk := checked_of hcheck
+  have wfi : LayoutWF initial := layoutWF_of_nil _ hilayout
+  obtain ⟨new, g, _⟩ := lowerBlocks_spec (effect := 0) (plan := plan) blocks wfi hieff hinext (fun b hb => (chk.fits b hb).2)
+    (fun he => absurd hplanEdges he) hlower
+  obtain ⟨hflagNext, _⟩ := flagSlots_spec
+    ((Lowering.outputs inner).filter fun output => !(leadingMoves seed.program).contains output.1)
+    (limit := Lowering.nextSlot inner) (start := Lowering.nextSlot inner) (init := []) (next := (flagSlots _ _).1) (flags := (flagSlots _ _).2)
+    rfl (Nat.le_refl _) (by simp) (by simp)
+  have wfL : LayoutWF lowering := ⟨fun b hb => by
+      rw [flayout] at hb
+      rw [fnext]
+      exact Nat.lt_of_lt_of_le (g.wf.bound b hb) hflagNext,
+    by rw [flayout]; exact g.wf.slotsDistinct, by rw [flayout]; exact g.wf.varsDistinct⟩
+  subst hblocks
+  simp only [lowerBlocks] at hlower
+  obtain ⟨mid, h1, h2⟩ := obind hlower
+  obtain ⟨m1, ok⟩ := lowerBlock_progress h1
+  obtain ⟨m2, _⟩ := lowerBlocks_progress rest h2
+  refine ⟨seed, rest, rfl, ?_⟩
+  have hw : ∀ var ∈ Lowering.written (if GraphPlan.chained plan = true then Lowering.withWritten initial (GraphPlan.definite plan seed.address) else initial), Good state.env var := by
+    rw [hplanChained]
+    simp [hiw]
+  rcases ok fuel state hw
+    (fun var hv => encodeState_good wfL henc (by rw [finputs]; exact m2.inputs var hv) (by rw [flayout]; exact chk.inputs var (m2.inputs var hv)))
+    (fun var hv => hbound var (by rw [fmemory]; exact m2.memory var hv)) with he | ⟨result, he, _⟩
+  · exact Or.inl he
+  · exact Or.inr ⟨result, he⟩
+
 /-- **A compiled block does what the interpreter does**, as `lowerGraph_correct` says for a range, for a block on its own, which has no budget and no
 code sites: a jump out of it with an output not written yet leaves that output as it was. -/
 theorem lowerGraph_single {blocks : List Block} {wrapFaults : Bool} {lowering : Lowering}
@@ -5231,7 +5255,7 @@ theorem lowerGraph_single {blocks : List Block} {wrapFaults : Bool} {lowering : 
           ∀ var, Lowering.memory lowering ≠ some var → Bil.lookup (syncState lowering state out).env var = Bil.lookup result.1.env var) ∧
         (∀ var, Lowering.memory lowering = some var → ∀ (width : Nat) (cells : Bap.Memory width),
           Bil.lookup result.1.env var = .ok (.memory cells) → MemoryInv m width cells) := by
-  obtain ⟨seed, rest, plan, initial, inner, hblocks, hl, hlower, hcheck, hplanEdges, hplanSeed, _, hiops, hilayout, hieff, hinext, _, _⟩ :=
+  obtain ⟨seed, rest, plan, initial, inner, hblocks, hl, hlower, hcheck, hplanEdges, hplanSeed, _, hiops, hilayout, hieff, hinext, _, _, _, _, _⟩ :=
     lowerGraph_parts h
   obtain ⟨fops, fflags, fnext, flayout, foutputs, fmemory, feffect, _, _, _⟩ := flagOutputs_parts (leadingMoves seed.program) inner
   rw [← hl] at fops fflags fnext flayout foutputs fmemory feffect

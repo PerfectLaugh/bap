@@ -2750,11 +2750,22 @@ theorem mips_likely_calls : mipsLikelyMnemonics.contains "bltzall" = true ∧ mi
 /-! ### The order of the semantics -/
 
 /-- The primitives that are bound first are primitives of the semantics, so that a name resolves to what it did. -/
-theorem semanticsPrimitives_are_primitives : ∀ name ∈ semanticsPrimitives, name ∈ (primus% primitiveNames) := by
-  decide
+theorem semanticsPrimitives_are_primitives : ∀ name ∈ semanticsPrimitives, name ∈ Primus.Semantics.primitiveNames := by
+  intro name h
+  exact (List.mem_filter.1 h).1
+
+/-- Which names they are: every primitive but `replicate`, which the lookups handle first, however a definition binds it. -/
+theorem mem_semanticsPrimitives (name : String) :
+    name ∈ semanticsPrimitives ↔ name ∈ Primus.Semantics.primitiveNames ∧ name ≠ "replicate" := by
+  simp [semanticsPrimitives, List.mem_filter]
+
+/-- `replicate` is a primitive, so that it is the only one left out. -/
+theorem replicate_is_primitive : "replicate" ∈ Primus.Semantics.primitiveNames := by decide
 
 theorem primitive_not_core : ∀ name ∈ semanticsPrimitives, name.startsWith "core:" = false := by
-  simp [semanticsPrimitives]
+  have key : ∀ name ∈ Primus.Semantics.primitiveNames, name.startsWith "core:" = false := by
+    simp [Primus.Semantics.primitiveNames]
+  exact fun name h => key name (List.mem_filter.1 h).1
 
 private theorem get_prims (ps : List String) (rest : Globals) (name : String) :
     Assoc.get name ((ps.map fun n => ((n, .callable (.primitive n)) : String × PValue)) ++ rest) =
@@ -2794,7 +2805,7 @@ theorem lookup_primitiveGlobals (definitions rest : Globals) (name : String) (lo
 
 theorem primitiveGlobals_spec (definitions : Globals) (binding : String × PValue)
     (h : binding ∈ (lift% primitiveGlobals) definitions) :
-    binding.1 ∈ (primus% primitiveNames) ∧ Assoc.get binding.1 definitions = none ∧
+    binding.1 ∈ Primus.Semantics.primitiveNames ∧ Assoc.get binding.1 definitions = none ∧
       binding.2 = .callable (.primitive binding.1) := by
   unfold_primitive_globals at h
   simp only [List.mem_map, List.mem_filter, Option.isNone_iff_eq_none] at h

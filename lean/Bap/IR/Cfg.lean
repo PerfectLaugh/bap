@@ -202,6 +202,39 @@ def Cfg.connected (sub : Sub) : Cfg :=
   let cfg := connectMissingStarts actual cfg (actual.length + 1)
   connectMissingExits actual cfg (actual.length + 1)
 
+/-- `Cfg.connected`, without going over the edges for each block. -/
+private def Cfg.connectedFast (sub : Sub) : Cfg :=
+  let base := Cfg.fromSub sub
+  let actual := sub.blks.map Blk.tid
+  let targets : Std.HashSet Tid := Std.HashSet.ofList (base.graph.edges.map Prod.snd)
+  let sources : Std.HashSet Tid := Std.HashSet.ofList (base.graph.edges.map Prod.fst)
+  let roots := actual.head?.toList ++ actual.filter fun tid => !targets.contains tid
+  let leaves := actual.filter fun tid => !sources.contains tid
+  let cfg : Cfg := {
+    start := pseudoStart
+    blocks := ⟨pseudoStart, [], [], []⟩ :: base.blocks ++ [⟨pseudoExit, [], [], []⟩]
+    graph := {
+      nodes := pseudoStart :: actual ++ [pseudoExit]
+      edges := base.graph.edges ++ roots.map (pseudoStart, ·) ++ leaves.map (·, pseudoExit)
+    }
+  }
+  let cfg := connectMissingStarts actual cfg (actual.length + 1)
+  connectMissingExits actual cfg (actual.length + 1)
+
+@[csimp] private theorem Cfg.connected_eq_fast : @Cfg.connected = @Cfg.connectedFast := by
+  funext sub
+  have hroots : ∀ tid, ((Cfg.fromSub sub).predecessors tid).isEmpty =
+      !(Std.HashSet.ofList ((Cfg.fromSub sub).graph.edges.map Prod.snd)).contains tid := by
+    intro tid
+    rw [Bool.eq_iff_iff, List.isEmpty_iff, List.eq_nil_iff_forall_not_mem]
+    simp [Std.HashSet.contains_ofList, Cfg.predecessors, Bap.Proofs.Graph.mem_predecessors]
+  have hleaves : ∀ tid, ((Cfg.fromSub sub).successors tid).isEmpty =
+      !(Std.HashSet.ofList ((Cfg.fromSub sub).graph.edges.map Prod.fst)).contains tid := by
+    intro tid
+    rw [Bool.eq_iff_iff, List.isEmpty_iff, List.eq_nil_iff_forall_not_mem]
+    simp [Std.HashSet.contains_ofList, Cfg.successors]
+  simp only [Cfg.connected, Cfg.connectedFast, hroots, hleaves]
+
 private theorem connectMissingStarts_start (actual : List Tid) (cfg : Cfg) (fuel : Nat) :
     (connectMissingStarts actual cfg fuel).start = cfg.start := by
   induction fuel generalizing cfg with

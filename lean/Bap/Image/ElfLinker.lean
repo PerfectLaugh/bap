@@ -1337,10 +1337,61 @@ def fieldFits (env : Env) (state : LinkState) (site : Site) : Bool :=
   | some check => fits check.kind check.bits (wordValue env check.value)
   | none => true
 
-/-- Warns if a relocation has to cut its value to its field. -/
+/-- What a relocation that drops the low bits of its value needs of them: their number as an alignment, and the value. An
+instruction has no place for them, so that the link would go to, or load from, somewhere else. These are the same as
+`ld.lld`'s `checkAlignment`, and those of the PowerPC `DS` forms that it does at the instruction. -/
+def alignCheck (env : Env) (state : LinkState) (site : Site) : Option (Nat × Int) :=
+  let x := site.s + site.a
+  let p := site.p
+  let tp := tpOff env site.s + site.a
+  match env.machine, site.rel.typ with
+  -- `LD_PREL_LO19`, `GOT_LD_PREL19`, `TSTBR14`, `CONDBR19`, `JUMP26`, `CALL26`
+  | 183, 0x111 | 183, 0x117 | 183, 0x118 | 183, 0x11a | 183, 0x11b => some (4, x - p)
+  | 183, 0x135 => some (4, slotOf state x - p)
+  | 183, 0x21f => some (4, slotOf state tp - p)
+  -- `LDST16`, `LDST32`, `LDST64`, `LDST128` and the GOT ones, of an offset that is the low bits of an address
+  | 183, 0x11c => some (2, x)
+  | 183, 0x11d => some (4, x)
+  | 183, 0x11e => some (8, x)
+  | 183, 0x12b => some (16, x)
+  | 183, 0x138 => some (8, slotOf state x)
+  | 183, 0x21e => some (8, slotOf state tp)
+  -- `BRANCH`, `JAL`, `RVC_BRANCH`, `RVC_JUMP`
+  | 243, 16 | 243, 17 | 243, 44 | 243, 45 => some (2, x - p)
+  -- `R_MIPS_PC16`, whose value is in words
+  | 8, 10 => some (4, site.s + sext ((readNat state.memory env.little site.off 4 &&& 0xffff) <<< 2 : Nat) 18 - p)
+  -- the branches, and the `DS` forms
+  | 20, 10 | 21, 10 | 20, 18 | 21, 18 | 20, 11 | 21, 11 => some (4, x - p)
+  | 21, 56 | 21, 57 => some (4, x)
+  | 21, 58 | 21, 59 => some (4, slotOf state x - (env.gotBase + 0x8000))
+  | 21, 63 | 21, 64 => some (4, x - (env.gotBase + 0x8000))
+  | 21, 87 | 21, 88 => some (4, slotOf state tp - (env.gotBase + 0x8000))
+  | 21, 95 | 21, 96 => some (4, tp)
+  -- the `DBL` ones of SystemZ, whose value is in halfwords
+  | 22, 17 | 22, 18 | 22, 19 | 22, 20 => some (2, x - p)
+  | _, _ => none
+
+/-- Whether what a relocation stores keeps its low bits. -/
+def aligned (env : Env) (state : LinkState) (site : Site) : Bool :=
+  match alignCheck env state site with
+  | some (alignment, value) => value % (alignment : Int) == 0
+  | none => true
+
+/-- Whether a relocation stores what it says. -/
+def fieldOk (env : Env) (state : LinkState) (site : Site) : Bool :=
+  fieldFits env state site && aligned env state site
+
+/-- What a relocation that doesn't store what it says has against it. -/
+def fieldProblem (env : Env) (state : LinkState) (site : Site) : String :=
+  if fieldFits env state site then
+    s!"relocation of type {site.rel.typ} at {site.p} needs a value aligned to {((alignCheck env state site).map (·.1)).getD 1}"
+  else s!"relocation of type {site.rel.typ} at {site.p} is out of range of its field"
+
+/-- Warns if a relocation has to cut its value to its field, or lose its low bits. -/
 def checkField (env : Env) (site : Site) : LinkM Unit := do
-  if !fieldFits env (← get) site then
-    warn s!"relocation of type {site.rel.typ} at {site.p} is out of range of its field"
+  let state ← get
+  if !fieldOk env state site then
+    warn (fieldProblem env state site)
 
 /-- Runs a pass, a failed relocation becoming a warning. -/
 def guard (action : LinkM Unit) : LinkM Unit :=

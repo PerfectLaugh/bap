@@ -945,7 +945,7 @@ section Slice
 open Bap.Analysis.Slice
 open_private Bap.Analysis.Slice in Bap.Analysis.Slice :
   Info Info.mk Info.writes Info.wholesale Info.uses Info.dynamic Info.always
-  constantRange usesExp merge chainRoot memoryWrites isStore stmtInfo blockInfo relevant moveBefore stmtBefore
+  constantRange closedBits affine offsetLimit accessAt bound oversized throughMove usesExp merge chainRoot memoryWrites isStore stmtInfo blockInfo relevant moveBefore stmtBefore
   codeBefore insnBefore Exits Exits.falls Exits.targets Exits.unknown constantTarget stmtExits codeExits mayEnd
   successorTable checkInsn checkEdges checkFlow expMemories stmtMemories
 
@@ -955,23 +955,39 @@ theorem slice_covers_overlaps {outer inner : Location} (h : outer.covers inner =
   exact h.1
 
 theorem slice_overlaps_symm (left right : Location) : left.overlaps right = right.overlaps left := by
-  cases left <;> cases right <;> simp only [Location.overlaps]
-  all_goals first
-    | rfl
-    | (rw [Bool.and_comm]; done)
-    | skip
-  · rename_i a b
+  have hbeq : ∀ a b : Bap.Var, (a == b) = (b == a) := by
+    intro a b
     by_cases h : a = b
     · subst h
       rfl
     · have h1 : (a == b) = false := by simpa using h
       have h2 : (b == a) = false := by simpa using fun e : b = a => h e.symm
       rw [h1, h2]
+  cases left <;> cases right <;> simp only [Location.overlaps]
+  all_goals first
+    | rfl
+    | (rw [Bool.and_comm]; done)
+    | exact hbeq _ _
+    | skip
   · rename_i a _ _ b _ _
     by_cases h : a = b
     · subst h
       simp only [Bool.and_assoc]
       rw [Bool.and_comm (decide _)]
+    · have h1 : (a == b) = false := by simpa using h
+      have h2 : (b == a) = false := by simpa using fun e : b = a => h e.symm
+      rw [h1, h2]
+      rfl
+  · rename_i a x j s b y k n
+    by_cases h : a = b
+    · subst h
+      have hx : (x != y) = (y != x) := by rw [bne, bne, hbeq]
+      have hap : Location.apart a j s k n = Location.apart a k n j s := by
+        unfold Location.apart
+        split
+        · rw [Bool.or_comm]
+        · rfl
+      rw [hx, hap]
     · have h1 : (a == b) = false := by simpa using h
       have h2 : (b == a) = false := by simpa using fun e : b = a => h e.symm
       rw [h1, h2]
@@ -1008,7 +1024,7 @@ theorem slice_relevant_iff (live : List Location) (code : Bap.Bil.Program) :
     relevant live (blockInfo code) = true ↔
       Info.always (blockInfo code) = true ∨
       (∃ m ∈ Info.wholesale (blockInfo code), ∃ l ∈ live, l.inMemory m = true) ∨
-      ∃ d ∈ Info.writes (blockInfo code), ∃ l ∈ live, d.overlaps l = true := by
+      ∃ d ∈ Info.writes (blockInfo code), ∃ l ∈ live, d.affects l = true := by
   simp [relevant, or_assoc]
 
 private theorem slice_usesExp_pure (exp : Bap.Bil.Exp) :
@@ -1142,20 +1158,28 @@ inductive slice_StmtWF (Ms : List Bap.Var) : Bap.Bil.Stmt → Prop where
 /-- All of `Ms` are memory variables, so no register is one of them. -/
 def slice_Memories (Ms : List Bap.Var) : Prop := ∀ m ∈ Ms, ∃ aw vw, m.typ = .mem aw vw
 
+/-- The `k`th byte at `offset` from the value of a register, in an address space of `w` bits. -/
+def slice_relAt (w : Nat) {wb : Nat} (c : BitVec wb) (offset : Int) (k : Nat) : BitVec w :=
+  c.setWidth w + BitVec.ofInt w offset + BitVec.ofNat w k
+
 /-- Two environments agree on the locations `P`, and each holds a full-paged memory of one width in
-each of `Ms`, of the width of its type. Bytes at or above the top of the address space aren't real and are ignored. -/
+each of `Ms`, of the width of its type. Bytes at or above the top of the address space aren't real and are ignored.
+A location that goes by a register says the register too, and then its bytes where the register points. -/
 def slice_Agree (Ms : List Bap.Var) (P : Location → Prop) (a b : Bap.Bil.Env) : Prop :=
   (∀ x, (∃ width, x.typ = Typ.imm width) → P (.reg x) → lookup a x = lookup b x) ∧
   ∀ m ∈ Ms, ∃ (w vw : Nat) (Ma Mb : Memory w), m.typ = .mem w vw ∧ lookup a m = .ok (.memory Ma) ∧ lookup b m = .ok (.memory Mb) ∧
-    PagesSized Ma ∧ PagesSized Mb ∧ ∀ address n, P (.memOf m address n) → ∀ p, address ≤ p → p < address + n →
-      p < 2 ^ w → Memory.readByte Ma (BitVec.ofNat w p) = Memory.readByte Mb (BitVec.ofNat w p)
+    PagesSized Ma ∧ PagesSized Mb ∧ (∀ address n, P (.memOf m address n) → ∀ p, address ≤ p → p < address + n →
+      p < 2 ^ w → Memory.readByte Ma (BitVec.ofNat w p) = Memory.readByte Mb (BitVec.ofNat w p)) ∧
+    (∀ base offset n, (∃ width, base.typ = Typ.imm width) → P (.rel m base offset n) → lookup a base = lookup b base ∧ ∀ (wb : Nat) (c : BitVec wb),
+      lookup a base = .ok (.bits c) → ∀ k, k < n → Memory.readByte Ma (slice_relAt w c offset k) = Memory.readByte Mb (slice_relAt w c offset k)) ∧
+    (P (.whole m) → ∀ q : BitVec w, Memory.readByte Ma q = Memory.readByte Mb q)
 
 private theorem slice_Agree_mono {Ms : List Bap.Var} {P Q : Location → Prop} {a b : Bap.Bil.Env}
     (hq : ∀ l, P l → Q l) (h : slice_Agree Ms Q a b) : slice_Agree Ms P a b := by
   obtain ⟨hr, hm⟩ := h
   refine ⟨fun x ht hp => hr x ht (hq _ hp), fun m hms => ?_⟩
-  obtain ⟨w, vw, Ma, Mb, ht, h1, h2, h3, h4, h5⟩ := hm m hms
-  exact ⟨w, vw, Ma, Mb, ht, h1, h2, h3, h4, fun address n hp => h5 address n (hq _ hp)⟩
+  obtain ⟨w, vw, Ma, Mb, ht, h1, h2, h3, h4, h5, h6, h7⟩ := hm m hms
+  exact ⟨w, vw, Ma, Mb, ht, h1, h2, h3, h4, fun address n hp => h5 address n (hq _ hp), fun base off n hi hp => h6 base off n hi (hq _ hp), fun hp => h7 (hq _ hp)⟩
 
 /-- Each memory of `Ms` in `a` holds a well-formed memory. -/
 def slice_MemOK (Ms : List Bap.Var) (a : Bap.Bil.Env) : Prop :=
@@ -1165,14 +1189,16 @@ private theorem slice_Agree_refl {Ms : List Bap.Var} {P : Location → Prop} {a 
     (h : slice_MemOK Ms a) : slice_Agree Ms P a a := by
   refine ⟨fun _ _ _ => rfl, fun m hm => ?_⟩
   obtain ⟨w, vw, M, ht, h1, h2⟩ := h m hm
-  exact ⟨w, vw, M, M, ht, h1, h1, h2, h2, fun _ _ _ _ _ _ _ => rfl⟩
+  exact ⟨w, vw, M, M, ht, h1, h1, h2, h2, fun _ _ _ _ _ _ _ => rfl, fun _ _ _ _ _ => ⟨rfl, fun _ _ _ _ _ => rfl⟩, fun _ _ => rfl⟩
 
 private theorem slice_Agree_symm {Ms : List Bap.Var} {P : Location → Prop} {a b : Bap.Bil.Env}
     (h : slice_Agree Ms P a b) : slice_Agree Ms P b a := by
   obtain ⟨hr, hm⟩ := h
   refine ⟨fun x ht hp => (hr x ht hp).symm, fun m hms => ?_⟩
-  obtain ⟨w, vw, Ma, Mb, ht, h1, h2, h3, h4, h5⟩ := hm m hms
-  exact ⟨w, vw, Mb, Ma, ht, h2, h1, h4, h3, fun address n hp p h6 h7 h8 => (h5 address n hp p h6 h7 h8).symm⟩
+  obtain ⟨w, vw, Ma, Mb, ht, h1, h2, h3, h4, h5, h6, h7⟩ := hm m hms
+  refine ⟨w, vw, Mb, Ma, ht, h2, h1, h4, h3, fun address n hp p k6 k7 k8 => (h5 address n hp p k6 k7 k8).symm, fun base off n hi hp => ?_, fun hp q => (h7 hp q).symm⟩
+  obtain ⟨he, hbytes⟩ := h6 base off n hi hp
+  exact ⟨he.symm, fun wb c hc k hk => (hbytes wb c (he.trans hc) k hk).symm⟩
 
 private theorem slice_memory_inj {w w' : Nat} {M : Memory w} {M' : Memory w'}
     (h : (Bap.Value.memory M : Bap.Value) = Bap.Value.memory M') : w = w' ∧ HEq M M' := by
@@ -1184,18 +1210,22 @@ private theorem slice_Agree_trans {Ms : List Bap.Var} {P : Location → Prop} {a
   obtain ⟨hr, hm⟩ := h
   obtain ⟨kr, km⟩ := k
   refine ⟨fun x ht hp => (hr x ht hp).trans (kr x ht hp), fun m hms => ?_⟩
-  obtain ⟨w, vw, Ma, Mb, ht, h1, h2, h3, h4, h5⟩ := hm m hms
-  obtain ⟨w', _, Mb', Mc, _, k1, k2, k3, k4, k5⟩ := km m hms
+  obtain ⟨w, vw, Ma, Mb, ht, h1, h2, h3, h4, h5, h6, h7⟩ := hm m hms
+  obtain ⟨w', _, Mb', Mc, _, k1, k2, k3, k4, k5, k6, k7⟩ := km m hms
   have he : (Except.ok (Bap.Value.memory Mb) : Except String Bap.Value) = .ok (.memory Mb') := h2.symm.trans k1
   obtain ⟨rfl, hh⟩ := slice_memory_inj (Except.ok.inj he)
   cases hh
-  exact ⟨w, vw, Ma, Mc, ht, h1, k2, h3, k4,
-    fun address n hp p h6 h7 h8 => (h5 address n hp p h6 h7 h8).trans (k5 address n hp p h6 h7 h8)⟩
+  refine ⟨w, vw, Ma, Mc, ht, h1, k2, h3, k4,
+    fun address n hp p g6 g7 g8 => (h5 address n hp p g6 g7 g8).trans (k5 address n hp p g6 g7 g8),
+    fun base off n hi hp => ?_, fun hp q => (h7 hp q).trans (k7 hp q)⟩
+  obtain ⟨he, hbytes⟩ := h6 base off n hi hp
+  obtain ⟨ke, kbytes⟩ := k6 base off n hi hp
+  exact ⟨he.trans ke, fun wb c hc k hk => (hbytes wb c hc k hk).trans (kbytes wb c (he.symm.trans hc) k hk)⟩
 
 private theorem slice_Agree_memOK_left {Ms : List Bap.Var} {P : Location → Prop} {a b : Bap.Bil.Env}
     (h : slice_Agree Ms P a b) : slice_MemOK Ms a := by
   intro m hm
-  obtain ⟨w, vw, Ma, _, ht, h1, _, h3, _, _⟩ := h.2 m hm
+  obtain ⟨w, vw, Ma, _, ht, h1, _, h3, _⟩ := h.2 m hm
   exact ⟨w, vw, Ma, ht, h1, h3⟩
 
 private theorem slice_Agree_memOK_right {Ms : List Bap.Var} {P : Location → Prop} {a b : Bap.Bil.Env}
@@ -1216,29 +1246,40 @@ private theorem slice_imm_ne_mem {Ms : List Bap.Var} (hM : slice_Memories Ms) {m
   rw [h'] at h
   cases h
 
-/-- Binding a register to one value on both sides keeps agreement. -/
+/-- Binding a register to one value on both sides keeps agreement, for what agreed and for the register itself. Bytes
+that go by the register are for the caller to say. -/
 private theorem slice_Agree_bind {Ms : List Bap.Var} (hM : slice_Memories Ms) {x : Bap.Var}
-    (hx : ∃ width, x.typ = Typ.imm width) {P : Location → Prop} {a b : Bap.Bil.Env}
-    (h : slice_Agree Ms P a b) (value : Bap.Value) :
-    slice_Agree Ms (fun l => P l ∨ l = .reg x) (Bap.Bil.bind a x value) (Bap.Bil.bind b x value) := by
+    (hx : ∃ width, x.typ = Typ.imm width) {P Q : Location → Prop} {a b : Bap.Bil.Env}
+    (h : slice_Agree Ms P a b) (value : Bap.Value)
+    (hq : ∀ l, Q l → (∀ m off n, l ≠ .rel m x off n) → l ≠ .reg x → P l)
+    (hrel : ∀ m ∈ Ms, ∀ (w : Nat) (Ma Mb : Memory w), lookup a m = .ok (.memory Ma) → lookup b m = .ok (.memory Mb) → ∀ off n, Q (.rel m x off n) →
+      ∀ (wb : Nat) (c : BitVec wb), value = .bits c → ∀ k, k < n → Memory.readByte Ma (slice_relAt w c off k) = Memory.readByte Mb (slice_relAt w c off k)) :
+    slice_Agree Ms Q (Bap.Bil.bind a x value) (Bap.Bil.bind b x value) := by
   obtain ⟨hr, hm⟩ := h
   refine ⟨fun y ht hp => ?_, fun m hms => ?_⟩
   · by_cases hy : x = y
     · subst hy
       rw [slice_lookup_bind_same, slice_lookup_bind_same]
     · rw [slice_lookup_bind_other _ hy, slice_lookup_bind_other _ hy]
-      rcases hp with hp | hp
-      · exact hr y ht hp
-      · cases hp
-        exact absurd rfl hy
-  · obtain ⟨w, vw, Ma, Mb, ht, h1, h2, h3, h4, h5⟩ := hm m hms
+      exact hr y ht (hq _ hp (by intro m off n he; cases he) (by intro he; injection he with he; exact hy he.symm))
+  · obtain ⟨w, vw, Ma, Mb, ht, h1, h2, h3, h4, h5, h6, h7⟩ := hm m hms
     have hne := slice_imm_ne_mem hM hms hx
-    refine ⟨w, vw, Ma, Mb, ht, ?_, ?_, h3, h4, fun address n hp => ?_⟩
+    refine ⟨w, vw, Ma, Mb, ht, ?_, ?_, h3, h4, fun address n hp => ?_, fun base off n hi hp => ?_, fun hp => ?_⟩
     · rw [slice_lookup_bind_other _ hne]; exact h1
     · rw [slice_lookup_bind_other _ hne]; exact h2
-    · rcases hp with hp | hp
-      · exact h5 address n hp
-      · cases hp
+    · exact h5 address n (hq _ hp (by intro m off n he; cases he) (by intro he; cases he))
+    · by_cases hb : x = base
+      · subst hb
+        refine ⟨by rw [slice_lookup_bind_same, slice_lookup_bind_same], fun wb c hc k hk => ?_⟩
+        rw [slice_lookup_bind_same] at hc
+        exact hrel m hms w Ma Mb h1 h2 off n hp wb c (Except.ok.inj hc) k hk
+      · rw [slice_lookup_bind_other _ hb, slice_lookup_bind_other _ hb]
+        obtain ⟨he, hbytes⟩ := h6 base off n hi (hq _ hp (by
+          intro m' off' n' he
+          injection he with _ he
+          exact hb he.symm) (by intro he; cases he))
+        exact ⟨he, hbytes⟩
+    · exact h7 (hq _ hp (by intro m off n he; cases he) (by intro he; cases he))
 
 private def slice_R {α : Type} (x y : Except String α) : Prop := ∀ v, x = .ok v → y = .ok v
 
@@ -1367,64 +1408,342 @@ private theorem slice_read_congr {w : Nat} {Ma Mb : Memory w} (c : BitVec w) (en
     exact h k (List.mem_range.mp hk)
   simp only [Memory.read, this]
 
+private theorem slice_closedBits_eval {exp : Bap.Bil.Exp} {x : Σ width, BitVec width} (h : closedBits exp = some x) :
+    ∀ env, evalExp env exp = .ok (.bits x.2) := by
+  intro env
+  simp only [closedBits] at h
+  cases he : evalExp [] exp with
+  | error e => simp [he] at h
+  | ok value =>
+    rw [he] at h
+    cases value with
+    | bits c =>
+      simp only [Bap.Value.asBits, Except.toOption, Option.some.injEq] at h
+      subst h
+      exact slice_eval_extends exp (fun v r hr => by simp [lookup] at hr) _ he
+    | memory _ => simp [Bap.Value.asBits, Except.toOption] at h
+    | undefined => simp [Bap.Value.asBits, Except.toOption] at h
+
+private theorem slice_ok_bits {e : Bap.Bil.Exp} {env : Bap.Bil.Env} {w : Nat} {c : BitVec w} (h : evalExp env e = .ok (.bits c)) {β : Type}
+    (f : (Σ width, BitVec width) → Except String β) :
+    ((evalExp env e >>= Bap.Value.asBits) >>= f) = f ⟨w, c⟩ := by
+  rw [h]
+  rfl
+
+private theorem slice_bin_inv {op : Bap.Bil.BinOp} {l r : Bap.Bil.Exp} {env : Bap.Bil.Env} {W : Nat} {cv : BitVec W}
+    (h : evalExp env (.bin op l r) = .ok (.bits cv)) :
+    ∃ (W1 : Nat) (x : BitVec W1) (W2 : Nat) (y : BitVec W2), evalExp env l = .ok (.bits x) ∧ evalExp env r = .ok (.bits y) ∧
+      Bap.Bil.evalBin op ⟨W1, x⟩ ⟨W2, y⟩ = .ok (.bits cv) := by
+  simp only [evalExp] at h
+  obtain ⟨vl, h1, h⟩ := slice_bind_ok h
+  obtain ⟨⟨W1, x⟩, h2, h⟩ := slice_bind_ok h
+  obtain ⟨vr, h3, h⟩ := slice_bind_ok h
+  obtain ⟨⟨W2, y⟩, h4, h⟩ := slice_bind_ok h
+  cases vl <;> simp [Bap.Value.asBits] at h2
+  cases vr <;> simp [Bap.Value.asBits] at h4
+  obtain ⟨rfl, hx⟩ := h2
+  obtain ⟨rfl, hy⟩ := h4
+  cases hx; cases hy
+  exact ⟨_, _, _, _, h1, h3, h⟩
+
+private theorem slice_bits_inj {W1 W2 : Nat} {x : BitVec W1} {y : BitVec W2}
+    (h : (Except.ok (.bits x) : Except String Bap.Value) = .ok (.bits y)) : W1 = W2 ∧ HEq x y := by
+  cases h
+  exact ⟨rfl, HEq.rfl⟩
+
+private theorem slice_relAt_add {W wb : Nat} (c : BitVec wb) (o : Int) (k : BitVec W) :
+    slice_relAt W c o 0 + k = slice_relAt W c (o + k.toInt) 0 := by
+  simp only [slice_relAt, BitVec.ofInt_add, BitVec.ofInt_toInt, BitVec.add_zero, BitVec.add_assoc]
+
+private theorem slice_relAt_sub {W wb : Nat} (c : BitVec wb) (o : Int) (k : BitVec W) :
+    slice_relAt W c o 0 - k = slice_relAt W c (o - k.toInt) 0 := by
+  simp only [slice_relAt, Int.sub_eq_add_neg, BitVec.ofInt_add, BitVec.ofInt_neg, BitVec.ofInt_toInt, BitVec.add_zero,
+    BitVec.sub_eq_add_neg, BitVec.add_assoc]
+
+/-- What `affine` says of a value: it goes by the register and the constant, at the width known. -/
+theorem slice_affine_eval (e : Bap.Bil.Exp) : ∀ {env : Bap.Bil.Env} {W : Nat} {cv : BitVec W} {base : Bap.Var} {offset : Int} {known : Option Nat},
+    affine e = some (base, offset, known) → evalExp env e = .ok (.bits cv) →
+    (∃ width, base.typ = Typ.imm width) ∧ ∃ (wb : Nat) (c : BitVec wb), lookup env base = .ok (.bits c) ∧ known.all (· == W) = true ∧
+      cv = slice_relAt W c offset 0 ∧ (known = none → offset = 0 ∧ W = wb ∧ HEq cv c) := by
+  induction e with
+  | var x =>
+    intro env W cv base offset known h hv
+    simp only [affine] at h
+    split at h
+    · next hty =>
+      cases h
+      have him : ∃ width, x.typ = Typ.imm width := by
+        revert hty
+        cases x.typ <;> simp
+      exact ⟨him, _, cv, by simpa [evalExp] using hv, rfl, by simp [slice_relAt], fun _ => ⟨rfl, rfl, HEq.rfl⟩⟩
+    · simp at h
+  | cast kind width value ih =>
+    intro env W cv base offset known h hv
+    simp only [affine] at h
+    split at h
+    · next hkind =>
+      split at h
+      · next inner base' offset' known' hi =>
+        simp only [evalExp] at hv
+        obtain ⟨v0, h1, hv⟩ := slice_bind_ok hv
+        cases v0 with
+        | memory _ => simp [Bap.Value.asBits, bind, Except.bind] at hv
+        | undefined => simp [Bap.Value.asBits, bind, Except.bind] at hv
+        | @bits W0 c0 =>
+          have hk : kind = .low ∨ kind = .unsigned := by simpa using hkind
+          have hres : (Except.ok (.bits (BitVec.setWidth width c0)) : Except String Bap.Value) = .ok (.bits cv) := by
+            rcases hk with rfl | rfl <;> exact hv
+          obtain ⟨rfl, hcv⟩ := slice_bits_inj hres
+          cases hcv
+          obtain ⟨him, wb, c, hl, hk0, hc0, hn⟩ := ih hi h1
+          cases known' with
+          | none =>
+            obtain ⟨rfl, rfl, hheq⟩ := hn rfl
+            cases hheq
+            simp only at h
+            split at h
+            · simp only [Option.some.injEq, Prod.mk.injEq] at h
+              obtain ⟨rfl, rfl, rfl⟩ := h
+              exact ⟨him, _, c0, hl, by simp, by simp [slice_relAt], by simp⟩
+            · simp at h
+          | some other =>
+            simp only at h
+            split at h
+            · next hother =>
+              simp only [Option.some.injEq, Prod.mk.injEq] at h
+              obtain ⟨rfl, rfl, rfl⟩ := h
+              have h1 : other = W0 := by simpa using hk0
+              have h2 : other = width := by simpa using hother
+              subst h1
+              subst h2
+              refine ⟨him, wb, c, hl, by simp, ?_, by simp⟩
+              simpa using hc0
+            · simp at h
+      · simp at h
+    · simp at h
+  | bin op left right il ir =>
+    intro env W cv base offset known h hv
+    obtain ⟨W1, x, W2, y, hx, hy, hb⟩ := slice_bin_inv hv
+    by_cases hW : W1 = W2
+    · subst hW
+      cases op
+      case add =>
+        have hcv : (Except.ok (.bits (x + y)) : Except String Bap.Value) = .ok (.bits cv) := by
+          simpa [Bap.Bil.evalBin] using hb
+        obtain ⟨rfl, hc⟩ := slice_bits_inj hcv
+        cases hc
+        simp only [affine] at h
+        split at h
+        · next k hk =>
+          split at h
+          · next b o kn hi =>
+            split at h
+            · simp only [Option.some.injEq, Prod.mk.injEq] at h
+              obtain ⟨rfl, rfl, rfl⟩ := h
+              have hkv := slice_closedBits_eval hk env
+              obtain ⟨W3, k'⟩ := k
+              obtain ⟨rfl, hh⟩ := slice_bits_inj (hy.symm.trans hkv)
+              cases hh
+              obtain ⟨him, wb, c, hl, _, hc0, _⟩ := il hi hx
+              exact ⟨him, wb, c, hl, by simp, by rw [hc0, slice_relAt_add], by simp⟩
+            · simp at h
+          · simp at h
+        · next hk =>
+          split at h
+          · next k hk2 =>
+            split at h
+            · next b o kn hi =>
+              split at h
+              · simp only [Option.some.injEq, Prod.mk.injEq] at h
+                obtain ⟨rfl, rfl, rfl⟩ := h
+                have hkv := slice_closedBits_eval hk2 env
+                obtain ⟨W3, k'⟩ := k
+                obtain ⟨rfl, hh⟩ := slice_bits_inj (hx.symm.trans hkv)
+                cases hh
+                obtain ⟨him, wb, c, hl, _, hc0, _⟩ := ir hi hy
+                exact ⟨him, wb, c, hl, by simp, by rw [hc0, BitVec.add_comm, slice_relAt_add], by simp⟩
+              · simp at h
+            · simp at h
+          · simp at h
+      case sub =>
+        have hcv : (Except.ok (.bits (x - y)) : Except String Bap.Value) = .ok (.bits cv) := by
+          simpa [Bap.Bil.evalBin] using hb
+        obtain ⟨rfl, hc⟩ := slice_bits_inj hcv
+        cases hc
+        simp only [affine] at h
+        split at h
+        · next k hk =>
+          split at h
+          · next b o kn hi =>
+            split at h
+            · simp only [Option.some.injEq, Prod.mk.injEq] at h
+              obtain ⟨rfl, rfl, rfl⟩ := h
+              have hkv := slice_closedBits_eval hk env
+              obtain ⟨W3, k'⟩ := k
+              obtain ⟨rfl, hh⟩ := slice_bits_inj (hy.symm.trans hkv)
+              cases hh
+              obtain ⟨him, wb, c, hl, _, hc0, _⟩ := il hi hx
+              exact ⟨him, wb, c, hl, by simp, by rw [hc0, slice_relAt_sub], by simp⟩
+            · simp at h
+          · simp at h
+        · simp at h
+      all_goals simp [affine] at h
+    · simp [Bap.Bil.evalBin, hW] at hb
+  | int _ | load _ _ _ _ _ _ | store _ _ _ _ _ _ _ _ | un _ _ _ | letIn _ _ _ _ _ | ite _ _ _ _ _ _ | extract _ _ _ _ | concat _ _ _ _ | unknown _ _ =>
+    intro env W cv base offset known h
+    simp [affine] at h
+
+/-- A byte of a location of memory, in an environment. -/
+def slice_Hits (env : Bap.Bil.Env) (w : Nat) : Location → BitVec w → Prop
+  | .memOf _ n s, q => ∃ k, k < s ∧ n + k < 2 ^ w ∧ q = BitVec.ofNat w (n + k)
+  | .rel _ b off s, q => ∃ (wb : Nat) (c : BitVec wb), lookup env b = .ok (.bits c) ∧ ∃ k, k < s ∧ q = slice_relAt w c off k
+  | _, _ => False
+
+private theorem slice_relAt_zero_add {W wb : Nat} (c : BitVec wb) (off : Int) (k : Nat) :
+    slice_relAt W c off 0 + BitVec.ofNat W k = slice_relAt W c off k := by
+  simp [slice_relAt]
+
+/-- What location an access has. -/
+private theorem slice_accessAt_cases {memory : Bap.Var} {w vw : Nat} (ht : memory.typ = .mem w vw) (address : Bap.Bil.Exp) (size : Nat) :
+    (∃ n, constantRange address size = some n ∧ accessAt memory address size = .memOf memory n size) ∨
+    (∃ base off known, affine address = some (base, off, known) ∧ known.all (· == w) = true ∧ accessAt memory address size = .rel memory base off size) ∨
+    accessAt memory address size = .whole memory := by
+  cases hr : constantRange address size with
+  | some n => exact .inl ⟨n, rfl, by simp [accessAt, hr]⟩
+  | none =>
+    cases ha : affine address with
+    | none => exact .inr (.inr (by simp [accessAt, hr, ha, ht]))
+    | some x =>
+      obtain ⟨base, off, known⟩ := x
+      by_cases hc : (known.all (· == w) && decide (-offsetLimit ≤ off) && decide (off ≤ offsetLimit)) = true
+      · refine .inr (.inl ⟨base, off, known, rfl, ?_, by simp only [accessAt, hr, ha, ht, hc, ↓reduceIte]⟩)
+        simp only [Bool.and_eq_true] at hc
+        exact hc.1.1
+      · exact .inr (.inr (by simp only [accessAt, hr, ha, ht, hc, Bool.false_eq_true, ↓reduceIte]))
+
+/-- The bytes of an access are in its location, if it has one. -/
+private theorem slice_accessAt_hits {memory : Bap.Var} {w vw : Nat} (ht : memory.typ = .mem w vw) {address : Bap.Bil.Exp} {size : Nat}
+    {env : Bap.Bil.Env} {c : BitVec w} (hev : evalExp env address = .ok (.bits c)) {k : Nat} (hk : k < size)
+    (hnot : ∀ m, accessAt memory address size ≠ .whole m) :
+    slice_Hits env w (accessAt memory address size) (c + BitVec.ofNat w k) := by
+  rcases slice_accessAt_cases ht address size with ⟨n, hr, he⟩ | ⟨base, off, known, ha, _, he⟩ | he
+  · rw [he]
+    obtain ⟨w', c', hca, rfl, hrange⟩ := slice_constantRange_eval hr
+    obtain ⟨rfl, hh⟩ := slice_bits_inj ((hca env).symm.trans hev)
+    cases hh
+    exact ⟨k, hk, by omega, slice_add_ofNat _ _⟩
+  · rw [he]
+    obtain ⟨_, wb, cb, hl, _, hc0, _⟩ := slice_affine_eval address ha hev
+    exact ⟨wb, cb, hl, k, hk, by rw [hc0, slice_relAt_zero_add]⟩
+  · exact absurd he (hnot _)
+
+/-- A read of a location that agrees reads the same. -/
+private theorem slice_read_agree {Ms : List Bap.Var} {P : Location → Prop} {a b : Bap.Bil.Env} (h : slice_Agree Ms P a b) {m : Bap.Var} (hms : m ∈ Ms)
+    {w vw : Nat} {Ma Mb : Memory w} (ht : m.typ = .mem w vw) (h1 : lookup a m = .ok (.memory Ma)) (h2 : lookup b m = .ok (.memory Mb))
+    {address : Bap.Bil.Exp} {size : Nat} (hp : P (accessAt m address size)) {c : BitVec w} (hev : evalExp a address = .ok (.bits c)) (endian : Bap.Endian) :
+    Memory.read Ma c endian size = Memory.read Mb c endian size := by
+  obtain ⟨w', _, Ma', Mb', ht', k1, k2, _, _, h5, h6, h7⟩ := h.2 m hms
+  obtain ⟨rfl, hh1⟩ := slice_memory_inj (Except.ok.inj (h1.symm.trans k1))
+  cases hh1
+  obtain ⟨_, hh2⟩ := slice_memory_inj (Except.ok.inj (h2.symm.trans k2))
+  cases hh2
+  apply slice_read_congr
+  intro k hk
+  rw [← slice_add_ofNat]
+  rcases slice_accessAt_cases ht address size with ⟨n, hr, he⟩ | ⟨base, off, known, ha, _, he⟩ | he <;> rw [he] at hp
+  · obtain ⟨w', c', hca, rfl, hrange⟩ := slice_constantRange_eval hr
+    obtain ⟨rfl, hh⟩ := slice_bits_inj ((hca a).symm.trans hev)
+    cases hh
+    rw [slice_add_ofNat]
+    exact h5 _ size hp _ (by omega) (by omega) (by omega)
+  · obtain ⟨him, wb, cb, hl, _, hc0, _⟩ := slice_affine_eval address ha hev
+    obtain ⟨_, hbytes⟩ := h6 base off size him hp
+    rw [hc0, slice_relAt_zero_add]
+    exact hbytes wb cb hl k hk
+  · exact h7 hp _
+
 /-- Evaluation of a value expression depends only on the locations it uses. -/
-private theorem slice_eval_agree {Ms : List Bap.Var} (hM : slice_Memories Ms)
-    {P : Location → Prop} (e : Bap.Bil.Exp) : ∀ {a b : Bap.Bil.Env}, slice_ValueWF Ms e →
+private theorem slice_eval_agree {Ms : List Bap.Var} (hM : slice_Memories Ms) (e : Bap.Bil.Exp) : ∀ {P : Location → Prop} {a b : Bap.Bil.Env}, slice_ValueWF Ms e →
     Info.dynamic (usesExp e) = false → (∀ l ∈ Info.uses (usesExp e), P l) → slice_Agree Ms P a b →
     slice_R (evalExp a e) (evalExp b e) := by
   induction e with
-  | int v => intro a b _ _ _ _; exact slice_R_refl _
+  | int v => intro P a b _ _ _ _; exact slice_R_refl _
   | var x =>
-    intro a b hw _ hu h
+    intro P a b hw _ hu h
     obtain ⟨width, ht⟩ := hw
     simp only [evalExp]
     rw [h.1 x ⟨width, ht⟩ (hu _ (by simp [usesExp, ht]))]
     exact slice_R_refl _
   | load mem ad endian size _ ia =>
-    intro a b hw hd hu h
+    intro P a b hw hd hu h
     obtain ⟨⟨m, hms, rfl⟩, hwa⟩ := hw
-    cases hr : constantRange ad size with
-    | none => simp [usesExp, hr] at hd
-    | some n =>
-      simp only [usesExp, hr] at hd hu
-      obtain ⟨w, _, Ma, Mb, _, h1, h2, _, _, h5⟩ := h.2 m hms
-      obtain ⟨w', c, hca, rfl, hrange⟩ := slice_constantRange_eval hr
-      have hp : P (.memOf m c.toNat size) := hu _ (by simp)
-      intro v hv
-      by_cases hwe : w' = w
-      · subst hwe
-        simp [evalExp, h1, hca, bind, Except.bind, expectMemory, Bap.Value.asBits] at hv
-        subst hv
-        simp [evalExp, h2, hca, bind, Except.bind, expectMemory, Bap.Value.asBits]
-        apply slice_read_congr
-        intro k hk
-        exact (h5 c.toNat size hp (c.toNat + k) (by omega) (by omega) (by omega)).symm
-      · simp [evalExp, h1, hca, bind, Except.bind, expectMemory, Bap.Value.asBits, hwe] at hv
-  | store _ _ _ _ _ _ _ _ => intro _ _ hw; exact hw.elim
+    simp only [usesExp] at hd hu
+    have hr := ia hwa hd (fun l hl => hu l (by simp [hl])) h
+    obtain ⟨w, vw, Ma, Mb, ht, h1, h2, _⟩ := h.2 m hms
+    intro v hv
+    simp only [evalExp, h1, bind, Except.bind, expectMemory] at hv
+    cases hA : evalExp a ad with
+    | error e => simp [hA] at hv
+    | ok va =>
+      rw [hA] at hv
+      cases va with
+      | memory _ => simp [Bap.Value.asBits] at hv
+      | undefined => simp [Bap.Value.asBits] at hv
+      | @bits w' c =>
+        by_cases hwe : w' = w
+        · subst hwe
+          simp [Bap.Value.asBits] at hv
+          subst hv
+          have hB := hr _ hA
+          simp [evalExp, h2, hB, bind, Except.bind, expectMemory, Bap.Value.asBits]
+          exact (slice_read_agree h hms ht h1 h2 (hu _ (by simp)) hA endian).symm
+        · simp [Bap.Value.asBits, hwe] at hv
+  | store _ _ _ _ _ _ _ _ => intro _ _ _ hw; exact hw.elim
   | bin _ _ _ il ir =>
-    intro a b hw hd hu h
+    intro P a b hw hd hu h
     simp only [usesExp, Bool.or_eq_false_iff] at hd
     simp only [evalExp]
     exact slice_R_bind (il hw.1 hd.1 (fun l hl => hu l (by simp [usesExp, hl])) h) fun _ =>
       slice_R_bind (slice_R_refl _) fun _ =>
       slice_R_bind (ir hw.2 hd.2 (fun l hl => hu l (by simp [usesExp, hl])) h) fun _ => slice_R_refl _
   | un _ _ i =>
-    intro a b hw hd hu h
+    intro P a b hw hd hu h
     simp only [evalExp]
     exact slice_R_bind (i hw hd hu h) fun _ => slice_R_refl _
   | cast _ _ _ i =>
-    intro a b hw hd hu h
+    intro P a b hw hd hu h
     simp only [evalExp]
     exact slice_R_bind (i hw hd hu h) fun _ => slice_R_refl _
-  | letIn x _ _ il ib =>
-    intro a b hw hd hu h
+  | letIn x _ body il ib =>
+    intro P a b hw hd hu h
     simp only [usesExp, Bool.or_eq_false_iff] at hd
     simp only [evalExp]
     refine slice_R_bind (il hw.2.1 hd.1 (fun l hl => hu l (by simp [usesExp, hl])) h) fun r => ?_
-    exact ib hw.2.2 hd.2 (fun l hl => hu l (by simp [usesExp, hl]))
-      (slice_Agree_mono (fun _ hp => .inl hp) (slice_Agree_bind hM hw.1 h r))
+    refine ib (P := (· ∈ Info.uses (usesExp body))) hw.2.2 hd.2 (fun l hl => hl) ?_
+    refine slice_Agree_bind hM hw.1 h r ?_ ?_
+    · intro l hl hne _hreg
+      have : bound x l = l := by
+        cases l <;> try rfl
+        next m b' off n =>
+          simp only [bound]
+          split
+          · next he =>
+            have : b' = x := by simpa using he
+            subst this
+            exact absurd rfl (hne _ _ _)
+          · rfl
+      exact hu l (by simp only [usesExp, List.mem_append, List.mem_map]; exact .inr ⟨l, hl, this⟩)
+    · intro m hms w Ma Mb h1 h2 off n hq wb c _ k _
+      obtain ⟨w', _, Ma', Mb', _, k1, k2, _, _, _, _, h7⟩ := h.2 m hms
+      obtain ⟨rfl, hh1⟩ := slice_memory_inj (Except.ok.inj (h1.symm.trans k1))
+      cases hh1
+      obtain ⟨_, hh2⟩ := slice_memory_inj (Except.ok.inj (h2.symm.trans k2))
+      cases hh2
+      refine h7 (hu _ ?_) _
+      simp only [usesExp, List.mem_append, List.mem_map]
+      exact .inr ⟨_, hq, by simp [bound]⟩
   | ite _ _ _ ic iy in_ =>
-    intro a b hw hd hu h
+    intro P a b hw hd hu h
     simp only [usesExp, Bool.or_eq_false_iff] at hd
     simp only [evalExp]
     refine slice_R_bind (ic hw.1 hd.1.1 (fun l hl => hu l (by simp [usesExp, hl])) h) fun _ =>
@@ -1438,17 +1757,20 @@ private theorem slice_eval_agree {Ms : List Bap.Var} (hM : slice_Memories Ms)
       · exact in_ hw.2.2 hd.2 (fun l hl => hu l (by simp [usesExp, hl])) h
     · simpa [hw1] using slice_R_refl _
   | extract _ _ _ i =>
-    intro a b hw hd hu h
+    intro P a b hw hd hu h
     simp only [evalExp]
     exact slice_R_bind (i hw hd hu h) fun _ => slice_R_refl _
   | concat _ _ il ir =>
-    intro a b hw hd hu h
+    intro P a b hw hd hu h
     simp only [usesExp, Bool.or_eq_false_iff] at hd
     simp only [evalExp]
     exact slice_R_bind (il hw.1 hd.1 (fun l hl => hu l (by simp [usesExp, hl])) h) fun _ =>
       slice_R_bind (slice_R_refl _) fun _ =>
       slice_R_bind (ir hw.2 hd.2 (fun l hl => hu l (by simp [usesExp, hl])) h) fun _ => slice_R_refl _
-  | unknown _ _ => intro a b _ hd; simp [usesExp] at hd
+  | unknown _ _ => intro P a b _ hd; simp [usesExp] at hd
+
+private theorem slice_value_inj {W1 W2 : Nat} {x : BitVec W1} {y : BitVec W2}
+    (h : (Except.ok (.bits x) : Except String Bap.Value) = .ok (.bits y)) : W1 = W2 ∧ HEq x y := slice_bits_inj h
 
 /-- Writing the same value at one address gives the same bytes in its range, whatever was there. -/
 private theorem slice_write_same_byte {w valueWidth : Nat} {M1 M2 M1' M2' : Memory w} (h1 : PagesSized M1)
@@ -1483,17 +1805,18 @@ private theorem slice_write_frame {w valueWidth : Nat} {M M' : Memory w} (h : Pa
   omega
 
 /-- Writes through a store chain from the memory `r`, on both sides: equal bytes stay equal, and what
-the chain writes becomes equal, whichever variable `dst` it goes to. -/
-private theorem slice_chain_agree {Ms : List Bap.Var} {typ : Typ} (hM : slice_Memories Ms) {dst r : Bap.Var}
-    {P : Location → Prop} {a b : Bap.Bil.Env} (hab : slice_Agree Ms P a b) {w : Nat} {Ma Mb : Memory w}
+the chain writes becomes equal, whichever variable `dst` it goes to and wherever it stores. -/
+private theorem slice_chain_agree {Ms : List Bap.Var} {typ : Typ} (hM : slice_Memories Ms) {dst r : Bap.Var} {wd vd : Nat} (hdst : dst.typ = .mem wd vd)
+    {P : Location → Prop} {a b : Bap.Bil.Env} (hab : slice_Agree Ms P a b) {w : Nat} (hwd : wd = w) {Ma Mb : Memory w}
     (h1 : lookup a r = .ok (.memory Ma)) (h2 : lookup b r = .ok (.memory Mb))
     (h3 : PagesSized Ma) (h4 : PagesSized Mb) (c : Bap.Bil.Exp) :
-    slice_ChainWF Ms typ c → chainRoot c = some r → (memoryWrites dst c).2 = false → Info.dynamic (usesExp c) = false →
+    slice_ChainWF Ms typ c → chainRoot c = some r → oversized dst c = false → Info.dynamic (usesExp c) = false →
     (∀ l ∈ Info.uses (usesExp c), P l) → ∀ v, evalExp a c = .ok v →
     ∃ Ma' Mb' : Memory w, v = .memory Ma' ∧ evalExp b c = .ok (.memory Mb') ∧ PagesSized Ma' ∧ PagesSized Mb' ∧
-      ∀ p, p < 2 ^ w → (Memory.readByte Ma (BitVec.ofNat w p) = Memory.readByte Mb (BitVec.ofNat w p) ∨
-        ∃ n s, Location.memOf dst n s ∈ (memoryWrites dst c).1 ∧ n ≤ p ∧ p < n + s) →
-        Memory.readByte Ma' (BitVec.ofNat w p) = Memory.readByte Mb' (BitVec.ofNat w p) := by
+      ∀ q : BitVec w, (Memory.readByte Ma q = Memory.readByte Mb q ∨
+        ∃ d ∈ (memoryWrites dst c).1, slice_Hits a w d q) →
+        Memory.readByte Ma' q = Memory.readByte Mb' q := by
+  subst hwd
   induction c with
   | var x =>
     intro hw hroot _ _ _ v hv
@@ -1501,77 +1824,100 @@ private theorem slice_chain_agree {Ms : List Bap.Var} {typ : Typ} (hM : slice_Me
     subst hroot
     simp only [evalExp, h1] at hv
     cases hv
-    refine ⟨Ma, Mb, rfl, by simpa [evalExp] using h2, h3, h4, fun p _ hor => ?_⟩
-    rcases hor with hor | ⟨_, _, hmem, _⟩
+    refine ⟨Ma, Mb, rfl, by simpa [evalExp] using h2, h3, h4, fun p hor => ?_⟩
+    rcases hor with hor | ⟨_, hmem, _⟩
     · exact hor
     · simp [memoryWrites] at hmem
   | store inner ad val endian size ih _ _ =>
-    intro hw hroot hwr hd hu v hv
+    intro hw hroot hover hd hu v hv
     obtain ⟨hwi, hwa, hwv⟩ := hw
     simp only [usesExp, Bool.or_eq_false_iff] at hd
     obtain ⟨⟨hdi, hda⟩, hdv⟩ := hd
-    simp only [memoryWrites] at hwr
-    cases hr : constantRange ad size with
-    | none => simp [hr] at hwr
-    | some n =>
-      simp only [hr] at hwr
-      obtain ⟨w', cv, hca, rfl, hrange⟩ := slice_constantRange_eval hr
-      cases hi : evalExp a inner with
-      | error e => simp [evalExp, hi, bind, Except.bind] at hv
-      | ok v0 =>
-        obtain ⟨Ma1, Mb1, rfl, hib, hs1, hs2, hbytes⟩ := ih hwi hroot hwr hdi
-          (fun l hl => hu l (by simp [usesExp, hl])) v0 hi
-        have hvr := slice_eval_agree hM val hwv hdv (fun l hl => hu l (by simp [usesExp, hl])) hab
-        by_cases hwe : w' = w
-        · subst hwe
-          cases hve : evalExp a val with
-          | error e => simp [evalExp, hi, hca, hve, bind, Except.bind, expectMemory, Bap.Value.asBits] at hv
-          | ok v2 =>
-            have hvb := hvr v2 hve
-            cases v2 with
-            | memory _ => simp [evalExp, hi, hca, hve, bind, Except.bind, expectMemory, Bap.Value.asBits] at hv
-            | undefined => simp [evalExp, hi, hca, hve, bind, Except.bind, expectMemory, Bap.Value.asBits] at hv
-            | @bits valueW vv =>
-              cases hwa1 : Memory.write Ma1 cv vv endian size with
-              | error e => simp [evalExp, hi, hca, hve, bind, Except.bind, expectMemory, Bap.Value.asBits, hwa1] at hv
-              | ok Ma2 =>
-                have hsz : size * 8 = valueW := by
-                  by_cases hs : size * 8 = valueW
-                  · exact hs
-                  · rw [Core.MemoryLaws.write_error_of_ne vv endian hs] at hwa1
-                    cases hwa1
-                have hwb1 : Memory.write Mb1 cv vv endian size =
-                    .ok (Memory.writeRegion Mb1 cv.toNat (ByteArray.mk (image vv endian size).toArray)) := write_eq hsz endian
-                refine ⟨Ma2, _, ?_, ?_, write_pagesSized hs1 hwa1, write_pagesSized hs2 hwb1, ?_⟩
-                · simp [evalExp, hi, hca, hve, bind, Except.bind, expectMemory, Bap.Value.asBits, hwa1] at hv
-                  exact hv.symm
-                · simp [evalExp, hib, hca, hvb, bind, Except.bind, expectMemory, Bap.Value.asBits, hwb1]
-                · intro p hp hor
-                  by_cases hin : cv.toNat ≤ p ∧ p < cv.toNat + size
-                  · have hk := slice_write_same_byte hs1 hs2 hwa1 hwb1 (by omega) (k := p - cv.toNat) (by omega)
-                    rwa [show cv.toNat + (p - cv.toNat) = p by omega] at hk
-                  · rw [slice_write_frame hs1 hwa1 hrange hp hin, slice_write_frame hs2 hwb1 hrange hp hin]
-                    apply hbytes p hp
-                    rcases hor with hor | ⟨n', s', hmem, h5, h6⟩
-                    · exact .inl hor
-                    · simp only [memoryWrites, hr, List.mem_cons, Location.memOf.injEq] at hmem
-                      rcases hmem with ⟨-, rfl, rfl⟩ | hmem
-                      · exact absurd ⟨h5, h6⟩ hin
-                      · exact .inr ⟨n', s', hmem, h5, h6⟩
-        · cases hve : evalExp a val with
-          | error e => simp [evalExp, hi, hca, hve, bind, Except.bind, expectMemory, Bap.Value.asBits] at hv
-          | ok v2 =>
-            cases v2 <;> simp [evalExp, hi, hca, hve, bind, Except.bind, expectMemory, Bap.Value.asBits, hwe] at hv
+    simp only [oversized, Bool.or_eq_false_iff, hdst, decide_eq_false_iff_not, Nat.not_lt] at hover
+    cases hi : evalExp a inner with
+    | error e => simp [evalExp, hi, bind, Except.bind] at hv
+    | ok v0 =>
+      obtain ⟨Ma1, Mb1, rfl, hib, hs1, hs2, hbytes⟩ := ih hwi hroot hover.1 hdi
+        (fun l hl => hu l (by simp [usesExp, hl])) v0 hi
+      have hva := slice_eval_agree hM ad hwa hda (fun l hl => hu l (by simp [usesExp, hl])) hab
+      have hvr := slice_eval_agree hM val hwv hdv (fun l hl => hu l (by simp [usesExp, hl])) hab
+      cases hA : evalExp a ad with
+      | error e => simp [evalExp, hi, hA, bind, Except.bind, expectMemory] at hv
+      | ok v1 =>
+        have hAb := hva v1 hA
+        cases v1 with
+        | memory _ => simp [evalExp, hi, hA, bind, Except.bind, expectMemory, Bap.Value.asBits] at hv
+        | undefined => simp [evalExp, hi, hA, bind, Except.bind, expectMemory, Bap.Value.asBits] at hv
+        | @bits wa cv =>
+          by_cases hwe : wa = wd
+          · subst hwe
+            cases hve : evalExp a val with
+            | error e => simp [evalExp, hi, hA, hve, bind, Except.bind, expectMemory, Bap.Value.asBits] at hv
+            | ok v2 =>
+              have hvb := hvr v2 hve
+              cases v2 with
+              | memory _ => simp [evalExp, hi, hA, hve, bind, Except.bind, expectMemory, Bap.Value.asBits] at hv
+              | undefined => simp [evalExp, hi, hA, hve, bind, Except.bind, expectMemory, Bap.Value.asBits] at hv
+              | @bits valueW vv =>
+                cases hwa1 : Memory.write Ma1 cv vv endian size with
+                | error e => simp [evalExp, hi, hA, hve, bind, Except.bind, expectMemory, Bap.Value.asBits, hwa1] at hv
+                | ok Ma2 =>
+                  have hsz : size * 8 = valueW := by
+                    by_cases hs : size * 8 = valueW
+                    · exact hs
+                    · rw [Core.MemoryLaws.write_error_of_ne vv endian hs] at hwa1
+                      cases hwa1
+                  have hwb1 : Memory.write Mb1 cv vv endian size =
+                      .ok (Memory.writeRegion Mb1 cv.toNat (ByteArray.mk (image vv endian size).toArray)) := write_eq hsz endian
+                  refine ⟨Ma2, _, ?_, ?_, write_pagesSized hs1 hwa1, write_pagesSized hs2 hwb1, ?_⟩
+                  · simp [evalExp, hi, hA, hve, bind, Except.bind, expectMemory, Bap.Value.asBits, hwa1] at hv
+                    exact hv.symm
+                  · simp [evalExp, hib, hAb, hvb, bind, Except.bind, expectMemory, Bap.Value.asBits, hwb1]
+                  · intro q hor
+                    by_cases hin : ∃ k, k < size ∧ q = cv + BitVec.ofNat wa k
+                    · obtain ⟨k, hk, rfl⟩ := hin
+                      have hsame := slice_write_same_byte hs1 hs2 hwa1 hwb1 hover.2 hk
+                      rwa [← slice_add_ofNat] at hsame
+                    · have hne : ∀ k, k < size → q ≠ cv + BitVec.ofNat wa k := fun k hk he => hin ⟨k, hk, he⟩
+                      rw [readByte_write_frame hs1 hwa1 hne, readByte_write_frame hs2 hwb1 hne]
+                      apply hbytes q
+                      rcases hor with hor | ⟨d, hmem, hh⟩
+                      · exact .inl hor
+                      · simp only [memoryWrites] at hmem
+                        split at hmem
+                        · exact .inr ⟨d, hmem, hh⟩
+                        · rcases List.mem_cons.1 hmem with rfl | hmem
+                          · exfalso
+                            rcases slice_accessAt_cases hdst ad size with ⟨n, hr, he⟩ | ⟨base, off, known, ha, _, he⟩ | he
+                            · rw [he] at hh
+                              obtain ⟨k, hk, _, rfl⟩ := hh
+                              obtain ⟨w', c', hca, rfl, hrange⟩ := slice_constantRange_eval hr
+                              obtain ⟨rfl, hh2⟩ := slice_bits_inj ((hca a).symm.trans hA)
+                              cases hh2
+                              exact hne k hk (slice_add_ofNat _ _).symm
+                            · rw [he] at hh
+                              obtain ⟨wb, cb, hl, k, hk, rfl⟩ := hh
+                              obtain ⟨_, wb', cb', hl', _, hc0, _⟩ := slice_affine_eval ad ha hA
+                              obtain ⟨rfl, hh2⟩ := slice_value_inj (hl.symm.trans hl')
+                              cases hh2
+                              exact hne k hk (by rw [hc0, slice_relAt_zero_add])
+                            · simp_all
+                          · exact .inr ⟨d, hmem, hh⟩
+          · cases hve : evalExp a val with
+            | error e => simp [evalExp, hi, hA, hve, bind, Except.bind, expectMemory, Bap.Value.asBits] at hv
+            | ok v2 =>
+              cases v2 <;> simp [evalExp, hi, hA, hve, bind, Except.bind, expectMemory, Bap.Value.asBits, hwe] at hv
   | _ => intro hw; exact hw.elim
 
 /-- One side of a store chain from the memory `r`: it yields a memory of the same width, equal to it
 outside what the chain writes when that is known. -/
-private theorem slice_chain_self {Ms : List Bap.Var} {typ : Typ} {dst r : Bap.Var} {a : Bap.Bil.Env} {w : Nat} {M : Memory w}
+private theorem slice_chain_self {Ms : List Bap.Var} {typ : Typ} {dst r : Bap.Var} {wd vd : Nat} (hdst : dst.typ = .mem wd vd) {a : Bap.Bil.Env} {w : Nat} (hwd : wd = w) {M : Memory w}
     (h1 : lookup a r = .ok (.memory M)) (h3 : PagesSized M) (c : Bap.Bil.Exp) :
     slice_ChainWF Ms typ c → chainRoot c = some r → ∀ v, evalExp a c = .ok v →
-    ∃ M' : Memory w, v = .memory M' ∧ PagesSized M' ∧ ∀ p, p < 2 ^ w → (memoryWrites dst c).2 = false →
-      (∀ n s, Location.memOf dst n s ∈ (memoryWrites dst c).1 → ¬ (n ≤ p ∧ p < n + s)) →
-      Memory.readByte M' (BitVec.ofNat w p) = Memory.readByte M (BitVec.ofNat w p) := by
+    ∃ M' : Memory w, v = .memory M' ∧ PagesSized M' ∧ ∀ q : BitVec w, (memoryWrites dst c).2 = false →
+      (∀ d ∈ (memoryWrites dst c).1, ¬ slice_Hits a w d q) →
+      Memory.readByte M' q = Memory.readByte M q := by
+  subst hwd
   induction c with
   | var x =>
     intro hw hroot v hv
@@ -1579,7 +1925,7 @@ private theorem slice_chain_self {Ms : List Bap.Var} {typ : Typ} {dst r : Bap.Va
     subst hroot
     simp only [evalExp, h1] at hv
     cases hv
-    exact ⟨M, rfl, h3, fun _ _ _ _ => rfl⟩
+    exact ⟨M, rfl, h3, fun _ _ _ => rfl⟩
   | store inner ad val endian size ih _ _ =>
     intro hw hroot v hv
     obtain ⟨hwi, _, _⟩ := hw
@@ -1601,7 +1947,7 @@ private theorem slice_chain_self {Ms : List Bap.Var} {typ : Typ} {dst r : Bap.Va
             | memory _ => simp [evalExp, hi, hA, hV, bind, Except.bind, expectMemory, Bap.Value.asBits] at hv
             | undefined => simp [evalExp, hi, hA, hV, bind, Except.bind, expectMemory, Bap.Value.asBits] at hv
             | bits vv =>
-              by_cases hwe : wa = w
+              by_cases hwe : wa = wd
               · subst hwe
                 cases hwa1 : Memory.write M1 cv vv endian size with
                 | error e =>
@@ -1610,18 +1956,23 @@ private theorem slice_chain_self {Ms : List Bap.Var} {typ : Typ} {dst r : Bap.Va
                   refine ⟨M2, ?_, write_pagesSized hs1 hwa1, ?_⟩
                   · simp [evalExp, hi, hA, hV, bind, Except.bind, expectMemory, Bap.Value.asBits, hwa1] at hv
                     exact hv.symm
-                  · intro p hp hwr hout
+                  · intro q hwr hout
                     simp only [memoryWrites] at hwr hout
-                    cases hr : constantRange ad size with
-                    | none => simp [hr] at hwr
-                    | some n =>
-                      simp only [hr] at hwr hout
-                      obtain ⟨w', c, hca, rfl, hrange⟩ := slice_constantRange_eval hr
-                      have he := (hca a).symm.trans hA
-                      cases he
-                      rw [slice_write_frame hs1 hwa1 hrange hp
-                        (hout _ _ (by simp))]
-                      exact hframe p hp hwr fun n s hm => hout n s (by simp [hm])
+                    split at hwr
+                    · simp at hwr
+                    · next hnw =>
+                      have hne : ∀ k, k < size → q ≠ cv + BitVec.ofNat wa k := by
+                        intro k hk he
+                        refine hout (accessAt dst ad size) ?_ ?_
+                        · simp
+                        · rw [he]
+                          exact slice_accessAt_hits hdst hA hk (fun m hm => by
+                            rcases slice_accessAt_cases hdst ad size with ⟨n, _, he'⟩ | ⟨base, off, known, _, _, he'⟩ | he'
+                            · rw [he'] at hm; cases hm
+                            · rw [he'] at hm; cases hm
+                            · exact hnw _ hm)
+                      rw [readByte_write_frame hs1 hwa1 hne]
+                      exact hframe q hwr fun d hd => hout d (by simp [hd])
               · simp [evalExp, hi, hA, hV, bind, Except.bind, expectMemory, Bap.Value.asBits, hwe] at hv
   | _ => intro hw; exact hw.elim
 
@@ -1633,19 +1984,215 @@ private theorem slice_chain_root {Ms : List Bap.Var} {typ : Typ} (c : Bap.Bil.Ex
   | store inner _ _ _ _ ih _ _ => exact ih h.1
   | _ => exact h.elim
 
-private theorem slice_memoryWrites_mem {dst : Bap.Var} (c : Bap.Bil.Exp) {l : Location}
-    (h : l ∈ (memoryWrites dst c).1) : ∃ n s, l = .memOf dst n s := by
+private theorem slice_memoryWrites_mem {dst : Bap.Var} {wd vd : Nat} (hdst : dst.typ = .mem wd vd) (c : Bap.Bil.Exp) {l : Location}
+    (h : l ∈ (memoryWrites dst c).1) : (∃ n s, l = .memOf dst n s) ∨ ∃ b off s, l = .rel dst b off s := by
   induction c with
   | store inner ad _ _ size ih _ _ =>
     simp only [memoryWrites] at h
-    cases hr : constantRange ad size with
-    | none => simp only [hr] at h; exact ih h
-    | some n =>
-      simp only [hr, List.mem_cons] at h
-      rcases h with rfl | h
-      · exact ⟨n, size, rfl⟩
+    split at h
+    · exact ih h
+    · next hnw =>
+      rcases List.mem_cons.1 h with rfl | h
+      · rcases slice_accessAt_cases hdst ad size with ⟨n, _, he⟩ | ⟨base, off, known, _, _, he⟩ | he
+        · exact .inl ⟨n, size, he⟩
+        · exact .inr ⟨base, off, size, he⟩
+        · exact absurd he (hnw _)
       · exact ih h
   | _ => simp [memoryWrites] at h
+
+/-- The register of an expression that adds to one is among what it uses. -/
+private theorem slice_affine_uses (e : Bap.Bil.Exp) : ∀ {base : Bap.Var} {offset : Int} {known : Option Nat},
+    affine e = some (base, offset, known) → Location.reg base ∈ Info.uses (usesExp e) := by
+  induction e with
+  | var x =>
+    intro base offset known h
+    simp only [affine] at h
+    split at h
+    · next hty =>
+      cases h
+      simp [usesExp, hty]
+    · simp at h
+  | cast _ _ _ ih =>
+    intro base offset known h
+    simp only [affine] at h
+    split at h
+    · split at h
+      · next hi =>
+        have := ih hi
+        simp only [usesExp]
+        split at h
+        · split at h
+          · simp only [Option.some.injEq, Prod.mk.injEq] at h
+            obtain ⟨rfl, -, -⟩ := h
+            exact this
+          · simp at h
+        · split at h
+          · simp only [Option.some.injEq, Prod.mk.injEq] at h
+            obtain ⟨rfl, -, -⟩ := h
+            exact this
+          · simp at h
+      · simp at h
+    · simp at h
+  | bin op l r il ir =>
+    intro base offset known h
+    simp only [usesExp, List.mem_append]
+    cases op <;> simp only [affine] at h
+    case add =>
+      split at h
+      · split at h
+        · next hi =>
+          split at h
+          · simp only [Option.some.injEq, Prod.mk.injEq] at h
+            obtain ⟨rfl, -, -⟩ := h
+            exact .inl (il hi)
+          · simp at h
+        · simp at h
+      · split at h
+        · split at h
+          · next hi =>
+            split at h
+            · simp only [Option.some.injEq, Prod.mk.injEq] at h
+              obtain ⟨rfl, -, -⟩ := h
+              exact .inr (ir hi)
+            · simp at h
+          · simp at h
+        · simp at h
+    case sub =>
+      split at h
+      · split at h
+        · next hi =>
+          split at h
+          · simp only [Option.some.injEq, Prod.mk.injEq] at h
+            obtain ⟨rfl, -, -⟩ := h
+            exact .inl (il hi)
+          · simp at h
+        · simp at h
+      · simp at h
+    all_goals simp at h
+  | _ =>
+    intro base offset known h
+    simp [affine] at h
+
+/-- What a store chain writes by a register, it uses. -/
+private theorem slice_memoryWrites_uses {dst : Bap.Var} {wd vd : Nat} (hdst : dst.typ = .mem wd vd) (c : Bap.Bil.Exp) {b : Bap.Var} {off : Int} {s : Nat}
+    (h : Location.rel dst b off s ∈ (memoryWrites dst c).1) : Location.reg b ∈ Info.uses (usesExp c) := by
+  induction c with
+  | store inner ad _ _ size ih _ _ =>
+    simp only [memoryWrites] at h
+    simp only [usesExp, List.mem_append]
+    split at h
+    · exact .inl (.inl (ih h))
+    · rcases List.mem_cons.1 h with he | h
+      · rcases slice_accessAt_cases hdst ad size with ⟨n, _, he'⟩ | ⟨base, off', known, ha, _, he'⟩ | he'
+        · rw [he'] at he; cases he
+        · rw [he'] at he
+          cases he
+          exact .inl (.inr (slice_affine_uses ad ha))
+        · rw [he'] at he; cases he
+      · exact .inl (.inl (ih h))
+  | _ => simp [memoryWrites] at h
+
+private theorem slice_relAt_eq {w wb : Nat} (c : BitVec wb) {j off : Int} {k k' : Nat} (h : j + k' = off + k) :
+    slice_relAt w c off k = slice_relAt w c j k' := by
+  have hs : ∀ (x : Int) (n : Nat), BitVec.ofInt w x + BitVec.ofNat w n = BitVec.ofInt w (x + n) := by
+    intro x n
+    rw [BitVec.ofInt_add, BitVec.ofInt_natCast]
+  simp only [slice_relAt, BitVec.add_assoc, hs, h]
+
+private theorem slice_ofInt_ne {w : Nat} {A B : Int} (h : BitVec.ofInt w A = BitVec.ofInt w B) (h1 : 0 < A - B) (h2 : A - B < (2 : Int) ^ w) : False := by
+  have hn := congrArg BitVec.toNat h
+  rw [BitVec.toNat_ofInt, BitVec.toNat_ofInt] at hn
+  have hp : (0 : Int) < ((2 ^ w : Nat) : Int) := by exact_mod_cast Nat.two_pow_pos w
+  have ha := Int.emod_nonneg A (Int.ne_of_gt hp)
+  have hb := Int.emod_nonneg B (Int.ne_of_gt hp)
+  have he : A % ((2 ^ w : Nat) : Int) = B % ((2 ^ w : Nat) : Int) := by omega
+  have hd : ((2 ^ w : Nat) : Int) ∣ A - B := Int.dvd_of_emod_eq_zero (Int.emod_eq_emod_iff_emod_sub_eq_zero.1 he)
+  have hc : ((2 ^ w : Nat) : Int) = (2 : Int) ^ w := by simp
+  rw [hc] at hd
+  have := Int.le_of_dvd h1 hd
+  omega
+
+/-- **Distinct slots**: bytes at offsets that are `apart` from one register are different bytes. -/
+theorem slice_apart_ne {m : Bap.Var} {w vw : Nat} (ht : m.typ = .mem w vw) {j off : Int} {s n : Nat} (h : Location.apart m j s off n = true) {wb : Nat}
+    (c : BitVec wb) {k k' : Nat} (hk : k < n) (hk' : k' < s) : slice_relAt w c off k ≠ slice_relAt w c j k' := by
+  intro he
+  simp only [slice_relAt] at he
+  have hs : ∀ (x : Int) (l : Nat), BitVec.ofInt w x + BitVec.ofNat w l = BitVec.ofInt w (x + l) := by
+    intro x l
+    rw [BitVec.ofInt_add, BitVec.ofInt_natCast]
+  rw [BitVec.add_assoc, BitVec.add_assoc, hs, hs] at he
+  have he' : BitVec.ofInt w (off + k) = BitVec.ofInt w (j + k') := by simpa using he
+  simp only [Location.apart, ht, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq] at h
+  rcases h with ⟨h1, h2⟩ | ⟨h1, h2⟩
+  · exact slice_ofInt_ne he' (by omega) (by omega)
+  · exact slice_ofInt_ne he'.symm (by omega) (by omega)
+
+private theorem slice_throughMove_cases {m : Bap.Var} {w vw : Nat} (ht : m.typ = .mem w vw) (value : Bap.Bil.Exp) (off : Int) (n : Nat) :
+    (∃ base moved known, affine value = some (base, moved, known) ∧ known.all (· == w) = true ∧ throughMove m value off n = .rel m base (moved + off) n) ∨
+    (∃ cc : BitVec w, closedBits value = some ⟨w, cc⟩ ∧ ∃ N : Nat, (N : Int) = (cc.toNat : Int) + off ∧ N + n ≤ 2 ^ w ∧ throughMove m value off n = .memOf m N n) ∨
+    throughMove m value off n = .whole m := by
+  cases ha : affine value with
+  | some x =>
+    obtain ⟨base, moved, known⟩ := x
+    by_cases hc : (known.all (· == w) && decide (-offsetLimit ≤ moved + off) && decide (moved + off ≤ offsetLimit)) = true
+    · refine .inl ⟨base, moved, known, rfl, ?_, by simp only [throughMove, ha, ht, hc, ↓reduceIte]⟩
+      simp only [Bool.and_eq_true] at hc
+      exact hc.1.1
+    · exact .inr (.inr (by simp only [throughMove, ha, ht, hc, Bool.false_eq_true, ↓reduceIte]))
+  | none =>
+    cases hcl : closedBits value with
+    | none => exact .inr (.inr (by simp only [throughMove, ha, hcl, ht]))
+    | some x =>
+      obtain ⟨W, cc⟩ := x
+      by_cases hc : (W == w && decide (0 ≤ (cc.toNat : Int) + off) && decide ((cc.toNat : Int) + off + n ≤ (2 : Int) ^ w)) = true
+      · have hd := hc
+        simp only [Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at hd
+        obtain ⟨⟨rfl, h0⟩, hle⟩ := hd
+        refine .inr (.inl ⟨cc, rfl, ((cc.toNat : Int) + off).toNat, by omega, ?_, by simp only [throughMove, ha, hcl, ht, hc, ↓reduceIte]⟩)
+        have : ((((cc.toNat : Int) + off).toNat + n : Nat) : Int) ≤ ((2 ^ W : Nat) : Int) := by
+          push_cast
+          omega
+        exact_mod_cast this
+      · exact .inr (.inr (by simp only [throughMove, ha, hcl, ht, hc, Bool.false_eq_true, ↓reduceIte]))
+
+/-- What `throughMove` says: the bytes that go by a register after a move to it agree. -/
+private theorem slice_throughMove_bytes {P : Location → Prop} {m : Bap.Var} {w vw : Nat} {Ma Mb : Memory w} (ht : m.typ = .mem w vw) {a b : Bap.Bil.Env}
+    (h5 : ∀ address n, P (.memOf m address n) → ∀ p, address ≤ p → p < address + n →
+      p < 2 ^ w → Memory.readByte Ma (BitVec.ofNat w p) = Memory.readByte Mb (BitVec.ofNat w p))
+    (h6 : ∀ base offset n, (∃ width, base.typ = Typ.imm width) → P (.rel m base offset n) → lookup a base = lookup b base ∧ ∀ (wb : Nat) (c : BitVec wb),
+      lookup a base = .ok (.bits c) → ∀ k, k < n → Memory.readByte Ma (slice_relAt w c offset k) = Memory.readByte Mb (slice_relAt w c offset k))
+    (h7 : P (.whole m) → ∀ q : BitVec w, Memory.readByte Ma q = Memory.readByte Mb q)
+    {value : Bap.Bil.Exp} {off : Int} {n : Nat} (hp : P (throughMove m value off n)) {wb : Nat} {c : BitVec wb} (he : evalExp a value = .ok (.bits c))
+    {k : Nat} (hk : k < n) :
+    Memory.readByte Ma (slice_relAt w c off k) = Memory.readByte Mb (slice_relAt w c off k) := by
+  rcases slice_throughMove_cases ht value off n with ⟨base, moved, known, ha, hk1, hw⟩ | ⟨cc, hcl, N, hN, hfit, hw⟩ | hw <;> rw [hw] at hp
+  · obtain ⟨him, wb', cb, hl, hk0, hc0, hn⟩ := slice_affine_eval value ha he
+    have hsame : slice_relAt w c off k = slice_relAt w cb (moved + off) k := by
+      cases known with
+      | none =>
+        obtain ⟨rfl, rfl, hheq⟩ := hn rfl
+        cases hheq
+        simp
+      | some W =>
+        have h1 : W = w := by simpa using hk1
+        have h2 : W = wb := by simpa using hk0
+        subst h1
+        subst h2
+        simp [slice_relAt, hc0, BitVec.ofInt_add, BitVec.add_assoc]
+    rw [hsame]
+    exact (h6 base _ n him hp).2 wb' cb hl k hk
+  · obtain ⟨rfl, hh⟩ := slice_bits_inj ((slice_closedBits_eval hcl a).symm.trans he)
+    cases hh
+    have hsame : slice_relAt w cc off k = BitVec.ofNat w (N + k) := by
+      simp only [slice_relAt, BitVec.setWidth_eq]
+      have : BitVec.ofInt w ((cc.toNat : Int) + off) = cc + BitVec.ofInt w off := by
+        rw [BitVec.ofInt_add, BitVec.ofInt_natCast]
+        simp
+      rw [← this, ← hN, BitVec.ofInt_natCast]
+      exact (BitVec.ofNat_add _ _).symm
+    rw [hsame]
+    exact h5 N n hp (N + k) (by omega) (by omega) (by omega)
+  · exact h7 hp _
 
 private theorem slice_always_dynamic_exp (e : Bap.Bil.Exp) :
     Info.always (usesExp e) = true → Info.dynamic (usesExp e) = true := by
@@ -1667,7 +2214,7 @@ private theorem slice_stmtInfo_moveMem {m : Bap.Var} {aw vw : Nat} (hm : m.typ =
     Info.writes (stmtInfo (.move m v)) = (memoryWrites m v).1 ∧
     Info.wholesale (stmtInfo (.move m v)) = (if (memoryWrites m v).2 || chainRoot v != some m then [m] else []) ∧
     Info.uses (stmtInfo (.move m v)) = Info.uses (usesExp v) ∧
-    Info.dynamic (stmtInfo (.move m v)) = ((memoryWrites m v).2 || Info.dynamic (usesExp v)) ∧
+    Info.dynamic (stmtInfo (.move m v)) = (oversized m v || Info.dynamic (usesExp v)) ∧
     Info.always (stmtInfo (.move m v)) = false := by
   simp [stmtInfo, hm]
 
@@ -1764,12 +2311,33 @@ private theorem slice_exec_agree {Ms : List Bap.Var} (hM : slice_Memories Ms) (e
           · simp only [execStmt, execExp]
             rw [hvb]
             rfl
-          · refine slice_Agree_mono (fun l hl => ?_) (slice_Agree_bind hM ⟨_, ht⟩ hab r)
-            simp only [slice_normal, ite_true] at hl
-            by_cases hreg : l = .reg x
-            · exact .inr hreg
-            · refine .inl (List.mem_append_right _ ?_)
-              simp [moveBefore, ht, hl, hreg]
+          · simp only [slice_normal, ite_true]
+            have hin : ∀ l, l ∈ after → (∀ m off n, l ≠ .rel m x off n) → l ≠ .reg x → l ∈ moveBefore x value after := by
+              intro l hl hne hr
+              simp only [moveBefore, ht, Bool.false_eq_true, ↓reduceIte, List.mem_map, List.mem_filter]
+              refine ⟨l, ⟨hl, by simpa using hr⟩, ?_⟩
+              cases l <;> try rfl
+              next m base off n =>
+              simp only
+              split
+              · next he =>
+                have hb : base = x := by simpa using he
+                subst hb
+                exact absurd rfl (hne _ _ _)
+              · rfl
+            refine slice_Agree_bind hM ⟨_, ht⟩ hab r
+              (fun l hl hne hr => List.mem_append_right _ (hin l hl hne hr)) ?_
+            intro m hms w Ma Mb h1 h2 off n hl wb c hr k hk
+            obtain ⟨w', vw, Ma', Mb', kt, k1, k2, _, _, k5, k6, k7⟩ := hab.2 m hms
+            obtain ⟨rfl, hh1⟩ := slice_memory_inj (Except.ok.inj (h1.symm.trans k1))
+            cases hh1
+            obtain ⟨_, hh2⟩ := slice_memory_inj (Except.ok.inj (h2.symm.trans k2))
+            cases hh2
+            subst hr
+            refine slice_throughMove_bytes kt k5 k6 k7 (value := value) (off := off) (n := n) ?_ he hk
+            refine List.mem_append_right _ ?_
+            simp only [moveBefore, ht, Bool.false_eq_true, ↓reduceIte, List.mem_map, List.mem_filter]
+            exact ⟨.rel m x off n, ⟨hl, by simp⟩, by simp⟩
         | moveMem hms hv =>
           obtain ⟨aw, vw, htm⟩ := hM _ hms
           obtain ⟨_, _, _, hdyn, _⟩ := slice_stmtInfo_moveMem htm value
@@ -1778,61 +2346,110 @@ private theorem slice_exec_agree {Ms : List Bap.Var} (hM : slice_Memories Ms) (e
           obtain ⟨r, he, h⟩ := slice_bind_ok h
           cases h
           obtain ⟨root, hroot, hrty, hrootEq⟩ := slice_chain_root value hv
-          obtain ⟨w, vw', Ma, Mb, hty, h1, h2, h3, h4, h5⟩ := hab.2 root hroot
+          obtain ⟨w, vw', Ma, Mb, hty, h1, h2, h3, h4, h5, h6, h7⟩ := hab.2 root hroot
+          have hwd : aw = w := by
+            have := htm.symm.trans (hrty.symm.trans hty)
+            cases this
+            rfl
           obtain ⟨Ma', Mb', rfl, hvb, hs1, hs2, hbytes⟩ :=
-            slice_chain_agree hM hab h1 h2 h3 h4 value hv hrootEq hd.1 hd.2 (fun l hl => List.mem_append_left _ hl) _ he
+            slice_chain_agree hM htm hab hwd h1 h2 h3 h4 value hv hrootEq hd.1 hd.2 (fun l hl => List.mem_append_left _ hl) _ he
           refine ⟨{ env := Bap.Bil.bind b.env x (.memory Mb') }, ?_, ?_⟩
           · simp only [execStmt, execExp]
             rw [hvb]
             rfl
-          · have hmoved : ∀ l, l ∈ after → (∀ y address n, l ≠ .memOf y address n ∨ y ≠ x) →
-                l ∈ moveBefore x value after := by
-              intro l hl hne
+          · simp only [slice_normal, ite_true]
+            have hother : ∀ l, l ∈ after → l.inMemory x = false → (∀ a' n', l ≠ .mem a' n') → l ∈ moveBefore x value after := by
+              intro l hl hne hmem
               simp only [moveBefore, htm, ↓reduceIte, List.mem_filterMap]
               refine ⟨l, hl, ?_⟩
               cases l with
               | reg y => rfl
-              | mem _ _ => rfl
+              | mem a' n' => exact absurd rfl (hmem _ _)
               | memOf y address n =>
-                rcases hne y address n with hne | hne
-                · exact absurd rfl hne
-                · simp [hne]
-            simp only [slice_normal, ite_true]
+                have : y ≠ x := by simpa [Location.inMemory] using hne
+                simp [this]
+              | rel y base off n =>
+                have : y ≠ x := by simpa [Location.inMemory] using hne
+                simp [this]
+              | whole y =>
+                have : y ≠ x := by simpa [Location.inMemory] using hne
+                simp [this]
+            have hregs : ∀ y, (∃ width, y.typ = Typ.imm width) → Location.reg y ∈ after → lookup a.env y = lookup b.env y := by
+              intro y ht hp
+              exact hab.1 y ht (List.mem_append_right _ (hother _ hp (by simp [Location.inMemory]) (by simp)))
             refine ⟨fun y ht hp => ?_, fun m hm => ?_⟩
             · have hne : x ≠ y := fun e => slice_imm_ne_mem hM hms (e ▸ ht) e.symm
               show lookup (Bap.Bil.bind a.env x _) y = lookup (Bap.Bil.bind b.env x _) y
               rw [slice_lookup_bind_other _ hne, slice_lookup_bind_other _ hne]
-              exact hab.1 y ht (List.mem_append_right _ (hmoved _ hp (fun _ _ _ => .inl (by simp))))
+              exact hregs y ht hp
             · by_cases hmx : m = x
               · subst hmx
                 refine ⟨w, vw', Ma', Mb', hrty ▸ hty, slice_lookup_bind_same _ _ _, slice_lookup_bind_same _ _ _, hs1, hs2,
-                  fun address n hp p h6 h7 h8 => ?_⟩
-                apply hbytes p h8
-                by_cases hc : (memoryWrites m value).1.any (·.covers (.memOf m address n)) = true
-                · obtain ⟨d, hd', hcov⟩ := List.any_eq_true.1 hc
-                  obtain ⟨n', s', rfl⟩ := slice_memoryWrites_mem _ hd'
-                  obtain ⟨_, h9, h10⟩ := slice_covers_mem hcov p h6 h7
-                  exact .inr ⟨n', s', hd', h9, h10⟩
-                · refine .inl (h5 address n (List.mem_append_right _ ?_) p h6 h7 h8)
+                  fun address n hp p g6 g7 g8 => ?_, fun base off n hi hp => ?_, fun hp q => ?_⟩
+                · apply hbytes
+                  by_cases hc : (memoryWrites m value).1.any (·.covers (.memOf m address n)) = true
+                  · obtain ⟨d, hd', hcov⟩ := List.any_eq_true.1 hc
+                    rcases slice_memoryWrites_mem htm _ hd' with ⟨n', s', rfl⟩ | ⟨b', off', s', rfl⟩
+                    · obtain ⟨_, g9, g10⟩ := slice_covers_mem hcov p g6 g7
+                      exact .inr ⟨_, hd', p - n', by omega, by omega, by rw [show n' + (p - n') = p by omega]⟩
+                    · simp [Location.covers] at hcov
+                  · refine .inl (h5 address n (List.mem_append_right _ ?_) p g6 g7 g8)
+                    simp only [moveBefore, htm, ↓reduceIte, List.mem_filterMap]
+                    refine ⟨.memOf m address n, hp, ?_⟩
+                    simp [hc, hrootEq]
+                · have hne : m ≠ base := fun e => slice_imm_ne_mem hM hms hi e.symm
+                  rw [slice_lookup_bind_other _ hne, slice_lookup_bind_other _ hne]
+                  by_cases hc : (memoryWrites m value).1.any (·.covers (.rel m base off n)) = true
+                  · obtain ⟨d, hd', hcov⟩ := List.any_eq_true.1 hc
+                    rcases slice_memoryWrites_mem htm _ hd' with ⟨n', s', rfl⟩ | ⟨b', off', s', rfl⟩
+                    · simp [Location.covers] at hcov
+                    · simp only [Location.covers, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at hcov
+                      obtain ⟨_, ⟨rfl, hc1⟩, hc2⟩ := hcov
+                      have hu := slice_memoryWrites_uses htm _ hd'
+                      refine ⟨hab.1 _ hi (List.mem_append_left _ hu), fun wb c hl k hk => ?_⟩
+                      apply hbytes
+                      refine .inr ⟨_, hd', wb, c, hl, (off + k - off').toNat, by omega, ?_⟩
+                      exact slice_relAt_eq c (by omega)
+                  · have hl : Location.rel root base off n ∈ Info.uses (usesExp value) ++ moveBefore m value after := by
+                      refine List.mem_append_right _ ?_
+                      simp only [moveBefore, htm, ↓reduceIte, List.mem_filterMap]
+                      refine ⟨.rel m base off n, hp, ?_⟩
+                      simp [hc, hrootEq]
+                    obtain ⟨hl1, hl2⟩ := h6 base off n hi hl
+                    exact ⟨hl1, fun wb c hc' k hk => hbytes _ (.inl (hl2 wb c hc' k hk))⟩
+                · refine hbytes q (.inl (h7 (List.mem_append_right _ ?_) q))
                   simp only [moveBefore, htm, ↓reduceIte, List.mem_filterMap]
-                  refine ⟨.memOf m address n, hp, ?_⟩
-                  simp [hc, hrootEq]
-              · obtain ⟨w', vw₁, Ma1, Mb1, kt, k1, k2, k3, k4, k5⟩ := hab.2 m hm
+                  refine ⟨.whole m, hp, ?_⟩
+                  simp [hrootEq]
+              · obtain ⟨w', vw₁, Ma1, Mb1, kt, k1, k2, k3, k4, k5, k6, k7⟩ := hab.2 m hm
                 have hne : x ≠ m := fun e => hmx e.symm
-                refine ⟨w', vw₁, Ma1, Mb1, kt, ?_, ?_, k3, k4, fun address n hp => ?_⟩
+                have hnotin : ∀ (l : Location), (l.inMemory m = true ∧ (∀ a' n', l ≠ .mem a' n')) → l.inMemory x = false := by
+                  intro l hl
+                  cases l with
+                  | reg _ => rfl
+                  | mem a' n' => exact absurd rfl (hl.2 _ _)
+                  | memOf y _ _ =>
+                    have : y = m := by simpa [Location.inMemory] using hl.1
+                    subst this
+                    simpa [Location.inMemory] using hmx
+                  | rel y _ _ _ =>
+                    have : y = m := by simpa [Location.inMemory] using hl.1
+                    subst this
+                    simpa [Location.inMemory] using hmx
+                  | whole y =>
+                    have : y = m := by simpa [Location.inMemory] using hl.1
+                    subst this
+                    simpa [Location.inMemory] using hmx
+                refine ⟨w', vw₁, Ma1, Mb1, kt, ?_, ?_, k3, k4, fun address n hp => ?_, fun base off n hi hp => ?_, fun hp => ?_⟩
                 · show lookup (Bap.Bil.bind a.env x _) m = _
                   rw [slice_lookup_bind_other _ hne]; exact k1
                 · show lookup (Bap.Bil.bind b.env x _) m = _
                   rw [slice_lookup_bind_other _ hne]; exact k2
-                · exact k5 address n (List.mem_append_right _ (hmoved _ hp
-                    (fun y a' n' => by
-                      by_cases hy : y = x
-                      · subst hy
-                        left
-                        intro e
-                        cases e
-                        exact hmx rfl
-                      · exact .inr hy)))
+                · exact k5 address n (List.mem_append_right _ (hother _ hp (hnotin _ ⟨by simp [Location.inMemory], by simp⟩) (by simp)))
+                · have hxb : x ≠ base := fun e => slice_imm_ne_mem hM hms hi e.symm
+                  rw [slice_lookup_bind_other _ hxb, slice_lookup_bind_other _ hxb]
+                  exact k6 base off n hi (List.mem_append_right _ (hother _ hp (hnotin _ ⟨by simp [Location.inMemory], by simp⟩) (by simp)))
+                · exact k7 (List.mem_append_right _ (hother _ hp (hnotin _ ⟨by simp [Location.inMemory], by simp⟩) (by simp)))
       | ifElse condition yes no =>
         simp only [stmtBefore] at hab
         cases hwf with
@@ -1918,12 +2535,12 @@ private theorem slice_exec_frame_live {Ms : List Bap.Var} (hM : slice_Memories M
     (L : Location → Prop) (fuel : Nat) :
     (∀ (s : Bap.Bil.Stmt) (a a' : Bap.Bil.State) (e : Effect), slice_StmtWF Ms s →
       Info.always (stmtInfo s) = false →
-      (∀ d ∈ Info.writes (stmtInfo s), ∀ l, L l → d.overlaps l = false) →
+      (∀ d ∈ Info.writes (stmtInfo s), ∀ l, L l → d.affects l = false) →
       (∀ m ∈ Info.wholesale (stmtInfo s), ∀ l, L l → l.inMemory m = false) →
       slice_MemOK Ms a.env → execStmt fuel a s = .ok (a', e) → slice_Agree Ms L a.env a'.env) ∧
     (∀ (code : Bap.Bil.Program) (a a' : Bap.Bil.State) (e : Effect), (∀ s ∈ code, slice_StmtWF Ms s) →
       (∀ s ∈ code, Info.always (stmtInfo s) = false) →
-      (∀ s ∈ code, ∀ d ∈ Info.writes (stmtInfo s), ∀ l, L l → d.overlaps l = false) →
+      (∀ s ∈ code, ∀ d ∈ Info.writes (stmtInfo s), ∀ l, L l → d.affects l = false) →
       (∀ s ∈ code, ∀ m ∈ Info.wholesale (stmtInfo s), ∀ l, L l → l.inMemory m = false) →
       slice_MemOK Ms a.env → execProgram fuel a code = .ok (a', e) → slice_Agree Ms L a.env a'.env) := by
   induction fuel with
@@ -1959,19 +2576,29 @@ private theorem slice_exec_frame_live {Ms : List Bap.Var} (hM : slice_Memories M
           · have hxy : x ≠ y := by
               rintro rfl
               have := hw (.reg x) (by simp [(slice_stmtInfo_moveReg (Ms := Ms) ht hv).1]) _ hp
-              simp [Location.overlaps] at this
+              simp [Location.affects, Location.overlaps] at this
             exact (slice_lookup_bind_other r hxy).symm
           · obtain ⟨w, vw, M, ht', h1, h3⟩ := hok m hm
-            refine ⟨w, vw, M, M, ht', h1, ?_, h3, h3, fun _ _ _ _ _ _ _ => rfl⟩
-            show lookup (Bap.Bil.bind a.env x r) m = _
-            rw [slice_lookup_bind_other _ (slice_imm_ne_mem hM hm ⟨_, ht⟩)]
-            exact h1
+            refine ⟨w, vw, M, M, ht', h1, ?_, h3, h3, fun _ _ _ _ _ _ _ => rfl, fun base off n _ hp => ⟨?_, fun _ _ _ _ _ => rfl⟩, fun _ _ => rfl⟩
+            · show lookup (Bap.Bil.bind a.env x r) m = _
+              rw [slice_lookup_bind_other _ (slice_imm_ne_mem hM hm ⟨_, ht⟩)]
+              exact h1
+            · have hxb : x ≠ base := by
+                rintro rfl
+                have := hw (.reg x) (by simp [(slice_stmtInfo_moveReg (Ms := Ms) ht hv).1]) _ hp
+                simp [Location.affects, Location.overlaps] at this
+              exact (slice_lookup_bind_other r hxb).symm
         | moveMem hms hv =>
           obtain ⟨aw, vw, htm⟩ := hM _ hms
           obtain ⟨hwrites, hwhole, _, _, _⟩ := slice_stmtInfo_moveMem htm value
           obtain ⟨root, hroot, hrty, hrootEq⟩ := slice_chain_root value hv
           obtain ⟨w, vw', M, hty, h1, h3⟩ := hok root hroot
-          obtain ⟨M', rfl, hs', hframe⟩ := slice_chain_self (dst := x) h1 h3 value hv hrootEq r he
+          have hwd : w = aw := by
+            have := htm.symm.trans (hrty.symm.trans hty)
+            cases this
+            rfl
+          subst hwd
+          obtain ⟨M', rfl, hs', hframe⟩ := slice_chain_self htm rfl h1 h3 value hv hrootEq r he
           refine ⟨fun y ht _ => ?_, fun m hm => ?_⟩
           · have hne : x ≠ y := fun e => slice_imm_ne_mem hM hms (e ▸ ht) e.symm
             exact (slice_lookup_bind_other _ hne).symm
@@ -1985,9 +2612,13 @@ private theorem slice_exec_frame_live {Ms : List Bap.Var} (hM : slice_Memories M
               subst hw₀
               by_cases hwh : ((memoryWrites m value).2 || chainRoot value != some m) = true
               · -- nothing live in this memory
-                refine ⟨w₀, vw₀, M₀, M', k0, k1, slice_lookup_bind_same _ _ _, k3, hs', fun address n hp => ?_⟩
-                have := hu m (by simp [hwhole, hwh]) _ hp
-                simp [Location.inMemory] at this
+                refine ⟨w₀, vw₀, M₀, M', k0, k1, slice_lookup_bind_same _ _ _, k3, hs', fun address n hp => ?_, fun base off n _ hp => ?_, fun hp => ?_⟩
+                · have := hu m (by simp [hwhole, hwh]) _ hp
+                  simp [Location.inMemory] at this
+                · have := hu m (by simp [hwhole, hwh]) _ hp
+                  simp [Location.inMemory] at this
+                · have := hu m (by simp [hwhole, hwh]) _ hp
+                  simp [Location.inMemory] at this
               · simp only [Bool.or_eq_true, bne_iff_ne, ne_eq, not_or, Bool.not_eq_true, Classical.not_not] at hwh
                 obtain ⟨hk, hr⟩ := hwh
                 have hrr : root = m := by rw [hrootEq] at hr; exact Option.some.inj hr
@@ -1996,17 +2627,41 @@ private theorem slice_exec_frame_live {Ms : List Bap.Var} (hM : slice_Memories M
                   have he := k1.symm.trans h1
                   simpa using he
                 subst heq
-                refine ⟨w₀, vw₀, M₀, M', k0, k1, slice_lookup_bind_same _ _ _, k3, hs', fun address n hp p h6 h7 h8 => ?_⟩
-                refine (hframe p h8 hk fun n' s' hmem hin => ?_).symm
-                have hov := hw (.memOf root n' s') (by rw [hwrites]; exact hmem) _ hp
-                simp only [Location.overlaps, beq_self_eq_true, Bool.true_and, Bool.and_eq_false_iff,
-                  decide_eq_false_iff_not] at hov
-                omega
+                refine ⟨w₀, vw₀, M₀, M', k0, k1, slice_lookup_bind_same _ _ _, k3, hs', fun address n hp p h6 h7 h8 => ?_, fun base off n hi hp => ?_, fun hp q => ?_⟩
+                · refine (hframe _ hk fun d hd hit => ?_).symm
+                  have hov := hw d (by rw [hwrites]; exact hd) _ hp
+                  rcases slice_memoryWrites_mem htm _ hd with ⟨n', s', rfl⟩ | ⟨b', off', s', rfl⟩
+                  · obtain ⟨k', hk', hlt, hq⟩ := hit
+                    have hp' : p = n' + k' := by
+                      have := congrArg BitVec.toNat hq
+                      rw [BitVec.toNat_ofNat, BitVec.toNat_ofNat, Nat.mod_eq_of_lt h8, Nat.mod_eq_of_lt hlt] at this
+                      exact this
+                    simp only [Location.affects, Location.overlaps, Bool.or_false, beq_self_eq_true, Bool.true_and, Bool.and_eq_false_iff,
+                      decide_eq_false_iff_not] at hov
+                    omega
+                  · simp [Location.affects, Location.overlaps] at hov
+                · have hxb : root ≠ base := fun e => slice_imm_ne_mem hM hms hi e.symm
+                  refine ⟨(slice_lookup_bind_other _ hxb).symm, fun wb c hc k hk' => ?_⟩
+                  refine (hframe _ hk fun d hd hit => ?_).symm
+                  have hov := hw d (by rw [hwrites]; exact hd) _ hp
+                  rcases slice_memoryWrites_mem htm _ hd with ⟨n', s', rfl⟩ | ⟨b', off', s', rfl⟩
+                  · simp [Location.affects, Location.overlaps] at hov
+                  · obtain ⟨wb', c', hl, k', hk2, hq⟩ := hit
+                    simp only [Location.affects, Location.overlaps, Bool.or_false, beq_self_eq_true, Bool.true_and, Bool.or_eq_false_iff, bne_eq_false_iff_eq, Bool.not_eq_false'] at hov
+                    obtain ⟨rfl, hap⟩ := hov
+                    obtain ⟨rfl, hh⟩ := slice_bits_inj (hl.symm.trans hc)
+                    cases hh
+                    exact slice_apart_ne htm hap c' hk' hk2 hq
+                · refine (hframe q hk fun d hd _ => ?_).symm
+                  have hov := hw d (by rw [hwrites]; exact hd) _ hp
+                  rcases slice_memoryWrites_mem htm _ hd with ⟨n', s', rfl⟩ | ⟨b', off', s', rfl⟩ <;> simp [Location.affects, Location.overlaps] at hov
             · obtain ⟨w', vw₁, M₁, kt, k1, k3⟩ := hok m hm
               have hne : x ≠ m := fun e => hmx e.symm
-              refine ⟨w', vw₁, M₁, M₁, kt, k1, ?_, k3, k3, fun _ _ _ _ _ _ _ => rfl⟩
-              show lookup (Bap.Bil.bind a.env x _) m = _
-              rw [slice_lookup_bind_other _ hne]; exact k1
+              refine ⟨w', vw₁, M₁, M₁, kt, k1, ?_, k3, k3, fun _ _ _ _ _ _ _ => rfl, fun base off n hi _ => ⟨?_, fun _ _ _ _ _ => rfl⟩, fun _ _ => rfl⟩
+              · show lookup (Bap.Bil.bind a.env x _) m = _
+                rw [slice_lookup_bind_other _ hne]; exact k1
+              · have hxb : x ≠ base := fun e => slice_imm_ne_mem hM hms hi e.symm
+                exact (slice_lookup_bind_other _ hxb).symm
       | ifElse condition yes no =>
         cases hwf with
         | ifElse hv hy hn =>
@@ -2417,7 +3072,7 @@ private theorem slice_simulation {Ms : List Bap.Var} (hM : slice_Memories Ms) {f
           rw [hnot] at this
           cases this)
       (fun s hs' d hd l hl => by
-        cases ho : d.overlaps l with
+        cases ho : d.affects l with
         | false => rfl
         | true =>
           have := (slice_relevant_iff _ _).2 (.inr (.inr ⟨d, (slice_block_writes_iff _ _).2 ⟨s, hs', hd⟩, l, hl, ho⟩))
@@ -2503,7 +3158,7 @@ theorem slice_end_to_end {Ms : List Bap.Var} (hM : slice_Memories Ms) {fuel : Na
   obtain ⟨bf, hbf, hr, hm⟩ := slice_simulation hM (fun y hy => slice_complete_solved hcomplete hy) hwf hrun hx st
     (slice_Agree_refl hmem)
   refine ⟨bf, hbf, fun r ht hc => hr r ht (slice_mem_expand_reg hc), fun m hms => ?_⟩
-  obtain ⟨w, _, Mf, Ms', _, h1, h2, _, _, h5⟩ := hm m hms
+  obtain ⟨w, _, Mf, Ms', _, h1, h2, _, _, h5, _, _⟩ := hm m hms
   refine ⟨w, Mf, Ms', h1, h2, fun address n hc => ?_⟩
   have hbytes := h5 address n (slice_mem_expand_memOf hc)
   refine ⟨hbytes, fun hfit endian => ?_⟩
@@ -2613,15 +3268,19 @@ private theorem slice_constantRange_int {address size : Nat} (h : address + size
   · simp only [Nat.add_zero]
     rw [ite_eq_left (Nat.le_of_lt (BitVec.isLt (BitVec.ofNat 64 address)))]
 
+private theorem slice_accessAt_int (memory : Bap.Var) {address size : Nat} (h : address + size ≤ 2 ^ 64) :
+    accessAt memory (.int (BitVec.ofNat 64 address)) size = .memOf memory (BitVec.ofNat 64 address).toNat size := by
+  simp only [accessAt, slice_constantRange_int h]
+
 /-- A store that covers a live range ends its liveness: nothing before it matters. -/
 theorem slice_covering_store_kills :
     moveBefore slice_m (slice_store slice_m slice_m 100 8) [.memOf slice_m 100 4] = [] := by
-  simp [moveBefore, slice_store, slice_m, memoryWrites, slice_constantRange_int, Location.covers, Location.overlaps]
+  simp [moveBefore, slice_store, slice_m, memoryWrites, slice_accessAt_int, Location.covers, Location.overlaps]
 
 /-- A store over part of a live range leaves the rest of it live. -/
 theorem slice_partial_store_keeps :
     moveBefore slice_m (slice_store slice_m slice_m 104 4) [.memOf slice_m 100 8] = [.memOf slice_m 100 8] := by
-  simp [moveBefore, slice_store, slice_m, memoryWrites, chainRoot, slice_constantRange_int, Location.covers, Location.overlaps]
+  simp [moveBefore, slice_store, slice_m, memoryWrites, chainRoot, slice_accessAt_int, Location.covers, Location.overlaps]
 
 /-- A store to one memory doesn't touch the same address of another, however it covers it: this is
 the aliasing that used to make code with two memory variables incomplete. -/
@@ -2639,7 +3298,7 @@ theorem slice_memory_move_renames :
 theorem slice_store_copy_renames :
     moveBefore slice_m (slice_store slice_m slice_n 100 8) [.memOf slice_m 100 4, .memOf slice_m 300 4] =
       [.memOf slice_n 300 4] := by
-  simp [moveBefore, slice_store, slice_m, slice_n, memoryWrites, chainRoot, slice_constantRange_int, Location.covers, Location.overlaps]
+  simp [moveBefore, slice_store, slice_m, slice_n, memoryWrites, chainRoot, slice_accessAt_int, Location.covers, Location.overlaps]
 
 /-- What follows a jump in one instruction may not run, so it doesn't end liveness. -/
 theorem slice_after_exit_keeps :
@@ -2653,21 +3312,53 @@ theorem slice_one_armed_if_keeps :
       [.reg slice_x] := by
   simp [insnBefore, codeBefore, stmtBefore]
 
-/-- A store at an unknown address may write any byte of that memory: it's relevant, and dynamic. -/
+/-- A store at an address that is not known may write any byte of that memory: it's relevant. As a site it writes the same
+in both runs, so it's not dynamic. -/
 theorem slice_unknown_store_relevant :
-    relevant [.memOf slice_m 100 1] (blockInfo [.move slice_m (.store (.var slice_m) (.var slice_y) (.int (BitVec.ofNat 8 7)) .little 1)]) = true ∧
-      Info.dynamic (blockInfo [.move slice_m (.store (.var slice_m) (.var slice_y) (.int (BitVec.ofNat 8 7)) .little 1)]) = true := by
-  simp [relevant, blockInfo, merge, stmtInfo, memoryWrites, constantRange, slice_y, slice_m, Bap.Bil.evalExp, Bap.Bil.lookup, Location.inMemory]
+    relevant [.memOf slice_m 100 1] (blockInfo [.move slice_m (.store (.var slice_m) (.bin .mul (.var slice_y) (.var slice_y)) (.int (BitVec.ofNat 8 7)) .little 1)]) = true ∧
+      Info.dynamic (blockInfo [.move slice_m (.store (.var slice_m) (.bin .mul (.var slice_y) (.var slice_y)) (.int (BitVec.ofNat 8 7)) .little 1)]) = false := by
+  simp [relevant, blockInfo, merge, stmtInfo, memoryWrites, accessAt, affine, oversized, constantRange, slice_y, slice_m, Bap.Bil.evalExp, Bap.Bil.lookup, Location.inMemory, usesExp, bind, Except.bind]
 
 /-- A store at an unknown address of another memory is not relevant to this one. -/
 theorem slice_unknown_store_other_memory :
-    relevant [.memOf slice_n 100 1] (blockInfo [.move slice_m (.store (.var slice_m) (.var slice_y) (.int (BitVec.ofNat 8 7)) .little 1)]) = false := by
-  simp [relevant, blockInfo, merge, stmtInfo, memoryWrites, constantRange, slice_y, slice_m, slice_n, Bap.Bil.evalExp, Bap.Bil.lookup, Location.inMemory]
+    relevant [.memOf slice_n 100 1] (blockInfo [.move slice_m (.store (.var slice_m) (.bin .mul (.var slice_y) (.var slice_y)) (.int (BitVec.ofNat 8 7)) .little 1)]) = false := by
+  simp [relevant, blockInfo, merge, stmtInfo, memoryWrites, accessAt, affine, constantRange, slice_y, slice_m, slice_n, Bap.Bil.evalExp, Bap.Bil.lookup, Location.inMemory, Location.affects, Location.overlaps, bind, Except.bind]
+
+private def slice_slotStore (base : Bap.Var) (offset size : Nat) : Bap.Bil.Exp :=
+  .store (.var slice_m) (.bin .add (.var base) (.int (BitVec.ofNat 64 offset))) (.int (BitVec.ofNat (size * 8) 7)) .little size
+
+/-- **Distinct slots don't alias**: a store to one slot from a register is not relevant to another slot from it. -/
+theorem slice_other_slot_not_relevant :
+    relevant [.rel slice_m slice_y 16 8] (blockInfo [.move slice_m (slice_slotStore slice_y 8 8)]) = false := by
+  simp [relevant, blockInfo, merge, stmtInfo, memoryWrites, accessAt, affine, closedBits, constantRange, chainRoot, slice_slotStore, slice_y, slice_m, offsetLimit,
+    Bap.Bil.evalExp, Bap.Bil.lookup, Location.affects, Location.overlaps, Location.apart, bind, Except.bind, Bap.Value.asBits, Except.toOption]
+
+/-- A store to the slot that is live ends its liveness. -/
+theorem slice_same_slot_kills :
+    moveBefore slice_m (slice_slotStore slice_y 8 8) [.rel slice_m slice_y 8 8] = [] := by
+  simp [moveBefore, memoryWrites, accessAt, affine, closedBits, constantRange, slice_slotStore, slice_y, slice_m, offsetLimit,
+    Bap.Bil.evalExp, Bap.Bil.lookup, Location.covers, Location.overlaps, Location.apart, bind, Except.bind, Bap.Value.asBits, Except.toOption]
+
+/-- A slot follows its register back through an adjustment of it. -/
+theorem slice_slot_through_move :
+    moveBefore slice_y (.bin .sub (.var slice_y) (.int (BitVec.ofNat 64 8))) [.rel slice_m slice_y 0 8] = [.rel slice_m slice_y (-8) 8] := by
+  simp [moveBefore, throughMove, affine, closedBits, slice_y, slice_m, offsetLimit, Bap.Bil.evalExp, bind, Except.bind, Bap.Value.asBits, Except.toOption]
+
+/-- A slot of a register written with what is not known is any byte. -/
+theorem slice_slot_lost :
+    moveBefore slice_y (.bin .mul (.var slice_x) (.var slice_x)) [.rel slice_m slice_y 0 8] = [.whole slice_m] := by
+  simp [moveBefore, throughMove, affine, closedBits, slice_x, slice_y, slice_m, Bap.Bil.evalExp, Bap.Bil.lookup, bind, Except.bind]
+
+/-- A read of an address that is not known needs all of the memory, and is no reason to give up. -/
+theorem slice_unknown_read :
+    Info.uses (usesExp (.load (.var slice_m) (.bin .mul (.var slice_y) (.var slice_y)) .little 1)) = [.whole slice_m, .reg slice_y, .reg slice_y] ∧
+      Info.dynamic (usesExp (.load (.var slice_m) (.bin .mul (.var slice_y) (.var slice_y)) .little 1)) = false := by
+  simp [usesExp, accessAt, affine, constantRange, slice_y, slice_m, Bap.Bil.evalExp, Bap.Bil.lookup, bind, Except.bind]
 
 /-- Reading a location doesn't make an instruction relevant to it: only writing does. -/
 theorem slice_read_not_relevant :
     relevant [.reg slice_x] (blockInfo [.move slice_y (.var slice_x)]) = false := by
-  simp [relevant, blockInfo, merge, stmtInfo, slice_x, slice_y, isStore, Location.overlaps]
+  simp [relevant, blockInfo, merge, stmtInfo, slice_x, slice_y, isStore, Location.affects, Location.overlaps]
 
 end Transfer
 
@@ -4663,7 +5354,7 @@ end Evaluation
 open Bap.Analysis.Taint
 open_private Bap.Analysis.Taint in Bap.Analysis.Taint :
   union putVar putMemory byteLabels constant bytes allLabels memoryLabels store joinBindings
-  assigned saturate loopFuel loopState storeCount writeCount
+  assigned saturate loopFuel loopState storeCount writeCount bitsOnly memoryOf holdsMemory mixes smear
 
 theorem taint_mem_union (l : Nat) (a b : Labels) : l ∈ union a b ↔ l ∈ a ∨ l ∈ b := by
   simp [union, List.mem_eraseDups]
@@ -4699,7 +5390,7 @@ theorem taint_labelsOfVar_putVar (s : State) (v w : Bap.Var) (l : Labels) :
       rw [taint_find_filter]
       simp [hw']
 
-private theorem taint_byteLabels_putMemory (s : State) (a b : Nat) (l : Labels) :
+private theorem taint_byteLabels_putMemory (s : State) (a b : Cell) (l : Labels) :
     byteLabels (putMemory a l s) b = if b = a then l else byteLabels s b := by
   unfold byteLabels putMemory
   cases l with
@@ -4717,26 +5408,26 @@ private theorem taint_byteLabels_putMemory (s : State) (a b : Nat) (l : Labels) 
       simp [hw']
 
 /-- Memory labels are what is known at the byte plus what may be anywhere. -/
-theorem taint_mem_labelsOfMemory (s : State) (m n : Nat) :
+theorem taint_mem_labelsOfMemory (s : State) (m : Cell) (n : Nat) :
     n ∈ labelsOfMemory s m ↔ n ∈ byteLabels s m ∨ n ∈ s.anywhere := by
   simp [labelsOfMemory, taint_mem_union]
 
 @[simp] private theorem taint_anywhere_putVar (s : State) (v : Bap.Var) (l : Labels) :
     (putVar v l s).anywhere = s.anywhere := rfl
 
-@[simp] private theorem taint_anywhere_putMemory (s : State) (a : Nat) (l : Labels) :
+@[simp] private theorem taint_anywhere_putMemory (s : State) (a : Cell) (l : Labels) :
     (putMemory a l s).anywhere = s.anywhere := rfl
 
-@[simp] private theorem taint_byteLabels_putVar (s : State) (v : Bap.Var) (l : Labels) (a : Nat) :
+@[simp] private theorem taint_byteLabels_putVar (s : State) (v : Bap.Var) (l : Labels) (a : Cell) :
     byteLabels (putVar v l s) a = byteLabels s a := rfl
 
-@[simp] private theorem taint_labelsOfVar_putMemory (s : State) (v : Bap.Var) (l : Labels) (a : Nat) :
+@[simp] private theorem taint_labelsOfVar_putMemory (s : State) (v : Bap.Var) (l : Labels) (a : Cell) :
     labelsOfVar (putMemory a l s) v = labelsOfVar s v := rfl
 
-@[simp] private theorem taint_labelsOfMemory_putVar (s : State) (v : Bap.Var) (l : Labels) (a : Nat) :
+@[simp] private theorem taint_labelsOfMemory_putVar (s : State) (v : Bap.Var) (l : Labels) (a : Cell) :
     labelsOfMemory (putVar v l s) a = labelsOfMemory s a := rfl
 
-theorem taint_labelsOfMemory_putMemory (s : State) (a b : Nat) (l : Labels) :
+theorem taint_labelsOfMemory_putMemory (s : State) (a b : Cell) (l : Labels) :
     labelsOfMemory (putMemory a l s) b = if b = a then union l s.anywhere else labelsOfMemory s b := by
   by_cases h : b = a <;> simp [labelsOfMemory, taint_byteLabels_putMemory, h]
 
@@ -4748,7 +5439,7 @@ theorem taint_mem_labelsOfVar_sourceVar (s : State) (v w : Bap.Var) (l : Labels)
   · subst hw; simp [sourceVar, taint_labelsOfVar_putVar, taint_mem_union]
   · simp [sourceVar, taint_labelsOfVar_putVar, hw]
 
-theorem taint_mem_labelsOfMemory_sourceMemory (s : State) (a b : Nat) (l : Labels) (n : Nat) :
+theorem taint_mem_labelsOfMemory_sourceMemory (s : State) (a b : Cell) (l : Labels) (n : Nat) :
     n ∈ labelsOfMemory (sourceMemory s a l) b ↔
       n ∈ labelsOfMemory s b ∨ (b = a ∧ n ∈ l) := by
   simp only [taint_mem_labelsOfMemory, sourceMemory, taint_anywhere_putMemory,
@@ -4758,10 +5449,10 @@ theorem taint_mem_labelsOfMemory_sourceMemory (s : State) (a b : Nat) (l : Label
     simp [taint_mem_union, or_comm, or_left_comm]
   · simp [hw]
 
-theorem taint_labelsOfMemory_sourceVar (s : State) (v : Bap.Var) (l : Labels) (a : Nat) :
+theorem taint_labelsOfMemory_sourceVar (s : State) (v : Bap.Var) (l : Labels) (a : Cell) :
     labelsOfMemory (sourceVar s v l) a = labelsOfMemory s a := rfl
 
-theorem taint_labelsOfVar_sourceMemory (s : State) (v : Bap.Var) (l : Labels) (a : Nat) :
+theorem taint_labelsOfVar_sourceMemory (s : State) (v : Bap.Var) (l : Labels) (a : Cell) :
     labelsOfVar (sourceMemory s a l) v = labelsOfVar s v := rfl
 
 theorem taint_labelsOfVar_clearVar (s : State) (v w : Bap.Var) :
@@ -4770,7 +5461,7 @@ theorem taint_labelsOfVar_clearVar (s : State) (v w : Bap.Var) :
 
 /-- Clearing a byte forgets what is known there. It is intended that labels a store with an
 unresolved address may have left anywhere still apply to it. -/
-theorem taint_labelsOfMemory_clearMemory (s : State) (a b : Nat) :
+theorem taint_labelsOfMemory_clearMemory (s : State) (a b : Cell) :
     labelsOfMemory (clearMemory s a) b =
       if b = a then s.anywhere.eraseDups else labelsOfMemory s b := by
   by_cases h : b = a <;> simp [clearMemory, labelsOfMemory, taint_byteLabels_putMemory, h, union]
@@ -4818,7 +5509,7 @@ private theorem taint_union_le {a b c : Labels} (h : a ⊆ c) (k : b ⊆ c) : un
   · exact h hn
   · exact k hn
 
-private theorem taint_byteLabels_key {s : State} {k n : Nat} (h : n ∈ byteLabels s k) :
+private theorem taint_byteLabels_key {s : State} {k : Cell} {n : Nat} (h : n ∈ byteLabels s k) :
     k ∈ s.memory.map Prod.fst := by
   unfold byteLabels at h
   split at h
@@ -4830,7 +5521,7 @@ private theorem taint_byteLabels_key {s : State} {k n : Nat} (h : n ∈ byteLabe
   · simp at h
 
 /-- A load at an unresolved address sees every label any byte holds. -/
-theorem taint_labelsOfMemory_subset_memoryLabels (s : State) (k : Nat) :
+theorem taint_labelsOfMemory_subset_memoryLabels (s : State) (k : Cell) :
     labelsOfMemory s k ⊆ memoryLabels s := by
   intro n hn
   simp only [memoryLabels, taint_mem_union, List.mem_flatMap]
@@ -4855,23 +5546,57 @@ theorem taint_exp_mono {a b : State} (h : taint_Le a b) (e : Bil.Exp) : exp a e 
   | load m ad _ size im _ =>
     simp only [exp]
     refine taint_union_mono im ?_
-    cases constant ad with
-    | none => exact taint_memoryLabels_mono h
-    | some address =>
+    cases constant ad <;> cases memoryOf m
+    case some.some address var =>
       intro n hn
       simp only [List.mem_eraseDups, List.mem_flatMap] at hn ⊢
       rcases hn with ⟨k, hk, hn⟩
       exact ⟨k, hk, h.2.1 k hn⟩
+    all_goals exact taint_memoryLabels_mono h
   | store _ _ _ _ _ im ia iv =>
     simp only [exp]; exact taint_union_mono im (taint_union_mono ia iv)
   | bin _ _ _ il ir => simp only [exp]; exact taint_union_mono il ir
   | un _ _ i => simpa only [exp] using i
   | cast _ _ _ i => simpa only [exp] using i
-  | letIn _ _ _ il ir => simp only [exp]; exact taint_union_mono il ir
+  | letIn x _ _ il ir =>
+    simp only [exp]
+    refine taint_union_mono il (taint_union_mono ir ?_)
+    split
+    · exact fun _ h => h
+    · exact taint_memoryLabels_mono h
   | ite _ _ _ _ iy in_ => simp only [exp]; exact taint_union_mono iy in_
   | extract _ _ _ i => simpa only [exp] using i
   | concat _ _ il ir => simp only [exp]; exact taint_union_mono il ir
   | unknown _ _ => simp [exp]
+
+/-! `smear` takes the labels of all memory to all memory, and leaves the rest. -/
+
+@[simp] private theorem taint_byteLabels_smear (a : State) (m : Cell) : byteLabels (smear a) m = byteLabels a m := rfl
+
+@[simp] private theorem taint_labelsOfVar_smear (a : State) (v : Bap.Var) : labelsOfVar (smear a) v = labelsOfVar a v := rfl
+
+private theorem taint_Le_smear (a : State) : taint_Le a (smear a) := by
+  refine ⟨fun _ _ h => h, fun m n hn => ?_, fun n hn => ?_⟩
+  · rcases (taint_mem_labelsOfMemory _ m n).mp hn with hn | hn
+    · exact (taint_mem_labelsOfMemory _ m n).mpr (Or.inl hn)
+    · refine (taint_mem_labelsOfMemory _ m n).mpr (Or.inr ?_)
+      simp only [smear, memoryLabels, taint_mem_union]
+      exact Or.inr hn
+  · simp only [smear, memoryLabels, taint_mem_union]
+    exact Or.inr hn
+
+private theorem taint_smear_mono {a b : State} (h : taint_Le a b) : taint_Le (smear a) (smear b) := by
+  refine ⟨h.1, fun m n hn => ?_, fun n hn => taint_memoryLabels_mono h hn⟩
+  rcases (taint_mem_labelsOfMemory _ m n).mp hn with hn | hn
+  · have h1 := h.2.1 m ((taint_mem_labelsOfMemory a m n).mpr (Or.inl hn))
+    exact (taint_Le_smear b).2.1 m h1
+  · exact (taint_mem_labelsOfMemory _ m n).mpr (Or.inr (taint_memoryLabels_mono h hn))
+
+private theorem taint_smear_le {a b : State} (h : taint_Le a b) (hany : memoryLabels a ⊆ b.anywhere) : taint_Le (smear a) b := by
+  refine ⟨h.1, fun m n hn => ?_, fun n hn => hany hn⟩
+  rcases (taint_mem_labelsOfMemory _ m n).mp hn with hn | hn
+  · exact h.2.1 m ((taint_mem_labelsOfMemory a m n).mpr (Or.inl hn))
+  · exact (taint_mem_labelsOfMemory _ m n).mpr (Or.inr (hany hn))
 
 private theorem taint_Le_putVar {a b : State} (h : taint_Le a b) (v : Bap.Var) {l r : Labels}
     (k : l ⊆ r) : taint_Le (putVar v l a) (putVar v r b) := by
@@ -4889,7 +5614,7 @@ private theorem taint_Le_putVar_left {a b : State} (h : taint_Le a b) (v : Bap.V
   · rename_i hw; subst hw; exact k
   · exact h.1 w
 
-private theorem taint_Le_putMemory {a b : State} (h : taint_Le a b) (m : Nat) {l r : Labels}
+private theorem taint_Le_putMemory {a b : State} (h : taint_Le a b) (m : Cell) {l r : Labels}
     (k : l ⊆ r) : taint_Le (putMemory m l a) (putMemory m r b) := by
   refine ⟨fun w => by simpa using h.1 w, fun w => ?_, by simpa using h.2.2⟩
   simp only [taint_labelsOfMemory_putMemory]
@@ -4897,7 +5622,7 @@ private theorem taint_Le_putMemory {a b : State} (h : taint_Le a b) (m : Nat) {l
   · exact taint_union_mono k h.2.2
   · exact h.2.1 w
 
-private theorem taint_Le_putMemory_left {a b : State} (h : taint_Le a b) (m : Nat) {l : Labels}
+private theorem taint_Le_putMemory_left {a b : State} (h : taint_Le a b) (m : Cell) {l : Labels}
     (k : l ⊆ b.anywhere) : taint_Le (putMemory m l a) b := by
   refine ⟨fun w => by simpa using h.1 w, fun w => ?_, by simpa using h.2.2⟩
   simp only [taint_labelsOfMemory_putMemory]
@@ -4908,25 +5633,25 @@ private theorem taint_Le_putMemory_left {a b : State} (h : taint_Le a b) (m : Na
   · exact h.2.1 w
 
 /-- Writes `labels` over the bytes `bytes`, one by one. -/
-private def taint_putAll (bytes : List Nat) (labels : Labels) (s : State) : State :=
+private def taint_putAll (bytes : List Cell) (labels : Labels) (s : State) : State :=
   bytes.foldl (fun state byte => putMemory byte labels state) s
 
-private theorem taint_Le_putAll {a b : State} (h : taint_Le a b) (bytes : List Nat) {l r : Labels}
+private theorem taint_Le_putAll {a b : State} (h : taint_Le a b) (bytes : List Cell) {l r : Labels}
     (k : l ⊆ r) : taint_Le (taint_putAll bytes l a) (taint_putAll bytes r b) := by
   induction bytes generalizing a b with
   | nil => exact h
   | cons head tail it => exact it (taint_Le_putMemory h head k)
 
-private theorem taint_Le_putAll_left {a b : State} (h : taint_Le a b) (bytes : List Nat) {l : Labels}
+private theorem taint_Le_putAll_left {a b : State} (h : taint_Le a b) (bytes : List Cell) {l : Labels}
     (k : l ⊆ b.anywhere) : taint_Le (taint_putAll bytes l a) b := by
   induction bytes generalizing a with
   | nil => exact h
   | cons head tail it => exact it (taint_Le_putMemory_left h head k)
 
-private theorem taint_labelsOfMemory_putAll (bytes : List Nat) (l : Labels) (s : State) (m : Nat) :
+private theorem taint_labelsOfMemory_putAll (bytes : List Cell) (l : Labels) (s : State) (m : Cell) :
     labelsOfMemory (taint_putAll bytes l s) m =
       if m ∈ bytes then union l s.anywhere else labelsOfMemory s m := by
-  have hany : ∀ (bs : List Nat) (s : State), (taint_putAll bs l s).anywhere = s.anywhere := by
+  have hany : ∀ (bs : List Cell) (s : State), (taint_putAll bs l s).anywhere = s.anywhere := by
     intro bs
     induction bs with
     | nil => intro s; rfl
@@ -4942,7 +5667,7 @@ private theorem taint_labelsOfMemory_putAll (bytes : List Nat) (l : Labels) (s :
     · simp [ht]
     · by_cases hh : m = head <;> simp [ht, hh, taint_labelsOfMemory_putMemory]
 
-@[simp] private theorem taint_labelsOfVar_putAll (bytes : List Nat) (l : Labels) (s : State) (v : Bap.Var) :
+@[simp] private theorem taint_labelsOfVar_putAll (bytes : List Cell) (l : Labels) (s : State) (v : Bap.Var) :
     labelsOfVar (taint_putAll bytes l s) v = labelsOfVar s v := by
   induction bytes generalizing s with
   | nil => rfl
@@ -4951,7 +5676,7 @@ private theorem taint_labelsOfMemory_putAll (bytes : List Nat) (l : Labels) (s :
 private theorem taint_store_store (dst : Bap.Var) (s : State) (m ad val : Bil.Exp) (e : Endian) (z : Nat) :
     store dst s (.store m ad val e z) =
       match constant ad with
-      | some address => taint_putAll (bytes address z) (union (exp s ad) (exp s val)) (store dst s m)
+      | some address => taint_putAll (bytes dst address z) (union (exp s ad) (exp s val)) (store dst s m)
       | none =>
         { store dst s m with anywhere := union (store dst s m).anywhere (union (exp s ad) (exp s val)) } := by
   rw [store]
@@ -4959,7 +5684,7 @@ private theorem taint_store_store (dst : Bap.Var) (s : State) (m ad val : Bil.Ex
 
 private theorem taint_store_other (dst : Bap.Var) (s : State) (e : Bil.Exp)
     (hs : ∀ m ad val en z, e ≠ .store m ad val en z) (hv : ∀ v, e ≠ .var v) :
-    store dst s e = putVar dst (exp s e) s := by
+    store dst s e = smear (putVar dst (exp s e) s) := by
   cases e <;> first
     | exact absurd rfl (hs _ _ _ _ _)
     | exact absurd rfl (hv _)
@@ -4969,10 +5694,11 @@ private theorem taint_stmt_store (s : State) (v : Bap.Var) (m ad val : Bil.Exp) 
     stmt s (.move v (.store m ad val e z)) = store v s (.store m ad val e z) := by
   simp [stmt]
 
-/-- A non-store move replaces the labels of its destination with those of its source. -/
+/-- A non-store move replaces the labels of its destination with those of its source, and if that takes memory to a memory,
+the labels of all memory may be anywhere in it. -/
 theorem taint_stmt_move (s : State) (v : Bap.Var) (e : Bil.Exp)
     (he : ∀ m ad val en z, e ≠ .store m ad val en z) :
-    stmt s (.move v e) = putVar v (exp s e) s := by
+    stmt s (.move v e) = if mixes v e then smear (putVar v (exp s e) s) else putVar v (exp s e) s := by
   cases e <;> first | (exact absurd rfl (he _ _ _ _ _)) | simp [stmt]
 
 private theorem taint_stmt_while (s : State) (c : Bil.Exp) (body : List Bil.Stmt) :
@@ -5066,7 +5792,7 @@ private theorem taint_labelsOfVar_eq_look (s : State) (v : Bap.Var) :
   generalize List.find? _ s.vars = r
   cases r <;> rfl
 
-private theorem taint_byteLabels_eq_look (s : State) (m : Nat) :
+private theorem taint_byteLabels_eq_look (s : State) (m : Cell) :
     byteLabels s m = taint_look s.memory m := by
   unfold byteLabels taint_look
   generalize List.find? _ s.memory = r
@@ -5077,12 +5803,12 @@ theorem taint_mem_labelsOfVar_join (a b : State) (v : Bap.Var) (n : Nat) :
   simp only [taint_labelsOfVar_eq_look]
   exact taint_mem_look_join a.vars b.vars v n
 
-private theorem taint_mem_byteLabels_join (a b : State) (m n : Nat) :
+private theorem taint_mem_byteLabels_join (a b : State) (m : Cell) (n : Nat) :
     n ∈ byteLabels (join a b) m ↔ n ∈ byteLabels a m ∨ n ∈ byteLabels b m := by
   simp only [taint_byteLabels_eq_look]
   exact taint_mem_look_join a.memory b.memory m n
 
-theorem taint_mem_labelsOfMemory_join (a b : State) (m n : Nat) :
+theorem taint_mem_labelsOfMemory_join (a b : State) (m : Cell) (n : Nat) :
     n ∈ labelsOfMemory (join a b) m ↔ n ∈ labelsOfMemory a m ∨ n ∈ labelsOfMemory b m := by
   simp only [taint_mem_labelsOfMemory, taint_mem_byteLabels_join]
   simp only [join, taint_mem_union, or_assoc, or_comm, or_left_comm]
@@ -5110,7 +5836,7 @@ theorem taint_join_le {a b c : State} (h : taint_Le a c) (k : taint_Le b c) : ta
     · exact h.2.2 hn
     · exact k.2.2 hn
 
-private theorem taint_byteLabels_binding {s : State} {m n : Nat} (h : n ∈ byteLabels s m) :
+private theorem taint_byteLabels_binding {s : State} {m : Cell} {n : Nat} (h : n ∈ byteLabels s m) :
     ∃ x ∈ s.memory, x.1 = m ∧ n ∈ x.2 := by
   unfold byteLabels at h
   split at h
@@ -5165,7 +5891,7 @@ private theorem taint_labelsOfVar_subset (s : State) (v : Bap.Var) : labelsOfVar
     exact (taint_mem_labels s n).mpr (Or.inl ⟨b, List.mem_of_find?_eq_some hb, hn⟩)
   · simp at hn
 
-private theorem taint_byteLabels_subset (s : State) (m : Nat) : byteLabels s m ⊆ taint_labels s := by
+private theorem taint_byteLabels_subset (s : State) (m : Cell) : byteLabels s m ⊆ taint_labels s := by
   intro n hn
   obtain ⟨x, hx, _, hl⟩ := taint_byteLabels_binding hn
   exact (taint_mem_labels s n).mpr (Or.inr (Or.inl ⟨x, hx, hl⟩))
@@ -5173,7 +5899,7 @@ private theorem taint_byteLabels_subset (s : State) (m : Nat) : byteLabels s m �
 private theorem taint_anywhere_subset (s : State) : s.anywhere ⊆ taint_labels s := fun n hn =>
   (taint_mem_labels s n).mpr (Or.inr (Or.inr hn))
 
-private theorem taint_labelsOfMemory_subset (s : State) (m : Nat) : labelsOfMemory s m ⊆ taint_labels s := by
+private theorem taint_labelsOfMemory_subset (s : State) (m : Cell) : labelsOfMemory s m ⊆ taint_labels s := by
   intro n hn
   rcases (taint_mem_labelsOfMemory s m n).mp hn with hn | hn
   · exact taint_byteLabels_subset s m hn
@@ -5193,17 +5919,24 @@ theorem taint_exp_provenance (s : State) (e : Bil.Exp) : exp s e ⊆ taint_label
   | load _ ad _ _ im _ =>
     simp only [exp]
     refine taint_union_le im ?_
-    cases constant ad with
-    | none => exact taint_memoryLabels_subset s
-    | some address =>
+    rename_i m _ _ _
+    cases constant ad <;> cases memoryOf m
+    case some.some address var =>
       intro n hn
       simp only [List.mem_eraseDups, List.mem_flatMap] at hn
       rcases hn with ⟨k, _, hn⟩
       exact taint_labelsOfMemory_subset s k hn
+    all_goals exact taint_memoryLabels_subset s
   | store _ _ _ _ _ im ia iv =>
     simp only [exp]; exact taint_union_le im (taint_union_le ia iv)
-  | bin _ _ _ il ir | letIn _ _ _ il ir | concat _ _ il ir =>
+  | bin _ _ _ il ir | concat _ _ il ir =>
     simp only [exp]; exact taint_union_le il ir
+  | letIn x _ _ il ir =>
+    simp only [exp]
+    refine taint_union_le il (taint_union_le ir ?_)
+    split
+    · exact fun _ h => by simp at h
+    · exact taint_memoryLabels_subset s
   | un _ _ i | cast _ _ _ i | extract _ _ _ i => simpa only [exp] using i
   | ite _ _ _ _ iy in_ => simp only [exp]; exact taint_union_le iy in_
   | unknown _ _ => simp [exp]
@@ -5221,7 +5954,7 @@ private theorem taint_labels_putVar (s : State) (v : Bap.Var) (l : Labels) (L : 
   · exact hs ((taint_mem_labels s n).mpr (Or.inr (Or.inl hn)))
   · exact hs ((taint_mem_labels s n).mpr (Or.inr (Or.inr hn)))
 
-private theorem taint_labels_putMemory (s : State) (a : Nat) (l : Labels) (L : Labels)
+private theorem taint_labels_putMemory (s : State) (a : Cell) (l : Labels) (L : Labels)
     (hs : taint_labels s ⊆ L) (hl : l ⊆ L) : taint_labels (putMemory a l s) ⊆ L := by
   intro n hn
   rcases (taint_mem_labels _ n).mp hn with hn | ⟨b, hb, hn⟩ | hn
@@ -5234,7 +5967,7 @@ private theorem taint_labels_putMemory (s : State) (a : Nat) (l : Labels) (L : L
       · exact hs ((taint_mem_labels s n).mpr (Or.inr (Or.inl ⟨b, (List.mem_filter.mp hb).1, hn⟩)))
   · exact hs ((taint_mem_labels s n).mpr (Or.inr (Or.inr hn)))
 
-private theorem taint_labels_putAll (bytes : List Nat) (s : State) (l L : Labels)
+private theorem taint_labels_putAll (bytes : List Cell) (s : State) (l L : Labels)
     (hs : taint_labels s ⊆ L) (hl : l ⊆ L) : taint_labels (taint_putAll bytes l s) ⊆ L := by
   induction bytes generalizing s with
   | nil => exact hs
@@ -5270,6 +6003,13 @@ private theorem taint_labels_join (a b : State) (L : Labels) (ha : taint_labels 
     · exact ha (taint_anywhere_subset a hn)
     · exact hb (taint_anywhere_subset b hn)
 
+private theorem taint_labels_smear (s : State) (L : Labels) (hs : taint_labels s ⊆ L) : taint_labels (smear s) ⊆ L := by
+  intro n hn
+  rcases (taint_mem_labels _ n).mp hn with hn | hn | hn
+  · exact hs ((taint_mem_labels _ n).mpr (Or.inl hn))
+  · exact hs ((taint_mem_labels _ n).mpr (Or.inr (Or.inl hn)))
+  · exact hs (taint_memoryLabels_subset s hn)
+
 private theorem taint_labels_store (dst : Bap.Var) (s : State) (e : Bil.Exp) (L : Labels)
     (hs : taint_labels s ⊆ L) : taint_labels (store dst s e) ⊆ L := by
   have hexp : ∀ e, exp s e ⊆ L := fun e _ h => hs (taint_exp_provenance s e h)
@@ -5293,8 +6033,8 @@ private theorem taint_labels_store (dst : Bap.Var) (s : State) (e : Bil.Exp) (L 
     simp only [store]
     split
     · exact hs
-    · exact taint_labels_putVar _ _ _ _ hs fun _ h => hs (taint_labelsOfVar_subset s source h)
-  | _ => simp only [store]; exact taint_labels_putVar _ _ _ _ hs (hexp _)
+    · exact taint_labels_smear _ _ (taint_labels_putVar _ _ _ _ hs fun _ h => hs (taint_labelsOfVar_subset s source h))
+  | _ => simp only [store]; exact taint_labels_smear _ _ (taint_labels_putVar _ _ _ _ hs (hexp _))
 
 private theorem taint_mem_allLabels (s : State) (n : Nat) : n ∈ allLabels s ↔ n ∈ taint_labels s := by
   simp [allLabels, taint_labels, List.mem_eraseDups]
@@ -5371,7 +6111,10 @@ theorem taint_stmt_provenance (s : Bil.Stmt) : ∀ a L, taint_labels a ⊆ L →
     intro a L h
     by_cases he : ∀ m ad val en z, e ≠ .store m ad val en z
     · rw [taint_stmt_move _ _ _ he]
-      exact taint_labels_putVar _ _ _ _ h fun _ k => h (taint_exp_provenance a e k)
+      have hput := taint_labels_putVar a v (exp a e) L h fun _ k => h (taint_exp_provenance a e k)
+      split
+      · exact taint_labels_smear _ _ hput
+      · exact hput
     · simp only [ne_eq, Classical.not_forall, Classical.not_not] at he
       rcases he with ⟨m, ad, val, en, z, rfl⟩
       rw [taint_stmt_store]
@@ -5456,10 +6199,12 @@ private theorem taint_store_bound {U : State} {L : Labels} {vars : List Bap.Var}
     simp only [store]
     split
     · exact hX
-    · exact taint_Le_putVar_left hX _ fun _ h => hU.var dst hd (hL (taint_labelsOfVar_subset X source h))
+    · refine taint_smear_le (taint_Le_putVar_left hX _ fun _ h => hU.var dst hd (hL (taint_labelsOfVar_subset X source h))) ?_
+      exact fun _ h => hU.anywhere (hL (taint_memoryLabels_subset X h))
   | _ =>
     simp only [store]
-    exact taint_Le_putVar_left hX _ fun _ h => hU.var dst hd (hexp _ h)
+    refine taint_smear_le (taint_Le_putVar_left hX _ fun _ h => hU.var dst hd (hexp _ h)) ?_
+    exact fun _ h => hU.anywhere (hL (taint_memoryLabels_subset X h))
 
 private theorem taint_stmt_bound {U : State} {L : Labels} (s : Bil.Stmt) :
     ∀ {vars : List Bap.Var}, TaintBound U L vars → (∀ v ∈ assigned s, v ∈ vars) →
@@ -5485,7 +6230,10 @@ private theorem taint_stmt_bound {U : State} {L : Labels} (s : Bil.Stmt) :
     have hd : v ∈ vars := ha v (by simp [assigned])
     by_cases he : ∀ m ad val en z, e ≠ .store m ad val en z
     · rw [taint_stmt_move _ _ _ he]
-      exact taint_Le_putVar_left hX _ fun _ h => hU.var v hd (hL (taint_exp_provenance X e h))
+      have hput := taint_Le_putVar_left hX v fun _ h => hU.var v hd (hL (taint_exp_provenance X e h))
+      split
+      · exact taint_smear_le hput fun _ h => hU.anywhere (hL (taint_memoryLabels_subset X h))
+      · exact hput
     · simp only [ne_eq, Classical.not_forall, Classical.not_not] at he
       rcases he with ⟨m, ad, val, en, z, rfl⟩
       rw [taint_stmt_store]
@@ -5590,25 +6338,28 @@ def taint_taken (env : Bil.Env) (c : Bil.Exp) : Bool :=
 /-- The labels of a value on one concrete execution: loads read the bytes of the address actually
 computed, and an `ite` carries the labels of the arm actually taken. Data flow only, as the analysis:
 a condition or a load address contributes nothing, so implicit flows and pointer taint are out of
-scope. A `let` body reads a shadowed variable's state labels; the bound value's labels are added. -/
+scope. A `let` body reads a shadowed variable's state labels; the bound value's labels are added, and those of all
+memory if it can be memory, as those of a load of what is not known to be the bytes of a memory variable. -/
 def taint_concreteExp (T : State) : Bil.Env → Bil.Exp → Labels
   | _, .int _ => []
   | _, .var v => labelsOfVar T v
   | env, .load m a _ size =>
     union (taint_concreteExp T env m) <|
-      match taint_address env a with
-      | some address => (bytes address size).flatMap (labelsOfMemory T)
-      | none => []
+      match taint_address env a, memoryOf m with
+      | some address, some var => (bytes var address size).flatMap (labelsOfMemory T)
+      | some _, none => memoryLabels T
+      | none, _ => []
   | env, .store m a v _ _ =>
     union (taint_concreteExp T env m) (union (taint_concreteExp T env a) (taint_concreteExp T env v))
   | env, .bin _ l r => union (taint_concreteExp T env l) (taint_concreteExp T env r)
   | env, .un _ v => taint_concreteExp T env v
   | env, .cast _ _ v => taint_concreteExp T env v
   | env, .letIn x v b =>
-    union (taint_concreteExp T env v) <|
-      match Bil.evalExp env v with
-      | .ok value => taint_concreteExp T (Bil.bind env x value) b
-      | .error _ => []
+    union (taint_concreteExp T env v) <| union
+      (match Bil.evalExp env v with
+       | .ok value => taint_concreteExp T (Bil.bind env x value) b
+       | .error _ => [])
+      (if bitsOnly x then [] else memoryLabels T)
   | env, .ite c y n =>
     if taint_taken env c then taint_concreteExp T env y else taint_concreteExp T env n
   | env, .extract _ _ v => taint_concreteExp T env v
@@ -5621,10 +6372,14 @@ def taint_concreteStore (dst : Bap.Var) (T : State) (env : Bil.Env) : Bil.Exp �
     let labels := union (taint_concreteExp T env a) (taint_concreteExp T env v)
     let inner := taint_concreteStore dst T env m
     match taint_address env a with
-    | some address => (bytes address size).foldl (fun state byte => putMemory byte labels state) inner
+    | some address => (bytes dst address size).foldl (fun state byte => putMemory byte labels state) inner
     | none => inner
-  | .var source => if source = dst then T else putVar dst (labelsOfVar T source) T
-  | other => putVar dst (taint_concreteExp T env other) T
+  | .var source => if source = dst then T else smear (putVar dst (labelsOfVar T source) T)
+  | other => smear (putVar dst (taint_concreteExp T env other) T)
+
+/-- The taint effect of assigning what is not a store. -/
+def taint_concreteMove (var : Bap.Var) (T : State) (env : Bil.Env) (value : Bil.Exp) : State :=
+  if mixes var value then smear (putVar var (taint_concreteExp T env value) T) else putVar var (taint_concreteExp T env value) T
 
 mutual
   /-- `Bil.execStmt` that also tracks byte-exact taint along the path it takes. -/
@@ -5638,7 +6393,7 @@ mutual
         let result ← Bil.execExp st value
         let T := match value with
           | .store .. => taint_concreteStore var T st.env value
-          | _ => putVar var (taint_concreteExp T st.env value) T
+          | _ => taint_concreteMove var T st.env value
         .ok ({ env := Bil.bind st.env var result }, T, .normal)
       | .jmp target => do
         let target ← Value.asBits (← Bil.execExp st target)
@@ -5782,21 +6537,26 @@ private theorem taint_concreteExp_subset {T S : State} (h : taint_Le T S) (e : B
     intro env
     simp only [taint_concreteExp, exp]
     refine taint_union_mono (im env) ?_
-    cases hc : constant ad with
-    | some x =>
-      rw [taint_address_of_constant env hc]
-      intro n hn
-      simp only [List.mem_eraseDups, List.mem_flatMap] at hn ⊢
-      rcases hn with ⟨k, hk, hn⟩
-      exact ⟨k, hk, h.2.1 k hn⟩
-    | none =>
-      cases taint_address env ad with
-      | none => simp
+    cases hm : memoryOf m with
+    | some var =>
+      cases hc : constant ad with
       | some x =>
+        rw [taint_address_of_constant env hc]
         intro n hn
-        simp only [List.mem_flatMap] at hn
-        rcases hn with ⟨k, _, hn⟩
-        exact taint_labelsOfMemory_subset_memoryLabels S k (h.2.1 k hn)
+        simp only [List.mem_eraseDups, List.mem_flatMap] at hn ⊢
+        rcases hn with ⟨k, hk, hn⟩
+        exact ⟨k, hk, h.2.1 k hn⟩
+      | none =>
+        cases taint_address env ad with
+        | none => simp
+        | some x =>
+          intro n hn
+          simp only [List.mem_flatMap] at hn
+          rcases hn with ⟨k, _, hn⟩
+          simpa [hc] using taint_labelsOfMemory_subset_memoryLabels S k (h.2.1 k hn)
+    | none =>
+      cases hc : constant ad <;> cases taint_address env ad <;> simp only
+      all_goals first | exact fun _ h => by simp at h | exact taint_memoryLabels_mono h
   | store _ _ _ _ _ im ia iv =>
     intro env
     simp only [taint_concreteExp, exp]
@@ -5815,10 +6575,13 @@ private theorem taint_concreteExp_subset {T S : State} (h : taint_Le T S) (e : B
   | letIn x v b iv ib =>
     intro env
     simp only [taint_concreteExp, exp]
-    refine taint_union_mono (iv env) ?_
-    cases Bil.evalExp env v with
-    | error _ => simp
-    | ok r => exact ib _
+    refine taint_union_mono (iv env) (taint_union_mono ?_ ?_)
+    · cases Bil.evalExp env v with
+      | error _ => simp
+      | ok r => exact ib _
+    · split
+      · exact fun _ h => h
+      · exact taint_memoryLabels_mono h
   | ite c _ _ _ iy in_ =>
     intro env n hn
     simp only [taint_concreteExp, exp] at hn ⊢
@@ -5859,10 +6622,18 @@ private theorem taint_concreteStore_le {T S : State} (h : taint_Le T S) (dst : B
     simp only [taint_concreteStore, store]
     split
     · exact h
-    · exact taint_Le_putVar h _ (h.1 source)
+    · exact taint_smear_mono (taint_Le_putVar h _ (h.1 source))
   | _ =>
     simp only [taint_concreteStore, store]
-    exact taint_Le_putVar h _ (hexp _ env)
+    exact taint_smear_mono (taint_Le_putVar h _ (hexp _ env))
+
+private theorem taint_concreteMove_le {T S : State} (h : taint_Le T S) (v : Bap.Var) (env : Bil.Env) (e : Bil.Exp) :
+    taint_Le (taint_concreteMove v T env e) (if mixes v e then smear (putVar v (exp S e) S) else putVar v (exp S e) S) := by
+  have hput := taint_Le_putVar h v (taint_concreteExp_subset h e env)
+  unfold taint_concreteMove
+  split
+  · exact taint_smear_mono hput
+  · exact hput
 
 mutual
   /-- `X` is the analysis state at a point where `s`, entered in state `S`, may leave the program by
@@ -5959,7 +6730,7 @@ private theorem taint_sim (fuel : Nat) :
             exact taint_concreteStore_le hT v st.env _
           | _ =>
             simp only [stmt]
-            exact taint_Le_putVar hT v (taint_concreteExp_subset hT _ st.env)
+            exact taint_concreteMove_le hT _ _ _
       | jmp t =>
         simp only [taint_execStmt] at h
         cases he : Bil.execExp st t with
@@ -6110,22 +6881,22 @@ section Addressing
 open Bap.Proofs.Core.MemoryLaws
 open_private Bap.Bil.Eval in Bap.Bil : expectMemory
 
-theorem taint_mem_bytes {w : Nat} (a : BitVec w) (z p : Nat) :
-    p ∈ bytes ⟨w, a⟩ z ↔ ∃ k, k < z ∧ p = (a + BitVec.ofNat w k).toNat := by
+theorem taint_mem_bytes (var : Bap.Var) {w : Nat} (a : BitVec w) (z : Nat) (c : Cell) :
+    c ∈ bytes var ⟨w, a⟩ z ↔ c.memory = var ∧ ∃ k, k < z ∧ c.address = (a + BitVec.ofNat w k).toNat := by
   simp only [bytes, List.mem_map, List.mem_range]
   constructor
   · rintro ⟨k, hk, rfl⟩
-    exact ⟨k, hk, rfl⟩
-  · rintro ⟨k, hk, rfl⟩
-    exact ⟨k, hk, rfl⟩
+    exact ⟨rfl, k, hk, rfl⟩
+  · rintro ⟨rfl, k, hk, he⟩
+    exact ⟨k, hk, by cases c; simp_all⟩
 
 /-- A byte outside `bytes` is untouched by the real write. -/
-theorem taint_bytes_write_frame {w vw : Nat} {M U : Memory w} (hM : PagesSized M) {a p : BitVec w}
+theorem taint_bytes_write_frame {w vw : Nat} {M U : Memory w} (hM : PagesSized M) {a p : BitVec w} {var : Bap.Var}
     {value : BitVec vw} {en : Endian} {z : Nat} (hw : Memory.write M a value en z = .ok U)
-    (hp : p.toNat ∉ bytes ⟨w, a⟩ z) : Memory.readByte U p = Memory.readByte M p := by
+    (hp : (⟨var, p.toNat⟩ : Cell) ∉ bytes var ⟨w, a⟩ z) : Memory.readByte U p = Memory.readByte M p := by
   apply readByte_write_frame hM hw
   intro k hk he
-  exact hp ((taint_mem_bytes a z _).mpr ⟨k, hk, by rw [he]⟩)
+  exact hp ((taint_mem_bytes var a z _).mpr ⟨rfl, k, hk, by rw [he]⟩)
 
 /-- Every byte in `bytes` holds the matching byte of the written image, so none is listed in vain. -/
 theorem taint_bytes_write_hit {w vw : Nat} {M U : Memory w} (hM : PagesSized M) {a : BitVec w}
@@ -6152,25 +6923,25 @@ theorem taint_bytes_write_hit {w vw : Nat} {M U : Memory w} (hM : PagesSized M) 
     simp at hw
 
 /-- `Memory.read` depends on nothing but the bytes in `bytes`. -/
-theorem taint_bytes_read {w : Nat} {M M' : Memory w} {a : BitVec w} (en : Endian) {z : Nat}
-    (h : ∀ p : BitVec w, p.toNat ∈ bytes ⟨w, a⟩ z → Memory.readByte M p = Memory.readByte M' p) :
+theorem taint_bytes_read {w : Nat} {M M' : Memory w} {a : BitVec w} (var : Bap.Var) (en : Endian) {z : Nat}
+    (h : ∀ p : BitVec w, (⟨var, p.toNat⟩ : Cell) ∈ bytes var ⟨w, a⟩ z → Memory.readByte M p = Memory.readByte M' p) :
     Memory.read M a en z = Memory.read M' a en z := by
   have : ((List.range z).map fun offset => Memory.readByte M (a + BitVec.ofNat w offset)) =
       (List.range z).map fun offset => Memory.readByte M' (a + BitVec.ofNat w offset) := by
     apply List.map_congr_left
     intro k hk
-    exact h _ ((taint_mem_bytes a z _).mpr ⟨k, List.mem_range.mp hk, rfl⟩)
+    exact h _ ((taint_mem_bytes var a z _).mpr ⟨rfl, k, List.mem_range.mp hk, rfl⟩)
   simp only [Memory.read, this]
 
 /-- Bytes in `bytes` carry the labels the instrumented store gives them. -/
 private theorem taint_concreteStore_covers (dst : Bap.Var) (T : State) (env : Bil.Env) (m ad val : Bil.Exp)
-    (en : Endian) (z : Nat) {x : Σ width, BitVec width} (hx : taint_address env ad = some x) {p : Nat}
-    (hp : p ∈ bytes x z) :
+    (en : Endian) (z : Nat) {x : Σ width, BitVec width} (hx : taint_address env ad = some x) {p : Cell}
+    (hp : p ∈ bytes dst x z) :
     union (taint_concreteExp T env ad) (taint_concreteExp T env val) ⊆
       labelsOfMemory (taint_concreteStore dst T env (.store m ad val en z)) p := by
   intro n hn
   simp only [taint_concreteStore, hx]
-  have := taint_labelsOfMemory_putAll (bytes x z)
+  have := taint_labelsOfMemory_putAll (bytes dst x z)
     (union (taint_concreteExp T env ad) (taint_concreteExp T env val)) (taint_concreteStore dst T env m) p
   simp only [taint_putAll] at this
   rw [this, ite_eq_left hp]
@@ -6183,7 +6954,7 @@ theorem taint_store_covers_changes {w : Nat} {M U : Memory w} (hM : PagesSized M
     (hne : Memory.readByte U p ≠ Memory.readByte M p) :
     taint_address env ad ≠ none ∧
       union (taint_concreteExp T env ad) (taint_concreteExp T env val) ⊆
-        labelsOfMemory (taint_concreteStore dst T env (.store m ad val en z)) p.toNat := by
+        labelsOfMemory (taint_concreteStore dst T env (.store m ad val en z)) ⟨dst, p.toNat⟩ := by
   simp only [Bil.evalExp, hm, bind, Except.bind, expectMemory] at h
   cases ha : Bil.evalExp env ad with
   | error e => simp [ha] at h
@@ -6216,7 +6987,7 @@ theorem taint_store_covers_changes {w : Nat} {M U : Memory w} (hM : PagesSized M
               subst h
               have hx : taint_address env ad = some ⟨aw, a⟩ := by
                 simp [taint_address, ha, hb, Except.toOption]
-              have hp : p.toNat ∈ bytes ⟨aw, a⟩ z := by
+              have hp : (⟨dst, p.toNat⟩ : Cell) ∈ bytes dst ⟨aw, a⟩ z := by
                 apply Classical.byContradiction
                 intro hnp
                 exact hne (taint_bytes_write_frame hM hw hnp)
@@ -6225,10 +6996,10 @@ theorem taint_store_covers_changes {w : Nat} {M U : Memory w} (hM : PagesSized M
 
 /-- A successful load reads `Memory.read` at the instrumented address, whose labels it carries. -/
 theorem taint_load_covers_read {w : Nat} {M : Memory w} (T : State) (env : Bil.Env) (m ad : Bil.Exp) (en : Endian)
-    (z : Nat) {r : Value} (hm : Bil.evalExp env m = .ok (.memory M))
+    (z : Nat) {r : Value} (hm : Bil.evalExp env m = .ok (.memory M)) {var : Bap.Var} (hvar : memoryOf m = some var)
     (h : Bil.evalExp env (.load m ad en z) = .ok r) :
     ∃ a : BitVec w, taint_address env ad = some ⟨w, a⟩ ∧ r = .bits (Memory.read M a en z) ∧
-      ∀ p ∈ bytes ⟨w, a⟩ z, labelsOfMemory T p ⊆ taint_concreteExp T env (.load m ad en z) := by
+      ∀ p ∈ bytes var ⟨w, a⟩ z, labelsOfMemory T p ⊆ taint_concreteExp T env (.load m ad en z) := by
   simp only [Bil.evalExp, hm, bind, Except.bind, expectMemory] at h
   cases ha : Bil.evalExp env ad with
   | error e => simp [ha] at h
@@ -6249,7 +7020,7 @@ theorem taint_load_covers_read {w : Nat} {M : Memory w} (T : State) (env : Bil.E
         have hx : taint_address env ad = some ⟨aw, a⟩ := by
           simp [taint_address, ha, hb, Except.toOption]
         refine ⟨a, hx, by rfl, fun p hp n hn => ?_⟩
-        simp only [taint_concreteExp, hx]
+        simp only [taint_concreteExp, hx, hvar]
         exact (taint_mem_union _ _ _).mpr (Or.inr (List.mem_flatMap.mpr ⟨p, hp, hn⟩))
       · simp at h
 
@@ -6260,25 +7031,25 @@ byte stored to on the path the run takes, in order, with the labels of its store
 last entry says what `taint_execProgram` leaves on it. -/
 
 /-- The writes of a chain of stores, the innermost first. -/
-def taint_storeLog (T : State) (env : Bil.Env) : Bil.Exp → List (Nat × Labels)
+def taint_storeLog (dst : Bap.Var) (T : State) (env : Bil.Env) : Bil.Exp → List (Cell × Labels)
   | .store m a v _ size =>
-    taint_storeLog T env m ++
+    taint_storeLog dst T env m ++
       match taint_address env a with
       | some address =>
-        (bytes address size).map (·, union (taint_concreteExp T env a) (taint_concreteExp T env v))
+        (bytes dst address size).map (·, union (taint_concreteExp T env a) (taint_concreteExp T env v))
       | none => []
   | _ => []
 
 mutual
   /-- The bytes `Bil.execStmt` stores to, in order, with the labels of the store. -/
-  def taint_writesStmt (fuel : Nat) (st : Bil.State) (T : State) (s : Bil.Stmt) : List (Nat × Labels) :=
+  def taint_writesStmt (fuel : Nat) (st : Bil.State) (T : State) (s : Bil.Stmt) : List (Cell × Labels) :=
     match fuel with
     | 0 => []
     | fuel + 1 =>
       match s with
-      | .move _ value =>
+      | .move var value =>
         match value with
-        | .store .. => taint_storeLog T st.env value
+        | .store .. => taint_storeLog var T st.env value
         | _ => []
       | .jmp _ | .special _ | .cpuExn _ => []
       | .ifElse condition yes no =>
@@ -6304,7 +7075,7 @@ mutual
         | _ => []
 
   /-- The bytes `Bil.execProgram` stores to, in order, with the labels of the store. -/
-  def taint_writes (fuel : Nat) (st : Bil.State) (T : State) (program : Bil.Program) : List (Nat × Labels) :=
+  def taint_writes (fuel : Nat) (st : Bil.State) (T : State) (program : Bil.Program) : List (Cell × Labels) :=
     match fuel with
     | 0 => []
     | fuel + 1 =>
@@ -6318,7 +7089,7 @@ mutual
 end
 
 /-- The labels of the last store to a byte. -/
-def taint_lastWrite (log : List (Nat × Labels)) (p : Nat) : Option Labels := log.reverse.lookup p
+def taint_lastWrite (log : List (Cell × Labels)) (p : Cell) : Option Labels := log.reverse.lookup p
 
 /-- A chain of stores from the memory `m` itself. -/
 def taint_Chain (m : Bap.Var) : Bil.Exp → Prop
@@ -6326,44 +7097,43 @@ def taint_Chain (m : Bap.Var) : Bil.Exp → Prop
   | .store inner _ _ _ _ => taint_Chain m inner
   | _ => False
 
-/-- The memory discipline: `m` is the only memory stored to, and only ever assigned stores into itself. -/
-inductive taint_StmtWF (m : Bap.Var) : Bil.Stmt → Prop where
-  | moveOther {x : Bap.Var} {value : Bil.Exp} (hx : x ≠ m) (hv : ∀ inner a v en z, value ≠ .store inner a v en z) :
-      taint_StmtWF m (.move x value)
-  | moveSelf : taint_StmtWF m (.move m (.var m))
-  | moveStore {inner a v : Bil.Exp} {en : Endian} {z : Nat} (hc : taint_Chain m inner) :
-      taint_StmtWF m (.move m (.store inner a v en z))
-  | jmp (target : Bil.Exp) : taint_StmtWF m (.jmp target)
-  | special (message : String) : taint_StmtWF m (.special message)
-  | cpuExn (number : Nat) : taint_StmtWF m (.cpuExn number)
-  | loop {condition : Bil.Exp} {body : Bil.Program} (hb : ∀ s ∈ body, taint_StmtWF m s) :
-      taint_StmtWF m (.while condition body)
-  | ifElse {condition : Bil.Exp} {yes no : Bil.Program} (hy : ∀ s ∈ yes, taint_StmtWF m s)
-      (hn : ∀ s ∈ no, taint_StmtWF m s) : taint_StmtWF m (.ifElse condition yes no)
+/-- The memory discipline: any number of memories, each only ever assigned stores into itself. What does not store
+either keeps to variables with bits, or assigns a memory to itself. -/
+inductive taint_StmtWF : Bil.Stmt → Prop where
+  | moveValue {x : Bap.Var} {value : Bil.Exp} (hm : mixes x value = false) : taint_StmtWF (.move x value)
+  | moveStore {x : Bap.Var} {inner a v : Bil.Exp} {en : Endian} {z : Nat} (hc : taint_Chain x inner) :
+      taint_StmtWF (.move x (.store inner a v en z))
+  | jmp (target : Bil.Exp) : taint_StmtWF (.jmp target)
+  | special (message : String) : taint_StmtWF (.special message)
+  | cpuExn (number : Nat) : taint_StmtWF (.cpuExn number)
+  | loop {condition : Bil.Exp} {body : Bil.Program} (hb : ∀ s ∈ body, taint_StmtWF s) :
+      taint_StmtWF (.while condition body)
+  | ifElse {condition : Bil.Exp} {yes no : Bil.Program} (hy : ∀ s ∈ yes, taint_StmtWF s)
+      (hn : ∀ s ∈ no, taint_StmtWF s) : taint_StmtWF (.ifElse condition yes no)
 
 /-- From `M` and `T` to `U` and `T'` along `log`: a byte with no write in it has not changed, in value or
 labels, and one with a write has the labels of the last one, with those that apply everywhere. -/
-private def taint_Tracks {w : Nat} (M U : Memory w) (T T' : State) (log : List (Nat × Labels)) : Prop :=
+private def taint_Tracks (m : Bap.Var) {w : Nat} (M U : Memory w) (T T' : State) (log : List (Cell × Labels)) : Prop :=
   T'.anywhere = T.anywhere ∧ ∀ p : BitVec w,
-    match taint_lastWrite log p.toNat with
-    | none => Memory.readByte U p = Memory.readByte M p ∧ labelsOfMemory T' p.toNat = labelsOfMemory T p.toNat
-    | some L => labelsOfMemory T' p.toNat = union L T.anywhere
+    match taint_lastWrite log ⟨m, p.toNat⟩ with
+    | none => Memory.readByte U p = Memory.readByte M p ∧ labelsOfMemory T' ⟨m, p.toNat⟩ = labelsOfMemory T ⟨m, p.toNat⟩
+    | some L => labelsOfMemory T' ⟨m, p.toNat⟩ = union L T.anywhere
 
-private theorem taint_Tracks_refl {w : Nat} (M : Memory w) (T : State) : taint_Tracks M M T T [] :=
+private theorem taint_Tracks_refl (m : Bap.Var) {w : Nat} (M : Memory w) (T : State) : taint_Tracks m M M T T [] :=
   ⟨rfl, fun _ => ⟨rfl, rfl⟩⟩
 
-private theorem taint_lastWrite_append (a b : List (Nat × Labels)) (p : Nat) :
+private theorem taint_lastWrite_append (a b : List (Cell × Labels)) (p : Cell) :
     taint_lastWrite (a ++ b) p = (taint_lastWrite b p).or (taint_lastWrite a p) := by
   simp only [taint_lastWrite, List.reverse_append]
   rw [List.lookup_append]
 
-private theorem taint_Tracks_trans {w : Nat} {M N U : Memory w} {T X T' : State} {a b : List (Nat × Labels)}
-    (h : taint_Tracks M N T X a) (k : taint_Tracks N U X T' b) : taint_Tracks M U T T' (a ++ b) := by
+private theorem taint_Tracks_trans {m : Bap.Var} {w : Nat} {M N U : Memory w} {T X T' : State} {a b : List (Cell × Labels)}
+    (h : taint_Tracks m M N T X a) (k : taint_Tracks m N U X T' b) : taint_Tracks m M U T T' (a ++ b) := by
   refine ⟨k.1.trans h.1, fun p => ?_⟩
   have h1 := h.2 p
   have h2 := k.2 p
   rw [taint_lastWrite_append]
-  cases hb : taint_lastWrite b p.toNat with
+  cases hb : taint_lastWrite b ⟨m, p.toNat⟩ with
   | some L =>
     rw [hb] at h2
     simp only [Option.some_or]
@@ -6371,7 +7141,7 @@ private theorem taint_Tracks_trans {w : Nat} {M N U : Memory w} {T X T' : State}
   | none =>
     rw [hb] at h2
     simp only [Option.none_or]
-    cases ha : taint_lastWrite a p.toNat with
+    cases ha : taint_lastWrite a ⟨m, p.toNat⟩ with
     | none =>
       rw [ha] at h1
       exact ⟨h2.1.trans h1.1, h2.2.trans h1.2⟩
@@ -6379,10 +7149,10 @@ private theorem taint_Tracks_trans {w : Nat} {M N U : Memory w} {T X T' : State}
       rw [ha] at h1
       rw [h2.2, h1]
 
-private theorem taint_lastWrite_map (bs : List Nat) (L : Labels) (p : Nat) :
+private theorem taint_lastWrite_map (bs : List Cell) (L : Labels) (p : Cell) :
     taint_lastWrite (bs.map (·, L)) p = if p ∈ bs then some L else none := by
   simp only [taint_lastWrite]
-  have key : ∀ l : List Nat, ((l.map (·, L)).lookup p) = if p ∈ l then some L else none := by
+  have key : ∀ l : List Cell, ((l.map (·, L)).lookup p) = if p ∈ l then some L else none := by
     intro l
     induction l with
     | nil => simp
@@ -6399,7 +7169,7 @@ private theorem taint_lastWrite_map (bs : List Nat) (L : Labels) (p : Nat) :
 private theorem taint_chain_tracks {m : Bap.Var} {T : State} {env : Bil.Env} {w : Nat} {M : Memory w}
     (hm : Bil.lookup env m = .ok (.memory M)) (hs : PagesSized M) (c : Bil.Exp) (hc : taint_Chain m c) :
     ∀ v, Bil.evalExp env c = .ok v → ∃ U : Memory w, v = .memory U ∧ PagesSized U ∧
-      taint_Tracks M U T (taint_concreteStore m T env c) (taint_storeLog T env c) := by
+      taint_Tracks m M U T (taint_concreteStore m T env c) (taint_storeLog m T env c) := by
   induction c with
   | var x =>
     intro v hv
@@ -6408,7 +7178,7 @@ private theorem taint_chain_tracks {m : Bap.Var} {T : State} {env : Bil.Env} {w 
     cases hv
     refine ⟨M, rfl, hs, ?_⟩
     simp only [taint_concreteStore, ite_true, taint_storeLog]
-    exact taint_Tracks_refl M T
+    exact taint_Tracks_refl m M T
   | store inner ad val en z ih _ _ =>
     intro v hv
     cases hi : Bil.evalExp env inner with
@@ -6442,23 +7212,23 @@ private theorem taint_chain_tracks {m : Bap.Var} {T : State} {env : Bil.Env} {w 
                     exact hv.symm
                   · simp only [taint_concreteStore, taint_storeLog, hx]
                     generalize hL : union (taint_concreteExp T env ad) (taint_concreteExp T env val) = L
-                    have hany : ∀ (bs : List Nat) (s : State), (taint_putAll bs L s).anywhere = s.anywhere := by
+                    have hany : ∀ (bs : List Cell) (s : State), (taint_putAll bs L s).anywhere = s.anywhere := by
                       intro bs
                       induction bs with
                       | nil => intro s; rfl
                       | cons h t it => intro s; simp only [taint_putAll, List.foldl_cons]; exact (it _).trans rfl
                     refine ⟨(hany _ _).trans htr.1, fun p => ?_⟩
                     rw [taint_lastWrite_append, taint_lastWrite_map]
-                    have hput := taint_labelsOfMemory_putAll (bytes ⟨wa, cv⟩ z) L
-                      (taint_concreteStore m T env inner) p.toNat
+                    have hput := taint_labelsOfMemory_putAll (bytes m ⟨wa, cv⟩ z) L
+                      (taint_concreteStore m T env inner) ⟨m, p.toNat⟩
                     simp only [taint_putAll] at hput
-                    by_cases hp : p.toNat ∈ bytes ⟨wa, cv⟩ z
+                    by_cases hp : (⟨m, p.toNat⟩ : Cell) ∈ bytes m ⟨wa, cv⟩ z
                     · simp only [hp, ↓reduceIte, Option.some_or]
                       rw [hput, ite_eq_left hp, htr.1]
                     · simp only [hp, ↓reduceIte, Option.none_or]
                       rw [hput, ite_eq_right hp]
                       have hin := htr.2 p
-                      cases hl : taint_lastWrite (taint_storeLog T env inner) p.toNat with
+                      cases hl : taint_lastWrite (taint_storeLog m T env inner) ⟨m, p.toNat⟩ with
                       | none =>
                         rw [hl] at hin
                         exact ⟨(taint_bytes_write_frame hs1 hwa1 hp).trans hin.1, hin.2⟩
@@ -6467,6 +7237,42 @@ private theorem taint_chain_tracks {m : Bap.Var} {T : State} {env : Bil.Env} {w 
                         exact hin
               · simp [Bil.evalExp, hi, hA, hV, bind, Except.bind, expectMemory, Value.asBits, hwe] at hv
   | _ => intro _; exact hc.elim
+
+/-- A chain of stores into another memory leaves the bytes and labels of `m`. -/
+private theorem taint_chain_other {x m : Bap.Var} {T : State} {env : Bil.Env} (hx : x ≠ m) (c : Bil.Exp) (hc : taint_Chain x c) :
+    (taint_concreteStore x T env c).anywhere = T.anywhere ∧ ∀ p,
+      taint_lastWrite (taint_storeLog x T env c) ⟨m, p⟩ = none ∧ labelsOfMemory (taint_concreteStore x T env c) ⟨m, p⟩ = labelsOfMemory T ⟨m, p⟩ := by
+  induction c with
+  | var y =>
+    cases hc
+    simp only [taint_concreteStore, ite_true, taint_storeLog]
+    exact ⟨trivial, fun p => ⟨rfl, trivial⟩⟩
+  | store inner ad val en z ih _ _ =>
+    obtain ⟨h1, h2⟩ := ih hc
+    have hany : ∀ (bs : List Cell) (L : Labels) (s : State), (taint_putAll bs L s).anywhere = s.anywhere := by
+      intro bs L
+      induction bs with
+      | nil => intro s; rfl
+      | cons h t it => intro s; simp only [taint_putAll, List.foldl_cons]; exact (it _).trans rfl
+    simp only [taint_concreteStore, taint_storeLog]
+    cases taint_address env ad with
+    | none =>
+      simp only [List.append_nil]
+      exact ⟨h1, h2⟩
+    | some address =>
+      simp only
+      refine ⟨(hany _ _ _).trans h1, fun p => ?_⟩
+      have hnot : (⟨m, p⟩ : Cell) ∉ bytes x address z := by
+        intro hin
+        obtain ⟨wa, cv⟩ := address
+        exact hx ((taint_mem_bytes x cv z _).1 hin).1.symm
+      rw [taint_lastWrite_append, taint_lastWrite_map, ite_eq_right hnot, Option.none_or]
+      have hput := taint_labelsOfMemory_putAll (bytes x address z)
+        (union (taint_concreteExp T env ad) (taint_concreteExp T env val)) (taint_concreteStore x T env inner) ⟨m, p⟩
+      simp only [taint_putAll] at hput
+      rw [hput, ite_eq_right hnot]
+      exact h2 p
+  | _ => exact hc.elim
 
 private theorem taint_ok_bind {α β : Type} {x : Except String α} {f : α → Except String β} {r : β}
     (h : (x >>= f) = .ok r) : ∃ a, x = .ok a ∧ f a = .ok r := by
@@ -6485,16 +7291,16 @@ private theorem taint_bind_ne_self {env : Bil.Env} {x m : Bap.Var} (h : x ≠ m)
   simp [Ne.symm h]
 
 /-- A whole run under the discipline, statement by statement. -/
-private theorem taint_run_tracks {m : Bap.Var} {w : Nat} (fuel : Nat) :
-    (∀ (s : Bil.Stmt) (st st' : Bil.State) (T T' : State) (e : Bil.Effect) (M : Memory w), taint_StmtWF m s →
+private theorem taint_run_tracks {m : Bap.Var} {w : Nat} (hmt : bitsOnly m = false) (fuel : Nat) :
+    (∀ (s : Bil.Stmt) (st st' : Bil.State) (T T' : State) (e : Bil.Effect) (M : Memory w), taint_StmtWF s →
       Bil.lookup st.env m = .ok (.memory M) → PagesSized M → taint_execStmt fuel st T s = .ok (st', T', e) →
       ∃ U : Memory w, Bil.lookup st'.env m = .ok (.memory U) ∧ PagesSized U ∧
-        taint_Tracks M U T T' (taint_writesStmt fuel st T s)) ∧
+        taint_Tracks m M U T T' (taint_writesStmt fuel st T s)) ∧
     (∀ (code : Bil.Program) (st st' : Bil.State) (T T' : State) (e : Bil.Effect) (M : Memory w),
-      (∀ s ∈ code, taint_StmtWF m s) →
+      (∀ s ∈ code, taint_StmtWF s) →
       Bil.lookup st.env m = .ok (.memory M) → PagesSized M → taint_execProgram fuel st T code = .ok (st', T', e) →
       ∃ U : Memory w, Bil.lookup st'.env m = .ok (.memory U) ∧ PagesSized U ∧
-        taint_Tracks M U T T' (taint_writes fuel st T code)) := by
+        taint_Tracks m M U T T' (taint_writes fuel st T code)) := by
   induction fuel with
   | zero =>
     refine ⟨?_, ?_⟩
@@ -6510,37 +7316,66 @@ private theorem taint_run_tracks {m : Bap.Var} {w : Nat} (fuel : Nat) :
       | special message =>
         simp only [taint_execStmt, Except.ok.injEq, Prod.mk.injEq] at h
         obtain ⟨rfl, rfl, rfl⟩ := h
-        exact ⟨M, hm, hs, by simpa [taint_writesStmt] using taint_Tracks_refl M T⟩
+        exact ⟨M, hm, hs, by simpa [taint_writesStmt] using taint_Tracks_refl m M T⟩
       | cpuExn number =>
         simp only [taint_execStmt, Except.ok.injEq, Prod.mk.injEq] at h
         obtain ⟨rfl, rfl, rfl⟩ := h
-        exact ⟨M, hm, hs, by simpa [taint_writesStmt] using taint_Tracks_refl M T⟩
+        exact ⟨M, hm, hs, by simpa [taint_writesStmt] using taint_Tracks_refl m M T⟩
       | jmp target =>
         simp only [taint_execStmt] at h
         obtain ⟨_, _, h⟩ := taint_ok_bind h
         obtain ⟨_, _, h⟩ := taint_ok_bind h
         cases h
-        exact ⟨M, hm, hs, by simpa [taint_writesStmt] using taint_Tracks_refl M T⟩
+        exact ⟨M, hm, hs, by simpa [taint_writesStmt] using taint_Tracks_refl m M T⟩
       | move x value =>
         simp only [taint_execStmt] at h
         obtain ⟨r, he, h⟩ := taint_ok_bind h
         cases h
         cases hwf with
-        | moveOther hx hv =>
-          refine ⟨M, ?_, hs, ?_⟩
-          · show Bil.lookup (Bil.bind st.env x r) m = _
-            rw [taint_bind_ne_self hx]
-            exact hm
-          · cases value <;> first | exact absurd rfl (hv _ _ _ _ _) | exact ⟨rfl, fun p => ⟨rfl, rfl⟩⟩
-        | moveSelf =>
-          simp only [Bil.execExp, Bil.evalExp, hm] at he
-          cases he
-          refine ⟨M, taint_lookup_bind_self _ _ _, hs, ?_⟩
-          simp only [taint_writesStmt]
-          exact ⟨rfl, fun p => ⟨rfl, rfl⟩⟩
-        | @moveStore inner a v en z hc =>
-          obtain ⟨U, rfl, hU, htr⟩ := taint_chain_tracks (T := T) hm hs (.store inner a v en z) hc r he
-          exact ⟨U, taint_lookup_bind_self _ _ _, hU, by simpa [taint_writesStmt] using htr⟩
+        | moveValue hmix =>
+          by_cases hx : x = m
+          · subst hx
+            obtain rfl : value = .var x := by
+              cases value
+              case var source =>
+                by_cases hs : source = x
+                · rw [hs]
+                · simp [mixes, hmt, hs] at hmix
+              all_goals simp [mixes, hmt] at hmix
+            simp only [Bil.execExp, Bil.evalExp, hm] at he
+            cases he
+            refine ⟨M, taint_lookup_bind_self _ _ _, hs, ?_⟩
+            simp only [taint_writesStmt, taint_concreteMove, hmix, Bool.false_eq_true, ↓reduceIte]
+            refine ⟨rfl, fun p => ⟨rfl, ?_⟩⟩
+            rfl
+          · refine ⟨M, ?_, hs, ?_⟩
+            · show Bil.lookup (Bil.bind st.env x r) m = _
+              rw [taint_bind_ne_self hx]
+              exact hm
+            · have hnot : ∀ inner a v en z, value ≠ .store inner a v en z := by
+                rintro inner a v en z rfl
+                simp [mixes, holdsMemory] at hmix
+              have hlog : taint_writesStmt (fuel + 1) st T (.move x value) = [] := by
+                cases value <;> first | exact absurd rfl (hnot _ _ _ _ _) | rfl
+              rw [hlog]
+              cases value <;> first
+                | exact absurd rfl (hnot _ _ _ _ _)
+                | (simp only [taint_concreteMove, hmix, Bool.false_eq_true, ↓reduceIte]; exact ⟨rfl, fun p => ⟨rfl, rfl⟩⟩)
+        | @moveStore x inner a v en z hc =>
+          by_cases hx : x = m
+          · subst hx
+            obtain ⟨U, rfl, hU, htr⟩ := taint_chain_tracks (T := T) hm hs (.store inner a v en z) hc r he
+            exact ⟨U, taint_lookup_bind_self _ _ _, hU, by simpa [taint_writesStmt] using htr⟩
+          · refine ⟨M, ?_, hs, ?_⟩
+            · show Bil.lookup (Bil.bind st.env x r) m = _
+              rw [taint_bind_ne_self hx]
+              exact hm
+            · obtain ⟨hany, hcell⟩ := taint_chain_other (T := T) (env := st.env) hx (.store inner a v en z) hc
+              refine ⟨hany, fun p => ?_⟩
+              simp only [taint_writesStmt]
+              obtain ⟨hl, hk⟩ := hcell p.toNat
+              rw [hl]
+              exact ⟨trivial, hk⟩
       | ifElse condition yes no =>
         cases hwf with
         | ifElse hy hn =>
@@ -6619,14 +7454,14 @@ private theorem taint_run_tracks {m : Bap.Var} {w : Nat} (fuel : Nat) :
                   exact ⟨U1, hU1, hs1, by simpa using htr1⟩
               · simp only [hc, ite_false, Except.ok.injEq, Prod.mk.injEq] at h3 ⊢
                 obtain ⟨rfl, rfl, rfl⟩ := h3
-                exact ⟨M, hm, hs, taint_Tracks_refl M T⟩
+                exact ⟨M, hm, hs, taint_Tracks_refl m M T⟩
             · simp [hw] at h2
     · intro code st st' T T' e M hwf hm hs h
       cases code with
       | nil =>
         simp only [taint_execProgram, Except.ok.injEq, Prod.mk.injEq] at h
         obtain ⟨rfl, rfl, rfl⟩ := h
-        exact ⟨M, hm, hs, by simpa [taint_writes] using taint_Tracks_refl M T⟩
+        exact ⟨M, hm, hs, by simpa [taint_writes] using taint_Tracks_refl m M T⟩
       | cons s rest =>
         simp only [taint_execProgram] at h
         obtain ⟨⟨next, T1, eff⟩, hstmt, h⟩ := taint_ok_bind h
@@ -6652,32 +7487,50 @@ private theorem taint_run_tracks {m : Bap.Var} {w : Nat} (fuel : Nat) :
 
 /-- Memory over a whole run: `taint_store_covers_changes` for all the stores of a run.
 
-A run of `code` under the memory discipline `taint_StmtWF m`, from `M` at `m` with full-size pages, ends
-with `U` at `m` with full-size pages. Every byte it changes was stored to on the way (`taint_writes`). The
-byte has the labels of its last store when the run has one, with the ones `T` has everywhere, and otherwise
-the labels it started with: nothing else adds labels to memory or takes them away. The analysis covers
-those labels: by `run S code` if the run falls through, and if it leaves the code by the analysis state at
-the statement that leaves. -/
+A run of `code` under the memory discipline `taint_StmtWF`, in which any number of memories are stored into, from `M` at
+any memory variable `m` with full-size pages, ends with `U` at `m` with full-size pages. Every byte of `m` it changes was
+stored to on the way (`taint_writes`). The byte has the labels of its last store to `m` when the run has one, with the
+ones `T` has everywhere, and otherwise the labels it started with: nothing else adds labels to the bytes of `m` or takes
+them away, stores to another memory at the same address included. The analysis covers those labels: by `run S code` if the
+run falls through, and if it leaves the code by the analysis state at the statement that leaves. -/
 theorem taint_run_memory {m : Bap.Var} {fuel : Nat} {st st' : Bil.State} {e : Bil.Effect} {T S : State}
-    {code : Bil.Program} {w : Nat} {M : Memory w} (hwf : ∀ s ∈ code, taint_StmtWF m s) (hT : taint_Le T S)
+    {code : Bil.Program} {w : Nat} {M : Memory w} (hmt : ∀ width, m.typ ≠ .imm width) (hwf : ∀ s ∈ code, taint_StmtWF s) (hT : taint_Le T S)
     (hm : Bil.lookup st.env m = .ok (.memory M)) (hs : PagesSized M) (h : Bil.execProgram fuel st code = .ok (st', e)) :
     ∃ (T' : State) (U : Memory w), taint_execProgram fuel st T code = .ok (st', T', e) ∧
       Bil.lookup st'.env m = .ok (.memory U) ∧ PagesSized U ∧
       taint_Post e (taint_Le T' (run S code)) (∃ X, taint_ExitIn S code X ∧ taint_Le T' X) ∧
       T'.anywhere = T.anywhere ∧ ∀ p : BitVec w,
-        (Memory.readByte U p ≠ Memory.readByte M p → (taint_lastWrite (taint_writes fuel st T code) p.toNat).isSome) ∧
-        match taint_lastWrite (taint_writes fuel st T code) p.toNat with
-        | none => Memory.readByte U p = Memory.readByte M p ∧ labelsOfMemory T' p.toNat = labelsOfMemory T p.toNat
-        | some L => labelsOfMemory T' p.toNat = union L T.anywhere := by
+        (Memory.readByte U p ≠ Memory.readByte M p → (taint_lastWrite (taint_writes fuel st T code) ⟨m, p.toNat⟩).isSome) ∧
+        match taint_lastWrite (taint_writes fuel st T code) ⟨m, p.toNat⟩ with
+        | none => Memory.readByte U p = Memory.readByte M p ∧ labelsOfMemory T' ⟨m, p.toNat⟩ = labelsOfMemory T ⟨m, p.toNat⟩
+        | some L => labelsOfMemory T' ⟨m, p.toNat⟩ = union L T.anywhere := by
+  have hbits : bitsOnly m = false := by
+    unfold bitsOnly
+    split
+    · next width he => exact absurd he (hmt width)
+    · rfl
   obtain ⟨T', hrun, hpost⟩ := taint_run_overapprox hT h
-  obtain ⟨U, hU, hsU, hany, htr⟩ := (taint_run_tracks fuel).2 code st st' T T' e M hwf hm hs hrun
+  obtain ⟨U, hU, hsU, hany, htr⟩ := (taint_run_tracks hbits fuel).2 code st st' T T' e M hwf hm hs hrun
   refine ⟨T', U, hrun, hU, hsU, hpost, hany, fun p => ⟨fun hne => ?_, htr p⟩⟩
   have := htr p
-  cases hl : taint_lastWrite (taint_writes fuel st T code) p.toNat with
+  cases hl : taint_lastWrite (taint_writes fuel st T code) ⟨m, p.toNat⟩ with
   | none =>
     rw [hl] at this
     exact absurd this.1 hne
   | some _ => rfl
+
+/-- The analysis keeps memories apart: a store to one, at a known address, leaves the labels of another. -/
+theorem taint_store_other_memory (S : State) {m other : Bap.Var} (hne : other ≠ m) (ad val : Bil.Exp) (en : Endian) (z p : Nat)
+    {x : Σ width, BitVec width} (hc : constant ad = some x) :
+    labelsOfMemory (stmt S (.move other (.store (.var other) ad val en z))) ⟨m, p⟩ = labelsOfMemory S ⟨m, p⟩ := by
+  have hnot : (⟨m, p⟩ : Cell) ∉ bytes other x z := by
+    intro hin
+    obtain ⟨wa, cv⟩ := x
+    exact hne ((taint_mem_bytes other cv z _).1 hin).1.symm
+  rw [taint_stmt_store, taint_store_store, hc]
+  simp only
+  rw [taint_labelsOfMemory_putAll, ite_eq_right hnot]
+  simp [store]
 
 end Addressing
 
@@ -6706,10 +7559,10 @@ private theorem taint_store_mono {a b : State} (h : taint_Le a b) (dst : Bap.Var
     simp only [store]
     split
     · exact h
-    · exact taint_Le_putVar h _ (h.1 source)
+    · exact taint_smear_mono (taint_Le_putVar h _ (h.1 source))
   | _ =>
     simp only [store]
-    exact taint_Le_putVar h _ (taint_exp_mono h _)
+    exact taint_smear_mono (taint_Le_putVar h _ (taint_exp_mono h _))
 
 private theorem taint_join_mono {a b c d : State} (h : taint_Le a c) (k : taint_Le b d) :
     taint_Le (join a b) (join c d) :=
@@ -6723,37 +7576,37 @@ fuel `loopFuel` grants is never exhausted and `saturate` is never reached. The r
 least stable state above the start, which is what monotonicity needs. -/
 
 /-- Bytes a constant store chain writes. -/
-private def taint_storeBytes : Bil.Exp → List Nat
+private def taint_storeBytes (dst : Bap.Var) : Bil.Exp → List Cell
   | .store m a _ _ size =>
     (match constant a with
-      | some x => bytes x size
-      | none => []) ++ taint_storeBytes m
+      | some x => bytes dst x size
+      | none => []) ++ taint_storeBytes dst m
   | _ => []
 
 /-- Bytes a statement can write through a constant address, at any depth. -/
-private def taint_written : Bil.Stmt → List Nat
-  | .move _ value => taint_storeBytes value
+private def taint_written : Bil.Stmt → List Cell
+  | .move dst value => taint_storeBytes dst value
   | .while _ body => body.flatMap taint_written
   | .ifElse _ yes no => yes.flatMap taint_written ++ no.flatMap taint_written
   | _ => []
 
 /-- From `X` to `Y`, only `vars` and `written` gained labels. -/
-private def taint_Frame (X Y : State) (vars : List Bap.Var) (written : List Nat) : Prop :=
+private def taint_Frame (X Y : State) (vars : List Bap.Var) (written : List Cell) : Prop :=
   (∀ v, v ∉ vars → labelsOfVar Y v ⊆ labelsOfVar X v) ∧
     ∀ m, m ∉ written → byteLabels Y m ⊆ byteLabels X m
 
-private theorem taint_Frame_refl (X : State) (vars : List Bap.Var) (written : List Nat) :
+private theorem taint_Frame_refl (X : State) (vars : List Bap.Var) (written : List Cell) :
     taint_Frame X X vars written :=
   ⟨fun _ _ _ h => h, fun _ _ _ h => h⟩
 
-private theorem taint_Frame_trans {X Y Z : State} {vs vs' vs'' : List Bap.Var} {ws ws' ws'' : List Nat}
+private theorem taint_Frame_trans {X Y Z : State} {vs vs' vs'' : List Bap.Var} {ws ws' ws'' : List Cell}
     (h : taint_Frame X Y vs ws) (k : taint_Frame Y Z vs' ws')
     (hv : ∀ v, v ∉ vs'' → v ∉ vs ∧ v ∉ vs') (hw : ∀ m, m ∉ ws'' → m ∉ ws ∧ m ∉ ws') :
     taint_Frame X Z vs'' ws'' :=
   ⟨fun v hn _ hl => h.1 v (hv v hn).1 (k.1 v (hv v hn).2 hl),
     fun m hn _ hl => h.2 m (hw m hn).1 (k.2 m (hw m hn).2 hl)⟩
 
-private theorem taint_Frame_join {X A B : State} {vs : List Bap.Var} {ws : List Nat}
+private theorem taint_Frame_join {X A B : State} {vs : List Bap.Var} {ws : List Cell}
     (h : taint_Frame X A vs ws) (k : taint_Frame X B vs ws) :
     taint_Frame X (join A B) vs ws := by
   refine ⟨fun v hn n hl => ?_, fun m hn n hl => ?_⟩
@@ -6764,7 +7617,7 @@ private theorem taint_Frame_join {X A B : State} {vs : List Bap.Var} {ws : List 
     · exact h.2 m hn hl
     · exact k.2 m hn hl
 
-private theorem taint_byteLabels_putAll (bs : List Nat) (l : Labels) (s : State) (m : Nat) (hm : m ∉ bs) :
+private theorem taint_byteLabels_putAll (bs : List Cell) (l : Labels) (s : State) (m : Cell) (hm : m ∉ bs) :
     byteLabels (taint_putAll bs l s) m = byteLabels s m := by
   induction bs generalizing s with
   | nil => rfl
@@ -6776,7 +7629,7 @@ private theorem taint_byteLabels_putAll (bs : List Nat) (l : Labels) (s : State)
     rw [this, taint_byteLabels_putMemory, ite_eq_right hm.1]
 
 private theorem taint_store_frame (dst : Bap.Var) (s : State) (e : Bil.Exp) :
-    taint_Frame s (store dst s e) [dst] (taint_storeBytes e) := by
+    taint_Frame s (store dst s e) [dst] (taint_storeBytes dst e) := by
   induction e with
   | store m ad val en z im _ _ =>
     rw [taint_store_store]
@@ -6795,12 +7648,12 @@ private theorem taint_store_frame (dst : Bap.Var) (s : State) (e : Bil.Exp) :
     split
     · exact taint_Frame_refl _ _ _
     · refine ⟨fun v hv n hl => ?_, fun w _ n hl => hl⟩
-      rw [taint_labelsOfVar_putVar, ite_eq_right (by simpa using hv)] at hl
+      rw [taint_labelsOfVar_smear, taint_labelsOfVar_putVar, ite_eq_right (by simpa using hv)] at hl
       exact hl
   | _ =>
     simp only [store]
     refine ⟨fun v hv n hl => ?_, fun w _ n hl => hl⟩
-    rw [taint_labelsOfVar_putVar, ite_eq_right (by simpa using hv)] at hl
+    rw [taint_labelsOfVar_smear, taint_labelsOfVar_putVar, ite_eq_right (by simpa using hv)] at hl
     exact hl
 
 private theorem taint_saturate_frame (s : State) (body : List Bil.Stmt) :
@@ -6847,10 +7700,15 @@ private theorem taint_stmt_frame (s : Bil.Stmt) :
     intro X
     by_cases he : ∀ m ad val en z, e ≠ .store m ad val en z
     · rw [taint_stmt_move _ _ _ he]
-      refine ⟨fun w hw n hl => ?_, fun m _ n hl => hl⟩
-      simp only [assigned, List.mem_singleton] at hw
-      rw [taint_labelsOfVar_putVar, ite_eq_right hw] at hl
-      exact hl
+      split
+      · refine ⟨fun w hw n hl => ?_, fun m _ n hl => hl⟩
+        simp only [assigned, List.mem_singleton] at hw
+        rw [taint_labelsOfVar_smear, taint_labelsOfVar_putVar, ite_eq_right hw] at hl
+        exact hl
+      · refine ⟨fun w hw n hl => ?_, fun m _ n hl => hl⟩
+        simp only [assigned, List.mem_singleton] at hw
+        rw [taint_labelsOfVar_putVar, ite_eq_right hw] at hl
+        exact hl
     · simp only [ne_eq, Classical.not_forall, Classical.not_not] at he
       rcases he with ⟨m, ad, val, en, z, rfl⟩
       rw [taint_stmt_store]
@@ -6865,7 +7723,7 @@ private theorem taint_stmt_frame (s : Bil.Stmt) :
   | ifElse c y n iy in_ =>
     intro X
     rw [taint_stmt_ifElse]
-    have widen : ∀ {A : State} {vs : List Bap.Var} {ws : List Nat}, taint_Frame X A vs ws →
+    have widen : ∀ {A : State} {vs : List Bap.Var} {ws : List Cell}, taint_Frame X A vs ws →
         (∀ v ∈ vs, v ∈ y.flatMap assigned ++ n.flatMap assigned) →
         (∀ m ∈ ws, m ∈ y.flatMap taint_written ++ n.flatMap taint_written) →
         taint_Frame X A (y.flatMap assigned ++ n.flatMap assigned)
@@ -6946,13 +7804,13 @@ private theorem taint_sum_bound {α : Type} (K : List α) (f : α → Nat) (c : 
     omega
 
 /-- Key and label pairs that `X` does not hold yet. -/
-private def taint_remaining (L : List Nat) (vars : List Bap.Var) (written : List Nat) (X : State) : Nat :=
+private def taint_remaining (L : List Nat) (vars : List Bap.Var) (written : List Cell) (X : State) : Nat :=
   (vars.map fun v => (L.filter (· ∉ labelsOfVar X v)).length).sum +
     (written.map fun m => (L.filter (· ∉ labelsOfMemory X m)).length).sum +
     (L.filter (· ∉ X.anywhere)).length
 
 /-- A state that grew past `X`, only at the counted keys and within `L`, has fewer pairs left. -/
-private theorem taint_remaining_lt {L : List Nat} {vars : List Bap.Var} {written : List Nat} {X Y : State}
+private theorem taint_remaining_lt {L : List Nat} {vars : List Bap.Var} {written : List Cell} {X Y : State}
     (hle : taint_Le X Y) (hL : taint_labels Y ⊆ L) (hframe : taint_Frame X Y vars written)
     (hnot : ¬ taint_Le Y X) : taint_remaining L vars written Y < taint_remaining L vars written X := by
   have hv : ∀ v ∈ vars, (L.filter (· ∉ labelsOfVar Y v)).length ≤ (L.filter (· ∉ labelsOfVar X v)).length :=
@@ -6996,12 +7854,12 @@ private theorem taint_remaining_lt {L : List Nat} {vars : List Bap.Var} {written
     have := taint_sum_lt hv hmem (taint_filter_lt (hle.1 v) (hL (taint_labelsOfVar_subset Y v hy)) hy hx)
     omega
 
-private theorem taint_length_storeBytes (e : Bil.Exp) : (taint_storeBytes e).length ≤ storeCount e := by
+private theorem taint_length_storeBytes (dst : Bap.Var) (e : Bil.Exp) : (taint_storeBytes dst e).length ≤ storeCount e := by
   induction e with
   | store m ad val en z im _ _ =>
     simp only [taint_storeBytes, storeCount, List.length_append]
     have : (match constant ad with
-        | some x => bytes x z
+        | some x => bytes dst x z
         | none => []).length ≤ z := by
       cases constant ad <;> simp [bytes]
     omega
@@ -7023,7 +7881,7 @@ private theorem taint_write_count (s : Bil.Stmt) :
   induction s using stmtInduction with
   | move v e =>
     simp only [assigned, taint_written, writeCount, List.length_singleton]
-    have := taint_length_storeBytes e
+    have := taint_length_storeBytes v e
     omega
   | jmp _ => simp [assigned, taint_written]
   | special _ => simp [assigned, taint_written]
@@ -7135,7 +7993,10 @@ theorem taint_stmt_mono (s : Bil.Stmt) : ∀ {a b}, taint_Le a b → taint_Le (s
     intro a b h
     by_cases he : ∀ m ad val en z, e ≠ .store m ad val en z
     · rw [taint_stmt_move _ _ _ he, taint_stmt_move _ _ _ he]
-      exact taint_Le_putVar h v (taint_exp_mono h e)
+      have hput := taint_Le_putVar h v (taint_exp_mono h e)
+      split
+      · exact taint_smear_mono hput
+      · exact hput
     · simp only [ne_eq, Classical.not_forall, Classical.not_not] at he
       rcases he with ⟨m, ad, val, en, z, rfl⟩
       rw [taint_stmt_store, taint_stmt_store]
@@ -7184,23 +8045,23 @@ theorem taint_while_covers_iterations (S : State) (c : Bil.Exp) (body : List Bil
 /-- Taint reaches through a loop's later iterations: with `z` tainted, `x` receives `y` on the second
 iteration of `while c { x := y; y := z }`. -/
 theorem taint_while_second_iteration (x y z : Bap.Var) (c : Bil.Exp) (l : Nat) (hxy : x ≠ y)
-    (hxz : x ≠ z) (hyz : y ≠ z) :
+    (hxz : x ≠ z) :
     l ∈ labelsOfVar (stmt (sourceVar {} z [l]) (.while c [.move x (.var y), .move y (.var z)])) x := by
   refine (taint_while_covers_iterations _ c _ 2).1 x ?_
-  have step : ∀ X : State, run X [.move x (.var y), .move y (.var z)] =
-      putVar y (labelsOfVar (putVar x (labelsOfVar X y) X) z) (putVar x (labelsOfVar X y) X) := by
-    intro X
-    simp only [taint_run_cons, taint_run_nil]
-    rw [taint_stmt_move _ _ _ (by intros; simp), taint_stmt_move _ _ _ (by intros; simp)]
-    simp [exp]
+  have hzx : z ≠ x := fun e => hxz e.symm
+  have put : ∀ (X : State) (v w u : Bap.Var), labelsOfVar (stmt X (.move v (.var u))) w = if w = v then labelsOfVar X u else labelsOfVar X w := by
+    intro X v w u
+    rw [taint_stmt_move _ _ _ (by intros; simp)]
+    split <;> simp [taint_labelsOfVar_putVar, exp]
+  have step : ∀ (X : State) (w : Bap.Var), labelsOfVar (run X [.move x (.var y), .move y (.var z)]) w =
+      if w = y then labelsOfVar X z else if w = x then labelsOfVar X y else labelsOfVar X w := by
+    intro X w
+    simp only [taint_run_cons, taint_run_nil, put, hzx, ↓reduceIte]
   have hz : l ∈ labelsOfVar (sourceVar {} z [l]) z :=
     (taint_mem_labelsOfVar_sourceVar _ _ _ _ _).mpr (Or.inr ⟨rfl, by simp⟩)
   show l ∈ labelsOfVar (run (run (sourceVar {} z [l]) _) _) x
-  rw [step, step]
-  simp only [taint_labelsOfVar_putVar]
-  have hzx : z ≠ x := fun e => hxz e.symm
-  have hzy : z ≠ y := fun e => hyz e.symm
-  simp [hxy, hzx, hz]
+  simp only [step, hxy, ↓reduceIte]
+  exact hz
 
 /-- A branch never loses taint: whatever either arm's analysis reports survives the join. -/
 theorem taint_ifElse_var (S : State) (c : Bil.Exp) (y n : List Bil.Stmt) (v : Bap.Var) (l : Nat) :
@@ -7208,7 +8069,7 @@ theorem taint_ifElse_var (S : State) (c : Bil.Exp) (y n : List Bil.Stmt) (v : Ba
       l ∈ labelsOfVar (run S y) v ∨ l ∈ labelsOfVar (run S n) v := by
   rw [taint_stmt_ifElse, taint_mem_labelsOfVar_join]
 
-theorem taint_ifElse_memory (S : State) (c : Bil.Exp) (y n : List Bil.Stmt) (m l : Nat) :
+theorem taint_ifElse_memory (S : State) (c : Bil.Exp) (y n : List Bil.Stmt) (m : Cell) (l : Nat) :
     l ∈ labelsOfMemory (stmt S (.ifElse c y n)) m ↔
       l ∈ labelsOfMemory (run S y) m ∨ l ∈ labelsOfMemory (run S n) m := by
   rw [taint_stmt_ifElse, taint_mem_labelsOfMemory_join]
@@ -7221,26 +8082,33 @@ theorem taint_branch_kill_keeps (S : State) (c : Bil.Exp) (x : Bap.Var) (w : Nat
   exact Or.inr h
 
 /-- A load reads every byte of its width at a constant address, and what the address space wraps to. -/
-theorem taint_load_covers_width (S : State) (m ad : Bil.Exp) (en : Endian) (z : Nat)
-    {x : Σ width, BitVec width} (hc : constant ad = some x) {k : Nat} (hk : k ∈ bytes x z) :
+theorem taint_load_covers_width (S : State) (m ad : Bil.Exp) (en : Endian) (z : Nat) {var : Bap.Var} (hm : memoryOf m = some var)
+    {x : Σ width, BitVec width} (hc : constant ad = some x) {k : Cell} (hk : k ∈ bytes var x z) :
     labelsOfMemory S k ⊆ exp S (.load m ad en z) := by
   intro n hn
-  simp only [exp, hc, taint_mem_union, List.mem_eraseDups, List.mem_flatMap]
+  simp only [exp, hc, hm, taint_mem_union, List.mem_eraseDups, List.mem_flatMap]
   exact Or.inr ⟨k, hk, hn⟩
 
+/-- A load of what is not known to be the bytes of a memory variable may read any byte of any memory. -/
+theorem taint_unknown_memory_load_reads_all (S : State) (m ad : Bil.Exp) (en : Endian) (z : Nat) (k : Cell)
+    (hm : memoryOf m = none) : labelsOfMemory S k ⊆ exp S (.load m ad en z) := by
+  intro n hn
+  simp only [exp, hm, taint_mem_union]
+  cases constant ad <;> exact Or.inr (taint_labelsOfMemory_subset_memoryLabels S k hn)
+
 /-- A load from an address that cannot be resolved may read any byte. -/
-theorem taint_dynamic_load_reads_all (S : State) (m ad : Bil.Exp) (en : Endian) (z k : Nat)
+theorem taint_dynamic_load_reads_all (S : State) (m ad : Bil.Exp) (en : Endian) (z : Nat) (k : Cell)
     (hc : constant ad = none) : labelsOfMemory S k ⊆ exp S (.load m ad en z) := by
   intro n hn
   simp only [exp, hc, taint_mem_union]
-  exact Or.inr (taint_labelsOfMemory_subset_memoryLabels S k hn)
+  cases memoryOf m <;> exact Or.inr (taint_labelsOfMemory_subset_memoryLabels S k hn)
 
 /-- A store to a constant address writes the labels of its address and value over all its bytes,
 strongly, and leaves other bytes alone. -/
 theorem taint_store_spec (S : State) (v : Bap.Var) (ad val : Bil.Exp) (en : Endian) (z : Nat)
-    {x : Σ width, BitVec width} (hc : constant ad = some x) (k : Nat) :
+    {x : Σ width, BitVec width} (hc : constant ad = some x) (k : Cell) :
     labelsOfMemory (stmt S (.move v (.store (.var v) ad val en z))) k =
-      if k ∈ bytes x z then union (union (exp S ad) (exp S val)) S.anywhere else labelsOfMemory S k := by
+      if k ∈ bytes v x z then union (union (exp S ad) (exp S val)) S.anywhere else labelsOfMemory S k := by
   rw [taint_stmt_store, taint_store_store, hc]
   simp only
   rw [taint_labelsOfMemory_putAll]
@@ -7248,7 +8116,7 @@ theorem taint_store_spec (S : State) (v : Bap.Var) (ad val : Bil.Exp) (en : Endi
 
 /-- The labels a store with an unresolvable address writes are visible at every address. -/
 theorem taint_dynamic_store_visible (S : State) (v : Bap.Var) (m ad val : Bil.Exp) (en : Endian) (z : Nat)
-    (hc : constant ad = none) (k : Nat) :
+    (hc : constant ad = none) (k : Cell) :
     exp S val ⊆ labelsOfMemory (stmt S (.move v (.store m ad val en z))) k := by
   rw [taint_stmt_store, taint_store_store, hc]
   intro n hn
@@ -7259,7 +8127,10 @@ theorem taint_dynamic_store_visible (S : State) (v : Bap.Var) (m ad val : Bil.Ex
 theorem taint_move_spec (s : State) (v w : Bap.Var) (e : Bil.Exp)
     (he : ∀ m ad val en z, e ≠ .store m ad val en z) :
     labelsOfVar (stmt s (.move v e)) w = if w = v then exp s e else labelsOfVar s w := by
-  rw [taint_stmt_move _ _ _ he, taint_labelsOfVar_putVar]
+  rw [taint_stmt_move _ _ _ he]
+  split
+  · rw [taint_labelsOfVar_smear, taint_labelsOfVar_putVar]
+  · rw [taint_labelsOfVar_putVar]
 
 /-! ### Clean states -/
 
@@ -7287,7 +8158,7 @@ theorem taint_exp_clean (s : State) (e : Bil.Exp) (hm : ∀ a, labelsOfMemory s 
     rcases hn with ⟨k, _, hn⟩ | hn
     · have := (taint_mem_labelsOfMemory s k n).mpr (Or.inl hn)
       simp [hm] at this
-    · have := (taint_mem_labelsOfMemory s 0 n).mpr (Or.inr hn)
+    · have := (taint_mem_labelsOfMemory s ⟨⟨"", .unknown, 0, false⟩, 0⟩ n).mpr (Or.inr hn)
       simp [hm] at this
   induction e with
   | int _ => rfl
@@ -7296,21 +8167,28 @@ theorem taint_exp_clean (s : State) (e : Bil.Exp) (hm : ∀ a, labelsOfMemory s 
     simp only [taint_occurrences, List.mem_append] at hv
     simp only [exp]
     refine taint_union_eq_nil (im fun v h => hv v (Or.inl h)) ?_
-    cases constant ad with
-    | none => exact hall
-    | some _ =>
+    rename_i mem _ _ _
+    cases constant ad <;> cases memoryOf mem
+    case some.some =>
       apply List.eq_nil_iff_forall_not_mem.mpr
       intro n hn
       simp only [List.mem_eraseDups, List.mem_flatMap] at hn
       rcases hn with ⟨k, _, hn⟩
       simp [hm] at hn
+    all_goals exact hall
   | store _ _ _ _ _ im ia iv =>
     simp only [taint_occurrences, List.mem_append] at hv
     exact taint_union_eq_nil (im fun v h => hv v (Or.inl (Or.inl h)))
       (taint_union_eq_nil (ia fun v h => hv v (Or.inl (Or.inr h))) (iv fun v h => hv v (Or.inr h)))
-  | bin _ _ _ il ir | letIn _ _ _ il ir | concat _ _ il ir =>
+  | bin _ _ _ il ir | concat _ _ il ir =>
     simp only [taint_occurrences, List.mem_append] at hv
     exact taint_union_eq_nil (il fun v h => hv v (Or.inl h)) (ir fun v h => hv v (Or.inr h))
+  | letIn x _ _ il ir =>
+    simp only [taint_occurrences, List.mem_append] at hv
+    refine taint_union_eq_nil (il fun v h => hv v (Or.inl h)) (taint_union_eq_nil (ir fun v h => hv v (Or.inr h)) ?_)
+    split
+    · rfl
+    · exact hall
   | un _ _ i | cast _ _ _ i | extract _ _ _ i =>
     simp only [taint_occurrences] at hv
     simpa only [exp] using i hv

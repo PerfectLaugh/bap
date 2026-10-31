@@ -4,10 +4,18 @@ namespace Bap.Analysis.Taint
 
 abbrev Labels := List Nat
 
-/-- `memory` holds per-byte labels, and `anywhere` labels a store may have put at any address. -/
+/-- A byte of a memory variable. -/
+structure Cell where
+  memory : Bap.Var
+  address : Nat
+  deriving DecidableEq, Repr
+
+/-- `memory` holds the labels of the bytes of each memory variable, and `anywhere` labels that may be at any address of
+any memory: a store with an address that is not known puts them there, and so does an assignment of a memory that is not
+a store into itself. -/
 structure State where
   vars : List (Bap.Var × Labels) := []
-  memory : List (Nat × Labels) := []
+  memory : List (Cell × Labels) := []
   anywhere : Labels := []
   deriving Repr
 
@@ -17,42 +25,68 @@ private def putVar (var : Bap.Var) (labels : Labels) (state : State) : State :=
   let vars := state.vars.filter fun binding => binding.1 != var
   { state with vars := if labels.isEmpty then vars else (var, labels) :: vars }
 
-private def putMemory (address : Nat) (labels : Labels) (state : State) : State :=
-  let memory := state.memory.filter fun binding => binding.1 != address
-  { state with memory := if labels.isEmpty then memory else (address, labels) :: memory }
+private def putMemory (cell : Cell) (labels : Labels) (state : State) : State :=
+  let memory := state.memory.filter fun binding => binding.1 != cell
+  { state with memory := if labels.isEmpty then memory else (cell, labels) :: memory }
 
 def labelsOfVar (state : State) (var : Bap.Var) : Labels :=
   match state.vars.find? fun binding => binding.1 = var with
   | some binding => binding.2
   | none => []
 
-private def byteLabels (state : State) (address : Nat) : Labels :=
-  match state.memory.find? fun binding => binding.1 = address with
+private def byteLabels (state : State) (cell : Cell) : Labels :=
+  match state.memory.find? fun binding => binding.1 = cell with
   | some binding => binding.2
   | none => []
 
-def labelsOfMemory (state : State) (address : Nat) : Labels :=
-  union (byteLabels state address) state.anywhere
+def labelsOfMemory (state : State) (cell : Cell) : Labels :=
+  union (byteLabels state cell) state.anywhere
 
 def sourceVar (state : State) (var : Bap.Var) (labels : Labels) : State :=
   putVar var (union (labelsOfVar state var) labels) state
 
-def sourceMemory (state : State) (address : Nat) (labels : Labels) : State :=
-  putMemory address (union (byteLabels state address) labels) state
+def sourceMemory (state : State) (cell : Cell) (labels : Labels) : State :=
+  putMemory cell (union (byteLabels state cell) labels) state
 
 def clearVar (state : State) (var : Bap.Var) : State := putVar var [] state
 
-/-- Clears what is known to be at `address`; `anywhere` still applies to every address. -/
-def clearMemory (state : State) (address : Nat) : State := putMemory address [] state
+/-- Clears what is known to be at a byte; `anywhere` still applies to every address. -/
+def clearMemory (state : State) (cell : Cell) : State := putMemory cell [] state
 
 private def constant (exp : Bil.Exp) : Option (Σ width, BitVec width) :=
   match Bil.evalExp [] exp with
   | .ok value => (Bap.Value.asBits value).toOption
   | .error _ => none
 
-/-- The addresses of a `size`-byte access at `address`, wrapping like the address space. -/
-private def bytes (address : Σ width, BitVec width) (size : Nat) : List Nat :=
-  (List.range size).map fun offset => (address.2 + BitVec.ofNat address.1 offset).toNat
+/-- The bytes of a `size`-byte access of `memory` at `address`, wrapping like the address space. -/
+private def bytes (memory : Bap.Var) (address : Σ width, BitVec width) (size : Nat) : List Cell :=
+  (List.range size).map fun offset => ⟨memory, (address.2 + BitVec.ofNat address.1 offset).toNat⟩
+
+/-- Whether a variable can only hold bits, by its type. -/
+private def bitsOnly (var : Bap.Var) : Bool :=
+  match var.typ with
+  | .imm _ => true
+  | _ => false
+
+/-- The memory variable whose bytes an expression holds, with what stores on it add, which are in its labels. -/
+private def memoryOf : Bil.Exp → Option Bap.Var
+  | .var var => if bitsOnly var then none else some var
+  | .store memory .. => memoryOf memory
+  | _ => none
+
+/-- Whether an expression can have a memory for a value. -/
+private def holdsMemory : Bil.Exp → Bool
+  | .var var => !bitsOnly var
+  | .store .. => true
+  | .ite _ yes no => holdsMemory yes || holdsMemory no
+  | .letIn _ _ body => holdsMemory body
+  | _ => false
+
+/-- Whether assigning `value` to `var` gives a memory bytes that are not its own, whose labels are not worth following. -/
+private def mixes (var : Bap.Var) (value : Bil.Exp) : Bool :=
+  match value with
+  | .var source => source != var && (!bitsOnly var || !bitsOnly source)
+  | _ => !bitsOnly var || holdsMemory value
 
 private def allLabels (state : State) : Labels :=
   (state.vars.flatMap Prod.snd ++ state.memory.flatMap Prod.snd ++ state.anywhere).eraseDups
@@ -60,38 +94,44 @@ private def allLabels (state : State) : Labels :=
 private def memoryLabels (state : State) : Labels :=
   union ((state.memory.map Prod.fst).flatMap (byteLabels state)) state.anywhere
 
+/-- Labels may now be at any address of any memory. -/
+private def smear (state : State) : State := { state with anywhere := memoryLabels state }
+
 /-- Labels of a value. Control dependencies and pointer taint are not data flow: an `ite` condition
-and a load address add nothing. -/
+and a load address add nothing. A load of what is not known to be the bytes of a memory variable has the labels of
+every memory, and so has what a `let` binds a memory to, whose name may be that of another. -/
 def exp (state : State) : Bil.Exp → Labels
   | .int _ => []
   | .var var => labelsOfVar state var
   | .load memory address _ size =>
     union (exp state memory) <|
-      match constant address with
-      | some address => ((bytes address size).flatMap (labelsOfMemory state)).eraseDups
-      | none => memoryLabels state
+      match constant address, memoryOf memory with
+      | some address, some var => ((bytes var address size).flatMap (labelsOfMemory state)).eraseDups
+      | _, _ => memoryLabels state
   | .store memory address value _ _ =>
     union (exp state memory) (union (exp state address) (exp state value))
   | .bin _ left right => union (exp state left) (exp state right)
   | .un _ value => exp state value
   | .cast _ _ value => exp state value
-  | .letIn _ value body => union (exp state value) (exp state body)
+  | .letIn var value body =>
+    union (exp state value) (union (exp state body) (if bitsOnly var then [] else memoryLabels state))
   | .ite _ yes no => union (exp state yes) (exp state no)
   | .extract _ _ value => exp state value
   | .concat left right => union (exp state left) (exp state right)
   | .unknown _ _ => []
 
-/-- The effect of assigning `value` to the memory variable `dst`, innermost store first. -/
+/-- The effect of assigning `value` to the memory variable `dst`, innermost store first. Only a memory stored into itself
+keeps track of its bytes. -/
 private def store (dst : Bap.Var) (state : State) : Bil.Exp → State
   | .store memory address value _ size =>
     let labels := union (exp state address) (exp state value)
     let inner := store dst state memory
     match constant address with
-    | some address => (bytes address size).foldl (fun state byte => putMemory byte labels state) inner
+    | some address => (bytes dst address size).foldl (fun state byte => putMemory byte labels state) inner
     | none => { inner with anywhere := union inner.anywhere labels }
   | .var source =>
-    if source = dst then state else putVar dst (labelsOfVar state source) state
-  | other => putVar dst (exp state other) state
+    if source = dst then state else smear (putVar dst (labelsOfVar state source) state)
+  | other => smear (putVar dst (exp state other) state)
 
 private def joinBindings [BEq α] (left right : List (α × Labels)) : List (α × Labels) :=
   let find (key : α) (bindings : List (α × Labels)) : Labels :=
@@ -147,7 +187,9 @@ mutual
     | .move var value =>
       match value with
       | .store .. => store var state value
-      | _ => putVar var (exp state value) state
+      | _ =>
+        let assigned := putVar var (exp state value) state
+        if mixes var value then smear assigned else assigned
     | .jmp _ | .special _ | .cpuExn _ => state
     | .while _ body => loopState body (loopFuel state body) state
     | .ifElse _ yes no => join (run state yes) (run state no)
@@ -185,6 +227,6 @@ mutual
 end
 
 def taintedVars (state : State) : List Bap.Var := state.vars.map Prod.fst
-def taintedMemory (state : State) : List Nat := state.memory.map Prod.fst
+def taintedMemory (state : State) : List Cell := state.memory.map Prod.fst
 
 end Bap.Analysis.Taint

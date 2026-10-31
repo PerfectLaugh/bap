@@ -9,11 +9,25 @@ inductive Location where
   | mem (address size : Nat)
   /-- Bytes of one memory variable. -/
   | memOf (memory : Bap.Var) (address size : Nat)
+  /-- Bytes of one memory variable at `offset` from the value of the register `base` where the location is live, the
+  stack slots of a stack pointer or a frame pointer among them. It says the register too. -/
+  | rel (memory base : Bap.Var) (offset : Int) (size : Nat)
+  /-- All of one memory variable, which is what a read at an address that is not known needs. -/
+  | whole (memory : Bap.Var)
   deriving DecidableEq, Repr
 
 namespace Location
 
-/-- Whether two locations share a register or at least one byte. -/
+/-- Whether `size` bytes at offset `left` and `rightSize` bytes at offset `right` from one address never meet in the
+address space of `memory`, around its end included. -/
+def apart (memory : Bap.Var) (left leftSize right rightSize : Int) : Bool :=
+  match memory.typ with
+  | .mem width _ =>
+    (left + leftSize ≤ right && right + rightSize - left ≤ (2 : Int) ^ width) ||
+      (right + rightSize ≤ left && left + leftSize - right ≤ (2 : Int) ^ width)
+  | _ => false
+
+/-- Whether two locations may share a register or at least one byte. Locations from two registers may. -/
 def overlaps : Location → Location → Bool
   | .reg left, .reg right => left == right
   | .mem left leftSize, .mem right rightSize
@@ -22,7 +36,19 @@ def overlaps : Location → Location → Bool
     left < right + rightSize && right < left + leftSize
   | .memOf leftMemory left leftSize, .memOf rightMemory right rightSize =>
     leftMemory == rightMemory && left < right + rightSize && right < left + leftSize
+  | .mem _ _, .rel .. | .rel .., .mem _ _ | .mem _ _, .whole _ | .whole _, .mem _ _ => true
+  | .memOf left _ _, .rel right .. | .rel left .., .memOf right _ _ | .memOf left _ _, .whole right
+  | .whole left, .memOf right _ _ | .rel left .., .whole right | .whole left, .rel right ..
+  | .whole left, .whole right => left == right
+  | .rel leftMemory leftBase left leftSize, .rel rightMemory rightBase right rightSize =>
+    leftMemory == rightMemory && (leftBase != rightBase || !apart leftMemory left leftSize right rightSize)
   | _, _ => false
+
+/-- Whether a write can change what a live location says: what it may share, and a register that a location goes by. -/
+def affects (write live : Location) : Bool :=
+  write.overlaps live || match write, live with
+    | .reg var, .rel _ base _ _ => var == base
+    | _, _ => false
 
 /-- Whether a write to `outer` overwrites every byte of `inner`. -/
 def covers (outer inner : Location) : Bool :=
@@ -32,11 +58,14 @@ def covers (outer inner : Location) : Bool :=
     | .memOf _ outerAddress outerSize, .mem innerAddress innerSize
     | .memOf _ outerAddress outerSize, .memOf _ innerAddress innerSize =>
       outerAddress ≤ innerAddress && innerAddress + innerSize ≤ outerAddress + outerSize
-    | _, _ => true
+    | .rel _ outerBase outer outerSize, .rel _ innerBase inner innerSize =>
+      outerBase == innerBase && outer ≤ inner && inner + innerSize ≤ outer + outerSize
+    | .reg _, .reg _ => true
+    | _, _ => false
 
 /-- Whether this is a location of the memory variable `memory`. -/
 def inMemory (memory : Bap.Var) : Location → Bool
-  | .memOf other _ _ => other == memory
+  | .memOf other _ _ | .rel other .. | .whole other => other == memory
   | .mem _ _ => true
   | .reg _ => false
 
@@ -61,6 +90,73 @@ private def constantRange (exp : Bil.Exp) (size : Nat) : Option Nat :=
     | .error _ => none
   | .error _ => none
 
+/-- The value of an expression that no variable changes. -/
+private def closedBits (exp : Bil.Exp) : Option (Σ width, BitVec width) :=
+  match Bil.evalExp [] exp with
+  | .ok value => (Bap.Value.asBits value).toOption
+  | .error _ => none
+
+/-- The register an expression adds a constant to, the constant, and its width if it is known: the value of an address
+as the lifters write it, with casts that do nothing and constants on either side. `none` for a width is the register
+itself, as wide as it is. -/
+private def affine : Bil.Exp → Option (Bap.Var × Int × Option Nat)
+  | .var var => if var.typ matches .imm _ then some (var, 0, none) else none
+  | .cast kind width value =>
+    if kind == .low || kind == .unsigned then
+      match affine value with
+      | some (base, offset, known) =>
+        match known with
+        | none => if offset == 0 then some (base, 0, some width) else none
+        | some other => if other == width then some (base, offset, some width) else none
+      | none => none
+    else none
+  | .bin .add left right =>
+    match closedBits right with
+    | some constant =>
+      match affine left with
+      | some (base, offset, known) =>
+        if known.all (· == constant.1) then some (base, offset + constant.2.toInt, some constant.1) else none
+      | none => none
+    | none =>
+      match closedBits left with
+      | some constant =>
+        match affine right with
+        | some (base, offset, known) =>
+          if known.all (· == constant.1) then some (base, offset + constant.2.toInt, some constant.1) else none
+        | none => none
+      | none => none
+  | .bin .sub left right =>
+    match closedBits right with
+    | some constant =>
+      match affine left with
+      | some (base, offset, known) =>
+        if known.all (· == constant.1) then some (base, offset - constant.2.toInt, some constant.1) else none
+      | none => none
+    | none => none
+  | _ => none
+
+/-- How far from its register a location keeps track of its bytes: a loop that moves a pointer ends in `whole`. -/
+private def offsetLimit : Int := 4096
+
+/-- The location of `size` bytes of `memory` at an address, the less the more of it is known: `offset` from a register,
+or wherever. -/
+private def accessAt (memory : Bap.Var) (address : Bil.Exp) (size : Nat) : Location :=
+  match constantRange address size with
+  | some constant => .memOf memory constant size
+  | none =>
+    match memory.typ, affine address with
+    | .mem width _, some (base, offset, known) =>
+      if known.all (· == width) && decide (-offsetLimit ≤ offset) && decide (offset ≤ offsetLimit) then
+        .rel memory base offset size
+      else .whole memory
+    | _, _ => .whole memory
+
+/-- A location in the body of a `let`: bytes that go by what it binds are nothing outside of it. -/
+private def bound (var : Bap.Var) (location : Location) : Location :=
+  match location with
+  | .rel memory base _ _ => if base == var then .whole memory else location
+  | other => other
+
 /-- What an expression reads. A load is only known through a memory variable itself. -/
 private def usesExp : Bil.Exp → Info
   | .int _ => {}
@@ -68,10 +164,9 @@ private def usesExp : Bil.Exp → Info
   | .load memory address _ size =>
     let inner := usesExp address
     let outer := usesExp memory
-    match memory, constantRange address size with
-    | .var source, some constant =>
-      { uses := .memOf source constant size :: inner.uses, dynamic := inner.dynamic }
-    | _, _ => { uses := outer.uses ++ inner.uses, dynamic := true }
+    match memory with
+    | .var source => { uses := accessAt source address size :: inner.uses, dynamic := inner.dynamic }
+    | _ => { uses := outer.uses ++ inner.uses, dynamic := true }
   | .store memory address value _ _ =>
     let left := usesExp memory
     let middle := usesExp address
@@ -83,10 +178,10 @@ private def usesExp : Bil.Exp → Info
     { uses := left.uses ++ right.uses, dynamic := left.dynamic || right.dynamic }
   | .un _ value => usesExp value
   | .cast _ _ value => usesExp value
-  | .letIn _ value body =>
+  | .letIn var value body =>
     let value := usesExp value
     let body := usesExp body
-    { uses := value.uses ++ body.uses, dynamic := value.dynamic || body.dynamic }
+    { uses := value.uses ++ body.uses.map (bound var), dynamic := value.dynamic || body.dynamic }
   | .ite condition yes no =>
     let condition := usesExp condition
     let yes := usesExp yes
@@ -117,14 +212,23 @@ private def chainRoot : Bil.Exp → Option Bap.Var
 private def memoryWrites (dst : Bap.Var) : Bil.Exp → List Location × Bool
   | .store memory address _ _ size =>
     let inner := memoryWrites dst memory
-    match constantRange address size with
-    | some address => (.memOf dst address size :: inner.1, inner.2)
-    | none => (inner.1, true)
+    match accessAt dst address size with
+    | .whole _ => (inner.1, true)
+    | location => (location :: inner.1, inner.2)
   | .var _ => ([], false)
   | _ => ([], true)
 
 private def isStore : Bil.Exp → Bool
   | .store .. => true
+  | _ => false
+
+/-- Whether a store of a chain is longer than the address space of `dst`, and so lands on itself. -/
+private def oversized (dst : Bap.Var) : Bil.Exp → Bool
+  | .store memory _ _ _ size =>
+    oversized dst memory ||
+      match dst.typ with
+      | .mem width _ => decide ((2 : Nat) ^ width < size)
+      | _ => true
   | _ => false
 
 private def stmtInfo : Bil.Stmt → Info
@@ -134,7 +238,7 @@ private def stmtInfo : Bil.Stmt → Info
       { writes := writes.1
         wholesale := if writes.2 || chainRoot value != some var then [var] else []
         uses := (usesExp value).uses
-        dynamic := writes.2 || (usesExp value).dynamic }
+        dynamic := oversized var value || (usesExp value).dynamic }
     else
       { writes := [.reg var], uses := (usesExp value).uses, dynamic := isStore value || (usesExp value).dynamic }
   | .jmp target => usesExp target
@@ -156,11 +260,25 @@ private def blockInfo (code : Bil.Program) : Info :=
 /-- Whether something an instruction may write is live. -/
 private def relevant (live : List Location) (info : Info) : Bool :=
   info.always || info.wholesale.any (fun memory => live.any (Location.inMemory memory)) ||
-    info.writes.any (fun write => live.any write.overlaps)
+    info.writes.any (fun write => live.any write.affects)
+
+/-- The bytes of `memory` at `offset` from the register `dst` after `dst := value`, in terms of before it. -/
+private def throughMove (memory : Bap.Var) (value : Bil.Exp) (offset : Int) (size : Nat) : Location :=
+  match memory.typ, affine value, closedBits value with
+  | .mem width _, some (base, moved, known), _ =>
+    if known.all (· == width) && decide (-offsetLimit ≤ moved + offset) && decide (moved + offset ≤ offsetLimit) then
+      .rel memory base (moved + offset) size
+    else .whole memory
+  | .mem width _, none, some constant =>
+    if constant.1 == width && decide (0 ≤ constant.2.toNat + offset) && decide (constant.2.toNat + offset + size ≤ (2 : Int) ^ width) then
+      .memOf memory (constant.2.toNat + offset).toNat size
+    else .whole memory
+  | _, _, _ => .whole memory
 
 /-- What must agree before `dst := value` for `live` to agree after it, leaving aside what `value`
-reads: a live register or byte of another location stays, and a live range of `dst` comes from the
-written bytes, unless a store covers it, and otherwise from the memory the chain of stores starts at. -/
+reads: a live register or byte of another location stays, a live range of `dst` comes from the
+written bytes, unless a store covers it, and otherwise from the memory the chain of stores starts at, and
+bytes that go by a register that is written go by what it is written with, if that is known. -/
 private def moveBefore (dst : Bap.Var) (value : Bil.Exp) (live : List Location) : List Location :=
   if dst.typ matches .mem _ _ then
     live.filterMap fun location =>
@@ -171,9 +289,24 @@ private def moveBefore (dst : Bap.Var) (value : Bil.Exp) (live : List Location) 
         else match chainRoot value with
           | some root => some (.memOf root address size)
           | none => some location
+      | .rel memory base offset size =>
+        if memory != dst then some location
+        else if (memoryWrites dst value).1.any (·.covers location) then none
+        else match chainRoot value with
+          | some root => some (.rel root base offset size)
+          | none => some location
+      | .whole memory =>
+        if memory != dst then some location
+        else match chainRoot value with
+          | some root => some (.whole root)
+          | none => some location
       | other => some other
   else
-    live.filter (· != .reg dst)
+    (live.filter (· != .reg dst)).map fun location =>
+      match location with
+      | .rel memory base offset size =>
+        if base == dst then throughMove memory value offset size else location
+      | other => other
 
 mutual
   /-- What must agree before a statement, given what must agree after it if it falls through and

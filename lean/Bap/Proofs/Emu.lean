@@ -2737,7 +2737,7 @@ end RegionMemory
 
 section Links
 
-open_private Bap.Emu Bap.Emu stepOps rangeLimitOf
+open_private Bap.Emu Bap.Emu stepOps rangeLimitOf rangeRestart
 
 /-- The operations of the emulator are made by `stepOpsOf` from its references, as those of the model are from its cells
 (`Bap.Emu.Model.ops_is_stepOpsOf`). -/
@@ -2747,7 +2747,8 @@ theorem stepOps_is_stepOpsOf (emu : Bap.Emu.Emu) : (stepOps emu).pc = emu.pc.get
   ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
 
 /-- The emulator's step is the generic step of `Bap.Emu.Core`, which `Bap.Emu.Model` is about. -/
-theorem step_is_stepM (emu : Bap.Emu.Emu) : Bap.Emu.step emu = stepM (ε := IO.Error) (stepOps emu) := rfl
+theorem step_is_stepM (emu : Bap.Emu.Emu) :
+    Bap.Emu.step emu = (do emu.budget.set 0; stepM (ε := IO.Error) (stepOps emu)) := rfl
 
 /-- And its run is the generic run of that step. -/
 theorem run_is_runM (emu : Bap.Emu.Emu) (fuel : Nat) (h : rangeLimitOf emu.config ≤ 1) :
@@ -2756,9 +2757,11 @@ theorem run_is_runM (emu : Bap.Emu.Emu) (fuel : Nat) (h : rangeLimitOf emu.confi
 
 /-- With compiled ranges, the same step, with the fuel counting the instructions it chains. -/
 theorem run_is_runChainedM (emu : Bap.Emu.Emu) (fuel : Nat) (h : ¬ rangeLimitOf emu.config ≤ 1) :
-    Bap.Emu.run emu fuel = runPreciseM (runChainedM (stepM (ε := IO.Error) (stepOps emu)) emu.budget.set
+    Bap.Emu.run emu fuel = runPreciseM (runChainedM (restartM (stepM (ε := IO.Error) (stepOps emu)) (rangeRestart emu)) emu.budget.set
       emu.engine.chained.get fuel fuel 0) (stepM (ε := IO.Error) (stepOps emu))
-      (do pure ((← emu.lastBudget.get) != 0 && !emu.engine.deferMemorySync)) (fuel + 1) := by
+      (do
+        emu.budget.set 0
+        pure ((← emu.lastBudget.get) != 0 && !emu.engine.deferMemorySync)) (fuel + 1) := by
   simp [Bap.Emu.run, h]
 
 end Links
