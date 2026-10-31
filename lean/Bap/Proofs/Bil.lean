@@ -812,7 +812,7 @@ theorem execStmt_foldStmt (fuel : Nat) (state : State) (stmt : Stmt) :
 
 /-! ## Type soundness -/
 
-open_private Bap.Bil.Typecheck Bap.Bil.expectImm Bap.Bil.expectSameType Bap.Bil.checkCondition
+open_private Bap.Bil.Typecheck Bap.Bil.expectImm Bap.Bil.expectSameType Bap.Bil.expectBits Bap.Bil.checkCondition
 
 /-- Every binding holds a value of its variable's declared type. -/
 def WellTypedEnv (env : Env) : Prop :=
@@ -834,6 +834,10 @@ theorem WellTypedEnv.lookup {env : Env} (h : WellTypedEnv env) {var : Bap.Var} {
 
 private theorem expectImm_ok {t : Typ} {w : Nat} : expectImm t = .ok w ↔ t = .imm w := by
   cases t <;> simp [expectImm]
+
+private theorem expectBits_ok {t t' : Typ} (h : expectBits t = .ok t') : t' = t := by
+  unfold expectBits at h
+  split at h <;> cases h <;> rfl
 
 private def comparison : BinOp → Bool
   | .eq | .neq | .lt | .le | .gt | .ge | .slt | .sle | .sgt | .sge => true
@@ -872,7 +876,7 @@ private theorem bit_cases (c : BitVec 1) : c = 1 ∨ c = 0 := by
 
 private theorem infer_load_inv {memory address : Exp} {endian : Endian} {size : Nat} {t : Typ}
     (h : inferExp (.load memory address endian size) = .ok t) :
-    ∃ w, inferExp memory = .ok (.mem w 8) ∧ inferExp address = .ok (.imm w) ∧ t = .imm (size * 8) := by
+    ∃ w, inferExp memory = .ok (.mem w 8) ∧ inferExp address = .ok (.imm w) ∧ t = .imm (size * 8) ∧ size ≠ 0 := by
   simp only [inferExp, except_bind_ok] at h
   obtain ⟨mt, hmt, h⟩ := h
   split at h
@@ -887,8 +891,11 @@ private theorem infer_load_inv {memory address : Exp} {endian : Endian} {size : 
       split at hif
       · rename_i he
         subst he
-        simp only [Except.ok.injEq] at hif
-        exact ⟨_, hmt, hat, hif.symm⟩
+        split at hif
+        · simp at hif
+        · rename_i hz
+          simp only [Except.ok.injEq] at hif
+          exact ⟨_, hmt, hat, hif.symm, hz⟩
       · simp at hif
     · simp at h
   · simp at h
@@ -896,7 +903,7 @@ private theorem infer_load_inv {memory address : Exp} {endian : Endian} {size : 
 private theorem infer_store_inv {memory address value : Exp} {endian : Endian} {size : Nat} {t : Typ}
     (h : inferExp (.store memory address value endian size) = .ok t) :
     ∃ w, inferExp memory = .ok (.mem w 8) ∧ inferExp address = .ok (.imm w) ∧
-      inferExp value = .ok (.imm (size * 8)) ∧ t = .mem w 8 := by
+      inferExp value = .ok (.imm (size * 8)) ∧ t = .mem w 8 ∧ size ≠ 0 ∧ size ≤ 2 ^ w := by
   simp only [inferExp, except_bind_ok] at h
   obtain ⟨mt, hmt, h⟩ := h
   split at h
@@ -919,11 +926,18 @@ private theorem infer_store_inv {memory address value : Exp} {endian : Endian} {
         rw [expectImm_ok] at hvw
         subst hvw
         split at hif
-        · rename_i hs
-          subst hs
-          simp only [Except.ok.injEq] at hif
-          exact ⟨_, hmt, hat, hvt, hif.symm⟩
         · simp at hif
+        · rename_i hs
+          have hs' := Decidable.not_not.mp hs
+          subst hs'
+          split at hif
+          · simp at hif
+          · rename_i hz
+            split at hif
+            · simp at hif
+            · rename_i hfit
+              simp only [Except.ok.injEq] at hif
+              exact ⟨_, hmt, hat, hvt, hif.symm, hz, by omega⟩
   · simp at h
 
 private theorem infer_un_inv {op : UnOp} {value : Exp} {t : Typ} (h : inferExp (.un op value) = .ok t) :
@@ -1028,22 +1042,23 @@ theorem evalExp_type_sound {env : Env} (hwt : WellTypedEnv env) (exp : Exp) {t :
     (hi : inferExp exp = .ok t) (he : evalExp env exp = .ok result) : result.type = t := by
   induction exp generalizing env t result with
   | int value =>
-    simp only [inferExp, Except.ok.injEq] at hi
+    simp only [inferExp] at hi
     simp only [evalExp, Except.ok.injEq] at he
-    subst hi he
+    cases expectBits_ok hi
+    subst he
     rfl
   | var var =>
-    simp only [inferExp, Except.ok.injEq] at hi
-    subst hi
+    simp only [inferExp] at hi
+    cases expectBits_ok hi
     exact hwt.lookup he
   | unknown message typ => simp [evalExp] at he
   | load memory address endian size _ _ =>
     obtain ⟨w, m, a, _, _, rfl⟩ := eval_load_iff.mp he
-    obtain ⟨_, _, _, rfl⟩ := infer_load_inv hi
+    obtain ⟨_, _, _, rfl, _⟩ := infer_load_inv hi
     rfl
   | store memory address value endian size ihm _ _ =>
     obtain ⟨w, m, a, vw, v, u, hm, _, _, _, rfl⟩ := eval_store_iff.mp he
-    obtain ⟨w', hmt, _, _, rfl⟩ := infer_store_inv hi
+    obtain ⟨w', hmt, _, _, rfl, _⟩ := infer_store_inv hi
     have := ihm hwt hmt hm
     simpa [Value.type] using this
   | bin op left right ihl _ =>
@@ -1715,7 +1730,7 @@ theorem simplify_drops_unbound_variable (var : Bap.Var) (h : var.typ = .imm 8) :
     simp [evalExp, lookup, Bind.bind, Except.bind, Value.asBits]
   refine ⟨by rw [horig]; rfl, ?_⟩
   rw [simplifyExp, horig]
-  simp [simplifyExp, evalExp, lookup, hasImmWidth, inferExp, h, hasUnknown, Bind.bind, Except.bind, Value.asBits]
+  simp [simplifyExp, evalExp, lookup, hasImmWidth, inferExp, expectBits, h, hasUnknown, Bind.bind, Except.bind, Value.asBits]
 
 /-- Width errors survive simplification. -/
 theorem simplify_keeps_width_error :
@@ -1723,7 +1738,7 @@ theorem simplify_keeps_width_error :
       .error "binary operands have different widths" := by
   have horig : evalExp [] (.bin .add (.int (0#8)) (.int (1#16))) = .error "binary operands have different widths" := rfl
   rw [simplifyExp, horig]
-  simp [simplifyExp, evalExp, hasImmWidth, inferExp, Bind.bind, Except.bind, Value.asBits, evalBin]
+  simp [simplifyExp, evalExp, hasImmWidth, inferExp, expectBits, Bind.bind, Except.bind, Value.asBits, evalBin]
 
 /-- `0 * unknown` keeps failing: the annihilator rule never drops an `unknown`. -/
 theorem simplify_keeps_unknown_error :
@@ -1732,7 +1747,7 @@ theorem simplify_keeps_unknown_error :
   have horig : evalExp [] (.bin .mul (.int (0#8)) (.unknown "x" (.imm 8))) =
       .error "cannot evaluate unknown value: x" := rfl
   rw [simplifyExp, horig]
-  simp [simplifyExp, evalExp, hasImmWidth, inferExp, hasUnknown, Bind.bind, Except.bind, Value.asBits]
+  simp [simplifyExp, evalExp, hasImmWidth, inferExp, expectBits, hasUnknown, Bind.bind, Except.bind, Value.asBits]
   rfl
 
 /-! ## The fuel interpreter -/
@@ -2111,6 +2126,289 @@ theorem execProgram_keeps_bound {fuel : Nat} {state : State} {program : Program}
     (he : execProgram fuel state program = .ok r) {var : Bap.Var} (hb : ∃ v, lookup state.env var = .ok v) :
     ∃ v, lookup r.1.env var = .ok v :=
   (exec_keeps_bound fuel).2 _ _ _ var he hb
+
+/-! ## Nothing well-typed lacks bits, and a well-typed program can only run out of fuel
+
+The checker rejects what has no bits: a zero-width constant, variable or `unknown`, and a load or store of no bytes.
+Concrete evaluation gives these a degenerate value, a `BitVec 0`, but neither upstream, whose `Size.t` starts at a
+byte and whose `Type.imm` starts at a bit, nor SMT-LIB, which has no sort for them, has them at all. It also rejects a
+store that covers an address twice: the evaluator lets the last byte win, but no load gets the stored value back. -/
+
+private theorem expectBits_has_bits {t t' : Typ} (h : expectBits t = .ok t') :
+    (∀ w, t' = .imm w → 0 < w) ∧ (∀ a v, t' = .mem a v → 0 < a ∧ 0 < v) := by
+  unfold expectBits at h
+  split at h
+  · cases h
+  · cases h
+  · cases h
+  · next t hi hm hm' =>
+    cases h
+    refine ⟨fun w he => Nat.pos_of_ne_zero fun hz => hi (by rw [he, hz]), fun a v he => ?_⟩
+    exact ⟨Nat.pos_of_ne_zero fun hz => hm v (by rw [he, hz]), Nat.pos_of_ne_zero fun hz => hm' a (by rw [he, hz])⟩
+
+/-- Every type the checker infers has bits. -/
+theorem inferExp_has_bits (exp : Exp) :
+    (∀ w, inferExp exp = .ok (.imm w) → 0 < w) ∧ (∀ a v, inferExp exp = .ok (.mem a v) → 0 < a ∧ 0 < v) := by
+  induction exp with
+  | int value =>
+    refine ⟨fun w h => (expectBits_has_bits h).1 w rfl, fun a v h => (expectBits_has_bits h).2 a v rfl⟩
+  | var var =>
+    refine ⟨fun w h => (expectBits_has_bits h).1 w rfl, fun a v h => (expectBits_has_bits h).2 a v rfl⟩
+  | unknown message typ =>
+    refine ⟨fun w h => (expectBits_has_bits h).1 w rfl, fun a v h => (expectBits_has_bits h).2 a v rfl⟩
+  | load memory address endian size =>
+    refine ⟨fun w h => ?_, fun a v h => ?_⟩
+    · obtain ⟨_, _, _, he, hz⟩ := infer_load_inv h
+      cases he
+      have := Nat.pos_of_ne_zero hz
+      omega
+    · obtain ⟨_, _, _, he, _⟩ := infer_load_inv h
+      cases he
+  | store memory address value endian size ihm =>
+    refine ⟨fun w h => ?_, fun a v h => ?_⟩
+    · obtain ⟨_, _, _, _, he, _⟩ := infer_store_inv h
+      cases he
+    · obtain ⟨_, hm, _, _, he, _⟩ := infer_store_inv h
+      cases he
+      exact ihm.2 _ _ hm
+  | bin op left right ihl =>
+    refine ⟨fun w h => ?_, fun a v h => ?_⟩
+    · obtain ⟨w', hl, _, he⟩ := infer_bin_inv h
+      have := ihl.1 _ hl
+      revert he
+      split <;> (intro he; cases he; first | omega | exact Nat.one_pos)
+    · obtain ⟨w', hl, _, he⟩ := infer_bin_inv h
+      revert he
+      split <;> (intro he; cases he)
+  | un op value ih =>
+    refine ⟨fun w h => ?_, fun a v h => ?_⟩
+    · obtain ⟨w', hv, he⟩ := infer_un_inv h
+      cases he
+      exact ih.1 _ hv
+    · obtain ⟨w', hv, he⟩ := infer_un_inv h
+      cases he
+  | cast kind width value =>
+    refine ⟨fun w h => ?_, fun a v h => ?_⟩
+    · obtain ⟨_, _, he, hz, _⟩ := infer_cast_inv h
+      cases he
+      exact Nat.pos_of_ne_zero hz
+    · obtain ⟨_, _, he, _⟩ := infer_cast_inv h
+      cases he
+  | letIn var value body _ ihb =>
+    obtain := ihb
+    exact ⟨fun w h => ihb.1 _ (infer_let_inv h).2, fun a v h => ihb.2 _ _ (infer_let_inv h).2⟩
+  | ite condition yes no _ ihy =>
+    exact ⟨fun w h => ihy.1 _ (infer_ite_inv h).2.1, fun a v h => ihy.2 _ _ (infer_ite_inv h).2.1⟩
+  | extract high low value =>
+    refine ⟨fun w h => ?_, fun a v h => ?_⟩
+    · obtain ⟨_, _, he, _⟩ := infer_extract_inv h
+      cases he
+      omega
+    · obtain ⟨_, _, he, _⟩ := infer_extract_inv h
+      cases he
+  | concat left right ihl =>
+    refine ⟨fun w h => ?_, fun a v h => ?_⟩
+    · obtain ⟨_, _, hl, _, he⟩ := infer_concat_inv h
+      cases he
+      have := ihl.1 _ hl
+      omega
+    · obtain ⟨_, _, _, _, he⟩ := infer_concat_inv h
+      cases he
+
+theorem infer_int_zero_rejected (value : BitVec 0) : (inferExp (.int value)).toOption = none := rfl
+
+theorem infer_var_zero_rejected {var : Bap.Var} (h : var.typ = .imm 0) : (inferExp (.var var)).toOption = none := by
+  simp [inferExp, h, expectBits, Except.toOption]
+
+theorem infer_unknown_zero_rejected (message : String) : (inferExp (.unknown message (.imm 0))).toOption = none := rfl
+
+theorem infer_load_zero_rejected {memory address : Exp} {w : Nat} (endian : Endian)
+    (hm : inferExp memory = .ok (.mem w 8)) (ha : inferExp address = .ok (.imm w)) :
+    inferExp (.load memory address endian 0) = .error "a load must have at least one byte" := by
+  simp [inferExp, hm, ha, Bind.bind, Except.bind, expectImm]
+
+/-- A store that writes no bytes is rejected for its value, or for its size if that had no bits. -/
+theorem infer_store_zero_rejected (memory address value : Exp) (endian : Endian) :
+    (inferExp (.store memory address value endian 0)).toOption = none := by
+  cases h : inferExp (.store memory address value endian 0) with
+  | error e => rfl
+  | ok t =>
+    obtain ⟨_, _, _, _, _, hz, _⟩ := infer_store_inv h
+    exact absurd rfl hz
+
+/-- A store that covers an address twice is rejected. -/
+theorem infer_store_overlap_rejected {memory address value : Exp} {w size : Nat} (endian : Endian)
+    (hfit : 2 ^ w < size) (hm : inferExp memory = .ok (.mem w 8)) (ha : inferExp address = .ok (.imm w))
+    (hv : inferExp value = .ok (.imm (size * 8))) :
+    inferExp (.store memory address value endian size) = .error "a store must not overlap itself" := by
+  have hz : size ≠ 0 := by have := Nat.two_pow_pos w; omega
+  simp [inferExp, hm, ha, hv, hz, hfit, Bind.bind, Except.bind, expectImm]
+
+/-- Progress with the checker's guarantee: a well-typed `unknown`-free expression evaluates, once its free variables
+are bound, to a value of the inferred type that has bits. -/
+theorem evalExp_progress_has_bits (exp : Exp) (hu : hasUnknown exp = false) {t : Typ} (hi : inferExp exp = .ok t)
+    {env : Env} (hwt : WellTypedEnv env) (hb : ∀ v, occursFree v exp = true → ∃ value, lookup env v = .ok value) :
+    ∃ value, evalExp env exp = .ok value ∧ value.type = t ∧ ∀ {w} (b : BitVec w), value = .bits b → 0 < w := by
+  obtain ⟨value, hv, ht⟩ := evalExp_progress exp hu hi hwt hb
+  refine ⟨value, hv, ht, fun b he => ?_⟩
+  subst he
+  simp only [Value.type] at ht
+  subst ht
+  exact (inferExp_has_bits exp).1 _ hi
+
+mutual
+  /-- No expression of a statement has an `unknown`, which the concrete evaluator has no value for. -/
+  def stmtKnown : Stmt → Bool
+    | .move _ value | .jmp value => !hasUnknown value
+    | .special _ | .cpuExn _ => true
+    | .while condition body => !hasUnknown condition && programKnown body
+    | .ifElse condition yes no => !hasUnknown condition && programKnown yes && programKnown no
+
+  def programKnown : Program → Bool
+    | [] => true
+    | stmt :: rest => stmtKnown stmt && programKnown rest
+end
+
+mutual
+  /-- A variable some expression of a statement reads, if an earlier statement doesn't bind it. -/
+  def stmtReads (var : Bap.Var) : Stmt → Bool
+    | .move _ value | .jmp value => occursFree var value
+    | .special _ | .cpuExn _ => false
+    | .while condition body => occursFree var condition || programReads var body
+    | .ifElse condition yes no => occursFree var condition || programReads var yes || programReads var no
+
+  def programReads (var : Bap.Var) : Program → Bool
+    | [] => false
+    | stmt :: rest => stmtReads var stmt || programReads var rest
+end
+
+private theorem condition_progress {env : Env} {condition : Exp} (hc : checkCondition condition = .ok ())
+    (hu : hasUnknown condition = false) (hwt : WellTypedEnv env)
+    (hb : ∀ v, occursFree v condition = true → ∃ value, lookup env v = .ok value) :
+    ∃ b : BitVec 1, evalExp env condition = .ok (.bits b) := by
+  unfold checkCondition at hc
+  simp only [except_bind_ok] at hc
+  obtain ⟨t, ht, w, hw, hif⟩ := hc
+  rw [expectImm_ok] at hw
+  subst hw
+  have hw1 : w = 1 := by
+    split at hif
+    · assumption
+    · cases hif
+  subst hw1
+  obtain ⟨value, hv, hty⟩ := evalExp_progress condition hu ht hwt hb
+  obtain ⟨b, rfl⟩ := bits_of_type hty
+  exact ⟨b, hv⟩
+
+/-- Progress for statements and programs: running a well-typed, `unknown`-free program whose inputs are bound in a
+well-typed environment only ever fails by running out of fuel. -/
+theorem exec_progress (fuel : Nat) :
+    (∀ state stmt, WellTypedEnv state.env → checkStmt stmt = .ok () → stmtKnown stmt = true →
+      (∀ v, stmtReads v stmt = true → ∃ value, lookup state.env v = .ok value) →
+      execStmt fuel state stmt = .error "execution fuel exhausted" ∨ ∃ r, execStmt fuel state stmt = .ok r) ∧
+    (∀ state program, WellTypedEnv state.env → checkProgram program = .ok () → programKnown program = true →
+      (∀ v, programReads v program = true → ∃ value, lookup state.env v = .ok value) →
+      execProgram fuel state program = .error "execution fuel exhausted" ∨ ∃ r, execProgram fuel state program = .ok r) := by
+  induction fuel with
+  | zero =>
+    exact ⟨fun _ _ _ _ _ _ => .inl (by rw [execStmt]), fun _ _ _ _ _ _ => .inl (by rw [execProgram])⟩
+  | succ f ih =>
+    obtain ⟨ihs, ihp⟩ := ih
+    refine ⟨fun state stmt hwt hc hk hb => ?_, fun state program hwt hc hk hb => ?_⟩
+    · cases stmt with
+      | move var value =>
+        simp only [checkStmt, except_bind_ok] at hc
+        obtain ⟨t, ht, _⟩ := hc
+        simp only [stmtKnown, Bool.not_eq_true'] at hk
+        obtain ⟨v, hv, _⟩ := evalExp_progress value hk ht hwt fun x hx => hb x (by simpa [stmtReads] using hx)
+        exact .inr ⟨_, by rw [execStmt]; simp [execExp, hv, Bind.bind, Except.bind]; rfl⟩
+      | jmp target =>
+        simp only [checkStmt, except_bind_ok] at hc
+        obtain ⟨t, ht, w, hw, _⟩ := hc
+        rw [expectImm_ok] at hw
+        subst hw
+        simp only [stmtKnown, Bool.not_eq_true'] at hk
+        obtain ⟨v, hv, hty⟩ := evalExp_progress target hk ht hwt fun x hx => hb x (by simpa [stmtReads] using hx)
+        obtain ⟨b, rfl⟩ := bits_of_type hty
+        exact .inr ⟨_, by rw [execStmt]; simp [execExp, hv, Value.asBits, Bind.bind, Except.bind]; rfl⟩
+      | special message => exact .inr ⟨_, by rw [execStmt]⟩
+      | cpuExn number => exact .inr ⟨_, by rw [execStmt]⟩
+      | ifElse condition yes no =>
+        simp only [checkStmt, except_bind_ok] at hc
+        obtain ⟨_, hcc, _, hcy, hcn⟩ := hc
+        simp only [stmtKnown, Bool.and_eq_true, Bool.not_eq_true'] at hk
+        obtain ⟨⟨hkc, hky⟩, hkn⟩ := hk
+        simp only [stmtReads, Bool.or_eq_true] at hb
+        obtain ⟨b, hv⟩ := condition_progress hcc hkc hwt fun x hx => hb x (.inl (.inl hx))
+        have hstep : execStmt (f + 1) state (.ifElse condition yes no) =
+            execProgram f state (if b = 1 then yes else no) := by
+          rw [execStmt]
+          simp [execExp, hv, Value.asBits, Bind.bind, Except.bind]
+        rw [hstep]
+        by_cases h1 : b = 1
+        · rw [ite_eq_left h1]
+          exact ihp _ _ hwt hcy hky fun x hx => hb x (.inl (.inr hx))
+        · rw [ite_eq_right h1]
+          exact ihp _ _ hwt hcn hkn fun x hx => hb x (.inr hx)
+      | «while» condition body =>
+        have hck := hc
+        have hkk := hk
+        simp only [checkStmt, except_bind_ok] at hc
+        obtain ⟨_, hcc, hcb⟩ := hc
+        simp only [stmtKnown, Bool.and_eq_true, Bool.not_eq_true'] at hk
+        obtain ⟨hkc, hkb⟩ := hk
+        have hb' := hb
+        simp only [stmtReads, Bool.or_eq_true] at hb'
+        obtain ⟨b, hv⟩ := condition_progress hcc hkc hwt fun x hx => hb' x (.inl hx)
+        have hstep : execStmt (f + 1) state (.while condition body) =
+            if b = 1 then
+              execProgram f state body >>= fun r => match r.2 with
+                | .normal => execStmt f r.1 (.while condition body)
+                | other => .ok (r.1, other)
+            else .ok (state, .normal) := by
+          rw [execStmt]
+          simp only [execExp, hv, Value.asBits, Bind.bind, Except.bind, dite_true]
+          rfl
+        rw [hstep]
+        by_cases h1 : b = 1
+        · rw [ite_eq_left h1]
+          rcases ihp _ _ hwt hcb hkb (fun x hx => hb' x (.inr hx)) with he | ⟨⟨next, effect⟩, he⟩
+          · exact .inl (by simp [he, Bind.bind, Except.bind])
+          · cases effect with
+            | normal =>
+              have hnext := ihs next (.while condition body) (execProgram_preserves_wellTyped hwt hcb he) hck hkk
+                fun x hx => execProgram_keeps_bound he (hb x hx)
+              simpa [he, Bind.bind, Except.bind] using hnext
+            | jump target => exact .inr ⟨_, by simp [he, Bind.bind, Except.bind]; rfl⟩
+            | special message => exact .inr ⟨_, by simp [he, Bind.bind, Except.bind]; rfl⟩
+            | cpuExn number => exact .inr ⟨_, by simp [he, Bind.bind, Except.bind]; rfl⟩
+        · rw [ite_eq_right h1]
+          exact .inr ⟨_, rfl⟩
+    · cases program with
+      | nil => exact .inr ⟨_, by rw [execProgram]⟩
+      | cons stmt rest =>
+        simp only [checkProgram, except_bind_ok] at hc
+        obtain ⟨_, hcs, hcr⟩ := hc
+        simp only [programKnown, Bool.and_eq_true] at hk
+        have hstep : execProgram (f + 1) state (stmt :: rest) =
+            execStmt f state stmt >>= fun r => match r.2 with
+              | .normal => execProgram f r.1 rest
+              | other => .ok (r.1, other) := by
+          rw [execProgram]
+          rfl
+        rw [hstep]
+        simp only [programReads, Bool.or_eq_true] at hb
+        rcases ihs _ _ hwt hcs hk.1 (fun x hx => hb x (.inl hx)) with he | ⟨⟨next, effect⟩, he⟩
+        · exact .inl (by simp [he, Bind.bind, Except.bind])
+        · cases effect with
+          | normal =>
+            have hwn : WellTypedEnv next.env := (exec_preserves f).1 _ _ _ hwt hcs he
+            have hnext := ihp next rest hwn hcr hk.2
+              fun x hx => (exec_keeps_bound f).1 _ _ _ x he (hb x (.inr hx))
+            simpa [he, Bind.bind, Except.bind] using hnext
+          | jump target => exact .inr ⟨_, by simp [he, Bind.bind, Except.bind]; rfl⟩
+          | special message => exact .inr ⟨_, by simp [he, Bind.bind, Except.bind]; rfl⟩
+          | cpuExn number => exact .inr ⟨_, by simp [he, Bind.bind, Except.bind]; rfl⟩
 
 /-! ## Small-step semantics against the fuel interpreter -/
 
@@ -2908,5 +3206,726 @@ theorem runObserved_none (program : Program) (state : State) (fuel : Nat) :
   execProgramObserved_none fuel state program
 
 end ObserveLaws
+
+/-! ## `Word` and `evalBin` against mathematics and SMT-LIB -/
+
+namespace WordMath
+
+/-! ## The specification: `Nat` and `Int` only -/
+
+/-- The two's complement reading of `a`: `a ≥ 2^(w-1)` means `a - 2^w`. Width `0` has only the value `0`. -/
+def signedOf (w a : Nat) : Int :=
+  if w = 0 then 0 else if a < 2 ^ (w - 1) then (a : Int) else (a : Int) - 2 ^ w
+
+/-- The residue of `i` modulo `2^w`. -/
+def wrap (w : Nat) (i : Int) : Nat := (i % (2 ^ w : Int)).toNat
+
+/-- `1` when `p` holds and `0` otherwise, the value of a comparison. -/
+def flag (p : Prop) [Decidable p] : Nat := if p then 1 else 0
+
+/-- The width of a result: a comparison has one bit, anything else the width of its operands. -/
+def resultWidth : BinOp → Nat → Nat
+  | .eq, _ | .neq, _ | .lt, _ | .le, _ | .gt, _ | .ge, _ | .slt, _ | .sle, _ | .sgt, _ | .sge, _ => 1
+  | _, w => w
+
+/-- What each operator means on the numbers `a` and `b` of `w` bits. -/
+def mathBin : BinOp → (w a b : Nat) → Nat
+  | .add, w, a, b => wrap w ((a : Int) + b)
+  | .sub, w, a, b => wrap w ((a : Int) - b)
+  | .mul, w, a, b => wrap w ((a : Int) * b)
+  | .div, w, a, b => if b = 0 then 2 ^ w - 1 else a / b
+  | .rem, _, a, b => if b = 0 then a else a % b
+  | .sdiv, w, a, b =>
+    if b = 0 then (if signedOf w a < 0 then 1 else 2 ^ w - 1) else wrap w ((signedOf w a).tdiv (signedOf w b))
+  | .srem, w, a, b => if b = 0 then a else wrap w ((signedOf w a).tmod (signedOf w b))
+  | .smod, w, a, b => if b = 0 then a else wrap w ((signedOf w a).fmod (signedOf w b))
+  | .lshift, w, a, b => (a * 2 ^ b) % 2 ^ w
+  | .rshift, _, a, b => a / 2 ^ b
+  | .ashift, w, a, b => wrap w (signedOf w a / (2 ^ b : Int))
+  | .and, _, a, b => a.land b
+  | .or, _, a, b => a.lor b
+  | .xor, _, a, b => a.xor b
+  | .eq, _, a, b => flag (a = b)
+  | .neq, _, a, b => flag (a ≠ b)
+  | .lt, _, a, b => flag (a < b)
+  | .le, _, a, b => flag (a ≤ b)
+  | .gt, _, a, b => flag (a > b)
+  | .ge, _, a, b => flag (a ≥ b)
+  | .slt, w, a, b => flag (signedOf w a < signedOf w b)
+  | .sle, w, a, b => flag (signedOf w a ≤ signedOf w b)
+  | .sgt, w, a, b => flag (signedOf w a > signedOf w b)
+  | .sge, w, a, b => flag (signedOf w a ≥ signedOf w b)
+
+/-! ## `Word` against the specification -/
+
+theorem wrap_eq_ofInt (w : Nat) (i : Int) : wrap w i = (BitVec.ofInt w i).toNat := by
+  simp [wrap, BitVec.toNat_ofInt]
+
+theorem wrap_toInt {w : Nat} (x : BitVec w) : wrap w x.toInt = x.toNat := by
+  rw [wrap_eq_ofInt, BitVec.ofInt_toInt]
+
+theorem two_pow_cast (w : Nat) : ((2 ^ w : Nat) : Int) = (2 : Int) ^ w := by simp
+
+theorem wrap_bmod (w : Nat) (i : Int) : wrap w (i.bmod (2 ^ w)) = wrap w i := by
+  have h := Int.bmod_emod (x := i) (m := 2 ^ w)
+  simp only [wrap, ← two_pow_cast, h]
+
+theorem wrap_natCast (w n : Nat) : wrap w n = n % 2 ^ w := by
+  simp only [wrap, ← two_pow_cast]; rw [← Int.natCast_emod, Int.toNat_natCast]
+
+/-- The two's complement reading is `BitVec.toInt`. -/
+theorem signedOf_toNat {w : Nat} (x : BitVec w) : signedOf w x.toNat = x.toInt := by
+  rcases w with _ | w
+  · simp [signedOf, BitVec.toInt_eq_toNat_cond, BitVec.eq_nil x]
+  · have h : 2 * x.toNat < 2 ^ (w + 1) ↔ x.toNat < 2 ^ w := by rw [Nat.pow_succ]; omega
+    simp [signedOf, BitVec.toInt_eq_toNat_cond, h]
+
+theorem word_add {w : Nat} (x y : BitVec w) : (x + y).toNat = wrap w ((x.toNat : Int) + y.toNat) := by
+  rw [← Int.natCast_add, wrap_natCast, BitVec.toNat_add]
+
+theorem word_mul {w : Nat} (x y : BitVec w) : (x * y).toNat = wrap w ((x.toNat : Int) * y.toNat) := by
+  rw [← Int.natCast_mul, wrap_natCast, BitVec.toNat_mul]
+
+theorem word_sub {w : Nat} (x y : BitVec w) : (x - y).toNat = wrap w ((x.toNat : Int) - y.toNat) := by
+  have hy := y.isLt
+  have e : (x.toNat : Int) - y.toNat = ((2 ^ w - y.toNat + x.toNat : Nat) : Int) - ((2 ^ w : Nat) : Int) := by omega
+  rw [e, BitVec.toNat_sub, ← wrap_natCast]
+  simp only [wrap, ← two_pow_cast, Int.sub_emod_right]
+
+theorem word_udiv {w : Nat} (x y : BitVec w) :
+    BitVec.toNat (Word.udiv x y) = if y.toNat = 0 then 2 ^ w - 1 else x.toNat / y.toNat := by
+  by_cases h : y = 0
+  · subst h; simp [Word.udiv, Word.ones]
+  · have : y.toNat ≠ 0 := by simpa [BitVec.toNat_eq] using h
+    rw [Word.udiv, ite_eq_right h, ite_eq_right this, BitVec.toNat_udiv]
+
+theorem word_urem {w : Nat} (x y : BitVec w) :
+    BitVec.toNat (Word.urem x y) = if y.toNat = 0 then x.toNat else x.toNat % y.toNat := by
+  by_cases h : y = 0
+  · subst h; simp [Word.urem]
+  · have : y.toNat ≠ 0 := by simpa [BitVec.toNat_eq] using h
+    rw [Word.urem, ite_eq_right h, ite_eq_right this, BitVec.toNat_umod]
+
+theorem word_sdiv_of_ne {w : Nat} (x : BitVec w) {y : BitVec w} (h : y ≠ 0) : Word.sdiv x y = BitVec.sdiv x y := by
+  have hn : y.neg ≠ 0 := fun e => h (by simpa using (BitVec.neg_eq_zero_iff (x := y)).mp e)
+  simp only [Word.sdiv, BitVec.smtSDiv, BitVec.smtUDiv, BitVec.sdiv]
+  split <;> simp_all
+
+/-- Division by zero is the `udiv` of the magnitude, with the sign of the dividend: `-1`, or `1` for a negative one. -/
+theorem word_sdiv_zero {w : Nat} (x : BitVec w) :
+    Word.sdiv x 0 = if x.toInt < 0 then 1#w else BitVec.allOnes w := by
+  rcases w with _ | w
+  · exact Subsingleton.elim ..
+  have hneg : x.toInt < 0 ↔ x.msb = true := by simp [BitVec.toInt_neg_iff, BitVec.msb_eq_true_iff_two_mul_ge]
+  simp only [Word.sdiv, BitVec.smtSDiv, BitVec.smtUDiv]
+  cases hm : x.msb
+  · simp [hneg, hm]
+  · have h1 : -BitVec.allOnes (w + 1) = 1#(w + 1) := by
+      apply BitVec.eq_of_toNat_eq
+      have hp := Nat.two_pow_pos (w + 1)
+      simp only [BitVec.toNat_neg, BitVec.toNat_allOnes, BitVec.toNat_ofNat]
+      rw [show 2 ^ (w + 1) - (2 ^ (w + 1) - 1) = 1 by omega]
+    simp [hneg, hm, h1]
+
+theorem word_sdiv {w : Nat} (x y : BitVec w) :
+    BitVec.toNat (Word.sdiv x y) =
+      if y.toNat = 0 then (if x.toInt < 0 then 1 else 2 ^ w - 1) else wrap w (x.toInt.tdiv y.toInt) := by
+  by_cases h : y = 0
+  · subst h
+    rw [word_sdiv_zero]
+    rcases w with _ | w
+    · rw [Subsingleton.elim x 0#0]; simp
+    · split <;> simp [*]
+  · have : y.toNat ≠ 0 := by simpa [BitVec.toNat_eq] using h
+    rw [word_sdiv_of_ne x h, ite_eq_right this, ← wrap_toInt, BitVec.toInt_sdiv, wrap_bmod]
+
+theorem word_srem {w : Nat} (x y : BitVec w) :
+    BitVec.toNat (Word.srem x y) = if y.toNat = 0 then x.toNat else wrap w (x.toInt.tmod y.toInt) := by
+  by_cases h : y = 0
+  · subst h; simp [Word.srem]
+  · have : y.toNat ≠ 0 := by simpa [BitVec.toNat_eq] using h
+    rw [Word.srem, ite_eq_right h, ite_eq_right this, ← wrap_toInt, BitVec.toInt_srem]
+
+theorem word_smod {w : Nat} (x y : BitVec w) :
+    BitVec.toNat (Word.smod x y) = if y.toNat = 0 then x.toNat else wrap w (x.toInt.fmod y.toInt) := by
+  by_cases h : y = 0
+  · subst h; simp [Word.smod]
+  · have : y.toNat ≠ 0 := by simpa [BitVec.toNat_eq] using h
+    rw [Word.smod, ite_eq_right this, ← wrap_toInt, BitVec.toInt_smod]
+
+theorem word_shl {w : Nat} (x y : BitVec w) : BitVec.toNat (Word.shl x y) = (x.toNat * 2 ^ y.toNat) % 2 ^ w := by
+  simp [Word.shl, Word.toNat, Nat.shiftLeft_eq]
+
+theorem word_lshr {w : Nat} (x y : BitVec w) : BitVec.toNat (Word.lshr x y) = x.toNat / 2 ^ y.toNat := by
+  simp [Word.lshr, Word.toNat, Nat.shiftRight_eq_div_pow]
+
+theorem word_ashr {w : Nat} (x y : BitVec w) :
+    BitVec.toNat (Word.ashr x y) = wrap w (x.toInt / (2 ^ y.toNat : Int)) := by
+  rw [← wrap_toInt, Word.ashr, BitVec.toInt_sshiftRight, Int.shiftRight_eq_div_pow, Word.toNat]; simp
+
+theorem word_bool (b : Bool) : BitVec.toNat (Word.bool b) = if b then 1 else 0 := by cases b <;> rfl
+
+theorem word_eq {w : Nat} (x y : BitVec w) : BitVec.toNat (Word.eq x y) = flag (x.toNat = y.toNat) := by
+  simp [Word.eq, word_bool, flag, BitVec.toNat_eq]
+
+theorem word_neq {w : Nat} (x y : BitVec w) : BitVec.toNat (Word.neq x y) = flag (x.toNat ≠ y.toNat) := by
+  simp [Word.neq, word_bool, flag, BitVec.toNat_eq]
+
+theorem word_lt {w : Nat} (x y : BitVec w) : BitVec.toNat (Word.lt x y) = flag (x.toNat < y.toNat) := by
+  simp [Word.lt, word_bool, flag, BitVec.lt_def]
+
+theorem word_le {w : Nat} (x y : BitVec w) : BitVec.toNat (Word.le x y) = flag (x.toNat ≤ y.toNat) := by
+  simp [Word.le, word_bool, flag, BitVec.le_def]
+
+theorem word_slt {w : Nat} (x y : BitVec w) : BitVec.toNat (Word.slt x y) = flag (x.toInt < y.toInt) := by
+  simp [Word.slt, word_bool, flag, BitVec.slt_iff_toInt_lt]
+
+theorem word_sle {w : Nat} (x y : BitVec w) : BitVec.toNat (Word.sle x y) = flag (x.toInt ≤ y.toInt) := by
+  simp [Word.sle, word_bool, flag, BitVec.sle_iff_toInt_le]
+
+/-- The value of every operator on equal widths, at every width including `0`. -/
+theorem evalBin_math (op : BinOp) {w : Nat} (x y : BitVec w) :
+    ∃ z : BitVec (resultWidth op w),
+      evalBin op ⟨w, x⟩ ⟨w, y⟩ = .ok (.bits z) ∧ z.toNat = mathBin op w x.toNat y.toNat := by
+  cases op
+  case add => exact ⟨x + y, by simp [evalBin, resultWidth], word_add x y⟩
+  case sub => exact ⟨x - y, by simp [evalBin, resultWidth], word_sub x y⟩
+  case mul => exact ⟨x * y, by simp [evalBin, resultWidth], word_mul x y⟩
+  case div => exact ⟨Word.udiv x y, by simp [evalBin, resultWidth], word_udiv x y⟩
+  case rem => exact ⟨Word.urem x y, by simp [evalBin, resultWidth], word_urem x y⟩
+  case sdiv =>
+    exact ⟨Word.sdiv x y, by simp [evalBin, resultWidth], (word_sdiv x y).trans (by simp [mathBin, signedOf_toNat])⟩
+  case srem =>
+    exact ⟨Word.srem x y, by simp [evalBin, resultWidth], (word_srem x y).trans (by simp [mathBin, signedOf_toNat])⟩
+  case smod =>
+    exact ⟨Word.smod x y, by simp [evalBin, resultWidth], (word_smod x y).trans (by simp [mathBin, signedOf_toNat])⟩
+  case lshift => exact ⟨Word.shl x y, by simp [evalBin, resultWidth], word_shl x y⟩
+  case rshift => exact ⟨Word.lshr x y, by simp [evalBin, resultWidth], word_lshr x y⟩
+  case ashift =>
+    exact ⟨Word.ashr x y, by simp [evalBin, resultWidth], (word_ashr x y).trans (by simp [mathBin, signedOf_toNat])⟩
+  case and => exact ⟨x &&& y, by simp [evalBin, resultWidth], BitVec.toNat_and x y⟩
+  case or => exact ⟨x ||| y, by simp [evalBin, resultWidth], BitVec.toNat_or x y⟩
+  case xor => exact ⟨x ^^^ y, by simp [evalBin, resultWidth], BitVec.toNat_xor x y⟩
+  case eq => exact ⟨Word.eq x y, by simp [evalBin, resultWidth], word_eq x y⟩
+  case neq => exact ⟨Word.neq x y, by simp [evalBin, resultWidth], word_neq x y⟩
+  case lt => exact ⟨Word.lt x y, by simp [evalBin, resultWidth], word_lt x y⟩
+  case le => exact ⟨Word.le x y, by simp [evalBin, resultWidth], word_le x y⟩
+  case gt => exact ⟨Word.lt y x, by simp [evalBin, resultWidth], word_lt y x⟩
+  case ge => exact ⟨Word.le y x, by simp [evalBin, resultWidth], word_le y x⟩
+  case slt =>
+    exact ⟨Word.slt x y, by simp [evalBin, resultWidth], (word_slt x y).trans (by simp [mathBin, signedOf_toNat])⟩
+  case sle =>
+    exact ⟨Word.sle x y, by simp [evalBin, resultWidth], (word_sle x y).trans (by simp [mathBin, signedOf_toNat])⟩
+  case sgt =>
+    exact ⟨Word.slt y x, by simp [evalBin, resultWidth], (word_slt y x).trans (by simp [mathBin, signedOf_toNat])⟩
+  case sge =>
+    exact ⟨Word.sle y x, by simp [evalBin, resultWidth], (word_sle y x).trans (by simp [mathBin, signedOf_toNat])⟩
+
+/-- Operands of different widths are an error, whatever the operator. -/
+theorem evalBin_widths (op : BinOp) {v w : Nat} (x : BitVec v) (y : BitVec w) (h : v ≠ w) :
+    evalBin op ⟨v, x⟩ ⟨w, y⟩ = .error "binary operands have different widths" := by
+  simp [evalBin, h]
+
+/-! ## SMT-LIB, by the text of `FixedSizeBitVectors` and `QF_BV` -/
+
+namespace Smt
+
+/-- `nat2bv[m]`, a vector read back as its number. -/
+def nat2bv (w n : Nat) : Nat := n % 2 ^ w
+/-- `((_ extract |m-1| |m-1|) s) = #b1`. -/
+def msb (w s : Nat) : Bool := s.testBit (w - 1)
+def bvnot (w s : Nat) : Nat := 2 ^ w - 1 - s
+def bvneg (w s : Nat) : Nat := nat2bv w (2 ^ w - s)
+def bvadd (w s t : Nat) : Nat := nat2bv w (s + t)
+def bvmul (w s t : Nat) : Nat := nat2bv w (s * t)
+def bvsub (w s t : Nat) : Nat := bvadd w s (bvneg w t)
+def bvudiv (w s t : Nat) : Nat := if t ≠ 0 then nat2bv w (s / t) else 2 ^ w - 1
+def bvurem (w s t : Nat) : Nat := if t ≠ 0 then nat2bv w (s % t) else s
+
+def bvsdiv (w s t : Nat) : Nat :=
+  match msb w s, msb w t with
+  | false, false => bvudiv w s t
+  | true, false => bvneg w (bvudiv w (bvneg w s) t)
+  | false, true => bvneg w (bvudiv w s (bvneg w t))
+  | true, true => bvudiv w (bvneg w s) (bvneg w t)
+
+def bvsrem (w s t : Nat) : Nat :=
+  match msb w s, msb w t with
+  | false, false => bvurem w s t
+  | true, false => bvneg w (bvurem w (bvneg w s) t)
+  | false, true => bvurem w s (bvneg w t)
+  | true, true => bvneg w (bvurem w (bvneg w s) (bvneg w t))
+
+def bvsmod (w s t : Nat) : Nat :=
+  let absS := if msb w s then bvneg w s else s
+  let absT := if msb w t then bvneg w t else t
+  let u := bvurem w absS absT
+  if u = 0 then u
+  else
+    match msb w s, msb w t with
+    | false, false => u
+    | true, false => bvadd w (bvneg w u) t
+    | false, true => bvadd w u t
+    | true, true => bvneg w u
+
+def bvshl (w s t : Nat) : Nat := nat2bv w (s * 2 ^ t)
+def bvlshr (w s t : Nat) : Nat := nat2bv w (s / 2 ^ t)
+def bvashr (w s t : Nat) : Nat := if msb w s then bvnot w (bvlshr w (bvnot w s) t) else bvlshr w s t
+
+def bvult (s t : Nat) : Bool := decide (s < t)
+def bvule (s t : Nat) : Bool := bvult s t || decide (s = t)
+def bvslt (w s t : Nat) : Bool := (msb w s && !msb w t) || (msb w s == msb w t && bvult s t)
+def bvsle (w s t : Nat) : Bool := (msb w s && !msb w t) || (msb w s == msb w t && bvule s t)
+/-- A predicate as a one-bit vector. -/
+def bit (p : Bool) : Nat := if p then 1 else 0
+
+end Smt
+open Smt
+
+/-- Every BIL operator as its SMT-LIB term, as the symbolic executor emits it. -/
+def smtBin : BinOp → (w a b : Nat) → Nat
+  | .add, w, a, b => bvadd w a b
+  | .sub, w, a, b => bvsub w a b
+  | .mul, w, a, b => bvmul w a b
+  | .div, w, a, b => bvudiv w a b
+  | .rem, w, a, b => bvurem w a b
+  | .sdiv, w, a, b => bvsdiv w a b
+  | .srem, w, a, b => bvsrem w a b
+  | .smod, w, a, b => bvsmod w a b
+  | .lshift, w, a, b => bvshl w a b
+  | .rshift, w, a, b => bvlshr w a b
+  | .ashift, w, a, b => bvashr w a b
+  | .and, _, a, b => a.land b
+  | .or, _, a, b => a.lor b
+  | .xor, _, a, b => a.xor b
+  | .eq, _, a, b => bit (decide (a = b))
+  | .neq, _, a, b => bit (!decide (a = b))
+  | .lt, _, a, b => bit (bvult a b)
+  | .le, _, a, b => bit (bvule a b)
+  | .gt, _, a, b => bit (bvult b a)
+  | .ge, _, a, b => bit (bvule b a)
+  | .slt, w, a, b => bit (bvslt w a b)
+  | .sle, w, a, b => bit (bvsle w a b)
+  | .sgt, w, a, b => bit (bvslt w b a)
+  | .sge, w, a, b => bit (bvsle w b a)
+
+section Transport
+variable {w : Nat} (x y : BitVec w)
+
+theorem msb_toNat : msb w x.toNat = x.msb := by
+  rw [BitVec.msb_eq_getLsbD_last]; rfl
+
+theorem bvneg_toNat : bvneg w x.toNat = (-x).toNat := (BitVec.toNat_neg x).symm
+
+theorem bvadd_toNat : bvadd w x.toNat y.toNat = (x + y).toNat := (BitVec.toNat_add x y).symm
+
+theorem bvudiv_toNat : bvudiv w x.toNat y.toNat = (BitVec.smtUDiv x y).toNat := by
+  by_cases h : y = 0
+  · subst h; simp [bvudiv, BitVec.smtUDiv]
+  · have hn : y.toNat ≠ 0 := by simpa [BitVec.toNat_eq] using h
+    have hlt : x.toNat / y.toNat < 2 ^ w := Nat.lt_of_le_of_lt (Nat.div_le_self _ _) x.isLt
+    rw [BitVec.smtUDiv, ite_eq_right h, BitVec.udiv_eq, BitVec.toNat_udiv]
+    simp [bvudiv, hn, nat2bv, Nat.mod_eq_of_lt hlt]
+
+theorem bvurem_toNat : bvurem w x.toNat y.toNat = (x % y).toNat := by
+  by_cases h : y = 0
+  · subst h; simp [bvurem]
+  · have hn : y.toNat ≠ 0 := by simpa [BitVec.toNat_eq] using h
+    have hlt : x.toNat % y.toNat < 2 ^ w := Nat.lt_of_le_of_lt (Nat.mod_le _ _) x.isLt
+    simp [bvurem, hn, nat2bv, Nat.mod_eq_of_lt hlt]
+
+theorem bvsdiv_toNat : bvsdiv w x.toNat y.toNat = (BitVec.smtSDiv x y).toNat := by
+  simp only [bvsdiv, msb_toNat, BitVec.smtSDiv]
+  cases x.msb <;> cases y.msb <;> simp only [bvneg_toNat, bvudiv_toNat] <;> rfl
+
+theorem bvsrem_toNat : bvsrem w x.toNat y.toNat = (BitVec.srem x y).toNat := by
+  simp only [bvsrem, msb_toNat, BitVec.srem_eq]
+  cases x.msb <;> cases y.msb <;> simp only [bvneg_toNat, bvurem_toNat]
+
+theorem bvsmod_toNat : bvsmod w x.toNat y.toNat = (BitVec.smod x y).toNat := by
+  have z : ∀ u : BitVec w, u.toNat = 0 ↔ u = 0#w := fun u => by simp [BitVec.toNat_eq]
+  simp only [bvsmod, msb_toNat, BitVec.smod_eq]
+  cases x.msb <;> cases y.msb <;> simp only [ite_true, ite_false, Bool.false_eq_true, bvneg_toNat, bvurem_toNat, z,
+    bvadd_toNat, BitVec.umod_eq]
+  · split <;> rfl
+  · by_cases hu : x % -y = 0#w <;> simp only [hu, ↓reduceIte]
+  · by_cases hu : -x % y = 0#w <;> simp only [hu, ↓reduceIte, BitVec.sub_eq_add_neg, BitVec.add_comm]
+  · by_cases hu : -x % -y = 0#w <;> simp only [hu, ↓reduceIte, BitVec.neg_zero]
+
+theorem bvashr_toNat (n : Nat) : bvashr w x.toNat n = (x.sshiftRight n).toNat := by
+  have hl : ∀ m, m < 2 ^ w → bvlshr w m n = m >>> n := fun m hm => by
+    rw [bvlshr, nat2bv, Nat.shiftRight_eq_div_pow,
+      Nat.mod_eq_of_lt (Nat.lt_of_le_of_lt (Nat.div_le_self _ _) hm)]
+  have hn : 2 ^ w - 1 - x.toNat < 2 ^ w := by have := x.isLt; omega
+  rw [BitVec.toNat_sshiftRight, bvashr, msb_toNat]
+  cases x.msb <;> simp [hl, hn, x.isLt, bvnot]
+
+theorem bvslt_toNat : bvslt w x.toNat y.toNat = decide (x.toInt < y.toInt) := by
+  have hx : (x.toNat : Int) < ((2 ^ w : Nat) : Int) := by exact_mod_cast x.isLt
+  have hy : (y.toNat : Int) < ((2 ^ w : Nat) : Int) := by exact_mod_cast y.isLt
+  rw [BitVec.toInt_eq_msb_cond x, BitVec.toInt_eq_msb_cond y, bvslt, msb_toNat, msb_toNat]
+  generalize ((2 ^ w : Nat) : Int) = m at *
+  cases x.msb <;> cases y.msb <;> simp [bvult] <;> omega
+
+theorem bvsle_toNat : bvsle w x.toNat y.toNat = decide (x.toInt ≤ y.toInt) := by
+  have hx : (x.toNat : Int) < ((2 ^ w : Nat) : Int) := by exact_mod_cast x.isLt
+  have hy : (y.toNat : Int) < ((2 ^ w : Nat) : Int) := by exact_mod_cast y.isLt
+  rw [BitVec.toInt_eq_msb_cond x, BitVec.toInt_eq_msb_cond y, bvsle, msb_toNat, msb_toNat]
+  generalize ((2 ^ w : Nat) : Int) = m at *
+  generalize x.toNat = a at *
+  generalize y.toNat = b at *
+  have le : (decide (a < b) || decide (a = b)) = decide (a ≤ b) := 
+    Bool.eq_iff_iff.mpr (by simp; omega)
+  cases x.msb <;> cases y.msb <;> simp [bvule, bvult, le] <;> omega
+
+end Transport
+
+theorem msb_pos {w a : Nat} (h : msb w a = true) (ha : a < 2 ^ w := by assumption) : 0 < w := by
+  rcases w with _ | w
+  · have : a = 0 := by simpa using ha
+    subst this; simp [msb] at h
+  · omega
+
+theorem math_sdiv {w : Nat} (x y : BitVec w) : mathBin .sdiv w x.toNat y.toNat = BitVec.toNat (Word.sdiv x y) := by
+  simp [mathBin, word_sdiv, signedOf_toNat]
+
+theorem math_srem {w : Nat} (x y : BitVec w) : mathBin .srem w x.toNat y.toNat = BitVec.toNat (Word.srem x y) := by
+  simp [mathBin, word_srem, signedOf_toNat]
+
+theorem math_smod {w : Nat} (x y : BitVec w) : mathBin .smod w x.toNat y.toNat = BitVec.toNat (Word.smod x y) := by
+  simp [mathBin, word_smod, signedOf_toNat]
+
+theorem math_ashift {w : Nat} (x : BitVec w) (n : Nat) : mathBin .ashift w x.toNat n = (x.sshiftRight n).toNat := by
+  rw [mathBin, signedOf_toNat, ← wrap_toInt, BitVec.toInt_sshiftRight, Int.shiftRight_eq_div_pow]; simp
+
+theorem exists_toNat {w a : Nat} (h : a < 2 ^ w) : ∃ x : BitVec w, x.toNat = a := ⟨BitVec.ofNatLT a h, by simp⟩
+
+theorem flag_eq_bit {p : Prop} [Decidable p] {q : Bool} (h : p ↔ q = true) : flag p = bit q := by
+  cases q <;> simp_all [flag, bit]
+
+theorem flag_bit (p : Prop) [Decidable p] : flag p = bit (decide p) := by simp [flag, bit]
+
+/-- SMT-LIB agrees with the specification on every operator, for `w`-bit operands. -/
+theorem math_eq_smt (op : BinOp) {w a b : Nat} (ha : a < 2 ^ w) (hb : b < 2 ^ w) :
+    mathBin op w a b = smtBin op w a b := by
+  obtain ⟨x, rfl⟩ := exists_toNat ha
+  obtain ⟨y, rfl⟩ := exists_toNat hb
+  cases op
+  case sdiv => rw [math_sdiv, smtBin, bvsdiv_toNat]; rfl
+  case add => exact (word_add x y).symm.trans (BitVec.toNat_add x y)
+  case mul => exact (word_mul x y).symm.trans (BitVec.toNat_mul x y)
+  case sub =>
+    refine (word_sub x y).symm.trans ?_
+    simp only [smtBin, bvsub, bvneg_toNat, bvadd_toNat, BitVec.sub_eq_add_neg]
+  case div =>
+    refine (word_udiv x y).symm.trans ?_
+    rw [smtBin, bvudiv_toNat, Word.udiv, BitVec.smtUDiv, Word.ones]; rfl
+  case rem =>
+    refine (word_urem x y).symm.trans ?_
+    rw [smtBin, bvurem_toNat, Word.urem]
+    split <;> simp_all
+  case srem =>
+    rw [math_srem, smtBin, bvsrem_toNat, Word.srem]
+    split <;> simp_all
+  case smod => exact (math_smod x y).trans (bvsmod_toNat x y).symm
+  case lshift => exact rfl
+  case rshift =>
+    rw [mathBin, smtBin, bvlshr, nat2bv, Nat.mod_eq_of_lt (Nat.lt_of_le_of_lt (Nat.div_le_self _ _) x.isLt)]
+  case ashift =>
+    exact (math_ashift x y.toNat).trans (bvashr_toNat x y.toNat).symm
+  case and => rfl
+  case or => rfl
+  case xor => rfl
+  case eq => exact flag_bit _
+  case neq => exact flag_eq_bit (by simp)
+  case lt => exact flag_eq_bit (by simp [bvult])
+  case le => exact flag_eq_bit (by simp [bvule, bvult]; omega)
+  case gt => exact flag_eq_bit (by simp [bvult])
+  case ge => exact flag_eq_bit (by simp [bvule, bvult]; omega)
+  case slt => rw [mathBin, signedOf_toNat, signedOf_toNat]; exact flag_eq_bit (by simp [bvslt_toNat])
+  case sle => rw [mathBin, signedOf_toNat, signedOf_toNat]; exact flag_eq_bit (by simp [bvsle_toNat])
+  case sgt => rw [mathBin, signedOf_toNat, signedOf_toNat]; exact flag_eq_bit (by simp [bvslt_toNat])
+  case sge => rw [mathBin, signedOf_toNat, signedOf_toNat]; exact flag_eq_bit (by simp [bvsle_toNat])
+
+/-- SMT-LIB's division by zero depends on the sign of the dividend: `1` for a negative one. -/
+theorem smt_sdiv_zero {w a : Nat} (ha : a < 2 ^ w) :
+    smtBin .sdiv w a 0 = if msb w a then 1 else 2 ^ w - 1 := by
+  obtain ⟨x, rfl⟩ := exists_toNat ha
+  have hz : msb w 0 = false := by simp [msb]
+  simp only [smtBin, bvsdiv, hz]
+  cases h : msb w x.toNat
+  · simp [bvudiv]
+  · have hw : 0 < w := msb_pos h
+    have : 2 ^ 1 ≤ 2 ^ w := Nat.pow_le_pow_right (by omega) hw
+    rw [Nat.pow_one] at this
+    have h1 : 2 ^ w - (2 ^ w - 1) = 1 := by omega
+    simp [bvudiv, bvneg, nat2bv, h1, Nat.mod_eq_of_lt (show 1 < 2 ^ w by omega)]
+
+/-- BIL's division by zero is SMT-LIB's: it depends on the sign of the dividend, `1` for a negative one. -/
+theorem math_sdiv_zero (w a : Nat) : mathBin .sdiv w a 0 = if signedOf w a < 0 then 1 else 2 ^ w - 1 := rfl
+
+/-! ## The edges -/
+
+section Edges
+variable {w : Nat} (x y : BitVec w)
+
+/-- Shifting left past the width gives `0`. -/
+theorem shl_past_width (h : w ≤ y.toNat) : Word.shl x y = 0 := by
+  apply BitVec.eq_of_toNat_eq
+  rw [word_shl]
+  exact (Nat.mod_eq_zero_of_dvd (Nat.dvd_trans (Nat.pow_dvd_pow 2 h) (Nat.dvd_mul_left _ _))).trans (by simp)
+
+/-- Shifting right past the width gives `0`. -/
+theorem lshr_past_width (h : w ≤ y.toNat) : Word.lshr x y = 0 := by
+  apply BitVec.eq_of_toNat_eq
+  rw [word_lshr, Nat.div_eq_of_lt (Nat.lt_of_lt_of_le x.isLt (Nat.pow_le_pow_right (by omega) h))]; simp
+
+/-- An arithmetic shift past the width fills with the sign: all ones or `0`. -/
+theorem sshiftRight_past_width {n : Nat} (h : w ≤ n) : x.sshiftRight n = if x.msb then BitVec.allOnes w else 0 := by
+  have hl : ∀ z : BitVec w, z >>> n = 0 := fun z => by
+    apply BitVec.eq_of_toNat_eq
+    rw [BitVec.toNat_ushiftRight, Nat.shiftRight_eq_div_pow,
+      Nat.div_eq_of_lt (Nat.lt_of_lt_of_le z.isLt (Nat.pow_le_pow_right (by omega) h))]; simp
+  cases hx : x.msb
+  · simp [BitVec.sshiftRight_eq_of_msb_false hx, hl]
+  · simp [BitVec.sshiftRight_eq_of_msb_true hx, hl]
+
+theorem ashr_past_width (h : w ≤ y.toNat) : Word.ashr x y = if x.msb then BitVec.allOnes w else 0 :=
+  sshiftRight_past_width x h
+
+end Edges
+
+theorem math_lshift_past (a : Nat) {w b : Nat} (h : w ≤ b) : mathBin .lshift w a b = 0 :=
+  Nat.mod_eq_zero_of_dvd (Nat.dvd_trans (Nat.pow_dvd_pow 2 h) (Nat.dvd_mul_left _ _))
+
+theorem math_rshift_past {w a b : Nat} (ha : a < 2 ^ w) (h : w ≤ b) : mathBin .rshift w a b = 0 :=
+  Nat.div_eq_of_lt (Nat.lt_of_lt_of_le ha (Nat.pow_le_pow_right (by omega) h))
+
+/-- `ashift` past the width is all ones for a negative value and `0` for any other. -/
+theorem math_ashift_past {w a b : Nat} (ha : a < 2 ^ w) (h : w ≤ b) :
+    mathBin .ashift w a b = if msb w a then 2 ^ w - 1 else 0 := by
+  obtain ⟨x, rfl⟩ := exists_toNat ha
+  rw [math_ashift, sshiftRight_past_width x h, msb_toNat]
+  cases x.msb <;> simp
+
+/-- Division and remainder by zero. -/
+theorem math_div_zero (w a : Nat) : mathBin .div w a 0 = 2 ^ w - 1 := rfl
+theorem math_rem_zero (w a : Nat) : mathBin .rem w a 0 = a := rfl
+theorem math_srem_zero (w a : Nat) : mathBin .srem w a 0 = a := rfl
+theorem math_smod_zero (w a : Nat) : mathBin .smod w a 0 = a := rfl
+
+section EvalEdges
+variable {w : Nat} (x y : BitVec w)
+
+theorem evalBin_lshift_past (h : w ≤ y.toNat) : evalBin .lshift ⟨w, x⟩ ⟨w, y⟩ = .ok (.bits (0#w)) := by
+  simp [evalBin, shl_past_width x y h]
+
+theorem evalBin_rshift_past (h : w ≤ y.toNat) : evalBin .rshift ⟨w, x⟩ ⟨w, y⟩ = .ok (.bits (0#w)) := by
+  simp [evalBin, lshr_past_width x y h]
+
+theorem evalBin_ashift_past (h : w ≤ y.toNat) :
+    evalBin .ashift ⟨w, x⟩ ⟨w, y⟩ = .ok (.bits (if x.msb then BitVec.allOnes w else 0#w)) := by
+  simp [evalBin, ashr_past_width x y h]
+
+theorem evalBin_div_zero : evalBin .div ⟨w, x⟩ ⟨w, 0#w⟩ = .ok (.bits (BitVec.allOnes w)) := by
+  simp [evalBin, Word.udiv, Word.ones]
+
+theorem evalBin_rem_zero : evalBin .rem ⟨w, x⟩ ⟨w, 0#w⟩ = .ok (.bits x) := by simp [evalBin, Word.urem]
+
+theorem evalBin_sdiv_zero :
+    evalBin .sdiv ⟨w, x⟩ ⟨w, 0#w⟩ = .ok (.bits (if x.toInt < 0 then 1#w else BitVec.allOnes w)) := by
+  simp [evalBin, ← word_sdiv_zero]
+
+theorem evalBin_srem_zero : evalBin .srem ⟨w, x⟩ ⟨w, 0#w⟩ = .ok (.bits x) := by simp [evalBin, Word.srem]
+
+theorem evalBin_smod_zero : evalBin .smod ⟨w, x⟩ ⟨w, 0#w⟩ = .ok (.bits x) := by simp [evalBin, Word.smod]
+
+end EvalEdges
+
+/-- `intMin / -1` overflows back to `intMin`. -/
+theorem word_intMin_sdiv (w : Nat) : Word.sdiv (BitVec.intMin w) (-1#w) = BitVec.intMin w := by
+  rcases w with _ | w
+  · exact Subsingleton.elim ..
+  · have h : (-1#(w + 1)) ≠ 0 := by simp
+    rw [word_sdiv_of_ne _ h, BitVec.intMin_sdiv_neg_one]
+
+theorem word_intMin_srem (w : Nat) : Word.srem (BitVec.intMin w) (-1#w) = 0 := by
+  rcases w with _ | w
+  · exact Subsingleton.elim ..
+  · have h : (-1#(w + 1)) ≠ 0 := by simp
+    rw [Word.srem, ite_eq_right h]
+    apply BitVec.eq_of_toInt_eq
+    simp [BitVec.toInt_srem, BitVec.neg_one_eq_allOnes]
+
+theorem word_intMin_smod (w : Nat) : Word.smod (BitVec.intMin w) (-1#w) = 0 := by
+  rcases w with _ | w
+  · exact Subsingleton.elim ..
+  · apply BitVec.eq_of_toInt_eq
+    simp [Word.smod, BitVec.toInt_smod, BitVec.neg_one_eq_allOnes, Int.fmod_eq_zero_of_dvd]
+
+theorem evalBin_intMin_sdiv (w : Nat) :
+    evalBin .sdiv ⟨w, BitVec.intMin w⟩ ⟨w, -1#w⟩ = .ok (.bits (BitVec.intMin w)) := by
+  simp only [evalBin, ↓reduceDIte]; exact congrArg (fun z => (.ok (.bits z) : Except String Value)) (word_intMin_sdiv w)
+
+theorem evalBin_intMin_srem (w : Nat) : evalBin .srem ⟨w, BitVec.intMin w⟩ ⟨w, -1#w⟩ = .ok (.bits (0#w)) := by
+  simp only [evalBin, ↓reduceDIte]; exact congrArg (fun z => (.ok (.bits z) : Except String Value)) (word_intMin_srem w)
+
+theorem evalBin_intMin_smod (w : Nat) : evalBin .smod ⟨w, BitVec.intMin w⟩ ⟨w, -1#w⟩ = .ok (.bits (0#w)) := by
+  simp only [evalBin, ↓reduceDIte]; exact congrArg (fun z => (.ok (.bits z) : Except String Value)) (word_intMin_smod w)
+
+theorem toNat_intMin_neg_one {w : Nat} (hw : 0 < w) :
+    (BitVec.intMin w).toNat = 2 ^ (w - 1) ∧ (-1#w).toNat = 2 ^ w - 1 :=
+  ⟨BitVec.toNat_intMin_of_pos hw, by simp [BitVec.neg_one_eq_allOnes]⟩
+
+/-- `intMin / -1 = intMin`, in numbers. -/
+theorem math_intMin_sdiv {w : Nat} (hw : 0 < w) : mathBin .sdiv w (2 ^ (w - 1)) (2 ^ w - 1) = 2 ^ (w - 1) := by
+  obtain ⟨h1, h2⟩ := toNat_intMin_neg_one hw
+  rw [← h1, ← h2, math_sdiv, word_intMin_sdiv]
+
+theorem math_intMin_srem {w : Nat} (hw : 0 < w) : mathBin .srem w (2 ^ (w - 1)) (2 ^ w - 1) = 0 := by
+  obtain ⟨h1, h2⟩ := toNat_intMin_neg_one hw
+  rw [← h1, ← h2, math_srem, word_intMin_srem]; simp
+
+theorem math_intMin_smod {w : Nat} (hw : 0 < w) : mathBin .smod w (2 ^ (w - 1)) (2 ^ w - 1) = 0 := by
+  obtain ⟨h1, h2⟩ := toNat_intMin_neg_one hw
+  rw [← h1, ← h2, math_smod, word_intMin_smod]; simp
+
+/-! Signs -/
+
+theorem signedOf_neg_iff {w a : Nat} (ha : a < 2 ^ w) : signedOf w a < 0 ↔ msb w a = true := by
+  obtain ⟨x, rfl⟩ := exists_toNat ha
+  have h : (x.toNat : Int) < ((2 ^ w : Nat) : Int) := by exact_mod_cast x.isLt
+  rw [signedOf_toNat, msb_toNat, BitVec.toInt_eq_msb_cond]
+  generalize ((2 ^ w : Nat) : Int) = m at *
+  cases x.msb <;> simp <;> omega
+
+theorem signedOf_ne_zero {w a : Nat} (ha : a < 2 ^ w) (h : a ≠ 0) : signedOf w a ≠ 0 := by
+  obtain ⟨x, rfl⟩ := exists_toNat ha
+  have hb : (x.toNat : Int) < ((2 ^ w : Nat) : Int) := by exact_mod_cast x.isLt
+  rw [signedOf_toNat, BitVec.toInt_eq_msb_cond]
+  generalize ((2 ^ w : Nat) : Int) = m at *
+  cases x.msb <;> simp <;> omega
+
+/-- `smod` is the floored remainder of the signed values, with no overflow at all. -/
+theorem signedOf_smod {w a b : Nat} (ha : a < 2 ^ w) (hb : b < 2 ^ w) :
+    signedOf w (mathBin .smod w a b) = (signedOf w a).fmod (signedOf w b) := by
+  obtain ⟨x, rfl⟩ := exists_toNat ha
+  obtain ⟨y, rfl⟩ := exists_toNat hb
+  rw [math_smod, signedOf_toNat, signedOf_toNat, signedOf_toNat, Word.smod, BitVec.toInt_smod]
+
+/-- `srem` is the truncated remainder of the signed values, with no overflow at all. -/
+theorem signedOf_srem {w a b : Nat} (ha : a < 2 ^ w) (hb : b < 2 ^ w) :
+    signedOf w (mathBin .srem w a b) = (signedOf w a).tmod (signedOf w b) := by
+  obtain ⟨x, rfl⟩ := exists_toNat ha
+  obtain ⟨y, rfl⟩ := exists_toNat hb
+  rw [math_srem, signedOf_toNat, signedOf_toNat, signedOf_toNat, Word.srem]
+  split
+  · simp [*]
+  · rw [BitVec.toInt_srem]
+
+theorem fmod_sign (a : Int) {b : Int} :
+    (0 < b → 0 ≤ a.fmod b ∧ a.fmod b < b) ∧ (b < 0 → b < a.fmod b ∧ a.fmod b ≤ 0) := by
+  refine ⟨fun h => ⟨Int.fmod_nonneg_of_pos _ h, Int.fmod_lt_of_pos _ h⟩, fun h => ?_⟩
+  have e : a.fmod b = -((-a).fmod (-b)) := by rw [Int.neg_fmod_neg, Int.neg_neg]
+  have h1 := Int.fmod_nonneg_of_pos (-a) (b := -b) (by omega)
+  have h2 := Int.fmod_lt_of_pos (-a) (b := -b) (by omega)
+  omega
+
+/-- The sign of a nonzero `smod` follows the divisor, and its magnitude is below the divisor's. -/
+theorem smod_sign_follows_divisor {w a b : Nat} (ha : a < 2 ^ w) (hb : b < 2 ^ w) (h : b ≠ 0)
+    (hr : mathBin .smod w a b ≠ 0) :
+    (signedOf w (mathBin .smod w a b) < 0 ↔ signedOf w b < 0) ∧
+      (signedOf w (mathBin .smod w a b)).natAbs < (signedOf w b).natAbs := by
+  have hs := signedOf_ne_zero hb h
+  have hrlt : mathBin .smod w a b < 2 ^ w := by
+    obtain ⟨x, rfl⟩ := exists_toNat ha
+    obtain ⟨y, rfl⟩ := exists_toNat hb
+    rw [math_smod]; exact BitVec.isLt _
+  have hr' := signedOf_ne_zero hrlt hr
+  rw [signedOf_smod ha hb] at hr' ⊢
+  obtain ⟨p, n⟩ := fmod_sign (signedOf w a) (b := signedOf w b)
+  rcases Int.lt_or_gt_of_ne hs with g | g
+  · have := n g; omega
+  · have := p g; omega
+
+/-- The sign of a nonzero `srem` follows the dividend, and its magnitude is below the divisor's. -/
+theorem srem_sign_follows_dividend {w a b : Nat} (ha : a < 2 ^ w) (hb : b < 2 ^ w) (h : b ≠ 0)
+    (hr : mathBin .srem w a b ≠ 0) :
+    (signedOf w (mathBin .srem w a b) < 0 ↔ signedOf w a < 0) ∧
+      (signedOf w (mathBin .srem w a b)).natAbs < (signedOf w b).natAbs := by
+  have hs := signedOf_ne_zero hb h
+  have hrlt : mathBin .srem w a b < 2 ^ w := by
+    obtain ⟨x, rfl⟩ := exists_toNat ha
+    obtain ⟨y, rfl⟩ := exists_toNat hb
+    rw [math_srem]; exact BitVec.isLt _
+  have hr' := signedOf_ne_zero hrlt hr
+  rw [signedOf_srem ha hb] at hr' ⊢
+  generalize signedOf w a = i at *
+  generalize signedOf w b = j at *
+  refine ⟨?_, by rw [Int.natAbs_tmod]; exact Nat.mod_lt _ (by omega)⟩
+  by_cases g : i < 0
+  · have e : i.tmod j = -((-i).tmod j) := by rw [Int.neg_tmod, Int.neg_neg]
+    have := Int.tmod_nonneg j (a := -i) (by omega)
+    omega
+  · have := Int.tmod_nonneg j (a := i) (by omega)
+    omega
+
+/-- A remainder differs from its dividend by a multiple of the divisor, for `smod`... -/
+theorem smod_dvd {w a b : Nat} (ha : a < 2 ^ w) (hb : b < 2 ^ w) :
+    signedOf w b ∣ signedOf w a - signedOf w (mathBin .smod w a b) := by
+  rw [signedOf_smod ha hb, Int.fmod_def]
+  exact ⟨_, Int.sub_sub_self ..⟩
+
+/-- ...and for `srem`. -/
+theorem srem_dvd {w a b : Nat} (ha : a < 2 ^ w) (hb : b < 2 ^ w) :
+    signedOf w b ∣ signedOf w a - signedOf w (mathBin .srem w a b) := by
+  rw [signedOf_srem ha hb, Int.tmod_def]
+  exact ⟨_, Int.sub_sub_self ..⟩
+
+/-- Signed division and remainder fit together: `(a /$ b) * b + a srem b = a` modulo `2^w`. -/
+theorem sdiv_mul_add_srem {w : Nat} (x y : BitVec w) (h : y ≠ 0) : Word.sdiv x y * y + Word.srem x y = x := by
+  have hn : y.toNat ≠ 0 := by simpa [BitVec.toNat_eq] using h
+  have hd : Word.sdiv x y = BitVec.ofInt w (x.toInt.tdiv y.toInt) := by
+    apply BitVec.eq_of_toNat_eq; rw [word_sdiv, ite_eq_right hn, wrap_eq_ofInt]
+  have hr : Word.srem x y = BitVec.ofInt w (x.toInt.tmod y.toInt) := by
+    apply BitVec.eq_of_toNat_eq; rw [word_srem, ite_eq_right hn, wrap_eq_ofInt]
+  conv => lhs; rw [hd, hr]; arg 1; arg 2; rw [← BitVec.ofInt_toInt (x := y)]
+  rw [← BitVec.ofInt_mul, ← BitVec.ofInt_add, Int.add_comm, Int.tmod_add_tdiv_mul, BitVec.ofInt_toInt]
+
+/-- The same in numbers. -/
+theorem math_sdiv_srem {w a b : Nat} (ha : a < 2 ^ w) (hb : b < 2 ^ w) (h : b ≠ 0) :
+    mathBin .add w (mathBin .mul w (mathBin .sdiv w a b) b) (mathBin .srem w a b) = a := by
+  obtain ⟨x, rfl⟩ := exists_toNat ha
+  obtain ⟨y, rfl⟩ := exists_toNat hb
+  have hy : y ≠ 0 := fun e => h (by simp [e])
+  have e := congrArg BitVec.toNat (sdiv_mul_add_srem x y hy)
+  rw [word_add, word_mul] at e
+  rw [math_sdiv, math_srem]; exact e
+
+/-! Bits -/
+
+theorem math_and_testBit (w a b i : Nat) : (mathBin .and w a b).testBit i = (a.testBit i && b.testBit i) :=
+  Nat.testBit_and a b i
+
+theorem math_or_testBit (w a b i : Nat) : (mathBin .or w a b).testBit i = (a.testBit i || b.testBit i) :=
+  Nat.testBit_or a b i
+
+theorem math_xor_testBit (w a b i : Nat) : (mathBin .xor w a b).testBit i = (a.testBit i ^^ b.testBit i) :=
+  Nat.testBit_xor a b i
+
+/-- `bvnot` as `2^w - 1 - s` is the bitwise complement of the text. -/
+theorem bvnot_testBit {w s : Nat} (hs : s < 2 ^ w) {i : Nat} (hi : i < w) : (bvnot w s).testBit i = !s.testBit i := by
+  have : 2 ^ w - 1 - s = 2 ^ w - (s + 1) := by omega
+  simp [bvnot, this, Nat.testBit_two_pow_sub_succ hs, hi]
+
+/-- A result always fits its width. -/
+theorem mathBin_lt (op : BinOp) {w a b : Nat} (ha : a < 2 ^ w) (hb : b < 2 ^ w) :
+    mathBin op w a b < 2 ^ resultWidth op w := by
+  obtain ⟨x, rfl⟩ := exists_toNat ha
+  obtain ⟨y, rfl⟩ := exists_toNat hb
+  obtain ⟨z, -, h⟩ := evalBin_math op x y
+  exact h ▸ z.isLt
+
+end WordMath
 
 end Bap.Proofs.Bil

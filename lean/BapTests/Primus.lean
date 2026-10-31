@@ -110,7 +110,277 @@ private def semanticsRegressions : IO Unit := do
   assertEqual "hexadecimal literal parses" 16 (← assignedConstant (← semanticsForms 64 "(set R 0x10)"))
   assertEqual "bare 0x is zero, as in Zarith" 0 (← assignedConstant (← semanticsForms 64 "(set R 0x)"))
 
+private def semanticsTargets : List (String × Primus.Semantics.Context × String × List String × IO Primus.Semantics.Environment) :=
+  let word32 : Primus.Semantics.Context := { bits := 32, memory := ⟨"mem", .mem 32 8, 0, false⟩ }
+  [("aarch64", {}, "arm", ["aarch64"], Target.LLVMLift.aarch64Environment),
+   ("x86_64", {}, "x86", ["bits", "x86-64", "x86-bits", "x86-move", "x86-arith", "x86-control"], Target.LLVMLift.x86Environment),
+   ("x86", word32, "x86", ["bits", "x86-32", "x86-bits", "x86-move", "x86-arith", "x86-control"], Target.LLVMLift.x8632Environment),
+   ("riscv64", {}, "riscv", ["riscv"], Target.LLVMLift.riscvEnvironment),
+   ("riscv32", word32, "riscv", ["riscv"], Target.LLVMLift.riscv32Environment),
+   ("powerpc64", {}, "powerpc", ["bits", "powerpc"], Target.LLVMLift.powerpcEnvironment),
+   ("powerpc32", { word32 with endian := .big }, "powerpc", ["bits", "powerpc"], Target.LLVMLift.powerpc32Environment),
+   ("mips64", { endian := .big }, "mips", ["mips"], Target.LLVMLift.mipsEnvironment),
+   ("mips32", { word32 with endian := .big }, "mips", ["mips"], Target.LLVMLift.mips32Environment),
+   ("arm", word32, "arm", ["arm"], Target.LLVMLift.arm32Environment),
+   ("thumb", word32, "arm", ["thumb2"], Target.LLVMLift.thumbEnvironment),
+   ("x86_64+", {}, "x86", ["bits", "x86-64", "x86-bits", "x86-move", "x86-arith", "x86-control", "x86-bmi", "x86-shift", "x86-sse", "x86-simd", "x86-sse-intrinsics", "x86-pcmpstr"], Target.LLVMLift.x86Environment),
+   ("x86+", word32, "x86", ["bits", "x86-32", "x86-bits", "x86-move", "x86-arith", "x86-control", "x86-bmi", "x86-shift", "x86-sse", "x86-simd", "x86-sse-intrinsics", "x86-pcmpstr"], Target.LLVMLift.x8632Environment),
+   ("thumb+", word32, "arm", ["thumb2", "thumb", "thumb-vfp"], Target.LLVMLift.thumbEnvironment),
+   ("arm+", word32, "arm", ["arm", "arm-float"], Target.LLVMLift.arm32Environment)]
+
+/-- The registers the semantics names that the target tables of `Bap/Target/LLVMLift.lean` do not have. -/
+private def missingRegisters (name : String) : Bool :=
+  ([] : List String).contains name
+
+/-- Every name and arity the semantics of a target use, statically, as the evaluator resolves them. -/
+private def auditSemantics : IO Unit := do
+  for (name, context, directory, entries, environment) in semanticsTargets do
+    let definitions ← Primus.Semantics.loadMany [s!"semantics/{directory}", "semantics/core"] entries context
+    let environment ← environment
+    let names := environment.globals.filter fun binding => (Assoc.get binding.1 definitions).isNone
+    let findings := Primus.Semantics.auditGlobals context (definitions ++ names)
+    let real := findings.filter fun finding =>
+      match finding.2.dropPrefix? "unknown symbol " with
+      | some register => !missingRegisters register.toString
+      | none => true
+    assertEqual s!"semantics of {name} resolve" [] real
+
+private def semanticsValue (state : Primus.Semantics.State) : IO Nat :=
+  match state.code with
+  | [.move _ value] =>
+    match Bil.evalExp [] value with
+    | .ok (.bits value) => pure value.toNat
+    | _ => throw <| IO.userError s!"not a constant: {repr value}"
+  | code => throw <| IO.userError s!"expected one move, got {repr code}"
+
+private def expectRejected (bits : Nat) (source : String) : IO Unit := do
+  match (← (semanticsForms bits source).toBaseIO) with
+  | .error _ => IO.println s!"ok: {source} is rejected"
+  | .ok _ => throw <| IO.userError s!"{source} accepted"
+
+private def runProgram (program : Bil.Program) (state : Bil.State) : IO Bil.State :=
+  match Bil.run program state with
+  | .ok (state, _) => pure state
+  | .error error => throw <| IO.userError error
+
+private def overloadRegressions : IO Unit := do
+  let functions := "(defun f (x) (set R x)) (defun f (x y) (set R (+ x y))) "
+  assertEqual "a function is selected by its arity" 1 (← semanticsValue (← semanticsForms 64 (functions ++ "(f 1)")))
+  assertEqual "the other arity is kept" 5 (← semanticsValue (← semanticsForms 64 (functions ++ "(f 2 3)")))
+  expectRejected 64 (functions ++ "(f 1 2 3)")
+  assertEqual "a later definition of the same arity replaces" 2
+    (← semanticsValue (← semanticsForms 64 "(defun f (x) (set R 1)) (defun f (y) (set R 2)) (f 0)"))
+  let compiled ← semanticsForms 64 (functions ++ "(defun g () (f 1 2))")
+  match (← Primus.Semantics.lift compiled.globals {} "f" [.int 7]) with
+  | [.move _ (.int value)] => assertEqual "a compiled overload is selected by its arity" 7 value.toNat
+  | code => throw <| IO.userError s!"compiled overload changed: {repr code}"
+  match (← Primus.Semantics.lift compiled.globals {} "g" []) with
+  | [.move _ _] => IO.println "ok: a compiled call selects the overload"
+  | code => throw <| IO.userError s!"compiled call changed: {repr code}"
+  let counting := "(defmacro count (r) 1) (defmacro count (r rs) (+ 1 (count rs))) "
+  assertEqual "the last macro parameter takes the rest" 3
+    (← semanticsValue (← semanticsForms 64 (counting ++ "(set R (count a b c))")))
+  assertEqual "the most specific macro is selected" 1
+    (← semanticsValue (← semanticsForms 64 (counting ++ "(set R (count a))")))
+  expectRejected 64 "(defmacro two (a b) a) (two 1)"
+  expectRejected 64 "(defmacro whole (a) a) (whole 1 2)"
+  assertEqual "macros hide functions of the same name" 9
+    (← semanticsValue (← semanticsForms 64 "(defun m (x) (set R 1)) (defmacro m (x) (set R 9)) (m 0)"))
+  expectRejected 64 "(progn (defun nested () 1))"
+
+private def languageRegressions : IO Unit := do
+  assertEqual "a character literal is its code" 97
+    (← semanticsValue (← semanticsForms 64 "(set R (cast-unsigned 64 ?a))"))
+  assertEqual "a character literal has 8 bits" 8
+    (← assignedConstant (← semanticsForms 64 "(set R (word-width ?a))"))
+  expectRejected 64 "(set R ?ab)"
+  expectRejected 64 "(set R ?)"
+  assertEqual "a parameter holds its value" 5
+    (← semanticsValue (← semanticsForms 64 "(defparameter *p* 5) (set R *p*)"))
+  expectRejected 64 "(error \"stop\")"
+  assertEqual "msg has no effect" 0
+    (← semanticsForms 64 "(msg \"text\" R)").code.length
+  assertEqual "a method is not semantics" 0
+    (← semanticsForms 64 "(defmethod bap:patterns-action (a) (unknown a))").code.length
+  assertEqual "symbols concatenate" 1
+    (← assignedConstant (← semanticsForms 64 "(set R (if (= (symbol-concat 'a 'b '32 :sep '_) 'a_b_32) 1 0))"))
+  assertEqual "a symbol names the assigned register" 3
+    (← assignedConstant (← semanticsForms 64 "(set$ 'R 3)"))
+  match (← semanticsForms 64 "(set R (unquote 'R))").code with
+  | [.move _ (.var read)] => assertEqual "unquote reads the register" "R" read.name
+  | code => throw <| IO.userError s!"unquote changed: {repr code}"
+  for (source, value) in [("(cast-saturate :signed 8 0x100:16)", 127), ("(cast-saturate :signed 8 0xff00:16)", 128),
+      ("(cast-saturate :signed 8 0x7f:16)", 127), ("(cast-saturate :signed 8 0xfffe:16)", 254),
+      ("(cast-saturate :unsigned 8 0x100:16)", 255), ("(cast-saturate :unsigned 8 0xffff:16)", 0),
+      ("(cast-saturate :unsigned 8 0x12:16)", 18)] do
+    assertEqual s!"{source}" value
+      (← semanticsValue (← semanticsForms 64 s!"(set R (cast-unsigned 64 {source}))"))
+  let context : Primus.Semantics.Context := {}
+  let forms ← match Sexp.parseMany "(set R (x86-prefix 0xf3))" with
+    | .ok forms => pure forms
+    | .error error => throw <| IO.userError error
+  let globals := [("R", Primus.Semantics.register "R" 1 1)]
+  expectError "a prefix is an error when the decoder gives none" (Primus.Semantics.evalForms context globals forms)
+  match Primus.Semantics.evalForms { context with prefixes := some [0xf3] } globals forms with
+  | .ok state => assertEqual "a prefix of the instruction is present" 1 state.code.length
+  | .error error => throw <| IO.userError error
+  -- the value of an intrinsic survives the next call, which overwrites its output variable
+  match (← semanticsForms 64 "(set R (+ (intrinsic 'f 1:64 :result 64) (intrinsic 'g 2:64 :result 64)))").code with
+  | [.move x0 _, .special "f", .move first (.var y0), .move _ _, .special "g", .move second (.var _), .move _ _] =>
+    assertEqual "an intrinsic gets its arguments in intrinsic:x0" "intrinsic:x0" x0.name
+    assertEqual "an intrinsic gives its result in intrinsic:y0" "intrinsic:y0" y0.name
+    assertTrue "the results are copies" (first != second)
+  | code => throw <| IO.userError s!"intrinsic changed: {repr code}"
+  match (← semanticsForms 64 "(defun op () (intrinsic 'trap :aborts)) (op)").code with
+  | [.special "trap"] => IO.println "ok: :aborts is not an argument"
+  | code => throw <| IO.userError s!"intrinsic changed: {repr code}"
+  match (← semanticsForms 32 "(set R (cast-unsigned 32 (+. :rne 1:32 2:32)))").code with
+  | [.move _ _, .move _ _, .special "fadd_rne_ieee754_binary_32", .move _ _, .move _ _] =>
+    IO.println "ok: a floating-point primitive calls its intrinsic"
+  | code => throw <| IO.userError s!"floating-point primitive changed: {repr code}"
+  -- the condition is computed again before every test, and a loop ends the block only when it ends
+  let loop ← semanticsForms 64 "(let ((i 0)) (while (< i 3) (set i (+ i 1))) (set R i))"
+  let final ← runProgram loop.code {}
+  match Bil.lookup final.env ⟨"R", .imm 64, 0, false⟩ with
+  | .ok (.bits value) => assertEqual "while runs until the condition fails" 3 value.toNat
+  | _ => throw <| IO.userError "while has no result"
+  assertEqual "a false loop condition has no code" 0 (← semanticsForms 64 "(while false (set R 1))").code.length
+  let compiledLoop ← semanticsForms 64 "(defun op () (let ((i 0)) (while (< i 3) (set i (+ i 1))) (set R i)))"
+  let final ← runProgram (← Primus.Semantics.lift compiledLoop.globals {} "op" []) {}
+  match Bil.lookup final.env ⟨"R", .imm 64, 0, false⟩ with
+  | .ok (.bits value) => assertEqual "a function with a loop lifts" 3 value.toNat
+  | _ => throw <| IO.userError "while has no result"
+  let prelude ← Primus.Semantics.loadMany ["semantics/core"] [] context
+  let withPrelude (source : String) : IO Primus.Semantics.State := do
+    let forms ← match Sexp.parseMany source with
+      | .ok forms => pure forms
+      | .error error => throw <| IO.userError error
+    match Primus.Semantics.evalForms context (prelude ++ [("R", Primus.Semantics.register "R" 64 64)]) forms with
+    | .ok state => pure state
+    | .error error => throw <| IO.userError error
+  assertEqual "and is the last value" 3 (← semanticsValue (← withPrelude "(set R (if (and 1:1 1:1 0:1) 2 3))"))
+  assertEqual "or is the first true value" 2 (← semanticsValue (← withPrelude "(set R (if (or 0:1 1:1 0:1) 2 3))"))
+  assertEqual "dolist applies to each argument" 2
+    (← withPrelude "(defun z (r) (set$ r 0)) (dolist z 'R 'R)").code.length
+  assertEqual "the core loads with an entry" 1
+    (← withPrelude "(+= R 4)").code.length
+  -- endianness of a definition
+  let forms ← match Sexp.parseMany "(defun e () (set R 0)) (defun e () (declare (context (endianness le))) (set R 1)) (e)" with
+    | .ok forms => pure forms
+    | .error error => throw <| IO.userError error
+  let register := [("R", Primus.Semantics.register "R" 64 64)]
+  match Primus.Semantics.evalForms { context with endian := .little } register forms,
+      Primus.Semantics.evalForms { context with endian := .big } register forms with
+  | .ok little, .ok big =>
+    assertEqual "an le definition holds on little-endian" 1 (← assignedConstant little)
+    assertEqual "an le definition does not on big-endian" 0 (← assignedConstant big)
+  | _, _ => throw <| IO.userError "endianness context failed"
+
+/-- The floating point of SSE from `x86-sse-intrinsics.lisp`, loaded as the x86 targets load the other files. -/
+private def sseRegressions : IO Unit := do
+  let context : Primus.Semantics.Context := {}
+  let definitions ← Primus.Semantics.loadMany ["semantics/x86", "semantics/core"]
+    ["bits", "x86-64", "x86-bits", "x86-move", "x86-arith", "x86-control", "x86-shift", "x86-bmi", "x86-sse", "x86-simd",
+      "x86-pcmpstr", "x86-sse-intrinsics"] context
+  let environment := Primus.Semantics.Environment.ofGlobals (Primus.Semantics.compileGlobals definitions)
+  let xmm (name : String) := Primus.Semantics.register name 128 256
+  let specials (code : Bil.Program) := code.filterMap fun stmt =>
+    match stmt with
+    | .special name => some name
+    | _ => none
+  let writes (code : Bil.Program) := code.filterMap fun stmt =>
+    match stmt with
+    | .move var _ => some var.name
+    | _ => none
+  let addsd ← Primus.Semantics.liftWith environment context "ADDSDrr_Int" [xmm "YMM0", xmm "YMM0", xmm "YMM1"]
+  assertEqual "addsd calls its intrinsic once" ["fadd_rne_ieee754_binary_64"] (specials addsd)
+  assertEqual "addsd gets its result" "YMM0" ((writes addsd).getLast?.getD "")
+  let mulss ← Primus.Semantics.liftWith environment context "MULSSrr_Int" [xmm "YMM0", xmm "YMM0", xmm "YMM1"]
+  assertEqual "mulss has the size in its name" ["fmul_rne_ieee754_binary_32"] (specials mulss)
+  let addpd ← Primus.Semantics.liftWith environment context "ADDPDrr" [xmm "YMM0", xmm "YMM0", xmm "YMM1"]
+  assertEqual "addpd calls its intrinsic per lane"
+    ["fadd_rne_ieee754_binary_64", "fadd_rne_ieee754_binary_64"] (specials addpd)
+  let paddsw ← Primus.Semantics.liftWith environment context "PADDSWrr" [xmm "YMM0", xmm "YMM0", xmm "YMM1"]
+  assertEqual "integer lanes are not floating point, whatever the load order" [] (specials paddsw)
+  assertTrue "integer lanes saturate" (!paddsw.isEmpty)
+  assertEqual "the high part of a whole value is empty" 8
+    (← assignedConstant (← semanticsForms 64 "(set R (word-width (concat (cast-high 0 1:8) 5:8)))"))
+  assertEqual "an empty part changes no value" 5
+    (← semanticsValue (← semanticsForms 64 "(set R (cast-unsigned 64 (concat (cast-high 0 1:8) 5:8)))"))
+
+private def armWord (value : Nat) : Primus.Semantics.Value := .bil 32 (.int (BitVec.ofNat 32 value))
+
+/-- `arm-a32-multiple.lisp` lifts through the arity of the register list, with no workaround. -/
+private def armMultipleRegressions : IO Unit := do
+  let environment ← Target.LLVMLift.arm32Environment
+  let context : Primus.Semantics.Context := { bits := 32, memory := ⟨"mem", .mem 32 8, 0, false⟩ }
+  let register (name : String) := Primus.Semantics.register name 32 32
+  let var (name : String) : Bap.Var := ⟨name, .imm 32, 0, false⟩
+  let memory := Bap.Memory.ofCells (addressWidth := 32)
+    ((List.range 12).map fun offset => (BitVec.ofNat 32 (0x100 + offset), UInt8.ofNat (offset + 1)))
+  let initial : Bil.State := { env := [
+    (context.memory, .memory memory), (var "R0", .bits (BitVec.ofNat 32 0x100)),
+    (var "R1", .bits (BitVec.ofNat 32 0)), (var "R2", .bits (BitVec.ofNat 32 0)),
+    (var "R3", .bits (BitVec.ofNat 32 0)), (var "R4", .bits (BitVec.ofNat 32 0xaabbccdd))] }
+  let value (state : Bil.State) (name : String) : IO Nat :=
+    match Bil.lookup state.env (var name) with
+    | .ok (.bits value) => pure value.toNat
+    | _ => throw <| IO.userError s!"{name} is missing"
+  let ldm ← Primus.Semantics.liftWith environment context "LDMIA"
+    [register "R0", armWord 14, register "Nil", register "R1", register "R2"]
+  let loaded ← runProgram ldm initial
+  assertEqual "LDMIA of two loads the first word" 0x04030201 (← value loaded "R1")
+  assertEqual "LDMIA of two loads the second word" 0x08070605 (← value loaded "R2")
+  let three ← Primus.Semantics.liftWith environment context "LDMIA"
+    [register "R0", armWord 14, register "Nil", register "R1", register "R2", register "R3"]
+  let loaded ← runProgram three initial
+  assertEqual "LDMIA of three loads the third word" 0x0c0b0a09 (← value loaded "R3")
+  let update ← Primus.Semantics.liftWith environment context "LDMIA_UPD"
+    [register "R0", register "R0", armWord 14, register "Nil", register "R1"]
+  let loaded ← runProgram update initial
+  assertEqual "LDMIA_UPD writes the base back" 0x104 (← value loaded "R0")
+  let store ← Primus.Semantics.liftWith environment context "STMDB_UPD"
+    [register "R0", register "R0", armWord 14, register "Nil", register "R4"]
+  let stored ← runProgram store initial
+  assertEqual "STMDB_UPD writes the base back" 0xfc (← value stored "R0")
+  match Bil.lookup stored.env context.memory with
+  | .ok (@Value.memory width stored) =>
+    assertEqual "STMDB stores below the base" 0xdd
+      (Bap.Memory.readByte stored (BitVec.ofNat width 0xfc)).toNat
+  | _ => throw <| IO.userError "memory is missing"
+  let vfp := Primus.Semantics.register "D0" 64 64
+  let vldm ← Primus.Semantics.liftWith environment context "VLDMDIA"
+    [register "R0", armWord 14, register "Nil", vfp, Primus.Semantics.register "D1" 64 64]
+  let loaded ← runProgram vldm { env := initial.env ++ [(⟨"D0", .imm 64, 0, false⟩, .bits (BitVec.ofNat 64 0)),
+    (⟨"D1", .imm 64, 0, false⟩, .bits (BitVec.ofNat 64 0))] }
+  match Bil.lookup loaded.env ⟨"D1", .imm 64, 0, false⟩ with
+  | .ok (.bits value) => assertEqual "VLDM selects the list of its arity" 0 (value.toNat - 0x100f0e0d0c0b0a09)
+  | _ => throw <| IO.userError "D1 is missing"
+
+private def protectRegressions : IO Unit := do
+  let memory ← mapped
+  let protected_ := memory.protect 0x1001 0x1003 ro
+  assertEqual "a partial protection splits the region" (some ro) (protected_.protection 0x1001)
+  assertEqual "the end of the range stays exclusive" (some ro) (protected_.protection 0x1002)
+  assertEqual "the bytes below the range keep their protection" (some rw) (protected_.protection 0x1000)
+  assertEqual "the bytes above the range keep their protection" (some rw) (protected_.protection 0x1003)
+  assertEqual "protection does not map" none (protected_.protection 0x1004)
+  assertEqual "an empty range changes nothing" (some rw) ((memory.protect 0x1002 0x1002 ro).protection 0x1002)
+  assertEqual "a range before the region changes nothing" (some rw) ((memory.protect 0 0x1000 ro).protection 0x1000)
+  assertEqual "a covering range protects it all" (some ro) ((memory.protect 0 0x2000 ro).protection 0x1003)
+
 def run : IO Unit := do
+  -- A binding that is no function shadows a function of the same name further on, in the index as in the definitions.
+  let shadowed := Primus.Semantics.Environment.ofGlobals
+    [("f", .int 1#64), ("f", .callable (.primitive "+")), ("g", .callable (.primitive "-"))]
+  assertTrue "a value shadows a function in the index" (shadowed.operations.get? "f").isNone
+  assertTrue "a function stays in the index" (shadowed.operations.get? "g").isSome
+  auditSemantics
+  overloadRegressions
+  languageRegressions
+  armMultipleRegressions
+  sseRegressions
+  protectRegressions
   let memory ← mapped
   match memory.loadByte 0x1001 with
   | .ok value => assertEqual "Primus mapped byte" 2 value

@@ -1,6 +1,7 @@
 import Lean.Elab.Tactic.Basic
 import Bap.Disasm.Linear
 import Bap.Disasm.Recursive
+import Std.Data.HashSet.Lemmas
 
 namespace Bap.Proofs.Disasm
 
@@ -16,20 +17,233 @@ open Lean Elab Tactic in
 local elab "prw " mod:ident n:ident : tactic => do
   evalTactic (← `(tactic| rw [$(mkIdent (mkPrivateNameCore mod.getId (n.getId ++ `eq_def))):ident]))
 
-private abbrev insertInsn : Insn → List Insn → List Insn :=
-  priv% Bap.Disasm.Basic Bap.Disasm.insertInsn
-
-private abbrev sweepAux : Disassembler → ByteArray → Nat → Nat → Nat → List Insn → List String →
-    IO (List Insn × List String) :=
+private abbrev fastSweepAux : Disassembler → ByteArray → Nat → Nat → Nat → Array Insn → Array String →
+    IO (Array Insn × Array String) :=
   priv% Bap.Disasm.Linear Bap.Disasm.Linear.sweepAux
-
-private abbrev decodeSlot : Disassembler → ByteArray → Nat → List Insn → List String →
-    IO (List Insn × List String) :=
+private abbrev fastDecodeSlot : Disassembler → ByteArray → Nat → Recursive.ScanState → IO Recursive.ScanState :=
   priv% Bap.Disasm.Recursive Bap.Disasm.Recursive.decodeSlot
-
-private abbrev scanAux : Disassembler → ByteArray → Nat → List Nat → List Nat → List Insn →
-    List (Nat × Nat) → List String → IO (List Insn × List (Nat × Nat) × List String) :=
+private abbrev fastScanAux : Disassembler → ByteArray → Nat → List Nat → Recursive.ScanState →
+    IO Recursive.ScanState :=
   priv% Bap.Disasm.Recursive Bap.Disasm.Recursive.scanAux
+private abbrev fastBuild : Std.HashSet Nat → List Insn → List Block → List Insn → List Block :=
+  priv% Bap.Disasm.Basic Bap.Disasm.buildBlocks
+
+/-- A step of the insertion sort, which sorts as `sortedInstructions` does. -/
+def insertInsn (insn : Insn) : List Insn → List Insn
+  | [] => [insn]
+  | head :: tail =>
+    if insn.address ≤ head.address then insn :: head :: tail else head :: insertInsn insn tail
+
+/-! ## The disassemblers as specifications on lists
+
+The disassemblers keep what they find in arrays and sets. What they compute is what these definitions on lists do, which
+the theorems of this file are about, by `sweep_eq`, `scan_eq` and `blocks_eq`. -/
+
+def sweepAux (disassembler : Disassembler) (data : ByteArray) (entry : Nat) :
+    Nat → Nat → List Insn → List String → IO (List Insn × List String)
+  | 0, _, instructions, errors => pure (instructions, errors)
+  | fuel + 1, offset, instructions, errors =>
+    if offset ≥ data.size then
+      pure (instructions, errors)
+    else do
+      match ← disassembler.decode (entry + offset) data with
+      | .error error => pure (instructions, errors ++ [error])
+      | .ok insn =>
+        if insn.size = 0 then
+          pure (instructions, errors ++ ["decoder produced a zero-sized instruction"])
+        else
+          sweepAux disassembler data entry fuel (offset + insn.size) (instructions ++ [insn]) errors
+
+def decodeSlot (disassembler : Disassembler) (data : ByteArray) (slot : Nat)
+    (instructions : List Insn) (errors : List String) : IO (List Insn × List String) := do
+  match ← disassembler.decode slot data with
+  | .error error => pure (instructions, errors ++ [error])
+  | .ok insn =>
+    if insn.address != slot || insn.size = 0 then
+      pure (instructions, errors ++ ["decoder returned an inconsistent instruction"])
+    else
+      pure (Recursive.addInsn insn instructions, errors)
+
+def scanAux (disassembler : Disassembler) (data : ByteArray) :
+    Nat → List Nat → List Nat → List Insn → List (Nat × Nat) → List String →
+      IO (List Insn × List (Nat × Nat) × List String)
+  | 0, work, visited, instructions, edges, errors =>
+    if work.all (· ∈ visited) then
+      pure (instructions, edges, errors)
+    else
+      pure (instructions, edges, errors ++ [Recursive.outOfFuel])
+  | fuel + 1, work, visited, instructions, edges, errors =>
+    match work.dropWhile (· ∈ visited) with
+    | [] => pure (instructions, edges, errors)
+    | address :: work => do
+      match ← disassembler.decode address data with
+      | .error error =>
+        scanAux disassembler data fuel work (address :: visited) instructions edges (errors ++ [error])
+      | .ok insn =>
+        if insn.address != address || insn.size = 0 then
+          scanAux disassembler data fuel work (address :: visited) instructions edges
+            (errors ++ ["decoder returned an inconsistent instruction"])
+        else
+          let instructions := Recursive.addInsn insn instructions
+          let edges := edges ++ Recursive.flowEdges disassembler insn
+          let work := Recursive.nextAddresses disassembler insn ++ work
+          if disassembler.hasDelaySlot insn then
+            let (instructions, errors) ← decodeSlot disassembler data insn.next instructions errors
+            scanAux disassembler data fuel work (address :: visited) instructions edges errors
+          else
+            scanAux disassembler data fuel work (address :: visited) instructions edges errors
+
+theorem io_pure_bind {α β} (a : α) (f : α → IO β) : (pure a >>= f : IO β) = f a := rfl
+
+theorem io_bind_assoc {α β γ} (m : IO α) (f : α → IO β) (g : β → IO γ) :
+    (m >>= f) >>= g = m >>= fun x => f x >>= g := by
+  funext s
+  show EST.bind (EST.bind m f) g s = EST.bind m (fun x => EST.bind (f x) g) s
+  simp only [EST.bind]
+  cases m s <;> rfl
+
+private theorem fast_sweep (d : Disassembler) (data : ByteArray) (entry : Nat) (fuel offset : Nat)
+    (instructions : Array Insn) (errors : Array String) :
+    fastSweepAux d data entry fuel offset instructions errors >>= (fun out => pure (out.1.toList, out.2.toList)) =
+      sweepAux d data entry fuel offset instructions.toList errors.toList := by
+  induction fuel generalizing offset instructions errors with
+  | zero => rfl
+  | succ fuel ih =>
+    dsimp only [fastSweepAux] at ih ⊢
+    prw Bap.Disasm.Linear Bap.Disasm.Linear.sweepAux
+    simp only [sweepAux]
+    split
+    · simp only [io_pure_bind]
+    · simp only [io_bind_assoc]
+      refine congrArg _ (funext fun r => ?_)
+      cases r with
+      | error e => simp only [io_pure_bind, Array.toList_push]
+      | ok insn =>
+        simp only
+        split
+        · simp only [io_pure_bind, Array.toList_push]
+        · rw [ih, Array.toList_push]
+
+/-- The linear sweep computes what its specification on lists does. -/
+theorem sweep_eq (d : Disassembler) (data : ByteArray) (entry : Nat) :
+    Linear.sweep d data entry = (sweepAux d data entry (data.size + 1) 0 [] [] >>= fun out =>
+      pure { entry := entry, instructions := out.1, errors := out.2 }) := by
+  have := fast_sweep d data entry (data.size + 1) 0 #[] #[]
+  rw [show sweepAux d data entry (data.size + 1) 0 [] [] = _ from this.symm, io_bind_assoc]
+  rfl
+
+/-- The state of the fast scan represents these lists. -/
+structure Represents (state : Recursive.ScanState) (visited : List Nat) (instructions : List Insn)
+    (edges : List (Nat × Nat)) (errors : List String) : Prop where
+  visited_iff : ∀ a, state.visited.contains a = decide (a ∈ visited)
+  addresses_iff : ∀ a, state.addresses.contains a = instructions.any (·.address == a)
+  instructions : state.instructions.toList = instructions
+  edges : state.edges.toList = edges
+  errors : state.errors.toList = errors
+
+private theorem Represents.add {s v is es errs} (h : Represents s v is es errs) (insn : Insn) :
+    Represents (s.add insn) v (Recursive.addInsn insn is) es errs := by
+  unfold Recursive.ScanState.add Recursive.addInsn
+  by_cases hc : s.addresses.contains insn.address = true
+  · have hany := hc
+    rw [h.addresses_iff] at hany
+    simp only [hc, hany, ite_true]
+    exact h
+  · have hany : ¬ is.any (·.address == insn.address) = true := by
+      rw [← h.addresses_iff]; exact hc
+    simp only [hc, hany, Bool.false_eq_true, ite_false]
+    refine ⟨h.visited_iff, ?_, ?_, h.edges, h.errors⟩
+    · intro a
+      simp only [Std.HashSet.contains_insert, h.addresses_iff, List.any_append, List.any_cons, List.any_nil, Bool.or_false]
+      rw [Bool.or_comm]
+    · simp [h.instructions]
+
+private theorem Represents.visit {s v is es errs} (h : Represents s v is es errs) (a : Nat) :
+    Represents (s.visit a) (a :: v) is es errs := by
+  refine ⟨?_, h.addresses_iff, h.instructions, h.edges, h.errors⟩
+  intro x
+  simp only [Recursive.ScanState.visit, Std.HashSet.contains_insert, h.visited_iff, List.mem_cons]
+  by_cases hx : x = a
+  · simp [hx]
+  · have : ¬ a = x := fun e => hx e.symm
+    simp [hx, this]
+
+private theorem Represents.error {s v is es errs} (h : Represents s v is es errs) (m : String) :
+    Represents (s.error m) v is es (errs ++ [m]) :=
+  ⟨h.visited_iff, h.addresses_iff, h.instructions, h.edges, by simp [Recursive.ScanState.error, h.errors]⟩
+
+private def project (s : Recursive.ScanState) : List Insn × List (Nat × Nat) × List String :=
+  (s.instructions.toList, s.edges.toList, s.errors.toList)
+
+private theorem fast_slot (d : Disassembler) (data : ByteArray) (slot : Nat) (s v is es errs)
+    (h : Represents s v is es errs) {γ} (kf : Recursive.ScanState → IO γ)
+    (ks : List Insn × List String → IO γ)
+    (hk : ∀ s' is' errs', Represents s' v is' es errs' → kf s' = ks (is', errs')) :
+    fastDecodeSlot d data slot s >>= kf = decodeSlot d data slot is errs >>= ks := by
+  dsimp only [fastDecodeSlot]
+  prw Bap.Disasm.Recursive Bap.Disasm.Recursive.decodeSlot
+  simp only [decodeSlot, io_bind_assoc]
+  refine congrArg _ (funext fun r => ?_)
+  cases r with
+  | error e => simpa only [io_pure_bind] using hk _ _ _ (h.error e)
+  | ok insn =>
+    simp only
+    split
+    · simpa only [io_pure_bind] using hk _ _ _ (h.error _)
+    · simpa only [io_pure_bind] using hk _ _ _ (h.add insn)
+
+private theorem fast_scan (d : Disassembler) (data : ByteArray) (fuel : Nat) (work : List Nat)
+    (s v is es errs) (h : Represents s v is es errs) :
+    fastScanAux d data fuel work s >>= (fun out => pure (project out)) = scanAux d data fuel work v is es errs := by
+  have hpred (s : Recursive.ScanState) (v) (is es errs) (h : Represents s v is es errs) :
+      (fun x => s.visited.contains x) = fun x => decide (x ∈ v) := funext h.visited_iff
+  induction fuel generalizing work s v is es errs with
+  | zero =>
+    dsimp only [fastScanAux]
+    prw Bap.Disasm.Recursive Bap.Disasm.Recursive.scanAux
+    simp only [scanAux]
+    have hall : (work.all fun x => s.visited.contains x) = work.all fun x => decide (x ∈ v) := by
+      rw [hpred s v is es errs h]
+    rw [hall]
+    split
+    · simp only [io_pure_bind, project, h.instructions, h.edges, h.errors]
+    · simp only [io_pure_bind, project, Recursive.ScanState.error, Array.toList_push, h.instructions, h.edges, h.errors]
+  | succ fuel ih =>
+    dsimp only [fastScanAux] at ih ⊢
+    prw Bap.Disasm.Recursive Bap.Disasm.Recursive.scanAux
+    simp only [scanAux]
+    have hdrop : work.dropWhile (fun x => s.visited.contains x) = work.dropWhile fun x => decide (x ∈ v) := by
+      rw [hpred s v is es errs h]
+    rw [hdrop]
+    cases List.dropWhile (fun x => decide (x ∈ v)) work with
+    | nil => simp only [io_pure_bind, project, h.instructions, h.edges, h.errors]
+    | cons address rest =>
+      simp only [io_bind_assoc]
+      refine congrArg _ (funext fun r => ?_)
+      cases r with
+      | error e => exact ih _ _ _ _ _ _ ((h.visit address).error e)
+      | ok insn =>
+        simp only
+        split
+        · exact ih _ _ _ _ _ _ ((h.visit address).error _)
+        · have hadded := (h.visit address).add insn
+          have hstate : Represents
+              { (s.visit address).add insn with edges := ((s.visit address).add insn).edges ++ (Recursive.flowEdges d insn).toArray }
+              (address :: v) (Recursive.addInsn insn is) (es ++ Recursive.flowEdges d insn) errs :=
+            ⟨hadded.visited_iff, hadded.addresses_iff, hadded.instructions, by simp [hadded.edges], hadded.errors⟩
+          split
+          · simp only [io_bind_assoc]
+            exact fast_slot d data insn.next _ _ _ _ _ hstate _ _ fun s' is' errs' hs => ih _ _ _ _ _ _ hs
+          · exact ih _ _ _ _ _ _ hstate
+
+/-- The recursive scan computes what its specification on lists does. -/
+theorem scan_eq (d : Disassembler) (data : ByteArray) (entry : Nat) :
+    Recursive.scan d data entry = (scanAux d data (3 * data.size + 1) [entry] [] [] [] [] >>= fun out =>
+      pure { entry := entry, instructions := out.1, edges := out.2.1, errors := out.2.2 }) := by
+  have hempty : Represents {} [] [] [] [] := by
+    refine ⟨?_, ?_, rfl, rfl, rfl⟩ <;> simp
+  rw [← fast_scan d data _ [entry] _ _ _ _ _ hempty, io_bind_assoc]
+  rfl
 
 /-! ## Successors -/
 
@@ -128,15 +342,24 @@ private theorem foldl_insert_sorted (input acc : List Insn) (h : SortedAddr acc)
   | nil => exact h
   | cons head tail ih => exact ih _ (insertInsn_sorted head acc h)
 
-theorem sortedInstructions_perm (disasm : Bap.Disasm.Disasm) :
-    (sortedInstructions disasm).Perm disasm.instructions := by
-  have := foldl_insert_perm disasm.instructions []
+/-- The insertion sort is as good a specification of the order. -/
+theorem foldl_insert_spec (input : List Insn) :
+    (input.foldl (fun result insn => insertInsn insn result) []).Perm input ∧
+      SortedAddr (input.foldl (fun result insn => insertInsn insn result) []) := by
+  have := foldl_insert_perm input []
   rw [List.append_nil] at this
-  exact this
+  exact ⟨this, foldl_insert_sorted _ _ List.Pairwise.nil⟩
+
+theorem sortedInstructions_perm (disasm : Bap.Disasm.Disasm) :
+    (sortedInstructions disasm).Perm disasm.instructions :=
+  List.mergeSort_perm _ _
 
 theorem sortedInstructions_sorted (disasm : Bap.Disasm.Disasm) :
-    (sortedInstructions disasm).Pairwise fun a b => a.address ≤ b.address :=
-  foldl_insert_sorted _ _ List.Pairwise.nil
+    (sortedInstructions disasm).Pairwise fun a b => a.address ≤ b.address := by
+  have := List.pairwise_mergeSort (l := disasm.instructions) (le := fun left right => decide (left.address ≤ right.address))
+    (fun a b c hab hbc => by simp only [decide_eq_true_eq] at *; omega)
+    (fun a b => by simp only [Bool.or_eq_true, decide_eq_true_eq]; omega)
+  exact this.imp (by simp)
 
 /-- With distinct addresses the sorted listing is strictly ascending. -/
 theorem sortedInstructions_strict (disasm : Bap.Disasm.Disasm)
@@ -156,9 +379,61 @@ def leaders (disasm : Bap.Disasm.Disasm) : List Nat :=
     | .normal => insn.target.toList
     | _ => insn.next :: insn.target.toList
 
+/-- What `Disasm.blocks` builds, on lists. -/
+def build (leaders : List Nat) (current : List Insn) (blocks : List Block) : List Insn → List Block
+  | [] =>
+    match current with
+    | [] => blocks
+    | head :: _ => blocks ++ [⟨head.address, current⟩]
+  | insn :: rest =>
+    if insn.address ∈ leaders && !current.isEmpty then
+      match current with
+      | [] => build leaders [insn] blocks rest
+      | head :: _ => build leaders [insn] (blocks ++ [⟨head.address, current⟩]) rest
+    else
+      build leaders (current ++ [insn]) blocks rest
+
+/-- `buildBlocks` of the reversed block and the reversed list of blocks is `build`. -/
+private theorem fast_build (set : Std.HashSet Nat) (ls : List Nat) (hset : ∀ a, set.contains a = decide (a ∈ ls))
+    (input current : List Insn) (blocks : List Block) :
+    (fastBuild set current.reverse blocks.reverse input).reverse = build ls current blocks input := by
+  induction input generalizing current blocks with
+  | nil =>
+    dsimp only [fastBuild]
+    prw Bap.Disasm.Basic Bap.Disasm.buildBlocks
+    cases current with
+    | nil => simp [build]
+    | cons head tail => simp [build]
+  | cons insn rest ih =>
+    dsimp only [fastBuild] at ih ⊢
+    prw Bap.Disasm.Basic Bap.Disasm.buildBlocks
+    simp only [hset, build]
+    by_cases hl : insn.address ∈ ls
+    · cases current with
+      | nil =>
+        have := ih [insn] blocks
+        simpa [hl] using this
+      | cons head tail =>
+        have := ih [insn] (blocks ++ [⟨head.address, head :: tail⟩])
+        simpa [hl] using this
+    · have := ih (current ++ [insn]) blocks
+      simpa [hl] using this
+
 theorem blocks_eq (disasm : Bap.Disasm.Disasm) :
-    disasm.blocks = Bap.Disasm.Disasm.blocks.build (leaders disasm) [] [] (sortedInstructions disasm) :=
-  rfl
+    disasm.blocks = build (leaders disasm) [] [] (sortedInstructions disasm) := by
+  have hfold : ∀ (ls : List Nat) (set : Std.HashSet Nat) (a : Nat),
+      (ls.foldl (fun set address => set.insert address) set).contains a = (set.contains a || decide (a ∈ ls)) := by
+    intro ls
+    induction ls with
+    | nil => intro set a; simp
+    | cons x xs ih =>
+      intro set a
+      rw [List.foldl_cons, ih, Std.HashSet.contains_insert]
+      by_cases hx : a = x
+      · simp [hx]
+      · have : (x == a) = false := by simp; exact fun e => hx e.symm
+        simp [hx, this]
+  exact fast_build _ (leaders disasm) (fun a => (hfold (leaders disasm) {} a).trans (by simp)) _ [] []
 
 /-- Shape of a finished block: non-empty, labelled by its head, no leader past the head. -/
 def BlockOk (ls : List Nat) (block : Block) : Prop :=
@@ -172,17 +447,17 @@ private theorem build_spec (ls : List Nat) (current : List Insn) (blocks : List 
     (hc : ∀ insn ∈ current.tail, insn.address ∉ ls)
     (he : current = [] → blocks = [])
     (hh : blocks ≠ [] → ∀ head ∈ current.head?, head.address ∈ ls) :
-    let out := Bap.Disasm.Disasm.blocks.build ls current blocks rest
+    let out := build ls current blocks rest
     out.flatMap Block.instructions = blocks.flatMap Block.instructions ++ current ++ rest ∧
       (∀ b ∈ out, BlockOk ls b) ∧ ∀ b ∈ out.tail, b.start ∈ ls := by
   induction rest generalizing current blocks with
   | nil =>
     cases current with
     | nil =>
-      simp only [Bap.Disasm.Disasm.blocks.build]
+      simp only [build]
       exact ⟨by simp, hb, hl⟩
     | cons head tail =>
-      simp only [Bap.Disasm.Disasm.blocks.build]
+      simp only [build]
       refine ⟨by simp, ?_, ?_⟩
       · intro b hbm
         rcases List.mem_append.1 hbm with hbm | hbm
@@ -199,7 +474,7 @@ private theorem build_spec (ls : List Nat) (current : List Insn) (blocks : List 
           · rcases List.mem_singleton.1 hbm with rfl
             exact hh (by simp) head (by simp)
   | cons insn rest ih =>
-    simp only [Bap.Disasm.Disasm.blocks.build]
+    simp only [build]
     by_cases hleader : insn.address ∈ ls
     · cases current with
       | nil =>
@@ -262,13 +537,13 @@ theorem blocks_flatten (disasm : Bap.Disasm.Disasm) :
 
 theorem blocks_wellFormed (disasm : Bap.Disasm.Disasm) :
     ∀ b ∈ disasm.blocks, BlockOk (leaders disasm) b :=
-  (build_spec (leaders disasm) [] [] (sortedInstructions disasm)
+  blocks_eq disasm ▸ (build_spec (leaders disasm) [] [] (sortedInstructions disasm)
     (by simp) (by simp) (by simp) (by simp) (by simp)).2.1
 
 /-- Every block but the first begins at a leader. -/
 theorem blocks_tail_start_leader (disasm : Bap.Disasm.Disasm) :
     ∀ b ∈ disasm.blocks.tail, b.start ∈ leaders disasm :=
-  (build_spec (leaders disasm) [] [] (sortedInstructions disasm)
+  blocks_eq disasm ▸ (build_spec (leaders disasm) [] [] (sortedInstructions disasm)
     (by simp) (by simp) (by simp) (by simp) (by simp)).2.2
 
 theorem target_mem_leaders (disasm : Bap.Disasm.Disasm) (insn : Insn)
@@ -317,7 +592,7 @@ theorem blocks_nil_iff (disasm : Bap.Disasm.Disasm) :
     have hp := sortedInstructions_perm disasm
     rw [h] at hp
     have hs := hp.eq_nil
-    simp [blocks_eq, hs, Bap.Disasm.Disasm.blocks.build]
+    simp [blocks_eq, hs, build]
 
 /-! ## A partial-correctness logic for `IO` -/
 
@@ -440,6 +715,7 @@ theorem sweep_run (d : Disassembler) (data : ByteArray) (entry : Nat) :
     Holds (Linear.sweep d data entry) fun result =>
       ∃ outcome, result.entry = entry ∧ result.edges = [] ∧ result.errors = outcome.toList ∧
         LinearRun d data entry 0 result.instructions outcome := by
+  rw [sweep_eq]
   refine Holds.bind (Q := fun out => ∃ rest outcome, out = ([] ++ rest, [] ++ outcome.toList) ∧
     LinearRun d data entry 0 rest outcome) (sweepAux_spec d data entry _ 0 [] [] (by omega)) ?_
   rintro ⟨is, es⟩ ⟨rest, outcome, heq, hrun⟩ _
@@ -620,7 +896,7 @@ private theorem sweepAux_noThrow (d : Disassembler) (data : ByteArray) (entry : 
 /-- Termination: for a decoder that does not throw, the sweep always returns. -/
 theorem sweep_noThrow (d : Disassembler) (data : ByteArray) (entry : Nat)
     (hd : ∀ address, NoThrow (d.decode address data)) : NoThrow (Linear.sweep d data entry) :=
-  NoThrow.bind (sweepAux_noThrow d data entry hd _ _ _ _) fun _ _ => NoThrow.pure _
+  sweep_eq d data entry ▸ NoThrow.bind (sweepAux_noThrow d data entry hd _ _ _ _) fun _ _ => NoThrow.pure _
 
 /-! ## Recursive scan -/
 
@@ -644,8 +920,7 @@ private theorem scanAux_succ_nil (d : Disassembler) (data fuel work visited inst
     (h : work.dropWhile (fun x => decide (x ∈ visited)) = []) :
     scanAux d data (fuel + 1) work visited instructions edges errors =
       pure (instructions, edges, errors) := by
-  dsimp only [scanAux]
-  prw Bap.Disasm.Recursive Bap.Disasm.Recursive.scanAux
+  rw [scanAux]
   simp only [h]
 
 private theorem scanAux_succ_cons (d : Disassembler) (data fuel work visited instructions edges
@@ -660,15 +935,13 @@ private theorem scanAux_succ_cons (d : Disassembler) (data fuel work visited ins
               (errors ++ ["decoder returned an inconsistent instruction"])
           else if d.hasDelaySlot insn = true then
             decodeSlot d data insn.next (Recursive.addInsn insn instructions) errors >>= fun out =>
-              scanAux d data fuel (insn.successors ++ rest) (address :: visited) out.1
+              scanAux d data fuel ((Recursive.nextAddresses d insn) ++ rest) (address :: visited) out.1
                 (edges ++ Recursive.flowEdges d insn) out.2
           else
-            scanAux d data fuel (insn.successors ++ rest) (address :: visited)
+            scanAux d data fuel ((Recursive.nextAddresses d insn) ++ rest) (address :: visited)
               (Recursive.addInsn insn instructions) (edges ++ Recursive.flowEdges d insn) errors := by
-  dsimp only [scanAux]
-  prw Bap.Disasm.Recursive Bap.Disasm.Recursive.scanAux
+  rw [scanAux]
   simp only [h]
-  rfl
 
 private theorem decodeSlot_eq (d : Disassembler) (data slot is errs) :
     decodeSlot d data slot is errs =
@@ -727,27 +1000,185 @@ theorem addInsn_length (insn : Insn) (is : List Insn) :
   unfold Recursive.addInsn
   split <;> simp
 
+/-- Reachability along a set of recovered CFG edges. -/
+inductive EdgeReach (edges : List (Nat × Nat)) (entry : Nat) : Nat → Prop
+  | entry : EdgeReach edges entry entry
+  | step {a b} : EdgeReach edges entry a → (a, b) ∈ edges → EdgeReach edges entry b
+
+theorem EdgeReach.mono {e e' : List (Nat × Nat)} {entry a} (hsub : ∀ x ∈ e, x ∈ e')
+    (h : EdgeReach e entry a) : EdgeReach e' entry a := by
+  induction h with
+  | entry => exact .entry
+  | step _ he ih => exact .step ih (hsub _ he)
+
 /-! ### Edges and delay slots -/
 
 /-- The edges of an instruction without a delay slot leave it for its successors. -/
 theorem mem_flowEdges_plain (d : Disassembler) (insn : Insn) (h : d.hasDelaySlot insn = false)
-    (a b : Nat) : (a, b) ∈ Recursive.flowEdges d insn ↔ a = insn.address ∧ b ∈ insn.successors := by
-  simp [Recursive.flowEdges, h, eq_comm]
-  exact and_comm
+    (hc : Recursive.isAnnulledCall d insn = false) (a b : Nat) :
+    (a, b) ∈ Recursive.flowEdges d insn ↔ a = insn.address ∧ b ∈ insn.successors := by
+  simp only [Recursive.flowEdges, h, hc, Bool.false_eq_true, ite_false, List.mem_map, Prod.mk.injEq]
+  constructor
+  · rintro ⟨x, hx, rfl, rfl⟩
+    exact ⟨rfl, hx⟩
+  · rintro ⟨rfl, hx⟩
+    exact ⟨b, hx, rfl, rfl⟩
 
-/-- A delayed transfer enters its slot, and only the slot goes on to the successors of the branch.
+theorem nextAddresses_plain (d : Disassembler) (insn : Insn) (h : d.hasDelaySlot insn = false)
+    (hc : Recursive.isAnnulledCall d insn = false) :
+    Recursive.nextAddresses d insn = insn.successors := by
+  simp [Recursive.nextAddresses, Recursive.isDelayedConditional, h, hc]
+
+/-- A call that annuls its slot, as a MIPS `BLTZALL`: into the slot, if it is taken, and over it, if it isn't. -/
+theorem flowEdges_annulled_call (d : Disassembler) (insn : Insn) (h : Recursive.isAnnulledCall d insn = true) :
+    Recursive.flowEdges d insn = [(insn.address, insn.next), (insn.address, insn.next + insn.size)] := by
+  have hd : d.hasDelaySlot insn = false := by
+    simp only [Recursive.isAnnulledCall, Bool.and_eq_true, Bool.not_eq_true'] at h
+    exact h.1.1
+  simp [Recursive.flowEdges, Recursive.pastSlot, h, hd]
+
+/-- A scan goes on from such a call at the slot and past it, and the slot has its own edge past itself. -/
+theorem nextAddresses_annulled_call (d : Disassembler) (insn : Insn) (h : Recursive.isAnnulledCall d insn = true) :
+    Recursive.nextAddresses d insn = [insn.next, insn.next + insn.size] := by
+  have hc : Recursive.isDelayedConditional d insn = false := by
+    simp only [Recursive.isAnnulledCall, Bool.and_eq_true, Bool.not_eq_true'] at h
+    simp [Recursive.isDelayedConditional, h.1.1]
+  simp [Recursive.nextAddresses, Recursive.pastSlot, hc, h]
+
+/-- Control can fall through an instruction without a slot of its own to the next instruction. -/
+theorem next_mem_nextAddresses (d : Disassembler) (insn : Insn) (h : d.hasDelaySlot insn = false)
+    (hft : insn.fallsThrough = true) : insn.next ∈ Recursive.nextAddresses d insn := by
+  cases hc : Recursive.isAnnulledCall d insn with
+  | false =>
+    rw [nextAddresses_plain d insn h hc]
+    exact next_mem_successors_of_fallsThrough insn hft
+  | true =>
+    rw [nextAddresses_annulled_call d insn hc]
+    simp
+
+/-- An unconditional delayed transfer enters its slot, and only the slot goes on to the successors of the branch.
 So the slot has no fall-through edge of its own, unless the scan also reaches it another way. -/
 theorem mem_flowEdges_delayed (d : Disassembler) (insn : Insn) (h : d.hasDelaySlot insn = true)
-    (a b : Nat) : (a, b) ∈ Recursive.flowEdges d insn ↔
+    (hc : insn.flow ≠ .conditionalJump) (a b : Nat) : (a, b) ∈ Recursive.flowEdges d insn ↔
       (a = insn.address ∧ b = insn.next) ∨ (a = insn.next ∧ b ∈ insn.successors) := by
-  simp [Recursive.flowEdges, h, eq_comm]
-  exact or_congr_right and_comm
+  have hd : Recursive.isDelayedConditional d insn = false := by
+    simp [Recursive.isDelayedConditional, hc]
+  simp only [Recursive.flowEdges, h, hd, ite_true, Bool.false_eq_true, ite_false, List.mem_cons, List.mem_map,
+    Prod.mk.injEq]
+  constructor
+  · rintro (h | ⟨x, hx, rfl, rfl⟩)
+    · exact .inl h
+    · exact .inr ⟨rfl, hx⟩
+  · rintro (h | ⟨rfl, hx⟩)
+    · exact .inl h
+    · exact .inr ⟨b, hx, rfl, rfl⟩
+
+/-- A conditional branch with a delay slot runs it whichever way it goes, and the slot decides: on to the target or
+past itself. The branch has no edge of its own to either. -/
+theorem mem_flowEdges_delayed_conditional (d : Disassembler) (insn : Insn) (h : d.hasDelaySlot insn = true)
+    (hc : insn.flow = .conditionalJump) (ha : d.annulsSlot insn = false) (a b : Nat) :
+    (a, b) ∈ Recursive.flowEdges d insn ↔
+      (a = insn.address ∧ b = insn.next) ∨ (a = insn.next ∧ b = Recursive.pastSlot insn) ∨
+        (a = insn.next ∧ b ∈ insn.target.toList) := by
+  cases ht : insn.target <;>
+    simp [Recursive.flowEdges, Recursive.isDelayedConditional, h, hc, ha, ht]
+
+/-- A branch that annuls its slot goes through it only to the target; not taken, it skips the slot. The slot has no
+edge past itself, and that is the exact flow of a MIPS `BEQL`. -/
+theorem mem_flowEdges_annulled (d : Disassembler) (insn : Insn) (h : d.hasDelaySlot insn = true)
+    (hc : insn.flow = .conditionalJump) (ha : d.annulsSlot insn = true) (a b : Nat) :
+    (a, b) ∈ Recursive.flowEdges d insn ↔
+      (a = insn.address ∧ b = insn.next) ∨ (a = insn.address ∧ b = Recursive.pastSlot insn) ∨
+        (a = insn.next ∧ b ∈ insn.target.toList) := by
+  cases ht : insn.target <;>
+    simp [Recursive.flowEdges, Recursive.isDelayedConditional, h, hc, ha, ht]
+
+/-- `BEQL` with a target: exactly the edge into the slot, the one over it, and the one from the slot to the target. -/
+theorem flowEdges_annulled_exact (d : Disassembler) (insn : Insn) (target : Nat) (h : d.hasDelaySlot insn = true)
+    (hc : insn.flow = .conditionalJump) (ha : d.annulsSlot insn = true) (ht : insn.target = some target) :
+    Recursive.flowEdges d insn =
+      [(insn.address, insn.next), (insn.address, insn.next + insn.size), (insn.next, target)] := by
+  simp [Recursive.flowEdges, Recursive.isDelayedConditional, Recursive.pastSlot, h, hc, ha, ht]
+
+/-- `BEQ` with a target: exactly the edge into the slot and its two ways out. -/
+theorem flowEdges_delayed_conditional_exact (d : Disassembler) (insn : Insn) (target : Nat)
+    (h : d.hasDelaySlot insn = true) (hc : insn.flow = .conditionalJump) (ha : d.annulsSlot insn = false)
+    (ht : insn.target = some target) :
+    Recursive.flowEdges d insn =
+      [(insn.address, insn.next), (insn.next, insn.next + insn.size), (insn.next, target)] := by
+  simp [Recursive.flowEdges, Recursive.isDelayedConditional, Recursive.pastSlot, h, hc, ha, ht]
+
+/-- A delayed conditional branch goes on past its slot or to its target, and never scans its slot as a fall-through. -/
+theorem nextAddresses_delayed_conditional (d : Disassembler) (insn : Insn) (h : d.hasDelaySlot insn = true)
+    (hc : insn.flow = .conditionalJump) :
+    Recursive.nextAddresses d insn = Recursive.pastSlot insn :: insn.target.toList := by
+  simp [Recursive.nextAddresses, Recursive.isDelayedConditional, h, hc]
+
+theorem nextAddresses_delayed (d : Disassembler) (insn : Insn) (h : d.hasDelaySlot insn = true)
+    (hc : insn.flow ≠ .conditionalJump) :
+    Recursive.nextAddresses d insn = insn.successors := by
+  simp [Recursive.nextAddresses, Recursive.isDelayedConditional, Recursive.isAnnulledCall, hc, h]
+
+theorem nextAddresses_length_le_two (d : Disassembler) (insn : Insn) :
+    (Recursive.nextAddresses d insn).length ≤ 2 := by
+  unfold Recursive.nextAddresses
+  split
+  · cases insn.target <;> simp
+  · split
+    · simp
+    · exact successors_length_le_two insn
+
+/-- Every place a scan goes on to from an instruction is reached along its edges, from the instruction. -/
+private theorem nextAddresses_reached {es : List (Nat × Nat)} {entry : Nat} (d : Disassembler) (insn : Insn)
+    (hra : EdgeReach es entry insn.address) (hflow : ∀ e ∈ Recursive.flowEdges d insn, e ∈ es)
+    (b : Nat) (hb : b ∈ Recursive.nextAddresses d insn) : EdgeReach es entry b := by
+  cases hdelay : d.hasDelaySlot insn with
+  | false =>
+    cases hannul : Recursive.isAnnulledCall d insn with
+    | false =>
+      rw [nextAddresses_plain d insn hdelay hannul] at hb
+      exact .step hra (hflow _ ((mem_flowEdges_plain d insn hdelay hannul _ _).2 ⟨rfl, hb⟩))
+    | true =>
+      rw [nextAddresses_annulled_call d insn hannul] at hb
+      rw [flowEdges_annulled_call d insn hannul] at hflow
+      simp only [List.mem_cons, List.not_mem_nil, or_false] at hb
+      rcases hb with rfl | rfl
+      · exact .step hra (hflow _ (by simp))
+      · exact .step hra (hflow _ (by simp))
+  | true =>
+    by_cases hc : insn.flow = .conditionalJump
+    · rw [nextAddresses_delayed_conditional d insn hdelay hc] at hb
+      cases han : d.annulsSlot insn with
+      | false =>
+        have mem := mem_flowEdges_delayed_conditional d insn hdelay hc han
+        have slot : EdgeReach es entry insn.next := .step hra (hflow _ ((mem _ _).2 (.inl ⟨rfl, rfl⟩)))
+        rcases List.mem_cons.1 hb with rfl | hb
+        · exact .step slot (hflow _ ((mem _ _).2 (.inr (.inl ⟨rfl, rfl⟩))))
+        · exact .step slot (hflow _ ((mem _ _).2 (.inr (.inr ⟨rfl, hb⟩))))
+      | true =>
+        have mem := mem_flowEdges_annulled d insn hdelay hc han
+        rcases List.mem_cons.1 hb with rfl | hb
+        · exact .step hra (hflow _ ((mem _ _).2 (.inr (.inl ⟨rfl, rfl⟩))))
+        · exact .step (.step hra (hflow _ ((mem _ _).2 (.inl ⟨rfl, rfl⟩))))
+            (hflow _ ((mem _ _).2 (.inr (.inr ⟨rfl, hb⟩))))
+    · rw [nextAddresses_delayed d insn hdelay hc] at hb
+      have mem := mem_flowEdges_delayed d insn hdelay hc
+      exact .step (.step hra (hflow _ ((mem _ _).2 (.inl ⟨rfl, rfl⟩))))
+        (hflow _ ((mem _ _).2 (.inr ⟨rfl, hb⟩)))
+
+/-- The edge into the slot of any delayed instruction. -/
+private theorem slot_edge (d : Disassembler) (insn : Insn) (h : d.hasDelaySlot insn = true) :
+    (insn.address, insn.next) ∈ Recursive.flowEdges d insn := by
+  simp only [Recursive.flowEdges, h, ite_true]
+  split
+  · split <;> simp
+  · simp
 
 /-- `J` with a delay slot: the branch goes to the slot and the slot to the target, nothing else. -/
 theorem flowEdges_delayed_jump (d : Disassembler) (insn : Insn) (target : Nat)
     (h : d.hasDelaySlot insn = true) (hf : insn.flow = .jump) (ht : insn.target = some target) :
     Recursive.flowEdges d insn = [(insn.address, insn.next), (insn.next, target)] := by
-  simp [Recursive.flowEdges, h, Insn.successors, hf, ht]
+  simp [Recursive.flowEdges, Recursive.isDelayedConditional, h, Insn.successors, hf, ht]
 
 private theorem dropWhile_nil_all (work visited : List Nat)
     (h : work.dropWhile (fun x => decide (x ∈ visited)) = []) : ∀ a ∈ work, a ∈ visited := by
@@ -785,17 +1216,6 @@ private theorem dropWhile_cons_spec (work visited : List Nat) (a : Nat) (rest : 
       rcases List.mem_cons.1 hx with rfl | hx'
       · exact .inr (.inl rfl)
       · exact .inr (.inr hx')
-
-/-- Reachability along a set of recovered CFG edges. -/
-inductive EdgeReach (edges : List (Nat × Nat)) (entry : Nat) : Nat → Prop
-  | entry : EdgeReach edges entry entry
-  | step {a b} : EdgeReach edges entry a → (a, b) ∈ edges → EdgeReach edges entry b
-
-theorem EdgeReach.mono {e e' : List (Nat × Nat)} {entry a} (hsub : ∀ x ∈ e, x ∈ e')
-    (h : EdgeReach e entry a) : EdgeReach e' entry a := by
-  induction h with
-  | entry => exact .entry
-  | step _ he ih => exact .step ih (hsub _ he)
 
 /-- What holds of a finished recursive scan. -/
 structure ScanOk (d : Disassembler) (data : ByteArray) (entry : Nat)
@@ -905,16 +1325,10 @@ private theorem scanAux_spec (d : Disassembler) (data : ByteArray) (entry fuel :
             rcases List.mem_append.1 he with he | he
             · exact hinv.ok.edges e he
             · exact ⟨insn, hsize, hr', he⟩
-          have hwork : ∀ a ∈ insn.successors ++ rest, EdgeReach es' entry a := by
+          have hwork : ∀ a ∈ (Recursive.nextAddresses d insn) ++ rest, EdgeReach es' entry a := by
             intro b hb
             rcases List.mem_append.1 hb with hb | hb
-            · cases hdelay : d.hasDelaySlot insn with
-              | false =>
-                exact .step hra' (hflow _ ((mem_flowEdges_plain d insn hdelay _ _).2 ⟨haddr.symm, hb⟩))
-              | true =>
-                exact .step (.step hra'
-                    (hflow _ ((mem_flowEdges_delayed d insn hdelay _ _).2 (.inl ⟨haddr.symm, rfl⟩))))
-                  (hflow _ ((mem_flowEdges_delayed d insn hdelay _ _).2 (.inr ⟨rfl, hb⟩)))
+            · exact nextAddresses_reached d insn (haddr.symm ▸ hra') hflow b hb
             · exact (hrw b hb).mono hsub'
           have hadded : ∀ x ∈ Recursive.addInsn insn is, EdgeReach es' entry x.address := by
             intro x hx
@@ -933,7 +1347,7 @@ private theorem scanAux_spec (d : Disassembler) (data : ByteArray) (entry fuel :
             refine Holds.bind (decodeSlot_spec d data insn.next _ errs) fun out hout _ => ?_
             obtain ⟨_, _, hmem', hnd, hcount⟩ := hout
             intro s result s' he
-            have ⟨h1, h2⟩ := ih (insn.successors ++ rest) (address :: visited) out.1 es' out.2
+            have ⟨h1, h2⟩ := ih ((Recursive.nextAddresses d insn) ++ rest) (address :: visited) out.1 es' out.2
               { ok :=
                   { nodup := hnd (addInsn_nodup _ _ hinv.ok.nodup)
                     decoded := by
@@ -947,12 +1361,11 @@ private theorem scanAux_spec (d : Disassembler) (data : ByteArray) (entry fuel :
                       rcases hmem' x hx with h | ⟨h1, _, _⟩
                       · exact hadded x h
                       · rw [h1]
-                        exact .step hra' (hflow _
-                          ((mem_flowEdges_delayed d insn hdelay _ _).2 (.inl ⟨haddr.symm, rfl⟩))) }
+                        exact .step hra' (haddr ▸ hflow _ (slot_edge d insn hdelay)) }
                 reachWork := hwork } s result s' he
             exact ⟨h1, by omega⟩
           · intro s result s' he
-            have ⟨h1, h2⟩ := ih (insn.successors ++ rest) (address :: visited)
+            have ⟨h1, h2⟩ := ih ((Recursive.nextAddresses d insn) ++ rest) (address :: visited)
               (Recursive.addInsn insn is) es' errs
               { ok :=
                   { nodup := addInsn_nodup _ _ hinv.ok.nodup
@@ -969,6 +1382,7 @@ theorem scan_sound (d : Disassembler) (data : ByteArray) (entry : Nat) :
     Holds (Recursive.scan d data entry) fun result =>
       result.entry = entry ∧ ScanOk d data entry result.instructions result.edges ∧
         result.instructions.length + result.errors.length ≤ 6 * data.size + 3 := by
+  rw [scan_eq]
   refine Holds.bind (Q := fun out => ScanOk d data entry out.1 out.2.1 ∧
       out.1.length + out.2.2.length ≤ [].length + [].length + 2 * (3 * data.size + 1) + 1)
     (scanAux_spec d data entry _ [entry] [] [] [] []
@@ -1010,7 +1424,7 @@ private theorem scanAux_noThrow (d : Disassembler) (data : ByteArray)
 /-- Termination of the scan for a decoder that does not throw. -/
 theorem scan_noThrow (d : Disassembler) (data : ByteArray) (entry : Nat)
     (hd : ∀ address, NoThrow (d.decode address data)) : NoThrow (Recursive.scan d data entry) :=
-  NoThrow.bind (scanAux_noThrow d data hd _ _ _ _ _ _) fun _ _ => NoThrow.pure _
+  scan_eq d data entry ▸ NoThrow.bind (scanAux_noThrow d data hd _ _ _ _ _ _) fun _ _ => NoThrow.pure _
 
 /-! ### Completeness -/
 
@@ -1019,9 +1433,9 @@ def Valid (f : Nat → Except String Insn) (address : Nat) (insn : Insn) : Prop 
   f address = .ok insn ∧ insn.address = address ∧ insn.size ≠ 0
 
 /-- Reachability under a deterministic decoder. -/
-inductive Reach (f : Nat → Except String Insn) (entry : Nat) : Nat → Prop
-  | entry : Reach f entry entry
-  | step {a b insn} : Reach f entry a → Valid f a insn → b ∈ insn.successors → Reach f entry b
+inductive Reach (d : Disassembler) (f : Nat → Except String Insn) (entry : Nat) : Nat → Prop
+  | entry : Reach d f entry entry
+  | step {a b insn} : Reach d f entry a → Valid f a insn → b ∈ Recursive.nextAddresses d insn → Reach d f entry b
 
 /-- A delay slot is accounted for: its instruction is listed or its decode error is reported. -/
 def SlotCovered (f : Nat → Except String Insn) (is : List Insn) (errs : List String) (slot : Nat) :
@@ -1081,7 +1495,7 @@ private theorem countP_cons_lt (S visited : List Nat) (a : Nat) (ha : a ∈ S) (
 private abbrev Closure (d : Disassembler) (f : Nat → Except String Insn) (is : List Insn)
     (es : List (Nat × Nat)) (errs : List String) (visited work : List Nat) : Prop :=
   ∀ a ∈ visited, Accounted d f is es errs a ∧
-    ∀ insn, Valid f a insn → ∀ b ∈ insn.successors, b ∈ visited ∨ b ∈ work
+    ∀ insn, Valid f a insn → ∀ b ∈ (Recursive.nextAddresses d insn), b ∈ visited ∨ b ∈ work
 
 /-- A scan that visited all it had to: the visited addresses contain the initial ones and are closed
 under successors, and each of them is accounted for in the output. -/
@@ -1163,7 +1577,7 @@ private theorem decodeSlot_covers (d : Disassembler) (data : ByteArray)
 
 private theorem scanAux_complete (d : Disassembler) (data : ByteArray)
     (f : Nat → Except String Insn) (hf : ∀ a r, Gives d data a r → r = f a) (S : List Nat)
-    (hS : ∀ a ∈ S, ∀ insn, Valid f a insn → ∀ b ∈ insn.successors, b ∈ S ∨ S = [])
+    (hS : ∀ a ∈ S, ∀ insn, Valid f a insn → ∀ b ∈ (Recursive.nextAddresses d insn), b ∈ S ∨ S = [])
     (fuel : Nat) (work visited : List Nat) (is : List Insn) (es : List (Nat × Nat))
     (errs : List String) (hwork : S ≠ [] → ∀ a ∈ work, a ∈ S)
     (hvalid : ∀ x ∈ is, Valid f x.address x)
@@ -1220,7 +1634,7 @@ private theorem scanAux_complete (d : Disassembler) (data : ByteArray)
           {rest' : List Nat},
           (∀ x ∈ is, x ∈ is') → (∀ x ∈ es, x ∈ es') → (∀ e ∈ errs, e ∈ errs') →
           (∀ x ∈ rest, x ∈ rest') → ∀ x ∈ visited, Accounted d f is' es' errs' x ∧
-            ∀ i, Valid f x i → ∀ b ∈ i.successors, b ∈ a :: visited ∨ b ∈ rest' := by
+            ∀ i, Valid f x i → ∀ b ∈ (Recursive.nextAddresses d i), b ∈ a :: visited ∨ b ∈ rest' := by
         intro is' es' errs' rest' h1 h1' h2 h3 x hx
         refine ⟨(hinv x hx).1.mono h1 h1' h2, fun i hi b hb => ?_⟩
         rcases (hinv x hx).2 i hi b hb with h | h
@@ -1288,7 +1702,7 @@ private theorem scanAux_complete (d : Disassembler) (data : ByteArray)
             · exact hvalid x h
             · exact hg.1 ▸ hvi
           let es' := es ++ Recursive.flowEdges d insn
-          have hwork' : S ≠ [] → ∀ x ∈ insn.successors ++ rest, x ∈ S := by
+          have hwork' : S ≠ [] → ∀ x ∈ (Recursive.nextAddresses d insn) ++ rest, x ∈ S := by
             intro hne x hx
             rcases List.mem_append.1 hx with hx | hx
             · exact (hS a (hwork hne a hmem) insn hvi x hx).resolve_right hne
@@ -1297,7 +1711,7 @@ private theorem scanAux_complete (d : Disassembler) (data : ByteArray)
           have closure : ∀ (is' : List Insn) (errs' : List String),
               (∀ x ∈ Recursive.addInsn insn is, x ∈ is') → (∀ e ∈ errs, e ∈ errs') →
               (d.hasDelaySlot insn = true → SlotCovered f is' errs' insn.next) →
-              Closure d f is' es' errs' (a :: visited) (insn.successors ++ rest) := by
+              Closure d f is' es' errs' (a :: visited) ((Recursive.nextAddresses d insn) ++ rest) := by
             intro is' errs' h1 h2 h3 x hx
             rcases List.mem_cons.1 hx with rfl | hx'
             · refine ⟨⟨?_, ?_⟩, ?_⟩
@@ -1319,19 +1733,19 @@ private theorem scanAux_complete (d : Disassembler) (data : ByteArray)
           · refine Holds.bind (decodeSlot_covers d data f hf insn.next _ errs hvalid') fun out hout _ => ?_
             obtain ⟨h1, h2, h3, h4⟩ := hout
             intro s result s' he
-            exact lift (insn.successors ++ rest) result (fun _ h => List.mem_append_right _ h)
-              (ih (insn.successors ++ rest) (a :: visited) out.1 es' out.2 hwork' h3
+            exact lift ((Recursive.nextAddresses d insn) ++ rest) result (fun _ h => List.mem_append_right _ h)
+              (ih ((Recursive.nextAddresses d insn) ++ rest) (a :: visited) out.1 es' out.2 hwork' h3
                 (closure _ _ h1 h2 fun _ => h4) s result s' he)
           · rename_i hdelay
             intro s result s' he
-            exact lift (insn.successors ++ rest) result (fun _ h => List.mem_append_right _ h)
-              (ih (insn.successors ++ rest) (a :: visited) _ es' errs hwork' hvalid'
+            exact lift ((Recursive.nextAddresses d insn) ++ rest) result (fun _ h => List.mem_append_right _ h)
+              (ih ((Recursive.nextAddresses d insn) ++ rest) (a :: visited) _ es' errs hwork' hvalid'
                 (closure _ _ (fun _ h => h) (fun _ h => h) fun h => absurd h hdelay) s result s' he)
 
 private theorem finished_reach {d : Disassembler} {f : Nat → Except String Insn} {entry : Nat}
     {is : List Insn} {es : List (Nat × Nat)} {errs : List String} {v : List Nat}
     (hw : ∀ a ∈ [entry], a ∈ v) (hc : Closure d f is es errs v []) (a : Nat)
-    (ha : Reach f entry a) : a ∈ v := by
+    (ha : Reach d f entry a) : a ∈ v := by
   induction ha with
   | entry => exact hw _ (by simp)
   | step _ hv hb ih =>
@@ -1346,7 +1760,8 @@ theorem scan_no_silent_loss (d : Disassembler) (data : ByteArray) (entry : Nat)
     (f : Nat → Except String Insn) (hf : ∀ a r, Gives d data a r → r = f a) :
     Holds (Recursive.scan d data entry) fun result =>
       Recursive.outOfFuel ∈ result.errors ∨
-        ∀ a, Reach f entry a → Accounted d f result.instructions result.edges result.errors a := by
+        ∀ a, Reach d f entry a → Accounted d f result.instructions result.edges result.errors a := by
+  rw [scan_eq]
   refine Holds.bind (scanAux_complete d data f hf [] (by simp) _ [entry] [] [] [] []
     (by simp) (by simp) (fun _ h => by cases h)) ?_
   rintro ⟨is, es, errs⟩ ⟨_, h⟩ _
@@ -1361,10 +1776,11 @@ reached again cost nothing. -/
 theorem scan_complete (d : Disassembler) (data : ByteArray) (entry : Nat)
     (f : Nat → Except String Insn) (hf : ∀ a r, Gives d data a r → r = f a) (S : List Nat)
     (hentry : entry ∈ S)
-    (hS : ∀ a ∈ S, ∀ insn, Valid f a insn → ∀ b ∈ insn.successors, b ∈ S)
+    (hS : ∀ a ∈ S, ∀ insn, Valid f a insn → ∀ b ∈ (Recursive.nextAddresses d insn), b ∈ S)
     (hfuel : S.length ≤ 3 * data.size + 1) :
     Holds (Recursive.scan d data entry) fun result =>
-      ∀ a, Reach f entry a → Accounted d f result.instructions result.edges result.errors a := by
+      ∀ a, Reach d f entry a → Accounted d f result.instructions result.edges result.errors a := by
+  rw [scan_eq]
   have hne : S ≠ [] := fun h => by simp [h] at hentry
   have hcount : S.countP (fun x => decide (x ∉ ([] : List Nat))) ≤ S.length := List.countP_le_length
   refine Holds.bind (scanAux_complete d data f hf S (fun a ha i hi b hb => .inl (hS a ha i hi b hb))
@@ -1381,20 +1797,20 @@ theorem scan_complete_of_in_range (d : Disassembler) (data : ByteArray) (entry b
     (f : Nat → Except String Insn) (hf : ∀ a r, Gives d data a r → r = f a)
     (hrange : ∀ a insn, Valid f a insn → base ≤ a ∧ a < base + data.size) :
     Holds (Recursive.scan d data entry) fun result =>
-      ∀ a, Reach f entry a → Accounted d f result.instructions result.edges result.errors a := by
+      ∀ a, Reach d f entry a → Accounted d f result.instructions result.edges result.errors a := by
   let region := (List.range data.size).map (base + ·)
   let successorsOf (a : Nat) : List Nat :=
     match f a with
-    | .ok insn => insn.successors
+    | .ok insn => (Recursive.nextAddresses d insn)
     | .error _ => []
   let S := entry :: (region ++ region.flatMap successorsOf)
   have hsucc : ∀ a, (successorsOf a).length ≤ 2 := by
     intro a
     show (match f a with
-      | .ok insn => insn.successors
+      | .ok insn => (Recursive.nextAddresses d insn)
       | .error _ => []).length ≤ 2
     split
-    · exact successors_length_le_two _
+    · exact nextAddresses_length_le_two d _
     · simp
   have hflat : ∀ l : List Nat, (l.flatMap successorsOf).length ≤ 2 * l.length := by
     intro l
@@ -1411,7 +1827,7 @@ theorem scan_complete_of_in_range (d : Disassembler) (data : ByteArray) (entry b
     have har : a ∈ region := List.mem_map.2 ⟨a - base, List.mem_range.2 (by omega), by omega⟩
     refine List.mem_cons_of_mem _ (List.mem_append_right _ (List.mem_flatMap.2 ⟨a, har, ?_⟩))
     show b ∈ (match f a with
-      | .ok insn => insn.successors
+      | .ok insn => (Recursive.nextAddresses d insn)
       | .error _ => [])
     rw [hv.1]
     exact hb
@@ -1425,14 +1841,15 @@ theorem scan_covers_delay_slots (d : Disassembler) (data : ByteArray) (entry bas
     (f : Nat → Except String Insn) (hf : ∀ a r, Gives d data a r → r = f a)
     (hrange : ∀ a insn, Valid f a insn → base ≤ a ∧ a < base + data.size) :
     Holds (Recursive.scan d data entry) fun result =>
-      ∀ a insn, Reach f entry a → Valid f a insn →
+      ∀ a insn, Reach d f entry a → Valid f a insn →
         (d.hasDelaySlot insn = true ∨ insn.fallsThrough = true) →
         SlotCovered f result.instructions result.errors insn.next := by
   intro s result s' he a insn ha hv hor
   have hall := scan_complete_of_in_range d data entry base f hf hrange s result s' he
-  rcases hor with hd | hft
+  by_cases hd : d.hasDelaySlot insn = true
   · exact ((hall a ha).1 insn hv).2.2 hd
-  · have hnext := hall _ (Reach.step ha hv (next_mem_successors_of_fallsThrough insn hft))
+  · have hft := hor.resolve_left hd
+    have hnext := hall _ (Reach.step ha hv (next_mem_nextAddresses d insn (by simpa using hd) hft))
     exact ⟨fun i hi => ((hnext).1 i hi).1, hnext.2⟩
 
 end Bap.Proofs.Disasm

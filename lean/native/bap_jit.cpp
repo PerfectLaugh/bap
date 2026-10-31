@@ -480,7 +480,8 @@ extern "C" lean_obj_res bap_jit_compile(lean_obj_arg ops, lean_obj_arg) {
           llvm::Value *quotient = binary == 16 ? builder.CreateSDiv(left, divisor)
                                                : builder.CreateSRem(left, divisor);
           result = builder.CreateSelect(overflow, binary == 16 ? left : zero, quotient);
-          result = builder.CreateSelect(isZero, binary == 16 ? ones : left, result);
+          llvm::Value *byZero = builder.CreateSelect(builder.CreateICmpSLT(left, zero), one, ones);
+          result = builder.CreateSelect(isZero, binary == 16 ? byZero : left, result);
           break;
         }
         }

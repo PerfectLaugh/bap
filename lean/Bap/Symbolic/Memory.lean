@@ -30,14 +30,14 @@ def baseOffset : Expr → Expr × Nat
     else (e, 0)
   | e => (e, 0)
 
-/-- Two addresses that denote different locations under every assignment: different constants, or different
-offsets from one base. -/
+/-- Two addresses that denote different locations under every assignment: different widths, different constants,
+or different offsets from one base. Comparing addresses of different widths would not be well sorted. -/
 def definitelyDistinct : Expr → Expr → Bool
   | @Expr.const width value, @Expr.const width' value' => !(width == width' && value.toNat == value'.toNat)
   | left, right =>
     let (leftBase, leftOffset) := baseOffset left
     let (rightBase, rightOffset) := baseOffset right
-    left.width == right.width && leftOffset != rightOffset && Expr.structuralEq leftBase rightBase
+    left.width != right.width || (leftOffset != rightOffset && Expr.structuralEq leftBase rightBase)
 
 /-- Reads an address through a list of writes: the newest write whose address equals the read address
 provides the byte, so writes through addresses that are not known to differ guard it with an equality. -/
@@ -73,12 +73,16 @@ private def offsetAddress (address : Expr) (offset : Nat) : Expr :=
 private def byteAt (value : Expr) (offset : Nat) : Expr :=
   .extract (offset * 8 + 7) (offset * 8) value
 
-def read (memory : Memory) (address : Expr) (endian : Endian) (size : Nat) : Expr :=
+/-- The bytes of a read, most significant first. -/
+def readBytes (memory : Memory) (address : Expr) (endian : Endian) (size : Nat) : List Expr :=
   let bytes := (List.range size).map fun offset => readByte memory (offsetAddress address offset)
-  let ordered := if endian = Bap.Endian.little then bytes.reverse else bytes
-  match ordered with
-  | [] => .const (BitVec.zero 0)
-  | first :: rest => rest.foldl (fun result byte => .concat result byte) first
+  if endian = Bap.Endian.little then bytes.reverse else bytes
+
+/-- The value of a read, which has `size` bytes: reading none has no value, as SMT-LIB has no empty sort. -/
+def read (memory : Memory) (address : Expr) (endian : Endian) (size : Nat) : Except String Expr :=
+  match readBytes memory address endian size with
+  | [] => .error "a load must have at least one byte"
+  | first :: rest => .ok (rest.foldl (fun result byte => .concat result byte) first)
 
 def write (memory : Memory) (address value : Expr) (endian : Endian) (size : Nat) : Memory :=
   (List.range size).foldl (init := memory) fun memory offset =>

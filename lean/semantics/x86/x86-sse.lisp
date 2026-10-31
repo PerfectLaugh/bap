@@ -8,6 +8,10 @@
 ;; The packed operations apply a function to each lane of the 128-bit
 ;; operands, the lanes are numbered from the least significant one.
 
+;; what an operation of a macro does when it does nothing, as AND has no
+;; first operand to complement
+(defun ident (x) x)
+
 (defmacro lanes8 (op x y)
   "(lanes8 OP X Y) applies OP to each of the 16 bytes of X and Y"
   (concat (op (extract 127 120 x) (extract 127 120 y))

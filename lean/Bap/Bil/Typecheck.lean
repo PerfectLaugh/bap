@@ -9,16 +9,22 @@ private def expectImm : Typ → Except String Nat
 private def expectSameType (left right : Typ) : Except String Unit :=
   if left = right then .ok () else .error s!"type mismatch: {repr left} and {repr right}"
 
+/-- Only types with bits have values: BIL has no size and SMT-LIB no sort for anything else. -/
+private def expectBits : Typ → Except String Typ
+  | .imm 0 => .error "a value must have at least one bit"
+  | .mem 0 _ | .mem _ 0 => .error "a memory must have addresses and cells of at least one bit"
+  | typ => .ok typ
+
 def inferExp : Exp → Except String Typ
-  | @Exp.int width _ => .ok (.imm width)
-  | .var var => .ok var.typ
+  | @Exp.int width _ => expectBits (.imm width)
+  | .var var => expectBits var.typ
   | .load memory address _ size => do
     match ← inferExp memory with
     | .mem addressWidth valueWidth =>
       if valueWidth = 8 then
         let actual ← expectImm (← inferExp address)
         if actual = addressWidth then
-          .ok (.imm (size * 8))
+          if size = 0 then .error "a load must have at least one byte" else .ok (.imm (size * 8))
         else
           .error "address width does not match memory"
       else
@@ -36,7 +42,14 @@ def inferExp : Exp → Except String Typ
           .error "address width does not match memory"
         else
           let valueWidth ← expectImm (← inferExp value)
-          if valueWidth = size * 8 then .ok memoryType else .error "stored value has the wrong width"
+          if valueWidth ≠ size * 8 then
+            .error "stored value has the wrong width"
+          else if size = 0 then
+            .error "a store must have at least one byte"
+          else if size > 2 ^ addressWidth then
+            .error "a store must not overlap itself"
+          else
+            .ok memoryType
     | typ => .error s!"expected memory, got {repr typ}"
   | .bin op left right => do
     let leftType ← inferExp left
@@ -87,7 +100,7 @@ def inferExp : Exp → Except String Typ
     let leftWidth ← expectImm (← inferExp left)
     let rightWidth ← expectImm (← inferExp right)
     .ok (.imm (leftWidth + rightWidth))
-  | .unknown _ typ => .ok typ
+  | .unknown _ typ => expectBits typ
 
 private def checkCondition (condition : Exp) : Except String Unit := do
   let width ← expectImm (← inferExp condition)

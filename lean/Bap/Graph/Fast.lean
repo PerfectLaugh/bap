@@ -1,0 +1,895 @@
+import Bap.Proofs.Graph
+import Std.Data.HashMap
+import Std.Data.HashSet
+import Lean.Elab.Command
+
+/-! Faster algorithms for graphs over `Nat`, proved to give the very lists of the definitions in
+`Bap.Graph.Basic`, which stay the specification: `Bap.IR.Cfg` makes the compiler use these. -/
+
+namespace Bap.Graph.Fast
+
+open Std
+
+open Lean Elab Command in
+/-- `open_private Mod in Ns : a b` names private declarations `Ns.a`, `Ns.b` of module `Mod`
+as `a`, `b` for the rest of the current scope. -/
+local elab "open_private " mod:ident " in " ns:ident " : " names:ident* : command => do
+  for name in names do
+    let target := (Name.mkNum (`_private ++ mod.getId) 0) ++ (ns.getId ++ name.getId)
+    unless (← getEnv).contains target do
+      throwErrorAt name "no private declaration {target}"
+    modifyScope fun scope =>
+      { scope with openDecls := .explicit name.getId target :: scope.openDecls }
+
+open_private Bap.Graph.Basic in Bap.Graph : closure closureStep frontierWalk
+
+/-! ### Tables -/
+
+/-- Looks up as `Assoc.get` does on the list. -/
+def assocTable {β : Type} (entries : List (Nat × β)) : HashMap Nat β :=
+  entries.foldr (fun entry table => table.insert entry.1 entry.2) {}
+
+theorem assocTable_get {β : Type} (entries : List (Nat × β)) (key : Nat) :
+    (assocTable entries).get? key = Assoc.get key entries := by
+  induction entries with
+  | nil => simp [assocTable, Assoc.get]
+  | cons head tail ih =>
+    simp only [assocTable, List.foldr_cons, HashMap.get?_eq_getElem?, HashMap.getElem?_insert] at ih ⊢
+    obtain ⟨k, v⟩ := head
+    by_cases hk : k = key
+    · subst hk
+      simp [Assoc.get]
+    · have h1 : (k == key) = false := by simpa using hk
+      have h2 : (key == k) = false := by simpa using fun e : key = k => hk e.symm
+      simp only [h1, Bool.false_eq_true, ite_false, ih]
+      simp [Assoc.get, List.lookup, h2]
+
+/-- All the targets of each source of `pairs`, in order. -/
+def groupBy (pairs : List (Nat × Nat)) : HashMap Nat (List Nat) :=
+  pairs.foldr (fun pair table => table.insert pair.1 (pair.2 :: table.getD pair.1 [])) {}
+
+theorem groupBy_getD (pairs : List (Nat × Nat)) (key : Nat) :
+    (groupBy pairs).getD key [] = (pairs.filter fun pair => pair.1 = key).map Prod.snd := by
+  induction pairs with
+  | nil => simp [groupBy]
+  | cons head tail ih =>
+    simp only [groupBy, List.foldr_cons, HashMap.getD_insert] at ih ⊢
+    obtain ⟨k, v⟩ := head
+    by_cases hk : k = key
+    · subst hk
+      simp [ih]
+    · have h1 : (k == key) = false := by simpa using hk
+      simp [h1, ih, hk]
+
+/-- `List.eraseDups` of what `seen` doesn't hold. -/
+def dedupFrom {α : Type} [BEq α] [Hashable α] (seen : HashSet α) : List α → List α
+  | [] => []
+  | x :: xs => if seen.contains x then dedupFrom seen xs else x :: dedupFrom (seen.insert x) xs
+
+theorem dedupFrom_eq {α : Type} [BEq α] [Hashable α] [LawfulBEq α] (seen : HashSet α) (l : List α) :
+    dedupFrom seen l = (l.filter fun x => !seen.contains x).eraseDups := by
+  induction l generalizing seen with
+  | nil => rfl
+  | cons x xs ih =>
+    simp only [dedupFrom, List.filter_cons]
+    by_cases hx : seen.contains x = true
+    · simp [hx, ih]
+    · simp only [hx, ite_false, Bool.false_eq_true, Bool.not_false, ite_true]
+      rw [List.eraseDups_cons, ih, List.filter_filter]
+      congr 2
+      apply List.filter_congr
+      intro y _
+      simp only [HashSet.contains_insert]
+      by_cases hy : y = x
+      · subst hy
+        simp [hx]
+      · have h1 : (x == y) = false := by simpa using fun e : x = y => hy e.symm
+        have h2 : (y == x) = false := by simpa using hy
+        simp [h1, h2]
+
+/-- `List.eraseDups`, in near-linear time. -/
+def dedup {α : Type} [BEq α] [Hashable α] (l : List α) : List α := dedupFrom {} l
+
+theorem dedup_eq {α : Type} [BEq α] [Hashable α] [LawfulBEq α] (l : List α) : dedup l = l.eraseDups := by
+  rw [dedup, dedupFrom_eq]
+  congr 1
+  apply List.filter_eq_self.2
+  simp
+
+/-- `predecessors`, from a table of them. -/
+def predecessorTable (graph : Graph Nat) : HashMap Nat (List Nat) :=
+  groupBy (graph.edges.map fun edge => (edge.2, edge.1))
+
+theorem predecessors_eq (graph : Graph Nat) (node : Nat) :
+    dedup ((predecessorTable graph).getD node []) = predecessors graph node := by
+  rw [dedup_eq, predecessorTable, groupBy_getD, predecessors, List.filter_map, List.map_map]
+  rfl
+
+/-- `successors`, from a table of them. -/
+def successorTable (graph : Graph Nat) : HashMap Nat (List Nat) := groupBy graph.edges
+
+theorem successors_eq (graph : Graph Nat) (node : Nat) :
+    dedup ((successorTable graph).getD node []) = successors graph node := by
+  rw [dedup_eq, successorTable, groupBy_getD, successors]
+
+/-! ### Reachability -/
+
+/-- A step of `closure`: `hits` holds the successors of what is `seen`, and `waiting` what isn't seen yet. -/
+private def reachLoop (graph : Graph Nat) (table : HashMap Nat (List Nat)) :
+    Nat → List Nat → List Nat → HashSet Nat → List Nat
+  | 0, seen, _, _ => seen
+  | fuel + 1, seen, waiting, hits =>
+    match waiting.filter hits.contains with
+    | [] => seen
+    | discovered =>
+      let hits' := discovered.foldl (fun hits node => hits.insertMany (table.getD node [])) hits
+      reachLoop graph table fuel (seen ++ discovered) (waiting.filter fun node => !hits.contains node) hits'
+
+private theorem mem_insertAll (table : HashMap Nat (List Nat)) (found : List Nat) (hits : HashSet Nat) (x : Nat) :
+    (found.foldl (fun hits node => hits.insertMany (table.getD node [])) hits).contains x = true ↔
+      hits.contains x = true ∨ ∃ node ∈ found, x ∈ table.getD node [] := by
+  induction found generalizing hits with
+  | nil => simp
+  | cons head tail ih =>
+    simp only [List.foldl_cons]
+    rw [ih, HashSet.contains_insertMany_list]
+    simp only [Bool.or_eq_true, List.contains_eq_mem, decide_eq_true_eq, List.mem_cons, exists_eq_or_imp]
+    grind
+
+private theorem mem_successorTable (graph : Graph Nat) (a b : Nat) :
+    b ∈ (successorTable graph).getD a [] ↔ (a, b) ∈ graph.edges := by
+  rw [successorTable, groupBy_getD]
+  simp only [List.mem_map, List.mem_filter, decide_eq_true_eq]
+  constructor
+  · rintro ⟨⟨u, v⟩, ⟨he, rfl⟩, rfl⟩
+    exact he
+  · intro h
+    exact ⟨(a, b), ⟨h, rfl⟩, rfl⟩
+
+private theorem reachLoop_eq (graph : Graph Nat) (fuel : Nat) (seen waiting : List Nat) (hits : HashSet Nat)
+    (hw : waiting = graph.nodes.filter fun node => node ∉ seen)
+    (hh : ∀ x, hits.contains x = true ↔ ∃ y ∈ seen, (y, x) ∈ graph.edges) :
+    reachLoop graph (successorTable graph) fuel seen waiting hits = closure graph fuel seen := by
+  induction fuel generalizing seen waiting hits with
+  | zero => rfl
+  | succ fuel ih =>
+    have hstep : closureStep graph seen = seen ++ waiting.filter hits.contains := by
+      simp only [closureStep]
+      congr 1
+      rw [hw, List.filter_filter]
+      apply List.filter_congr
+      intro x _
+      have := hh x
+      rw [Bool.eq_iff_iff]
+      simp only [decide_eq_true_eq, Bool.and_eq_true, List.any_eq_true, Bap.Proofs.Graph.mem_predecessors, and_comm (b := x ∉ seen)]
+      constructor
+      · rintro ⟨hx, y, he, hy⟩
+        exact ⟨hx, this.2 ⟨y, by simpa using hy, he⟩⟩
+      · rintro ⟨hx, hc⟩
+        obtain ⟨y, hy, he⟩ := this.1 hc
+        exact ⟨hx, y, he, by simpa using hy⟩
+    simp only [reachLoop, closure]
+    rw [hstep]
+    split
+    · rename_i hnil
+      simp [hnil]
+    · rename_i discovered hne
+      have hne' : ¬ (seen ++ waiting.filter hits.contains = seen) := by
+        intro he
+        apply hne
+        simpa using he
+      simp only [hne', ite_false]
+      apply ih
+      · rw [hw, List.filter_filter]
+        apply List.filter_congr
+        intro x hx
+        by_cases hs : x ∈ seen
+        · simp [hs]
+        · have hmem : x ∈ waiting := by
+            rw [hw]
+            exact List.mem_filter.2 ⟨hx, by simpa using hs⟩
+          have hd : x ∈ waiting.filter hits.contains ↔ hits.contains x = true := by simp [List.mem_filter, hmem]
+          cases hc : hits.contains x <;> simp [hs, hd, hc, hx]
+      · intro x
+        rw [mem_insertAll, hh x]
+        simp only [mem_successorTable, List.mem_append]
+        constructor
+        · rintro (⟨y, hy, he⟩ | ⟨y, hy, he⟩)
+          · exact ⟨y, .inl hy, he⟩
+          · exact ⟨y, .inr hy, he⟩
+        · rintro ⟨y, hy | hy, he⟩
+          · exact .inl ⟨y, hy, he⟩
+          · exact .inr ⟨y, hy, he⟩
+
+/-- `reachableFrom`. -/
+def reachableFrom (graph : Graph Nat) (seeds : List Nat) : List Nat :=
+  let nodes : HashSet Nat := HashSet.ofList graph.nodes
+  let start := dedup (seeds.filter nodes.contains)
+  let table := successorTable graph
+  let started : HashSet Nat := HashSet.ofList start
+  let hits := start.foldl (fun hits node => hits.insertMany (table.getD node [])) ({} : HashSet Nat)
+  reachLoop graph table (graph.nodes.length + 1) start (graph.nodes.filter fun node => !started.contains node) hits
+
+theorem reachableFrom_eq (graph : Graph Nat) (seeds : List Nat) :
+    reachableFrom graph seeds = Bap.Graph.reachableFrom graph seeds := by
+  have hstart : dedup (seeds.filter (HashSet.ofList graph.nodes).contains) = (seeds.filter fun node => node ∈ graph.nodes).eraseDups := by
+    rw [dedup_eq]
+    congr 1
+    apply List.filter_congr
+    intro x _
+    simp [HashSet.contains_ofList]
+  simp only [reachableFrom, Bap.Graph.reachableFrom]
+  rw [hstart]
+  apply reachLoop_eq
+  · apply List.filter_congr
+    intro x _
+    simp [HashSet.contains_ofList]
+  · intro x
+    rw [mem_insertAll]
+    simp [mem_successorTable]
+
+/-- `reachable`. -/
+def reachable (graph : Graph Nat) (start : Nat) : List Nat := reachableFrom graph [start]
+
+theorem reachable_eq (graph : Graph Nat) (start : Nat) : reachable graph start = Bap.Graph.reachable graph start :=
+  reachableFrom_eq graph [start]
+
+/-! ### Dominators -/
+
+private abbrev Sorted (l : List Nat) : Prop := l.Pairwise (· < ·)
+
+/-- The intersection of two ascending lists. -/
+private def inter : List Nat → List Nat → List Nat
+  | [], _ => []
+  | _, [] => []
+  | a :: as, b :: bs =>
+    if a < b then inter as (b :: bs)
+    else if b < a then inter (a :: as) bs
+    else a :: inter as bs
+termination_by left right => left.length + right.length
+
+private theorem mem_inter_left {a b : List Nat} {x : Nat} (h : x ∈ inter a b) : x ∈ a ∧ x ∈ b := by
+  induction a, b using inter.induct with
+  | case1 => simp [inter] at h
+  | case2 => simp [inter] at h
+  | case3 a as b bs hlt ih =>
+    simp only [inter, hlt, ite_true] at h
+    obtain ⟨h1, h2⟩ := ih h
+    exact ⟨List.mem_cons_of_mem _ h1, h2⟩
+  | case4 a as b bs hlt hgt ih =>
+    simp only [inter, hlt, ite_false, hgt, ite_true] at h
+    obtain ⟨h1, h2⟩ := ih h
+    exact ⟨h1, List.mem_cons_of_mem _ h2⟩
+  | case5 a as b bs hlt hgt ih =>
+    simp only [inter, hlt, ite_false, hgt, List.mem_cons] at h
+    have hab : a = b := by omega
+    subst hab
+    rcases h with rfl | h
+    · simp
+    · obtain ⟨h1, h2⟩ := ih h
+      exact ⟨List.mem_cons_of_mem _ h1, List.mem_cons_of_mem _ h2⟩
+
+private theorem inter_sorted {a b : List Nat} (ha : Sorted a) : Sorted (inter a b) := by
+  induction a, b using inter.induct with
+  | case1 => simp [inter]
+  | case2 => simp [inter]
+  | case3 a as b bs hlt ih =>
+    simp only [inter, hlt, ite_true]
+    exact ih (List.pairwise_cons.1 ha).2
+  | case4 a as b bs hlt hgt ih =>
+    simp only [inter, hlt, ite_false, hgt, ite_true]
+    exact ih ha
+  | case5 a as b bs hlt hgt ih =>
+    simp only [inter, hlt, ite_false, hgt]
+    obtain ⟨h1, h2⟩ := List.pairwise_cons.1 ha
+    exact List.pairwise_cons.2 ⟨fun y hy => h1 y (mem_inter_left hy).1, ih h2⟩
+
+private theorem mem_inter_right {a b : List Nat} {x : Nat} (ha : Sorted a) (hb : Sorted b) (hxa : x ∈ a) (hxb : x ∈ b) :
+    x ∈ inter a b := by
+  induction a, b using inter.induct with
+  | case1 => simp at hxa
+  | case2 => simp at hxb
+  | case3 a as b bs hlt ih =>
+    simp only [inter, hlt, ite_true]
+    obtain ⟨h1, h2⟩ := List.pairwise_cons.1 ha
+    obtain ⟨h3, _⟩ := List.pairwise_cons.1 hb
+    refine ih h2 hb ?_ hxb
+    rcases List.mem_cons.1 hxa with rfl | h
+    · rcases List.mem_cons.1 hxb with rfl | h'
+      · omega
+      · have := h3 _ h'
+        omega
+    · exact h
+  | case4 a as b bs hlt hgt ih =>
+    simp only [inter, hlt, ite_false, hgt, ite_true]
+    obtain ⟨h1, h2⟩ := List.pairwise_cons.1 hb
+    obtain ⟨h3, _⟩ := List.pairwise_cons.1 ha
+    refine ih ha h2 hxa ?_
+    rcases List.mem_cons.1 hxb with rfl | h
+    · rcases List.mem_cons.1 hxa with rfl | h'
+      · omega
+      · have := h3 _ h'
+        omega
+    · exact h
+  | case5 a as b bs hlt hgt ih =>
+    simp only [inter, hlt, ite_false, hgt, List.mem_cons]
+    have hab : a = b := by omega
+    subst hab
+    obtain ⟨h1, h2⟩ := List.pairwise_cons.1 ha
+    obtain ⟨_, h4⟩ := List.pairwise_cons.1 hb
+    rcases List.mem_cons.1 hxa with rfl | h
+    · exact .inl rfl
+    · rcases List.mem_cons.1 hxb with rfl | h'
+      · exact .inl rfl
+      · exact .inr (ih h2 h4 h h')
+
+private def insertSorted (x : Nat) : List Nat → List Nat
+  | [] => [x]
+  | a :: as => if x < a then x :: a :: as else if a < x then a :: insertSorted x as else a :: as
+
+private theorem mem_insertSorted (x y : Nat) (l : List Nat) : y ∈ insertSorted x l ↔ y = x ∨ y ∈ l := by
+  induction l with
+  | nil => simp [insertSorted]
+  | cons a as ih =>
+    simp only [insertSorted]
+    split
+    · simp
+    · split
+      · simp only [List.mem_cons, ih]
+        grind
+      · have : x = a := by omega
+        subst this
+        simp
+
+private theorem insertSorted_sorted (x : Nat) {l : List Nat} (h : Sorted l) : Sorted (insertSorted x l) := by
+  induction l with
+  | nil => simp [insertSorted]
+  | cons a as ih =>
+    obtain ⟨h1, h2⟩ := List.pairwise_cons.1 h
+    simp only [insertSorted]
+    split
+    · rename_i hlt
+      refine List.pairwise_cons.2 ⟨fun y hy => ?_, h⟩
+      rcases List.mem_cons.1 hy with rfl | hy
+      · exact hlt
+      · have := h1 y hy
+        omega
+    · split
+      · rename_i _ hgt
+        refine List.pairwise_cons.2 ⟨fun y hy => ?_, ih h2⟩
+        rcases (mem_insertSorted _ _ _).1 hy with rfl | hy
+        · exact hgt
+        · exact h1 y hy
+      · exact h
+
+/-- The positions of a list, from `index` on. -/
+private def posTable : Nat → List Nat → HashMap Nat Nat → HashMap Nat Nat
+  | _, [], table => table
+  | index, x :: xs, table => posTable (index + 1) xs (table.insert x index)
+
+private theorem posTable_get {index : Nat} {l : List Nat} {table : HashMap Nat Nat} {y : Nat} (hy : y ∉ l) :
+    (posTable index l table).get? y = table.get? y := by
+  induction l generalizing index table with
+  | nil => rfl
+  | cons x xs ih =>
+    simp only [List.mem_cons, not_or] at hy
+    simp only [posTable]
+    rw [ih hy.2]
+    simp only [HashMap.get?_eq_getElem?, HashMap.getElem?_insert]
+    have : (x == y) = false := by simpa using fun e : x = y => hy.1 e.symm
+    simp [this]
+
+/-- Where an element is in a list without repeats. -/
+private theorem posTable_at {l : List Nat} (hl : l.Nodup) (index : Nat) (table : HashMap Nat Nat) (k : Nat) (hk : k < l.length) :
+    (posTable index l table).getD l[k] 0 = index + k := by
+  induction l generalizing index table k with
+  | nil => simp at hk
+  | cons x xs ih =>
+    obtain ⟨hx, hxs⟩ := List.nodup_cons.1 hl
+    simp only [posTable]
+    cases k with
+    | zero =>
+      simp only [List.getElem_cons_zero, Nat.add_zero, HashMap.getD_eq_getD_getElem?]
+      have := posTable_get (index := index + 1) (table := table.insert x index) hx
+      simp only [HashMap.get?_eq_getElem?] at this
+      rw [this]
+      simp
+    | succ k =>
+      simp only [List.getElem_cons_succ]
+      rw [ih hxs (index + 1) _ k (by simpa using hk)]
+      omega
+
+/-- Reads the elements of `l`, whose positions start at `index`, at the ascending positions of `row`. -/
+private def select : Nat → List Nat → List Nat → List Nat
+  | _, [], _ => []
+  | _, _, [] => []
+  | index, x :: xs, r :: rs =>
+    if index = r then x :: select (index + 1) xs rs else select (index + 1) xs (r :: rs)
+
+private theorem select_eq (pos : Nat → Nat) {l : List Nat} {index : Nat} {row : List Nat} (hrow : Sorted row)
+    (hge : ∀ r ∈ row, index ≤ r) (hpos : ∀ (k : Nat) (hk : k < l.length), pos l[k] = index + k) :
+    select index l row = l.filter fun x => decide (pos x ∈ row) := by
+  induction l generalizing index row with
+  | nil => simp [select]
+  | cons x xs ih =>
+    have hx : pos x = index := hpos 0 (by simp)
+    have hrest : ∀ (k : Nat) (hk : k < xs.length), pos xs[k] = index + 1 + k := by
+      intro k hk
+      have := hpos (k + 1) (by simpa using hk)
+      simp only [List.getElem_cons_succ] at this
+      omega
+    have hxs : ∀ y ∈ xs, index < pos y := by
+      intro y hy
+      obtain ⟨k, hk, rfl⟩ := List.mem_iff_getElem.1 hy
+      have := hrest k hk
+      omega
+    cases row with
+    | nil =>
+      simp only [select, List.not_mem_nil, decide_false]
+      rw [List.filter_cons]
+      simp
+    | cons r rs =>
+      obtain ⟨h1, h2⟩ := List.pairwise_cons.1 hrow
+      have hr := hge r List.mem_cons_self
+      simp only [select, List.filter_cons, hx]
+      by_cases he : index = r
+      · subst he
+        simp only [↓reduceIte, List.mem_cons, true_or, decide_true]
+        rw [ih h2 (fun y hy => h1 y hy) hrest]
+        congr 1
+        apply List.filter_congr
+        intro y hy
+        have := hxs y hy
+        have hne : pos y ≠ index := by omega
+        simp [hne]
+      · have hgt : index < r := by omega
+        have hni : index ∉ r :: rs := by
+          intro hm
+          rcases List.mem_cons.1 hm with h | h
+          · exact he h
+          · have := h1 _ h
+            omega
+        simp only [he, ↓reduceIte, hni, decide_false, Bool.false_eq_true]
+        exact ih hrow (fun y hy => by
+          rcases List.mem_cons.1 hy with rfl | h
+          · exact hgt
+          · have := h1 _ h
+            omega) hrest
+
+/-- The dominators a block has from its predecessors so far: the ones not known yet don't restrict it. -/
+private def meet (table : HashMap Nat (List Nat)) (preds : List Nat) : Option (List Nat) :=
+  match preds.filterMap table.get? with
+  | [] => none
+  | first :: rest => some (rest.foldl inter first)
+
+/-- A pass of dominator sets over the nodes, each from the latest sets of its predecessors. -/
+private def domPass (pos : HashMap Nat Nat) (preds : HashMap Nat (List Nat)) (start : Nat) (nodes : List Nat)
+    (table : HashMap Nat (List Nat)) : HashMap Nat (List Nat) × Bool :=
+  nodes.foldl (init := (table, false)) fun state node =>
+    if node = start then state
+    else
+      match meet state.1 (preds.getD node []) with
+      | none => state
+      | some common =>
+        let row := insertSorted (pos.getD node 0) common
+        if state.1.get? node = some row then state else (state.1.insert node row, true)
+
+private def domLoop (pos : HashMap Nat Nat) (preds : HashMap Nat (List Nat)) (start : Nat) (nodes : List Nat) :
+    Nat → HashMap Nat (List Nat) → HashMap Nat (List Nat)
+  | 0, table => table
+  | fuel + 1, table =>
+    let (next, changed) := domPass pos preds start nodes table
+    if changed then domLoop pos preds start nodes fuel next else next
+
+/-- The sets are a fixpoint, with every predecessor taken into account. -/
+private def domCheck (pos : HashMap Nat Nat) (preds : HashMap Nat (List Nat)) (start : Nat) (nodes : List Nat)
+    (table : HashMap Nat (List Nat)) : Bool :=
+  nodes.all fun node =>
+    if node = start then table.get? node == some [pos.getD node 0]
+    else
+      (preds.getD node []).all (fun pred => !nodes.contains pred || table.contains pred) &&
+      match meet table (preds.getD node []) with
+      | none => false
+      | some common => table.get? node == some (insertSorted (pos.getD node 0) common)
+
+/-- The dominator sets, from nothing known but the start. -/
+private def domTable (pos : HashMap Nat Nat) (preds : HashMap Nat (List Nat)) (start : Nat) (nodes : List Nat) :
+    HashMap Nat (List Nat) :=
+  domLoop pos preds start nodes (nodes.length + 2)
+    (if nodes.contains start then HashMap.insert {} start [pos.getD start 0] else {})
+
+/-- `dominators`. Sets of positions in `reachable`, ascending, make the rows in that order. -/
+def dominators (graph : Graph Nat) (start : Nat) : List (Nat × List Nat) :=
+  let nodes := reachable graph start
+  let unique := dedup nodes
+  let pos := posTable 0 unique {}
+  let preds := predecessorTable graph
+  let table := domTable pos preds start unique
+  if domCheck pos preds start unique table then
+    nodes.map fun node =>
+      (node, if node = start then [start] else
+        node :: (select 0 unique ((table.get? node).getD [])).filter (· != node))
+  else
+    Bap.Graph.dominators graph start
+
+section DomProofs
+
+variable {graph : Graph Nat} {start : Nat}
+
+private theorem mem_predecessorTable (a b : Nat) : a ∈ (predecessorTable graph).getD b [] ↔ (a, b) ∈ graph.edges := by
+  rw [predecessorTable, groupBy_getD]
+  simp only [List.mem_map, List.mem_filter, decide_eq_true_eq]
+  constructor
+  · rintro ⟨_, ⟨⟨⟨u, v⟩, he, rfl⟩, rfl⟩, rfl⟩
+    exact he
+  · intro h
+    exact ⟨(b, a), ⟨⟨(a, b), h, rfl⟩, rfl⟩, rfl⟩
+
+private theorem mem_foldl_inter_left {rest : List (List Nat)} {first : List Nat} {x : Nat}
+    (h : x ∈ rest.foldl inter first) : x ∈ first ∧ ∀ v ∈ rest, x ∈ v := by
+  induction rest generalizing first with
+  | nil => simpa using h
+  | cons v vs ih =>
+    obtain ⟨h1, h2⟩ := ih h
+    obtain ⟨h3, h4⟩ := mem_inter_left h1
+    exact ⟨h3, fun w hw => by
+      rcases List.mem_cons.1 hw with rfl | hw
+      · exact h4
+      · exact h2 w hw⟩
+
+private theorem foldl_inter_right {rest : List (List Nat)} {first : List Nat} {x : Nat} (hs : Sorted first)
+    (hall : ∀ v ∈ rest, Sorted v) (h1 : x ∈ first) (h2 : ∀ v ∈ rest, x ∈ v) :
+    x ∈ rest.foldl inter first ∧ Sorted (rest.foldl inter first) := by
+  induction rest generalizing first with
+  | nil => exact ⟨h1, hs⟩
+  | cons v vs ih =>
+    exact ih (inter_sorted hs) (fun w hw => hall w (List.mem_cons_of_mem _ hw))
+      (mem_inter_right hs (hall v List.mem_cons_self) h1 (h2 v List.mem_cons_self))
+      (fun w hw => h2 w (List.mem_cons_of_mem _ hw))
+
+private theorem foldl_inter_sorted {rest : List (List Nat)} {first : List Nat} (hs : Sorted first) :
+    Sorted (rest.foldl inter first) := by
+  induction rest generalizing first with
+  | nil => exact hs
+  | cons v vs ih => exact ih (inter_sorted hs)
+
+/-- What holds of the sets all along: each is ascending, and has every true dominator. -/
+private def Holds (graph : Graph Nat) (start : Nat) (pos : Nat → Nat) (table : HashMap Nat (List Nat)) : Prop :=
+  ∀ n row, table.get? n = some row → n ∈ Bap.Graph.reachable graph start ∧ Sorted row ∧
+    ∀ d, Bap.Proofs.Graph.Dom graph start n d → pos d ∈ row
+
+private theorem holds_meet {pos : Nat → Nat} {table : HashMap Nat (List Nat)} (h : Holds graph start pos table)
+    {n : Nat} (hnn : n ∈ graph.nodes) {common : List Nat} (hm : meet table ((predecessorTable graph).getD n []) = some common) :
+    Sorted common ∧ ∀ d, d ≠ n → Bap.Proofs.Graph.Dom graph start n d → pos d ∈ common := by
+  simp only [meet] at hm
+  split at hm
+  · cases hm
+  · rename_i first rest he
+    cases hm
+    have hmem : ∀ v, v ∈ first :: rest → ∃ a, a ∈ (predecessorTable graph).getD n [] ∧ table.get? a = some v := by
+      intro v hv
+      rw [← he] at hv
+      obtain ⟨a, ha, hget⟩ := List.mem_filterMap.1 hv
+      exact ⟨a, ha, hget⟩
+    have hsorted : ∀ v, v ∈ first :: rest → Sorted v := by
+      intro v hv
+      obtain ⟨a, _, hget⟩ := hmem v hv
+      exact (h a v hget).2.1
+    refine ⟨foldl_inter_sorted (hsorted first List.mem_cons_self), fun d hdn hdom => ?_⟩
+    have hin : ∀ v, v ∈ first :: rest → pos d ∈ v := by
+      intro v hv
+      obtain ⟨a, ha, hget⟩ := hmem v hv
+      obtain ⟨hreach, _, hc⟩ := h a v hget
+      refine hc d fun q hq => ?_
+      have he := (mem_predecessorTable a n).1 ha
+      rcases List.mem_cons.1 (hdom _ (.cons hq he hnn)) with h' | h'
+      · exact absurd h' hdn
+      · exact h'
+    exact (foldl_inter_right (hsorted first List.mem_cons_self) (fun v hv => hsorted v (List.mem_cons_of_mem _ hv))
+      (hin first List.mem_cons_self) (fun v hv => hin v (List.mem_cons_of_mem _ hv))).1
+
+private theorem domPass_holds (pos : HashMap Nat Nat) {nodes : List Nat} {table : HashMap Nat (List Nat)}
+    (hnodes : ∀ n ∈ nodes, n ∈ Bap.Graph.reachable graph start)
+    (h : Holds graph start (pos.getD · 0) table) :
+    Holds graph start (pos.getD · 0) (domPass pos (predecessorTable graph) start nodes table).1 := by
+  have key : ∀ (l : List Nat) (state : HashMap Nat (List Nat) × Bool), (∀ n ∈ l, n ∈ Bap.Graph.reachable graph start) →
+      Holds graph start (pos.getD · 0) state.1 →
+      Holds graph start (pos.getD · 0) (l.foldl (fun state node =>
+        if node = start then state
+        else
+          match meet state.1 ((predecessorTable graph).getD node []) with
+          | none => state
+          | some common =>
+            let row := insertSorted (pos.getD node 0) common
+            if state.1.get? node = some row then state else (state.1.insert node row, true)) state).1 := by
+    intro l
+    induction l with
+    | nil => intro state _ hs; exact hs
+    | cons node rest ih =>
+      intro state hl hs
+      simp only [List.foldl_cons]
+      apply ih _ fun n hn => hl n (List.mem_cons_of_mem _ hn)
+      have hreach := hl node List.mem_cons_self
+      split
+      · exact hs
+      · rename_i hne
+        split
+        · exact hs
+        · rename_i common hm
+          split
+          · exact hs
+          · intro n row hget
+            simp only [HashMap.get?_eq_getElem?, HashMap.getElem?_insert] at hget
+            split at hget
+            · rename_i heq
+              have hnn : node = n := by simpa using heq
+              subst hnn
+              cases hget
+              obtain ⟨hsorted, hdoms⟩ := holds_meet hs (Bap.Proofs.Graph.reachableFrom_subset_nodes _ _ hreach) hm
+              refine ⟨hreach, insertSorted_sorted _ hsorted, fun d hdom => ?_⟩
+              rw [mem_insertSorted]
+              by_cases hd : d = node
+              · exact .inl (by rw [hd])
+              · exact .inr (hdoms d hd hdom)
+            · exact hs n row hget
+  exact key nodes (table, false) hnodes h
+
+private theorem domLoop_holds (pos : HashMap Nat Nat) {nodes : List Nat}
+    (hnodes : ∀ n ∈ nodes, n ∈ Bap.Graph.reachable graph start) (fuel : Nat) {table : HashMap Nat (List Nat)}
+    (h : Holds graph start (pos.getD · 0) table) :
+    Holds graph start (pos.getD · 0) (domLoop pos (predecessorTable graph) start nodes fuel table) := by
+  induction fuel generalizing table with
+  | zero => exact h
+  | succ fuel ih =>
+    simp only [domLoop]
+    have hp := domPass_holds pos hnodes h
+    cases hr : domPass pos (predecessorTable graph) start nodes table with
+    | mk next changed =>
+      rw [hr] at hp
+      cases changed with
+      | true => exact ih hp
+      | false => exact hp
+
+private theorem mem_meet {table : HashMap Nat (List Nat)} {preds : List Nat} {common : List Nat} {x : Nat}
+    (hm : meet table preds = some common) (hx : x ∈ common) {a : Nat} {v : List Nat} (ha : a ∈ preds)
+    (hv : table.get? a = some v) : x ∈ v := by
+  simp only [meet] at hm
+  split at hm
+  · cases hm
+  · rename_i first rest he
+    cases hm
+    have hmem : v ∈ first :: rest := by
+      rw [← he]
+      exact List.mem_filterMap.2 ⟨a, ha, hv⟩
+    obtain ⟨h1, h2⟩ := mem_foldl_inter_left hx
+    rcases List.mem_cons.1 hmem with rfl | h
+    · exact h1
+    · exact h2 v h
+
+/-- What a set that checks out has is a true dominator. -/
+private theorem domCheck_sound {posT : HashMap Nat Nat} {nodes : List Nat} {table : HashMap Nat (List Nat)}
+    (hnodes : ∀ n, n ∈ nodes ↔ n ∈ Bap.Graph.reachable graph start)
+    (hinj : ∀ x ∈ nodes, ∀ y ∈ nodes, posT.getD x 0 = posT.getD y 0 → x = y)
+    (hc : domCheck posT (predecessorTable graph) start nodes table = true) :
+    ∀ {n : Nat} {p : List Nat}, Bap.Proofs.Graph.Walk graph start n p → ∀ row d, table.get? n = some row → d ∈ nodes →
+      posT.getD d 0 ∈ row → d ∈ p := by
+  intro n p hw
+  have hcheck := List.all_eq_true.1 hc
+  have hatStart : ∀ {row d}, start ∈ nodes → table.get? start = some row → d ∈ nodes → posT.getD d 0 ∈ row → d = start := by
+    intro row d hs hget hd hmem
+    have hst := hcheck start hs
+    simp only [↓reduceIte, beq_iff_eq, hget, Option.some.injEq] at hst
+    subst hst
+    exact hinj d hd start hs (by simpa using hmem)
+  induction hw with
+  | nil hs =>
+    intro row d hget hd hmem
+    have hsr : start ∈ nodes := (hnodes _).2 ((Bap.Proofs.Graph.mem_reachable_iff_walk start).2 ⟨_, .nil hs⟩)
+    simp [hatStart hsr hget hd hmem]
+  | @cons a b q w he hbn ih =>
+    intro row d hget hd hmem
+    have hbr : b ∈ nodes := (hnodes _).2 ((Bap.Proofs.Graph.mem_reachable_iff_walk b).2 ⟨_, .cons w he hbn⟩)
+    have har : a ∈ nodes := (hnodes _).2 ((Bap.Proofs.Graph.mem_reachable_iff_walk a).2 ⟨_, w⟩)
+    by_cases hb : b = start
+    · subst hb
+      rw [hatStart hbr hget hd hmem]
+      exact List.mem_cons_self
+    · have hchk := hcheck b hbr
+      simp only [hb, ↓reduceIte, Bool.and_eq_true, List.all_eq_true] at hchk
+      obtain ⟨hall, hmatch⟩ := hchk
+      have hpred := (mem_predecessorTable a b).2 he
+      have hcontains : table.contains a = true := by
+        have := hall a hpred
+        simpa [har] using this
+      obtain ⟨v, hv⟩ : ∃ v, table.get? a = some v := by
+        rw [HashMap.contains_eq_isSome_getElem?] at hcontains
+        exact Option.isSome_iff_exists.1 hcontains
+      split at hmatch
+      · cases hmatch
+      · rename_i common hm
+        simp only [hget, beq_iff_eq, Option.some.injEq] at hmatch
+        subst hmatch
+        rcases (mem_insertSorted _ _ _).1 hmem with heq | hin
+        · rw [hinj d hd b hbr heq]
+          exact List.mem_cons_self
+        · exact List.mem_cons_of_mem _ (ih v d hv hd (mem_meet hm hin hpred hv))
+
+open Classical in
+theorem dominators_eq (graph : Graph Nat) (start : Nat) :
+    dominators graph start = Bap.Graph.dominators graph start := by
+  unfold dominators
+  dsimp only
+  split
+  · rename_i hc
+    rw [Bap.Proofs.Graph.dominators_rows]
+    simp only [reachable_eq, dedup_eq] at hc ⊢
+    apply List.map_congr_left
+    intro node hnode
+    congr 1
+    by_cases hns : node = start
+    · simp [hns]
+    · simp only [hns, ite_false]
+      refine congrArg (node :: ·) ?_
+      generalize hu : (Bap.Graph.reachable graph start).eraseDups = unique at *
+      have hund : unique.Nodup := by
+        rw [← hu]
+        exact Bap.Proofs.Graph.nodup_eraseDups _
+      have hunodes : ∀ n, n ∈ unique ↔ n ∈ Bap.Graph.reachable graph start := by
+        intro n
+        rw [← hu, List.mem_eraseDups]
+      generalize hp : posTable 0 unique {} = posT at *
+      have hposAt : ∀ (k : Nat) (hk : k < unique.length), posT.getD unique[k] 0 = k := by
+        intro k hk
+        have := posTable_at hund 0 {} k hk
+        rw [hp] at this
+        simpa using this
+      have hinj : ∀ x ∈ unique, ∀ y ∈ unique, posT.getD x 0 = posT.getD y 0 → x = y := by
+        intro x hx y hy he
+        obtain ⟨i, hi, rfl⟩ := List.mem_iff_getElem.1 hx
+        obtain ⟨j, hj, rfl⟩ := List.mem_iff_getElem.1 hy
+        rw [hposAt, hposAt] at he
+        subst he
+        rfl
+      have hinitial : Holds graph start (posT.getD · 0)
+          (if unique.contains start then HashMap.insert {} start [posT.getD start 0] else {}) := by
+        split
+        · rename_i hcon
+          intro n row hget
+          simp only [HashMap.get?_eq_getElem?, HashMap.getElem?_insert] at hget
+          split at hget
+          · rename_i heq
+            have : start = n := by simpa using heq
+            subst this
+            cases hget
+            have hsr : start ∈ Bap.Graph.reachable graph start := (hunodes _).1 (by simpa using hcon)
+            refine ⟨hsr, by simp, fun d hdom => ?_⟩
+            have hsn : start ∈ graph.nodes := Bap.Proofs.Graph.reachableFrom_subset_nodes _ _ hsr
+            have := hdom _ (.nil hsn)
+            simp only [List.mem_singleton] at this
+            simp [this]
+          · simp at hget
+        · intro n row hget
+          simp at hget
+      have hholds := domLoop_holds posT (nodes := unique) (fun n hn => (hunodes n).1 hn) (unique.length + 2) hinitial
+      rw [show domLoop posT (predecessorTable graph) start unique (unique.length + 2)
+        (if unique.contains start then HashMap.insert {} start [posT.getD start 0] else {}) =
+        domTable posT (predecessorTable graph) start unique from rfl] at hholds
+      generalize domTable posT (predecessorTable graph) start unique = table at *
+      have hnodeu : node ∈ unique := (hunodes node).2 hnode
+      obtain ⟨row, hrow⟩ : ∃ row, table.get? node = some row := by
+        have hchk := List.all_eq_true.1 hc node hnodeu
+        simp only [hns, ↓reduceIte, Bool.and_eq_true] at hchk
+        have hm := hchk.2
+        split at hm
+        · cases hm
+        · exact ⟨_, by simpa using hm⟩
+      obtain ⟨hreach, hsorted, hcomplete⟩ := hholds node row hrow
+      simp only [hrow, Option.getD_some]
+      rw [select_eq (posT.getD · 0) hsorted (fun _ _ => Nat.zero_le _) (fun k hk => by simpa using hposAt k hk), List.filter_filter]
+      apply List.filter_congr
+      intro d hd
+      by_cases hdn : d = node
+      · subst hdn
+        simp
+      · rw [Bool.eq_iff_iff, Bool.and_eq_true, decide_eq_true_eq, decide_eq_true_eq]
+        have hne : (d != node) = true := by simpa using hdn
+        constructor
+        · rintro ⟨_, hm⟩
+          exact ⟨fun p hp => domCheck_sound hunodes hinj hc hp row d hrow hd hm, hdn⟩
+        · rintro ⟨hdom, _⟩
+          exact ⟨hne, hcomplete d hdom⟩
+  · rfl
+
+/-! ### Immediate dominators and the dominance frontier -/
+
+/-- `immediateDominators`, with the sizes of the rows in a table. -/
+def immediateDominators (graph : Graph Nat) (start : Nat) : List (Nat × Nat) :=
+  let rows := dominators graph start
+  let sizes := assocTable (rows.map fun entry => (entry.1, entry.2.length))
+  rows.filterMap fun entry =>
+    let node := entry.1
+    if node = start then
+      none
+    else
+      let strict := entry.2.filter fun candidate => @bne Nat instBEqOfDecidableEq candidate node
+      strict.foldl (fun best candidate =>
+        match best with
+        | none => some (node, candidate)
+        | some (_, current) =>
+          if sizes.getD candidate 0 > sizes.getD current 0 then some (node, candidate) else best) none
+
+private theorem sizes_getD (rows : List (Nat × List Nat)) (key : Nat) :
+    (assocTable (rows.map fun entry => (entry.1, entry.2.length))).getD key 0 = ((Assoc.get key rows).getD []).length := by
+  have hlook : Assoc.get key (rows.map fun entry => (entry.1, entry.2.length)) = (Assoc.get key rows).map List.length := by
+    induction rows with
+    | nil => rfl
+    | cons head tail ih =>
+      obtain ⟨k, v⟩ := head
+      simp only [Assoc.get, List.map_cons, List.lookup_cons] at ih ⊢
+      by_cases hk : key = k
+      · simp [hk]
+      · have : (key == k) = false := by simpa using hk
+        simp [this, ih]
+  have hget := assocTable_get (rows.map fun entry => (entry.1, entry.2.length)) key
+  rw [hlook] at hget
+  simp only [HashMap.get?_eq_getElem?] at hget
+  rw [HashMap.getD_eq_getD_getElem?, hget]
+  cases Assoc.get key rows <;> rfl
+
+theorem immediateDominators_eq (graph : Graph Nat) (start : Nat) :
+    immediateDominators graph start = Bap.Graph.immediateDominators graph start := by
+  simp only [immediateDominators, Bap.Graph.immediateDominators, dominators_eq, sizes_getD]
+  apply congrArg (fun f => List.filterMap f (Bap.Graph.dominators graph start))
+  funext entry
+  split
+  · rfl
+  · congr 1
+    funext best candidate
+    cases best with
+    | none => rfl
+    | some pair =>
+      obtain ⟨a, c⟩ := pair
+      rfl
+
+private def walk (table : HashMap Nat Nat) (stop : Option Nat) (tid : Nat) :
+    Nat → Nat → List (Nat × Nat) → List (Nat × Nat)
+  | 0, _, result => result
+  | fuel + 1, runner, result =>
+    if some runner = stop then
+      result
+    else
+      let result := (runner, tid) :: result
+      match table.get? runner with
+      | some next => walk table stop tid fuel next result
+      | none => result
+
+private theorem walk_eq (graph : Graph Nat) (idom : List (Nat × Nat)) (stop : Option Nat) (tid fuel runner : Nat)
+    (result : List (Nat × Nat)) :
+    walk (assocTable idom) stop tid fuel runner result = frontierWalk graph idom stop tid fuel runner result := by
+  induction fuel generalizing runner result with
+  | zero => rfl
+  | succ fuel ih =>
+    simp only [walk, frontierWalk, assocTable_get]
+    split
+    · rfl
+    · split <;> simp_all
+
+/-- `dominanceFrontier`, with its lookups in tables. -/
+def dominanceFrontier (graph : Graph Nat) (start : Nat) : List (Nat × List Nat) :=
+  let table := assocTable (immediateDominators graph start)
+  let preds := predecessorTable graph
+  let fuel := graph.nodes.length + 1
+  let pairs := (reachable graph start).foldl (init := []) fun result tid =>
+    (dedup (preds.getD tid [])).foldl (fun result pred => walk table (table.get? tid) tid fuel pred result) result
+  let grouped := groupBy pairs
+  graph.nodes.map fun node => (node, dedup (grouped.getD node []))
+
+theorem dominanceFrontier_eq (graph : Graph Nat) (start : Nat) :
+    dominanceFrontier graph start = Bap.Graph.dominanceFrontier graph start := by
+  simp only [dominanceFrontier, Bap.Graph.dominanceFrontier, immediateDominators_eq, reachable_eq, predecessors_eq,
+    walk_eq graph, assocTable_get]
+  simp only [dedup_eq, groupBy_getD]
+
+end DomProofs
+
+end Bap.Graph.Fast

@@ -32,7 +32,7 @@ theorem argumentLocation_of_lt (abi : Convention) (index : Nat)
 theorem argumentLocation_of_ge (abi : Convention) (index : Nat)
     (h : abi.functionArguments.length ≤ index) :
     argumentLocation abi index =
-      .stack ((index - abi.functionArguments.length) * (abi.wordSize / 8)) := by
+      .stack (abi.stackArgumentsStart + (index - abi.functionArguments.length) * (abi.wordSize / 8)) := by
   simp [argumentLocation, List.getElem?_eq_none h]
 
 /-- The register/stack split is exactly at the length of the register list. -/
@@ -79,11 +79,12 @@ theorem stack_offset_succ (abi : Convention) (index offset : Nat)
   rw [argumentLocation_of_ge abi index hle] at h
   rw [argumentLocation_of_ge abi (index + 1) (by omega)]
   cases h
-  rw [Nat.sub_add_comm hle, Nat.add_mul, Nat.one_mul]
+  rw [Nat.sub_add_comm hle, Nat.add_mul, Nat.one_mul, Nat.add_assoc]
 
-/-- The first overflowing argument sits at offset zero. -/
+/-- The first overflowing argument sits where the convention starts them, at the stack pointer unless it reserves
+something below them. -/
 theorem first_stack_argument (abi : Convention) :
-    argumentLocation abi abi.functionArguments.length = .stack 0 := by
+    argumentLocation abi abi.functionArguments.length = .stack abi.stackArgumentsStart := by
   rw [argumentLocation_of_ge abi _ (Nat.le_refl _)]
   simp
 
@@ -97,10 +98,9 @@ theorem stack_slots_disjoint (abi : Convention) (i j a b : Nat) (hij : i < j)
   cases hi
   cases hj
   have hstep : (i - abi.functionArguments.length + 1) ≤ j - abi.functionArguments.length := by omega
-  calc (i - abi.functionArguments.length) * (abi.wordSize / 8) + abi.wordSize / 8
-      = (i - abi.functionArguments.length + 1) * (abi.wordSize / 8) := by
-        rw [Nat.add_mul, Nat.one_mul]
-    _ ≤ _ := Nat.mul_le_mul_right _ hstep
+  have := Nat.mul_le_mul_right (abi.wordSize / 8) hstep
+  rw [Nat.add_mul, Nat.one_mul] at this
+  omega
 
 /-- Stack offsets are monotone in the argument index. -/
 theorem stack_offset_mono (abi : Convention) (i j a b : Nat) (hij : i ≤ j)
@@ -132,7 +132,7 @@ theorem argumentLocation_injective (abi : Convention) (hn : abi.functionArgument
   · have hi' := Nat.le_of_not_lt hi
     have hj' := Nat.le_of_not_lt hj
     rw [argumentLocation_of_ge abi i hi', argumentLocation_of_ge abi j hj'] at h
-    have := Nat.eq_of_mul_eq_mul_right hbyte (Location.stack.inj h)
+    have := Nat.eq_of_mul_eq_mul_right hbyte (Nat.add_left_cancel (Location.stack.inj h))
     omega
 
 /-! ## `alignStack` -/
@@ -446,9 +446,19 @@ theorem functionArguments_length (arch : Image.Arch) (w : Nat) (c : Convention)
   rw [List.length_map, argumentNames_length] at this
   exact this
 
+/-- Where the arguments in memory start: above the home area under o32, and at the stack pointer otherwise. -/
+def stackStart (arch : Image.Arch) (w : Nat) : Nat :=
+  match arch with
+  | .mips => if w = 32 then 16 else 0
+  | _ => 0
+
+theorem convention_stackStart (arch : Image.Arch) (w : Nat) (c : Convention) (h : convention arch w = some c) :
+    c.stackArgumentsStart = stackStart arch w := by
+  cases arch <;> simp only [convention, Option.some.injEq, reduceCtorEq] at h <;> subst h <;> rfl
+
 /-- Complete specification of argument placement on every supported architecture: the first
 `argumentRegisterCount` arguments use the tabulated registers in order, of word type; the others
-use word-spaced stack slots counted from zero. -/
+use word-spaced stack slots counted from `stackStart`. -/
 theorem convention_argumentLocation (arch : Image.Arch) (w index : Nat) (c : Convention)
     (h : convention arch w = some c) :
     (∀ hi : index < argumentRegisterCount arch w, ∃ var,
@@ -456,7 +466,7 @@ theorem convention_argumentLocation (arch : Image.Arch) (w index : Nat) (c : Con
         var.typ = .imm (expectedWordSize arch w) ∧
         argumentLocation c index = .register var) ∧
       (argumentRegisterCount arch w ≤ index → argumentLocation c index =
-        .stack ((index - argumentRegisterCount arch w) * (expectedWordSize arch w / 8))) := by
+        .stack (stackStart arch w + (index - argumentRegisterCount arch w) * (expectedWordSize arch w / 8))) := by
   have hs := convention_shape arch w c h
   have hl := functionArguments_length arch w c h
   constructor
@@ -467,7 +477,7 @@ theorem convention_argumentLocation (arch : Image.Arch) (w index : Nat) (c : Con
       simp
     · rw [hs.typed.args _ (List.getElem_mem hlt), hs.word]
   · intro hge
-    rw [argumentLocation_of_ge c index (by omega), hl, hs.word]
+    rw [argumentLocation_of_ge c index (by omega), hl, hs.word, convention_stackStart arch w c h]
 
 /-- With at least byte-sized words, different argument indices have different locations on every
 supported architecture. -/
@@ -509,14 +519,42 @@ theorem mips_argument_registers (w : Nat) (c : Convention) (h : convention .mips
     c.functionArguments.length = if w = 32 then 4 else 8 :=
   functionArguments_length .mips w c h
 
-/-- Intended, as in `plugins/mips/mips_abi.ml`, where the memory arguments are allocated from the
-stack pointer: the convention doesn't model the 16-byte home area of the o32 psABI, so the first
-stack argument is at offset 0 for the 32-bit and the 64-bit MIPS. -/
+/-- The first argument in memory is above the 16 bytes the caller reserves under o32 for the four registers it passes,
+as in the psABI and LLVM's `GetCalleeAllocdArgSizeInBytes`, and at the stack pointer under n32 and n64, which have no
+such area. Upstream's `plugins/mips/mips_abi.ml` starts at 0 for all of them, which misplaces every o32 stack argument. -/
 theorem mips_first_stack_argument (w : Nat) (c : Convention) (h : convention .mips w = some c) :
-    argumentLocation c (if w = 32 then 4 else 8) = .stack 0 := by
+    argumentLocation c (if w = 32 then 4 else 8) = .stack (if w = 32 then 16 else 0) := by
   have hl := mips_argument_registers w c h
-  rw [← hl]
-  exact first_stack_argument c
+  rw [← hl, first_stack_argument, convention_stackStart .mips w c h]
+  rfl
+
+/-- Each later argument is one word further: under o32 from 16 bytes above the stack pointer. -/
+theorem mips_o32_stack_arguments (index : Nat) (c : Convention) (h : convention .mips 32 = some c) :
+    argumentLocation c (4 + index) = .stack (16 + index * 4) := by
+  have hl : c.functionArguments.length = 4 := mips_argument_registers 32 c h
+  have hs : c.stackArgumentsStart = 16 := convention_stackStart .mips 32 c h
+  have hw : c.wordSize = 32 := by
+    simp only [convention, Option.some.injEq] at h
+    subst h
+    rfl
+  rw [argumentLocation_of_ge c _ (by omega), hl, hs, hw]
+  simp
+
+/-- The memory arguments of n32 and n64 start at the stack pointer. -/
+theorem mips_n64_stack_arguments (w index : Nat) (hw : w ≠ 32) (c : Convention) (h : convention .mips w = some c) :
+    argumentLocation c (8 + index) = .stack (index * (w / 8)) := by
+  have hl : c.functionArguments.length = 8 := by
+    have := mips_argument_registers w c h
+    simpa [hw] using this
+  have hs : c.stackArgumentsStart = 0 := by
+    have := convention_stackStart .mips w c h
+    simpa [stackStart, hw] using this
+  have hc : c.wordSize = w := by
+    simp only [convention, Option.some.injEq] at h
+    subst h
+    rfl
+  rw [argumentLocation_of_ge c _ (by omega), hl, hs, hc]
+  simp
 
 /-- x86 is a 32-bit target, whatever word size is asked of it, including the default: registers
 are 32 bits wide and the arguments, all on the stack, take four bytes each. -/
@@ -527,7 +565,7 @@ theorem x86_is_32_bit (w index : Nat) (c : Convention) (h : convention .x86 w = 
   subst h
   exact ⟨rfl, rfl, rfl, by
     rw [argumentLocation_of_ge _ _ (Nat.zero_le index)]
-    show Location.stack ((index - 0) * (32 / 8)) = _
+    show Location.stack (0 + (index - 0) * (32 / 8)) = _
     simp⟩
 
 end Bap.Proofs.ABI

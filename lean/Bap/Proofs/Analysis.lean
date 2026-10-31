@@ -944,29 +944,10 @@ end Strings
 section Slice
 open Bap.Analysis.Slice
 open_private Bap.Analysis.Slice in Bap.Analysis.Slice :
-  Info Info.mk Info.defs Info.mayDefs Info.uses Info.dynamic Info.always Info.unknownWrite Info.exits
-  constantRange usesExp merge memoryWrites isStore stmtInfo addUnique removeDefinitions touches relevant
-  backwardInstruction linear
-
-/-- The summary of a block of statements. -/
-private def slice_block (code : Bap.Bil.Program) : Info :=
-  code.foldl (fun info stmt => merge info (stmtInfo stmt)) (Info.mk [] [] [] false false false false)
-
-/-- One backward step of the slicer. -/
-private def slice_step (current : List Location × List Nat × Bool × List Nat) (insn : Bap.Disasm.Insn) :
-    List Location × List Nat × Bool × List Nat :=
-  let calls := if insn.flow = .call && !current.1.isEmpty then current.2.2.2 ++ [insn.address] else current.2.2.2
-  if relevant current.1 (slice_block insn.bil) then
-    (backwardInstruction current.1 (slice_block insn.bil), current.2.1 ++ [insn.address],
-      current.2.2.1 && !Info.dynamic (slice_block insn.bil), calls)
-  else
-    (current.1, current.2.1, current.2.2.1, calls)
-
-private theorem slice_backward_eq (instructions : List Bap.Disasm.Insn) (criteria : List Location) :
-    backward instructions criteria =
-      let final := instructions.reverse.foldl slice_step (criteria, [], true, [])
-      { sites := final.2.1.reverse, live := final.1, determined := final.2.2.1,
-        calls := final.2.2.2.reverse, complete := final.2.2.1 && final.2.2.2.isEmpty } := rfl
+  Info Info.mk Info.writes Info.wholesale Info.uses Info.dynamic Info.always
+  constantRange usesExp merge chainRoot memoryWrites isStore stmtInfo blockInfo relevant moveBefore stmtBefore
+  codeBefore insnBefore Exits Exits.falls Exits.targets Exits.unknown constantTarget stmtExits codeExits mayEnd
+  successorTable checkInsn checkEdges checkFlow expMemories stmtMemories
 
 theorem slice_covers_overlaps {outer inner : Location} (h : outer.covers inner = true) :
     outer.overlaps inner = true := by
@@ -975,6 +956,10 @@ theorem slice_covers_overlaps {outer inner : Location} (h : outer.covers inner =
 
 theorem slice_overlaps_symm (left right : Location) : left.overlaps right = right.overlaps left := by
   cases left <;> cases right <;> simp only [Location.overlaps]
+  all_goals first
+    | rfl
+    | (rw [Bool.and_comm]; done)
+    | skip
   · rename_i a b
     by_cases h : a = b
     · subst h
@@ -982,14 +967,22 @@ theorem slice_overlaps_symm (left right : Location) : left.overlaps right = righ
     · have h1 : (a == b) = false := by simpa using h
       have h2 : (b == a) = false := by simpa using fun e : b = a => h e.symm
       rw [h1, h2]
-  · rw [Bool.and_comm]
+  · rename_i a _ _ b _ _
+    by_cases h : a = b
+    · subst h
+      simp only [Bool.and_assoc]
+      rw [Bool.and_comm (decide _)]
+    · have h1 : (a == b) = false := by simpa using h
+      have h2 : (b == a) = false := by simpa using fun e : b = a => h e.symm
+      rw [h1, h2]
+      rfl
 
-/-- Non-empty byte ranges overlap exactly when they share an address. -/
-theorem slice_overlaps_mem_iff {left leftSize right rightSize : Nat} (hl : 0 < leftSize)
+/-- Non-empty byte ranges of one memory overlap exactly when they share an address. -/
+theorem slice_overlaps_mem_iff {memory : Bap.Var} {left leftSize right rightSize : Nat} (hl : 0 < leftSize)
     (hr : 0 < rightSize) :
-    (Location.mem left leftSize).overlaps (.mem right rightSize) = true ↔
+    (Location.memOf memory left leftSize).overlaps (.memOf memory right rightSize) = true ↔
       ∃ byte, left ≤ byte ∧ byte < left + leftSize ∧ right ≤ byte ∧ byte < right + rightSize := by
-  simp only [Location.overlaps, Bool.and_eq_true, decide_eq_true_eq]
+  simp only [Location.overlaps, beq_self_eq_true, Bool.true_and, Bool.and_eq_true, decide_eq_true_eq]
   constructor
   · intro h
     by_cases hle : left ≤ right
@@ -998,450 +991,84 @@ theorem slice_overlaps_mem_iff {left leftSize right rightSize : Nat} (hl : 0 < l
   · rintro ⟨byte, _, _, _, _⟩
     omega
 
+/-- Ranges of two different memories never overlap, wherever they are. -/
+theorem slice_overlaps_other_memory {memory other : Bap.Var} (h : memory ≠ other) (left leftSize right rightSize : Nat) :
+    (Location.memOf memory left leftSize).overlaps (.memOf other right rightSize) = false := by
+  simp [Location.overlaps, h]
+
 /-- A covering write contains every byte of what it covers. -/
-theorem slice_covers_mem {outer outerSize inner innerSize : Nat}
-    (h : (Location.mem outer outerSize).covers (.mem inner innerSize) = true) (byte : Nat)
+theorem slice_covers_mem {memory other : Bap.Var} {outer outerSize inner innerSize : Nat}
+    (h : (Location.memOf memory outer outerSize).covers (.memOf other inner innerSize) = true) (byte : Nat)
     (hl : inner ≤ byte) (hr : byte < inner + innerSize) :
-    outer ≤ byte ∧ byte < outer + outerSize := by
-  simp only [Location.covers, Bool.and_eq_true, decide_eq_true_eq] at h
-  omega
+    memory = other ∧ outer ≤ byte ∧ byte < outer + outerSize := by
+  simp only [Location.covers, Location.overlaps, Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at h
+  exact ⟨h.1.1.1, by omega, by omega⟩
 
-private theorem slice_relevant_iff (live : List Location) (info : Info) :
-    relevant live info = true ↔ Info.always info = true ∨
-      (Info.unknownWrite info = true ∧ ∃ loc ∈ live, loc.isMemory = true) ∨
-      (∃ d ∈ Info.defs info, ∃ loc ∈ live, d.overlaps loc = true) ∨
-      (∃ d ∈ Info.mayDefs info, ∃ loc ∈ live, d.overlaps loc = true) ∨
-      (∃ d ∈ Info.uses info, ∃ loc ∈ live, d.overlaps loc = true) := by
-  simp [relevant, touches, or_assoc]
-
-private theorem slice_mem_foldl_addUnique (uses live : List Location) (loc : Location) :
-    loc ∈ uses.foldl addUnique live ↔ loc ∈ live ∨ loc ∈ uses := by
-  induction uses generalizing live with
-  | nil => simp
-  | cons head tail ih =>
-    simp only [List.foldl_cons, ih, addUnique, List.mem_cons]
-    split
-    · rename_i h
-      have : head ∈ live := by simpa using h
-      constructor
-      · rintro (h | h)
-        · exact .inl h
-        · exact .inr (.inr h)
-      · rintro (h | rfl | h)
-        · exact .inl h
-        · exact .inl this
-        · exact .inr h
-    · simp only [List.mem_append, List.mem_singleton]
-      constructor
-      · rintro ((h | h) | h)
-        · exact .inl h
-        · exact .inr (.inl h)
-        · exact .inr (.inr h)
-      · rintro (h | h | h)
-        · exact .inl (.inl h)
-        · exact .inl (.inr h)
-        · exact .inr h
-
-/-- Liveness transfer: a location is live before an instruction when it is used there, or live
-after it and not entirely overwritten on every path through it. -/
-theorem slice_mem_backwardInstruction (live : List Location) (info : Info) (loc : Location) :
-    loc ∈ backwardInstruction live info ↔
-      (loc ∈ live ∧ ∀ d ∈ Info.defs info, d.covers loc = false) ∨ loc ∈ Info.uses info := by
-  simp [backwardInstruction, slice_mem_foldl_addUnique, removeDefinitions]
-
-/-- Only a must-definition covering the whole location ends its liveness. -/
-theorem slice_killed_iff {live : List Location} {info : Info} {loc : Location} (hl : loc ∈ live)
-    (hu : loc ∉ Info.uses info) :
-    loc ∉ backwardInstruction live info ↔ ∃ d ∈ Info.defs info, d.covers loc = true := by
-  rw [slice_mem_backwardInstruction]
-  simp [hl, hu]
+theorem slice_relevant_iff (live : List Location) (code : Bap.Bil.Program) :
+    relevant live (blockInfo code) = true ↔
+      Info.always (blockInfo code) = true ∨
+      (∃ m ∈ Info.wholesale (blockInfo code), ∃ l ∈ live, l.inMemory m = true) ∨
+      ∃ d ∈ Info.writes (blockInfo code), ∃ l ∈ live, d.overlaps l = true := by
+  simp [relevant, or_assoc]
 
 private theorem slice_usesExp_pure (exp : Bap.Bil.Exp) :
-    Info.defs (usesExp exp) = [] ∧ Info.mayDefs (usesExp exp) = [] ∧
-      Info.unknownWrite (usesExp exp) = false ∧ Info.exits (usesExp exp) = false := by
-  induction exp <;> simp_all [usesExp]
-  all_goals split <;> simp
-
-/-- Everything a statement may write, as the slicer summarises it. -/
-private def slice_writes (info : Info) : List Location := Info.defs info ++ Info.mayDefs info
-
-/-- What a block certainly writes: statements after one that may exit don't count. -/
-private def slice_must : Bap.Bil.Program → List Location
-  | [] => []
-  | s :: rest => Info.defs (stmtInfo s) ++ if Info.exits (stmtInfo s) then [] else slice_must rest
+    Info.writes (usesExp exp) = [] ∧ Info.wholesale (usesExp exp) = [] := by
+  induction exp <;> simp only [usesExp] <;> (try split) <;> simp_all
 
 private theorem slice_fold_fields (code : Bap.Bil.Program) (init : Info) :
     let result := code.foldl (fun info stmt => merge info (stmtInfo stmt)) init
-    Info.defs result = Info.defs init ++ (if Info.exits init then [] else slice_must code) ∧
-    (∀ d, d ∈ slice_writes result ↔ d ∈ slice_writes init ∨ ∃ s ∈ code, d ∈ slice_writes (stmtInfo s)) ∧
-    Info.uses result = Info.uses init ++ code.flatMap (fun s => Info.uses (stmtInfo s)) ∧
-    Info.unknownWrite result = (Info.unknownWrite init || code.any fun s => Info.unknownWrite (stmtInfo s)) ∧
-    Info.dynamic result = (Info.dynamic init || code.any fun s => Info.dynamic (stmtInfo s)) ∧
-    Info.always result = (Info.always init || code.any fun s => Info.always (stmtInfo s)) ∧
-    Info.exits result = (Info.exits init || code.any fun s => Info.exits (stmtInfo s)) := by
+    (∀ d, d ∈ Info.writes result ↔ d ∈ Info.writes init ∨ ∃ s ∈ code, d ∈ Info.writes (stmtInfo s)) ∧
+    (∀ d, d ∈ Info.wholesale result ↔ d ∈ Info.wholesale init ∨ ∃ s ∈ code, d ∈ Info.wholesale (stmtInfo s)) ∧
+    (∀ d, d ∈ Info.uses result ↔ d ∈ Info.uses init ∨ ∃ s ∈ code, d ∈ Info.uses (stmtInfo s)) ∧
+    (Info.dynamic result = true ↔ Info.dynamic init = true ∨ ∃ s ∈ code, Info.dynamic (stmtInfo s) = true) ∧
+    (Info.always result = true ↔ Info.always init = true ∨ ∃ s ∈ code, Info.always (stmtInfo s) = true) := by
   induction code generalizing init with
-  | nil => simp [slice_must]
+  | nil => simp
   | cons head tail ih =>
+    obtain ⟨h1, h2, h3, h4, h5⟩ := ih (merge init (stmtInfo head))
     simp only [List.foldl_cons]
-    obtain ⟨h1, h2, h3, h4, h5, h6, h7⟩ := ih (merge init (stmtInfo head))
-    refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
-    · rw [h1]
-      cases hi : Info.exits init <;> cases hh : Info.exits (stmtInfo head) <;> simp [merge, slice_must, hi, hh]
-    · intro d
-      rw [h2]
-      cases hi : Info.exits init <;> simp [merge, slice_writes, hi] <;> grind
-    · simpa [merge, List.append_assoc] using h3
-    · simpa [merge, Bool.or_assoc] using h4
-    · simpa [merge, Bool.or_assoc] using h5
-    · simpa [merge, Bool.or_assoc] using h6
-    · simpa [merge, Bool.or_assoc] using h7
-
-private theorem slice_block_defs (code : Bap.Bil.Program) : Info.defs (slice_block code) = slice_must code := by
-  rw [slice_block, (slice_fold_fields code _).1]
-  simp
+    refine ⟨fun d => ?_, fun d => ?_, fun d => ?_, ?_, ?_⟩
+    · rw [h1]; simp [merge]; grind
+    · rw [h2]; simp [merge]; grind
+    · rw [h3]; simp [merge]; grind
+    · rw [h4]; simp [merge]; grind
+    · rw [h5]; simp [merge]; grind
 
 private theorem slice_block_writes_iff (code : Bap.Bil.Program) (d : Location) :
-    d ∈ slice_writes (slice_block code) ↔ ∃ s ∈ code, d ∈ slice_writes (stmtInfo s) := by
-  rw [slice_block, (slice_fold_fields code _).2.1]
-  simp [slice_writes]
-
-private theorem slice_block_uses (code : Bap.Bil.Program) (d : Location) :
-    d ∈ Info.uses (slice_block code) ↔ ∃ s ∈ code, d ∈ Info.uses (stmtInfo s) := by
-  rw [slice_block, (slice_fold_fields code _).2.2.1]
+    d ∈ Info.writes (blockInfo code) ↔ ∃ s ∈ code, d ∈ Info.writes (stmtInfo s) := by
+  rw [blockInfo, (slice_fold_fields code _).1]
   simp
 
-private theorem slice_block_unknownWrite (code : Bap.Bil.Program) :
-    Info.unknownWrite (slice_block code) = true ↔ ∃ s ∈ code, Info.unknownWrite (stmtInfo s) = true := by
-  rw [slice_block, (slice_fold_fields code _).2.2.2.1]
+private theorem slice_block_wholesale_iff (code : Bap.Bil.Program) (d : Bap.Var) :
+    d ∈ Info.wholesale (blockInfo code) ↔ ∃ s ∈ code, d ∈ Info.wholesale (stmtInfo s) := by
+  rw [blockInfo, (slice_fold_fields code _).2.1]
   simp
 
 private theorem slice_block_dynamic (code : Bap.Bil.Program) :
-    Info.dynamic (slice_block code) = true ↔ ∃ s ∈ code, Info.dynamic (stmtInfo s) = true := by
-  rw [slice_block, (slice_fold_fields code _).2.2.2.2.1]
+    Info.dynamic (blockInfo code) = true ↔ ∃ s ∈ code, Info.dynamic (stmtInfo s) = true := by
+  rw [blockInfo, (slice_fold_fields code _).2.2.2.1]
   simp
 
 private theorem slice_block_always (code : Bap.Bil.Program) :
-    Info.always (slice_block code) = true ↔ ∃ s ∈ code, Info.always (stmtInfo s) = true := by
-  rw [slice_block, (slice_fold_fields code _).2.2.2.2.2.1]
-  simp
-
-private theorem slice_block_exits (code : Bap.Bil.Program) :
-    Info.exits (slice_block code) = true ↔ ∃ s ∈ code, Info.exits (stmtInfo s) = true := by
-  rw [slice_block, (slice_fold_fields code _).2.2.2.2.2.2]
+    Info.always (blockInfo code) = true ↔ ∃ s ∈ code, Info.always (stmtInfo s) = true := by
+  rw [blockInfo, (slice_fold_fields code _).2.2.2.2]
   simp
 
 private theorem slice_stmtInfo_while (condition : Bap.Bil.Exp) (body : Bap.Bil.Program) :
-    Info.defs (stmtInfo (.while condition body)) = [] ∧
-    Info.mayDefs (stmtInfo (.while condition body)) =
-      Info.defs (slice_block body) ++ Info.mayDefs (slice_block body) ∧
-    Info.unknownWrite (stmtInfo (.while condition body)) = Info.unknownWrite (slice_block body) ∧
-    Info.dynamic (stmtInfo (.while condition body)) = true ∧
-    Info.always (stmtInfo (.while condition body)) = true := by
-  obtain ⟨h1, h2, h3, h4⟩ := slice_usesExp_pure condition
-  simp [stmtInfo, merge, h1, h2, h3, h4, slice_block]
+    Info.always (stmtInfo (.while condition body)) = true ∧ Info.dynamic (stmtInfo (.while condition body)) = true := by
+  simp [stmtInfo, merge]
 
 private theorem slice_stmtInfo_ifElse (condition : Bap.Bil.Exp) (yes no : Bap.Bil.Program) :
-    Info.defs (stmtInfo (.ifElse condition yes no)) =
-      (Info.defs (slice_block yes)).filter (Info.defs (slice_block no)).contains ∧
-    Info.mayDefs (stmtInfo (.ifElse condition yes no)) =
-      Info.defs (slice_block yes) ++ Info.mayDefs (slice_block yes) ++ Info.defs (slice_block no) ++
-        Info.mayDefs (slice_block no) ∧
+    (∀ d, d ∈ Info.writes (stmtInfo (.ifElse condition yes no)) ↔ d ∈ Info.writes (blockInfo yes) ∨ d ∈ Info.writes (blockInfo no)) ∧
+    (∀ d, d ∈ Info.wholesale (stmtInfo (.ifElse condition yes no)) ↔ d ∈ Info.wholesale (blockInfo yes) ∨ d ∈ Info.wholesale (blockInfo no)) ∧
     Info.uses (stmtInfo (.ifElse condition yes no)) =
-      Info.uses (usesExp condition) ++ (Info.uses (slice_block yes) ++ Info.uses (slice_block no)) ∧
-    Info.unknownWrite (stmtInfo (.ifElse condition yes no)) =
-      (Info.unknownWrite (slice_block yes) || Info.unknownWrite (slice_block no)) ∧
+      Info.uses (usesExp condition) ++ (Info.uses (blockInfo yes) ++ Info.uses (blockInfo no)) ∧
     Info.dynamic (stmtInfo (.ifElse condition yes no)) =
-      (Info.dynamic (usesExp condition) || (Info.dynamic (slice_block yes) || Info.dynamic (slice_block no))) ∧
+      (Info.dynamic (usesExp condition) || (Info.dynamic (blockInfo yes) || Info.dynamic (blockInfo no))) ∧
     Info.always (stmtInfo (.ifElse condition yes no)) =
-      (Info.always (usesExp condition) || (Info.always (slice_block yes) || Info.always (slice_block no))) ∧
-    Info.exits (stmtInfo (.ifElse condition yes no)) =
-      (Info.exits (slice_block yes) || Info.exits (slice_block no)) := by
-  obtain ⟨h1, h2, h3, h4⟩ := slice_usesExp_pure condition
-  simp [stmtInfo, merge, h1, h2, h3, h4, slice_block]
-
-/-- A location only counts as defined by a conditional if both branches define it. -/
-theorem slice_ifElse_must_defs (condition : Bap.Bil.Exp) (yes no : Bap.Bil.Program) (d : Location) :
-    d ∈ Info.defs (stmtInfo (.ifElse condition yes no)) ↔
-      d ∈ slice_must yes ∧ d ∈ slice_must no := by
-  rw [(slice_stmtInfo_ifElse condition yes no).1]
-  simp [slice_block_defs]
-
-/-- A one-armed conditional overwrites nothing for certain, so everything live after it stays live. -/
-theorem slice_one_armed_if_keeps_live (condition : Bap.Bil.Exp) (yes : Bap.Bil.Program)
-    (live : List Location) (loc : Location) (hl : loc ∈ live) :
-    loc ∈ backwardInstruction live (stmtInfo (.ifElse condition yes [])) := by
-  rw [slice_mem_backwardInstruction]
-  refine .inl ⟨hl, fun d hd => ?_⟩
-  have := ((slice_ifElse_must_defs condition yes [] d).mp hd).2
-  simp [slice_must] at this
-
-/-- A loop may run zero times, so everything live after it stays live. -/
-theorem slice_while_keeps_live (condition : Bap.Bil.Exp) (body : Bap.Bil.Program)
-    (live : List Location) (loc : Location) (hl : loc ∈ live) :
-    loc ∈ backwardInstruction live (stmtInfo (.while condition body)) := by
-  rw [slice_mem_backwardInstruction, (slice_stmtInfo_while condition body).1]
-  simp [hl]
-
-private theorem slice_unknownWrite_dynamic_stmt (stmt : Bap.Bil.Stmt) :
-    Info.unknownWrite (stmtInfo stmt) = true → Info.dynamic (stmtInfo stmt) = true := by
-  induction stmt using stmtInduction with
-  | move var value =>
-    cases hs : isStore value <;> cases ht : var.typ <;> simp +contextual [stmtInfo, hs, ht]
-  | jmp target => simp [stmtInfo, (slice_usesExp_pure target).2.2.1]
-  | special message => simp [stmtInfo]
-  | cpuExn number => simp [stmtInfo]
-  | while_ condition body _ => intro _; exact (slice_stmtInfo_while condition body).2.2.2.1
-  | ifElse condition yes no ihy ihn =>
-    intro h
-    obtain ⟨_, _, _, h3, h4, _, _⟩ := slice_stmtInfo_ifElse condition yes no
-    rw [h3, Bool.or_eq_true] at h
-    rw [h4]
-    rcases h with h | h
-    · obtain ⟨s, hs, hu⟩ := (slice_block_unknownWrite yes).mp h
-      simp [(slice_block_dynamic yes).mpr ⟨s, hs, ihy s hs hu⟩]
-    · obtain ⟨s, hs, hu⟩ := (slice_block_unknownWrite no).mp h
-      simp [(slice_block_dynamic no).mpr ⟨s, hs, ihn s hs hu⟩]
-
-/-- A write to an undetermined address always clears `complete` at a site. -/
-theorem slice_unknownWrite_dynamic (code : Bap.Bil.Program)
-    (h : Info.unknownWrite (slice_block code) = true) : Info.dynamic (slice_block code) = true := by
-  obtain ⟨s, hs, hu⟩ := (slice_block_unknownWrite code).mp h
-  exact (slice_block_dynamic code).mpr ⟨s, hs, slice_unknownWrite_dynamic_stmt s hu⟩
-
-private theorem slice_fold_accum (instructions : List Bap.Disasm.Insn) (live : List Location)
-    (sites : List Nat) (determined : Bool) (calls : List Nat) :
-    instructions.foldl slice_step (live, sites, determined, calls) =
-      let result := instructions.foldl slice_step (live, [], true, [])
-      (result.1, sites ++ result.2.1, determined && result.2.2.1, calls ++ result.2.2.2) := by
-  induction instructions generalizing live sites determined calls with
-  | nil => simp
-  | cons insn rest ih =>
-    simp only [List.foldl_cons, slice_step]
-    by_cases hrel : relevant live (slice_block insn.bil) = true
-    · simp only [hrel, ite_true]
-      split
-      · rw [ih _ (sites ++ [insn.address]), ih _ ([] ++ [insn.address])]
-        simp [Bool.and_assoc]
-      · rw [ih _ (sites ++ [insn.address]), ih _ ([] ++ [insn.address])]
-        simp [Bool.and_assoc]
-    · simp only [hrel, Bool.false_eq_true, ite_false]
-      split
-      · rw [ih live sites determined (calls ++ [insn.address]), ih live [] true ([] ++ [insn.address])]
-        simp
-      · rw [ih live sites determined calls]
-
-private theorem slice_complete_conj (a b : Bool) (x y : List Nat) :
-    ((a && b) && (x ++ y).isEmpty) = ((a && x.isEmpty) && (b && y.isEmpty)) := by
-  cases a <;> cases b <;> cases x <;> cases y <;> rfl
-
-/-- Slicing a concatenation runs the suffix first and feeds its live set into the prefix. -/
-theorem slice_backward_append (xs ys : List Bap.Disasm.Insn) (criteria : List Location) :
-    let later := backward ys criteria
-    let earlier := backward xs later.live
-    (backward (xs ++ ys) criteria).sites = earlier.sites ++ later.sites ∧
-      (backward (xs ++ ys) criteria).live = earlier.live ∧
-      (backward (xs ++ ys) criteria).determined = (later.determined && earlier.determined) ∧
-      (backward (xs ++ ys) criteria).calls = earlier.calls ++ later.calls ∧
-      (backward (xs ++ ys) criteria).complete = (later.complete && earlier.complete) := by
-  simp only [slice_backward_eq, List.reverse_append, List.foldl_append]
-  rw [slice_fold_accum xs.reverse]
-  refine ⟨by simp, rfl, by simp, by simp, ?_⟩
-  simpa using slice_complete_conj _ _ _ _
-
-/-- `complete` is exactly `determined` with no live call. -/
-theorem slice_complete_iff (instructions : List Bap.Disasm.Insn) (criteria : List Location) :
-    (backward instructions criteria).complete = true ↔
-      (backward instructions criteria).determined = true ∧ (backward instructions criteria).calls = [] := by
-  simp [slice_backward_eq]
-
-/-- A singleton slice takes the instruction exactly when it is relevant to the criteria. -/
-theorem slice_backward_singleton (insn : Bap.Disasm.Insn) (criteria : List Location) :
-    (backward [insn] criteria).sites =
-      if relevant criteria (slice_block insn.bil) then [insn.address] else [] := by
-  simp only [slice_backward_eq, List.reverse_cons, List.reverse_nil, List.nil_append,
-    List.foldl_cons, List.foldl_nil, slice_step]
-  split <;> simp
-
-private theorem slice_backward_singleton_live (insn : Bap.Disasm.Insn) (criteria : List Location) :
-    (backward [insn] criteria).live =
-      if relevant criteria (slice_block insn.bil) then backwardInstruction criteria (slice_block insn.bil)
-      else criteria := by
-  simp only [slice_backward_eq, List.reverse_cons, List.reverse_nil, List.nil_append,
-    List.foldl_cons, List.foldl_nil, slice_step]
-  split <;> simp
-
-private theorem slice_backward_singleton_determined (insn : Bap.Disasm.Insn) (criteria : List Location) :
-    (backward [insn] criteria).determined =
-      if relevant criteria (slice_block insn.bil) then !Info.dynamic (slice_block insn.bil) else true := by
-  simp only [slice_backward_eq, List.reverse_cons, List.reverse_nil, List.nil_append,
-    List.foldl_cons, List.foldl_nil, slice_step]
-  split <;> simp
-
-private theorem slice_backward_singleton_calls (insn : Bap.Disasm.Insn) (criteria : List Location) :
-    (backward [insn] criteria).calls =
-      if insn.flow = .call ∧ criteria ≠ [] then [insn.address] else [] := by
-  simp only [slice_backward_eq, List.reverse_cons, List.reverse_nil, List.nil_append,
-    List.foldl_cons, List.foldl_nil, slice_step]
-  by_cases hf : insn.flow = .call <;> cases criteria <;> split <;> simp [hf]
-
-/-- Sites are a subsequence of the input instruction addresses, in input order. -/
-theorem slice_sites_sublist (instructions : List Bap.Disasm.Insn) (criteria : List Location) :
-    (backward instructions criteria).sites.Sublist (instructions.map Bap.Disasm.Insn.address) := by
-  have key : ∀ (rest : List Bap.Disasm.Insn) (live : List Location) (sites : List Nat) (det : Bool) (calls : List Nat),
-      (rest.foldl slice_step (live, sites, det, calls)).2.1.Sublist
-        (sites ++ rest.map Bap.Disasm.Insn.address) := by
-    intro rest
-    induction rest with
-    | nil => simp
-    | cons insn rest ih =>
-      intro live sites det calls
-      simp only [List.foldl_cons, slice_step, List.map_cons]
-      split
-      · have := ih (backwardInstruction live (slice_block insn.bil)) (sites ++ [insn.address])
-          (det && !Info.dynamic (slice_block insn.bil))
-          (if insn.flow = .call && !live.isEmpty then calls ++ [insn.address] else calls)
-        simpa using this
-      · exact (ih live sites det _).trans
-          (List.Sublist.append_left (List.sublist_cons_self _ _) _)
-  have := (key instructions.reverse criteria [] true []).reverse
-  simpa [slice_backward_eq] using this
-
-theorem slice_site_is_instruction {instructions : List Bap.Disasm.Insn} {criteria : List Location}
-    {site : Nat} (h : site ∈ (backward instructions criteria).sites) :
-    ∃ insn ∈ instructions, insn.address = site := by
-  have := (slice_sites_sublist instructions criteria).subset h
-  simpa using this
-
-/-- Splits a slice around one instruction: `later` slices what follows it. -/
-private theorem slice_backward_around (xs : List Bap.Disasm.Insn) (insn : Bap.Disasm.Insn)
-    (ys : List Bap.Disasm.Insn) (criteria : List Location) :
-    let later := backward ys criteria
-    let here := backward [insn] later.live
-    let earlier := backward xs here.live
-    (backward (xs ++ insn :: ys) criteria).sites = earlier.sites ++ here.sites ++ later.sites ∧
-      (backward (xs ++ insn :: ys) criteria).determined =
-        (later.determined && (here.determined && earlier.determined)) ∧
-      (backward (xs ++ insn :: ys) criteria).calls = earlier.calls ++ here.calls ++ later.calls ∧
-      (backward (xs ++ insn :: ys) criteria).complete =
-        (later.complete && (here.complete && earlier.complete)) := by
-  have h1 := slice_backward_append xs (insn :: ys) criteria
-  have h2 := slice_backward_append [insn] ys criteria
-  simp only [List.singleton_append] at h2
-  obtain ⟨h1s, _, h1d, h1k, h1c⟩ := h1
-  obtain ⟨h2s, h2l, h2d, h2k, h2c⟩ := h2
-  simp only [h1s, h1d, h1k, h1c, h2s, h2l, h2d, h2k, h2c, List.append_assoc]
-  simp [Bool.and_assoc]
-
-/-- An instruction relevant to what is live after it is a site. -/
-theorem slice_relevant_is_site (xs : List Bap.Disasm.Insn) (insn : Bap.Disasm.Insn)
-    (ys : List Bap.Disasm.Insn) (criteria : List Location)
-    (h : relevant (backward ys criteria).live (slice_block insn.bil) = true) :
-    insn.address ∈ (backward (xs ++ insn :: ys) criteria).sites := by
-  rw [(slice_backward_around xs insn ys criteria).1, slice_backward_singleton]
-  simp [h]
-
-/-- An instruction whose effects can't be summarised statically is in every slice. -/
-theorem slice_always_is_site (xs : List Bap.Disasm.Insn) (insn : Bap.Disasm.Insn)
-    (ys : List Bap.Disasm.Insn) (criteria : List Location)
-    (halways : Info.always (slice_block insn.bil) = true) :
-    insn.address ∈ (backward (xs ++ insn :: ys) criteria).sites :=
-  slice_relevant_is_site xs insn ys criteria ((slice_relevant_iff _ _).mpr (.inl halways))
-
-/-- A store that overlaps a live location, even partly, makes its instruction a site. -/
-theorem slice_overlapping_def_is_site (xs : List Bap.Disasm.Insn) (insn : Bap.Disasm.Insn)
-    (ys : List Bap.Disasm.Insn) (criteria : List Location) {d loc : Location}
-    (hd : d ∈ Info.defs (slice_block insn.bil) ∨ d ∈ Info.mayDefs (slice_block insn.bil))
-    (hl : loc ∈ (backward ys criteria).live) (ho : d.overlaps loc = true) :
-    insn.address ∈ (backward (xs ++ insn :: ys) criteria).sites := by
-  apply slice_relevant_is_site
-  rw [slice_relevant_iff]
-  rcases hd with hd | hd
-  · exact .inr (.inr (.inl ⟨d, hd, loc, hl, ho⟩))
-  · exact .inr (.inr (.inr (.inl ⟨d, hd, loc, hl, ho⟩)))
-
-/-- A store to an undetermined address may write any live memory: it is a site and the slice is
-not complete. -/
-theorem slice_unknown_write_incomplete (xs : List Bap.Disasm.Insn) (insn : Bap.Disasm.Insn)
-    (ys : List Bap.Disasm.Insn) (criteria : List Location) {loc : Location}
-    (hu : Info.unknownWrite (slice_block insn.bil) = true)
-    (hl : loc ∈ (backward ys criteria).live) (hm : loc.isMemory = true) :
-    insn.address ∈ (backward (xs ++ insn :: ys) criteria).sites ∧
-      (backward (xs ++ insn :: ys) criteria).complete = false := by
-  have hrel : relevant (backward ys criteria).live (slice_block insn.bil) = true :=
-    (slice_relevant_iff _ _).mpr (.inr (.inl ⟨hu, loc, hl, hm⟩))
-  refine ⟨slice_relevant_is_site xs insn ys criteria hrel, ?_⟩
-  have hdet : (backward (xs ++ insn :: ys) criteria).determined = false := by
-    rw [(slice_backward_around xs insn ys criteria).2.1, slice_backward_singleton_determined]
-    simp [hrel, slice_unknownWrite_dynamic _ hu]
-  cases hc : (backward (xs ++ insn :: ys) criteria).complete with
-  | false => rfl
-  | true => rw [((slice_complete_iff _ _).mp hc).1] at hdet; cases hdet
-
-/-- Soundness of `complete`, for the linear order `backward` assumes (`backwardProject` clears the
-flag otherwise). Each instruction is either a site with a fully determined summary, or nothing it
-may write overlaps what is live after it, and it writes no undetermined address while memory is
-live. -/
-theorem slice_complete_sound {xs ys : List Bap.Disasm.Insn} {insn : Bap.Disasm.Insn}
-    {criteria : List Location} (h : (backward (xs ++ insn :: ys) criteria).complete = true) :
-    let live := (backward ys criteria).live
-    let info := slice_block insn.bil
-    (insn.address ∈ (backward (xs ++ insn :: ys) criteria).sites ∧ Info.dynamic info = false ∧
-        Info.unknownWrite info = false) ∨
-      (relevant live info = false ∧ Info.always info = false ∧
-        (∀ d, d ∈ Info.defs info ∨ d ∈ Info.mayDefs info → ∀ loc ∈ live, d.overlaps loc = false) ∧
-        (Info.unknownWrite info = true → ∀ loc ∈ live, loc.isMemory = false)) := by
-  intro live info
-  have hdet := ((slice_complete_iff _ _).mp h).1
-  rw [(slice_backward_around xs insn ys criteria).2.1, slice_backward_singleton_determined] at hdet
-  by_cases hrel : relevant live info = true
-  · refine .inl ⟨slice_relevant_is_site xs insn ys criteria hrel, ?_⟩
-    have hd : Info.dynamic info = false := by
-      simp only [Bool.and_eq_true] at hdet
-      have := hdet.2.1
-      simpa [live, info, hrel] using this
-    refine ⟨hd, ?_⟩
-    cases hu : Info.unknownWrite info with
-    | false => rfl
-    | true => rw [slice_unknownWrite_dynamic _ hu] at hd; cases hd
-  · refine .inr ⟨by simpa using hrel, ?_, ?_, ?_⟩
-    · cases ha : Info.always info with
-      | false => rfl
-      | true => exact absurd ((slice_relevant_iff _ _).mpr (.inl ha)) hrel
-    · intro d hd loc hl
-      cases ho : d.overlaps loc with
-      | false => rfl
-      | true =>
-        refine absurd ((slice_relevant_iff _ _).mpr ?_) hrel
-        rcases hd with hd | hd
-        · exact .inr (.inr (.inl ⟨d, hd, loc, hl, ho⟩))
-        · exact .inr (.inr (.inr (.inl ⟨d, hd, loc, hl, ho⟩)))
-    · intro hu loc hl
-      cases hm : loc.isMemory with
-      | false => rfl
-      | true => exact absurd ((slice_relevant_iff _ _).mpr (.inr (.inl ⟨hu, loc, hl, hm⟩))) hrel
-
-private theorem slice_writes_move {var : Bap.Var} {value : Bap.Bil.Exp}
-    (h : ¬ (var.typ matches .mem _ _)) : Location.reg var ∈ slice_writes (stmtInfo (.move var value)) := by
-  revert h
-  cases hs : isStore value <;> cases ht : var.typ <;> simp [slice_writes, stmtInfo, hs, ht]
-
-private theorem slice_writes_while {condition : Bap.Bil.Exp} {body : Bap.Bil.Program}
-    {s : Bap.Bil.Stmt} (hs : s ∈ body) {d : Location} (hd : d ∈ slice_writes (stmtInfo s)) :
-    d ∈ slice_writes (stmtInfo (.while condition body)) := by
-  have := (slice_block_writes_iff body d).mpr ⟨s, hs, hd⟩
-  simpa [slice_writes, (slice_stmtInfo_while condition body).1, (slice_stmtInfo_while condition body).2.1] using this
-
-private theorem slice_writes_ifElse {condition : Bap.Bil.Exp} {yes no : Bap.Bil.Program}
-    {s : Bap.Bil.Stmt} (hs : s ∈ yes ∨ s ∈ no) {d : Location} (hd : d ∈ slice_writes (stmtInfo s)) :
-    d ∈ slice_writes (stmtInfo (.ifElse condition yes no)) := by
-  simp only [slice_writes, List.mem_append, (slice_stmtInfo_ifElse condition yes no).2.1]
-  rcases hs with hs | hs
-  · have := (slice_block_writes_iff yes d).mpr ⟨s, hs, hd⟩
-    simp only [slice_writes, List.mem_append] at this
-    grind
-  · have := (slice_block_writes_iff no d).mpr ⟨s, hs, hd⟩
-    simp only [slice_writes, List.mem_append] at this
-    grind
+      (Info.always (usesExp condition) || (Info.always (blockInfo yes) || Info.always (blockInfo no))) := by
+  obtain ⟨h1, h2⟩ := slice_usesExp_pure condition
+  simp [stmtInfo, merge, h1, h2, blockInfo]
 
 private theorem slice_lookup_bind_other {env : Bap.Bil.Env} {var other : Bap.Var} (value : Bap.Value)
     (h : var ≠ other) : Bap.Bil.lookup (Bap.Bil.bind env var value) other = Bap.Bil.lookup env other := by
@@ -1462,407 +1089,11 @@ private theorem slice_bind_ok {α β : Type} {x : Except String α} {f : α → 
   | ok a => exact ⟨a, rfl, h⟩
   | error e => cases h
 
-/-- Executing statements the slicer sees no write of `var` in leaves `var` alone. -/
-private theorem slice_exec_frame (var : Bap.Var) (hvar : ¬ (var.typ matches .mem _ _)) (fuel : Nat) :
-    (∀ (s : Bap.Bil.Stmt) (st st' : Bap.Bil.State) (e : Bap.Bil.Effect),
-      Location.reg var ∉ slice_writes (stmtInfo s) → Bap.Bil.execStmt fuel st s = .ok (st', e) →
-      Bap.Bil.lookup st'.env var = Bap.Bil.lookup st.env var) ∧
-    (∀ (code : List Bap.Bil.Stmt) (st st' : Bap.Bil.State) (e : Bap.Bil.Effect),
-      (∀ s ∈ code, Location.reg var ∉ slice_writes (stmtInfo s)) →
-      Bap.Bil.execProgram fuel st code = .ok (st', e) →
-      Bap.Bil.lookup st'.env var = Bap.Bil.lookup st.env var) := by
-  induction fuel with
-  | zero =>
-    refine ⟨?_, ?_⟩
-    · intro s st st' e _ h
-      simp [Bap.Bil.execStmt] at h
-    · intro code st st' e _ h
-      simp [Bap.Bil.execProgram] at h
-  | succ fuel ih =>
-    obtain ⟨ihs, ihp⟩ := ih
-    refine ⟨?_, ?_⟩
-    · intro s st st' e hw h
-      cases s with
-      | move target value =>
-        simp only [Bap.Bil.execStmt, Bap.Bil.execExp] at h
-        obtain ⟨val, _, h⟩ := slice_bind_ok h
-        cases h
-        apply slice_lookup_bind_other
-        intro heq
-        subst heq
-        exact hw (slice_writes_move hvar)
-      | jmp target =>
-        simp only [Bap.Bil.execStmt, Bap.Bil.execExp] at h
-        obtain ⟨_, _, h⟩ := slice_bind_ok h
-        obtain ⟨_, _, h⟩ := slice_bind_ok h
-        cases h
-        rfl
-      | special message =>
-        simp only [Bap.Bil.execStmt] at h
-        cases h
-        rfl
-      | cpuExn number =>
-        simp only [Bap.Bil.execStmt] at h
-        cases h
-        rfl
-      | ifElse condition yes no =>
-        simp only [Bap.Bil.execStmt, Bap.Bil.execExp] at h
-        obtain ⟨_, _, h⟩ := slice_bind_ok h
-        obtain ⟨_, _, h⟩ := slice_bind_ok h
-        split at h
-        · split at h
-          · exact ihp yes st st' e (fun s hs hd => hw (slice_writes_ifElse (.inl hs) hd)) h
-          · exact ihp no st st' e (fun s hs hd => hw (slice_writes_ifElse (.inr hs) hd)) h
-        · cases h
-      | «while» condition body =>
-        simp only [Bap.Bil.execStmt, Bap.Bil.execExp] at h
-        obtain ⟨_, _, h⟩ := slice_bind_ok h
-        obtain ⟨_, _, h⟩ := slice_bind_ok h
-        split at h
-        · split at h
-          · obtain ⟨⟨next, effect⟩, hbody, h⟩ := slice_bind_ok h
-            have h1 := ihp body st next effect (fun s hs hd => hw (slice_writes_while hs hd)) hbody
-            cases effect with
-            | normal => exact (ihs _ next st' e hw h).trans h1
-            | jump _ => cases h; exact h1
-            | special _ => cases h; exact h1
-            | cpuExn _ => cases h; exact h1
-          · cases h
-            rfl
-        · cases h
-    · intro code st st' e hw h
-      cases code with
-      | nil =>
-        simp only [Bap.Bil.execProgram] at h
-        cases h
-        rfl
-      | cons head tail =>
-        simp only [Bap.Bil.execProgram] at h
-        obtain ⟨⟨next, effect⟩, hhead, h⟩ := slice_bind_ok h
-        have h1 := ihs head st next effect (hw head List.mem_cons_self) hhead
-        cases effect with
-        | normal =>
-          exact (ihp tail next st' e (fun s hs => hw s (List.mem_cons_of_mem _ hs)) h).trans h1
-        | jump _ => cases h; exact h1
-        | special _ => cases h; exact h1
-        | cpuExn _ => cases h; exact h1
+/-! ### Soundness
 
-private theorem slice_block_writes {code : Bap.Bil.Program} {s : Bap.Bil.Stmt} (hs : s ∈ code)
-    {d : Location} (hd : d ∈ slice_writes (stmtInfo s)) :
-    d ∈ Info.defs (slice_block code) ∨ d ∈ Info.mayDefs (slice_block code) := by
-  have := (slice_block_writes_iff code d).mpr ⟨s, hs, hd⟩
-  simpa [slice_writes] using this
-
-/-- Semantic frame for registers: executing an instruction that is not relevant to `live`, however
-the execution ends, leaves every live non-memory register's value unchanged. -/
-theorem slice_irrelevant_preserves_registers {live : List Location} {insn : Bap.Disasm.Insn}
-    (hrel : relevant live (slice_block insn.bil) = false) {var : Bap.Var}
-    (hl : Location.reg var ∈ live) (hvar : ¬ (var.typ matches .mem _ _))
-    {fuel : Nat} {st st' : Bap.Bil.State} {e : Bap.Bil.Effect}
-    (h : Bap.Bil.execProgram fuel st insn.bil = .ok (st', e)) :
-    Bap.Bil.lookup st'.env var = Bap.Bil.lookup st.env var := by
-  refine (slice_exec_frame var hvar fuel).2 insn.bil st st' e (fun s hs hd => ?_) h
-  have hself : (Location.reg var).overlaps (.reg var) = true := by simp [Location.overlaps]
-  have : relevant live (slice_block insn.bil) = true := by
-    rw [slice_relevant_iff]
-    rcases slice_block_writes hs hd with hb | hb
-    · exact .inr (.inr (.inl ⟨_, hb, _, hl, hself⟩))
-    · exact .inr (.inr (.inr (.inl ⟨_, hb, _, hl, hself⟩)))
-  rw [this] at hrel
-  cases hrel
-
-/-- `inner` occurs in `outer`, at any depth. -/
-inductive slice_SubStmt : Bap.Bil.Stmt → Bap.Bil.Stmt → Prop where
-  | refl (s : Bap.Bil.Stmt) : slice_SubStmt s s
-  | loop {inner s : Bap.Bil.Stmt} {condition : Bap.Bil.Exp} {body : Bap.Bil.Program}
-      (hs : s ∈ body) (h : slice_SubStmt inner s) : slice_SubStmt inner (.while condition body)
-  | branch {inner s : Bap.Bil.Stmt} {condition : Bap.Bil.Exp} {yes no : Bap.Bil.Program}
-      (hs : s ∈ yes ∨ s ∈ no) (h : slice_SubStmt inner s) : slice_SubStmt inner (.ifElse condition yes no)
-
-private theorem slice_subStmt_writes {inner outer : Bap.Bil.Stmt} (h : slice_SubStmt inner outer) :
-    (∀ d ∈ slice_writes (stmtInfo inner), d ∈ slice_writes (stmtInfo outer)) ∧
-      (Info.unknownWrite (stmtInfo inner) = true → Info.unknownWrite (stmtInfo outer) = true) := by
-  induction h with
-  | refl => exact ⟨fun _ h => h, id⟩
-  | loop hs _ ih =>
-    refine ⟨fun d hd => slice_writes_while hs (ih.1 d hd), fun hu => ?_⟩
-    rw [(slice_stmtInfo_while _ _).2.2.1]
-    exact (slice_block_unknownWrite _).mpr ⟨_, hs, ih.2 hu⟩
-  | branch hs _ ih =>
-    refine ⟨fun d hd => slice_writes_ifElse hs (ih.1 d hd), fun hu => ?_⟩
-    rw [(slice_stmtInfo_ifElse _ _ _).2.2.2.1, Bool.or_eq_true]
-    rcases hs with hs | hs
-    · exact .inl ((slice_block_unknownWrite _).mpr ⟨_, hs, ih.2 hu⟩)
-    · exact .inr ((slice_block_unknownWrite _).mpr ⟨_, hs, ih.2 hu⟩)
-
-/-- `store` is a node on the chain of stores a memory expression is built from. -/
-inductive slice_StoreOf : Bap.Bil.Exp → Bap.Bil.Exp → Prop where
-  | self (e : Bap.Bil.Exp) : slice_StoreOf e e
-  | inner {store memory address value : Bap.Bil.Exp} {endian : Bap.Endian} {size : Nat}
-      (h : slice_StoreOf store memory) :
-      slice_StoreOf store (.store memory address value endian size)
-
-/-- Every store of a chain is accounted for: at its constant address, or as an undetermined write. -/
-theorem slice_memoryWrites_complete {dst : Bap.Var} {value memory address stored : Bap.Bil.Exp}
-    {endian : Bap.Endian} {size : Nat}
-    (h : slice_StoreOf (.store memory address stored endian size) value) :
-    (∃ n, constantRange address size = some n ∧ Location.mem n size ∈ (memoryWrites dst value).1) ∨
-      (constantRange address size = none ∧ (memoryWrites dst value).2 = true) := by
-  generalize hnode : Bap.Bil.Exp.store memory address stored endian size = node at h
-  induction h with
-  | self =>
-    subst hnode
-    cases hc : constantRange address size with
-    | none => exact .inr ⟨rfl, by simp [memoryWrites, hc]⟩
-    | some n => exact .inl ⟨n, rfl, by simp [memoryWrites, hc]⟩
-  | @inner m a _ _ s _ ih =>
-    rcases ih with ⟨n, hn, hm⟩ | ⟨hn, hu⟩
-    · refine .inl ⟨n, hn, ?_⟩
-      simp only [memoryWrites]
-      cases hc : constantRange a s <;> simp [hm]
-    · refine .inr ⟨hn, ?_⟩
-      simp only [memoryWrites]
-      cases hc : constantRange a s <;> simp [hu]
-
-private theorem slice_stmtInfo_move_store (var : Bap.Var) (value : Bap.Bil.Exp)
-    (hmem : (isStore value || var.typ matches .mem _ _) = true) :
-    (∀ d ∈ (memoryWrites var value).1, d ∈ slice_writes (stmtInfo (.move var value))) ∧
-      Info.unknownWrite (stmtInfo (.move var value)) = (memoryWrites var value).2 := by
-  revert hmem
-  cases hs : isStore value <;> cases ht : var.typ <;>
-    simp +contextual [slice_writes, stmtInfo, hs, ht]
-
-/-- Memory frame, syntactically: every memory assignment at any depth of an instruction that is
-not relevant to `live` writes constant ranges disjoint from `live`, and writes an undetermined
-address only if no memory is live. `slice_end_to_end` turns this into a statement about bytes. -/
-theorem slice_irrelevant_store_frame {live : List Location} {insn : Bap.Disasm.Insn}
-    (hrel : relevant live (slice_block insn.bil) = false) {outer : Bap.Bil.Stmt}
-    (houter : outer ∈ insn.bil) {var : Bap.Var} {value : Bap.Bil.Exp}
-    (hsub : slice_SubStmt (.move var value) outer)
-    (hmem : (isStore value || var.typ matches .mem _ _) = true) :
-    (∀ d ∈ (memoryWrites var value).1, ∀ loc ∈ live, d.overlaps loc = false) ∧
-      ((memoryWrites var value).2 = true → ∀ loc ∈ live, loc.isMemory = false) := by
-  obtain ⟨hw, hu⟩ := slice_subStmt_writes hsub
-  obtain ⟨hwm, hum⟩ := slice_stmtInfo_move_store var value hmem
-  have hnot : relevant live (slice_block insn.bil) ≠ true := by simp [hrel]
-  constructor
-  · intro d hd loc hl
-    cases ho : d.overlaps loc with
-    | false => rfl
-    | true =>
-      refine absurd ((slice_relevant_iff _ _).mpr ?_) hnot
-      rcases slice_block_writes houter (hw d (hwm d hd)) with hb | hb
-      · exact .inr (.inr (.inl ⟨d, hb, loc, hl, ho⟩))
-      · exact .inr (.inr (.inr (.inl ⟨d, hb, loc, hl, ho⟩)))
-  · intro hflag loc hl
-    cases hm : loc.isMemory with
-    | false => rfl
-    | true =>
-      refine absurd ((slice_relevant_iff _ _).mpr (.inr (.inl ⟨?_, loc, hl, hm⟩))) hnot
-      exact (slice_block_unknownWrite _).mpr ⟨outer, houter, hu (hum.trans hflag)⟩
-
-section Regression
-
-private def slice_x : Bap.Var := ⟨"x", .imm 64, 0, false⟩
-private def slice_y : Bap.Var := ⟨"y", .imm 64, 0, false⟩
-private def slice_c : Bap.Var := ⟨"c", .imm 1, 0, false⟩
-private def slice_mem : Bap.Var := ⟨"m", .mem 64 8, 0, false⟩
-
-private def slice_condInsns : List Bap.Disasm.Insn := [
-  ⟨0, 1, "x = 5", .normal, none, [.move slice_x (.int (BitVec.ofNat 64 5))]⟩,
-  ⟨1, 1, "if c then x = 1", .normal, none,
-    [.ifElse (.var slice_c) [.move slice_x (.int (BitVec.ofNat 64 1))] []]⟩]
-
-private def slice_storeAt (address size : Nat) : Bap.Disasm.Insn :=
-  ⟨0, 1, "store", .normal, none,
-    [.move slice_mem (.store (.var slice_mem) (.int (BitVec.ofNat 64 address))
-      (.int (BitVec.ofNat (size * 8) 7)) .little size)]⟩
-
-private def slice_dynamicStore : Bap.Disasm.Insn :=
-  ⟨0, 1, "store", .normal, none,
-    [.move slice_mem (.store (.var slice_mem) (.var slice_y) (.int (BitVec.ofNat 8 7)) .little 1)]⟩
-
-set_option linter.unusedSimpArgs false
-
-/-- `x` keeps its first value if the branch isn't taken, so both definitions are in the slice. -/
-theorem slice_conditional_def_regression :
-    (backward slice_condInsns [.reg slice_x]).sites = [0, 1] := by
-  simp [slice_backward_eq, slice_step, slice_block, stmtInfo, merge, usesExp, relevant, touches,
-    backwardInstruction, removeDefinitions, addUnique, Location.overlaps, Location.covers,
-    Location.isMemory, memoryWrites, constantRange, isStore, Bap.Bil.evalExp, Bap.Value.asBits, Bap.Bil.lookup, Except.toOption,
-    slice_condInsns, slice_storeAt, slice_dynamicStore, slice_x, slice_y, slice_c, slice_mem]
-
-/-- An 8-byte store over a 4-byte criterion is a site and fully overwrites it. -/
-theorem slice_covering_store_regression :
-    (backward [slice_storeAt 100 8] [.mem 100 4]).sites = [0] ∧
-      (backward [slice_storeAt 100 8] [.mem 100 4]).live = [] ∧
-      (backward [slice_storeAt 100 8] [.mem 100 4]).complete = true := by
-  simp [slice_backward_eq, slice_step, slice_block, stmtInfo, merge, usesExp, relevant, touches,
-    backwardInstruction, removeDefinitions, addUnique, Location.overlaps, Location.covers,
-    Location.isMemory, memoryWrites, constantRange, isStore, Bap.Bil.evalExp, Bap.Value.asBits, Bap.Bil.lookup, Except.toOption,
-    slice_condInsns, slice_storeAt, slice_dynamicStore, slice_x, slice_y, slice_c, slice_mem]
-
-/-- A 4-byte store over half of an 8-byte criterion is a site that leaves the criterion live. -/
-theorem slice_partial_store_regression :
-    (backward [slice_storeAt 104 4] [.mem 100 8]).sites = [0] ∧
-      (backward [slice_storeAt 104 4] [.mem 100 8]).live = [.mem 100 8] := by
-  simp [slice_backward_eq, slice_step, slice_block, stmtInfo, merge, usesExp, relevant, touches,
-    backwardInstruction, removeDefinitions, addUnique, Location.overlaps, Location.covers,
-    Location.isMemory, memoryWrites, constantRange, isStore, Bap.Bil.evalExp, Bap.Value.asBits, Bap.Bil.lookup, Except.toOption,
-    slice_condInsns, slice_storeAt, slice_dynamicStore, slice_x, slice_y, slice_c, slice_mem]
-
-/-- A store to an unknown address may write the criterion: a site, and the slice is incomplete. -/
-theorem slice_dynamic_store_regression :
-    (backward [slice_dynamicStore] [.mem 100 1]).sites = [0] ∧
-      (backward [slice_dynamicStore] [.mem 100 1]).complete = false := by
-  simp [slice_backward_eq, slice_step, slice_block, stmtInfo, merge, usesExp, relevant, touches,
-    backwardInstruction, removeDefinitions, addUnique, Location.overlaps, Location.covers,
-    Location.isMemory, memoryWrites, constantRange, isStore, Bap.Bil.evalExp, Bap.Value.asBits, Bap.Bil.lookup, Except.toOption,
-    slice_condInsns, slice_storeAt, slice_dynamicStore, slice_x, slice_y, slice_c, slice_mem]
-
-end Regression
-
-/-- The instructions `backwardProject` slices. -/
-private def slice_functionInsns (project : Bap.Project.Project) (entry : Nat) : List Bap.Disasm.Insn :=
-  let index := Bap.Analysis.Xrefs.create project
-  let owner := (Bap.Analysis.Xrefs.functionOf index entry).map Bap.Image.Symbol.addr
-  project.disasm.map (fun disasm =>
-    if owner.isSome then
-      disasm.instructions.filter fun insn =>
-        (Bap.Analysis.Xrefs.functionOf index insn.address).map Bap.Image.Symbol.addr = owner
-    else
-      disasm.instructions) |>.getD []
-
-/-- `backwardProject` claims `complete` only if the function's listing order is an execution order:
-no conditional or indirect jump, and no direct jump back into the listing. -/
-theorem slice_backwardProject_complete_linear {project : Bap.Project.Project} {entry : Nat}
-    {criteria : List Location} (h : (backwardProject project entry criteria).complete = true) :
-    let insns := slice_functionInsns project entry
-    (backward insns criteria).complete = true ∧ ∀ insn ∈ insns,
-      insn.flow ≠ .conditionalJump ∧ insn.flow ≠ .indirectJump ∧
-        (insn.flow = .jump → ∀ target, insn.target = some target → target ∉ insns.map Bap.Disasm.Insn.address) := by
-  intro insns
-  have heq : (backwardProject project entry criteria).complete =
-      ((backward insns criteria).complete && linear insns) := rfl
-  rw [heq, Bool.and_eq_true] at h
-  refine ⟨h.1, fun insn hi => ?_⟩
-  have hl := List.all_eq_true.mp h.2 insn hi
-  revert hl
-  cases hf : insn.flow <;> simp
-  intro hl target ht
-  simpa [ht] using hl
-
-private theorem slice_relevant_mono {small big : List Location} {info : Info}
-    (h : ∀ loc ∈ small, loc ∈ big) (hrel : relevant small info = true) : relevant big info = true := by
-  rw [slice_relevant_iff] at hrel ⊢
-  rcases hrel with h' | ⟨hu, l, hl, hm⟩ | ⟨d, hd, l, hl, ho⟩ | ⟨d, hd, l, hl, ho⟩ | ⟨d, hd, l, hl, ho⟩
-  · exact .inl h'
-  · exact .inr (.inl ⟨hu, l, h _ hl, hm⟩)
-  · exact .inr (.inr (.inl ⟨d, hd, l, h _ hl, ho⟩))
-  · exact .inr (.inr (.inr (.inl ⟨d, hd, l, h _ hl, ho⟩)))
-  · exact .inr (.inr (.inr (.inr ⟨d, hd, l, h _ hl, ho⟩)))
-
-private theorem slice_fold_mono (instructions : List Bap.Disasm.Insn) :
-    ∀ (small big : List Location × List Nat × Bool × List Nat),
-      (∀ loc ∈ small.1, loc ∈ big.1) → small.2.1.Sublist big.2.1 → (big.2.2.1 = true → small.2.2.1 = true) →
-      (∀ k ∈ small.2.2.2, k ∈ big.2.2.2) →
-      let small' := instructions.foldl slice_step small
-      let big' := instructions.foldl slice_step big
-      (∀ loc ∈ small'.1, loc ∈ big'.1) ∧ small'.2.1.Sublist big'.2.1 ∧ (big'.2.2.1 = true → small'.2.2.1 = true) ∧
-        (∀ k ∈ small'.2.2.2, k ∈ big'.2.2.2) := by
-  induction instructions with
-  | nil => intro _ _ h1 h2 h3 h4; exact ⟨h1, h2, h3, h4⟩
-  | cons insn rest ih =>
-    rintro ⟨liveS, sitesS, detS, callsS⟩ ⟨liveB, sitesB, detB, callsB⟩ h1 h2 h3 h4
-    simp only [List.foldl_cons]
-    simp only at h1 h2 h3 h4
-    have hcalls : ∀ k ∈ (if insn.flow = .call && !liveS.isEmpty then callsS ++ [insn.address] else callsS),
-        k ∈ (if insn.flow = .call && !liveB.isEmpty then callsB ++ [insn.address] else callsB) := by
-      intro k hk
-      by_cases hf : insn.flow = .call
-      · cases hs : liveS with
-        | nil =>
-          simp [hs] at hk
-          split
-          · simp [h4 k hk]
-          · exact h4 k hk
-        | cons l ls =>
-          have hb : liveB ≠ [] := by
-            intro e
-            have := h1 l (by simp [hs])
-            simp [e] at this
-          simp [hs, hf] at hk
-          simp [hf, hb]
-          exact hk.imp (h4 k) id
-      · simp [hf] at hk ⊢
-        exact h4 k hk
-    apply ih
-    all_goals
-      by_cases hS : relevant liveS (slice_block insn.bil) = true
-      · have hB := slice_relevant_mono h1 hS
-        simp only [slice_step, hS, hB, ite_true]
-        first
-          | exact hcalls
-          | (intro loc hloc
-             simp only [slice_mem_backwardInstruction] at hloc ⊢
-             exact hloc.imp (fun h => ⟨h1 _ h.1, h.2⟩) id)
-          | exact List.Sublist.append h2 (List.Sublist.refl _)
-          | (intro h
-             simp only [Bool.and_eq_true] at h ⊢
-             exact ⟨h3 h.1, h.2⟩)
-      · by_cases hB : relevant liveB (slice_block insn.bil) = true
-        · simp only [slice_step, hS, hB, Bool.false_eq_true, ite_true, ite_false]
-          first
-            | exact hcalls
-            | (intro loc hloc
-               rw [slice_mem_backwardInstruction]
-               refine .inl ⟨h1 _ hloc, fun d hd => ?_⟩
-               cases hc : d.covers loc with
-               | false => rfl
-               | true =>
-                 exact absurd ((slice_relevant_iff _ _).mpr
-                   (.inr (.inr (.inl ⟨d, hd, loc, hloc, slice_covers_overlaps hc⟩)))) hS)
-            | exact h2.trans (List.sublist_append_left _ _)
-            | (intro h
-               simp only [Bool.and_eq_true] at h
-               exact h3 h.1)
-        · simp only [slice_step, hS, hB, Bool.false_eq_true, ite_false]
-          first
-            | exact hcalls
-            | exact h1
-            | exact h2
-            | exact h3
-
-/-- Enlarging the criteria can only enlarge the slice: more live locations, a super-sequence of
-sites, and a completeness claim that implies the smaller slice's claim. -/
-theorem slice_backward_mono (instructions : List Bap.Disasm.Insn) {small big : List Location}
-    (h : ∀ loc ∈ small, loc ∈ big) :
-    (∀ loc ∈ (backward instructions small).live, loc ∈ (backward instructions big).live) ∧
-    (backward instructions small).sites.Sublist (backward instructions big).sites ∧
-    ((backward instructions big).determined = true → (backward instructions small).determined = true) ∧
-    (∀ k ∈ (backward instructions small).calls, k ∈ (backward instructions big).calls) ∧
-    ((backward instructions big).complete = true → (backward instructions small).complete = true) := by
-  obtain ⟨h1, h2, h3, h4⟩ := slice_fold_mono instructions.reverse (small, [], true, []) (big, [], true, []) h
-    (by simp) (by simp) (by simp)
-  have hk : ∀ k ∈ (backward instructions small).calls, k ∈ (backward instructions big).calls := by
-    intro k hk
-    simp only [slice_backward_eq, List.mem_reverse] at hk ⊢
-    exact h4 k hk
-  have hd : (backward instructions big).determined = true → (backward instructions small).determined = true := h3
-  refine ⟨h1, List.Sublist.reverse h2, hd, hk, fun hc => ?_⟩
-  obtain ⟨hb, hn⟩ := (slice_complete_iff _ _).mp hc
-  refine (slice_complete_iff _ _).mpr ⟨hd hb, ?_⟩
-  apply List.eq_nil_iff_forall_not_mem.mpr
-  intro k hm
-  have := hk k hm
-  simp [hn] at this
-
-/-! ### End-to-end soundness
-
-`slice_end_to_end` says that running only the sites reproduces the criteria. It holds of a linear
-trace (`slice_runInsns`: an instruction's jump ends that instruction and the next listed one runs),
-for code in the memory discipline `slice_StmtWF`, when the full run succeeds. Callees are not
-modelled; `complete` is what rules out a call with something live after it. -/
+`slice_end_to_end` says that running only the sites over the CFG reproduces the criteria when the
+tables of the slice check out (`complete`). It rests on the equations `checkInsn` tests, however the
+tables came about. -/
 
 section EndToEnd
 
@@ -1870,110 +1101,128 @@ open Bap.Bil (evalExp lookup execStmt execProgram execExp Effect)
 open_private Bap.Bil.Eval in Bap.Bil : expectMemory
 open Core.MemoryLaws (PagesSized write_eq write_pagesSized readByte_write_frame readByte_writeRegion_inside image)
 
-/-- Value-level expressions: registers and constants, and reads of the memory `m`. -/
-def slice_ValueWF (m : Bap.Var) : Bap.Bil.Exp → Prop
+/-- Value-level expressions: registers and constants, and reads of a memory of `Ms`. -/
+def slice_ValueWF (Ms : List Bap.Var) : Bap.Bil.Exp → Prop
   | .int _ => True
   | .var x => ∃ width, x.typ = .imm width
-  | .load memory address _ _ => memory = .var m ∧ slice_ValueWF m address
+  | .load memory address _ _ => (∃ m ∈ Ms, memory = .var m) ∧ slice_ValueWF Ms address
   | .store .. => False
-  | .bin _ left right => slice_ValueWF m left ∧ slice_ValueWF m right
-  | .un _ value => slice_ValueWF m value
-  | .cast _ _ value => slice_ValueWF m value
-  | .letIn x value body => (∃ width, x.typ = .imm width) ∧ slice_ValueWF m value ∧ slice_ValueWF m body
-  | .ite condition yes no => slice_ValueWF m condition ∧ slice_ValueWF m yes ∧ slice_ValueWF m no
-  | .extract _ _ value => slice_ValueWF m value
-  | .concat left right => slice_ValueWF m left ∧ slice_ValueWF m right
+  | .bin _ left right => slice_ValueWF Ms left ∧ slice_ValueWF Ms right
+  | .un _ value => slice_ValueWF Ms value
+  | .cast _ _ value => slice_ValueWF Ms value
+  | .letIn x value body => (∃ width, x.typ = .imm width) ∧ slice_ValueWF Ms value ∧ slice_ValueWF Ms body
+  | .ite condition yes no => slice_ValueWF Ms condition ∧ slice_ValueWF Ms yes ∧ slice_ValueWF Ms no
+  | .extract _ _ value => slice_ValueWF Ms value
+  | .concat left right => slice_ValueWF Ms left ∧ slice_ValueWF Ms right
   | .unknown _ _ => True
 
-/-- A chain of stores rooted at the memory `m`. -/
-def slice_ChainWF (m : Bap.Var) : Bap.Bil.Exp → Prop
-  | .var x => x = m
+/-- A chain of stores rooted at a memory of `Ms` of the type `typ`. -/
+def slice_ChainWF (Ms : List Bap.Var) (typ : Typ) : Bap.Bil.Exp → Prop
+  | .var x => x ∈ Ms ∧ x.typ = typ
   | .store memory address value _ _ =>
-    slice_ChainWF m memory ∧ slice_ValueWF m address ∧ slice_ValueWF m value
+    slice_ChainWF Ms typ memory ∧ slice_ValueWF Ms address ∧ slice_ValueWF Ms value
   | _ => False
 
-/-- The memory discipline: `m` is the only memory, and only ever assigned stores into itself. -/
-inductive slice_StmtWF (m : Bap.Var) : Bap.Bil.Stmt → Prop where
+/-- The memory discipline: memories are the variables of `Ms`, and only ever assigned stores into
+one of them of its own type, itself or another. -/
+inductive slice_StmtWF (Ms : List Bap.Var) : Bap.Bil.Stmt → Prop where
   | moveReg {x : Bap.Var} {value : Bap.Bil.Exp} {width : Nat} (ht : x.typ = .imm width)
-      (hv : slice_ValueWF m value) : slice_StmtWF m (.move x value)
-  | moveMem {value : Bap.Bil.Exp} (hv : slice_ChainWF m value) : slice_StmtWF m (.move m value)
-  | jmp {target : Bap.Bil.Exp} (hv : slice_ValueWF m target) : slice_StmtWF m (.jmp target)
-  | special (message : String) : slice_StmtWF m (.special message)
-  | cpuExn (number : Nat) : slice_StmtWF m (.cpuExn number)
-  | loop {condition : Bap.Bil.Exp} {body : Bap.Bil.Program} (hv : slice_ValueWF m condition)
-      (hb : ∀ s ∈ body, slice_StmtWF m s) : slice_StmtWF m (.while condition body)
-  | ifElse {condition : Bap.Bil.Exp} {yes no : Bap.Bil.Program} (hv : slice_ValueWF m condition)
-      (hy : ∀ s ∈ yes, slice_StmtWF m s) (hn : ∀ s ∈ no, slice_StmtWF m s) :
-      slice_StmtWF m (.ifElse condition yes no)
+      (hv : slice_ValueWF Ms value) : slice_StmtWF Ms (.move x value)
+  | moveMem {m : Bap.Var} {value : Bap.Bil.Exp} (hm : m ∈ Ms) (hv : slice_ChainWF Ms m.typ value) :
+      slice_StmtWF Ms (.move m value)
+  | jmp {target : Bap.Bil.Exp} (hv : slice_ValueWF Ms target) : slice_StmtWF Ms (.jmp target)
+  | special (message : String) : slice_StmtWF Ms (.special message)
+  | cpuExn (number : Nat) : slice_StmtWF Ms (.cpuExn number)
+  | loop {condition : Bap.Bil.Exp} {body : Bap.Bil.Program} (hv : slice_ValueWF Ms condition)
+      (hb : ∀ s ∈ body, slice_StmtWF Ms s) : slice_StmtWF Ms (.while condition body)
+  | ifElse {condition : Bap.Bil.Exp} {yes no : Bap.Bil.Program} (hv : slice_ValueWF Ms condition)
+      (hy : ∀ s ∈ yes, slice_StmtWF Ms s) (hn : ∀ s ∈ no, slice_StmtWF Ms s) :
+      slice_StmtWF Ms (.ifElse condition yes no)
 
-/-- Two environments agree on the locations `P`. Bytes at or above the top of the address space
-aren't real and are ignored. -/
-def slice_Agree (m : Bap.Var) (P : Location → Prop) (a b : Bap.Bil.Env) : Prop :=
+/-- All of `Ms` are memory variables, so no register is one of them. -/
+def slice_Memories (Ms : List Bap.Var) : Prop := ∀ m ∈ Ms, ∃ aw vw, m.typ = .mem aw vw
+
+/-- Two environments agree on the locations `P`, and each holds a full-paged memory of one width in
+each of `Ms`, of the width of its type. Bytes at or above the top of the address space aren't real and are ignored. -/
+def slice_Agree (Ms : List Bap.Var) (P : Location → Prop) (a b : Bap.Bil.Env) : Prop :=
   (∀ x, (∃ width, x.typ = Typ.imm width) → P (.reg x) → lookup a x = lookup b x) ∧
-  ∃ (w : Nat) (Ma Mb : Memory w), lookup a m = .ok (.memory Ma) ∧ lookup b m = .ok (.memory Mb) ∧
-    PagesSized Ma ∧ PagesSized Mb ∧ ∀ address n, P (.mem address n) → ∀ p, address ≤ p → p < address + n →
+  ∀ m ∈ Ms, ∃ (w vw : Nat) (Ma Mb : Memory w), m.typ = .mem w vw ∧ lookup a m = .ok (.memory Ma) ∧ lookup b m = .ok (.memory Mb) ∧
+    PagesSized Ma ∧ PagesSized Mb ∧ ∀ address n, P (.memOf m address n) → ∀ p, address ≤ p → p < address + n →
       p < 2 ^ w → Memory.readByte Ma (BitVec.ofNat w p) = Memory.readByte Mb (BitVec.ofNat w p)
 
-private theorem slice_Agree_mono {m : Bap.Var} {P Q : Location → Prop} {a b : Bap.Bil.Env}
-    (hq : ∀ l, P l → Q l) (h : slice_Agree m Q a b) : slice_Agree m P a b := by
-  obtain ⟨hr, w, Ma, Mb, h1, h2, h3, h4, h5⟩ := h
-  exact ⟨fun x ht hp => hr x ht (hq _ hp), w, Ma, Mb, h1, h2, h3, h4,
-    fun address n hp => h5 address n (hq _ hp)⟩
+private theorem slice_Agree_mono {Ms : List Bap.Var} {P Q : Location → Prop} {a b : Bap.Bil.Env}
+    (hq : ∀ l, P l → Q l) (h : slice_Agree Ms Q a b) : slice_Agree Ms P a b := by
+  obtain ⟨hr, hm⟩ := h
+  refine ⟨fun x ht hp => hr x ht (hq _ hp), fun m hms => ?_⟩
+  obtain ⟨w, vw, Ma, Mb, ht, h1, h2, h3, h4, h5⟩ := hm m hms
+  exact ⟨w, vw, Ma, Mb, ht, h1, h2, h3, h4, fun address n hp => h5 address n (hq _ hp)⟩
 
-/-- `a` holds a well-formed memory at `m`. -/
-private def slice_MemOK (m : Bap.Var) (a : Bap.Bil.Env) : Prop :=
-  ∃ (w : Nat) (M : Memory w), lookup a m = .ok (.memory M) ∧ PagesSized M
+/-- Each memory of `Ms` in `a` holds a well-formed memory. -/
+def slice_MemOK (Ms : List Bap.Var) (a : Bap.Bil.Env) : Prop :=
+  ∀ m ∈ Ms, ∃ (w vw : Nat) (M : Memory w), m.typ = .mem w vw ∧ lookup a m = .ok (.memory M) ∧ PagesSized M
 
-private theorem slice_Agree_refl {m : Bap.Var} {P : Location → Prop} {a : Bap.Bil.Env}
-    (h : slice_MemOK m a) : slice_Agree m P a a := by
-  obtain ⟨w, M, h1, h2⟩ := h
-  exact ⟨fun _ _ _ => rfl, w, M, M, h1, h1, h2, h2, fun _ _ _ _ _ _ _ => rfl⟩
+private theorem slice_Agree_refl {Ms : List Bap.Var} {P : Location → Prop} {a : Bap.Bil.Env}
+    (h : slice_MemOK Ms a) : slice_Agree Ms P a a := by
+  refine ⟨fun _ _ _ => rfl, fun m hm => ?_⟩
+  obtain ⟨w, vw, M, ht, h1, h2⟩ := h m hm
+  exact ⟨w, vw, M, M, ht, h1, h1, h2, h2, fun _ _ _ _ _ _ _ => rfl⟩
 
-private theorem slice_Agree_symm {m : Bap.Var} {P : Location → Prop} {a b : Bap.Bil.Env}
-    (h : slice_Agree m P a b) : slice_Agree m P b a := by
-  obtain ⟨hr, w, Ma, Mb, h1, h2, h3, h4, h5⟩ := h
-  exact ⟨fun x ht hp => (hr x ht hp).symm, w, Mb, Ma, h2, h1, h4, h3,
-    fun address n hp p h6 h7 h8 => (h5 address n hp p h6 h7 h8).symm⟩
+private theorem slice_Agree_symm {Ms : List Bap.Var} {P : Location → Prop} {a b : Bap.Bil.Env}
+    (h : slice_Agree Ms P a b) : slice_Agree Ms P b a := by
+  obtain ⟨hr, hm⟩ := h
+  refine ⟨fun x ht hp => (hr x ht hp).symm, fun m hms => ?_⟩
+  obtain ⟨w, vw, Ma, Mb, ht, h1, h2, h3, h4, h5⟩ := hm m hms
+  exact ⟨w, vw, Mb, Ma, ht, h2, h1, h4, h3, fun address n hp p h6 h7 h8 => (h5 address n hp p h6 h7 h8).symm⟩
 
 private theorem slice_memory_inj {w w' : Nat} {M : Memory w} {M' : Memory w'}
     (h : (Bap.Value.memory M : Bap.Value) = Bap.Value.memory M') : w = w' ∧ HEq M M' := by
   cases h
   exact ⟨rfl, HEq.rfl⟩
 
-private theorem slice_Agree_trans {m : Bap.Var} {P : Location → Prop} {a b c : Bap.Bil.Env}
-    (h : slice_Agree m P a b) (k : slice_Agree m P b c) : slice_Agree m P a c := by
-  obtain ⟨hr, w, Ma, Mb, h1, h2, h3, h4, h5⟩ := h
-  obtain ⟨kr, w', Mb', Mc, k1, k2, k3, k4, k5⟩ := k
+private theorem slice_Agree_trans {Ms : List Bap.Var} {P : Location → Prop} {a b c : Bap.Bil.Env}
+    (h : slice_Agree Ms P a b) (k : slice_Agree Ms P b c) : slice_Agree Ms P a c := by
+  obtain ⟨hr, hm⟩ := h
+  obtain ⟨kr, km⟩ := k
+  refine ⟨fun x ht hp => (hr x ht hp).trans (kr x ht hp), fun m hms => ?_⟩
+  obtain ⟨w, vw, Ma, Mb, ht, h1, h2, h3, h4, h5⟩ := hm m hms
+  obtain ⟨w', _, Mb', Mc, _, k1, k2, k3, k4, k5⟩ := km m hms
   have he : (Except.ok (Bap.Value.memory Mb) : Except String Bap.Value) = .ok (.memory Mb') := h2.symm.trans k1
   obtain ⟨rfl, hh⟩ := slice_memory_inj (Except.ok.inj he)
   cases hh
-  exact ⟨fun x ht hp => (hr x ht hp).trans (kr x ht hp), w, Ma, Mc, h1, k2, h3, k4,
+  exact ⟨w, vw, Ma, Mc, ht, h1, k2, h3, k4,
     fun address n hp p h6 h7 h8 => (h5 address n hp p h6 h7 h8).trans (k5 address n hp p h6 h7 h8)⟩
 
-private theorem slice_Agree_memOK_right {m : Bap.Var} {P : Location → Prop} {a b : Bap.Bil.Env}
-    (h : slice_Agree m P a b) : slice_MemOK m b := by
-  obtain ⟨_, w, _, Mb, _, h2, _, h4, _⟩ := h
-  exact ⟨w, Mb, h2, h4⟩
+private theorem slice_Agree_memOK_left {Ms : List Bap.Var} {P : Location → Prop} {a b : Bap.Bil.Env}
+    (h : slice_Agree Ms P a b) : slice_MemOK Ms a := by
+  intro m hm
+  obtain ⟨w, vw, Ma, _, ht, h1, _, h3, _, _⟩ := h.2 m hm
+  exact ⟨w, vw, Ma, ht, h1, h3⟩
+
+private theorem slice_Agree_memOK_right {Ms : List Bap.Var} {P : Location → Prop} {a b : Bap.Bil.Env}
+    (h : slice_Agree Ms P a b) : slice_MemOK Ms b := by
+  intro m hm
+  obtain ⟨w, vw, _, Mb, ht, _, h2, _, h4, _⟩ := h.2 m hm
+  exact ⟨w, vw, Mb, ht, h2, h4⟩
 
 private theorem slice_lookup_bind_same (env : Bap.Bil.Env) (var : Bap.Var) (value : Bap.Value) :
     lookup (Bap.Bil.bind env var value) var = .ok value := by
   simp [lookup, Bap.Bil.bind]
 
-private theorem slice_imm_ne_mem {m x : Bap.Var} {aw vw : Nat} (hm : m.typ = .mem aw vw)
+private theorem slice_imm_ne_mem {Ms : List Bap.Var} (hM : slice_Memories Ms) {m x : Bap.Var} (hm : m ∈ Ms)
     (hx : ∃ width, x.typ = Typ.imm width) : x ≠ m := by
   rintro rfl
   obtain ⟨_, h⟩ := hx
-  rw [hm] at h
+  obtain ⟨_, _, h'⟩ := hM _ hm
+  rw [h'] at h
   cases h
 
 /-- Binding a register to one value on both sides keeps agreement. -/
-private theorem slice_Agree_bind {m x : Bap.Var} {aw vw : Nat} (hm : m.typ = .mem aw vw)
+private theorem slice_Agree_bind {Ms : List Bap.Var} (hM : slice_Memories Ms) {x : Bap.Var}
     (hx : ∃ width, x.typ = Typ.imm width) {P : Location → Prop} {a b : Bap.Bil.Env}
-    (h : slice_Agree m P a b) (value : Bap.Value) :
-    slice_Agree m (fun l => P l ∨ l = .reg x) (Bap.Bil.bind a x value) (Bap.Bil.bind b x value) := by
-  obtain ⟨hr, w, Ma, Mb, h1, h2, h3, h4, h5⟩ := h
-  have hne := slice_imm_ne_mem hm hx
-  refine ⟨fun y ht hp => ?_, w, Ma, Mb, ?_, ?_, h3, h4, fun address n hp => ?_⟩
+    (h : slice_Agree Ms P a b) (value : Bap.Value) :
+    slice_Agree Ms (fun l => P l ∨ l = .reg x) (Bap.Bil.bind a x value) (Bap.Bil.bind b x value) := by
+  obtain ⟨hr, hm⟩ := h
+  refine ⟨fun y ht hp => ?_, fun m hms => ?_⟩
   · by_cases hy : x = y
     · subst hy
       rw [slice_lookup_bind_same, slice_lookup_bind_same]
@@ -1982,11 +1231,14 @@ private theorem slice_Agree_bind {m x : Bap.Var} {aw vw : Nat} (hm : m.typ = .me
       · exact hr y ht hp
       · cases hp
         exact absurd rfl hy
-  · rw [slice_lookup_bind_other _ hne]; exact h1
-  · rw [slice_lookup_bind_other _ hne]; exact h2
-  · rcases hp with hp | hp
-    · exact h5 address n hp
-    · cases hp
+  · obtain ⟨w, vw, Ma, Mb, ht, h1, h2, h3, h4, h5⟩ := hm m hms
+    have hne := slice_imm_ne_mem hM hms hx
+    refine ⟨w, vw, Ma, Mb, ht, ?_, ?_, h3, h4, fun address n hp => ?_⟩
+    · rw [slice_lookup_bind_other _ hne]; exact h1
+    · rw [slice_lookup_bind_other _ hne]; exact h2
+    · rcases hp with hp | hp
+      · exact h5 address n hp
+      · cases hp
 
 private def slice_R {α : Type} (x y : Except String α) : Prop := ∀ v, x = .ok v → y = .ok v
 
@@ -2116,9 +1368,9 @@ private theorem slice_read_congr {w : Nat} {Ma Mb : Memory w} (c : BitVec w) (en
   simp only [Memory.read, this]
 
 /-- Evaluation of a value expression depends only on the locations it uses. -/
-private theorem slice_eval_agree {m : Bap.Var} {aw vw : Nat} (hm : m.typ = .mem aw vw)
-    {P : Location → Prop} (e : Bap.Bil.Exp) : ∀ {a b : Bap.Bil.Env}, slice_ValueWF m e →
-    Info.dynamic (usesExp e) = false → (∀ l ∈ Info.uses (usesExp e), P l) → slice_Agree m P a b →
+private theorem slice_eval_agree {Ms : List Bap.Var} (hM : slice_Memories Ms)
+    {P : Location → Prop} (e : Bap.Bil.Exp) : ∀ {a b : Bap.Bil.Env}, slice_ValueWF Ms e →
+    Info.dynamic (usesExp e) = false → (∀ l ∈ Info.uses (usesExp e), P l) → slice_Agree Ms P a b →
     slice_R (evalExp a e) (evalExp b e) := by
   induction e with
   | int v => intro a b _ _ _ _; exact slice_R_refl _
@@ -2130,15 +1382,14 @@ private theorem slice_eval_agree {m : Bap.Var} {aw vw : Nat} (hm : m.typ = .mem 
     exact slice_R_refl _
   | load mem ad endian size _ ia =>
     intro a b hw hd hu h
-    obtain ⟨rfl, hwa⟩ := hw
-    simp only [usesExp, Bool.or_eq_false_iff] at hd
-    obtain ⟨⟨hc, _⟩, _⟩ := hd
+    obtain ⟨⟨m, hms, rfl⟩, hwa⟩ := hw
     cases hr : constantRange ad size with
-    | none => simp [hr] at hc
+    | none => simp [usesExp, hr] at hd
     | some n =>
-      obtain ⟨_, w, Ma, Mb, h1, h2, _, _, h5⟩ := h
+      simp only [usesExp, hr] at hd hu
+      obtain ⟨w, _, Ma, Mb, _, h1, h2, _, _, h5⟩ := h.2 m hms
       obtain ⟨w', c, hca, rfl, hrange⟩ := slice_constantRange_eval hr
-      have hp : P (.mem c.toNat size) := hu _ (by simp [usesExp, hr])
+      have hp : P (.memOf m c.toNat size) := hu _ (by simp)
       intro v hv
       by_cases hwe : w' = w
       · subst hwe
@@ -2171,7 +1422,7 @@ private theorem slice_eval_agree {m : Bap.Var} {aw vw : Nat} (hm : m.typ = .mem 
     simp only [evalExp]
     refine slice_R_bind (il hw.2.1 hd.1 (fun l hl => hu l (by simp [usesExp, hl])) h) fun r => ?_
     exact ib hw.2.2 hd.2 (fun l hl => hu l (by simp [usesExp, hl]))
-      (slice_Agree_mono (fun _ hp => .inl hp) (slice_Agree_bind hm hw.1 h r))
+      (slice_Agree_mono (fun _ hp => .inl hp) (slice_Agree_bind hM hw.1 h r))
   | ite _ _ _ ic iy in_ =>
     intro a b hw hd hu h
     simp only [usesExp, Bool.or_eq_false_iff] at hd
@@ -2231,22 +1482,23 @@ private theorem slice_write_frame {w valueWidth : Nat} {M M' : Memory w} (h : Pa
   rw [BitVec.toNat_ofNat, BitVec.toNat_ofNat, Nat.mod_eq_of_lt hp, Nat.mod_eq_of_lt (by omega)] at this
   omega
 
-/-- Writes through a store chain, on both sides: equal bytes stay equal, and what the chain writes
-becomes equal. -/
-private theorem slice_chain_agree {m : Bap.Var} {aw vw : Nat} (hm : m.typ = .mem aw vw)
-    {P : Location → Prop} {a b : Bap.Bil.Env} (hab : slice_Agree m P a b) {w : Nat} {Ma Mb : Memory w}
-    (h1 : lookup a m = .ok (.memory Ma)) (h2 : lookup b m = .ok (.memory Mb))
+/-- Writes through a store chain from the memory `r`, on both sides: equal bytes stay equal, and what
+the chain writes becomes equal, whichever variable `dst` it goes to. -/
+private theorem slice_chain_agree {Ms : List Bap.Var} {typ : Typ} (hM : slice_Memories Ms) {dst r : Bap.Var}
+    {P : Location → Prop} {a b : Bap.Bil.Env} (hab : slice_Agree Ms P a b) {w : Nat} {Ma Mb : Memory w}
+    (h1 : lookup a r = .ok (.memory Ma)) (h2 : lookup b r = .ok (.memory Mb))
     (h3 : PagesSized Ma) (h4 : PagesSized Mb) (c : Bap.Bil.Exp) :
-    slice_ChainWF m c → (memoryWrites m c).2 = false → Info.dynamic (usesExp c) = false →
+    slice_ChainWF Ms typ c → chainRoot c = some r → (memoryWrites dst c).2 = false → Info.dynamic (usesExp c) = false →
     (∀ l ∈ Info.uses (usesExp c), P l) → ∀ v, evalExp a c = .ok v →
     ∃ Ma' Mb' : Memory w, v = .memory Ma' ∧ evalExp b c = .ok (.memory Mb') ∧ PagesSized Ma' ∧ PagesSized Mb' ∧
       ∀ p, p < 2 ^ w → (Memory.readByte Ma (BitVec.ofNat w p) = Memory.readByte Mb (BitVec.ofNat w p) ∨
-        ∃ n s, Location.mem n s ∈ (memoryWrites m c).1 ∧ n ≤ p ∧ p < n + s) →
+        ∃ n s, Location.memOf dst n s ∈ (memoryWrites dst c).1 ∧ n ≤ p ∧ p < n + s) →
         Memory.readByte Ma' (BitVec.ofNat w p) = Memory.readByte Mb' (BitVec.ofNat w p) := by
   induction c with
   | var x =>
-    intro hw _ _ _ v hv
-    cases hw
+    intro hw hroot _ _ _ v hv
+    simp only [chainRoot, Option.some.injEq] at hroot
+    subst hroot
     simp only [evalExp, h1] at hv
     cases hv
     refine ⟨Ma, Mb, rfl, by simpa [evalExp] using h2, h3, h4, fun p _ hor => ?_⟩
@@ -2254,7 +1506,7 @@ private theorem slice_chain_agree {m : Bap.Var} {aw vw : Nat} (hm : m.typ = .mem
     · exact hor
     · simp [memoryWrites] at hmem
   | store inner ad val endian size ih _ _ =>
-    intro hw hwr hd hu v hv
+    intro hw hroot hwr hd hu v hv
     obtain ⟨hwi, hwa, hwv⟩ := hw
     simp only [usesExp, Bool.or_eq_false_iff] at hd
     obtain ⟨⟨hdi, hda⟩, hdv⟩ := hd
@@ -2267,9 +1519,9 @@ private theorem slice_chain_agree {m : Bap.Var} {aw vw : Nat} (hm : m.typ = .mem
       cases hi : evalExp a inner with
       | error e => simp [evalExp, hi, bind, Except.bind] at hv
       | ok v0 =>
-        obtain ⟨Ma1, Mb1, rfl, hib, hs1, hs2, hbytes⟩ := ih hwi hwr hdi
+        obtain ⟨Ma1, Mb1, rfl, hib, hs1, hs2, hbytes⟩ := ih hwi hroot hwr hdi
           (fun l hl => hu l (by simp [usesExp, hl])) v0 hi
-        have hvr := slice_eval_agree hm val hwv hdv (fun l hl => hu l (by simp [usesExp, hl])) hab
+        have hvr := slice_eval_agree hM val hwv hdv (fun l hl => hu l (by simp [usesExp, hl])) hab
         by_cases hwe : w' = w
         · subst hwe
           cases hve : evalExp a val with
@@ -2302,8 +1554,8 @@ private theorem slice_chain_agree {m : Bap.Var} {aw vw : Nat} (hm : m.typ = .mem
                     apply hbytes p hp
                     rcases hor with hor | ⟨n', s', hmem, h5, h6⟩
                     · exact .inl hor
-                    · simp only [memoryWrites, hr, List.mem_cons, Location.mem.injEq] at hmem
-                      rcases hmem with ⟨rfl, rfl⟩ | hmem
+                    · simp only [memoryWrites, hr, List.mem_cons, Location.memOf.injEq] at hmem
+                      rcases hmem with ⟨-, rfl, rfl⟩ | hmem
                       · exact absurd ⟨h5, h6⟩ hin
                       · exact .inr ⟨n', s', hmem, h5, h6⟩
         · cases hve : evalExp a val with
@@ -2312,28 +1564,29 @@ private theorem slice_chain_agree {m : Bap.Var} {aw vw : Nat} (hm : m.typ = .mem
             cases v2 <;> simp [evalExp, hi, hca, hve, bind, Except.bind, expectMemory, Bap.Value.asBits, hwe] at hv
   | _ => intro hw; exact hw.elim
 
-/-- One side of a store chain: it yields a memory of the same width, untouched outside what the
-chain writes when that is known. -/
-private theorem slice_chain_self {m : Bap.Var} {a : Bap.Bil.Env} {w : Nat} {M : Memory w}
-    (h1 : lookup a m = .ok (.memory M)) (h3 : PagesSized M) (c : Bap.Bil.Exp) :
-    slice_ChainWF m c → ∀ v, evalExp a c = .ok v →
-    ∃ M' : Memory w, v = .memory M' ∧ PagesSized M' ∧ ∀ p, p < 2 ^ w → (memoryWrites m c).2 = false →
-      (∀ n s, Location.mem n s ∈ (memoryWrites m c).1 → ¬ (n ≤ p ∧ p < n + s)) →
+/-- One side of a store chain from the memory `r`: it yields a memory of the same width, equal to it
+outside what the chain writes when that is known. -/
+private theorem slice_chain_self {Ms : List Bap.Var} {typ : Typ} {dst r : Bap.Var} {a : Bap.Bil.Env} {w : Nat} {M : Memory w}
+    (h1 : lookup a r = .ok (.memory M)) (h3 : PagesSized M) (c : Bap.Bil.Exp) :
+    slice_ChainWF Ms typ c → chainRoot c = some r → ∀ v, evalExp a c = .ok v →
+    ∃ M' : Memory w, v = .memory M' ∧ PagesSized M' ∧ ∀ p, p < 2 ^ w → (memoryWrites dst c).2 = false →
+      (∀ n s, Location.memOf dst n s ∈ (memoryWrites dst c).1 → ¬ (n ≤ p ∧ p < n + s)) →
       Memory.readByte M' (BitVec.ofNat w p) = Memory.readByte M (BitVec.ofNat w p) := by
   induction c with
   | var x =>
-    intro hw v hv
-    cases hw
+    intro hw hroot v hv
+    simp only [chainRoot, Option.some.injEq] at hroot
+    subst hroot
     simp only [evalExp, h1] at hv
     cases hv
     exact ⟨M, rfl, h3, fun _ _ _ _ => rfl⟩
   | store inner ad val endian size ih _ _ =>
-    intro hw v hv
+    intro hw hroot v hv
     obtain ⟨hwi, _, _⟩ := hw
     cases hi : evalExp a inner with
     | error e => simp [evalExp, hi, bind, Except.bind] at hv
     | ok v0 =>
-      obtain ⟨M1, rfl, hs1, hframe⟩ := ih hwi v0 hi
+      obtain ⟨M1, rfl, hs1, hframe⟩ := ih hwi hroot v0 hi
       cases hA : evalExp a ad with
       | error e => simp [evalExp, hi, hA, bind, Except.bind, expectMemory] at hv
       | ok v1 =>
@@ -2372,8 +1625,16 @@ private theorem slice_chain_self {m : Bap.Var} {a : Bap.Bil.Env} {w : Nat} {M : 
               · simp [evalExp, hi, hA, hV, bind, Except.bind, expectMemory, Bap.Value.asBits, hwe] at hv
   | _ => intro hw; exact hw.elim
 
+/-- A well-formed chain has a root in `Ms`. -/
+private theorem slice_chain_root {Ms : List Bap.Var} {typ : Typ} (c : Bap.Bil.Exp) (h : slice_ChainWF Ms typ c) :
+    ∃ r ∈ Ms, r.typ = typ ∧ chainRoot c = some r := by
+  induction c with
+  | var x => exact ⟨x, h.1, h.2, rfl⟩
+  | store inner _ _ _ _ ih _ _ => exact ih h.1
+  | _ => exact h.elim
+
 private theorem slice_memoryWrites_mem {dst : Bap.Var} (c : Bap.Bil.Exp) {l : Location}
-    (h : l ∈ (memoryWrites dst c).1) : ∃ n s, l = .mem n s := by
+    (h : l ∈ (memoryWrites dst c).1) : ∃ n s, l = .memOf dst n s := by
   induction c with
   | store inner ad _ _ size ih _ _ =>
     simp only [memoryWrites] at h
@@ -2389,36 +1650,34 @@ private theorem slice_memoryWrites_mem {dst : Bap.Var} (c : Bap.Bil.Exp) {l : Lo
 private theorem slice_always_dynamic_exp (e : Bap.Bil.Exp) :
     Info.always (usesExp e) = true → Info.dynamic (usesExp e) = true := by
   induction e <;> simp_all [usesExp]
-  split <;> simp
+  all_goals (try split) <;> simp_all
 
-private theorem slice_value_not_store {m : Bap.Var} {v : Bap.Bil.Exp} (h : slice_ValueWF m v) : isStore v = false := by
+private theorem slice_value_not_store {Ms : List Bap.Var} {v : Bap.Bil.Exp} (h : slice_ValueWF Ms v) : isStore v = false := by
   cases v <;> first | rfl | exact h.elim
 
-private theorem slice_stmtInfo_moveReg {m x : Bap.Var} {v : Bap.Bil.Exp} {width : Nat} (ht : x.typ = .imm width)
-    (hv : slice_ValueWF m v) :
-    Info.defs (stmtInfo (.move x v)) = [.reg x] ∧ Info.mayDefs (stmtInfo (.move x v)) = [] ∧
+private theorem slice_stmtInfo_moveReg {Ms : List Bap.Var} {x : Bap.Var} {v : Bap.Bil.Exp} {width : Nat} (ht : x.typ = .imm width)
+    (hv : slice_ValueWF Ms v) :
+    Info.writes (stmtInfo (.move x v)) = [.reg x] ∧ Info.wholesale (stmtInfo (.move x v)) = [] ∧
     Info.uses (stmtInfo (.move x v)) = Info.uses (usesExp v) ∧
     Info.dynamic (stmtInfo (.move x v)) = Info.dynamic (usesExp v) ∧
-    Info.unknownWrite (stmtInfo (.move x v)) = false ∧ Info.always (stmtInfo (.move x v)) = false ∧
-    Info.exits (stmtInfo (.move x v)) = false := by
+    Info.always (stmtInfo (.move x v)) = false := by
   simp [stmtInfo, slice_value_not_store hv, ht]
 
 private theorem slice_stmtInfo_moveMem {m : Bap.Var} {aw vw : Nat} (hm : m.typ = .mem aw vw) (v : Bap.Bil.Exp) :
-    Info.defs (stmtInfo (.move m v)) = (memoryWrites m v).1 ∧ Info.mayDefs (stmtInfo (.move m v)) = [] ∧
+    Info.writes (stmtInfo (.move m v)) = (memoryWrites m v).1 ∧
+    Info.wholesale (stmtInfo (.move m v)) = (if (memoryWrites m v).2 || chainRoot v != some m then [m] else []) ∧
     Info.uses (stmtInfo (.move m v)) = Info.uses (usesExp v) ∧
     Info.dynamic (stmtInfo (.move m v)) = ((memoryWrites m v).2 || Info.dynamic (usesExp v)) ∧
-    Info.unknownWrite (stmtInfo (.move m v)) = (memoryWrites m v).2 ∧ Info.always (stmtInfo (.move m v)) = false ∧
-    Info.exits (stmtInfo (.move m v)) = false := by
+    Info.always (stmtInfo (.move m v)) = false := by
   simp [stmtInfo, hm]
 
 private theorem slice_stmtInfo_jmp (t : Bap.Bil.Exp) :
-    Info.defs (stmtInfo (.jmp t)) = [] ∧ Info.mayDefs (stmtInfo (.jmp t)) = [] ∧
+    Info.writes (stmtInfo (.jmp t)) = [] ∧ Info.wholesale (stmtInfo (.jmp t)) = [] ∧
     Info.uses (stmtInfo (.jmp t)) = Info.uses (usesExp t) ∧
     Info.dynamic (stmtInfo (.jmp t)) = Info.dynamic (usesExp t) ∧
-    Info.unknownWrite (stmtInfo (.jmp t)) = false ∧ Info.always (stmtInfo (.jmp t)) = Info.always (usesExp t) ∧
-    Info.exits (stmtInfo (.jmp t)) = true := by
-  obtain ⟨h1, h2, h3, _⟩ := slice_usesExp_pure t
-  simp [stmtInfo, h1, h2, h3]
+    Info.always (stmtInfo (.jmp t)) = Info.always (usesExp t) := by
+  obtain ⟨h1, h2⟩ := slice_usesExp_pure t
+  simp [stmtInfo, h1, h2]
 
 /-- Whether an effect lets the instruction go on. -/
 private def slice_normal : Effect → Bool
@@ -2444,153 +1703,173 @@ private theorem slice_exec_if_eq {fuel : Nat} {st : Bap.Bil.State} {c : Bap.Bil.
     execStmt (fuel + 1) st (.ifElse c y n) = execProgram fuel st (if cv = 1 then y else n) := by
   simp [execStmt, execExp, h, Bap.Value.asBits, bind, Except.bind]
 
-/-- A run of a block of a site, from agreeing states: the other side runs alike, what agreed still
-agrees, and whatever the block certainly writes now agrees too. -/
-private theorem slice_exec_agree {m : Bap.Var} {aw vw : Nat} (hm : m.typ = .mem aw vw) (fuel : Nat) :
-    (∀ (s : Bap.Bil.Stmt) (a a' b : Bap.Bil.State) (e : Effect) (P : Location → Prop), slice_StmtWF m s →
-      Info.dynamic (stmtInfo s) = false → (∀ l ∈ Info.uses (stmtInfo s), P l) →
-      slice_Agree m P a.env b.env → execStmt fuel a s = .ok (a', e) →
+/-- A run of a block of a site, from states that agree on what it needs: the other side runs alike
+and ends with the same effect, and what has to agree then does. -/
+private theorem slice_exec_agree {Ms : List Bap.Var} (hM : slice_Memories Ms) (exit : List Location) (fuel : Nat) :
+    (∀ (s : Bap.Bil.Stmt) (a a' b : Bap.Bil.State) (e : Effect) (after : List Location), slice_StmtWF Ms s →
+      Info.dynamic (stmtInfo s) = false →
+      slice_Agree Ms (· ∈ stmtBefore exit s after) a.env b.env → execStmt fuel a s = .ok (a', e) →
       ∃ b', execStmt fuel b s = .ok (b', e) ∧
-        slice_Agree m (fun l => P l ∨ l ∈ Info.defs (stmtInfo s)) a'.env b'.env ∧
-        (slice_normal e = false → Info.exits (stmtInfo s) = true)) ∧
-    (∀ (code : Bap.Bil.Program) (a a' b : Bap.Bil.State) (e : Effect) (P : Location → Prop),
-      (∀ s ∈ code, slice_StmtWF m s) → (∀ s ∈ code, Info.dynamic (stmtInfo s) = false) →
-      (∀ s ∈ code, ∀ l ∈ Info.uses (stmtInfo s), P l) →
-      slice_Agree m P a.env b.env → execProgram fuel a code = .ok (a', e) →
+        slice_Agree Ms (· ∈ if slice_normal e then after else exit) a'.env b'.env) ∧
+    (∀ (code : Bap.Bil.Program) (a a' b : Bap.Bil.State) (e : Effect) (after : List Location),
+      (∀ s ∈ code, slice_StmtWF Ms s) → (∀ s ∈ code, Info.dynamic (stmtInfo s) = false) →
+      slice_Agree Ms (· ∈ codeBefore exit code after) a.env b.env → execProgram fuel a code = .ok (a', e) →
       ∃ b', execProgram fuel b code = .ok (b', e) ∧
-        slice_Agree m (fun l => P l ∨ l ∈ slice_must code) a'.env b'.env ∧
-        (slice_normal e = false → ∃ s ∈ code, Info.exits (stmtInfo s) = true)) := by
+        slice_Agree Ms (· ∈ if slice_normal e then after else exit) a'.env b'.env) := by
   induction fuel with
   | zero =>
     refine ⟨?_, ?_⟩
-    · intro s a a' b e P _ _ _ _ h
+    · intro s a a' b e after _ _ _ h
       simp [execStmt] at h
-    · intro code a a' b e P _ _ _ _ h
+    · intro code a a' b e after _ _ _ h
       simp [execProgram] at h
   | succ fuel ih =>
     obtain ⟨ihs, ihp⟩ := ih
     refine ⟨?_, ?_⟩
-    · intro s a a' b e P hwf hd hu hab h
+    · intro s a a' b e after hwf hd hab h
       cases s with
       | special message => simp [stmtInfo] at hd
       | cpuExn number => simp [stmtInfo] at hd
       | «while» condition body =>
-        rw [(slice_stmtInfo_while condition body).2.2.2.1] at hd
+        rw [(slice_stmtInfo_while condition body).2] at hd
         cases hd
       | jmp target =>
         cases hwf with
         | jmp hv =>
-          obtain ⟨hdefs, _, huses, hdyn, _, _, hexits⟩ := slice_stmtInfo_jmp target
+          obtain ⟨_, _, _, hdyn, _⟩ := slice_stmtInfo_jmp target
           rw [hdyn] at hd
-          rw [huses] at hu
           simp only [execStmt, execExp] at h
           obtain ⟨v, he, h⟩ := slice_bind_ok h
           obtain ⟨bits, hb, h⟩ := slice_bind_ok h
           cases h
-          have hvb := slice_eval_agree hm target hv hd hu hab v he
-          refine ⟨b, ?_, slice_Agree_mono (fun l hl => ?_) hab, fun _ => hexits⟩
+          simp only [stmtBefore] at hab
+          have hvb := slice_eval_agree hM target hv hd (fun l hl => List.mem_append_left _ hl) hab v he
+          refine ⟨b, ?_, slice_Agree_mono (fun l hl => ?_) hab⟩
           · simp only [execStmt, execExp]
             rw [hvb]
             simp only [bind, Except.bind, hb]
-          · simpa [hdefs] using hl
+          · simp only [slice_normal, Bool.false_eq_true, ite_false] at hl
+            exact List.mem_append_right _ hl
       | move x value =>
+        simp only [stmtBefore] at hab
         cases hwf with
         | moveReg ht hv =>
-          obtain ⟨hdefs, _, huses, hdyn, _, _, _⟩ := slice_stmtInfo_moveReg (m := m) ht hv
+          have hdyn := (slice_stmtInfo_moveReg (Ms := Ms) ht hv).2.2.2.1
           rw [hdyn] at hd
-          rw [huses] at hu
           simp only [execStmt, execExp] at h
           obtain ⟨r, he, h⟩ := slice_bind_ok h
           cases h
-          have hvb := slice_eval_agree hm value hv hd hu hab r he
-          refine ⟨{ env := Bap.Bil.bind b.env x r }, ?_, ?_, by simp [slice_normal]⟩
+          have hvb := slice_eval_agree hM value hv hd (fun l hl => List.mem_append_left _ hl) hab r he
+          refine ⟨{ env := Bap.Bil.bind b.env x r }, ?_, ?_⟩
           · simp only [execStmt, execExp]
             rw [hvb]
             rfl
-          · refine slice_Agree_mono (fun l hl => ?_) (slice_Agree_bind hm ⟨_, ht⟩ hab r)
-            rw [hdefs] at hl
-            simpa using hl
-        | moveMem hv =>
-          obtain ⟨hdefs, _, huses, hdyn, _, _, _⟩ := slice_stmtInfo_moveMem hm value
+          · refine slice_Agree_mono (fun l hl => ?_) (slice_Agree_bind hM ⟨_, ht⟩ hab r)
+            simp only [slice_normal, ite_true] at hl
+            by_cases hreg : l = .reg x
+            · exact .inr hreg
+            · refine .inl (List.mem_append_right _ ?_)
+              simp [moveBefore, ht, hl, hreg]
+        | moveMem hms hv =>
+          obtain ⟨aw, vw, htm⟩ := hM _ hms
+          obtain ⟨_, _, _, hdyn, _⟩ := slice_stmtInfo_moveMem htm value
           rw [hdyn, Bool.or_eq_false_iff] at hd
-          rw [huses] at hu
           simp only [execStmt, execExp] at h
           obtain ⟨r, he, h⟩ := slice_bind_ok h
           cases h
-          obtain ⟨hr, w, Ma, Mb, h1, h2, h3, h4, h5⟩ := id hab
+          obtain ⟨root, hroot, hrty, hrootEq⟩ := slice_chain_root value hv
+          obtain ⟨w, vw', Ma, Mb, hty, h1, h2, h3, h4, h5⟩ := hab.2 root hroot
           obtain ⟨Ma', Mb', rfl, hvb, hs1, hs2, hbytes⟩ :=
-            slice_chain_agree hm hab h1 h2 h3 h4 value hv hd.1 hd.2 hu _ he
-          refine ⟨{ env := Bap.Bil.bind b.env m (.memory Mb') }, ?_, ?_, by simp [slice_normal]⟩
+            slice_chain_agree hM hab h1 h2 h3 h4 value hv hrootEq hd.1 hd.2 (fun l hl => List.mem_append_left _ hl) _ he
+          refine ⟨{ env := Bap.Bil.bind b.env x (.memory Mb') }, ?_, ?_⟩
           · simp only [execStmt, execExp]
             rw [hvb]
             rfl
-          · refine ⟨fun y ht hp => ?_, w, Ma', Mb', slice_lookup_bind_same _ _ _, slice_lookup_bind_same _ _ _, hs1, hs2,
-              fun address n hp p h6 h7 h8 => ?_⟩
-            · have hne : m ≠ y := fun e => slice_imm_ne_mem hm ht e.symm
-              show lookup (Bap.Bil.bind a.env m _) y = lookup (Bap.Bil.bind b.env m _) y
+          · have hmoved : ∀ l, l ∈ after → (∀ y address n, l ≠ .memOf y address n ∨ y ≠ x) →
+                l ∈ moveBefore x value after := by
+              intro l hl hne
+              simp only [moveBefore, htm, reduceCtorEq, ↓reduceIte, List.mem_filterMap]
+              refine ⟨l, hl, ?_⟩
+              cases l with
+              | reg y => rfl
+              | mem _ _ => rfl
+              | memOf y address n =>
+                rcases hne y address n with hne | hne
+                · exact absurd rfl hne
+                · simp [hne]
+            simp only [slice_normal, ite_true]
+            refine ⟨fun y ht hp => ?_, fun m hm => ?_⟩
+            · have hne : x ≠ y := fun e => slice_imm_ne_mem hM hms (e ▸ ht) e.symm
+              show lookup (Bap.Bil.bind a.env x _) y = lookup (Bap.Bil.bind b.env x _) y
               rw [slice_lookup_bind_other _ hne, slice_lookup_bind_other _ hne]
-              rcases hp with hp | hp
-              · exact hr y ht hp
-              · rw [hdefs] at hp
-                obtain ⟨_, _, he⟩ := slice_memoryWrites_mem _ hp
-                cases he
-            · apply hbytes p h8
-              rcases hp with hp | hp
-              · exact .inl (h5 address n hp p h6 h7 h8)
-              · rw [hdefs] at hp
-                exact .inr ⟨address, n, hp, h6, h7⟩
+              exact hab.1 y ht (List.mem_append_right _ (hmoved _ hp (fun _ _ _ => .inl (by simp))))
+            · by_cases hmx : m = x
+              · subst hmx
+                refine ⟨w, vw', Ma', Mb', hrty ▸ hty, slice_lookup_bind_same _ _ _, slice_lookup_bind_same _ _ _, hs1, hs2,
+                  fun address n hp p h6 h7 h8 => ?_⟩
+                apply hbytes p h8
+                by_cases hc : (memoryWrites m value).1.any (·.covers (.memOf m address n)) = true
+                · obtain ⟨d, hd', hcov⟩ := List.any_eq_true.1 hc
+                  obtain ⟨n', s', rfl⟩ := slice_memoryWrites_mem _ hd'
+                  obtain ⟨_, h9, h10⟩ := slice_covers_mem hcov p h6 h7
+                  exact .inr ⟨n', s', hd', h9, h10⟩
+                · refine .inl (h5 address n (List.mem_append_right _ ?_) p h6 h7 h8)
+                  simp only [moveBefore, htm, reduceCtorEq, ↓reduceIte, List.mem_filterMap]
+                  refine ⟨.memOf m address n, hp, ?_⟩
+                  simp [hc, hrootEq]
+              · obtain ⟨w', vw₁, Ma1, Mb1, kt, k1, k2, k3, k4, k5⟩ := hab.2 m hm
+                have hne : x ≠ m := fun e => hmx e.symm
+                refine ⟨w', vw₁, Ma1, Mb1, kt, ?_, ?_, k3, k4, fun address n hp => ?_⟩
+                · show lookup (Bap.Bil.bind a.env x _) m = _
+                  rw [slice_lookup_bind_other _ hne]; exact k1
+                · show lookup (Bap.Bil.bind b.env x _) m = _
+                  rw [slice_lookup_bind_other _ hne]; exact k2
+                · exact k5 address n (List.mem_append_right _ (hmoved _ hp
+                    (fun y a' n' => by
+                      by_cases hy : y = x
+                      · subst hy
+                        left
+                        intro e
+                        cases e
+                        exact hmx rfl
+                      · exact .inr hy)))
       | ifElse condition yes no =>
+        simp only [stmtBefore] at hab
         cases hwf with
         | ifElse hv hy hn =>
-          obtain ⟨hdefs, _, huses, _, hdyn, _, hexits⟩ := slice_stmtInfo_ifElse condition yes no
+          obtain ⟨_, _, _, hdyn, _⟩ := slice_stmtInfo_ifElse condition yes no
           rw [hdyn, Bool.or_eq_false_iff, Bool.or_eq_false_iff] at hd
           obtain ⟨hdc, hdy, hdn⟩ := hd
           obtain ⟨cv, he, hp⟩ := slice_exec_if_ok h
-          have hub : ∀ l, l ∈ Info.uses (usesExp condition) ∨ l ∈ Info.uses (slice_block yes) ∨
-              l ∈ Info.uses (slice_block no) → P l := by
-            intro l hl
-            apply hu
-            rw [huses]
-            simpa using hl
-          have hvb := slice_eval_agree hm condition hv hdc (fun l hl => hub l (.inl hl)) hab _ he
+          have hvb := slice_eval_agree hM condition hv hdc
+            (fun l hl => List.mem_append_left _ (List.mem_append_left _ hl)) hab _ he
           rw [slice_exec_if_eq hvb]
-          have hdefs_y : ∀ l, l ∈ Info.defs (stmtInfo (.ifElse condition yes no)) → l ∈ slice_must yes ∧ l ∈ slice_must no :=
-            fun l hl => (slice_ifElse_must_defs condition yes no l).mp hl
           by_cases hc : cv = 1
           · simp only [hc, ite_true] at hp ⊢
-            obtain ⟨b', h6, h7, h8⟩ := ihp yes a a' b e P hy
+            exact ihp yes a a' b e after hy
               (fun s hs => by
                 cases hds : Info.dynamic (stmtInfo s) with
                 | false => rfl
                 | true => rw [(slice_block_dynamic yes).mpr ⟨s, hs, hds⟩] at hdy; cases hdy)
-              (fun s hs l hl => hub l (.inr (.inl ((slice_block_uses yes l).mpr ⟨s, hs, hl⟩)))) hab hp
-            refine ⟨b', h6, slice_Agree_mono (fun l hl => hl.imp id fun k => (hdefs_y l k).1) h7, fun hn' => ?_⟩
-            obtain ⟨s, hs, hx⟩ := h8 hn'
-            rw [hexits, (slice_block_exits yes).mpr ⟨s, hs, hx⟩]
-            rfl
+              (slice_Agree_mono (fun l hl => List.mem_append_left _ (List.mem_append_right _ hl)) hab) hp
           · simp only [hc, ite_false] at hp ⊢
-            obtain ⟨b', h6, h7, h8⟩ := ihp no a a' b e P hn
+            exact ihp no a a' b e after hn
               (fun s hs => by
                 cases hds : Info.dynamic (stmtInfo s) with
                 | false => rfl
                 | true => rw [(slice_block_dynamic no).mpr ⟨s, hs, hds⟩] at hdn; cases hdn)
-              (fun s hs l hl => hub l (.inr (.inr ((slice_block_uses no l).mpr ⟨s, hs, hl⟩)))) hab hp
-            refine ⟨b', h6, slice_Agree_mono (fun l hl => hl.imp id fun k => (hdefs_y l k).2) h7, fun hn' => ?_⟩
-            obtain ⟨s, hs, hx⟩ := h8 hn'
-            rw [hexits, (slice_block_exits no).mpr ⟨s, hs, hx⟩]
-            simp
-    · intro code a a' b e P hwf hd hu hab h
+              (slice_Agree_mono (fun l hl => List.mem_append_right _ hl) hab) hp
+    · intro code a a' b e after hwf hd hab h
       cases code with
       | nil =>
         simp only [execProgram] at h
         cases h
-        refine ⟨b, by simp [execProgram], slice_Agree_mono (fun l hl => ?_) hab, by simp [slice_normal]⟩
-        simpa [slice_must] using hl
+        exact ⟨b, by simp [execProgram], by simpa [codeBefore, slice_normal] using hab⟩
       | cons s rest =>
         simp only [execProgram] at h
         obtain ⟨⟨next, eff⟩, hs, h⟩ := slice_bind_ok h
-        obtain ⟨b1, hb1, hag, hex⟩ := ihs s a next b eff P (hwf s List.mem_cons_self) (hd s List.mem_cons_self)
-          (hu s List.mem_cons_self) hab hs
+        simp only [codeBefore] at hab
+        obtain ⟨b1, hb1, hag⟩ := ihs s a next b eff _ (hwf s List.mem_cons_self) (hd s List.mem_cons_self) hab hs
         have hprog : execProgram (fuel + 1) b (s :: rest) =
             (execStmt fuel b s >>= fun (result : Bap.Bil.State × Effect) => match result.2 with
               | .normal => execProgram fuel result.1 rest
@@ -2598,81 +1877,55 @@ private theorem slice_exec_agree {m : Bap.Var} {aw vw : Nat} (hm : m.typ = .mem 
           simp only [execProgram]
           rfl
         rw [hprog, hb1]
-        have hstop : Info.exits (stmtInfo s) = true → ∀ l, l ∈ slice_must (s :: rest) → l ∈ Info.defs (stmtInfo s) := by
-          intro hx l hl
-          simpa [slice_must, hx] using hl
-        have hstep : ∀ other : Effect, slice_normal other = false → (next, eff) = (a', other) →
-            eff = other →
-            ∃ b', (Except.ok (b1, eff) >>= fun (result : Bap.Bil.State × Effect) => match result.2 with
-              | .normal => execProgram fuel result.1 rest
-              | other => (Except.ok (result.1, other) : Except String _)) = .ok (b', other) ∧
-              slice_Agree m (fun l => P l ∨ l ∈ slice_must (s :: rest)) a'.env b'.env ∧
-              (slice_normal other = false → ∃ s' ∈ s :: rest, Info.exits (stmtInfo s') = true) := by
-          intro other hn hpair he
-          subst he
-          have hnext : next = a' := (Prod.mk.inj hpair).1
-          subst hnext
-          have hx := hex hn
-          refine ⟨b1, ?_, slice_Agree_mono (fun l hl => hl.imp id (hstop hx l)) hag, fun _ => ⟨s, List.mem_cons_self, hx⟩⟩
-          cases eff <;> first | rfl | simp [slice_normal] at hn
         cases eff with
-        | jump t => cases h; exact hstep _ rfl rfl rfl
-        | special t => cases h; exact hstep _ rfl rfl rfl
-        | cpuExn t => cases h; exact hstep _ rfl rfl rfl
+        | jump t =>
+          cases h
+          exact ⟨b1, rfl, by simpa [slice_normal] using hag⟩
+        | special t =>
+          cases h
+          exact ⟨b1, rfl, by simpa [slice_normal] using hag⟩
+        | cpuExn t =>
+          cases h
+          exact ⟨b1, rfl, by simpa [slice_normal] using hag⟩
         | normal =>
-          obtain ⟨b2, hb2, hag2, hex2⟩ := ihp rest next a' b1 e (fun l => P l ∨ l ∈ Info.defs (stmtInfo s))
-            (fun s' hs' => hwf s' (List.mem_cons_of_mem _ hs'))
-            (fun s' hs' => hd s' (List.mem_cons_of_mem _ hs'))
-            (fun s' hs' l hl => .inl (hu s' (List.mem_cons_of_mem _ hs') l hl)) hag h
-          refine ⟨b2, hb2, slice_Agree_mono (fun l hl => ?_) hag2, fun hn => ?_⟩
-          · rcases hl with hl | hl
-            · exact .inl (.inl hl)
-            · simp only [slice_must, List.mem_append] at hl
-              rcases hl with hl | hl
-              · exact .inl (.inr hl)
-              · split at hl
-                · simp at hl
-                · exact .inr hl
-          · obtain ⟨s', hs', hx⟩ := hex2 hn
-            exact ⟨s', List.mem_cons_of_mem _ hs', hx⟩
+          exact ihp rest next a' b1 e after (fun s' hs' => hwf s' (List.mem_cons_of_mem _ hs'))
+            (fun s' hs' => hd s' (List.mem_cons_of_mem _ hs')) (by simpa [slice_normal] using hag) h
 
-private theorem slice_always_dynamic (s : Bap.Bil.Stmt) :
-    Info.always (stmtInfo s) = true → Info.dynamic (stmtInfo s) = true := by
-  induction s using stmtInduction with
-  | move var value =>
-    cases hs : isStore value <;> cases ht : var.typ <;> simp [stmtInfo, hs, ht]
-  | jmp target =>
-    obtain ⟨_, _, _, h1, _, h2, _⟩ := slice_stmtInfo_jmp target
-    rw [h1, h2]
-    exact slice_always_dynamic_exp target
-  | special message => simp [stmtInfo]
-  | cpuExn number => simp [stmtInfo]
-  | while_ condition body _ => intro _; exact (slice_stmtInfo_while condition body).2.2.2.1
-  | ifElse condition yes no ihy ihn =>
-    obtain ⟨_, _, _, _, h1, h2, _⟩ := slice_stmtInfo_ifElse condition yes no
-    rw [h1, h2]
-    intro h
-    simp only [Bool.or_eq_true] at h ⊢
-    rcases h with h | h | h
-    · exact .inl (slice_always_dynamic_exp condition h)
-    · obtain ⟨s, hs, ha⟩ := (slice_block_always yes).mp h
-      exact .inr (.inl ((slice_block_dynamic yes).mpr ⟨s, hs, ihy s hs ha⟩))
-    · obtain ⟨s, hs, ha⟩ := (slice_block_always no).mp h
-      exact .inr (.inr ((slice_block_dynamic no).mpr ⟨s, hs, ihn s hs ha⟩))
+private theorem slice_block_always_stmt {code : Bap.Bil.Program} (h : Info.always (blockInfo code) = false) :
+    ∀ s ∈ code, Info.always (stmtInfo s) = false := fun s hs => by
+  cases has : Info.always (stmtInfo s) with
+  | false => rfl
+  | true => rw [(slice_block_always code).mpr ⟨s, hs, has⟩] at h; cases h
+
+private theorem slice_writes_ifElse {condition : Bap.Bil.Exp} {yes no : Bap.Bil.Program}
+    {s : Bap.Bil.Stmt} (hs : s ∈ yes ∨ s ∈ no) {d : Location} (hd : d ∈ Info.writes (stmtInfo s)) :
+    d ∈ Info.writes (stmtInfo (.ifElse condition yes no)) := by
+  rw [(slice_stmtInfo_ifElse condition yes no).1]
+  rcases hs with hs | hs
+  · exact .inl ((slice_block_writes_iff yes d).2 ⟨s, hs, hd⟩)
+  · exact .inr ((slice_block_writes_iff no d).2 ⟨s, hs, hd⟩)
+
+private theorem slice_wholesale_ifElse {condition : Bap.Bil.Exp} {yes no : Bap.Bil.Program}
+    {s : Bap.Bil.Stmt} (hs : s ∈ yes ∨ s ∈ no) {d : Bap.Var} (hd : d ∈ Info.wholesale (stmtInfo s)) :
+    d ∈ Info.wholesale (stmtInfo (.ifElse condition yes no)) := by
+  rw [(slice_stmtInfo_ifElse condition yes no).2.1]
+  rcases hs with hs | hs
+  · exact .inl ((slice_block_wholesale_iff yes d).2 ⟨s, hs, hd⟩)
+  · exact .inr ((slice_block_wholesale_iff no d).2 ⟨s, hs, hd⟩)
 
 /-- Running code that writes nothing live, on one side: what is live stays as it was. -/
-private theorem slice_exec_frame_live {m : Bap.Var} {aw vw : Nat} (hm : m.typ = .mem aw vw)
+private theorem slice_exec_frame_live {Ms : List Bap.Var} (hM : slice_Memories Ms)
     (L : Location → Prop) (fuel : Nat) :
-    (∀ (s : Bap.Bil.Stmt) (a a' : Bap.Bil.State) (e : Effect), slice_StmtWF m s →
+    (∀ (s : Bap.Bil.Stmt) (a a' : Bap.Bil.State) (e : Effect), slice_StmtWF Ms s →
       Info.always (stmtInfo s) = false →
-      (∀ d ∈ slice_writes (stmtInfo s), ∀ l, L l → d.overlaps l = false) →
-      (Info.unknownWrite (stmtInfo s) = true → ∀ l, L l → l.isMemory = false) →
-      slice_MemOK m a.env → execStmt fuel a s = .ok (a', e) → slice_Agree m L a.env a'.env) ∧
-    (∀ (code : Bap.Bil.Program) (a a' : Bap.Bil.State) (e : Effect), (∀ s ∈ code, slice_StmtWF m s) →
+      (∀ d ∈ Info.writes (stmtInfo s), ∀ l, L l → d.overlaps l = false) →
+      (∀ m ∈ Info.wholesale (stmtInfo s), ∀ l, L l → l.inMemory m = false) →
+      slice_MemOK Ms a.env → execStmt fuel a s = .ok (a', e) → slice_Agree Ms L a.env a'.env) ∧
+    (∀ (code : Bap.Bil.Program) (a a' : Bap.Bil.State) (e : Effect), (∀ s ∈ code, slice_StmtWF Ms s) →
       (∀ s ∈ code, Info.always (stmtInfo s) = false) →
-      (∀ s ∈ code, ∀ d ∈ slice_writes (stmtInfo s), ∀ l, L l → d.overlaps l = false) →
-      (∀ s ∈ code, Info.unknownWrite (stmtInfo s) = true → ∀ l, L l → l.isMemory = false) →
-      slice_MemOK m a.env → execProgram fuel a code = .ok (a', e) → slice_Agree m L a.env a'.env) := by
+      (∀ s ∈ code, ∀ d ∈ Info.writes (stmtInfo s), ∀ l, L l → d.overlaps l = false) →
+      (∀ s ∈ code, ∀ m ∈ Info.wholesale (stmtInfo s), ∀ l, L l → l.inMemory m = false) →
+      slice_MemOK Ms a.env → execProgram fuel a code = .ok (a', e) → slice_Agree Ms L a.env a'.env) := by
   induction fuel with
   | zero =>
     refine ⟨?_, ?_⟩
@@ -2688,7 +1941,7 @@ private theorem slice_exec_frame_live {m : Bap.Var} {aw vw : Nat} (hm : m.typ = 
       | special message => simp [stmtInfo] at ha
       | cpuExn number => simp [stmtInfo] at ha
       | «while» condition body =>
-        rw [(slice_stmtInfo_while condition body).2.2.2.2] at ha
+        rw [(slice_stmtInfo_while condition body).1] at ha
         cases ha
       | jmp target =>
         simp only [execStmt, execExp] at h
@@ -2700,60 +1953,75 @@ private theorem slice_exec_frame_live {m : Bap.Var} {aw vw : Nat} (hm : m.typ = 
         simp only [execStmt, execExp] at h
         obtain ⟨r, he, h⟩ := slice_bind_ok h
         cases h
-        obtain ⟨w, M, h1, h3⟩ := hok
         cases hwf with
         | moveReg ht hv =>
-          have hne := slice_imm_ne_mem hm ⟨_, ht⟩
-          refine ⟨fun y _ hp => ?_, w, M, M, h1, ?_, h3, h3, fun _ _ _ _ _ _ _ => rfl⟩
+          refine ⟨fun y _ hp => ?_, fun m hm => ?_⟩
           · have hxy : x ≠ y := by
               rintro rfl
-              have := hw (.reg x) (by simp [slice_writes, (slice_stmtInfo_moveReg (m := m) ht hv).1]) _ hp
+              have := hw (.reg x) (by simp [(slice_stmtInfo_moveReg (Ms := Ms) ht hv).1]) _ hp
               simp [Location.overlaps] at this
             exact (slice_lookup_bind_other r hxy).symm
-          · show lookup (Bap.Bil.bind a.env x r) m = _
-            rw [slice_lookup_bind_other _ hne]
+          · obtain ⟨w, vw, M, ht', h1, h3⟩ := hok m hm
+            refine ⟨w, vw, M, M, ht', h1, ?_, h3, h3, fun _ _ _ _ _ _ _ => rfl⟩
+            show lookup (Bap.Bil.bind a.env x r) m = _
+            rw [slice_lookup_bind_other _ (slice_imm_ne_mem hM hm ⟨_, ht⟩)]
             exact h1
-        | moveMem hv =>
-          obtain ⟨hdefs, _, _, _, hunk, _, _⟩ := slice_stmtInfo_moveMem hm value
-          obtain ⟨M', rfl, hs', hframe⟩ := slice_chain_self h1 h3 value hv r he
-          refine ⟨fun y ht _ => ?_, w, M, M', h1, slice_lookup_bind_same _ _ _, h3, hs',
-            fun address n hp p h6 h7 h8 => ?_⟩
-          · have hne : m ≠ y := fun e => slice_imm_ne_mem hm ht e.symm
+        | moveMem hms hv =>
+          obtain ⟨aw, vw, htm⟩ := hM _ hms
+          obtain ⟨hwrites, hwhole, _, _, _⟩ := slice_stmtInfo_moveMem htm value
+          obtain ⟨root, hroot, hrty, hrootEq⟩ := slice_chain_root value hv
+          obtain ⟨w, vw', M, hty, h1, h3⟩ := hok root hroot
+          obtain ⟨M', rfl, hs', hframe⟩ := slice_chain_self (dst := x) h1 h3 value hv hrootEq r he
+          refine ⟨fun y ht _ => ?_, fun m hm => ?_⟩
+          · have hne : x ≠ y := fun e => slice_imm_ne_mem hM hms (e ▸ ht) e.symm
             exact (slice_lookup_bind_other _ hne).symm
-          · cases hu2 : (memoryWrites m value).2 with
-            | true =>
-              have := hu (hunk.trans hu2) _ hp
-              simp [Location.isMemory] at this
-            | false =>
-              refine (hframe p h8 hu2 fun n' s' hmem hin => ?_).symm
-              have hov := hw (.mem n' s') (by simp [slice_writes, hdefs, hmem]) _ hp
-              simp only [Location.overlaps, Bool.and_eq_false_iff, decide_eq_false_iff_not] at hov
-              omega
+          · by_cases hmx : m = x
+            · subst hmx
+              obtain ⟨w₀, vw₀, M₀, k0, k1, k3⟩ := hok m hm
+              have hw₀ : w₀ = w := by
+                have := k0.symm.trans (hrty.symm.trans hty)
+                cases this
+                rfl
+              subst hw₀
+              by_cases hwh : ((memoryWrites m value).2 || chainRoot value != some m) = true
+              · -- nothing live in this memory
+                refine ⟨w₀, vw₀, M₀, M', k0, k1, slice_lookup_bind_same _ _ _, k3, hs', fun address n hp => ?_⟩
+                have := hu m (by simp [hwhole, hwh]) _ hp
+                simp [Location.inMemory] at this
+              · simp only [Bool.or_eq_true, bne_iff_ne, ne_eq, not_or, Bool.not_eq_true, Classical.not_not] at hwh
+                obtain ⟨hk, hr⟩ := hwh
+                have hrr : root = m := by rw [hrootEq] at hr; exact Option.some.inj hr
+                subst hrr
+                have heq : M₀ = M := by
+                  have he := k1.symm.trans h1
+                  simpa using he
+                subst heq
+                refine ⟨w₀, vw₀, M₀, M', k0, k1, slice_lookup_bind_same _ _ _, k3, hs', fun address n hp p h6 h7 h8 => ?_⟩
+                refine (hframe p h8 hk fun n' s' hmem hin => ?_).symm
+                have hov := hw (.memOf root n' s') (by rw [hwrites]; exact hmem) _ hp
+                simp only [Location.overlaps, beq_self_eq_true, Bool.true_and, Bool.and_eq_false_iff,
+                  decide_eq_false_iff_not] at hov
+                omega
+            · obtain ⟨w', vw₁, M₁, kt, k1, k3⟩ := hok m hm
+              have hne : x ≠ m := fun e => hmx e.symm
+              refine ⟨w', vw₁, M₁, M₁, kt, k1, ?_, k3, k3, fun _ _ _ _ _ _ _ => rfl⟩
+              show lookup (Bap.Bil.bind a.env x _) m = _
+              rw [slice_lookup_bind_other _ hne]; exact k1
       | ifElse condition yes no =>
         cases hwf with
         | ifElse hv hy hn =>
           obtain ⟨cv, _, hp⟩ := slice_exec_if_ok h
-          obtain ⟨_, _, _, hunk, _, halways, _⟩ := slice_stmtInfo_ifElse condition yes no
+          obtain ⟨_, _, _, _, halways⟩ := slice_stmtInfo_ifElse condition yes no
           rw [halways, Bool.or_eq_false_iff, Bool.or_eq_false_iff] at ha
-          have hay : ∀ s ∈ yes, Info.always (stmtInfo s) = false := fun s hs => by
-            cases has : Info.always (stmtInfo s) with
-            | false => rfl
-            | true => rw [(slice_block_always yes).mpr ⟨s, hs, has⟩] at ha; simp at ha
-          have han : ∀ s ∈ no, Info.always (stmtInfo s) = false := fun s hs => by
-            cases has : Info.always (stmtInfo s) with
-            | false => rfl
-            | true => rw [(slice_block_always no).mpr ⟨s, hs, has⟩] at ha; simp at ha
           by_cases hc : cv = 1
           · simp only [hc, ite_true] at hp
-            refine ihp yes a a' e hy hay (fun s hs d hd => hw d (slice_writes_ifElse (.inl hs) hd))
-              (fun s hs hx => hu ?_) hok hp
-            rw [hunk, (slice_block_unknownWrite yes).mpr ⟨s, hs, hx⟩]
-            rfl
+            exact ihp yes a a' e hy (slice_block_always_stmt ha.2.1)
+              (fun s hs d hd => hw d (slice_writes_ifElse (.inl hs) hd))
+              (fun s hs d hd => hu d (slice_wholesale_ifElse (.inl hs) hd)) hok hp
           · simp only [hc, ite_false] at hp
-            refine ihp no a a' e hn han (fun s hs d hd => hw d (slice_writes_ifElse (.inr hs) hd))
-              (fun s hs hx => hu ?_) hok hp
-            rw [hunk, (slice_block_unknownWrite no).mpr ⟨s, hs, hx⟩]
-            simp
+            exact ihp no a a' e hn (slice_block_always_stmt ha.2.2)
+              (fun s hs d hd => hw d (slice_writes_ifElse (.inr hs) hd))
+              (fun s hs d hd => hu d (slice_wholesale_ifElse (.inr hs) hd)) hok hp
     · intro code a a' e hwf ha hw hu hok h
       cases code with
       | nil =>
@@ -2777,286 +2045,631 @@ private theorem slice_exec_frame_live {m : Bap.Var} {aw vw : Nat} (hm : m.typ = 
             (fun s' hs' => hu s' (List.mem_cons_of_mem _ hs'))
             (slice_Agree_memOK_right h1) h)
 
-/-- Agreement on a location covered by one that agrees. -/
-private theorem slice_Agree_covered {m : Bap.Var} {Q : Location → Prop} {L : List Location} {a b : Bap.Bil.Env}
-    (h : slice_Agree m Q a b) (hc : ∀ l ∈ L, Q l ∨ ∃ d, Q d ∧ d.covers l = true) :
-    slice_Agree m (· ∈ L) a b := by
-  obtain ⟨hr, w, Ma, Mb, h1, h2, h3, h4, h5⟩ := h
-  refine ⟨fun x ht hp => ?_, w, Ma, Mb, h1, h2, h3, h4, fun address n hp p h6 h7 h8 => ?_⟩
-  · rcases hc _ hp with hq | ⟨d, hq, hd⟩
-    · exact hr x ht hq
-    · cases d with
-      | reg y =>
-        simp only [Location.covers, Location.overlaps, Bool.and_eq_true, beq_iff_eq] at hd
-        rw [← hd.1] at ht ⊢
-        exact hr y ht hq
-      | mem _ _ => simp [Location.covers, Location.overlaps] at hd
-  · rcases hc _ hp with hq | ⟨d, hq, hd⟩
-    · exact h5 address n hq p h6 h7 h8
-    · cases d with
-      | reg y => simp [Location.covers, Location.overlaps] at hd
-      | mem outer size =>
-        obtain ⟨h9, h10⟩ := slice_covers_mem hd p h6 h7
-        exact h5 outer size hq p h9 h10 h8
+/-! #### Where an instruction goes -/
 
-/-- A linear trace: each instruction runs in turn from the previous state, and whatever effect it
-ends with (a jump only ends that instruction), the next one listed follows. -/
-def slice_runInsns (fuel : Nat) : Bap.Bil.State → List Bap.Disasm.Insn → Except String Bap.Bil.State
-  | state, [] => .ok state
-  | state, insn :: rest => do
-    let (next, _) ← execProgram fuel state insn.bil
-    slice_runInsns fuel next rest
+private theorem slice_constantTarget_eval {target : Bap.Bil.Exp} {n : Nat} (h : constantTarget target = some n) :
+    ∃ (w : Nat) (c : BitVec w), (∀ env, evalExp env target = .ok (.bits c)) ∧ c.toNat = n := by
+  simp only [constantTarget] at h
+  cases he : evalExp [] target with
+  | error e => simp [he] at h
+  | ok value =>
+    rw [he] at h
+    cases value with
+    | bits c =>
+      simp only [Bap.Value.asBits, Option.some.injEq] at h
+      exact ⟨_, c, fun env => slice_eval_extends target (fun v r hr => by simp [lookup] at hr) _ he, h⟩
+    | memory _ => simp [Bap.Value.asBits] at h
+    | undefined => simp [Bap.Value.asBits] at h
 
-/-- The instructions that are sites, by position. -/
-private def slice_sited (criteria : List Location) : List Bap.Disasm.Insn → List Bap.Disasm.Insn
-  | [] => []
-  | insn :: rest =>
-    if relevant (backward rest criteria).live (slice_block insn.bil) then
-      insn :: slice_sited criteria rest
-    else
-      slice_sited criteria rest
+/-- Whether `exits` allows an effect. -/
+private def slice_allows (exits : Exits) : Effect → Prop
+  | .normal => Exits.falls exits = true
+  | .jump target => target.toNat ∈ Exits.targets exits ∨ Exits.unknown exits = true
+  | .special _ | .cpuExn _ => Exits.unknown exits = true
 
-private theorem slice_backward_cons (insn : Bap.Disasm.Insn) (rest : List Bap.Disasm.Insn) (criteria : List Location) :
-    (backward (insn :: rest) criteria).sites =
-        (if relevant (backward rest criteria).live (slice_block insn.bil) then [insn.address] else []) ++
-          (backward rest criteria).sites ∧
-    (backward (insn :: rest) criteria).live =
-      (if relevant (backward rest criteria).live (slice_block insn.bil) then
-        backwardInstruction (backward rest criteria).live (slice_block insn.bil)
-      else (backward rest criteria).live) ∧
-    (backward (insn :: rest) criteria).determined =
-      ((backward rest criteria).determined &&
-        if relevant (backward rest criteria).live (slice_block insn.bil) then
-          !Info.dynamic (slice_block insn.bil) else true) ∧
-    (backward (insn :: rest) criteria).calls =
-      (if insn.flow = .call ∧ (backward rest criteria).live ≠ [] then [insn.address] else []) ++
-        (backward rest criteria).calls := by
-  obtain ⟨h1, h2, h3, h4, _⟩ := slice_backward_append [insn] rest criteria
-  simp only [List.singleton_append] at h1 h2 h3 h4
-  rw [h1, h2, h3, h4, slice_backward_singleton, slice_backward_singleton_live,
-    slice_backward_singleton_determined, slice_backward_singleton_calls]
-  exact ⟨rfl, rfl, rfl, rfl⟩
+/-- What the statements say about where they can go holds of every run of them. -/
+private theorem slice_exits_sound (fuel : Nat) :
+    (∀ (s : Bap.Bil.Stmt) (a a' : Bap.Bil.State) (e : Effect), execStmt fuel a s = .ok (a', e) →
+      slice_allows (stmtExits s) e) ∧
+    (∀ (code : Bap.Bil.Program) (a a' : Bap.Bil.State) (e : Effect), execProgram fuel a code = .ok (a', e) →
+      slice_allows (codeExits code) e) := by
+  induction fuel with
+  | zero =>
+    refine ⟨?_, ?_⟩
+    · intro s a a' e h
+      simp [execStmt] at h
+    · intro code a a' e h
+      simp [execProgram] at h
+  | succ fuel ih =>
+    obtain ⟨ihs, ihp⟩ := ih
+    refine ⟨?_, ?_⟩
+    · intro s a a' e h
+      cases s with
+      | special message =>
+        simp only [execStmt] at h
+        cases h
+        simp [stmtExits, slice_allows]
+      | cpuExn number =>
+        simp only [execStmt] at h
+        cases h
+        simp [stmtExits, slice_allows]
+      | «while» condition body =>
+        cases e <;> simp [stmtExits, slice_allows]
+      | move x value =>
+        simp only [execStmt, execExp] at h
+        obtain ⟨_, _, h⟩ := slice_bind_ok h
+        cases h
+        simp [stmtExits, slice_allows]
+      | jmp target =>
+        simp only [execStmt, execExp] at h
+        obtain ⟨v, he, h⟩ := slice_bind_ok h
+        obtain ⟨bits, hb, h⟩ := slice_bind_ok h
+        cases h
+        simp only [stmtExits]
+        cases hc : constantTarget target with
+        | none => simp [slice_allows]
+        | some n =>
+          obtain ⟨w, c, hca, hn⟩ := slice_constantTarget_eval hc
+          rw [hca a.env] at he
+          cases he
+          simp only [Bap.Value.asBits] at hb
+          cases hb
+          simp [slice_allows, hn]
+      | ifElse condition yes no =>
+        obtain ⟨cv, _, hp⟩ := slice_exec_if_ok h
+        have hy := ihp yes a a' e
+        have hn := ihp no a a' e
+        simp only [stmtExits]
+        by_cases hc : cv = 1
+        · simp only [hc, ite_true] at hp
+          have := hy hp
+          cases e <;> simp only [slice_allows, Bool.or_eq_true, List.mem_append] at this ⊢ <;> grind
+        · simp only [hc, ite_false] at hp
+          have := hn hp
+          cases e <;> simp only [slice_allows, Bool.or_eq_true, List.mem_append] at this ⊢ <;> grind
+    · intro code a a' e h
+      cases code with
+      | nil =>
+        simp only [execProgram] at h
+        cases h
+        simp [codeExits, slice_allows]
+      | cons s rest =>
+        simp only [execProgram] at h
+        obtain ⟨⟨next, eff⟩, hs, h⟩ := slice_bind_ok h
+        have h1 := ihs s a next eff hs
+        simp only [codeExits]
+        cases eff with
+        | jump t =>
+          cases h
+          split <;> simp only [slice_allows, Bool.or_eq_true, List.mem_append] at h1 ⊢ <;> grind
+        | special t =>
+          cases h
+          split <;> simp only [slice_allows, Bool.or_eq_true] at h1 ⊢ <;> grind
+        | cpuExn t =>
+          cases h
+          split <;> simp only [slice_allows, Bool.or_eq_true] at h1 ⊢ <;> grind
+        | normal =>
+          have h2 := ihp rest next a' e h
+          simp only [slice_allows] at h1
+          simp only [h1, ite_true]
+          cases e <;> simp only [slice_allows, Bool.or_eq_true, List.mem_append] at h2 ⊢ <;> grind
 
-/-- With distinct addresses, keeping the instructions whose address is a site keeps the sites. -/
-private theorem slice_filter_sites (criteria : List Location) (instructions : List Bap.Disasm.Insn)
-    (h : (instructions.map Bap.Disasm.Insn.address).Nodup) :
-    instructions.filter (fun insn => (backward instructions criteria).sites.contains insn.address) =
-      slice_sited criteria instructions := by
-  induction instructions with
-  | nil => rfl
-  | cons insn rest ih =>
-    simp only [List.map_cons, List.nodup_cons] at h
-    obtain ⟨hnew, hnd⟩ := h
-    have hsites := (slice_backward_cons insn rest criteria).1
-    have hrest : rest.filter (fun j => (backward (insn :: rest) criteria).sites.contains j.address) =
-        rest.filter (fun j => (backward rest criteria).sites.contains j.address) := by
-      apply List.filter_congr
-      intro j hj
-      have hne : j.address ≠ insn.address := by
-        intro e
-        exact hnew (e ▸ List.mem_map_of_mem hj)
-      rw [hsites]
-      split <;> simp [hne]
-    have hold : insn.address ∉ (backward rest criteria).sites := fun hm =>
-      hnew ((slice_sites_sublist rest criteria).subset hm)
-    rw [List.filter_cons, hrest, ih hnd, slice_sited, hsites]
-    by_cases hrel : relevant (backward rest criteria).live (slice_block insn.bil) = true
-    · simp [hrel]
-    · simp [hrel, hold]
+/-- An instruction that goes somewhere its successors don't list is one `mayEnd` said might. -/
+private theorem slice_mayEnd_of_stop {fuel : Nat} {insn : Bap.Disasm.Insn} {a a' : Bap.Bil.State} {e : Effect}
+    {next : List Nat} (hrun : execProgram fuel a insn.bil = .ok (a', e))
+    (hstop : ∀ t, nextAddress insn e = some t → t ∉ next) : mayEnd insn next = true := by
+  have hallow := (slice_exits_sound fuel).2 _ _ _ _ hrun
+  simp only [mayEnd, Bool.or_eq_true, Bool.and_eq_true, Bool.not_eq_true', List.contains_eq_mem,
+    decide_eq_false_iff_not]
+  cases e with
+  | normal =>
+    have := hstop _ rfl
+    simp only [slice_allows] at hallow
+    exact .inl (.inr ⟨hallow, this⟩)
+  | special m => exact .inl (.inl hallow)
+  | cpuExn m => exact .inl (.inl hallow)
+  | jump target =>
+    have ht := hstop _ rfl
+    by_cases hc : insn.flow = .call
+    · simp only [hc, ite_true] at ht
+      simp only [hc, ↓reduceIte, Bool.not_eq_true', List.contains_eq_mem, decide_eq_false_iff_not]
+      exact .inr ht
+    · simp only [hc, ite_false] at ht
+      rcases hallow with hallow | hallow
+      · simp only [hc, ↓reduceIte, List.any_eq_true, Bool.not_eq_true', List.contains_eq_mem, decide_eq_false_iff_not]
+        exact .inr ⟨_, hallow, ht⟩
+      · exact .inl (.inl hallow)
 
-/-- The forward simulation: from states that agree on what is live before the list, running the
-sites alone reaches a state that agrees with the full run on the criteria. -/
-private theorem slice_forward {m : Bap.Var} {aw vw : Nat} (hm : m.typ = .mem aw vw) (fuel : Nat)
-    (criteria : List Location) (instructions : List Bap.Disasm.Insn) :
-    ∀ (a b af : Bap.Bil.State), (∀ insn ∈ instructions, ∀ s ∈ insn.bil, slice_StmtWF m s) →
-      (backward instructions criteria).determined = true →
-      slice_Agree m (· ∈ (backward instructions criteria).live) a.env b.env →
-      slice_runInsns fuel a instructions = .ok af →
-      ∃ bf, slice_runInsns fuel b (slice_sited criteria instructions) = .ok bf ∧
-        slice_Agree m (· ∈ criteria) af.env bf.env := by
-  induction instructions with
-  | nil =>
-    intro a b af _ _ hab h
-    simp only [slice_runInsns] at h
-    cases h
-    exact ⟨b, rfl, by simpa [slice_backward_eq] using hab⟩
-  | cons insn rest ih =>
-    intro a b af hwf hdet hab h
-    obtain ⟨_, hlive, hdeter, _⟩ := slice_backward_cons insn rest criteria
-    simp only [slice_runInsns] at h
-    obtain ⟨⟨a1, e⟩, hrun, h⟩ := slice_bind_ok h
-    have hrestWF : ∀ i ∈ rest, ∀ s ∈ i.bil, slice_StmtWF m s := fun i hi => hwf i (List.mem_cons_of_mem _ hi)
-    have hiWF := hwf insn List.mem_cons_self
-    rw [hdeter, Bool.and_eq_true] at hdet
-    obtain ⟨hdetRest, hdetHere⟩ := hdet
-    rw [hlive] at hab
-    rw [slice_sited]
-    by_cases hrel : relevant (backward rest criteria).live (slice_block insn.bil) = true
-    · simp only [hrel, ite_true] at hab hdetHere ⊢
-      have hdyn : Info.dynamic (slice_block insn.bil) = false := by simpa using hdetHere
-      have hdynS : ∀ s ∈ insn.bil, Info.dynamic (stmtInfo s) = false := fun s hs => by
+/-! #### The runs -/
+
+/-- Whether the CFG goes on from `insn` to the address `next`: it has that edge and the listing an instruction there. -/
+def slice_Continues (instructions : List Bap.Disasm.Insn) (edges : List (Nat × Nat)) (insn : Bap.Disasm.Insn)
+    (next : Nat) : Prop :=
+  (insn.address, next) ∈ edges ∧ ∃ other ∈ instructions, other.address = next
+
+/-- A run over the CFG from an instruction to the end of the code: its statements run, the effect
+decides where it goes (`nextAddress`), and it ends when that leaves the CFG. -/
+inductive slice_Run (fuel : Nat) (instructions : List Bap.Disasm.Insn) (edges : List (Nat × Nat)) :
+    Bap.Disasm.Insn → Bap.Bil.State → Bap.Bil.State → Prop where
+  | stop {insn a a' e} : execProgram fuel a insn.bil = .ok (a', e) →
+      (∀ t, nextAddress insn e = some t → ¬ slice_Continues instructions edges insn t) →
+      slice_Run fuel instructions edges insn a a'
+  | step {insn other a a' e final} : execProgram fuel a insn.bil = .ok (a', e) →
+      nextAddress insn e = some other.address → (insn.address, other.address) ∈ edges → other ∈ instructions →
+      slice_Run fuel instructions edges other a' final →
+      slice_Run fuel instructions edges insn a final
+
+/-- A run of the sites alone: each runs from where the one before left off, and control goes from it
+to the first site `Result.nextSite` gives for the address its effect names. -/
+inductive slice_SiteRun (fuel : Nat) (instructions : List Bap.Disasm.Insn) (edges : List (Nat × Nat)) (result : Result) :
+    Option Nat → Bap.Bil.State → Bap.Bil.State → Prop where
+  | done {a} : slice_SiteRun fuel instructions edges result none a a
+  | stop {insn a a' e} : insn ∈ instructions → (result.entry insn.address).site = true →
+      execProgram fuel a insn.bil = .ok (a', e) →
+      (∀ t, nextAddress insn e = some t → ¬ slice_Continues instructions edges insn t) →
+      slice_SiteRun fuel instructions edges result (some insn.address) a a'
+  | step {insn other a a' e final} : insn ∈ instructions → (result.entry insn.address).site = true →
+      execProgram fuel a insn.bil = .ok (a', e) →
+      nextAddress insn e = some other.address → (insn.address, other.address) ∈ edges → other ∈ instructions →
+      slice_SiteRun fuel instructions edges result (result.nextSite other.address) a' final →
+      slice_SiteRun fuel instructions edges result (some insn.address) a final
+
+/-- The equations `complete` tests, one instruction at a time. -/
+private structure slice_Solved (instructions : List Bap.Disasm.Insn) (edges : List (Nat × Nat)) (result : Result)
+    (criteria : List Location) (insn : Bap.Disasm.Insn) : Prop where
+  flow : ∀ other ∈ instructions, (insn.address, other.address) ∈ edges →
+    ∀ l ∈ (result.entry other.address).before, l ∈ (result.entry insn.address).after
+  ends : mayEnd insn ((successorTable instructions edges).getD insn.address []) = true →
+    ∀ l ∈ criteria, l ∈ (result.entry insn.address).after
+  relevantSite : relevant (result.entry insn.address).after (blockInfo insn.bil) = true → (result.entry insn.address).site = true
+  site : (result.entry insn.address).site = true →
+    (∀ l ∈ insnBefore insn.bil (result.entry insn.address).after, l ∈ (result.entry insn.address).before) ∧
+    (result.entry insn.address).next = .site insn.address ∧ Info.dynamic (blockInfo insn.bil) = false
+  skip : (result.entry insn.address).site = false →
+    (∀ l ∈ (result.entry insn.address).after, l ∈ (result.entry insn.address).before) ∧
+    (mayEnd insn ((successorTable instructions edges).getD insn.address []) = true →
+      (result.entry insn.address).next = .exit) ∧
+    ∀ other ∈ instructions, (insn.address, other.address) ∈ edges →
+      (result.entry other.address).next = (result.entry insn.address).next ∨ (result.entry other.address).next = .never
+
+private theorem slice_mem_listed (instructions : List Bap.Disasm.Insn) (table : Std.HashMap Nat Unit) (t : Nat) :
+    (instructions.foldl (fun table insn => table.insert insn.address ()) table).contains t = true ↔
+      table.contains t = true ∨ ∃ other ∈ instructions, other.address = t := by
+  induction instructions generalizing table with
+  | nil => simp
+  | cons head tail ih =>
+    simp only [List.foldl_cons]
+    rw [ih, Std.HashMap.contains_insert]
+    simp only [Bool.or_eq_true, beq_iff_eq, List.mem_cons, exists_eq_or_imp]
+    grind
+
+private theorem slice_mem_successorTable (instructions : List Bap.Disasm.Insn) (edges : List (Nat × Nat)) (a t : Nat) :
+    t ∈ (successorTable instructions edges).getD a [] ↔ (a, t) ∈ edges ∧ ∃ other ∈ instructions, other.address = t := by
+  have hlisted : ∀ t, (instructions.foldl (fun (table : Std.HashMap Nat Unit) insn => table.insert insn.address ()) {}).contains t = true ↔
+      ∃ other ∈ instructions, other.address = t := by
+    intro t
+    rw [slice_mem_listed]
+    simp
+  have key : ∀ (edges : List (Nat × Nat)) (table : Std.HashMap Nat (List Nat)),
+      t ∈ (edges.foldl (fun table edge =>
+        if (instructions.foldl (fun (table : Std.HashMap Nat Unit) insn => table.insert insn.address ()) {}).contains edge.2 then
+          table.insert edge.1 (edge.2 :: table.getD edge.1 []) else table) table).getD a [] ↔
+        t ∈ table.getD a [] ∨ ((a, t) ∈ edges ∧ ∃ other ∈ instructions, other.address = t) := by
+    intro edges
+    induction edges with
+    | nil => simp
+    | cons head tail ih =>
+      intro table
+      simp only [List.foldl_cons]
+      rw [ih]
+      obtain ⟨u, v⟩ := head
+      split
+      · rename_i hc
+        have hv := (hlisted v).1 hc
+        rw [Std.HashMap.getD_insert]
+        by_cases hu : u = a
+        · subst hu
+          simp only [beq_self_eq_true, ↓reduceIte, List.mem_cons, Prod.mk.injEq, true_and]
+          grind
+        · have : (u == a) = false := by simpa using hu
+          simp only [this, Bool.false_eq_true, ↓reduceIte, List.mem_cons, Prod.mk.injEq]
+          grind
+      · rename_i hc
+        have hv : ¬ ∃ other ∈ instructions, other.address = v := fun h => hc ((hlisted v).2 h)
+        simp only [List.mem_cons, Prod.mk.injEq]
+        grind
+  rw [successorTable, key]
+  simp
+
+private theorem slice_mem_expand_reg {instructions : List Bap.Disasm.Insn} {criteria : List Location} {r : Bap.Var}
+    (h : Location.reg r ∈ criteria) : Location.reg r ∈ expandCriteria instructions criteria := by
+  simp only [expandCriteria, List.mem_eraseDups, List.mem_flatMap]
+  exact ⟨_, h, by simp⟩
+
+private theorem slice_mem_expand_memOf {instructions : List Bap.Disasm.Insn} {criteria : List Location} {m : Bap.Var}
+    {address n : Nat} (h : Location.memOf m address n ∈ criteria ∨ (Location.mem address n ∈ criteria ∧ m ∈ memories instructions)) :
+    Location.memOf m address n ∈ expandCriteria instructions criteria := by
+  simp only [expandCriteria, List.mem_eraseDups, List.mem_flatMap]
+  rcases h with h | ⟨h, hm⟩
+  · exact ⟨_, h, by simp⟩
+  · refine ⟨_, h, ?_⟩
+    have hne : memories instructions ≠ [] := List.ne_nil_of_mem hm
+    simp [hne, hm]
+
+/-- What `complete` says of the tables. -/
+private theorem slice_complete_tables {instructions : List Bap.Disasm.Insn} {edges : List (Nat × Nat)}
+    {entry : Option Nat} {criteria : List Location} {r : Result} (hr : backwardCfg instructions edges entry criteria = r)
+    (h : r.complete = true) :
+    (∀ x ∈ instructions, (r.entry x.address).site = true → Info.dynamic (blockInfo x.bil) = false) ∧
+    ∀ x ∈ instructions, checkInsn r.entry ((successorTable instructions edges).getD x.address [])
+      (expandCriteria instructions criteria) x = true := by
+  subst hr
+  have h' : (((instructions.filter fun i => ((backwardCfg instructions edges entry criteria).entry i.address).site).all
+      (fun i => !Info.dynamic (blockInfo i.bil))) &&
+    (instructions.all fun i => checkInsn (backwardCfg instructions edges entry criteria).entry ((successorTable instructions edges).getD i.address [])
+      (expandCriteria instructions criteria) i && _ && _) && _) = true := h
+  simp only [Bool.and_eq_true, List.all_eq_true, List.mem_filter, Bool.not_eq_true'] at h'
+  exact ⟨fun x hx hs => h'.1.1 x ⟨hx, hs⟩, fun x hx => (h'.1.2 x hx).1.1⟩
+
+/-- What `complete` says of the result. -/
+private theorem slice_complete_solved {instructions : List Bap.Disasm.Insn} {edges : List (Nat × Nat)}
+    {entry : Option Nat} {criteria : List Location} (h : (backwardCfg instructions edges entry criteria).complete = true)
+    {insn : Bap.Disasm.Insn} (hi : insn ∈ instructions) :
+    slice_Solved instructions edges (backwardCfg instructions edges entry criteria)
+      (expandCriteria instructions criteria) insn := by
+  generalize hr : backwardCfg instructions edges entry criteria = r at h ⊢
+  obtain ⟨hdet, htab⟩ := slice_complete_tables hr h
+  have hc := (htab insn hi)
+  have hd := fun hs => hdet insn hi hs
+  simp only [checkInsn, Bool.and_eq_true, Bool.or_eq_true, Bool.not_eq_true', List.all_eq_true, List.contains_eq_mem,
+    decide_eq_true_eq] at hc
+  obtain ⟨⟨⟨ha, hb⟩, hrel⟩, hsplit⟩ := hc
+  refine ⟨fun other ho he l hl => ha _ ((slice_mem_successorTable _ _ _ _).2 ⟨he, other, ho, rfl⟩) l hl, ?_, ?_, ?_, ?_⟩
+  · intro hm l hl
+    rcases hb with hb | hb
+    · rw [hm] at hb
+      cases hb
+    · exact hb l hl
+  · intro hm
+    rcases hrel with hrel | hrel
+    · rw [hm] at hrel
+      cases hrel
+    · exact hrel
+  · intro hs
+    simp only [hs, ↓reduceIte, Bool.and_eq_true, List.all_eq_true, List.contains_eq_mem, decide_eq_true_eq, beq_iff_eq] at hsplit
+    exact ⟨hsplit.1, hsplit.2, hd hs⟩
+  · intro hs
+    simp only [hs, Bool.false_eq_true, ↓reduceIte, Bool.and_eq_true, Bool.or_eq_true, Bool.not_eq_true', List.all_eq_true,
+      List.contains_eq_mem, decide_eq_true_eq, beq_iff_eq] at hsplit
+    obtain ⟨⟨h1, h2⟩, h3⟩ := hsplit
+    refine ⟨h1, fun hm => ?_, fun other ho he => h3 _ ((slice_mem_successorTable _ _ _ _).2 ⟨he, other, ho, rfl⟩)⟩
+    rcases h2 with h2 | h2
+    · rw [hm] at h2
+      cases h2
+    · exact h2
+
+/-- A run that ends went through no code that `never` ends. -/
+private theorem slice_next_good {fuel : Nat} {instructions : List Bap.Disasm.Insn} {edges : List (Nat × Nat)}
+    {result : Result} {criteria : List Location}
+    (hs : ∀ x ∈ instructions, slice_Solved instructions edges result criteria x)
+    {x : Bap.Disasm.Insn} {a af : Bap.Bil.State} (h : slice_Run fuel instructions edges x a af) (hx : x ∈ instructions) :
+    (result.entry x.address).next ≠ .never ∧ (result.entry x.address).next ≠ .conflict := by
+  induction h with
+  | @stop insn a a' e hrun hstop =>
+    cases hsite : (result.entry insn.address).site with
+    | true => simp [((hs insn hx).site hsite).2.1]
+    | false =>
+      rw [((hs insn hx).skip hsite).2.1 (slice_mayEnd_of_stop hrun fun t ht hm =>
+        hstop t ht ((slice_mem_successorTable _ _ _ _).1 hm))]
+      simp
+  | @step insn other a a' e final hrun hnext he ho _ ih =>
+    cases hsite : (result.entry insn.address).site with
+    | true => simp [((hs insn hx).site hsite).2.1]
+    | false =>
+      obtain ⟨h1, h2⟩ := ih ho
+      rcases ((hs insn hx).skip hsite).2.2 other ho he with h3 | h3
+      · rw [← h3]
+        exact ⟨h1, h2⟩
+      · exact absurd h3 h1
+
+/-- The simulation: from states that agree on what must agree before an instruction, the sites alone
+reach a state that agrees with the full run on the criteria. -/
+private theorem slice_simulation {Ms : List Bap.Var} (hM : slice_Memories Ms) {fuel : Nat}
+    {instructions : List Bap.Disasm.Insn} {edges : List (Nat × Nat)} {result : Result} {criteria : List Location}
+    (hs : ∀ x ∈ instructions, slice_Solved instructions edges result criteria x)
+    (hwf : ∀ insn ∈ instructions, ∀ s ∈ insn.bil, slice_StmtWF Ms s)
+    {x : Bap.Disasm.Insn} {a af : Bap.Bil.State} (h : slice_Run fuel instructions edges x a af) (hx : x ∈ instructions) :
+    ∀ b : Bap.Bil.State, slice_Agree Ms (· ∈ (result.entry x.address).before) a.env b.env →
+      ∃ bf, slice_SiteRun fuel instructions edges result (result.nextSite x.address) b bf ∧
+        slice_Agree Ms (· ∈ criteria) af.env bf.env := by
+  have hsiteRun : ∀ {i : Bap.Disasm.Insn} {a a' b : Bap.Bil.State} {e : Effect}, i ∈ instructions →
+      (result.entry i.address).site = true → slice_Agree Ms (· ∈ (result.entry i.address).before) a.env b.env →
+      execProgram fuel a i.bil = .ok (a', e) →
+      ∃ b', execProgram fuel b i.bil = .ok (b', e) ∧ slice_Agree Ms (· ∈ (result.entry i.address).after) a'.env b'.env := by
+    intro i a a' b e hi hsite hab hrun
+    obtain ⟨hbefore, _, hdyn⟩ := (hs i hi).site hsite
+    obtain ⟨b', h1, h2⟩ := (slice_exec_agree hM (result.entry i.address).after fuel).2 i.bil a a' b e
+      (result.entry i.address).after (hwf i hi)
+      (fun s hs' => by
         cases hds : Info.dynamic (stmtInfo s) with
         | false => rfl
-        | true => rw [(slice_block_dynamic _).mpr ⟨s, hs, hds⟩] at hdyn; cases hdyn
-      obtain ⟨b1, hb1, hag, _⟩ := (slice_exec_agree hm fuel).2 insn.bil a a1 b e _ hiWF hdynS
-        (fun s hs l hl => (slice_mem_backwardInstruction _ _ _).mpr
-          (.inr ((slice_block_uses _ l).mpr ⟨s, hs, hl⟩))) hab hrun
-      have hafter : slice_Agree m (· ∈ (backward rest criteria).live) a1.env b1.env := by
-        refine slice_Agree_covered hag fun l hl => ?_
-        by_cases hk : ∀ d ∈ Info.defs (slice_block insn.bil), d.covers l = false
-        · exact .inl (.inl ((slice_mem_backwardInstruction _ _ _).mpr (.inl ⟨hl, hk⟩)))
-        · simp only [Classical.not_forall, Bool.not_eq_false] at hk
-          obtain ⟨d, hd, hc⟩ := hk
-          rw [slice_block_defs] at hd
-          exact .inr ⟨d, .inr hd, hc⟩
-      obtain ⟨bf, hbf, hfin⟩ := ih a1 b1 af hrestWF hdetRest hafter h
-      refine ⟨bf, ?_, hfin⟩
-      simp only [slice_runInsns, hb1]
-      exact hbf
-    · simp only [hrel, Bool.false_eq_true, ite_false] at hab ⊢
-      have hnot := hrel
-      rw [slice_relevant_iff] at hnot
-      simp only [not_or, not_and, not_exists] at hnot
-      obtain ⟨hna, hnu, hnd, hnm, _⟩ := hnot
-      have hay : ∀ s ∈ insn.bil, Info.always (stmtInfo s) = false := fun s hs => by
+        | true => rw [(slice_block_dynamic _).mpr ⟨s, hs', hds⟩] at hdyn; cases hdyn)
+      (slice_Agree_mono hbefore hab) hrun
+    exact ⟨b', h1, by simpa using h2⟩
+  have hframe : ∀ {i : Bap.Disasm.Insn} {a a' b : Bap.Bil.State} {e : Effect}, i ∈ instructions →
+      (result.entry i.address).site = false → slice_Agree Ms (· ∈ (result.entry i.address).before) a.env b.env →
+      execProgram fuel a i.bil = .ok (a', e) → slice_Agree Ms (· ∈ (result.entry i.address).after) a'.env b.env := by
+    intro i a a' b e hi hsite hab hrun
+    have hnot : relevant (result.entry i.address).after (blockInfo i.bil) = false := by
+      cases hr : relevant (result.entry i.address).after (blockInfo i.bil) with
+      | false => rfl
+      | true =>
+        have := (hs i hi).relevantSite hr
+        rw [hsite] at this
+        cases this
+    have hag := slice_Agree_mono ((hs i hi).skip hsite).1 hab
+    have hfr := (slice_exec_frame_live hM (· ∈ (result.entry i.address).after) fuel).2 i.bil a a' e (hwf i hi)
+      (fun s hs' => by
         cases has : Info.always (stmtInfo s) with
         | false => rfl
-        | true => exact absurd ((slice_block_always _).mpr ⟨s, hs, has⟩) hna
-      have hframe := (slice_exec_frame_live hm (· ∈ (backward rest criteria).live) fuel).2 insn.bil a a1 e hiWF hay
-        (fun s hs d hd l hl => by
-          cases ho : d.overlaps l with
-          | false => rfl
-          | true =>
-            rcases slice_block_writes hs hd with hb | hb
-            · exact absurd ho (hnd d hb l hl)
-            · exact absurd ho (hnm d hb l hl))
-        (fun s hs hx l hl => by
-          cases hmm : l.isMemory with
-          | false => rfl
-          | true => exact absurd hmm (hnu ((slice_block_unknownWrite _).mpr ⟨s, hs, hx⟩) l hl))
-        (by
-          obtain ⟨_, w, Ma, _, h1, _, h3, _, _⟩ := hab
-          exact ⟨w, Ma, h1, h3⟩) hrun
-      exact ih a1 b af hrestWF hdetRest (slice_Agree_trans (slice_Agree_symm hframe) hab) h
+        | true =>
+          have := (slice_relevant_iff (result.entry i.address).after _).2 (.inl ((slice_block_always _).mpr ⟨s, hs', has⟩))
+          rw [hnot] at this
+          cases this)
+      (fun s hs' d hd l hl => by
+        cases ho : d.overlaps l with
+        | false => rfl
+        | true =>
+          have := (slice_relevant_iff _ _).2 (.inr (.inr ⟨d, (slice_block_writes_iff _ _).2 ⟨s, hs', hd⟩, l, hl, ho⟩))
+          rw [hnot] at this
+          cases this)
+      (fun s hs' m hd l hl => by
+        cases ho : l.inMemory m with
+        | false => rfl
+        | true =>
+          have := (slice_relevant_iff _ _).2 (.inr (.inl ⟨m, (slice_block_wholesale_iff _ _).2 ⟨s, hs', hd⟩, l, hl, ho⟩))
+          rw [hnot] at this
+          cases this)
+      (slice_Agree_memOK_left hag) hrun
+    exact slice_Agree_trans (slice_Agree_symm hfr) hag
+  induction h with
+  | @stop insn a a' e hrun hstop =>
+    intro b hab
+    have hend : mayEnd insn ((successorTable instructions edges).getD insn.address []) = true :=
+      slice_mayEnd_of_stop hrun fun t ht hm => hstop t ht ((slice_mem_successorTable _ _ _ _).1 hm)
+    cases hsite : (result.entry insn.address).site with
+    | true =>
+      obtain ⟨b', h1, h2⟩ := hsiteRun hx hsite hab hrun
+      refine ⟨b', ?_, slice_Agree_mono ((hs insn hx).ends hend) h2⟩
+      have hn : result.nextSite insn.address = some insn.address := by
+        simp [Result.nextSite, ((hs insn hx).site hsite).2.1]
+      rw [hn]
+      exact .stop hx hsite h1 hstop
+    | false =>
+      have hn : result.nextSite insn.address = none := by
+        simp [Result.nextSite, ((hs insn hx).skip hsite).2.1 hend]
+      rw [hn]
+      exact ⟨b, .done, slice_Agree_mono ((hs insn hx).ends hend) (hframe hx hsite hab hrun)⟩
+  | @step insn other a a' e final hrun hnext he ho hrest ih =>
+    intro b hab
+    cases hsite : (result.entry insn.address).site with
+    | true =>
+      obtain ⟨b', h1, h2⟩ := hsiteRun hx hsite hab hrun
+      obtain ⟨bf, hbf, hag⟩ := ih ho b' (slice_Agree_mono ((hs insn hx).flow other ho he) h2)
+      refine ⟨bf, ?_, hag⟩
+      have hn : result.nextSite insn.address = some insn.address := by
+        simp [Result.nextSite, ((hs insn hx).site hsite).2.1]
+      rw [hn]
+      exact .step hx hsite h1 hnext he ho hbf
+    | false =>
+      obtain ⟨bf, hbf, hag⟩ := ih ho b (slice_Agree_mono ((hs insn hx).flow other ho he) (hframe hx hsite hab hrun))
+      refine ⟨bf, ?_, hag⟩
+      have hgood := slice_next_good hs hrest ho
+      have hn : result.nextSite insn.address = result.nextSite other.address := by
+        rcases ((hs insn hx).skip hsite).2.2 other ho he with h3 | h3
+        · simp [Result.nextSite, h3]
+        · exact absurd h3 hgood.1
+      rw [hn]
+      exact hbf
 
-/-- End-to-end soundness of a slice: running only the sites reproduces the criteria.
+/-- End-to-end soundness of a slice over a CFG: when `complete` holds, a run of the sites alone
+reproduces the criteria.
 
-Assumes instructions run as a linear trace (`slice_runInsns`) in the memory discipline
-`slice_StmtWF m`, that addresses are distinct (a site is named by its address), that `m` starts out
-holding a memory with full-size pages, and that the full run succeeds: deleting code can hide an
-error in it. Callees aren't modelled: a call runs as its own BIL, and `complete` is what rules out
-one with something live after it. Bytes at or above the top of the address space aren't compared. -/
-theorem slice_end_to_end {m : Bap.Var} {aw vw : Nat} (hm : m.typ = .mem aw vw) {fuel : Nat}
-    {criteria : List Location} {instructions : List Bap.Disasm.Insn} {st full : Bap.Bil.State}
-    (haddr : (instructions.map Bap.Disasm.Insn.address).Nodup)
-    (hcomplete : (backward instructions criteria).complete = true)
-    (hwf : ∀ insn ∈ instructions, ∀ s ∈ insn.bil, slice_StmtWF m s)
-    (hmem : ∃ (w : Nat) (M : Memory w), lookup st.env m = .ok (.memory M) ∧ PagesSized M)
-    (hrun : slice_runInsns fuel st instructions = .ok full) :
-    ∃ sliced, slice_runInsns fuel st
-        (instructions.filter fun insn => (backward instructions criteria).sites.contains insn.address) = .ok sliced ∧
-      (∀ x, (∃ width, x.typ = Typ.imm width) → Location.reg x ∈ criteria →
-        lookup full.env x = lookup sliced.env x) ∧
-      ∃ (w : Nat) (Mf Ms : Memory w), lookup full.env m = .ok (.memory Mf) ∧ lookup sliced.env m = .ok (.memory Ms) ∧
-        ∀ address n, Location.mem address n ∈ criteria →
+From any listed instruction, take a run of the code over the CFG to its end (`slice_Run`), and the
+sites alone run (`slice_SiteRun`) from the first site `Result.nextSite` gives for it, and the two agree
+on the criteria at the end. It covers branches and loops, and any number of memory variables: `Ms`
+are the memories the code uses, in the discipline `slice_StmtWF Ms`, a criterion `.memOf m ..` is about
+the bytes of `m`, and `.mem ..` about those of each memory the code mentions. Assumes that each of `Ms`
+starts out holding a memory with full-size pages of the width its type has, and that the full run
+succeeds: deleting code can hide an error in it. Callees aren't modelled: a call runs as its own BIL and
+goes on at its return address, and `complete` is what rules out one with something live after it.
+Bytes at or above the top of the address space aren't compared. -/
+theorem slice_end_to_end {Ms : List Bap.Var} (hM : slice_Memories Ms) {fuel : Nat}
+    {instructions : List Bap.Disasm.Insn} {edges : List (Nat × Nat)} {entry : Option Nat} {criteria : List Location}
+    {x : Bap.Disasm.Insn} {st full : Bap.Bil.State}
+    (hcomplete : (backwardCfg instructions edges entry criteria).complete = true)
+    (hwf : ∀ insn ∈ instructions, ∀ s ∈ insn.bil, slice_StmtWF Ms s)
+    (hmem : slice_MemOK Ms st.env) (hx : x ∈ instructions)
+    (hrun : slice_Run fuel instructions edges x st full) :
+    ∃ sliced, slice_SiteRun fuel instructions edges (backwardCfg instructions edges entry criteria)
+        ((backwardCfg instructions edges entry criteria).nextSite x.address) st sliced ∧
+      (∀ r, (∃ width, r.typ = Typ.imm width) → Location.reg r ∈ criteria → lookup full.env r = lookup sliced.env r) ∧
+      ∀ m ∈ Ms, ∃ (w : Nat) (Mf Ms' : Memory w), lookup full.env m = .ok (.memory Mf) ∧ lookup sliced.env m = .ok (.memory Ms') ∧
+        ∀ address n, (Location.memOf m address n ∈ criteria ∨ (Location.mem address n ∈ criteria ∧ m ∈ memories instructions)) →
           (∀ p, address ≤ p → p < address + n → p < 2 ^ w →
-            Memory.readByte Mf (BitVec.ofNat w p) = Memory.readByte Ms (BitVec.ofNat w p)) ∧
+            Memory.readByte Mf (BitVec.ofNat w p) = Memory.readByte Ms' (BitVec.ofNat w p)) ∧
           (address + n ≤ 2 ^ w → ∀ endian,
-            Memory.read Mf (BitVec.ofNat w address) endian n = Memory.read Ms (BitVec.ofNat w address) endian n) := by
-  rw [slice_filter_sites criteria instructions haddr]
-  obtain ⟨bf, hbf, hr, w, Mf, Ms, h1, h2, _, _, h5⟩ := slice_forward hm fuel criteria instructions st st full hwf
-    ((slice_complete_iff _ _).mp hcomplete).1 (slice_Agree_refl hmem) hrun
-  refine ⟨bf, hbf, hr, w, Mf, Ms, h1, h2, fun address n hmemb => ⟨h5 address n hmemb, fun hfit endian => ?_⟩⟩
+            Memory.read Mf (BitVec.ofNat w address) endian n = Memory.read Ms' (BitVec.ofNat w address) endian n) := by
+  obtain ⟨bf, hbf, hr, hm⟩ := slice_simulation hM (fun y hy => slice_complete_solved hcomplete hy) hwf hrun hx st
+    (slice_Agree_refl hmem)
+  refine ⟨bf, hbf, fun r ht hc => hr r ht (slice_mem_expand_reg hc), fun m hms => ?_⟩
+  obtain ⟨w, _, Mf, Ms', _, h1, h2, _, _, h5⟩ := hm m hms
+  refine ⟨w, Mf, Ms', h1, h2, fun address n hc => ?_⟩
+  have hbytes := h5 address n (slice_mem_expand_memOf hc)
+  refine ⟨hbytes, fun hfit endian => ?_⟩
   apply slice_read_congr
   intro k hk
   have hlt : address < 2 ^ w ∨ n = 0 := by omega
   rcases hlt with hlt | rfl
   · rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt hlt]
-    exact h5 address n hmemb _ (by omega) (by omega) (by omega)
+    exact hbytes _ (by omega) (by omega) (by omega)
   · omega
 
 end EndToEnd
 
-/-- Calls with something live after them are exactly what `calls` lists. -/
-theorem slice_mem_calls_iff (instructions : List Bap.Disasm.Insn) (criteria : List Location) (address : Nat) :
-    address ∈ (backward instructions criteria).calls ↔
-      ∃ xs insn ys, instructions = xs ++ insn :: ys ∧ insn.flow = .call ∧ insn.address = address ∧
-        (backward ys criteria).live ≠ [] := by
-  induction instructions with
-  | nil => simp [slice_backward_eq]
-  | cons head rest ih =>
-    rw [(slice_backward_cons head rest criteria).2.2.2, List.mem_append, ih]
-    constructor
-    · rintro (h | ⟨xs, insn, ys, rfl, h1, h2, h3⟩)
-      · split at h
-        · rename_i hc
-          exact ⟨[], head, rest, rfl, hc.1, by simpa using (List.mem_singleton.mp h).symm, hc.2⟩
-        · simp at h
-      · exact ⟨head :: xs, insn, ys, rfl, h1, h2, h3⟩
-    · rintro ⟨xs, insn, ys, he, h1, h2, h3⟩
-      cases xs with
-      | nil =>
-        simp only [List.nil_append, List.cons.injEq] at he
-        obtain ⟨rfl, rfl⟩ := he
-        exact .inl (by simp [h1, h2, h3])
-      | cons x xs =>
-        simp only [List.cons_append, List.cons.injEq] at he
-        obtain ⟨rfl, rfl⟩ := he
-        exact .inr ⟨xs, insn, ys, rfl, h1, h2, h3⟩
+/-- Every site is the address of a listed instruction. -/
+theorem slice_site_is_instruction {instructions : List Bap.Disasm.Insn} {edges : List (Nat × Nat)} {entry : Option Nat}
+    {criteria : List Location} {site : Nat} (h : site ∈ (backwardCfg instructions edges entry criteria).sites) :
+    ∃ insn ∈ instructions, insn.address = site := by
+  have h' : site ∈ (instructions.filter fun i => ((backwardCfg instructions edges entry criteria).entry i.address).site).map
+      (·.address) := h
+  obtain ⟨insn, hi, rfl⟩ := List.mem_map.1 h'
+  exact ⟨insn, (List.mem_filter.1 hi).1, rfl⟩
+
+/-- `complete` is the determination of the sites, and no live call. -/
+theorem slice_complete_iff (instructions : List Bap.Disasm.Insn) (edges : List (Nat × Nat)) (entry : Option Nat)
+    (criteria : List Location) :
+    (backwardCfg instructions edges entry criteria).complete = true ↔
+      (backwardCfg instructions edges entry criteria).determined = true ∧
+        (backwardCfg instructions edges entry criteria).calls = [] := by
+  have h : (backwardCfg instructions edges entry criteria).complete =
+      ((backwardCfg instructions edges entry criteria).determined &&
+        (backwardCfg instructions edges entry criteria).calls.isEmpty) := rfl
+  rw [h, Bool.and_eq_true, List.isEmpty_iff]
+
+/-- When `complete` holds, an instruction that writes something live after it is a site. -/
+theorem slice_complete_relevant_site {instructions : List Bap.Disasm.Insn} {edges : List (Nat × Nat)} {entry : Option Nat}
+    {criteria : List Location} (h : (backwardCfg instructions edges entry criteria).complete = true)
+    {insn : Bap.Disasm.Insn} (hi : insn ∈ instructions)
+    (hr : relevant ((backwardCfg instructions edges entry criteria).entry insn.address).after (blockInfo insn.bil) = true) :
+    ((backwardCfg instructions edges entry criteria).entry insn.address).site = true :=
+  (slice_complete_solved h hi).relevantSite hr
+
+/-- When `complete` holds, every site's effect on live locations is known. -/
+theorem slice_complete_site_known {instructions : List Bap.Disasm.Insn} {edges : List (Nat × Nat)} {entry : Option Nat}
+    {criteria : List Location} (h : (backwardCfg instructions edges entry criteria).complete = true)
+    {insn : Bap.Disasm.Insn} (hi : insn ∈ instructions)
+    (hs : ((backwardCfg instructions edges entry criteria).entry insn.address).site = true) :
+    Info.dynamic (blockInfo insn.bil) = false :=
+  ((slice_complete_solved h hi).site hs).2.2
 
 /-- `complete` promises that nothing is live across any call: a callee can't change the criteria
 without the slice saying so. -/
-theorem slice_complete_no_live_call {xs ys : List Bap.Disasm.Insn} {insn : Bap.Disasm.Insn}
-    {criteria : List Location} (hflow : insn.flow = .call)
-    (h : (backward (xs ++ [insn] ++ ys) criteria).complete = true) : (backward ys criteria).live = [] := by
-  have hcalls := ((slice_complete_iff _ _).mp h).2
-  cases hl : (backward ys criteria).live with
-  | nil => rfl
-  | cons l ls =>
-    have hmem : insn.address ∈ (backward (xs ++ [insn] ++ ys) criteria).calls :=
-      (slice_mem_calls_iff _ _ _).mpr ⟨xs, insn, ys, by simp, hflow, rfl, by simp [hl]⟩
-    rw [hcalls] at hmem
-    simp at hmem
+theorem slice_complete_no_live_call {instructions : List Bap.Disasm.Insn} {edges : List (Nat × Nat)} {entry : Option Nat}
+    {criteria : List Location} (h : (backwardCfg instructions edges entry criteria).complete = true)
+    {insn : Bap.Disasm.Insn} (hi : insn ∈ instructions) (hflow : insn.flow = .call) :
+    ((backwardCfg instructions edges entry criteria).entry insn.address).after = [] := by
+  have h' : (_ && ((instructions.filter fun i => decide (i.flow = .call) &&
+      !((backwardCfg instructions edges entry criteria).entry i.address).after.isEmpty).map (·.address)).isEmpty) = true := h
+  simp only [Bool.and_eq_true, List.isEmpty_iff, List.map_eq_nil_iff] at h'
+  have hmem := List.filter_eq_nil_iff.1 h'.2 insn hi
+  simpa [hflow] using hmem
 
-section CallRegression
+/-- `complete` promises that no listed instruction is an indirect jump, which the CFG has no edges for. -/
+theorem slice_complete_no_indirect {instructions : List Bap.Disasm.Insn} {edges : List (Nat × Nat)} {entry : Option Nat}
+    {criteria : List Location} (h : (backwardCfg instructions edges entry criteria).complete = true)
+    {insn : Bap.Disasm.Insn} (hi : insn ∈ instructions) : insn.flow ≠ .indirectJump := by
+  have h' : (_ && (instructions.all fun i => (_ && _ && checkFlow i)) && _) = true := h
+  simp only [Bool.and_eq_true, List.all_eq_true] at h'
+  simpa [checkFlow] using (h'.1.2 insn hi).2
 
-set_option linter.unusedSimpArgs false
+/-- `complete` promises that the CFG has an edge for every constant jump into the listing. -/
+theorem slice_complete_edges {instructions : List Bap.Disasm.Insn} {edges : List (Nat × Nat)} {entry : Option Nat}
+    {criteria : List Location} (h : (backwardCfg instructions edges entry criteria).complete = true)
+    {insn other : Bap.Disasm.Insn} (hi : insn ∈ instructions) (ho : other ∈ instructions) (hf : insn.flow ≠ .call)
+    (ht : other.address ∈ Exits.targets (codeExits insn.bil)) : (insn.address, other.address) ∈ edges := by
+  have h' : (_ && (instructions.all fun i => (_ && checkEdges (fun t =>
+      (instructions.foldl (fun (table : Std.HashMap Nat Unit) insn => table.insert insn.address ()) {}).contains t)
+      ((successorTable instructions edges).getD i.address []) i && _)) && _) = true := h
+  simp only [Bool.and_eq_true, List.all_eq_true] at h'
+  have hc := (h'.1.2 insn hi).1.2
+  simp only [checkEdges, Bool.or_eq_true, beq_iff_eq, hf, false_or, List.all_eq_true, List.contains_eq_mem,
+    decide_eq_true_eq, Bool.not_eq_true'] at hc
+  rcases hc _ ht with hm | hm
+  · exact ((slice_mem_successorTable _ _ _ _).1 hm).1
+  · rw [show (instructions.foldl (fun (table : Std.HashMap Nat Unit) insn => table.insert insn.address ()) {}).contains
+      other.address = true from (slice_mem_listed _ _ _).2 (.inr ⟨other, ho, rfl⟩)] at hm
+    cases hm
 
-private def slice_callInsn : Bap.Disasm.Insn := ⟨0, 1, "call", .call, none, []⟩
+/-! #### What the transfer does -/
 
-/-- A call with `x` live after it may change `x`: the slice says so instead of claiming `complete`. -/
-theorem slice_live_call_regression :
-    (backward [slice_callInsn, ⟨1, 1, "y = x", .normal, none, [.move slice_y (.var slice_x)]⟩] [.reg slice_y]).calls = [0] ∧
-      (backward [slice_callInsn, ⟨1, 1, "y = x", .normal, none, [.move slice_y (.var slice_x)]⟩] [.reg slice_y]).complete = false := by
-  simp [slice_backward_eq, slice_step, slice_block, stmtInfo, merge, usesExp, relevant, touches,
-    backwardInstruction, removeDefinitions, addUnique, Location.overlaps, Location.covers,
-    Location.isMemory, memoryWrites, constantRange, isStore, slice_callInsn, slice_x, slice_y]
+section Transfer
 
-/-- A location overwritten after the call owes the callee nothing. -/
-theorem slice_dead_call_regression :
-    (backward [slice_callInsn, ⟨1, 1, "x = 1", .normal, none, [.move slice_x (.int (BitVec.ofNat 64 1))]⟩] [.reg slice_x]).calls = [] ∧
-      (backward [slice_callInsn, ⟨1, 1, "x = 1", .normal, none, [.move slice_x (.int (BitVec.ofNat 64 1))]⟩] [.reg slice_x]).complete = true := by
-  simp [slice_backward_eq, slice_step, slice_block, stmtInfo, merge, usesExp, relevant, touches,
-    backwardInstruction, removeDefinitions, addUnique, Location.overlaps, Location.covers,
-    Location.isMemory, memoryWrites, constantRange, isStore, slice_callInsn, slice_x, slice_y]
+private def slice_x : Bap.Var := ⟨"x", .imm 64, 0, false⟩
+private def slice_y : Bap.Var := ⟨"y", .imm 64, 0, false⟩
+private def slice_c : Bap.Var := ⟨"c", .imm 1, 0, false⟩
+private def slice_m : Bap.Var := ⟨"m", .mem 64 8, 0, false⟩
+private def slice_n : Bap.Var := ⟨"n", .mem 64 8, 0, false⟩
 
-/-- A store wrapping around the address space isn't one location: it may write anything. -/
-theorem slice_wrapping_store_regression :
-    (backward [slice_storeAt (2 ^ 64 - 1) 8] [.mem 0 4]).sites = [0] ∧
-      (backward [slice_storeAt (2 ^ 64 - 1) 8] [.mem 0 4]).complete = false := by
-  simp [slice_backward_eq, slice_step, slice_block, stmtInfo, merge, usesExp, relevant, touches,
-    backwardInstruction, removeDefinitions, addUnique, Location.overlaps, Location.covers,
-    Location.isMemory, memoryWrites, constantRange, isStore, Bap.Bil.evalExp, Bap.Value.asBits, slice_storeAt, slice_mem]
+private def slice_store (memory root : Bap.Var) (address size : Nat) : Bap.Bil.Exp :=
+  .store (.var root) (.int (BitVec.ofNat 64 address)) (.int (BitVec.ofNat (size * 8) 7)) .little size
+
+private theorem slice_constantRange_int {address size : Nat} (h : address + size ≤ 2 ^ 64) :
+    constantRange (.int (BitVec.ofNat 64 address)) size = some (BitVec.ofNat 64 address).toNat := by
+  simp only [constantRange, Bap.Bil.evalExp, Bap.Value.asBits]
+  have hlt : address < 2 ^ 64 ∨ size = 0 := by omega
+  rcases hlt with hlt | rfl
+  · rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt hlt, if_pos h]
+  · simp only [Nat.add_zero]
+    rw [if_pos (Nat.le_of_lt (BitVec.isLt (BitVec.ofNat 64 address)))]
+
+/-- A store that covers a live range ends its liveness: nothing before it matters. -/
+theorem slice_covering_store_kills :
+    moveBefore slice_m (slice_store slice_m slice_m 100 8) [.memOf slice_m 100 4] = [] := by
+  simp [moveBefore, slice_store, slice_m, memoryWrites, slice_constantRange_int, Location.covers, Location.overlaps]
+
+/-- A store over part of a live range leaves the rest of it live. -/
+theorem slice_partial_store_keeps :
+    moveBefore slice_m (slice_store slice_m slice_m 104 4) [.memOf slice_m 100 8] = [.memOf slice_m 100 8] := by
+  simp [moveBefore, slice_store, slice_m, memoryWrites, chainRoot, slice_constantRange_int, Location.covers, Location.overlaps]
+
+/-- A store to one memory doesn't touch the same address of another, however it covers it: this is
+the aliasing that used to make code with two memory variables incomplete. -/
+theorem slice_other_memory_store_keeps :
+    moveBefore slice_n (slice_store slice_n slice_n 100 8) [.memOf slice_m 100 4] = [.memOf slice_m 100 4] := by
+  simp [moveBefore, slice_store, slice_m, slice_n]
+
+/-- A move from one memory to another moves what is live with it. -/
+theorem slice_memory_move_renames :
+    moveBefore slice_m (.var slice_n) [.memOf slice_m 100 4, .memOf slice_n 200 1] =
+      [.memOf slice_n 100 4, .memOf slice_n 200 1] := by
+  simp [moveBefore, slice_m, slice_n, memoryWrites, chainRoot]
+
+/-- A store into a copy takes the bytes it covers from the store, and the rest from the original. -/
+theorem slice_store_copy_renames :
+    moveBefore slice_m (slice_store slice_m slice_n 100 8) [.memOf slice_m 100 4, .memOf slice_m 300 4] =
+      [.memOf slice_n 300 4] := by
+  simp [moveBefore, slice_store, slice_m, slice_n, memoryWrites, chainRoot, slice_constantRange_int, Location.covers, Location.overlaps]
 
 /-- What follows a jump in one instruction may not run, so it doesn't end liveness. -/
-theorem slice_after_exit_regression :
-    (backward [⟨0, 1, "jmp; x = 1", .normal, none,
-      [.jmp (.int (BitVec.ofNat 64 0)), .move slice_x (.int (BitVec.ofNat 64 1))]⟩] [.reg slice_x]).live = [.reg slice_x] := by
-  simp [slice_backward_eq, slice_step, slice_block, stmtInfo, merge, usesExp, relevant, touches,
-    backwardInstruction, removeDefinitions, addUnique, Location.overlaps, Location.covers,
-    Location.isMemory, memoryWrites, constantRange, isStore, slice_x]
+theorem slice_after_exit_keeps :
+    Location.reg slice_x ∈ insnBefore [.jmp (.int (BitVec.ofNat 64 0)), .move slice_x (.int (BitVec.ofNat 64 1))]
+      [.reg slice_x] := by
+  simp [insnBefore, codeBefore, stmtBefore]
 
-end CallRegression
+/-- An assignment in one arm of a conditional leaves what the other arm doesn't assign live. -/
+theorem slice_one_armed_if_keeps :
+    Location.reg slice_x ∈ insnBefore [.ifElse (.var slice_c) [.move slice_x (.int (BitVec.ofNat 64 1))] []]
+      [.reg slice_x] := by
+  simp [insnBefore, codeBefore, stmtBefore]
+
+/-- A store at an unknown address may write any byte of that memory: it's relevant, and dynamic. -/
+theorem slice_unknown_store_relevant :
+    relevant [.memOf slice_m 100 1] (blockInfo [.move slice_m (.store (.var slice_m) (.var slice_y) (.int (BitVec.ofNat 8 7)) .little 1)]) = true ∧
+      Info.dynamic (blockInfo [.move slice_m (.store (.var slice_m) (.var slice_y) (.int (BitVec.ofNat 8 7)) .little 1)]) = true := by
+  simp [relevant, blockInfo, merge, stmtInfo, memoryWrites, constantRange, slice_y, slice_m, Bap.Bil.evalExp, Bap.Bil.lookup, Location.inMemory]
+
+/-- A store at an unknown address of another memory is not relevant to this one. -/
+theorem slice_unknown_store_other_memory :
+    relevant [.memOf slice_n 100 1] (blockInfo [.move slice_m (.store (.var slice_m) (.var slice_y) (.int (BitVec.ofNat 8 7)) .little 1)]) = false := by
+  simp [relevant, blockInfo, merge, stmtInfo, memoryWrites, constantRange, slice_y, slice_m, slice_n, Bap.Bil.evalExp, Bap.Bil.lookup, Location.inMemory]
+
+/-- Reading a location doesn't make an instruction relevant to it: only writing does. -/
+theorem slice_read_not_relevant :
+    relevant [.reg slice_x] (blockInfo [.move slice_y (.var slice_x)]) = false := by
+  simp [relevant, blockInfo, merge, stmtInfo, slice_x, slice_y, isStore, Location.overlaps]
+
+end Transfer
 
 end Slice
 
@@ -6642,6 +6255,432 @@ theorem taint_load_covers_read {w : Nat} {M : Memory w} (T : State) (env : Bil.E
         simp only [taint_concreteExp, hx]
         exact (taint_mem_union _ _ _).mpr (Or.inr (List.mem_flatMap.mpr ⟨p, hp, hn⟩))
       · simp at h
+
+/-! ### Memory over a whole run
+
+Which bytes of memory a whole run changes, and what labels they end up with. `taint_writes` lists each
+byte stored to on the path the run takes, in order, with the labels of its store, so that a byte's
+last entry says what `taint_execProgram` leaves on it. -/
+
+/-- The writes of a chain of stores, the innermost first. -/
+def taint_storeLog (T : State) (env : Bil.Env) : Bil.Exp → List (Nat × Labels)
+  | .store m a v _ size =>
+    taint_storeLog T env m ++
+      match taint_address env a with
+      | some address =>
+        (bytes address size).map (·, union (taint_concreteExp T env a) (taint_concreteExp T env v))
+      | none => []
+  | _ => []
+
+mutual
+  /-- The bytes `Bil.execStmt` stores to, in order, with the labels of the store. -/
+  def taint_writesStmt (fuel : Nat) (st : Bil.State) (T : State) (s : Bil.Stmt) : List (Nat × Labels) :=
+    match fuel with
+    | 0 => []
+    | fuel + 1 =>
+      match s with
+      | .move _ value =>
+        match value with
+        | .store .. => taint_storeLog T st.env value
+        | _ => []
+      | .jmp _ | .special _ | .cpuExn _ => []
+      | .ifElse condition yes no =>
+        match Bil.execExp st condition with
+        | .ok (@Value.bits width bits) =>
+          if h : width = 1 then
+            let bits : BitVec 1 := h ▸ bits
+            taint_writes fuel st T (if bits = 1 then yes else no)
+          else []
+        | _ => []
+      | .while condition body =>
+        match Bil.execExp st condition with
+        | .ok (@Value.bits width bits) =>
+          if h : width = 1 then
+            let bits : BitVec 1 := h ▸ bits
+            if bits = 1 then
+              taint_writes fuel st T body ++
+                match taint_execProgram fuel st T body with
+                | .ok (next, T', .normal) => taint_writesStmt fuel next T' (.while condition body)
+                | _ => []
+            else []
+          else []
+        | _ => []
+
+  /-- The bytes `Bil.execProgram` stores to, in order, with the labels of the store. -/
+  def taint_writes (fuel : Nat) (st : Bil.State) (T : State) (program : Bil.Program) : List (Nat × Labels) :=
+    match fuel with
+    | 0 => []
+    | fuel + 1 =>
+      match program with
+      | [] => []
+      | s :: rest =>
+        taint_writesStmt fuel st T s ++
+          match taint_execStmt fuel st T s with
+          | .ok (next, T', .normal) => taint_writes fuel next T' rest
+          | _ => []
+end
+
+/-- The labels of the last store to a byte. -/
+def taint_lastWrite (log : List (Nat × Labels)) (p : Nat) : Option Labels := log.reverse.lookup p
+
+/-- A chain of stores from the memory `m` itself. -/
+def taint_Chain (m : Bap.Var) : Bil.Exp → Prop
+  | .var x => x = m
+  | .store inner _ _ _ _ => taint_Chain m inner
+  | _ => False
+
+/-- The memory discipline: `m` is the only memory stored to, and only ever assigned stores into itself. -/
+inductive taint_StmtWF (m : Bap.Var) : Bil.Stmt → Prop where
+  | moveOther {x : Bap.Var} {value : Bil.Exp} (hx : x ≠ m) (hv : ∀ inner a v en z, value ≠ .store inner a v en z) :
+      taint_StmtWF m (.move x value)
+  | moveSelf : taint_StmtWF m (.move m (.var m))
+  | moveStore {inner a v : Bil.Exp} {en : Endian} {z : Nat} (hc : taint_Chain m inner) :
+      taint_StmtWF m (.move m (.store inner a v en z))
+  | jmp (target : Bil.Exp) : taint_StmtWF m (.jmp target)
+  | special (message : String) : taint_StmtWF m (.special message)
+  | cpuExn (number : Nat) : taint_StmtWF m (.cpuExn number)
+  | loop {condition : Bil.Exp} {body : Bil.Program} (hb : ∀ s ∈ body, taint_StmtWF m s) :
+      taint_StmtWF m (.while condition body)
+  | ifElse {condition : Bil.Exp} {yes no : Bil.Program} (hy : ∀ s ∈ yes, taint_StmtWF m s)
+      (hn : ∀ s ∈ no, taint_StmtWF m s) : taint_StmtWF m (.ifElse condition yes no)
+
+/-- From `M` and `T` to `U` and `T'` along `log`: a byte with no write in it has not changed, in value or
+labels, and one with a write has the labels of the last one, with those that apply everywhere. -/
+private def taint_Tracks {w : Nat} (M U : Memory w) (T T' : State) (log : List (Nat × Labels)) : Prop :=
+  T'.anywhere = T.anywhere ∧ ∀ p : BitVec w,
+    match taint_lastWrite log p.toNat with
+    | none => Memory.readByte U p = Memory.readByte M p ∧ labelsOfMemory T' p.toNat = labelsOfMemory T p.toNat
+    | some L => labelsOfMemory T' p.toNat = union L T.anywhere
+
+private theorem taint_Tracks_refl {w : Nat} (M : Memory w) (T : State) : taint_Tracks M M T T [] :=
+  ⟨rfl, fun _ => ⟨rfl, rfl⟩⟩
+
+private theorem taint_lastWrite_append (a b : List (Nat × Labels)) (p : Nat) :
+    taint_lastWrite (a ++ b) p = (taint_lastWrite b p).or (taint_lastWrite a p) := by
+  simp only [taint_lastWrite, List.reverse_append]
+  rw [List.lookup_append]
+
+private theorem taint_Tracks_trans {w : Nat} {M N U : Memory w} {T X T' : State} {a b : List (Nat × Labels)}
+    (h : taint_Tracks M N T X a) (k : taint_Tracks N U X T' b) : taint_Tracks M U T T' (a ++ b) := by
+  refine ⟨k.1.trans h.1, fun p => ?_⟩
+  have h1 := h.2 p
+  have h2 := k.2 p
+  rw [taint_lastWrite_append]
+  cases hb : taint_lastWrite b p.toNat with
+  | some L =>
+    rw [hb] at h2
+    simp only [Option.some_or]
+    rw [h2, h.1]
+  | none =>
+    rw [hb] at h2
+    simp only [Option.none_or]
+    cases ha : taint_lastWrite a p.toNat with
+    | none =>
+      rw [ha] at h1
+      exact ⟨h2.1.trans h1.1, h2.2.trans h1.2⟩
+    | some L =>
+      rw [ha] at h1
+      rw [h2.2, h1]
+
+private theorem taint_lastWrite_map (bs : List Nat) (L : Labels) (p : Nat) :
+    taint_lastWrite (bs.map (·, L)) p = if p ∈ bs then some L else none := by
+  simp only [taint_lastWrite]
+  have key : ∀ l : List Nat, ((l.map (·, L)).lookup p) = if p ∈ l then some L else none := by
+    intro l
+    induction l with
+    | nil => simp
+    | cons h t it =>
+      simp only [List.map_cons, List.lookup_cons, List.mem_cons]
+      by_cases hp : p = h
+      · simp [hp]
+      · have : (p == h) = false := by simpa using hp
+        simp [this, hp, it]
+  rw [← List.map_reverse, key]
+  simp
+
+/-- What a chain of stores from `M` does to memory, bytes and labels. -/
+private theorem taint_chain_tracks {m : Bap.Var} {T : State} {env : Bil.Env} {w : Nat} {M : Memory w}
+    (hm : Bil.lookup env m = .ok (.memory M)) (hs : PagesSized M) (c : Bil.Exp) (hc : taint_Chain m c) :
+    ∀ v, Bil.evalExp env c = .ok v → ∃ U : Memory w, v = .memory U ∧ PagesSized U ∧
+      taint_Tracks M U T (taint_concreteStore m T env c) (taint_storeLog T env c) := by
+  induction c with
+  | var x =>
+    intro v hv
+    cases hc
+    simp only [Bil.evalExp, hm] at hv
+    cases hv
+    refine ⟨M, rfl, hs, ?_⟩
+    simp only [taint_concreteStore, ite_true, taint_storeLog]
+    exact taint_Tracks_refl M T
+  | store inner ad val en z ih _ _ =>
+    intro v hv
+    cases hi : Bil.evalExp env inner with
+    | error e => simp [Bil.evalExp, hi, bind, Except.bind] at hv
+    | ok v0 =>
+      obtain ⟨M1, rfl, hs1, htr⟩ := ih hc v0 hi
+      cases hA : Bil.evalExp env ad with
+      | error e => simp [Bil.evalExp, hi, hA, bind, Except.bind, expectMemory] at hv
+      | ok v1 =>
+        cases v1 with
+        | memory _ => simp [Bil.evalExp, hi, hA, bind, Except.bind, expectMemory, Value.asBits] at hv
+        | undefined => simp [Bil.evalExp, hi, hA, bind, Except.bind, expectMemory, Value.asBits] at hv
+        | @bits wa cv =>
+          cases hV : Bil.evalExp env val with
+          | error e => simp [Bil.evalExp, hi, hA, hV, bind, Except.bind, expectMemory, Value.asBits] at hv
+          | ok v2 =>
+            cases v2 with
+            | memory _ => simp [Bil.evalExp, hi, hA, hV, bind, Except.bind, expectMemory, Value.asBits] at hv
+            | undefined => simp [Bil.evalExp, hi, hA, hV, bind, Except.bind, expectMemory, Value.asBits] at hv
+            | bits vv =>
+              by_cases hwe : wa = w
+              · subst hwe
+                cases hwa1 : Memory.write M1 cv vv en z with
+                | error e =>
+                  simp [Bil.evalExp, hi, hA, hV, bind, Except.bind, expectMemory, Value.asBits, hwa1] at hv
+                | ok M2 =>
+                  have hx : taint_address env ad = some ⟨wa, cv⟩ := by
+                    simp [taint_address, hA, Value.asBits, Except.toOption]
+                  refine ⟨M2, ?_, write_pagesSized hs1 hwa1, ?_⟩
+                  · simp [Bil.evalExp, hi, hA, hV, bind, Except.bind, expectMemory, Value.asBits, hwa1] at hv
+                    exact hv.symm
+                  · simp only [taint_concreteStore, taint_storeLog, hx]
+                    generalize hL : union (taint_concreteExp T env ad) (taint_concreteExp T env val) = L
+                    have hany : ∀ (bs : List Nat) (s : State), (taint_putAll bs L s).anywhere = s.anywhere := by
+                      intro bs
+                      induction bs with
+                      | nil => intro s; rfl
+                      | cons h t it => intro s; simp only [taint_putAll, List.foldl_cons]; exact (it _).trans rfl
+                    refine ⟨(hany _ _).trans htr.1, fun p => ?_⟩
+                    rw [taint_lastWrite_append, taint_lastWrite_map]
+                    have hput := taint_labelsOfMemory_putAll (bytes ⟨wa, cv⟩ z) L
+                      (taint_concreteStore m T env inner) p.toNat
+                    simp only [taint_putAll] at hput
+                    by_cases hp : p.toNat ∈ bytes ⟨wa, cv⟩ z
+                    · simp only [hp, ↓reduceIte, Option.some_or]
+                      rw [hput, ite_eq_left hp, htr.1]
+                    · simp only [hp, ↓reduceIte, Option.none_or]
+                      rw [hput, ite_eq_right hp]
+                      have hin := htr.2 p
+                      cases hl : taint_lastWrite (taint_storeLog T env inner) p.toNat with
+                      | none =>
+                        rw [hl] at hin
+                        exact ⟨(taint_bytes_write_frame hs1 hwa1 hp).trans hin.1, hin.2⟩
+                      | some L' =>
+                        rw [hl] at hin
+                        exact hin
+              · simp [Bil.evalExp, hi, hA, hV, bind, Except.bind, expectMemory, Value.asBits, hwe] at hv
+  | _ => intro _; exact hc.elim
+
+private theorem taint_ok_bind {α β : Type} {x : Except String α} {f : α → Except String β} {r : β}
+    (h : (x >>= f) = .ok r) : ∃ a, x = .ok a ∧ f a = .ok r := by
+  cases x with
+  | ok a => exact ⟨a, rfl, h⟩
+  | error e => cases h
+
+private theorem taint_lookup_bind_self (env : Bil.Env) (x : Bap.Var) (value : Value) :
+    Bil.lookup (Bil.bind env x value) x = .ok value := by
+  rw [taint_lookup_bind]
+  simp
+
+private theorem taint_bind_ne_self {env : Bil.Env} {x m : Bap.Var} (h : x ≠ m) (value : Value) :
+    Bil.lookup (Bil.bind env x value) m = Bil.lookup env m := by
+  rw [taint_lookup_bind]
+  simp [Ne.symm h]
+
+/-- A whole run under the discipline, statement by statement. -/
+private theorem taint_run_tracks {m : Bap.Var} {w : Nat} (fuel : Nat) :
+    (∀ (s : Bil.Stmt) (st st' : Bil.State) (T T' : State) (e : Bil.Effect) (M : Memory w), taint_StmtWF m s →
+      Bil.lookup st.env m = .ok (.memory M) → PagesSized M → taint_execStmt fuel st T s = .ok (st', T', e) →
+      ∃ U : Memory w, Bil.lookup st'.env m = .ok (.memory U) ∧ PagesSized U ∧
+        taint_Tracks M U T T' (taint_writesStmt fuel st T s)) ∧
+    (∀ (code : Bil.Program) (st st' : Bil.State) (T T' : State) (e : Bil.Effect) (M : Memory w),
+      (∀ s ∈ code, taint_StmtWF m s) →
+      Bil.lookup st.env m = .ok (.memory M) → PagesSized M → taint_execProgram fuel st T code = .ok (st', T', e) →
+      ∃ U : Memory w, Bil.lookup st'.env m = .ok (.memory U) ∧ PagesSized U ∧
+        taint_Tracks M U T T' (taint_writes fuel st T code)) := by
+  induction fuel with
+  | zero =>
+    refine ⟨?_, ?_⟩
+    · intro s st st' T T' e M _ _ _ h
+      simp [taint_execStmt] at h
+    · intro code st st' T T' e M _ _ _ h
+      simp [taint_execProgram] at h
+  | succ fuel ih =>
+    obtain ⟨ihs, ihp⟩ := ih
+    refine ⟨?_, ?_⟩
+    · intro s st st' T T' e M hwf hm hs h
+      cases s with
+      | special message =>
+        simp only [taint_execStmt, Except.ok.injEq, Prod.mk.injEq] at h
+        obtain ⟨rfl, rfl, rfl⟩ := h
+        exact ⟨M, hm, hs, by simpa [taint_writesStmt] using taint_Tracks_refl M T⟩
+      | cpuExn number =>
+        simp only [taint_execStmt, Except.ok.injEq, Prod.mk.injEq] at h
+        obtain ⟨rfl, rfl, rfl⟩ := h
+        exact ⟨M, hm, hs, by simpa [taint_writesStmt] using taint_Tracks_refl M T⟩
+      | jmp target =>
+        simp only [taint_execStmt] at h
+        obtain ⟨_, _, h⟩ := taint_ok_bind h
+        obtain ⟨_, _, h⟩ := taint_ok_bind h
+        cases h
+        exact ⟨M, hm, hs, by simpa [taint_writesStmt] using taint_Tracks_refl M T⟩
+      | move x value =>
+        simp only [taint_execStmt] at h
+        obtain ⟨r, he, h⟩ := taint_ok_bind h
+        cases h
+        cases hwf with
+        | moveOther hx hv =>
+          refine ⟨M, ?_, hs, ?_⟩
+          · show Bil.lookup (Bil.bind st.env x r) m = _
+            rw [taint_bind_ne_self hx]
+            exact hm
+          · cases value <;> first | exact absurd rfl (hv _ _ _ _ _) | exact ⟨rfl, fun p => ⟨rfl, rfl⟩⟩
+        | moveSelf =>
+          simp only [Bil.execExp, Bil.evalExp, hm] at he
+          cases he
+          refine ⟨M, taint_lookup_bind_self _ _ _, hs, ?_⟩
+          simp only [taint_writesStmt]
+          exact ⟨rfl, fun p => ⟨rfl, rfl⟩⟩
+        | @moveStore inner a v en z hc =>
+          obtain ⟨U, rfl, hU, htr⟩ := taint_chain_tracks (T := T) hm hs (.store inner a v en z) hc r he
+          exact ⟨U, taint_lookup_bind_self _ _ _, hU, by simpa [taint_writesStmt] using htr⟩
+      | ifElse condition yes no =>
+        cases hwf with
+        | ifElse hy hn =>
+          simp only [taint_execStmt] at h
+          obtain ⟨cv, he, h⟩ := taint_ok_bind h
+          obtain ⟨⟨cw, bits⟩, hb, h2⟩ := taint_ok_bind h
+          cases cv with
+          | memory _ => simp [Value.asBits] at hb
+          | undefined => simp [Value.asBits] at hb
+          | @bits width value =>
+            simp only [Value.asBits] at hb
+            cases hb
+            by_cases hw : cw = 1
+            · subst hw
+              have h3 : taint_execProgram fuel st T (if bits = 1 then yes else no) = .ok (st', T', e) := h2
+              have hgoal : taint_writesStmt (fuel + 1) st T (.ifElse condition yes no) =
+                  taint_writes fuel st T (if bits = 1 then yes else no) := by
+                simp only [taint_writesStmt, he]
+                rfl
+              rw [hgoal]
+              by_cases hc : bits = 1
+              · simp only [hc, ite_true] at h3 ⊢
+                exact ihp yes st st' T T' e M hy hm hs h3
+              · simp only [hc, ite_false] at h3 ⊢
+                exact ihp no st st' T T' e M hn hm hs h3
+            · simp [hw] at h2
+      | «while» condition body =>
+        cases hwf with
+        | loop hb =>
+          simp only [taint_execStmt] at h
+          obtain ⟨cv, he, h⟩ := taint_ok_bind h
+          obtain ⟨⟨cw, bits⟩, hbb, h2⟩ := taint_ok_bind h
+          cases cv with
+          | memory _ => simp [Value.asBits] at hbb
+          | undefined => simp [Value.asBits] at hbb
+          | @bits width value =>
+            simp only [Value.asBits] at hbb
+            cases hbb
+            by_cases hw : cw = 1
+            · subst hw
+              have h3 : (if bits = 1 then
+                  (taint_execProgram fuel st T body >>= fun x => match x.2.2 with
+                    | .normal => taint_execStmt fuel x.1 x.2.1 (.while condition body)
+                    | other => .ok (x.1, x.2.1, other))
+                  else .ok (st, T, .normal)) = Except.ok (st', T', e) := h2
+              have hgoal : taint_writesStmt (fuel + 1) st T (.while condition body) =
+                  if bits = 1 then
+                    taint_writes fuel st T body ++
+                      match taint_execProgram fuel st T body with
+                      | .ok (next, T', .normal) => taint_writesStmt fuel next T' (.while condition body)
+                      | _ => []
+                  else [] := by
+                simp only [taint_writesStmt, he]
+                rfl
+              rw [hgoal]
+              by_cases hc : bits = 1
+              · simp only [hc, ite_true] at h3 ⊢
+                obtain ⟨⟨next, T1, eff⟩, hbody, h4⟩ := taint_ok_bind h3
+                obtain ⟨U1, hU1, hs1, htr1⟩ := ihp body st next T T1 eff M hb hm hs hbody
+                rw [hbody]
+                cases eff with
+                | normal =>
+                  obtain ⟨U2, hU2, hs2, htr2⟩ := ihs _ next st' T1 T' e U1 (.loop hb) hU1 hs1 h4
+                  exact ⟨U2, hU2, hs2, taint_Tracks_trans htr1 htr2⟩
+                | jump t =>
+                  simp only [Except.ok.injEq, Prod.mk.injEq] at h4
+                  obtain ⟨rfl, rfl, rfl⟩ := h4
+                  exact ⟨U1, hU1, hs1, by simpa using htr1⟩
+                | special t =>
+                  simp only [Except.ok.injEq, Prod.mk.injEq] at h4
+                  obtain ⟨rfl, rfl, rfl⟩ := h4
+                  exact ⟨U1, hU1, hs1, by simpa using htr1⟩
+                | cpuExn t =>
+                  simp only [Except.ok.injEq, Prod.mk.injEq] at h4
+                  obtain ⟨rfl, rfl, rfl⟩ := h4
+                  exact ⟨U1, hU1, hs1, by simpa using htr1⟩
+              · simp only [hc, ite_false, Except.ok.injEq, Prod.mk.injEq] at h3 ⊢
+                obtain ⟨rfl, rfl, rfl⟩ := h3
+                exact ⟨M, hm, hs, taint_Tracks_refl M T⟩
+            · simp [hw] at h2
+    · intro code st st' T T' e M hwf hm hs h
+      cases code with
+      | nil =>
+        simp only [taint_execProgram, Except.ok.injEq, Prod.mk.injEq] at h
+        obtain ⟨rfl, rfl, rfl⟩ := h
+        exact ⟨M, hm, hs, by simpa [taint_writes] using taint_Tracks_refl M T⟩
+      | cons s rest =>
+        simp only [taint_execProgram] at h
+        obtain ⟨⟨next, T1, eff⟩, hstmt, h⟩ := taint_ok_bind h
+        obtain ⟨U1, hU1, hs1, htr1⟩ := ihs s st next T T1 eff M (hwf s List.mem_cons_self) hm hs hstmt
+        simp only [taint_writes, hstmt]
+        cases eff with
+        | normal =>
+          obtain ⟨U2, hU2, hs2, htr2⟩ := ihp rest next st' T1 T' e U1
+            (fun s' hs' => hwf s' (List.mem_cons_of_mem _ hs')) hU1 hs1 h
+          exact ⟨U2, hU2, hs2, taint_Tracks_trans htr1 htr2⟩
+        | jump t =>
+          simp only [Except.ok.injEq, Prod.mk.injEq] at h
+          obtain ⟨rfl, rfl, rfl⟩ := h
+          exact ⟨U1, hU1, hs1, by simpa using htr1⟩
+        | special t =>
+          simp only [Except.ok.injEq, Prod.mk.injEq] at h
+          obtain ⟨rfl, rfl, rfl⟩ := h
+          exact ⟨U1, hU1, hs1, by simpa using htr1⟩
+        | cpuExn t =>
+          simp only [Except.ok.injEq, Prod.mk.injEq] at h
+          obtain ⟨rfl, rfl, rfl⟩ := h
+          exact ⟨U1, hU1, hs1, by simpa using htr1⟩
+
+/-- Memory over a whole run: `taint_store_covers_changes` for all the stores of a run.
+
+A run of `code` under the memory discipline `taint_StmtWF m`, from `M` at `m` with full-size pages, ends
+with `U` at `m` with full-size pages. Every byte it changes was stored to on the way (`taint_writes`). The
+byte has the labels of its last store when the run has one, with the ones `T` has everywhere, and otherwise
+the labels it started with: nothing else adds labels to memory or takes them away. The analysis covers
+those labels: by `run S code` if the run falls through, and if it leaves the code by the analysis state at
+the statement that leaves. -/
+theorem taint_run_memory {m : Bap.Var} {fuel : Nat} {st st' : Bil.State} {e : Bil.Effect} {T S : State}
+    {code : Bil.Program} {w : Nat} {M : Memory w} (hwf : ∀ s ∈ code, taint_StmtWF m s) (hT : taint_Le T S)
+    (hm : Bil.lookup st.env m = .ok (.memory M)) (hs : PagesSized M) (h : Bil.execProgram fuel st code = .ok (st', e)) :
+    ∃ (T' : State) (U : Memory w), taint_execProgram fuel st T code = .ok (st', T', e) ∧
+      Bil.lookup st'.env m = .ok (.memory U) ∧ PagesSized U ∧
+      taint_Post e (taint_Le T' (run S code)) (∃ X, taint_ExitIn S code X ∧ taint_Le T' X) ∧
+      T'.anywhere = T.anywhere ∧ ∀ p : BitVec w,
+        (Memory.readByte U p ≠ Memory.readByte M p → (taint_lastWrite (taint_writes fuel st T code) p.toNat).isSome) ∧
+        match taint_lastWrite (taint_writes fuel st T code) p.toNat with
+        | none => Memory.readByte U p = Memory.readByte M p ∧ labelsOfMemory T' p.toNat = labelsOfMemory T p.toNat
+        | some L => labelsOfMemory T' p.toNat = union L T.anywhere := by
+  obtain ⟨T', hrun, hpost⟩ := taint_run_overapprox hT h
+  obtain ⟨U, hU, hsU, hany, htr⟩ := (taint_run_tracks fuel).2 code st st' T T' e M hwf hm hs hrun
+  refine ⟨T', U, hrun, hU, hsU, hpost, hany, fun p => ⟨fun hne => ?_, htr p⟩⟩
+  have := htr p
+  cases hl : taint_lastWrite (taint_writes fuel st T code) p.toNat with
+  | none =>
+    rw [hl] at this
+    exact absurd this.1 hne
+  | some _ => rfl
 
 end Addressing
 

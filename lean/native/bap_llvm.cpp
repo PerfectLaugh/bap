@@ -28,6 +28,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 using namespace llvm;
@@ -176,22 +177,54 @@ struct Disassembly {
   uint32_t flags = 0;
 };
 
+// Building these takes longer than decoding, so each thread keeps one set per triple.
+struct DecoderContext {
+  TargetContext context;
+  MCContext machineContext;
+  std::unique_ptr<MCDisassembler> decoder;
+  std::unique_ptr<MCInstPrinter> printer;
+
+  explicit DecoderContext(const char *triple)
+      : context(triple), machineContext(context.triple, *context.asmInfo,
+                                        *context.registers, *context.subtarget) {
+    decoder.reset(context.target->createMCDisassembler(*context.subtarget, machineContext));
+    if (!decoder)
+      throw std::runtime_error("target does not support disassembly");
+    unsigned dialect = context.triple.isX86() ? 1 : context.asmInfo->getAssemblerDialect();
+    printer.reset(context.target->createMCInstPrinter(
+        context.triple, dialect, *context.asmInfo, *context.instructions,
+        *context.registers));
+    if (!printer)
+      throw std::runtime_error("unable to create instruction printer");
+    printer->setPrintImmHex(true);
+  }
+};
+
+DecoderContext &decoderContext(const char *triple) {
+  thread_local std::unordered_map<std::string, std::unique_ptr<DecoderContext>> contexts;
+  auto &entry = contexts[triple];
+  if (!entry)
+    entry = std::make_unique<DecoderContext>(triple);
+  return *entry;
+}
+
+const std::unordered_map<std::string, unsigned> &opcodeTable(const char *triple) {
+  thread_local std::unordered_map<std::string, std::unordered_map<std::string, unsigned>> tables;
+  auto [entry, fresh] = tables.try_emplace(triple);
+  if (fresh) {
+    TargetContext context(triple);
+    for (unsigned opcode = 0; opcode != context.instructions->getNumOpcodes(); ++opcode)
+      entry->second.emplace(context.instructions->getName(opcode).str(), opcode);
+  }
+  return entry->second;
+}
+
 Disassembly disassemble(const char *triple, const uint8_t *bytes, size_t size,
                         uint64_t address) {
-  TargetContext context(triple);
-  MCContext machineContext(context.triple, *context.asmInfo,
-                           *context.registers, *context.subtarget);
-  auto decoder = std::unique_ptr<MCDisassembler>(
-      context.target->createMCDisassembler(*context.subtarget, machineContext));
-  if (!decoder)
-    throw std::runtime_error("target does not support disassembly");
-  unsigned dialect = context.triple.isX86() ? 1 : context.asmInfo->getAssemblerDialect();
-  auto printer = context.target->createMCInstPrinter(
-      context.triple, dialect, *context.asmInfo, *context.instructions,
-      *context.registers);
-  if (!printer)
-    throw std::runtime_error("unable to create instruction printer");
-  printer->setPrintImmHex(true);
+  DecoderContext &cached = decoderContext(triple);
+  TargetContext &context = cached.context;
+  auto &decoder = cached.decoder;
+  auto &printer = cached.printer;
 
   Disassembly result;
   uint64_t decodedSize = 0;
@@ -355,11 +388,10 @@ extern "C" lean_obj_res bap_llvm_opcode_id(lean_obj_arg triple, lean_obj_arg nam
                                              lean_obj_arg) {
   initialize();
   try {
-    TargetContext context(lean_string_cstr(triple));
-    const char *expected = lean_string_cstr(name);
-    for (unsigned opcode = 0; opcode != context.instructions->getNumOpcodes(); ++opcode)
-      if (context.instructions->getName(opcode) == expected)
-        return lean_io_result_mk_ok(lean_uint64_to_nat(opcode));
+    const auto &table = opcodeTable(lean_string_cstr(triple));
+    auto found = table.find(lean_string_cstr(name));
+    if (found != table.end())
+      return lean_io_result_mk_ok(lean_uint64_to_nat(found->second));
     return io_error("unknown LLVM opcode");
   } catch (const std::exception &error) {
     return io_error(error.what());
@@ -370,14 +402,12 @@ extern "C" lean_obj_res bap_llvm_opcode_id_opt(lean_obj_arg triple, lean_obj_arg
                                                  lean_obj_arg) {
   initialize();
   try {
-    TargetContext context(lean_string_cstr(triple));
-    const char *expected = lean_string_cstr(name);
-    for (unsigned opcode = 0; opcode != context.instructions->getNumOpcodes(); ++opcode) {
-      if (context.instructions->getName(opcode) == expected) {
-        lean_object *result = lean_alloc_ctor(1, 1, 0);
-        lean_ctor_set(result, 0, lean_uint64_to_nat(opcode));
-        return lean_io_result_mk_ok(result);
-      }
+    const auto &table = opcodeTable(lean_string_cstr(triple));
+    auto found = table.find(lean_string_cstr(name));
+    if (found != table.end()) {
+      lean_object *result = lean_alloc_ctor(1, 1, 0);
+      lean_ctor_set(result, 0, lean_uint64_to_nat(found->second));
+      return lean_io_result_mk_ok(result);
     }
     return lean_io_result_mk_ok(lean_box(0));
   } catch (const std::exception &error) {

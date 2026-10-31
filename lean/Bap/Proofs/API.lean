@@ -113,7 +113,7 @@ theorem argumentLocations_nodup (abi : Convention) (prototype : Prototype)
       have hge := List.getElem?_eq_none_iff.1 hi
       have hj : abi.functionArguments[j]? = none := List.getElem?_eq_none_iff.2 (by omega)
       rw [hi, hj] at he
-      have := Nat.eq_of_mul_eq_mul_right hbyte (Location.stack.inj he)
+      have := Nat.eq_of_mul_eq_mul_right hbyte (Nat.add_left_cancel (Location.stack.inj he))
       omega
     | some a =>
       cases hj : abi.functionArguments[j]? with

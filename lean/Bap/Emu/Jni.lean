@@ -66,6 +66,7 @@ structure FieldInfo where
 structure StringInfo where
   contents : String
   address : Option Nat := none
+  wideAddress : Option Nat := none
 
 structure Layout where
   vm : Nat
@@ -108,6 +109,60 @@ structure Model where
   vm : IO.Ref Nat
 
 def arg (call : Call) (index : Nat) : Nat := call.args.getD index 0
+
+/-- The UTF-16 code units of a string, as `GetStringChars` and `GetStringLength` see it. -/
+def utf16Units (text : String) : List Nat :=
+  text.toList.flatMap fun char =>
+    if char.toNat < 0x10000 then [char.toNat]
+    else
+      let offset := char.toNat - 0x10000
+      [0xD800 + offset / 0x400, 0xDC00 + offset % 0x400]
+
+/-- The little-endian bytes of UTF-16 code units. -/
+def utf16Bytes (units : List Nat) : ByteArray :=
+  ByteArray.mk (units.flatMap fun unit => [UInt8.ofNat (unit % 256), UInt8.ofNat (unit / 256)]).toArray
+
+/-- The size of an element of a primitive array, by the `Get<Type>ArrayElements` of the JNI table:
+boolean, byte, char, short, int, long, float, double. -/
+def arrayElementWidth : Nat → Option Nat
+  | 183 | 184 => some 1
+  | 185 | 186 => some 2
+  | 187 | 189 => some 4
+  | 188 | 190 => some 8
+  | _ => none
+
+/-- The array class of `New<Type>Array` of the JNI table. -/
+def primitiveArrayClass : Nat → Option String
+  | 175 => some "[Z"
+  | 176 => some "[B"
+  | 177 => some "[C"
+  | 178 => some "[S"
+  | 179 => some "[I"
+  | 180 => some "[J"
+  | 181 => some "[F"
+  | 182 => some "[D"
+  | _ => none
+
+/-- What the JNI table has at an index, for the families that `compute` serves alike. -/
+inductive Family where
+  | callMethod (static : Bool) (methodArgument : Nat)
+  | getField (static : Bool)
+  | other
+  deriving DecidableEq, Repr
+
+def familyOf (index : Nat) : Family :=
+  if index ≥ 28 && index ≤ 30 then .callMethod false 2
+  else if index ≥ 34 && index ≤ 63 then .callMethod false 2
+  else if index ≥ 64 && index ≤ 93 then .callMethod false 3
+  else if index ≥ 95 && index ≤ 103 then .getField false
+  else if index ≥ 114 && index ≤ 143 then .callMethod true 2
+  else if index ≥ 145 && index ≤ 153 then .getField true
+  else .other
+
+/-- `JavaVM.GetEnv`: 0, or `JNI_EVERSION` (-3, as an unsigned word) for a version that the model does not
+have, that is a newer one. -/
+def getEnvResult (requested supported : Nat) : Nat :=
+  if requested ≤ supported then 0 else 0xFFFFFFFFFFFFFFFD
 
 private def reg (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
 
@@ -176,7 +231,7 @@ private def stringIdentity (model : Model) (contents : String) (fresh : Bool := 
   | some id => pure id
   | none =>
     let id ← freshIdentity model
-    model.strings.modify (·.insert id ⟨contents, none⟩)
+    model.strings.modify (·.insert id { contents })
     if !fresh then model.stringsByContent.modify (·.insert contents id)
     pure id
 
@@ -308,6 +363,18 @@ private def stringAddress (model : Model) (id : Identity) : IO Nat := do
       model.strings.modify (·.insert id { info with address := some address })
       pure address
 
+/-- The UTF-16 buffer of `GetStringChars`, which is not the UTF-8 one of `GetStringUTFChars`. -/
+private def wideStringAddress (model : Model) (id : Identity) : IO Nat := do
+  match (← model.strings.get).get? id with
+  | none => pure 0
+  | some info =>
+    match info.wideAddress with
+    | some address => pure address
+    | none =>
+      let address ← model.allocBytes (utf16Bytes (utf16Units info.contents))
+      model.strings.modify (·.insert id { info with wideAddress := some address })
+      pure address
+
 private def newArray (model : Model) (className : String) (length : Nat) : IO Nat := do
   if length > 1000000 then throw <| IO.userError "unreasonable JNI array length"
   let id ← freshIdentity model
@@ -351,7 +418,10 @@ private def compute (model : Model) (call : Call) : IO (Nat × String) := do
     model.exception.set (some (← resolve model (arg call 1)))
     pure (0, "throw")
   | 14 =>
-    model.exception.set (some (← resolve model (arg call 1)))
+    -- ThrowNew(env, class, message) throws a new object of the class, and not the class.
+    let exception ← freshIdentity model
+    model.objectClasses.modify (·.insert exception (← resolve model (arg call 1)))
+    model.exception.set (some exception)
     pure (0, "throw-new")
   | 15 =>
     match ← model.exception.get with
@@ -369,7 +439,6 @@ private def compute (model : Model) (call : Call) : IO (Nat × String) := do
     let same := if arg call 1 = 0 || arg call 2 = 0 then arg call 1 = arg call 2 else left = right
     pure (if same then 1 else 0, "")
   | 25 => pure (← resolve model (arg call 1) >>= internIdentity model .local, "")
-  | 28 | 29 | 30 => pure (← callMethod model call false (arg call 2), "")
   | 31 => pure (← getObjectClass model (arg call 1), "")
   | 33 | 113 =>
     let name ← model.readString (arg call 2)
@@ -382,12 +451,18 @@ private def compute (model : Model) (call : Call) : IO (Nat × String) := do
   | 167 =>
     let contents ← model.readString (arg call 1)
     pure (← stringIdentity model contents true >>= internIdentity model .local, contents)
-  | 164 | 168 =>
+  | 164 =>
+    let id ← resolve model (arg call 1)
+    match (← model.strings.get).get? id with
+    | some info => pure ((utf16Units info.contents).length, "")
+    | none => pure (← fallback (), "")
+  | 168 =>
     let id ← resolve model (arg call 1)
     match (← model.strings.get).get? id with
     | some info => pure (info.contents.utf8ByteSize, "")
     | none => pure (← fallback (), "")
-  | 165 | 169 => pure (← resolve model (arg call 1) >>= stringAddress model, "")
+  | 165 => pure (← resolve model (arg call 1) >>= wideStringAddress model, "")
+  | 169 => pure (← resolve model (arg call 1) >>= stringAddress model, "")
   | 171 =>
     let id ← resolve model (arg call 1)
     match (← model.arrays.get).get? id with
@@ -419,18 +494,6 @@ private def compute (model : Model) (call : Call) : IO (Nat × String) := do
         pure (0, "")
       else pure (← fallback (), "")
     | none => pure (← fallback (), "")
-  | 175 => pure (← newArray model "[Z" (arg call 1), "")
-  | 176 => pure (← newArray model "[B" (arg call 1), "")
-  | 177 => pure (← newArray model "[C" (arg call 1), "")
-  | 178 => pure (← newArray model "[S" (arg call 1), "")
-  | 179 => pure (← newArray model "[I" (arg call 1), "")
-  | 180 => pure (← newArray model "[J" (arg call 1), "")
-  | 181 => pure (← newArray model "[F" (arg call 1), "")
-  | 182 => pure (← newArray model "[D" (arg call 1), "")
-  | 183 | 184 => pure (← arrayAddress model (← resolve model (arg call 1)) 1, "")
-  | 185 | 186 => pure (← arrayAddress model (← resolve model (arg call 1)) 2, "")
-  | 187 | 188 | 189 => pure (← arrayAddress model (← resolve model (arg call 1)) 4, "")
-  | 190 => pure (← arrayAddress model (← resolve model (arg call 1)) 8, "")
   | 219 => pure (0, s!"vm-out={arg call 1}")
   | 226 => pure (← resolve model (arg call 1) >>= internIdentity model .weak, "")
   | 228 =>
@@ -438,12 +501,15 @@ private def compute (model : Model) (call : Call) : IO (Nat × String) := do
     | some _ => pure (1, "exception-pending")
     | none => pure (0, "")
   | _ =>
-    if call.index ≥ 34 && call.index ≤ 63 then pure (← callMethod model call false (arg call 2), "")
-    else if call.index ≥ 64 && call.index ≤ 93 then pure (← callMethod model call false (arg call 3), "")
-    else if call.index ≥ 95 && call.index ≤ 103 then pure (← getField model call false (arg call 2), "")
-    else if call.index ≥ 114 && call.index ≤ 143 then pure (← callMethod model call true (arg call 2), "")
-    else if call.index ≥ 145 && call.index ≤ 153 then pure (← getField model call true (arg call 2), "")
-    else pure (← fallback (), "")
+    match primitiveArrayClass call.index, arrayElementWidth call.index with
+    | some className, _ => pure (← newArray model className (arg call 1), "")
+    | _, some width => pure (← arrayAddress model (← resolve model (arg call 1)) width, "")
+    | none, none =>
+      match familyOf call.index with
+      | .callMethod static methodArgument =>
+        pure (← callMethod model call static (arg call methodArgument), "")
+      | .getField static => pure (← getField model call static (arg call 2), "")
+      | .other => pure (← fallback (), "")
 
 def dispatch (model : Model) (call : Call) : IO Nat := do
   let (result, detail) ← compute model call
@@ -451,7 +517,7 @@ def dispatch (model : Model) (call : Call) : IO Nat := do
   pure result
 
 def dispatchVm (model : Model) (call : Call) : IO Nat := do
-  let result ← if call.index = 6 && arg call 2 != model.version then pure 0xFFFFFFFFFFFFFFFE else pure 0
+  let result := if call.index = 6 then getEnvResult (arg call 2) model.version else 0
   model.log call "JavaVM" result
   pure result
 

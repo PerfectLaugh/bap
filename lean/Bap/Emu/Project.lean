@@ -30,6 +30,36 @@ private def mergeDisasm (left right : Disasm.Disasm) : Disasm.Disasm := {
   errors := left.errors ++ right.errors
 }
 
+/-- The roots to disassemble from: the pc first, then the given ones and the symbols, each once. -/
+def projectRoots (entry : Nat) (roots : List Nat) (symbols : List (String × Nat)) : List Nat :=
+  (entry :: roots ++ symbols.map Prod.snd).foldl (init := []) fun roots root =>
+    if roots.contains root then roots else roots ++ [root]
+
+/-- The memory image of the regions. -/
+def projectMemory (mapped : List Region) : Image.MemoryMap Unit :=
+  mapped.foldl (init := Image.MemoryMap.empty) fun memory region =>
+    memory.add ⟨region.address, region.data, region.protection.readable,
+      region.protection.writable, region.protection.executable⟩ ()
+
+def projectSegments (mapped : List Region) : List Image.Segment :=
+  mapped.map fun region => {
+    name := "live"
+    addr := region.address
+    size := region.data.size
+    readable := region.protection.readable
+    writable := region.protection.writable
+    executable := region.protection.executable
+  }
+
+def projectSymbols (symbols : List (String × Nat)) : List Image.Symbol :=
+  symbols.map fun symbol => {
+    name := symbol.1
+    addr := symbol.2
+    size := 0
+    isFunction := true
+    isDebug := false
+  }
+
 def project (emu : Emu) (roots : List Nat := []) (symbols : List (String × Nat) := []) :
     IO Project.Project := do
   Bap.Emu.refreshRegions emu
@@ -38,33 +68,16 @@ def project (emu : Emu) (roots : List Nat := []) (symbols : List (String × Nat)
   let width ← match imageWidth emu.config with
     | .ok width => pure width
     | .error error => throw <| IO.userError error
-  let roots := (entry :: roots ++ symbols.map Prod.snd).foldl (init := []) fun roots root =>
-    if roots.contains root then roots else roots ++ [root]
-  let memory : Image.MemoryMap Unit := mapped.foldl (init := Image.MemoryMap.empty) fun memory region =>
-    memory.add ⟨region.address, region.data, region.protection.readable,
-      region.protection.writable, region.protection.executable⟩ ()
+  let roots := projectRoots entry roots symbols
   let image : Image.Image := {
     arch := imageArch emu.config.syscallAbi
     addrWidth := width
     endian := emu.config.endian
     entryPoint := entry
     data := ByteArray.empty
-    segments := mapped.map fun region => {
-      name := "live"
-      addr := region.address
-      size := region.data.size
-      readable := region.protection.readable
-      writable := region.protection.writable
-      executable := region.protection.executable
-    }
-    symbols := symbols.map fun symbol => {
-      name := symbol.1
-      addr := symbol.2
-      size := 0
-      isFunction := true
-      isDebug := false
-    }
-    memory := memory
+    segments := projectSegments mapped
+    symbols := projectSymbols symbols
+    memory := projectMemory mapped
   }
   let disasm ← mapped.foldlM (init := ({ entry := entry } : Disasm.Disasm)) fun disasm region => do
     if !region.protection.executable then

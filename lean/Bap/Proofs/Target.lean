@@ -11,6 +11,8 @@ import Bap.Target.RISCV32
 import Bap.Target.MIPS32
 import Bap.Target.PowerPC32
 import Bap.ABI
+import Bap.Proofs.Bil
+import Bap.Proofs.Core
 
 namespace Bap.Proofs.Target
 
@@ -65,15 +67,39 @@ local elab "unfold_low" " at " h:ident : tactic => do
   evalTactic (← `(tactic| unfold $p:ident at $h:ident))
 
 open Lean Elab Tactic in
-/-- Unfolds the private high-byte rewrite of an expression. -/
-local elab "unfold_high_exp" : tactic => do
-  let p := mkIdent (mkPrivateNameCore `Bap.Target.LLVMLift `Bap.Target.LLVMLift.highBytesExp)
+/-- Unfolds the private table of the registers of x87 in a hypothesis. -/
+local elab "unfold_float" " at " h:ident : tactic => do
+  let p := mkIdent (mkPrivateNameCore `Bap.Target.LLVMLift `Bap.Target.LLVMLift.x86FloatRegister)
+  evalTactic (← `(tactic| unfold $p:ident at $h:ident))
+
+open Lean Elab Tactic in
+/-- Unfolds the private list of the primitives in a hypothesis. -/
+local elab "unfold_primitive_globals" " at " h:ident : tactic => do
+  let p := mkIdent (mkPrivateNameCore `Bap.Target.LLVMLift `Bap.Target.LLVMLift.primitiveGlobals)
+  evalTactic (← `(tactic| unfold $p:ident at $h:ident))
+
+open Lean Elab Tactic in
+/-- Unfolds the private table of the status registers of AArch64. -/
+local elab "unfold_status" : tactic => do
+  let p := mkIdent (mkPrivateNameCore `Bap.Target.LLVMLift `Bap.Target.LLVMLift.aarch64StatusRegister)
   evalTactic (← `(tactic| unfold $p:ident))
 
 open Lean Elab Tactic in
-/-- Rewrites by the unfolding equation of the private high-byte rewrite of a program. -/
+/-- Unfolds the private lookup of a name of the semantics. -/
+local elab "unfold_lookup" : tactic => do
+  let p := mkIdent (mkPrivateNameCore `Bap.Primus.Semantics `Bap.Primus.Semantics.lookup)
+  evalTactic (← `(tactic| unfold $p:ident))
+
+open Lean Elab Tactic in
+/-- Unfolds the private alias rewrite of an expression. -/
+local elab "unfold_alias_exp" : tactic => do
+  let p := mkIdent (mkPrivateNameCore `Bap.Target.LLVMLift `Bap.Target.LLVMLift.aliasExp)
+  evalTactic (← `(tactic| unfold $p:ident))
+
+open Lean Elab Tactic in
+/-- Rewrites by the unfolding equation of the private alias rewrite of a program. -/
 local elab "unfold_resolve" : tactic => do
-  let p := mkIdent (mkPrivateNameCore `Bap.Target.LLVMLift (`Bap.Target.LLVMLift.resolveHighBytes ++ `eq_def))
+  let p := mkIdent (mkPrivateNameCore `Bap.Target.LLVMLift (`Bap.Target.LLVMLift.resolveAliases ++ `eq_def))
   evalTactic (← `(tactic| rw [$p:ident]))
 
 private abbrev aarch64Register : String → PValue := lift% aarch64Register
@@ -81,9 +107,13 @@ private abbrev x86LowRegister : String → Option (String × Nat) := lift% x86Lo
 private abbrev x86HighByteBase : String → Option String := lift% x86HighByteBase
 private abbrev x8632HighByteBase : String → Option String := lift% x8632HighByteBase
 private abbrev mipsCanonicalName : String → String := lift% mipsCanonicalName
-private abbrev resolveHighBytes : (String → Option String) → Nat → Bil.Program → Bil.Program :=
-  lift% resolveHighBytes
-private abbrev highBytesExp : (String → Option String) → Nat → Bil.Exp → Bil.Exp := lift% highBytesExp
+private abbrev resolveAliases : (String → Option Alias) → Bil.Program → Bil.Program := lift% resolveAliases
+private abbrev aliasExp : (String → Option Alias) → Bil.Exp → Bil.Exp := lift% aliasExp
+private abbrev x86Aliases : (String → Option String) → Nat → String → Option Alias := lift% x86Aliases
+private abbrev armAliases : String → Option Alias := lift% armAliases
+private abbrev powerpcAliases : String → Option Alias := lift% powerpcAliases
+private abbrev x86FlagBits : List String := lift% x86FlagBits
+private abbrev x86FloatRegister : String → Option PValue := lift% x86FloatRegister
 private abbrev x86Register : String → PValue := lift% x86Register
 private abbrev x8632Register : String → PValue := lift% x8632Register
 private abbrev riscvRegister : String → PValue := lift% riscvRegister
@@ -108,6 +138,8 @@ private abbrev flow : Nat → Flow := lift% flow
 private abbrev directControl : Nat → Bool := lift% directControl
 private abbrev riscvFlow : Nat → Nat → Flow := lift% riscvFlow
 private abbrev arm32Flow : LLVM.Decoded → Flow := lift% arm32Flow
+private abbrev decodeThumbIt : Primus.Semantics.Environment → Nat → Nat → ByteArray → LLVM.Decoded → Nat → Nat → IO Insn :=
+  lift% decodeThumbIt
 private abbrev powerpcMCTarget : Nat → Nat → Nat → List LLVM.MCOperand → Option Nat :=
   lift% powerpcMCTarget
 private abbrev riscvIsJal : Nat → Bool := lift% riscvIsJal
@@ -585,13 +617,21 @@ theorem mips_b_is_a_jump (assembly : String) (size flags : Nat) (r immediate : L
   lift_unfold mipsFlow
   simp
 
-/-- The delayed jumps have a slot only if they do not fall through, as the slot of the others is
-reached by falling through. -/
+/-- An instruction has a slot only if it does not fall through, or is a conditional branch and decides past the slot.
+The slot of calls and other instructions that fall through is reached by that. -/
 theorem mipsHasDelaySlot_no_fallthrough (insn : Insn) (h : mipsHasDelaySlot insn = true) :
-    insn.fallsThrough = false := by
+    insn.fallsThrough = false ∨ insn.flow = .conditionalJump := by
   unfold mipsHasDelaySlot at h
   cases insn with
   | mk a s asm flow target bil => cases flow <;> simp_all [Insn.fallsThrough]
+
+/-- All conditional branches have a slot, which is what makes the edge from the slot to the target exact. -/
+theorem mipsHasDelaySlot_of_conditional (insn : Insn) (hf : insn.flow = .conditionalJump)
+    (h1 : insn.asm.startsWith "eret" = false) (h2 : insn.asm.startsWith "deret" = false) :
+    mipsHasDelaySlot insn = true := by
+  unfold mipsHasDelaySlot
+  rw [h1, h2]
+  simp [hf]
 
 /-- All delayed jumps without fall-through have a slot, except for the exception returns. -/
 theorem mipsHasDelaySlot_of_jump (insn : Insn)
@@ -624,6 +664,57 @@ theorem arm32Flow_other (decoded : LLVM.Decoded) (h : decoded.opcode ≠ "Bcc") 
     arm32Flow decoded = flow decoded.flags := by
   lift_unfold arm32Flow
   split <;> simp_all
+
+/-- All of `arm32Flow`: `Bcc` with the condition `AL` is the plain `b`, and everything else goes by its flags, including `Bcc`
+with another condition. -/
+theorem arm32Flow_cases (decoded : LLVM.Decoded) :
+    arm32Flow decoded = if decoded.opcode = "Bcc" ∧ decoded.operands.tail.head? = some (.imm 14) then .jump
+      else flow decoded.flags := by
+  obtain ⟨assembly, size, flags, opcode, operands⟩ := decoded
+  lift_unfold arm32Flow
+  by_cases h : opcode = "Bcc"
+  · subst h
+    match operands with
+    | [] => simp
+    | [_] => simp
+    | _ :: .reg _ :: _ => simp
+    | _ :: .imm value :: _ =>
+      by_cases hv : value = 14
+      · subst hv
+        rfl
+      · have hv' : (LLVM.Operand.imm value == LLVM.Operand.imm 14) = false := by simpa using hv
+        simp [hv]
+  · simp [h]
+
+/-- All of `mipsFlow`, first: `BEQ` and `BEQL` of a register with itself always branch, and of two registers by the flags. -/
+theorem mipsFlow_beq (assembly : String) (size flags : Nat) (opcode : String) (left right immediate : LLVM.Operand)
+    (h : opcode = "BEQ" ∨ opcode = "BEQL") :
+    mipsFlow ⟨assembly, size, flags, opcode, [left, right, immediate]⟩ = if left = right then .jump else flow flags := by
+  rcases h with rfl | rfl <;> lift_unfold mipsFlow <;> simp
+
+/-- `BGEZ` and `BGEZL` of the zero register always branch. -/
+theorem mipsFlow_bgez (assembly : String) (size flags : Nat) (opcode zero : String) (immediate : LLVM.Operand)
+    (h : opcode = "BGEZ" ∨ opcode = "BGEZL") (hz : zero = "ZERO" ∨ zero = "ZERO_64") :
+    mipsFlow ⟨assembly, size, flags, opcode, [.reg zero, immediate]⟩ = .jump := by
+  rcases h with rfl | rfl <;> rcases hz with rfl | rfl <;> lift_unfold mipsFlow <;> rfl
+
+/-- Everything else goes by its flags. -/
+theorem mipsFlow_other (decoded : LLVM.Decoded)
+    (h1 : (decoded.opcode = "BEQ" ∨ decoded.opcode = "BEQL") → decoded.operands.length ≠ 3)
+    (h2 : (decoded.opcode = "BGEZ" ∨ decoded.opcode = "BGEZL") →
+      ∀ zero immediate, decoded.operands = [.reg zero, immediate] → zero ≠ "ZERO" ∧ zero ≠ "ZERO_64") :
+    mipsFlow decoded = flow decoded.flags := by
+  obtain ⟨assembly, size, flags, opcode, operands⟩ := decoded
+  lift_unfold mipsFlow
+  simp only at h1 h2
+  split
+  · simp_all
+  · simp_all
+  · simp_all
+  · simp_all
+  · simp_all
+  · simp_all
+  · rfl
 
 /-! ### Writes to the pc of ARM -/
 
@@ -743,12 +834,22 @@ private theorem shape_ite {P : Nat → Nat → Prop} {c : Prop} [Decidable c] {a
 /-- Every lifted register operand is a register, with a view no wider than its base. -/
 theorem aarch64Register_shape (name : String) :
     ∃ n w b, aarch64Register name = register n w b ∧
-      (w, b) ∈ [(1, 1), (8, 128), (16, 128), (32, 128), (64, 128), (128, 128), (32, 64), (64, 64)] := by
+      (w, b) ∈ [(1, 1), (4, 4), (8, 128), (16, 128), (32, 128), (64, 128), (128, 128), (32, 32), (32, 64), (64, 64)] := by
   lift_unfold aarch64Register
   dsimp only
   generalize (if name = "LR" then "X30" else if name = "FP" then "X29" else name) = canonical
   repeat' refine shape_ite ?_ ?_
-  all_goals exact ⟨_, _, _, rfl, by decide⟩
+  · exact ⟨_, _, _, rfl, by decide⟩
+  · exact ⟨_, _, _, rfl, by decide⟩
+  · split
+    · rename_i register h
+      revert h
+      unfold_status
+      split <;> first
+        | (intro h; cases h; exact ⟨_, _, _, rfl, by decide⟩)
+        | (intro h; cases h)
+    · repeat' refine shape_ite ?_ ?_
+      all_goals exact ⟨_, _, _, rfl, by decide⟩
 
 /-- The vector registers have their architectural widths, and XMM is the low half of YMM. -/
 theorem x86VectorRegister_shape (name : String) (value : PValue)
@@ -784,10 +885,24 @@ theorem x86_vector_views :
       x86Register "YMM3" = register "YMM3" 256 256 ∧ x86Register "ZMM4" = register "ZMM4" 512 512 ∧
       x8632Register "XMM7" = register "YMM7" 128 256 := ⟨rfl, rfl, rfl, rfl, rfl⟩
 
+/-- The registers of x87 have 80 bits, the control words 16, and MXCSR and EFLAGS 32, as they have no bases. -/
+private theorem float_shape {P : Nat → Nat → Prop} (name : String) (value : PValue)
+    (h : (lift% x86FloatRegister) name = some value) (hp : P 80 80 ∧ P 16 16 ∧ P 32 32) :
+    ∃ n w b, value = register n w b ∧ P w b := by
+  unfold_float at h
+  repeat' split at h
+  all_goals first
+    | cases h
+      first
+        | exact ⟨_, 80, 80, rfl, hp.1⟩
+        | exact ⟨_, 16, 16, rfl, hp.2.1⟩
+        | exact ⟨_, 32, 32, rfl, hp.2.2⟩
+    | cases h
+
 theorem x86Register_shape (name : String) :
     ∃ n w b, x86Register name = register n w b ∧
-      (w, b) ∈ [(1, 1), (8, 8), (8, 64), (16, 64), (32, 64), (64, 64), (128, 256), (256, 256),
-        (512, 512)] := by
+      (w, b) ∈ [(1, 1), (8, 8), (8, 64), (16, 16), (16, 64), (32, 32), (32, 64), (64, 64), (80, 80), (128, 256),
+        (256, 256), (512, 512)] := by
   lift_unfold x86Register
   simp only []
   generalize hc : (if (name.isEmpty || decide (name = "NoRegister")) = true then "Nil" else name) = c
@@ -799,7 +914,10 @@ theorem x86Register_shape (name : String) :
       | none =>
         dsimp only [x86LowRegister] at hl
         rw [hl]
-        exact vector_getD c _ ⟨c, 64, 64, rfl, by decide⟩ (by decide)
+        dsimp only
+        split
+        · exact float_shape _ _ (by assumption) (by decide)
+        · exact vector_getD c _ ⟨c, 64, 64, rfl, by decide⟩ (by decide)
       | some pair =>
         obtain ⟨base, width⟩ := pair
         have hw := (x86LowRegister_spec _ _ _ hl).1
@@ -810,7 +928,8 @@ theorem x86Register_shape (name : String) :
 
 theorem x8632Register_shape (name : String) :
     ∃ n w b, x8632Register name = register n w b ∧
-      (w, b) ∈ [(1, 1), (8, 8), (8, 32), (16, 32), (32, 32), (128, 256), (256, 256), (512, 512)] := by
+      (w, b) ∈ [(1, 1), (8, 8), (8, 32), (16, 16), (16, 32), (32, 32), (80, 80), (128, 256), (256, 256),
+        (512, 512)] := by
   lift_unfold x8632Register
   simp only []
   generalize (if (name.isEmpty || decide (name = "NoRegister")) = true then "Nil" else name) = c
@@ -819,24 +938,25 @@ theorem x8632Register_shape (name : String) :
     | exact ⟨_, 1, _, rfl, by decide⟩
     | exact ⟨_, 8, _, rfl, by decide⟩
     | exact ⟨_, 16, _, rfl, by decide⟩
+    | exact float_shape _ _ (by assumption) (by decide)
     | exact vector_getD c _ ⟨c, 32, 32, rfl, by decide⟩ (by decide)
 
 theorem arm32Register_shape (name : String) :
-    ∃ n w, arm32Register name = register n w w ∧ (w = 1 ∨ w = 32) := by
+    ∃ n w, arm32Register name = register n w w ∧ (w = 1 ∨ w = 32 ∨ w = 64 ∨ w = 128) := by
   lift_unfold arm32Register
   simp only []
   repeat' split
-  all_goals exact ⟨_, _, rfl, by decide⟩
+  all_goals exact ⟨_, _, rfl, by simp⟩
 
 theorem powerpcRegister_shape (name : String) :
-    ∃ n w, powerpcRegister name = register n w w ∧ (w = 1 ∨ w = 64) := by
+    ∃ n w, powerpcRegister name = register n w w ∧ (w = 1 ∨ w = 4 ∨ w = 64) := by
   lift_unfold powerpcRegister
   simp only []
   repeat' split
   all_goals exact ⟨_, _, rfl, by decide⟩
 
 theorem powerpc32Register_shape (name : String) :
-    ∃ n w, powerpc32Register name = register n w w ∧ (w = 1 ∨ w = 32) := by
+    ∃ n w, powerpc32Register name = register n w w ∧ (w = 1 ∨ w = 4 ∨ w = 32) := by
   lift_unfold powerpc32Register
   simp only []
   repeat' split
@@ -850,10 +970,17 @@ theorem riscvRegister_widths (name : String) :
   lift_unfold riscv32Register
   by_cases h : name = "X0" <;> simp [h]
 
-/-- The 32-bit and 64-bit MIPS tables differ in width only. -/
-theorem mipsRegister_widths (name : String) :
-    ∃ n, mipsRegister name = register n 64 64 ∧ mips32Register name = register n 32 32 :=
-  ⟨mipsCanonicalName name, rfl, rfl⟩
+/-- The 32-bit and 64-bit MIPS tables differ in width only, but for the condition codes, which are bits. -/
+theorem mipsRegister_widths (name : String) (h : (lift% mipsConditionCode) name = false) :
+    ∃ n, mipsRegister name = register n 64 64 ∧ mips32Register name = register n 32 32 := by
+  refine ⟨mipsCanonicalName name, ?_, ?_⟩
+  · lift_unfold mipsRegister
+    simp [h]
+  · lift_unfold mips32Register
+    simp [h]
+
+theorem mips_condition_codes :
+    mipsRegister "FCC0" = register "FCC0" 1 1 ∧ mips32Register "FCC7" = register "FCC7" 1 1 := ⟨rfl, rfl⟩
 
 /-- Register names outside the special classes pass through the table unchanged. -/
 theorem arm32Register_name (name : String) (h1 : name ≠ "") (h2 : name ≠ "NoRegister") :
@@ -861,7 +988,11 @@ theorem arm32Register_name (name : String) (h1 : name ≠ "") (h2 : name ≠ "No
   lift_unfold arm32Register
   have he : name.isEmpty = false := by simpa using h1
   simp only [he, h2, Bool.false_or, decide_false, Bool.false_eq_true, ite_false]
-  split <;> exact ⟨_, rfl⟩
+  repeat' split
+  all_goals first
+    | exact ⟨_, rfl⟩
+    | exact ⟨64, rfl⟩
+    | exact ⟨32, rfl⟩
 
 /-- x86 aliases map a 32-bit register onto the low half of its 64-bit base. -/
 theorem x86_low_half_aliases :
@@ -915,35 +1046,65 @@ theorem x86_high_bytes :
       x86HighByteBase "AH" = some "RAX" ∧ x8632HighByteBase "AH" = some "EAX" :=
   ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
 
+/-- Reads of an alias are its value. -/
+theorem alias_read (aliases : String → Option Alias) (var : Bap.Var) (alias : Alias)
+    (h : aliases var.name = some alias) : aliasExp aliases (.var var) = aliasRead alias := by
+  dsimp only [aliasExp]
+  unfold_alias_exp
+  simp [h]
+
+/-- Writes of an alias are the writes of its parts. -/
+theorem alias_write (aliases : String → Option Alias) (var : Bap.Var) (alias : Alias) (value : Bil.Exp)
+    (rest : Bil.Program) (h : aliases var.name = some alias) :
+    resolveAliases aliases (.move var value :: rest) =
+      aliasWrite var.typ (aliasExp aliases value) alias ++ resolveAliases aliases rest := by
+  dsimp only [resolveAliases]
+  unfold_resolve
+  simp [h]
+
+/-- A program without aliases is not changed: moves to other registers keep their targets. -/
+theorem alias_write_other (aliases : String → Option Alias) (var : Bap.Var) (value : Bil.Exp) (rest : Bil.Program)
+    (h : aliases var.name = none) :
+    resolveAliases aliases (.move var value :: rest) =
+      .move var (aliasExp aliases value) :: resolveAliases aliases rest := by
+  dsimp only [resolveAliases]
+  unfold_resolve
+  simp [h]
+
+private theorem highByte_alias (base : String → Option String) (width : Nat) (name base' : String)
+    (h : base name = some base') (hflags : name ≠ "EFLAGS") :
+    x86Aliases base width name = some (⟨base', width, 15, 8⟩, []) := by
+  lift_unfold x86Aliases
+  simp [h, hflags]
+
 /-- Reads of a high byte are bits 15 to 8 of the base. -/
 theorem highBytes_read (base : String → Option String) (width : Nat) (var : Bap.Var) (name : String)
-    (h : base var.name = some name) :
-    highBytesExp base width (.var var) = .extract 15 8 (.var ⟨name, .imm width, 0, false⟩) := by
-  dsimp only [highBytesExp]
-  unfold_high_exp
-  simp [h]
+    (h : base var.name = some name) (hflags : var.name ≠ "EFLAGS") :
+    aliasExp (x86Aliases base width) (.var var) = .extract 15 8 (.var ⟨name, .imm width, 0, false⟩) := by
+  rw [alias_read _ _ _ (highByte_alias base width _ _ h hflags)]
+  simp [aliasRead, AliasPart.read, AliasPart.var]
 
 /-- Writes of a high byte keep the other bits of the base. -/
 theorem highBytes_write (base : String → Option String) (width : Nat) (var : Bap.Var)
-    (name : String) (value : Bil.Exp) (rest : Bil.Program) (h : base var.name = some name) :
-    resolveHighBytes base width (.move var value :: rest) =
+    (name : String) (value : Bil.Exp) (rest : Bil.Program) (h : base var.name = some name)
+    (hflags : var.name ≠ "EFLAGS") (hwidth : 16 < width) :
+    resolveAliases (x86Aliases base width) (.move var value :: rest) =
       .move ⟨name, .imm width, 0, false⟩
         (.concat (.extract (width - 1) 16 (.var ⟨name, .imm width, 0, false⟩))
-          (.concat (highBytesExp base width value)
+          (.concat (aliasExp (x86Aliases base width) value)
             (.extract 7 0 (.var ⟨name, .imm width, 0, false⟩)))) ::
-        resolveHighBytes base width rest := by
-  dsimp only [resolveHighBytes, highBytesExp]
-  unfold_resolve
-  simp [h]
+        resolveAliases (x86Aliases base width) rest := by
+  rw [alias_write _ _ _ _ _ (highByte_alias base width _ _ h hflags)]
+  simp [aliasWrite, AliasPart.write, AliasPart.var, hwidth]
 
-/-- A program without high bytes is not changed: moves to other registers keep their targets. -/
+/-- A move to another register than a high byte or EFLAGS keeps its target. -/
 theorem highBytes_write_other (base : String → Option String) (width : Nat) (var : Bap.Var)
-    (value : Bil.Exp) (rest : Bil.Program) (h : base var.name = none) :
-    resolveHighBytes base width (.move var value :: rest) =
-      .move var (highBytesExp base width value) :: resolveHighBytes base width rest := by
-  dsimp only [resolveHighBytes, highBytesExp]
-  unfold_resolve
-  simp [h]
+    (value : Bil.Exp) (rest : Bil.Program) (h : base var.name = none) (hflags : var.name ≠ "EFLAGS") :
+    resolveAliases (x86Aliases base width) (.move var value :: rest) =
+      .move var (aliasExp (x86Aliases base width) value) :: resolveAliases (x86Aliases base width) rest := by
+  apply alias_write_other
+  lift_unfold x86Aliases
+  simp [h, hflags]
 
 /-- Canonicalising a MIPS register name twice is the same as doing it once. -/
 theorem mipsRegisterName_idempotent (name : String) :
@@ -959,37 +1120,44 @@ theorem mipsRegisterName_idempotent (name : String) :
 
 /-! ### Register bindings of the semantic environments -/
 
+set_option maxRecDepth 20000 in
 /-- `riscvGlobals` binds each `Xn` for n below 32, once. -/
-theorem riscvGlobals_keys : (riscvGlobals.map (·.1)).Nodup ∧ riscvGlobals.length = 32 :=
-  ⟨by decide, rfl⟩
-
-theorem riscv32Globals_keys : (riscv32Globals.map (·.1)).Nodup ∧ riscv32Globals.length = 32 :=
-  ⟨by decide, rfl⟩
-
-theorem x86Globals_keys : (x86Globals.map (·.1)).Nodup ∧ x86Globals.length = 47 := ⟨by decide, rfl⟩
-
-theorem x8632Globals_keys : (x8632Globals.map (·.1)).Nodup ∧ x8632Globals.length = 35 :=
-  ⟨by decide, rfl⟩
-
-theorem arm32Globals_keys : (arm32Globals.map (·.1)).Nodup ∧ arm32Globals.length = 26 :=
-  ⟨by decide, rfl⟩
-
-theorem mipsGlobals_keys : (mipsGlobals.map (·.1)).Nodup ∧ mipsGlobals.length = 36 :=
-  ⟨by decide, rfl⟩
-
-theorem mips32Globals_keys : (mips32Globals.map (·.1)).Nodup ∧ mips32Globals.length = 36 :=
+theorem riscvGlobals_keys : (riscvGlobals.map (·.1)).Nodup ∧ riscvGlobals.length = 66 :=
   ⟨by decide, rfl⟩
 
 set_option maxRecDepth 20000 in
-theorem powerpcGlobals_keys : (powerpcGlobals.map (·.1)).Nodup ∧ powerpcGlobals.length = 73 :=
+theorem riscv32Globals_keys : (riscv32Globals.map (·.1)).Nodup ∧ riscv32Globals.length = 66 :=
   ⟨by decide, rfl⟩
 
 set_option maxRecDepth 20000 in
-theorem powerpc32Globals_keys : (powerpc32Globals.map (·.1)).Nodup ∧ powerpc32Globals.length = 73 :=
+theorem x86Globals_keys : (x86Globals.map (·.1)).Nodup ∧ x86Globals.length = 92 := ⟨by decide, rfl⟩
+
+set_option maxRecDepth 20000 in
+theorem x8632Globals_keys : (x8632Globals.map (·.1)).Nodup ∧ x8632Globals.length = 64 :=
+  ⟨by decide, rfl⟩
+
+set_option maxRecDepth 20000 in
+theorem arm32Globals_keys : (arm32Globals.map (·.1)).Nodup ∧ arm32Globals.length = 61 :=
+  ⟨by decide, rfl⟩
+
+set_option maxRecDepth 20000 in
+theorem mipsGlobals_keys : (mipsGlobals.map (·.1)).Nodup ∧ mipsGlobals.length = 77 :=
+  ⟨by decide, rfl⟩
+
+set_option maxRecDepth 20000 in
+theorem mips32Globals_keys : (mips32Globals.map (·.1)).Nodup ∧ mips32Globals.length = 77 :=
+  ⟨by decide, rfl⟩
+
+set_option maxRecDepth 20000 in
+theorem powerpcGlobals_keys : (powerpcGlobals.map (·.1)).Nodup ∧ powerpcGlobals.length = 85 :=
+  ⟨by decide, rfl⟩
+
+set_option maxRecDepth 20000 in
+theorem powerpc32Globals_keys : (powerpc32Globals.map (·.1)).Nodup ∧ powerpc32Globals.length = 85 :=
   ⟨by decide, rfl⟩
 
 set_option maxRecDepth 100000 in
-theorem aarch64Globals_keys : (aarch64Globals.map (·.1)).Nodup ∧ aarch64Globals.length = 200 :=
+theorem aarch64Globals_keys : (aarch64Globals.map (·.1)).Nodup ∧ aarch64Globals.length = 210 :=
   ⟨by decide, rfl⟩
 
 
@@ -1064,7 +1232,7 @@ theorem mips_abi_names (w : Nat) (c : ABI.Convention) (h : ABI.convention .mips 
 
 private abbrev armMultiple : Nat → Primus.Semantics.Context → LLVM.Decoded → Option Bil.Program :=
   lift% armMultiple
-private abbrev ArmMultipleKind := lift% ArmMultiple
+private abbrev ArmMultipleKind := ArmMultiple
 private abbrev armMultipleOperands : String → List LLVM.Operand →
     Option (Bool × ArmMultipleKind × Bool × String × Int × List String) := lift% armMultipleOperands
 
@@ -1077,7 +1245,7 @@ private theorem operand_names (g : LLVM.Operand → Option String) (hg : ∀ n, 
 /-- `pop` has the condition and the list of registers as its operands, from the stack pointer. -/
 theorem pop_operands (condition : Int) (predicate : LLVM.Operand) (names : List String) :
     armMultipleOperands "tPOP" (.imm condition :: predicate :: names.map .reg) =
-      some (true, (lift% ArmMultiple.increaseAfter), true, "SP", condition, names) := by
+      some (true, ArmMultiple.increaseAfter, true, "SP", condition, names) := by
   lift_unfold armMultipleOperands
   show Option.map _ (List.mapM _ _) = _
   rw [operand_names _ fun _ => rfl]
@@ -1117,6 +1285,8 @@ theorem armMultiple_load_pc (pc : Nat) (context : Primus.Semantics.Context) (dec
   refine ⟨_, rfl, ?_⟩
   dsimp only
   rw [hc]
+  unfold armMultipleBody
+  dsimp only
   refine programJump_of_top_jmp _ ?_
   have ⟨i, hi⟩ := mem_indexed list "PC" hpc
   simp only [↓reduceIte, List.mem_cons, List.mem_append, List.mem_map, reduceCtorEq, false_or]
@@ -1136,6 +1306,8 @@ theorem armMultiple_load_no_pc (pc : Nat) (context : Primus.Semantics.Context) (
   refine ⟨_, rfl, ?_⟩
   dsimp only
   rw [hc]
+  unfold armMultipleBody
+  dsimp only
   refine programJump_all_moves _ ?_
   intro stmt hs
   rcases List.mem_cons.1 hs with rfl | hs
@@ -1164,6 +1336,8 @@ theorem armMultiple_store (pc : Nat) (context : Primus.Semantics.Context) (decod
   refine ⟨_, rfl, ?_⟩
   dsimp only
   rw [hc]
+  unfold armMultipleBody
+  dsimp only
   refine programJump_all_moves _ ?_
   intro stmt hs
   rcases List.mem_cons.1 hs with rfl | hs
@@ -1185,6 +1359,489 @@ theorem pop_pc_is_indirect (pc : Nat) (context : Primus.Semantics.Context) (asse
     ⟨assembly, size, flags, "tPOP", .imm 14 :: predicate :: names.map .reg⟩ _ _ _ 14 names
     (pop_operands 14 predicate names) rfl hpc
   exact ⟨bil, h1, armControlFlow_of_jump bil h2⟩
+
+/-! ### What a load or store of multiple registers does
+
+The Lean evaluator of Primus semantics has no definitions by arity, so these instructions are built by `armMultiple`, and
+this is what the programs it builds compute. Each register is at its own address and the base is written back. -/
+
+/-- A general purpose register of ARM. -/
+private abbrev armVar (name : String) : Bap.Var := ⟨name, .imm 32, 0, false⟩
+
+/-- The lowest address of the transfer of `size` bytes, from the base. -/
+def armFirstAddress (addressing : ArmMultiple) (base : BitVec 32) (size : Nat) : BitVec 32 :=
+  match addressing with
+  | .increaseAfter => base
+  | .increaseBefore => base + BitVec.ofNat 32 4
+  | .decreaseAfter => base + BitVec.ofNat 32 4 - BitVec.ofNat 32 size
+  | .decreaseBefore => base - BitVec.ofNat 32 size
+
+/-- The base written back: past the registers, whichever way it goes. -/
+def armAfterAddress (addressing : ArmMultiple) (base : BitVec 32) (size : Nat) : BitVec 32 :=
+  match addressing with
+  | .increaseAfter | .increaseBefore => base + BitVec.ofNat 32 size
+  | .decreaseAfter | .decreaseBefore => base - BitVec.ofNat 32 size
+
+private theorem eval_add_int {env : Bil.Env} {a : Bil.Exp} {f : BitVec 32} (c : Nat) (h : Bil.evalExp env a = .ok (.bits f)) :
+    Bil.evalExp env (.bin .add a (armWord c)) = .ok (.bits (f + BitVec.ofNat 32 c)) := by
+  simp only [Bil.evalExp, armWord, h]
+  rfl
+
+private theorem eval_sub_int {env : Bil.Env} {a : Bil.Exp} {f : BitVec 32} (c : Nat) (h : Bil.evalExp env a = .ok (.bits f)) :
+    Bil.evalExp env (.bin .sub a (armWord c)) = .ok (.bits (f - BitVec.ofNat 32 c)) := by
+  simp only [Bil.evalExp, armWord, h]
+  rfl
+
+private theorem eval_first {env : Bil.Env} {b : BitVec 32} (addressing : ArmMultiple) (size : Nat)
+    (h : Bil.lookup env armMultipleBase = .ok (.bits b)) :
+    Bil.evalExp env (armMultipleFirst addressing size) = .ok (.bits (armFirstAddress addressing b size)) := by
+  have hv : Bil.evalExp env (.var armMultipleBase) = .ok (.bits b) := h
+  cases addressing
+  · exact hv
+  · exact eval_add_int _ hv
+  · exact eval_sub_int _ (eval_add_int _ hv)
+  · exact eval_sub_int _ hv
+
+private theorem eval_after {env : Bil.Env} {b : BitVec 32} (addressing : ArmMultiple) (size : Nat)
+    (h : Bil.lookup env armMultipleBase = .ok (.bits b)) :
+    Bil.evalExp env (armMultipleAfter addressing size) = .ok (.bits (armAfterAddress addressing b size)) := by
+  have hv : Bil.evalExp env (.var armMultipleBase) = .ok (.bits b) := h
+  cases addressing
+  · exact eval_add_int _ hv
+  · exact eval_add_int _ hv
+  · exact eval_sub_int _ hv
+  · exact eval_sub_int _ hv
+
+private theorem exec_move {fuel : Nat} {state : Bil.State} {var : Bap.Var} {exp : Bil.Exp} {value : Bap.Value} {rest : Bil.Program}
+    (he : Bil.evalExp state.env exp = .ok value) :
+    Bil.execProgram (fuel + 2) state (.move var exp :: rest) =
+      Bil.execProgram (fuel + 1) { env := Bil.bind state.env var value } rest := by
+  rw [Bil.execProgram, Bil.execStmt]
+  simp only [Bil.execExp, he, bind, Except.bind]
+
+private theorem lookup_bind_same (env : Bil.Env) (var : Bap.Var) (value : Bap.Value) :
+    Bil.lookup (Bil.bind env var value) var = .ok value := by
+  simp [Bil.lookup, Bil.bind]
+
+private theorem lookup_bind_ne (env : Bil.Env) {var other : Bap.Var} (value : Bap.Value) (h : other ≠ var) :
+    Bil.lookup (Bil.bind env var value) other = Bil.lookup env other :=
+  Bap.Proofs.Bil.lookup_bind_other env value h
+
+/-- The loads in order, each from its own address. -/
+private def armLoads (first : Bil.Exp) (memory : Bap.Var) (endian : Endian) (entries : List (Nat × String)) : Bil.Program :=
+  entries.map fun entry =>
+    .move (armVar entry.2) (.load (.var memory) (.bin .add first (armWord (4 * entry.1))) endian 4)
+
+private theorem exec_loads {first : Bil.Exp} {memory : Bap.Var} {endian : Endian} {m : Memory 32} {f : BitVec 32} :
+    ∀ (entries : List (Nat × String)) (fuel : Nat) (state : Bil.State) (rest : Bil.Program),
+      (∀ entry ∈ entries, armVar entry.2 ≠ memory) →
+      (entries.map Prod.snd).Nodup →
+      (∀ env : Bil.Env, (∀ var, var ∉ entries.map (armVar ·.2) → Bil.lookup env var = Bil.lookup state.env var) →
+        Bil.evalExp env first = .ok (.bits f)) →
+      Bil.lookup state.env memory = .ok (.memory m) →
+      ∃ state', Bil.execProgram (fuel + entries.length + 2) state (armLoads first memory endian entries ++ rest) =
+          Bil.execProgram (fuel + 2) state' rest ∧
+        (∀ entry ∈ entries, Bil.lookup state'.env (armVar entry.2) =
+          .ok (.bits (Memory.read m (f + BitVec.ofNat 32 (4 * entry.1)) endian 4))) ∧
+        ∀ var, var ∉ entries.map (armVar ·.2) → Bil.lookup state'.env var = Bil.lookup state.env var
+  | [], fuel, state, rest, _, _, _, _ => ⟨state, rfl, by simp, fun _ _ => rfl⟩
+  | entry :: entries, fuel, state, rest, hne, hnd, hfirst, hm => by
+    have hfirst' := hfirst state.env (fun _ _ => rfl)
+    have hmem : Bil.evalExp state.env (.var memory) = .ok (.memory m) := hm
+    have haddr := eval_add_int (4 * entry.1) hfirst'
+    have hload : Bil.evalExp state.env
+        (.load (.var memory) (.bin .add first (armWord (4 * entry.1))) endian 4) =
+        .ok (.bits (Memory.read m (f + BitVec.ofNat 32 (4 * entry.1)) endian 4)) :=
+      Bap.Proofs.Bil.eval_load_iff.2 ⟨32, m, _, hmem, haddr, rfl⟩
+    have hstep : Bil.execProgram (fuel + (entry :: entries).length + 2) state
+        (armLoads first memory endian (entry :: entries) ++ rest) =
+        Bil.execProgram (fuel + entries.length + 2)
+          { env := Bil.bind state.env (armVar entry.2) (.bits (Memory.read m (f + BitVec.ofNat 32 (4 * entry.1)) endian 4)) }
+          (armLoads first memory endian entries ++ rest) := by
+      have e : fuel + (entry :: entries).length + 2 = (fuel + entries.length + 1) + 2 := by
+        simp only [List.length_cons]
+        omega
+      rw [e]
+      exact exec_move hload
+    rw [hstep]
+    have hnd' := List.nodup_cons.1 (by simpa using hnd : (entry.2 :: entries.map Prod.snd).Nodup)
+    have ⟨state', he, hl, ho⟩ := exec_loads (endian := endian) (m := m) (f := f) (first := first) (memory := memory) entries fuel
+      { env := Bil.bind state.env (armVar entry.2) (.bits (Memory.read m (f + BitVec.ofNat 32 (4 * entry.1)) endian 4)) } rest
+      (fun e h => hne e (List.mem_cons_of_mem _ h)) hnd'.2
+      (fun env hsame => hfirst env fun var hvar => by
+        rw [hsame var (fun h => hvar (List.mem_cons_of_mem _ h))]
+        exact lookup_bind_ne _ _ (fun h => hvar (by rw [h]; simp)))
+      (by
+        show Bil.lookup (Bil.bind _ _ _) memory = _
+        exact (lookup_bind_ne _ _ (Ne.symm (hne entry (by simp)))).trans hm)
+    refine ⟨state', he, ?_, ?_⟩
+    · intro e hme
+      rcases List.mem_cons.1 hme with rfl | hme
+      · have hnot : armVar e.2 ∉ entries.map (armVar ·.2) := by
+          intro h
+          rcases List.mem_map.1 h with ⟨o, ho', hequal⟩
+          apply hnd'.1
+          have : o.2 = e.2 := by
+            have := congrArg Bap.Var.name hequal
+            simpa using this
+          exact List.mem_map.2 ⟨o, ho', this⟩
+        rw [ho _ hnot]
+        exact lookup_bind_same _ _ _
+      · exact hl e hme
+    · intro var hvar
+      rw [ho var (fun h => hvar (List.mem_cons_of_mem _ h))]
+      exact lookup_bind_ne _ _ (fun h => hvar (by rw [h]; simp))
+
+/-- `LDM` and its relatives, evaluated: each register holds the word at its address, the lowest register at the lowest
+address; the base is written back if it is not loaded, and a loaded base keeps the loaded value; memory and every other
+register stay. -/
+theorem armMultipleBody_load_eval (pc : Nat) (context : Primus.Semantics.Context)
+    (addressing : ArmMultiple) (writeback : Bool) (base : String) (list : List String)
+    (hpc : "PC" ∉ list) (hnd : list.Nodup)
+    (hn : armMultipleBase.name ∉ list) (hbn : base ≠ armMultipleBase.name)
+    (hmem : context.memory.typ ≠ .imm 32) (fuel : Nat)
+    {env : Bil.Env} {b : BitVec 32} {m : Memory 32}
+    (hbase : Bil.lookup env (armVar base) = .ok (.bits b)) (hm : Bil.lookup env context.memory = .ok (.memory m)) :
+    let first := armFirstAddress addressing b (4 * list.length)
+    ∃ state', Bil.execProgram (fuel + list.length + 5) { env := env }
+        (armMultipleBody pc context true addressing writeback base list) = .ok (state', .normal) ∧
+      (∀ entry ∈ (List.range list.length).zip list, Bil.lookup state'.env (armVar entry.2) =
+        .ok (.bits (Memory.read m (first + BitVec.ofNat 32 (4 * entry.1)) context.endian 4))) ∧
+      (writeback = true → base ∉ list →
+        Bil.lookup state'.env (armVar base) = .ok (.bits (armAfterAddress addressing b (4 * list.length)))) ∧
+      (writeback = false → base ∉ list → Bil.lookup state'.env (armVar base) = .ok (.bits b)) ∧
+      Bil.lookup state'.env context.memory = .ok (.memory m) ∧
+      ∀ var, var ≠ armMultipleBase → var ≠ armVar base → (∀ name ∈ list, var ≠ armVar name) →
+        Bil.lookup state'.env var = Bil.lookup env var := by
+  intro first
+  have hne : ∀ name, armVar name ≠ context.memory := fun name he => hmem (by rw [← he])
+  have hbvm : armMultipleBase ≠ context.memory := fun he => hmem (by rw [← he]; rfl)
+  have hbv : armVar base ≠ armMultipleBase := fun he => hbn (congrArg Bap.Var.name he)
+  have hnames : ∀ name ∈ list, armVar name ≠ armMultipleBase := fun name hin he =>
+    hn ((congrArg Bap.Var.name he) ▸ hin)
+  let entries := (List.range list.length).zip list
+  have hsnd : entries.map Prod.snd = list := by
+    simp [entries, List.map_snd_zip]
+  have hmemEntries : ∀ entry ∈ entries, entry.2 ∈ list := fun entry he =>
+    hsnd ▸ List.mem_map.2 ⟨entry, he, rfl⟩
+  have hnotPc : ∀ entry ∈ entries, entry.2 ≠ "PC" := fun entry he hp => hpc (hp ▸ hmemEntries entry he)
+  have hprogram : ((List.range list.length).zip list).map (fun (x : Nat × String) =>
+      (if x.2 = "PC" then Bil.Stmt.jmp (.bin .and (.load (.var context.memory)
+          (.bin .add (armMultipleFirst addressing (4 * list.length)) (armWord (4 * x.1))) context.endian 4) (armWord 0xfffffffe))
+        else .move ⟨x.2, .imm 32, 0, false⟩ (.load (.var context.memory)
+          (.bin .add (armMultipleFirst addressing (4 * list.length)) (armWord (4 * x.1))) context.endian 4))) =
+      armLoads (armMultipleFirst addressing (4 * list.length)) context.memory context.endian entries := by
+    apply List.map_congr_left
+    intro x hx
+    rw [ite_eq_right (hnotPc x hx)]
+  have hbody : armMultipleBody pc context true addressing writeback base list =
+      .move armMultipleBase (.var (armVar base)) ::
+        ((if writeback then [.move (armVar base) (armMultipleAfter addressing (4 * list.length))] else []) ++
+          (armLoads (armMultipleFirst addressing (4 * list.length)) context.memory context.endian entries ++ [])) := by
+    rw [List.append_nil, ← hprogram]
+    rfl
+  rw [hbody]
+  have h1 : Bil.evalExp env (.var (armVar base)) = .ok (.bits b) := hbase
+  have step1 := exec_move (fuel := fuel + list.length + 3) (state := { env := env }) (var := armMultipleBase)
+    (rest := (if writeback then [.move (armVar base) (armMultipleAfter addressing (4 * list.length))] else []) ++
+      (armLoads (armMultipleFirst addressing (4 * list.length)) context.memory context.endian entries ++ [])) h1
+  have e1 : fuel + list.length + 5 = fuel + list.length + 3 + 2 := by omega
+  rw [e1, step1]
+  have hB1 : Bil.lookup (Bil.bind env armMultipleBase (.bits b)) armMultipleBase = .ok (.bits b) := lookup_bind_same ..
+  have hAfter := eval_after (env := Bil.bind env armMultipleBase (.bits b)) addressing (4 * list.length) hB1
+  -- the state before the loads, whether it writes back or not
+  obtain ⟨state1, fuel1, hstate, hBs, hMs, hOther, hBase⟩ : ∃ (state1 : Bil.State) (fuel1 : Nat),
+      Bil.execProgram (fuel + list.length + 3 + 1) { env := Bil.bind env armMultipleBase (.bits b) }
+          ((if writeback then [.move (armVar base) (armMultipleAfter addressing (4 * list.length))] else []) ++
+            (armLoads (armMultipleFirst addressing (4 * list.length)) context.memory context.endian entries ++ [])) =
+        Bil.execProgram (fuel1 + entries.length + 2) state1
+          (armLoads (armMultipleFirst addressing (4 * list.length)) context.memory context.endian entries ++ []) ∧
+      Bil.lookup state1.env armMultipleBase = .ok (.bits b) ∧
+      Bil.lookup state1.env context.memory = .ok (.memory m) ∧
+      (∀ var, var ≠ armMultipleBase → var ≠ armVar base → Bil.lookup state1.env var = Bil.lookup env var) ∧
+      Bil.lookup state1.env (armVar base) =
+        .ok (.bits (if writeback then armAfterAddress addressing b (4 * list.length) else b)) := by
+    have hlen : entries.length = list.length := by simp [entries]
+    have hmem1 : Bil.lookup (Bil.bind env armMultipleBase (.bits b)) context.memory = .ok (.memory m) := by
+      exact (lookup_bind_ne _ _ (Ne.symm hbvm)).trans hm
+    cases writeback with
+    | true =>
+      let written : Bap.Value := .bits (armAfterAddress addressing b (4 * list.length))
+      refine ⟨{ env := Bil.bind (Bil.bind env armMultipleBase (.bits b)) (armVar base) written }, fuel + 1, ?_, ?_, ?_, ?_, ?_⟩
+      · have e : fuel + list.length + 3 + 1 = (fuel + list.length + 2) + 2 := by omega
+        rw [e]
+        simp only [ite_true, List.singleton_append]
+        rw [exec_move (state := { env := Bil.bind env armMultipleBase (.bits b) }) (var := armVar base) hAfter, hlen]
+        have : fuel + 1 + list.length + 2 = fuel + list.length + 2 + 1 := by omega
+        rw [this]
+      · show Bil.lookup (Bil.bind _ _ _) armMultipleBase = _
+        exact (lookup_bind_ne _ _ (Ne.symm hbv)).trans hB1
+      · show Bil.lookup (Bil.bind _ _ _) context.memory = _
+        exact (lookup_bind_ne _ _ (Ne.symm (hne base))).trans hmem1
+      · intro var h1 h2
+        show Bil.lookup (Bil.bind _ _ _) var = _
+        exact (lookup_bind_ne _ _ h2).trans (lookup_bind_ne _ _ h1)
+      · exact lookup_bind_same ..
+    | false =>
+      refine ⟨{ env := Bil.bind env armMultipleBase (.bits b) }, fuel + 2, ?_, hB1, hmem1, ?_, ?_⟩
+      · simp only [Bool.false_eq_true, ite_false, List.nil_append]
+        rw [hlen, show fuel + list.length + 3 + 1 = fuel + 2 + list.length + 2 by omega]
+      · intro var h1 _
+        exact lookup_bind_ne _ _ h1
+      · simp only [Bool.false_eq_true, ite_false]
+        show Bil.lookup (Bil.bind _ _ _) _ = _
+        exact (lookup_bind_ne _ _ hbv).trans hbase
+  have hnd' : (entries.map Prod.snd).Nodup := by rw [hsnd]; exact hnd
+  have ⟨state', hexec, hloaded, hframe⟩ := exec_loads (endian := context.endian) (m := m) (f := first)
+    (first := armMultipleFirst addressing (4 * list.length)) (memory := context.memory) entries fuel1 state1 []
+    (fun entry _ => hne entry.2) hnd'
+    (fun env' hsame => eval_first addressing (4 * list.length) (by
+      rw [hsame armMultipleBase (fun h => by
+        rcases List.mem_map.1 h with ⟨o, ho, he⟩
+        exact hnames o.2 (hmemEntries o ho) he)]
+      exact hBs)) hMs
+  have hnotList : ∀ var, (∀ name ∈ list, var ≠ armVar name) → var ∉ entries.map (armVar ·.2) := fun var hv h => by
+    rcases List.mem_map.1 h with ⟨o, ho, he⟩
+    exact hv o.2 (hmemEntries o ho) he.symm
+  have hbaseNot : base ∉ list → armVar base ∉ entries.map (armVar ·.2) := fun hb =>
+    hnotList _ fun name hin he => hb (by
+      have := congrArg Bap.Var.name he
+      simp only at this
+      exact this ▸ hin)
+  refine ⟨state', ?_, hloaded, ?_, ?_, ?_, ?_⟩
+  · rw [hstate, hexec]
+    rw [Bil.execProgram]
+  · intro hw hb
+    rw [hframe _ (hbaseNot hb), hBase, hw]
+    rfl
+  · intro hw hb
+    rw [hframe _ (hbaseNot hb), hBase, hw]
+    rfl
+  · rw [hframe _ (fun h => by
+      rcases List.mem_map.1 h with ⟨o, _, he⟩
+      exact hne o.2 he)]
+    exact hMs
+  · intro var h1 h2 h3
+    rw [hframe var (hnotList var h3), hOther var h1 h2]
+
+/-- An instruction whose condition always holds is its body, so those theorems say what it does. -/
+theorem armMultiple_unconditional (pc : Nat) (context : Primus.Semantics.Context) (decoded : LLVM.Decoded)
+    (addressing : ArmMultipleKind) (writeback : Bool) (base : String) (condition : Int) (list : List String)
+    (h : armMultipleOperands decoded.opcode decoded.operands = some (true, addressing, writeback, base, condition, list))
+    (hc : armCondition condition = none) :
+    armMultiple pc context decoded = some (armMultipleBody pc context true addressing writeback base list) := by
+  dsimp only [armMultipleOperands, armCondition] at h hc
+  lift_unfold armMultiple
+  rw [h]
+  simp only [Option.map]
+  rw [hc]
+
+/-- And under a condition, the instruction does this only if the condition holds, and otherwise nothing. -/
+theorem armMultiple_conditional (pc : Nat) (context : Primus.Semantics.Context) (decoded : LLVM.Decoded)
+    (load : Bool) (addressing : ArmMultipleKind) (writeback : Bool) (base : String) (condition : Int) (list : List String)
+    {holds : Bil.Exp} (h : armMultipleOperands decoded.opcode decoded.operands = some (load, addressing, writeback, base, condition, list))
+    (hc : armCondition condition = some holds) :
+    armMultiple pc context decoded = some [.ifElse holds (armMultipleBody pc context load addressing writeback base list) []] := by
+  dsimp only [armMultipleOperands, armCondition] at h hc
+  lift_unfold armMultiple
+  rw [h]
+  simp only [Option.map]
+  rw [hc]
+
+/-- `tLDMIA` writes back exactly if it does not load its base, as the architecture has it. -/
+theorem tLDMIA_writeback (base : String) (condition : Int) (predicate : LLVM.Operand) (list : List String) :
+    armMultipleOperands "tLDMIA" (.reg base :: .imm condition :: predicate :: list.map .reg) =
+      some (true, ArmMultiple.increaseAfter, !list.contains base, base, condition, list) := by
+  lift_unfold armMultipleOperands
+  show Option.map _ (List.mapM _ _) = _
+  rw [operand_names _ fun _ => rfl]
+  simp
+
+/-- The stores in order, each to its own address. -/
+private def armStores (first : Bil.Exp) (memory : Bap.Var) (endian : Endian) (pc : Nat) (entries : List (Nat × String)) :
+    Bil.Program :=
+  entries.map fun entry =>
+    .move memory (.store (.var memory) (.bin .add first (armWord (4 * entry.1)))
+      (if entry.2 = "PC" then armWord pc else .var (armVar entry.2)) endian 4)
+
+open Bap.Proofs.Core.MemoryLaws in
+private theorem read_of_bytes {m m' : Memory 32} {a : BitVec 32} {endian : Endian} {size : Nat}
+    (h : ∀ k, k < size → Memory.readByte m' (a + BitVec.ofNat 32 k) = Memory.readByte m (a + BitVec.ofNat 32 k)) :
+    Memory.read m' a endian size = Memory.read m a endian size := by
+  have : ((List.range size).map fun offset => Memory.readByte m' (a + BitVec.ofNat 32 offset)) =
+      (List.range size).map fun offset => Memory.readByte m (a + BitVec.ofNat 32 offset) :=
+    List.map_congr_left fun k hk => h k (List.mem_range.1 hk)
+  simp only [Memory.read, this]
+
+open Bap.Proofs.Core.MemoryLaws in
+private theorem exec_stores {first : Bil.Exp} {memory : Bap.Var} {endian : Endian} {pc : Nat} {f : BitVec 32}
+    (regs : String → BitVec 32) (hpc : ∀ name, name = "PC" → regs name = BitVec.ofNat 32 pc)
+    (hmemvar : ∀ name, armVar name ≠ memory) :
+    ∀ (entries : List (Nat × String)) (fuel : Nat) (state : Bil.State) (rest : Bil.Program) (m : Memory 32),
+      PagesSized m →
+      entries.Pairwise (fun x y => ∀ k l, k < 4 → l < 4 →
+        f + BitVec.ofNat 32 (4 * x.1) + BitVec.ofNat 32 k ≠ f + BitVec.ofNat 32 (4 * y.1) + BitVec.ofNat 32 l) →
+      (∀ env : Bil.Env, (∀ var, var ≠ memory → Bil.lookup env var = Bil.lookup state.env var) →
+        Bil.evalExp env first = .ok (.bits f)) →
+      (∀ entry ∈ entries, entry.2 ≠ "PC" → Bil.lookup state.env (armVar entry.2) = .ok (.bits (regs entry.2))) →
+      Bil.lookup state.env memory = .ok (.memory m) →
+      ∃ (state' : Bil.State) (m' : Memory 32), Bil.execProgram (fuel + entries.length + 2) state (armStores first memory endian pc entries ++ rest) =
+          Bil.execProgram (fuel + 2) state' rest ∧
+        PagesSized m' ∧ Bil.lookup state'.env memory = .ok (.memory m') ∧
+        (∀ entry ∈ entries, Memory.read m' (f + BitVec.ofNat 32 (4 * entry.1)) endian 4 = regs entry.2) ∧
+        (∀ a, (∀ entry ∈ entries, ∀ k, k < 4 → a ≠ f + BitVec.ofNat 32 (4 * entry.1) + BitVec.ofNat 32 k) →
+          Memory.readByte m' a = Memory.readByte m a) ∧
+        ∀ var, var ≠ memory → Bil.lookup state'.env var = Bil.lookup state.env var
+  | [], fuel, state, rest, m, hp, _, _, _, hm => ⟨state, m, rfl, hp, hm, by simp, fun _ _ => rfl, fun _ _ => rfl⟩
+  | entry :: entries, fuel, state, rest, m, hp, hdis, hfirst, hregs, hm => by
+    have hfirst' := hfirst state.env (fun _ _ => rfl)
+    have hmem : Bil.evalExp state.env (.var memory) = .ok (.memory m) := hm
+    have haddr := eval_add_int (4 * entry.1) hfirst'
+    have hval : Bil.evalExp state.env (if entry.2 = "PC" then armWord pc else .var (armVar entry.2)) =
+        .ok (.bits (regs entry.2)) := by
+      by_cases hn : entry.2 = "PC"
+      · rw [ite_eq_left hn, hpc _ hn]
+        rfl
+      · rw [ite_eq_right hn]
+        exact hregs entry (by simp) hn
+    let address := f + BitVec.ofNat 32 (4 * entry.1)
+    have ⟨m1, hwrite⟩ : ∃ m1, Memory.write m address (regs entry.2) endian 4 = .ok m1 := ⟨_, write_eq rfl endian⟩
+    have hstore : Bil.evalExp state.env (.store (.var memory) (.bin .add first (armWord (4 * entry.1)))
+        (if entry.2 = "PC" then armWord pc else .var (armVar entry.2)) endian 4) = .ok (.memory m1) :=
+      Bap.Proofs.Bil.eval_store_iff.2 ⟨32, m, address, 32, regs entry.2, m1, hmem, haddr, hval, hwrite, rfl⟩
+    have hstep : Bil.execProgram (fuel + (entry :: entries).length + 2) state
+        (armStores first memory endian pc (entry :: entries) ++ rest) =
+        Bil.execProgram (fuel + entries.length + 2) { env := Bil.bind state.env memory (.memory m1) }
+          (armStores first memory endian pc entries ++ rest) := by
+      have e : fuel + (entry :: entries).length + 2 = (fuel + entries.length + 1) + 2 := by
+        simp only [List.length_cons]
+        omega
+      rw [e]
+      exact exec_move hstore
+    rw [hstep]
+    have hp1 := write_pagesSized hp hwrite
+    have ⟨hd, hrest⟩ := List.pairwise_cons.1 hdis
+    have ⟨state', m', he, hp', hm', hread, hbytes, hother⟩ := exec_stores (endian := endian) (first := first) (pc := pc) (f := f) regs hpc hmemvar entries fuel
+      { env := Bil.bind state.env memory (.memory m1) } rest m1 hp1 hrest
+      (fun env hsame => hfirst env fun var hvar => (hsame var hvar).trans (lookup_bind_ne _ _ hvar))
+      (fun e hme hn => by
+        show Bil.lookup (Bil.bind _ _ _) _ = _
+        exact (lookup_bind_ne _ _ (hmemvar e.2)).trans (hregs e (List.mem_cons_of_mem _ hme) hn))
+      (lookup_bind_same ..)
+    refine ⟨state', m', he, hp', hm', ?_, ?_, ?_⟩
+    · intro e hme
+      rcases List.mem_cons.1 hme with rfl | hme
+      · have hsame : Memory.read m' address endian 4 = Memory.read m1 address endian 4 :=
+          read_of_bytes fun k hk => hbytes _ fun o ho l hl he' => hd o ho k l hk hl he'
+        rw [hsame]
+        exact read_write hp address (regs e.2) endian (by decide : 4 ≤ 2 ^ 32) hwrite
+      · exact hread e hme
+    · intro a ha
+      rw [hbytes a (fun o ho k hk => ha o (List.mem_cons_of_mem _ ho) k hk)]
+      exact readByte_write_frame hp hwrite fun k hk => ha entry (by simp) k hk
+    · intro var hvar
+      exact (hother var hvar).trans (lookup_bind_ne _ _ hvar)
+
+/-- `STM` and its relatives, evaluated: the word at each address holds its register, the lowest register at the lowest
+address, and of PC its value as the architecture reads it; no other byte of memory changes and no register, except that the
+base is written back after the stores, which stored its old value if it is on the list. -/
+theorem armMultipleBody_store_eval (pc : Nat) (context : Primus.Semantics.Context)
+    (addressing : ArmMultiple) (writeback : Bool) (base : String) (list : List String)
+    (hlen : 4 * list.length ≤ 2 ^ 32) (hbn : base ≠ armMultipleBase.name)
+    (hn : armMultipleBase.name ∉ list)
+    (hmem : context.memory.typ ≠ .imm 32) (fuel : Nat)
+    {env : Bil.Env} {b : BitVec 32} {m : Memory 32} (regs : String → BitVec 32)
+    (hpages : Bap.Proofs.Core.MemoryLaws.PagesSized m)
+    (hPc : regs "PC" = BitVec.ofNat 32 pc)
+    (hbase : Bil.lookup env (armVar base) = .ok (.bits b)) (hm : Bil.lookup env context.memory = .ok (.memory m))
+    (hregs : ∀ name ∈ list, name ≠ "PC" → Bil.lookup env (armVar name) = .ok (.bits (regs name))) :
+    let first := armFirstAddress addressing b (4 * list.length)
+    ∃ (state' : Bil.State) (m' : Memory 32), Bil.execProgram (fuel + list.length + 5) { env := env }
+        (armMultipleBody pc context false addressing writeback base list) = .ok (state', .normal) ∧
+      Bil.lookup state'.env context.memory = .ok (.memory m') ∧
+      (∀ entry ∈ (List.range list.length).zip list,
+        Memory.read m' (first + BitVec.ofNat 32 (4 * entry.1)) context.endian 4 = regs entry.2) ∧
+      (∀ a, (∀ index, index < list.length → ∀ k, k < 4 → a ≠ first + BitVec.ofNat 32 (4 * index) + BitVec.ofNat 32 k) →
+        Memory.readByte m' a = Memory.readByte m a) ∧
+      (writeback = true → Bil.lookup state'.env (armVar base) = .ok (.bits (armAfterAddress addressing b (4 * list.length)))) ∧
+      (writeback = false → Bil.lookup state'.env (armVar base) = .ok (.bits b)) ∧
+      ∀ var, var ≠ armMultipleBase → var ≠ armVar base → var ≠ context.memory →
+        Bil.lookup state'.env var = Bil.lookup env var := by
+  intro first
+  have hne : ∀ name, armVar name ≠ context.memory := fun name he => hmem (by rw [← he])
+  have hbvm : armMultipleBase ≠ context.memory := fun he => hmem (by rw [← he]; rfl)
+  have hbv : armVar base ≠ armMultipleBase := fun he => hbn (congrArg Bap.Var.name he)
+  have hnames : ∀ name ∈ list, armVar name ≠ armMultipleBase := fun name hin he =>
+    hn ((congrArg Bap.Var.name he) ▸ hin)
+  let entries := (List.range list.length).zip list
+  have hentries : entries.length = list.length := by simp [entries]
+  have hsnd : entries.map Prod.snd = list := by simp [entries, List.map_snd_zip]
+  have hfst : entries.map Prod.fst = List.range list.length := by simp [entries, List.map_fst_zip]
+  have hmemEntries : ∀ entry ∈ entries, entry.2 ∈ list := fun entry he =>
+    hsnd ▸ List.mem_map.2 ⟨entry, he, rfl⟩
+  have hindex : ∀ entry ∈ entries, entry.1 < list.length := fun entry he =>
+    List.mem_range.1 (hfst ▸ List.mem_map.2 ⟨entry, he, rfl⟩)
+  have hbody : armMultipleBody pc context false addressing writeback base list =
+      .move armMultipleBase (.var (armVar base)) ::
+        (armStores (armMultipleFirst addressing (4 * list.length)) context.memory context.endian pc entries ++
+          (if writeback then [.move (armVar base) (armMultipleAfter addressing (4 * list.length))] else [])) := rfl
+  rw [hbody]
+  have h1 : Bil.evalExp env (.var (armVar base)) = .ok (.bits b) := hbase
+  rw [show fuel + list.length + 5 = fuel + list.length + 3 + 2 by omega, exec_move h1]
+  have hB1 : Bil.lookup (Bil.bind env armMultipleBase (.bits b)) armMultipleBase = .ok (.bits b) := lookup_bind_same ..
+  have hdis : entries.Pairwise (fun x y => ∀ k l, k < 4 → l < 4 →
+      first + BitVec.ofNat 32 (4 * x.1) + BitVec.ofNat 32 k ≠ first + BitVec.ofNat 32 (4 * y.1) + BitVec.ofNat 32 l) := by
+    have hnd : (entries.map Prod.fst).Nodup := by rw [hfst]; exact List.nodup_range
+    have hp := List.pairwise_map.1 hnd
+    refine List.Pairwise.imp_of_mem ?_ hp
+    intro x y hx hy hxy k l hk hl he
+    have hx' := hindex x hx
+    have hy' := hindex y hy
+    rw [BitVec.add_assoc, BitVec.add_assoc] at he
+    have hcancel := (BitVec.add_right_inj first).1 he
+    have e1 : BitVec.ofNat 32 (4 * x.1) + BitVec.ofNat 32 k = BitVec.ofNat 32 (4 * x.1 + k) := by
+      apply BitVec.eq_of_toNat_eq
+      simp
+    have e2 : BitVec.ofNat 32 (4 * y.1) + BitVec.ofNat 32 l = BitVec.ofNat 32 (4 * y.1 + l) := by
+      apply BitVec.eq_of_toNat_eq
+      simp
+    rw [e1, e2] at hcancel
+    have := congrArg BitVec.toNat hcancel
+    simp only [BitVec.toNat_ofNat] at this
+    rw [Nat.mod_eq_of_lt (by omega), Nat.mod_eq_of_lt (by omega)] at this
+    omega
+  have hmem1 : Bil.lookup (Bil.bind env armMultipleBase (.bits b)) context.memory = .ok (.memory m) :=
+    (lookup_bind_ne _ _ (Ne.symm hbvm)).trans hm
+  have ⟨state1, m', hexec, hp', hm', hread, hbytes, hother⟩ := exec_stores (endian := context.endian) (pc := pc) (f := first)
+    (first := armMultipleFirst addressing (4 * list.length)) (memory := context.memory)
+    regs (fun name h => h ▸ hPc) hne entries (fuel + 2)
+    { env := Bil.bind env armMultipleBase (.bits b) }
+    (if writeback then [.move (armVar base) (armMultipleAfter addressing (4 * list.length))] else [])
+    m hpages hdis
+    (fun env' hsame => eval_first addressing (4 * list.length) ((hsame _ hbvm).trans hB1))
+    (fun entry he hp => (lookup_bind_ne _ _ (hnames _ (hmemEntries entry he))).trans
+      (hregs _ (hmemEntries entry he) hp)) hmem1
+  have hAfter := eval_after (env := state1.env) addressing (4 * list.length) ((hother _ hbvm).trans hB1)
+  have hbaseOf : Bil.lookup state1.env (armVar base) = .ok (.bits b) :=
+    (hother _ (hne base)).trans ((lookup_bind_ne _ _ hbv).trans hbase)
+  have hbytes' : ∀ a, (∀ index, index < list.length → ∀ k, k < 4 → a ≠ first + BitVec.ofNat 32 (4 * index) + BitVec.ofNat 32 k) →
+      Memory.readByte m' a = Memory.readByte m a := fun a ha =>
+    hbytes a fun entry he k hk => ha entry.1 (hindex entry he) k hk
+  rw [show fuel + list.length + 3 + 1 = fuel + 2 + entries.length + 2 by rw [hentries]; omega, hexec]
+  cases writeback with
+  | true =>
+    refine ⟨{ env := Bil.bind state1.env (armVar base) (.bits (armAfterAddress addressing b (4 * list.length))) }, m', ?_,
+      (lookup_bind_ne _ _ (Ne.symm (hne base))).trans hm', hread, hbytes', fun _ => lookup_bind_same .., (fun h => by cases h), ?_⟩
+    · simp only [ite_true]
+      rw [exec_move hAfter, Bil.execProgram]
+    · intro var h1 h2 h3
+      exact (lookup_bind_ne _ _ h2).trans ((hother _ h3).trans (lookup_bind_ne _ _ h1))
+  | false =>
+    refine ⟨state1, m', ?_, hm', hread, hbytes', (fun h => by cases h), fun _ => hbaseOf, ?_⟩
+    · simp only [Bool.false_eq_true, ite_false]
+      rw [Bil.execProgram]
+    · intro var h1 _ h3
+      exact (hother _ h3).trans (lookup_bind_ne _ _ h1)
 
 /-! ### Writes through partial registers -/
 
@@ -1323,10 +1980,18 @@ theorem decodeAArch64With_lifted (globals : Primus.Semantics.Environment) (base 
   unfold decodeAArch64With
   lifted_decoder
 
-theorem decodeRISCVWith_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
-    (data : ByteArray) : Holds (decodeRISCVWith globals base address data) (Lifted (fun flow : Flow => flow) address) := by
+/-- The flow of a RISC-V instruction is the role its registers give it, as in `riscvFlow`. -/
+theorem decodeRISCVWith_flow (globals : Primus.Semantics.Environment) (base address : Nat)
+    (data : ByteArray) : Holds (decodeRISCVWith globals base address data)
+      (fun insn => insn.address = address ∧ ∃ word flags, insn.flow = riscvFlow word flags) := by
   unfold decodeRISCVWith
-  lifted_decoder
+  repeat' first
+    | exact Holds.pure ⟨rfl, _, _, rfl⟩
+    | refine Holds.bind fun _ => ?_
+
+theorem decodeRISCVWith_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
+    (data : ByteArray) : Holds (decodeRISCVWith globals base address data) (Lifted (fun flow : Flow => flow) address) :=
+  fun s r s' he => ⟨(decodeRISCVWith_flow globals base address data s r s' he).1, _, rfl⟩
 
 theorem decodePowerPCWith_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : Holds (decodePowerPCWith globals base address data) (Lifted (flow) address) := by
@@ -1334,40 +1999,156 @@ theorem decodePowerPCWith_lifted (globals : Primus.Semantics.Environment) (base 
   lifted_decoder
 
 theorem decodeMIPSWith_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
-    (data : ByteArray) : Holds (decodeMIPSWith globals base address data) (Lifted (fun flow : Flow => flow) address) := by
+    (data : ByteArray) : Holds (decodeMIPSWith globals base address data) (Lifted mipsFlow address) := by
   unfold decodeMIPSWith
   lifted_decoder
 
+/-- The flow of an A32 instruction is what `arm32Flow` says of it, corrected by what its program does to the pc. -/
 theorem decodeARM32With_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
-    (data : ByteArray) : Holds (decodeARM32With globals base address data) (Lifted (fun flow : Flow => flow) address) := by
+    (data : ByteArray) : Holds (decodeARM32With globals base address data)
+      (Lifted (fun evidence : LLVM.Decoded × Bil.Program => armControlFlow (arm32Flow evidence.1) evidence.2) address) := by
   unfold decodeARM32With
   refine Holds.bind fun _ => ?_
   dsimp only
   split
-  · exact Holds.pure ⟨rfl, _, rfl⟩
-  · exact Holds.bind fun _ => Holds.pure ⟨rfl, _, rfl⟩
+  · exact Holds.pure ⟨rfl, (_, _), rfl⟩
+  · exact Holds.bind fun _ => Holds.pure ⟨rfl, (_, _), rfl⟩
 
-theorem decodeThumbWith_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
-    (data : ByteArray) : Holds (decodeThumbWith globals base address data) (Lifted (fun flow : Flow => flow) address) := by
-  unfold decodeThumbWith
+/-- The flow of a T32 instruction goes by its flags, corrected by what its program does to the pc, and that of an IT block
+by those of its last instruction, except that it can always be skipped. -/
+inductive ThumbFlow : Flow → Prop
+  | single (flags : Nat) (bil : Bil.Program) : ThumbFlow (armControlFlow (flow flags) bil)
+  | block (flow' : Flow) (bil : Bil.Program) : ThumbFlow (thumbItFlow (armControlFlow flow' bil))
+
+/-- The block of an IT instruction, as `ITAdvance` has it: the first instruction has `firstcond`, and each next one its top
+three bits and the next bit of the mask. The lowest bit set in the mask ends the block. -/
+theorem thumbItConditions_spec (firstcond mask : Nat) :
+    (mask % 2 = 1 → (thumbItConditions firstcond mask).length = 4) ∧
+      (mask % 4 = 2 → (thumbItConditions firstcond mask).length = 3) ∧
+      (mask % 8 = 4 → (thumbItConditions firstcond mask).length = 2) ∧
+      (mask % 16 = 8 → (thumbItConditions firstcond mask).length = 1) ∧
+      (thumbItConditions firstcond mask)[0]? = some (firstcond : Int) ∧
+      ∀ index, 0 < index → (h : index < (thumbItConditions firstcond mask).length) →
+        (thumbItConditions firstcond mask)[index] =
+          ((firstcond / 2 * 2 + (mask >>> (4 - index)) % 2 : Nat) : Int) := by
+  unfold thumbItConditions
+  simp only [List.length_map, List.length_range]
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+  · intro h
+    simp [h]
+  · intro h
+    have h1 : ¬ mask % 2 = 1 := by omega
+    simp [h, h1]
+  · intro h
+    have h1 : ¬ mask % 2 = 1 := by omega
+    have h2 : ¬ mask % 4 = 2 := by omega
+    simp [h, h1, h2]
+  · intro h
+    have h1 : ¬ mask % 2 = 1 := by omega
+    have h2 : ¬ mask % 4 = 2 := by omega
+    have h3 : ¬ mask % 8 = 4 := by omega
+    simp [h1, h2, h3]
+  · split <;> (try split) <;> (try split) <;> simp
+  · intro index h0 _
+    have hi : index ≠ 0 := by omega
+    simp [hi]
+
+/-- The blocks of the examples of the manual: `ITE EQ` is then and else, and `ITTE LT` then, then and else. -/
+theorem thumbItConditions_examples :
+    thumbItConditions 0 0b1100 = [0, 1] ∧ thumbItConditions 0b1011 0b1010 = [0b1011, 0b1011, 0b1010] := by
+  decide
+
+/-- In a block, nothing sets the flags. -/
+theorem thumbPredicated_no_flags (condition : Int) (operands : List LLVM.Operand) :
+    LLVM.Operand.reg "CPSR" ∉ thumbPredicated condition operands := by
+  unfold thumbPredicated
+  fun_induction thumbPredicated.go condition operands <;> simp_all
+  rename_i h _ _
+  exact fun e => h e.symm
+
+/-- The predicate operand of an instruction of a block holds its condition, and the flags operand does not ask for them. -/
+theorem thumbPredicated_operands (condition : Int) (rest : List LLVM.Operand) :
+    thumbPredicated condition (.imm 14 :: .reg "Nil" :: rest) =
+        .imm (thumbBlockPredicate condition) :: .reg "Nil" :: thumbPredicated condition rest ∧
+      thumbPredicated condition (.reg "CPSR" :: rest) = .reg "Nil" :: thumbPredicated condition rest := by
+  constructor <;> (unfold thumbPredicated; rw [thumbPredicated.go])
+
+/-- A predicate in a block is never the one of an instruction out of a block, whose narrow forms set the flags, and
+it is its condition if that can fail. -/
+theorem thumbBlockPredicate_spec (condition : Int) :
+    thumbBlockPredicate condition ≠ 14 ∧ (condition ≠ 14 → thumbBlockPredicate condition = condition) ∧
+      (armCondition condition = none → armCondition (thumbBlockPredicate condition) = none) := by
+  unfold thumbBlockPredicate
+  split
+  · subst_vars
+    exact ⟨by decide, by simp, fun _ => rfl⟩
+  · exact ⟨‹_›, fun _ => rfl, id⟩
+
+/-- `it al`: the only condition of the block always holds, and the instruction is not told that it is out of a block. -/
+theorem thumb_it_always :
+    thumbItConditions 14 8 = [14] ∧ armCondition 14 = none ∧ armCondition (thumbBlockPredicate 14) = none ∧
+      thumbBlockPredicate 14 ≠ 14 :=
+  ⟨by decide, rfl, rfl, by decide⟩
+
+/-- A block can always be skipped: what is `.normal` or a call stays, and the rest is conditional. -/
+theorem thumbItFlow_spec (flow' : Flow) :
+    thumbItFlow flow' = (match flow' with
+      | .normal => .normal
+      | .call => .call
+      | _ => .conditionalJump) := by
+  cases flow' <;> rfl
+
+private theorem decodeThumbIt_flow (globals : Primus.Semantics.Environment) (base address : Nat) (data : ByteArray)
+    (it : LLVM.Decoded) (firstcond mask : Nat) :
+    Holds (decodeThumbIt globals base address data it firstcond mask)
+      (fun insn => insn.address = address ∧ ThumbFlow insn.flow) := by
+  lift_unfold decodeThumbIt
   refine Holds.bind fun _ => ?_
   dsimp only
+  split <;> exact Holds.pure ⟨rfl, .block _ _⟩
+
+private theorem decodeThumbIt_fields (globals : Primus.Semantics.Environment) (base address : Nat) (data : ByteArray)
+    (it : LLVM.Decoded) (firstcond mask : Nat) :
+    Holds (decodeThumbIt globals base address data it firstcond mask)
+      (fun insn => insn.address = address ∧ ∃ flow' : Flow, insn.flow = thumbItFlow (armControlFlow flow' insn.bil)) := by
+  lift_unfold decodeThumbIt
+  refine Holds.bind fun _ => ?_
+  dsimp only
+  split <;> exact Holds.pure ⟨rfl, _, rfl⟩
+
+theorem decodeThumbWith_flow (globals : Primus.Semantics.Environment) (base address : Nat)
+    (data : ByteArray) : Holds (decodeThumbWith globals base address data)
+      (fun insn => insn.address = address ∧ ThumbFlow insn.flow) := by
+  unfold decodeThumbWith
+  refine Holds.bind fun _ => ?_
   split
-  · exact Holds.pure ⟨rfl, _, rfl⟩
-  · exact Holds.bind fun _ => Holds.pure ⟨rfl, _, rfl⟩
+  · exact decodeThumbIt_flow globals base address data _ _ _
+  · exact Holds.bind fun _ => Holds.pure ⟨rfl, .single _ _⟩
+
+theorem decodeThumbWith_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
+    (data : ByteArray) : Holds (decodeThumbWith globals base address data) (Lifted (fun flow : Flow => flow) address) :=
+  fun s r s' he => ⟨(decodeThumbWith_flow globals base address data s r s' he).1, _, rfl⟩
 
 theorem decodeX8632With_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : Holds (decodeX8632With globals base address data) (Lifted (flow) address) := by
   unfold decodeX8632With
   lifted_decoder
 
-theorem decodeRISCV32With_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
-    (data : ByteArray) : Holds (decodeRISCV32With globals base address data) (Lifted (fun flow : Flow => flow) address) := by
+/-- The flow of a RISC-V instruction is the role its registers give it, as in `riscvFlow`. -/
+theorem decodeRISCV32With_flow (globals : Primus.Semantics.Environment) (base address : Nat)
+    (data : ByteArray) : Holds (decodeRISCV32With globals base address data)
+      (fun insn => insn.address = address ∧ ∃ word flags, insn.flow = riscvFlow word flags) := by
   unfold decodeRISCV32With
-  lifted_decoder
+  repeat' first
+    | exact Holds.pure ⟨rfl, _, _, rfl⟩
+    | refine Holds.bind fun _ => ?_
+
+theorem decodeRISCV32With_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
+    (data : ByteArray) : Holds (decodeRISCV32With globals base address data) (Lifted (fun flow : Flow => flow) address) :=
+  fun s r s' he => ⟨(decodeRISCV32With_flow globals base address data s r s' he).1, _, rfl⟩
 
 theorem decodeMIPS32With_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
-    (data : ByteArray) : Holds (decodeMIPS32With globals base address data) (Lifted (fun flow : Flow => flow) address) := by
+    (data : ByteArray) : Holds (decodeMIPS32With globals base address data) (Lifted mipsFlow address) := by
   unfold decodeMIPS32With
   lifted_decoder
 
@@ -1375,6 +2156,667 @@ theorem decodePowerPC32With_lifted (globals : Primus.Semantics.Environment) (bas
     (data : ByteArray) : Holds (decodePowerPC32With globals base address data) (Lifted (flow) address) := by
   unfold decodePowerPC32With
   lifted_decoder
+
+/-! ### What the decoders return, field by field -/
+
+private abbrev normalizeAssembly : String → String := lift% normalizeAssembly
+private abbrev instructionWord : Endian → ByteArray → Nat := lift% instructionWord
+private abbrev riscvAddress (address : Nat) (data : ByteArray) (base : Nat) : Nat :=
+  instructionWord .little (instructionBytes data (address - base))
+
+/-- An instruction as it comes of the machine instruction of LLVM: its size and text are the ones of LLVM, its flow
+and target are computed from them, and its program is what `resolve` makes of the lifted one. -/
+def FromMC (address : Nat) (flowOf : LLVM.MCDecoded → Flow) (targetOf : LLVM.MCDecoded → List LLVM.MCOperand → Option Nat)
+    (resolve : Bil.Program → Bil.Program) (insn : Insn) : Prop :=
+  insn.address = address ∧ ∃ (decoded : LLVM.MCDecoded) (operands : List LLVM.MCOperand) (bil : Bil.Program),
+    insn.size = decoded.size ∧ insn.asm = normalizeAssembly decoded.assembly ∧ insn.flow = flowOf decoded ∧
+      insn.target = targetOf decoded operands ∧ insn.bil = resolve bil
+
+/-- Peels monadic steps off a decoder body until its final `pure`. -/
+local macro "fields_decoder" : tactic =>
+  `(tactic| (repeat' first
+    | refine Holds.bind fun _ => ?_
+    | exact Holds.pure ⟨rfl, _, _, _, rfl, rfl, rfl, rfl, rfl⟩))
+
+theorem decodeX86With_fields (globals : Primus.Semantics.Environment) (base address : Nat) (data : ByteArray) :
+    Holds (decodeX86With globals base address data)
+      (FromMC address (flow ·.flags)
+        (fun decoded operands => x86MCTarget 64 globals (address + decoded.size) (LLVM.mcOpcode decoded.instruction) operands)
+        (resolveAliases (x86Aliases x86HighByteBase 64))) := by
+  unfold decodeX86With
+  refine Holds.bind fun decoded => ?_
+  refine Holds.bind fun operands => ?_
+  refine Holds.bind fun _ => ?_
+  refine Holds.bind fun bil => ?_
+  exact Holds.pure ⟨rfl, decoded, operands, bil, rfl, rfl, rfl, rfl, rfl⟩
+
+theorem decodeX8632With_fields (globals : Primus.Semantics.Environment) (base address : Nat) (data : ByteArray) :
+    Holds (decodeX8632With globals base address data)
+      (FromMC address (flow ·.flags)
+        (fun decoded operands => x86MCTarget 32 globals (address + decoded.size) (LLVM.mcOpcode decoded.instruction) operands)
+        (resolveAliases (x86Aliases x8632HighByteBase 32))) := by
+  unfold decodeX8632With
+  refine Holds.bind fun decoded => ?_
+  refine Holds.bind fun operands => ?_
+  refine Holds.bind fun _ => ?_
+  refine Holds.bind fun bil => ?_
+  exact Holds.pure ⟨rfl, decoded, operands, bil, rfl, rfl, rfl, rfl, rfl⟩
+
+theorem decodeAArch64With_fields (globals : Primus.Semantics.Environment) (base address : Nat) (data : ByteArray) :
+    Holds (decodeAArch64With globals base address data)
+      (FromMC address (flow ·.flags) (fun decoded operands => aarch64MCTarget address decoded.flags operands) id) := by
+  unfold decodeAArch64With
+  fields_decoder
+
+/-- The word of a RISC-V instruction, which `riscvFlow` and `riscvMCTarget` read, is the one at its address. -/
+theorem decodeRISCVWith_fields (globals : Primus.Semantics.Environment) (base address : Nat) (data : ByteArray) :
+    Holds (decodeRISCVWith globals base address data)
+      (FromMC address (fun decoded => riscvFlow (riscvAddress address data base) decoded.flags)
+        (fun decoded operands => riscvMCTarget 64 address (riscvAddress address data base) decoded.flags operands) id) := by
+  unfold decodeRISCVWith
+  refine Holds.bind fun decoded => ?_
+  refine Holds.bind fun operands => ?_
+  refine Holds.bind fun _ => ?_
+  refine Holds.bind fun bil => ?_
+  exact Holds.pure ⟨rfl, decoded, operands, bil, rfl, rfl, by dsimp only, by dsimp only, rfl⟩
+
+theorem decodeRISCV32With_fields (globals : Primus.Semantics.Environment) (base address : Nat) (data : ByteArray) :
+    Holds (decodeRISCV32With globals base address data)
+      (FromMC address (fun decoded => riscvFlow (riscvAddress address data base) decoded.flags)
+        (fun decoded operands => riscvMCTarget 32 address (riscvAddress address data base) decoded.flags operands) id) := by
+  unfold decodeRISCV32With
+  refine Holds.bind fun decoded => ?_
+  refine Holds.bind fun operands => ?_
+  refine Holds.bind fun _ => ?_
+  refine Holds.bind fun bil => ?_
+  exact Holds.pure ⟨rfl, decoded, operands, bil, rfl, rfl, by dsimp only, by dsimp only, rfl⟩
+
+theorem decodePowerPCWith_fields (globals : Primus.Semantics.Environment) (base address : Nat) (data : ByteArray) :
+    Holds (decodePowerPCWith globals base address data)
+      (FromMC address (flow ·.flags)
+        (fun _ operands => powerpcMCTarget 64 address (riscvAddress address data base) operands)
+        (resolveAliases powerpcAliases)) := by
+  unfold decodePowerPCWith
+  fields_decoder
+
+theorem decodePowerPC32With_fields (globals : Primus.Semantics.Environment) (base address : Nat) (data : ByteArray) :
+    Holds (decodePowerPC32With globals base address data)
+      (FromMC address (flow ·.flags)
+        (fun _ operands => powerpcMCTarget 32 address (instructionWord .big (instructionBytes data (address - base))) operands)
+        (resolveAliases powerpcAliases)) := by
+  unfold decodePowerPC32With
+  fields_decoder
+
+/-- An instruction as it comes of the text of LLVM, with the opcode name that it is lifted by. -/
+def FromText (address : Nat) (flowOf : LLVM.Decoded → Bil.Program → Flow) (targetOf : LLVM.Decoded → Option Nat)
+    (insn : Insn) : Prop :=
+  insn.address = address ∧ ∃ decoded : LLVM.Decoded,
+    insn.size = decoded.size ∧ insn.asm = normalizeAssembly decoded.assembly ∧ insn.flow = flowOf decoded insn.bil ∧
+      insn.target = targetOf decoded
+
+local macro "text_decoder" : tactic =>
+  `(tactic| (repeat' first
+    | exact Holds.pure ⟨rfl, _, rfl, rfl, rfl, rfl⟩
+    | refine Holds.bind fun _ => ?_))
+
+theorem decodeMIPSWith_fields (globals : Primus.Semantics.Environment) (base address : Nat) (data : ByteArray) :
+    Holds (decodeMIPSWith globals base address data)
+      (FromText address (fun decoded _ => mipsFlow decoded) (mipsTarget 64 address)) := by
+  unfold decodeMIPSWith
+  text_decoder
+
+theorem decodeMIPS32With_fields (globals : Primus.Semantics.Environment) (base address : Nat) (data : ByteArray) :
+    Holds (decodeMIPS32With globals base address data)
+      (FromText address (fun decoded _ => mipsFlow decoded) (mipsTarget 32 address)) := by
+  unfold decodeMIPS32With
+  text_decoder
+
+theorem decodeARM32With_fields (globals : Primus.Semantics.Environment) (base address : Nat) (data : ByteArray) :
+    Holds (decodeARM32With globals base address data)
+      (FromText address (fun decoded bil => armControlFlow (arm32Flow decoded) bil) (arm32Target address)) := by
+  unfold decodeARM32With
+  refine Holds.bind fun _ => ?_
+  dsimp only
+  split <;> exact Holds.bind fun _ => Holds.pure ⟨rfl, _, rfl, rfl, rfl, rfl⟩
+
+/-- A Thumb instruction out of a block is what it is, and a block has the program and the flow of `thumbItFlow`, whose
+target is the one of its last instruction. -/
+theorem decodeThumbWith_fields (globals : Primus.Semantics.Environment) (base address : Nat) (data : ByteArray) :
+    Holds (decodeThumbWith globals base address data) fun insn =>
+      insn.address = address ∧
+        ((∃ decoded : LLVM.Decoded, insn.size = decoded.size ∧ insn.asm = normalizeAssembly decoded.assembly ∧
+            insn.flow = armControlFlow (flow decoded.flags) insn.bil ∧ insn.target = thumbTarget address decoded) ∨
+          (∃ flow' : Flow, insn.flow = thumbItFlow (armControlFlow flow' insn.bil))) := by
+  unfold decodeThumbWith
+  refine Holds.bind fun _ => ?_
+  split
+  · refine fun s r s' he => ?_
+    have := decodeThumbIt_fields globals base address data _ _ _ s r s' he
+    exact ⟨this.1, .inr this.2⟩
+  · exact Holds.bind fun _ => Holds.pure ⟨rfl, .inl ⟨_, rfl, rfl, rfl, rfl⟩⟩
+
+/-! ### What aliases evaluate to -/
+
+/-- An expression evaluates to a word of this width with this value. -/
+def Reads (env : Bil.Env) (exp : Bil.Exp) (width value : Nat) : Prop :=
+  ∃ (w : Nat) (x : BitVec w), Bil.evalExp env exp = .ok (.bits x) ∧ w = width ∧ x.toNat = value
+
+private theorem Reads.concat {env : Bil.Env} {left right : Bil.Exp} {lw rw l r : Nat}
+    (hl : Reads env left lw l) (hr : Reads env right rw r) :
+    Reads env (.concat left right) (lw + rw) (2 ^ rw * l + r) := by
+  obtain ⟨w1, x1, h1, rfl, rfl⟩ := hl
+  obtain ⟨w2, x2, h2, rfl, rfl⟩ := hr
+  refine ⟨_, Word.concat x1 x2, ?_, rfl, Bap.Proofs.Core.WordLaws.concat_toNat x1 x2⟩
+  simp [Bil.evalExp, h1, h2, Bap.Value.asBits, bind, Except.bind]
+
+private theorem Reads.extract {env : Bil.Env} {value : Bil.Exp} {w v high low : Nat}
+    (h : Reads env value w v) (h1 : low ≤ high) (h2 : high < w) :
+    Reads env (.extract high low value) (high - low + 1) (v / 2 ^ low % 2 ^ (high - low + 1)) := by
+  obtain ⟨w, x, he, rfl, rfl⟩ := h
+  refine ⟨_, BitVec.extractLsb high low x, ?_, rfl, Bap.Proofs.Core.WordLaws.extract_toNat x high low⟩
+  simp [Bil.evalExp, he, Bap.Value.asBits, Bap.Proofs.Core.WordLaws.extract_ok x high low h1 h2, bind, Except.bind]
+
+private theorem Reads.var {env : Bil.Env} {var : Bap.Var} {w : Nat} {x : BitVec w}
+    (h : Bil.lookup env var = .ok (.bits x)) : Reads env (.var var) w x.toNat :=
+  ⟨w, x, by simpa [Bil.evalExp] using h, rfl, rfl⟩
+
+/-- The flags are the bits of `v`, the last one is the lowest. -/
+private def FlagsHold (env : Bil.Env) : List String → Nat → Prop
+  | [], _ => True
+  | name :: rest, v =>
+    (∃ (w : Nat) (x : BitVec w), Bil.lookup env (flagPart name).var = .ok (.bits x) ∧ w = 1 ∧ x.toNat = v / 2 ^ rest.length % 2) ∧
+      FlagsHold env rest v
+
+private theorem flagPart_read (name : String) : (flagPart name).read = .var (flagPart name).var := by
+  simp [AliasPart.read, flagPart]
+
+private theorem flagPart_write (name : String) (value : Bil.Exp) :
+    (flagPart name).write value = .move (flagPart name).var value := by
+  simp [AliasPart.write, flagPart]
+
+private theorem flags_read {env : Bil.Env} {v : Nat} :
+    ∀ (name : String) (rest : List String), FlagsHold env (name :: rest) v →
+      Reads env (aliasRead (flagPart name, rest.map flagPart)) (rest.length + 1) (v % 2 ^ (rest.length + 1))
+  | name, [], ⟨⟨w, x, hx, hw, hv⟩, _⟩ => by
+    subst hw
+    have hr := Reads.var hx
+    rw [hv] at hr
+    simp only [List.map_nil, aliasRead, flagPart_read]
+    simpa [Nat.pow_zero, Nat.div_one] using hr
+  | name, next :: rest, ⟨⟨w, x, hx, hw, hv⟩, htail⟩ => by
+    subst hw
+    have hr := Reads.var hx
+    rw [hv] at hr
+    have hs := flags_read next rest htail
+    have hc := Reads.concat hr hs
+    simp only [List.map_cons, aliasRead, flagPart_read, List.length_cons] at hc ⊢
+    have hnat : 2 ^ (rest.length + 1) * (v / 2 ^ (rest.length + 1) % 2) + v % 2 ^ (rest.length + 1) =
+        v % 2 ^ (rest.length + 1 + 1) := by
+      rw [Nat.mod_pow_succ (k := rest.length + 1)]
+      omega
+    rw [hnat] at hc
+    rw [show rest.length + 1 + 1 = 1 + (rest.length + 1) by omega]
+    rw [show 1 + (rest.length + 1) = rest.length + 1 + 1 by omega] at *
+    simpa [Nat.add_comm] using hc
+
+/-- Setting the flags from the bits of a value in a temporary. -/
+private theorem flags_write (temporary : Bap.Var) {v w : Nat} (x : BitVec w) (hv : x.toNat = v) (fuel : Nat) :
+    ∀ (names : List String) (state : Bil.State) (rest : Bil.Program),
+      names.Nodup → names.length ≤ w → (∀ name ∈ names, (flagPart name).var ≠ temporary) →
+      Bil.lookup state.env temporary = .ok (.bits x) →
+      ∃ state', Bil.execProgram (fuel + names.length + 2) state
+          (aliasWrites (.var temporary) names.length (names.map flagPart) ++ rest) =
+          Bil.execProgram (fuel + 2) state' rest ∧ FlagsHold state'.env names v ∧
+        ∀ var, (∀ name ∈ names, var ≠ (flagPart name).var) → Bil.lookup state'.env var = Bil.lookup state.env var := by
+  intro names
+  induction names with
+  | nil =>
+    intro state rest _ _ _ _
+    exact ⟨state, rfl, by simp [FlagsHold], fun _ _ => rfl⟩
+  | cons name others ih =>
+    intro state rest hnodup hlen hne htemp
+    have hndp := List.nodup_cons.1 hnodup
+    have htail : others.length < w := by simp only [List.length_cons] at hlen; omega
+    have hsize : (flagPart name).size = 1 := rfl
+    have hread : Reads state.env (.var temporary) w v := by
+      rw [← hv]; exact Reads.var htemp
+    have hbit := Reads.extract hread (Nat.le_refl _) htail
+    obtain ⟨w', y, he, hw', hy⟩ := hbit
+    have hw1 : w' = 1 := by omega
+    let state1 : Bil.State := { env := Bil.bind state.env (flagPart name).var (.bits y) }
+    have htemp1 : Bil.lookup state1.env temporary = .ok (.bits x) := by
+      rw [lookup_bind_ne _ _ (fun e => hne name (by simp) e.symm)]; exact htemp
+    obtain ⟨state2, hrun, hhold, hframe⟩ := ih state1 rest hndp.2 (by omega)
+      (fun n hn => hne n (by simp [hn])) htemp1
+    have hexec : Bil.execProgram (fuel + (name :: others).length + 2) state
+        (aliasWrites (.var temporary) (name :: others).length ((name :: others).map flagPart) ++ rest) =
+        Bil.execProgram (fuel + 2) state2 rest := by
+      have hstep : aliasWrites (.var temporary) (others.length + 1) ((name :: others).map flagPart) =
+          .move (flagPart name).var (.extract others.length others.length (.var temporary)) ::
+            aliasWrites (.var temporary) others.length (others.map flagPart) := by
+        simp [aliasWrites, flagPart_write, hsize]
+      simp only [List.length_cons]
+      rw [hstep, List.cons_append, show fuel + (others.length + 1) + 2 = (fuel + others.length + 1) + 2 by omega,
+        exec_move he]
+      rw [show fuel + others.length + 1 + 1 = fuel + others.length + 2 by omega]
+      exact hrun
+    have hlook : Bil.lookup state2.env (flagPart name).var = .ok (.bits y) := by
+      rw [hframe _ (fun n hn e => hndp.1 (by
+        have : name = n := by simpa [flagPart, AliasPart.var] using e
+        rw [this]; exact hn))]
+      exact lookup_bind_same _ _ _
+    have hval : y.toNat = v / 2 ^ others.length % 2 := by simpa using hy
+    refine ⟨state2, hexec, ⟨⟨w', y, hlook, hw1, hval⟩, hhold⟩, ?_⟩
+    intro var hvar
+    rw [hframe var (fun n hn => hvar n (by simp [hn]))]
+    exact lookup_bind_ne _ _ (hvar name (by simp))
+
+private theorem flag_sizes (names : List String) :
+    (names.map flagPart).foldr (fun part size => part.size + size) 0 = names.length := by
+  induction names with
+  | nil => rfl
+  | cons name rest ih =>
+    simp only [List.map_cons, List.foldr_cons, List.length_cons, ih]
+    show 1 + rest.length = _
+    omega
+
+/-- An alias of several flags has the value that is assigned to it, and the flags have the bits of the value. -/
+theorem flagAlias_write_read (typ : Typ) (value : Bil.Exp) (name next : String) (others : List String) (state : Bil.State)
+    (rest : Bil.Program) (fuel w : Nat) (x : BitVec w) (hvalue : Bil.evalExp state.env value = .ok (.bits x))
+    (hnodup : (name :: next :: others).Nodup) (hlen : others.length + 2 ≤ w)
+    (htemp : ∀ n ∈ name :: next :: others, (flagPart n).var ≠ aliasTemporary typ) :
+    ∃ state', Bil.execProgram (fuel + others.length + 5) state
+        (aliasWrite typ value (flagPart name, (next :: others).map flagPart) ++ rest) =
+        Bil.execProgram (fuel + 2) state' rest ∧
+      Reads state'.env (aliasRead (flagPart name, (next :: others).map flagPart)) (others.length + 2)
+        (x.toNat % 2 ^ (others.length + 2)) ∧
+      FlagsHold state'.env (name :: next :: others) x.toNat ∧
+      ∀ var, var ≠ aliasTemporary typ → (∀ n ∈ name :: next :: others, var ≠ (flagPart n).var) →
+        Bil.lookup state'.env var = Bil.lookup state.env var := by
+  let state1 : Bil.State := { env := Bil.bind state.env (aliasTemporary typ) (.bits x) }
+  obtain ⟨state2, hrun, hhold, hframe⟩ := flags_write (aliasTemporary typ) x rfl fuel (name :: next :: others) state1 rest
+    hnodup (by simp only [List.length_cons]; omega) htemp (lookup_bind_same _ _ _)
+  refine ⟨state2, ?_, ?_, hhold, ?_⟩
+  · have hshape : aliasWrite typ value (flagPart name, (next :: others).map flagPart) =
+        .move (aliasTemporary typ) value ::
+          aliasWrites (.var (aliasTemporary typ)) (name :: next :: others).length ((name :: next :: others).map flagPart) := by
+      change Bil.Stmt.move _ value :: aliasWrites _ (((name :: next :: others).map flagPart).foldr
+        (fun part size => part.size + size) 0) ((name :: next :: others).map flagPart) = _
+      rw [flag_sizes]
+    rw [hshape, List.cons_append, show fuel + others.length + 5 = (fuel + others.length + 3) + 2 by omega, exec_move hvalue]
+    rw [show fuel + others.length + 3 + 1 = fuel + (name :: next :: others).length + 2 by simp only [List.length_cons]; omega]
+    exact hrun
+  · have := flags_read name (next :: others) hhold
+    simpa only [List.length_cons] using this
+  · intro var ht hv
+    rw [hframe var hv]
+    exact lookup_bind_ne _ _ ht
+
+private theorem flag_not_temporary (typ : Typ) (names : List String) (h : "_alias" ∉ names) :
+    ∀ n ∈ names, (flagPart n).var ≠ aliasTemporary typ := by
+  intro n hn e
+  have : n = "_alias" := congrArg Bap.Var.name e
+  exact h (this ▸ hn)
+
+/-- EFLAGS is the 32 flags: what is written to it is what is read from it, whatever it is. -/
+theorem x86_eflags_write_read (base : String → Option String) (bits : Nat) (typ : Typ) (value : Bil.Exp) (state : Bil.State)
+    (rest : Bil.Program) (fuel : Nat) (x : BitVec 32) (hvalue : Bil.evalExp state.env value = .ok (.bits x)) :
+    ∃ alias state', (lift% x86Aliases) base bits "EFLAGS" = some alias ∧
+      Bil.execProgram (fuel + 35) state (aliasWrite typ value alias ++ rest) = Bil.execProgram (fuel + 2) state' rest ∧
+      Reads state'.env (aliasRead alias) 32 x.toNat ∧ FlagsHold state'.env (lift% x86FlagBits) x.toNat := by
+  have hnames : (lift% x86FlagBits) = "AI" :: "AES" :: ((lift% x86FlagBits).drop 2) := rfl
+  have hnodup : (lift% x86FlagBits).Nodup := by decide
+  have htemp : "_alias" ∉ (lift% x86FlagBits) := by decide
+  rw [hnames] at hnodup htemp
+  obtain ⟨state', hrun, hread, hhold, _⟩ := flagAlias_write_read typ value "AI" "AES" ((lift% x86FlagBits).drop 2) state rest
+    fuel 32 x hvalue hnodup (by decide) (flag_not_temporary typ _ htemp)
+  refine ⟨_, state', rfl, hrun, ?_, hhold⟩
+  have hlt : x.toNat % 2 ^ 32 = x.toNat := Nat.mod_eq_of_lt x.isLt
+  exact hlt ▸ hread
+
+/-- The flags are where the architecture has them in EFLAGS, from the lowest bit: CF, PF, AF, ZF, SF, TF, IF, DF, OF. -/
+theorem x86_eflags_bits :
+    (lift% x86FlagBits).length = 32 ∧ (lift% x86FlagBits)[31 - 0]? = some "CF" ∧ (lift% x86FlagBits)[31 - 2]? = some "PF" ∧
+      (lift% x86FlagBits)[31 - 4]? = some "AF" ∧ (lift% x86FlagBits)[31 - 6]? = some "ZF" ∧
+      (lift% x86FlagBits)[31 - 7]? = some "SF" ∧ (lift% x86FlagBits)[31 - 8]? = some "TF" ∧
+      (lift% x86FlagBits)[31 - 9]? = some "IF" ∧ (lift% x86FlagBits)[31 - 10]? = some "DF" ∧
+      (lift% x86FlagBits)[31 - 11]? = some "OF" :=
+  ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+private theorem field_case (lt gt eq un : String) (hnodup : [lt, gt, eq, un].Nodup) (htemp : "_alias" ∉ [lt, gt, eq, un])
+    (typ : Typ) (value : Bil.Exp) (state : Bil.State) (rest : Bil.Program) (fuel : Nat) (x : BitVec 4)
+    (hvalue : Bil.evalExp state.env value = .ok (.bits x)) :
+    ∃ state', Bil.execProgram (fuel + 7) state
+        (aliasWrite typ value (flagPart lt, [flagPart gt, flagPart eq, flagPart un]) ++ rest) =
+        Bil.execProgram (fuel + 2) state' rest ∧
+      Reads state'.env (aliasRead (flagPart lt, [flagPart gt, flagPart eq, flagPart un])) 4 x.toNat := by
+  have hlt : x.toNat % 2 ^ 4 = x.toNat := Nat.mod_eq_of_lt x.isLt
+  obtain ⟨state', hrun, hread, _, _⟩ := flagAlias_write_read typ value lt gt [eq, un] state rest fuel 4 x hvalue
+    hnodup (by simp) (flag_not_temporary typ _ htemp)
+  exact ⟨state', hrun, hlt ▸ hread⟩
+
+/-- A field of the condition register of PowerPC is its bits: what is written to it is what is read from it. -/
+theorem powerpc_field_write_read (name : String) (h : name ∈ ["CR0", "CR1", "CR2", "CR3", "CR4", "CR5", "CR6", "CR7"])
+    (typ : Typ) (value : Bil.Exp) (state : Bil.State) (rest : Bil.Program) (fuel : Nat) (x : BitVec 4)
+    (hvalue : Bil.evalExp state.env value = .ok (.bits x)) :
+    ∃ alias state', (lift% powerpcAliases) name = some alias ∧
+      Bil.execProgram (fuel + 7) state (aliasWrite typ value alias ++ rest) = Bil.execProgram (fuel + 2) state' rest ∧
+      Reads state'.env (aliasRead alias) 4 x.toNat := by
+  simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+  rcases h with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+  · obtain ⟨s, h1, h2⟩ := field_case "CR0LT" "CR0GT" "CR0EQ" "CR0UN" (by decide) (by decide) typ value state rest fuel x hvalue
+    exact ⟨_, s, rfl, h1, h2⟩
+  · obtain ⟨s, h1, h2⟩ := field_case "CR1LT" "CR1GT" "CR1EQ" "CR1UN" (by decide) (by decide) typ value state rest fuel x hvalue
+    exact ⟨_, s, rfl, h1, h2⟩
+  · obtain ⟨s, h1, h2⟩ := field_case "CR2LT" "CR2GT" "CR2EQ" "CR2UN" (by decide) (by decide) typ value state rest fuel x hvalue
+    exact ⟨_, s, rfl, h1, h2⟩
+  · obtain ⟨s, h1, h2⟩ := field_case "CR3LT" "CR3GT" "CR3EQ" "CR3UN" (by decide) (by decide) typ value state rest fuel x hvalue
+    exact ⟨_, s, rfl, h1, h2⟩
+  · obtain ⟨s, h1, h2⟩ := field_case "CR4LT" "CR4GT" "CR4EQ" "CR4UN" (by decide) (by decide) typ value state rest fuel x hvalue
+    exact ⟨_, s, rfl, h1, h2⟩
+  · obtain ⟨s, h1, h2⟩ := field_case "CR5LT" "CR5GT" "CR5EQ" "CR5UN" (by decide) (by decide) typ value state rest fuel x hvalue
+    exact ⟨_, s, rfl, h1, h2⟩
+  · obtain ⟨s, h1, h2⟩ := field_case "CR6LT" "CR6GT" "CR6EQ" "CR6UN" (by decide) (by decide) typ value state rest fuel x hvalue
+    exact ⟨_, s, rfl, h1, h2⟩
+  · obtain ⟨s, h1, h2⟩ := field_case "CR7LT" "CR7GT" "CR7EQ" "CR7UN" (by decide) (by decide) typ value state rest fuel x hvalue
+    exact ⟨_, s, rfl, h1, h2⟩
+
+private theorem part_bits (s l q v r : Nat) (hr : r < 2 ^ l) (hv : v < 2 ^ s) :
+    (2 ^ (s + l) * q + (2 ^ l * v + r)) / 2 ^ l % 2 ^ s = v := by
+  have hpos : 0 < 2 ^ l := Nat.two_pow_pos l
+  have heq : 2 ^ (s + l) * q + (2 ^ l * v + r) = 2 ^ l * (2 ^ s * q + v) + r := by
+    rw [Nat.pow_add, Nat.mul_add, Nat.add_assoc, Nat.mul_comm (2 ^ s) (2 ^ l), Nat.mul_assoc]
+  rw [heq, Nat.mul_add_div hpos, Nat.div_eq_of_lt hr, Nat.add_zero, Nat.mul_add_mod, Nat.mod_eq_of_lt hv]
+
+/-- A part of a register has the value that is written to it, and the other bits of the register stay. This is what
+the high bytes of x86 and the `Sn` of ARM are. -/
+theorem aliasPart_write_read (part : AliasPart) (hlow : part.low ≤ part.high) (hhigh : part.high < part.width)
+    (value : Bil.Exp) (state : Bil.State) (rest : Bil.Program) (fuel : Nat) (b : BitVec part.width)
+    (v : BitVec (part.high + 1 - part.low)) (hbase : Bil.lookup state.env part.var = .ok (.bits b))
+    (hvalue : Bil.evalExp state.env value = .ok (.bits v)) :
+    ∃ state', Bil.execProgram (fuel + 2) state (part.write value :: rest) = Bil.execProgram (fuel + 1) state' rest ∧
+      Reads state'.env part.read (part.high + 1 - part.low) v.toNat ∧
+      Reads state'.env (.var part.var) part.width
+        (2 ^ (part.high + 1) * (b.toNat / 2 ^ (part.high + 1)) + (2 ^ part.low * v.toNat + b.toNat % 2 ^ part.low)) ∧
+      ∀ other, other ≠ part.var → Bil.lookup state'.env other = Bil.lookup state.env other := by
+  obtain ⟨base, width, high, low⟩ := part
+  dsimp only at hlow hhigh b v ⊢
+  have hbaseRead : Reads state.env (.var (AliasPart.var ⟨base, width, high, low⟩)) width b.toNat := Reads.var hbase
+  have hvalueRead : Reads state.env value (high + 1 - low) v.toNat := ⟨_, v, hvalue, rfl, rfl⟩
+  have hlowLt : b.toNat % 2 ^ low < 2 ^ low := Nat.mod_lt _ (Nat.two_pow_pos low)
+  -- the value that is moved to the register
+  have hbelow : Reads state.env
+      (if low = 0 then value else .concat value (.extract (low - 1) 0 (.var (AliasPart.var ⟨base, width, high, low⟩))))
+      (high + 1) (2 ^ low * v.toNat + b.toNat % 2 ^ low) := by
+    split
+    · rename_i h0
+      subst h0
+      simpa [Nat.mod_one] using hvalueRead
+    · rename_i h0
+      have he := Reads.extract hbaseRead (Nat.zero_le (low - 1)) (by omega)
+      have hc := Reads.concat hvalueRead he
+      have hw : high + 1 - low + (low - 1 - 0 + 1) = high + 1 := by omega
+      have hs : low - 1 - 0 + 1 = low := by omega
+      rw [hw] at hc
+      rw [hs] at hc
+      simpa using hc
+  have hall : Reads state.env
+      (if high + 1 < width then
+        .concat (.extract (width - 1) (high + 1) (.var (AliasPart.var ⟨base, width, high, low⟩)))
+          (if low = 0 then value else .concat value (.extract (low - 1) 0 (.var (AliasPart.var ⟨base, width, high, low⟩))))
+      else (if low = 0 then value else .concat value (.extract (low - 1) 0 (.var (AliasPart.var ⟨base, width, high, low⟩)))))
+      width (2 ^ (high + 1) * (b.toNat / 2 ^ (high + 1)) + (2 ^ low * v.toNat + b.toNat % 2 ^ low)) := by
+    split
+    · rename_i hup
+      have he := Reads.extract hbaseRead (show high + 1 ≤ width - 1 by omega) (show width - 1 < width by omega)
+      have hc := Reads.concat he hbelow
+      have hw : width - 1 - (high + 1) + 1 + (high + 1) = width := by omega
+      have hs : width - 1 - (high + 1) + 1 = width - (high + 1) := by omega
+      rw [hw, hs, Nat.mod_eq_of_lt] at hc
+      · exact hc
+      · have := b.isLt
+        exact Nat.div_lt_of_lt_mul (by rw [← Nat.pow_add]; rw [show high + 1 + (width - (high + 1)) = width by omega]; exact this)
+    · rename_i hup
+      have hw : width = high + 1 := by omega
+      have hq : b.toNat / 2 ^ (high + 1) = 0 := Nat.div_eq_of_lt (hw ▸ b.isLt)
+      rw [hq, Nat.mul_zero, Nat.zero_add]
+      exact hw ▸ hbelow
+  obtain ⟨w', y, he, hw', hy⟩ := hall
+  refine ⟨{ env := Bil.bind state.env (AliasPart.var ⟨base, width, high, low⟩) (.bits y) }, ?_, ?_, ?_, ?_⟩
+  · exact exec_move he
+  · subst hw'
+    have hnew : Reads (Bil.bind state.env (AliasPart.var ⟨base, w', high, low⟩) (.bits y))
+        (.var (AliasPart.var ⟨base, w', high, low⟩)) w' y.toNat := Reads.var (lookup_bind_same _ _ _)
+    unfold AliasPart.read
+    dsimp only
+    split
+    · rename_i hwhole
+      obtain ⟨h0, h1⟩ := hwhole
+      subst h0
+      have hq : b.toNat / 2 ^ (high + 1) = 0 := Nat.div_eq_of_lt (h1 ▸ b.isLt)
+      have hyv : y.toNat = v.toNat := by simp [hy, hq, Nat.mod_one]
+      rw [← hyv]
+      have hw : high + 1 - 0 = w' := by omega
+      rw [hw]
+      exact hnew
+    · have hx := Reads.extract hnew hlow hhigh
+      have hs : high - low + 1 = high + 1 - low := by omega
+      rw [hs, hy] at hx
+      have hsum : high + 1 = (high + 1 - low) + low := by omega
+      have hbits := part_bits (high + 1 - low) low (b.toNat / 2 ^ (high + 1)) v.toNat (b.toNat % 2 ^ low) hlowLt v.isLt
+      rw [← hsum] at hbits
+      rw [hbits] at hx
+      exact hx
+  · subst hw'
+    rw [← hy]
+    exact Reads.var (lookup_bind_same _ _ _)
+  · intro other hother
+    exact lookup_bind_ne _ _ hother
+
+/-! ### The tables of the registers -/
+
+/-- As in `x86_target` of the reference implementation. -/
+theorem x86_status_registers :
+    x86Register "ST0" = register "ST0" 80 80 ∧ x86Register "ST7" = register "ST7" 80 80 ∧
+      x86Register "EFLAGS" = register "EFLAGS" 32 32 ∧ x86Register "MXCSR" = register "MXCSR" 32 32 ∧
+      x86Register "FPU_CONTROL" = register "FPU_CONTROL" 16 16 ∧ x86Register "FPU_STATUS" = register "FPU_STATUS" 16 16 ∧
+      x86Register "FPU_TAG" = register "FPU_TAG" 16 16 ∧ x8632Register "ST0" = register "ST0" 80 80 ∧
+      x8632Register "EFLAGS" = register "EFLAGS" 32 32 ∧ x8632Register "MXCSR" = register "MXCSR" 32 32 ∧
+      x8632Register "FPU_TAG" = register "FPU_TAG" 16 16 :=
+  ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- As in `arm_target` of the reference implementation, where `Sn` and `Qn` are aliases of `Dn`. -/
+theorem arm_registers :
+    arm32Register "D0" = register "D0" 64 64 ∧ arm32Register "D31" = register "D31" 64 64 ∧
+      arm32Register "Q15" = register "Q15" 128 128 ∧ arm32Register "S1" = register "S1" 32 32 ∧
+      arm32Register "FPSCR" = register "FPSCR" 32 32 ∧ arm32Register "TPIDRURO" = register "TPIDRURO" 32 32 ∧
+      arm32Register "TPIDRURW" = register "TPIDRURW" 32 32 ∧ arm32Register "QF" = register "QF" 1 1 := by
+  refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- `S0` and `S1` are the low and high halves of `D0`, `S31` the high half of `D15`, and `Qn` is `D(2n+1):D(2n)`. -/
+theorem arm_aliases :
+    armAliases "S0" = some (⟨"D0", 64, 31, 0⟩, []) ∧ armAliases "S1" = some (⟨"D0", 64, 63, 32⟩, []) ∧
+      armAliases "S31" = some (⟨"D15", 64, 63, 32⟩, []) ∧
+      armAliases "Q0" = some (⟨"D1", 64, 63, 0⟩, [⟨"D0", 64, 63, 0⟩]) ∧
+      armAliases "Q15" = some (⟨"D31", 64, 63, 0⟩, [⟨"D30", 64, 63, 0⟩]) ∧
+      armAliases "D0" = none ∧ armAliases "R0" = none ∧ armAliases "SP" = none ∧ armAliases "S32" = none ∧
+      armAliases "Q16" = none :=
+  ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+set_option maxRecDepth 20000 in
+/-- `R31` is the stack pointer, whose variable is `SP`, and PSTATE is what it has of each field. -/
+theorem aarch64_status_registers :
+    aarch64Register "DAIF" = register "DAIF" 4 4 ∧ aarch64Register "SPSel" = register "SPSel" 1 1 ∧
+      aarch64Register "PAN" = register "PAN" 1 1 ∧ aarch64Register "UAO" = register "UAO" 1 1 ∧
+      aarch64Register "R31" = register "SP" 64 64 ∧ aarch64Register "SP_EL0" = register "SP_EL0" 64 64 ∧
+      aarch64Register "SP_EL1" = register "SP_EL1" 64 64 ∧ aarch64Register "CNTVCT_EL0" = register "CNTVCT_EL0" 64 64 ∧
+      aarch64Register "FPCR" = register "FPCR" 32 32 ∧ aarch64Register "FPSR" = register "FPSR" 32 32 := by
+  and_intros <;> rfl
+
+set_option maxRecDepth 20000 in
+theorem powerpc_status_registers :
+    powerpcRegister "CR0" = register "CR0" 4 4 ∧ powerpcRegister "CR7" = register "CR7" 4 4 ∧
+      powerpcRegister "FE" = register "FE" 1 1 ∧ powerpcRegister "FG" = register "FG" 1 1 ∧
+      powerpcRegister "FL" = register "FL" 1 1 ∧ powerpcRegister "FU" = register "FU" 1 1 ∧
+      powerpc32Register "CR0" = register "CR0" 4 4 ∧ powerpc32Register "FE" = register "FE" 1 1 ∧
+      powerpcAliases "CR2" = some (⟨"CR2LT", 1, 0, 0⟩, [⟨"CR2GT", 1, 0, 0⟩, ⟨"CR2EQ", 1, 0, 0⟩, ⟨"CR2UN", 1, 0, 0⟩]) ∧
+      powerpcAliases "CR2LT" = none := by
+  and_intros <;> rfl
+
+set_option maxRecDepth 20000 in
+theorem riscv_status_registers :
+    Assoc.get "FCSR" riscvGlobals = some (register "FCSR" 32 32) ∧ Assoc.get "VXRM" riscvGlobals = some (register "VXRM" 32 32) ∧
+      Assoc.get "FCSR" riscv32Globals = some (register "FCSR" 32 32) ∧
+      Assoc.get "VXRM" riscv32Globals = some (register "VXRM" 32 32) ∧
+      Assoc.get "F31" riscv32Globals = some (register "F31" 64 64) :=
+  ⟨rfl, rfl, rfl, rfl, rfl⟩
+
+set_option maxRecDepth 20000 in
+theorem mips_status_registers :
+    Assoc.get "USERLOCAL" mipsGlobals = some (register "USERLOCAL" 64 64) ∧
+      Assoc.get "USERLOCAL" mips32Globals = some (register "USERLOCAL" 32 32) ∧
+      Assoc.get "F31" mipsGlobals = some (register "F31" 64 64) ∧
+      Assoc.get "F31" mips32Globals = some (register "F31" 32 32) :=
+  ⟨rfl, rfl, rfl, rfl⟩
+
+/-! ### The prefixes of x86 -/
+
+/-- What isn't a prefix ends them: a repeated string instruction has a prefix, a plain one doesn't. -/
+theorem x86Prefixes_stop (long : Bool) (byte : Nat) (rest : List Nat) (h : x86LegacyPrefix byte = false)
+    (hrex : long = false ∨ byte / 16 ≠ 4 ∨ (rest.head?.map x86LegacyPrefix).getD false = false) :
+    x86Prefixes long (byte :: rest) = [] := by
+  simp only [x86Prefixes, h, Bool.false_eq_true, ite_false]
+  rcases hrex with rfl | hrex | hrex
+  · simp
+  · simp [hrex]
+  · simp [hrex]
+
+/-- The prefixes are bytes of the instruction. -/
+theorem x86Prefixes_mem (long : Bool) (bytes : List Nat) (byte : Nat) (h : byte ∈ x86Prefixes long bytes) : byte ∈ bytes := by
+  induction bytes with
+  | nil => cases h
+  | cons head tail ih =>
+    unfold x86Prefixes at h
+    split at h
+    · dsimp only at h
+      split at h
+      · exact List.mem_cons_of_mem _ (ih h)
+      · rcases List.mem_cons.1 h with rfl | h
+        · exact List.mem_cons_self
+        · exact List.mem_cons_of_mem _ (ih h)
+    · split at h
+      · exact List.mem_cons_of_mem _ (ih h)
+      · cases h
+
+/-- REP and REPNE are of one group: an instruction has one of them, the last one, which is what `x86-prefix` reports. -/
+theorem x86Prefixes_one_repeat (long : Bool) (bytes : List Nat) :
+    ((x86Prefixes long bytes).filter x86RepeatPrefix).length ≤ 1 := by
+  induction bytes with
+  | nil => simp [x86Prefixes]
+  | cons head tail ih =>
+    unfold x86Prefixes
+    split
+    · dsimp only
+      split
+      · exact ih
+      · rename_i hboth
+        by_cases hr : x86RepeatPrefix head = true
+        · have hnone : (x86Prefixes long tail).any x86RepeatPrefix = false := by
+            simpa [hr] using hboth
+          have hempty : (x86Prefixes long tail).filter x86RepeatPrefix = [] := by
+            simp only [List.any_eq_false] at hnone
+            simp only [List.filter_eq_nil_iff]
+            exact hnone
+          simp [hr, hempty]
+        · simpa [List.filter_cons, hr] using ih
+    · split
+      · exact ih
+      · simp
+
+theorem x86Prefixes_examples :
+    x86Prefixes true [0xf3, 0xa4] = [0xf3] ∧ x86Prefixes false [0xf3, 0xa4] = [0xf3] ∧ x86Prefixes true [0xa4] = [] ∧
+      x86Prefixes true [0xf2, 0xae] = [0xf2] ∧ x86Prefixes true [0xf3, 0xf2, 0xae] = [0xf2] ∧
+      x86Prefixes true [0xf2, 0xf3, 0xae] = [0xf3] ∧ x86Prefixes true [0x66, 0xf3, 0xa5] = [0x66, 0xf3] ∧
+      x86Prefixes true [0x48, 0xf3, 0xa4] = [0xf3] ∧ x86Prefixes false [0x48, 0xf3, 0xa4] = [] ∧
+      x86Prefixes true [0xf3, 0x48, 0xab] = [0xf3] := by
+  decide
+
+/-! ### The likely calls of MIPS -/
+
+theorem mips_likely_calls : mipsLikelyMnemonics.contains "bltzall" = true ∧ mipsLikelyMnemonics.contains "bgezall" = true ∧
+    mipsLikelyMnemonics.contains "bltzal" = false ∧ mipsLikelyMnemonics.contains "bgezal" = false := by
+  decide
+
+/-! ### The order of the semantics -/
+
+/-- The primitives that are bound first are primitives of the semantics, so that a name resolves to what it did. -/
+theorem semanticsPrimitives_are_primitives : ∀ name ∈ semanticsPrimitives, name ∈ (primus% primitiveNames) := by
+  decide
+
+theorem primitive_not_core : ∀ name ∈ semanticsPrimitives, name.startsWith "core:" = false := by
+  simp [semanticsPrimitives]
+
+private theorem get_prims (ps : List String) (rest : Globals) (name : String) :
+    Assoc.get name ((ps.map fun n => ((n, .callable (.primitive n)) : String × PValue)) ++ rest) =
+      if name ∈ ps then some (.callable (.primitive name)) else Assoc.get name rest := by
+  induction ps with
+  | nil => simp
+  | cons p ps ih =>
+    by_cases hp : name = p
+    · subst hp
+      simp [Assoc.get]
+    · have hb : (name == p) = false := by simpa using hp
+      have : Assoc.get name (((p :: ps).map fun n => ((n, .callable (.primitive n)) : String × PValue)) ++ rest) =
+          Assoc.get name ((ps.map fun n => ((n, .callable (.primitive n)) : String × PValue)) ++ rest) := by
+        simp [Assoc.get, List.lookup, hb]
+      rw [this, ih]
+      simp [hp]
+
+/-- Binding the primitives first doesn't change what a name resolves to, unless a register has the name of a primitive,
+as none has. -/
+theorem lookup_primitiveGlobals (definitions rest : Globals) (name : String) (locals : Bap.Primus.Semantics.Locals)
+    (hrest : ∀ n ∈ semanticsPrimitives, Assoc.get n definitions = none → Assoc.get n rest = none) :
+    (primus% lookup) name locals ((lift% primitiveGlobals) definitions ++ rest) = (primus% lookup) name locals rest := by
+  have hget : Assoc.get name ((lift% primitiveGlobals) definitions ++ rest) =
+      if name ∈ semanticsPrimitives.filter (fun n => (Assoc.get n definitions).isNone) then
+        some (.callable (.primitive name))
+      else Assoc.get name rest := get_prims _ rest name
+  unfold_lookup
+  dsimp only
+  rw [hget]
+  by_cases hn : name ∈ semanticsPrimitives.filter (fun n => (Assoc.get n definitions).isNone)
+  · have hmem := (List.mem_filter.1 hn).1
+    have hnone := hrest name hmem (by simpa using (List.mem_filter.1 hn).2)
+    have hcore := primitive_not_core name hmem
+    have hprim := semanticsPrimitives_are_primitives name hmem
+    simp [hn, hnone, hcore, hprim]
+  · simp [hn]
+
+theorem primitiveGlobals_spec (definitions : Globals) (binding : String × PValue)
+    (h : binding ∈ (lift% primitiveGlobals) definitions) :
+    binding.1 ∈ (primus% primitiveNames) ∧ Assoc.get binding.1 definitions = none ∧
+      binding.2 = .callable (.primitive binding.1) := by
+  unfold_primitive_globals at h
+  simp only [List.mem_map, List.mem_filter, Option.isNone_iff_eq_none] at h
+  obtain ⟨name, ⟨hname, hnone⟩, rfl⟩ := h
+  exact ⟨semanticsPrimitives_are_primitives name hname, hnone, rfl⟩
+
+/-- A window of the bytes of a decoder is long enough for an instruction and it holds the same bytes. -/
+theorem instructionBytes_get (data : ByteArray) (offset index : Nat) (hindex : index < 16) (hsize : offset + index < data.size) :
+    (instructionBytes data offset)[index]! = data[offset + index]! := by
+  have bang_eq (page : ByteArray) (j : Nat) : page[j]! = (page.data[j]?).getD 0 := by
+    have hpage : page[j]! = page.data[j]! := by
+      by_cases hj : j < page.size
+      · simp [getElem!_pos, hj]
+        rfl
+      · have hj' : ¬ j < page.data.size := hj
+        simp [getElem!_neg, hj]
+    rw [hpage, getElem!_def]
+    cases page.data[j]? <;> rfl
+  have hd : min (offset + 16) data.data.size - offset > index := by
+    have : data.data.size = data.size := rfl
+    omega
+  rw [bang_eq, bang_eq, instructionBytes, ByteArray.data_extract, Array.getElem?_extract, ite_eq_left hd]
 
 /-! ## Target modules -/
 
@@ -1460,8 +2902,8 @@ structure RegisteredAs (name : String) (d : Disassembler) : Prop where
 private theorem registeredAs_mk (name : String) (decode : Nat → ByteArray → IO (Except String Insn))
     (inner : Nat → ByteArray → IO Insn) (hd : ∀ a d, decode a d = wrap (inner a d))
     {α} (classify : α → Flow) (hi : ∀ a d, Holds (inner a d) (Lifted classify a))
-    (delay : Insn → Bool) :
-    RegisteredAs name { name := name, decode := decode, hasDelaySlot := delay } where
+    (delay : Insn → Bool) (annul : Insn → Bool := fun _ => false) :
+    RegisteredAs name { name := name, decode := decode, hasDelaySlot := delay, annulsSlot := annul } where
   name := rfl
   total a d := by
     show NoThrow (decode a d)
@@ -1475,14 +2917,14 @@ private theorem registeredAs_mk (name : String) (decode : Nat → ByteArray → 
 
 /-- MIPS scans cover their delay slots, and no other target has one. -/
 theorem mips_delay_slots (base : Nat) :
-    Holds (MIPS.disassembler base) (fun d => d.hasDelaySlot = mipsHasDelaySlot) ∧
-      Holds (MIPS32.disassembler base) (fun d => d.hasDelaySlot = mipsHasDelaySlot) ∧
+    Holds (MIPS.disassembler base) (fun d => d.hasDelaySlot = mipsHasDelaySlot ∧ d.annulsSlot = mipsAnnulsSlot) ∧
+      Holds (MIPS32.disassembler base) (fun d => d.hasDelaySlot = mipsHasDelaySlot ∧ d.annulsSlot = mipsAnnulsSlot) ∧
       Holds (X86.disassembler base) (fun d => ∀ insn, d.hasDelaySlot insn = false) := by
   refine ⟨?_, ?_, ?_⟩
   · unfold MIPS.disassembler
-    exact Holds.bind fun _ => Holds.pure rfl
+    exact Holds.bind fun _ => Holds.pure ⟨rfl, rfl⟩
   · unfold MIPS32.disassembler
-    exact Holds.bind fun _ => Holds.pure rfl
+    exact Holds.bind fun _ => Holds.pure ⟨rfl, rfl⟩
   · unfold X86.disassembler
     exact Holds.bind fun _ => Holds.pure fun _ => rfl
 
@@ -1563,7 +3005,7 @@ theorem mips_disassembler (base : Nat) :
     Holds (MIPS.disassembler base) (RegisteredAs "mips64-llvm-primus") := by
   unfold MIPS.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeMIPSWith globals base) (fun _ _ => rfl) _ (decodeMIPSWith_lifted globals base) _
+  exact registeredAs_mk _ _ (decodeMIPSWith globals base) (fun _ _ => rfl) _ (decodeMIPSWith_lifted globals base) _ _
 
 theorem mips_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (MIPS.decodeAt base address data) fun result =>
@@ -1653,7 +3095,7 @@ theorem mips32_disassembler (base : Nat) :
     Holds (MIPS32.disassembler base) (RegisteredAs "mips-llvm-primus") := by
   unfold MIPS32.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeMIPS32With globals base) (fun _ _ => rfl) _ (decodeMIPS32With_lifted globals base) _
+  exact registeredAs_mk _ _ (decodeMIPS32With globals base) (fun _ _ => rfl) _ (decodeMIPS32With_lifted globals base) _ _
 
 theorem mips32_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (MIPS32.decodeAt base address data) fun result =>

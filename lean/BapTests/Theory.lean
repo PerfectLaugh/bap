@@ -34,14 +34,52 @@ private def child : Target := declare {
   parent := some parent
   nicknames := some ["amd64", "x64"]
   bits := some 64
+}
+
+private def ah := reg "AH" 8
+private def al := reg "AL" 8
+private def flags := reg "FLAGS" 2
+private def status := reg "STATUS" 2
+
+/-- The check that discharges `Free` for a concrete table, on the examples. -/
+private def resolving : IO Unit := do
+  let table := Proofs.Theory.TargetLaws.X86Table.table
+  assertTrue "the table of RAX resolves" (Proofs.Theory.TargetLaws.Resolves table)
+  assertEqual "AH in RAX" (some (.sub Proofs.Theory.TargetLaws.X86Table.rax 15 8 false))
+    (table.unalias Proofs.Theory.TargetLaws.X86Table.ah)
+
+/-- The example of upstream's documentation of `Origin`, with a flag register of each direction. -/
+private def nested : Target := declare {
+  name := "nested"
+  regs := some [([.general], [rax]), ([.alias], [upper, eax, ax, ah, al, flags, cf])]
   aliases := some [
     ⟨rax, [.reg upper, .reg eax]⟩,
-    ⟨eax, [.reg ax]⟩,
-    ⟨reg "RFLAGS" 64, [.bit of, .bit cf]⟩
+    ⟨eax, [.unknown, .reg ax]⟩,
+    ⟨ax, [.reg ah, .reg al]⟩,
+    ⟨flags, [.bit of, .bit (flag "ZF")]⟩,
+    ⟨status, [.unknown, .bit cf]⟩
   ]
 }
 
+private def r25 := reg "r25" 8
+private def r24 := reg "r24" 8
+private def r25r24 := reg "r25r24" 16
+private def w := reg "w" 16
+private def whi := reg "whi" 8
+private def wlo := reg "wlo" 8
+
+/-- The example of upstream's documentation of `Alias`: equations hold in either direction. -/
+private def equations : Target := declare {
+  name := "equations"
+  regs := some [([.general], [r25, r24]), ([.alias], [r25r24, w, whi, wlo])]
+  aliases := some [⟨r25r24, [.reg r25, .reg r24]⟩, ⟨w, [.reg r25r24]⟩, ⟨w, [.reg whi, .reg wlo]⟩]
+}
+
+private def aliasing (regs : List Theory.Var) (aliases : List Alias) : Target :=
+  declare { name := "aliasing", regs := some [([.alias], regs)], aliases := some aliases }
+
 def run : IO Unit := do
+  resolving
   assertEqual "target width override" 64 child.bits
   assertEqual "target byte inheritance" 8 child.byte
   assertEqual "target system inheritance" SystemKind.linux child.system
@@ -64,21 +102,37 @@ def run : IO Unit := do
   assertEqual "reg honours exclusion" (some eax) (multiRole.reg .general true [.integer])
   assertEqual "reg stays ambiguous without exclusion" none (multiRole.reg .general true)
   assertEqual "whole-register alias is an alias" (some (.sub eax 31 0 true))
-    (Target.unalias (declare {
-      name := "full"
-      aliases := some [⟨eax, [.reg (reg "E" 32)]⟩]
-    }) (reg "E" 32))
+    ((aliasing [reg "E" 32] [⟨eax, [.reg (reg "E" 32)]⟩]).unalias (reg "E" 32))
   assertEqual "missing role is rejected" false (multiRole.hasRoles [.general, .integer] eax)
   assertEqual "absent variable has no role" false (multiRole.hasRoles [.general] of)
   assertTrue "empty role list holds vacuously" (multiRole.hasRoles [] of)
   assertEqual "register role query" [rax] (child.registers [.general])
   assertEqual "register exclusion" [] (child.registers [] [.general])
   assertEqual "unique register query" (some rax) (child.reg .general true)
-  assertEqual "alias subregister range" (some (.sub rax 31 0 false)) (child.unalias eax)
-  assertEqual "nested alias resolved to original register" (some (.sub rax 15 0 false)) (child.unalias ax)
-  assertEqual "alias superregister" (some (.sup [upper, eax])) (child.unalias rax)
-  assertEqual "flag bit range" (some (.sub (reg "RFLAGS" 64) 0 0 false)) (child.unalias cf)
-  assertEqual "flag set" (some (.set [of, cf])) (child.unalias (reg "RFLAGS" 64))
+  assertEqual "alias subregister range" (some (.sub rax 31 0 false)) (nested.unalias eax)
+  assertEqual "alias of the high half" (some (.sub rax 63 32 false)) (nested.unalias upper)
+  assertEqual "nested alias resolved to original register" (some (.sub rax 15 0 false)) (nested.unalias ax)
+  assertEqual "nested high byte adds offsets" (some (.sub rax 15 8 false)) (nested.unalias ah)
+  assertEqual "nested low byte" (some (.sub rax 7 0 false)) (nested.unalias al)
+  assertEqual "a basis register has no origin" none (nested.unalias rax)
+  assertEqual "flag bit range" (some (.sub status 0 0 false)) (nested.unalias cf)
+  assertEqual "flag set" (some (.set [of, flag "ZF"])) (nested.unalias flags)
+  assertEqual "a flag of the basis has no origin" none (nested.unalias of)
+  assertEqual "concatenation of basis registers" (some (.sup [r25, r24])) (equations.unalias r25r24)
+  assertEqual "alias of a concatenation" (some (.sup [r25, r24])) (equations.unalias w)
+  assertEqual "part of an alias is a synonym of a basis register" (some (.sub r25 7 0 true)) (equations.unalias whi)
+  assertEqual "other part of an alias" (some (.sub r24 7 0 true)) (equations.unalias wlo)
+  assertEqual "a register above an unknown part" (some (.sub rax 63 32 false))
+    ((aliasing [upper] [⟨rax, [.reg upper, .unknown]⟩]).unalias upper)
+  assertEqual "parts must add up to the register" none ((aliasing [ax] [⟨eax, [.reg ax]⟩]).unalias ax)
+  assertEqual "an alias wider than its only part has no origin" none
+    ((aliasing [eax] [⟨eax, [.unknown, .reg ax]⟩]).unalias eax)
+  assertEqual "an alias across basis registers has no origin" none
+    ((aliasing [r25r24, whi] [⟨r25r24, [.reg r25, .reg r24]⟩, ⟨r25r24, [.unknown, .reg whi, .unknown]⟩]).unalias whi)
+  assertEqual "equations without an alias role have no solution" none
+    ((declare { name := "unmarked", aliases := some [⟨rax, [.reg upper, .reg eax]⟩] }).unalias eax)
+  assertEqual "a cycle of aliases has no origin" none
+    ((aliasing [r25, r24] [⟨r25, [.reg r24]⟩, ⟨r24, [.reg r25]⟩]).unalias r25)
   let registry := register child [parent]
   assertEqual "registry lookup by name" (some child) (get "x86_64" registry)
   assertEqual "registry lookup is not by nickname" none (get "amd64" registry)
@@ -170,8 +224,9 @@ def run : IO Unit := do
   assertEqual "MIPS n64 ninth argument uses stack" (ABI.Location.stack 0) (ABI.argumentLocation mips 8)
   match ABI.convention .mips 32 with
   | some mips32 =>
-    assertEqual "MIPS o32 fifth argument uses stack" (ABI.Location.stack 0)
+    assertEqual "MIPS o32 fifth argument is above the home area" (ABI.Location.stack 16)
       (ABI.argumentLocation mips32 4)
+    assertEqual "MIPS o32 sixth argument follows it" (ABI.Location.stack 20) (ABI.argumentLocation mips32 5)
   | none => throw <| IO.userError "missing MIPS o32 ABI"
   let i386 ← convention .x86
   assertEqual "x86 word size" 32 i386.wordSize

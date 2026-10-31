@@ -42,6 +42,7 @@ import Bap.Proofs.Plugin
 import Bap.Proofs.Primus
 import Bap.Proofs.Project
 import Bap.Proofs.Symbolic
+import Bap.Proofs.SmtReader
 import Bap.Proofs.Target
 import Bap.Proofs.Theory
 

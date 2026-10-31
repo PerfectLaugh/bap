@@ -225,68 +225,121 @@ inductive Origin where
   | set (bits : List Var)
   deriving DecidableEq, Repr
 
-private def aliasPartVar : AliasPart → Option Var
-  | .reg var | .bit var => some var
-  | .unknown => none
+/-- The number of bits of a register. -/
+def regWidth (var : Var) : Option Nat :=
+  match var.sort with
+  | .bitv width => some width
+  | .bool => some 1
+  | _ => none
 
-private def partWidth : AliasPart → Option Nat
-  | .reg var => var.sort.bits
-  | .bit _ => some 1
-  | .unknown => none
+/-- A part of a definition as an equation: the bits of `var` are the `width` bits of the defined
+register that start at `offset`. -/
+structure AliasSpan where
+  var : Var
+  offset : Nat
+  width : Nat
+  deriving DecidableEq, Repr
 
-private def findSub (var : Var) : List Alias → Option Origin
-  | [] => none
-  | alias :: rest =>
-    let rec find (parts : List AliasPart) : Option Origin :=
-      match parts with
-      | [] => none
-      | part :: tail =>
-        let low := (tail.mapM partWidth).map List.sum
-        match part with
-        | .reg partValue | .bit partValue =>
-          if partValue = var then
-            match partWidth part, low with
-            | some width, some low =>
-              some (.sub alias.target (low + width - 1) low false)
-            | _, _ => none
-          else
-            find tail
-        | .unknown => find tail
-    match find alias.parts with
-    | some origin => some origin
-    | none => findSub var rest
+/-- Lays parts out from the end of the list, which is the least significant one. Returns their size. -/
+private def layoutParts (hole : Nat) : List AliasPart → Option (Nat × List AliasSpan)
+  | [] => some (0, [])
+  | part :: rest => do
+    let (low, spans) ← layoutParts hole rest
+    match part with
+    | .unknown => some (low + hole, spans)
+    | .reg var | .bit var =>
+      let width ← regWidth var
+      some (low + width, ⟨var, low, width⟩ :: spans)
 
-/-- Follows nested aliases out to the original register, adding up the offsets. The fuel only
-matters for cyclic definitions. -/
-private def resolveBase (target : Target) : Nat → Var → Nat → Var × Nat
-  | 0, base, low => (base, low)
-  | fuel + 1, base, low =>
-    match findSub base target.aliases with
-    | some (.sub outer _ inner _) => resolveBase target fuel outer (low + inner)
-    | _ => (base, low)
+/-- The equations of a definition, or nothing if the parts do not add up to the defined register. The
+unknown parts share what the others leave. For the equal parts that upstream's `Alias.def` requires
+this is its layout; that function raises where this returns nothing. -/
+def Alias.spans (alias : Alias) : Option (List AliasSpan) := do
+  let total ← regWidth alias.target
+  let (known, _) ← layoutParts 0 alias.parts
+  let holes := alias.parts.countP fun part => part == .unknown
+  let (size, spans) ← layoutParts (if holes = 0 then 0 else (total - known) / holes) alias.parts
+  if size = total then some spans else none
 
-/-- The origin of a register in terms of the original registers. A `sub` is an alias of its base
-when it covers the whole of it. -/
-def Target.unalias (target : Target) (var : Var) : Option Origin :=
-  match findSub var target.aliases with
-  | some (.sub base hi lo _) =>
-    let (root, low) := resolveBase target target.aliases.length base lo
-    some (.sub root (low + (hi - lo)) low (root.sort.bits == some (hi - lo + 1)))
-  | some origin => some origin
-  | none =>
-    target.aliases.findSome? fun alias =>
-      if alias.target = var then
-        match alias.parts.mapM aliasPartVar with
-        | some vars =>
-          if alias.parts.all fun part => match part with | .reg _ => true | _ => false then
-            some (.sup vars)
-          else if alias.parts.all fun part => match part with | .bit _ => true | _ => false then
-            some (.set vars)
-          else
-            none
-        | none => none
+/-- The bits that are equal to a bit of a register by a single equation, in either direction. -/
+def Target.linked (target : Target) (var : Var) (index : Nat) : List (Var × Nat) :=
+  target.aliases.flatMap fun alias =>
+    (alias.spans.getD []).filterMap fun span =>
+      if alias.target = var ∧ span.offset ≤ index ∧ index < span.offset + span.width then
+        some (span.var, index - span.offset)
+      else if span.var = var ∧ index < span.width then
+        some (alias.target, span.offset + index)
       else
         none
+
+/-- Registers without the `alias` role are the basis, as upstream's `Alias.solve`. -/
+def Target.isAlias (target : Target) (var : Var) : Bool := target.hasRole var .alias
+
+/-- Searches the equations for the bit of a basis register that a bit of a register is equal to. -/
+def Target.locate (target : Target) : Nat → List (Var × Nat) → Var → Nat → Option (Var × Nat)
+  | 0, _, _, _ => none
+  | fuel + 1, seen, var, index =>
+    if target.isAlias var then
+      (target.linked var index).findSome? fun bit =>
+        if bit ∈ (var, index) :: seen then none else target.locate fuel ((var, index) :: seen) bit.1 bit.2
+    else if (regWidth var).any (index < ·) then
+      some (var, index)
+    else
+      none
+
+/-- No path through the equations needs more steps than there are registers in them. -/
+def Target.aliasFuel (target : Target) : Nat :=
+  (target.aliases.map fun alias => alias.parts.length + 1).sum + 1
+
+def wholeBits (var : Var) : List (Var × Nat) :=
+  (List.range ((regWidth var).getD 0)).map (var, ·)
+
+/-- The bits of the basis that an origin denotes, least significant first. -/
+def Origin.locations : Origin → List (Var × Nat)
+  | .sub reg hi lo _ => (List.range (hi - lo + 1)).map fun index => (reg, lo + index)
+  | .sup regs | .set regs => regs.reverse.flatMap wholeBits
+
+/-- The registers of a sequence of bits, in their order, with repetitions collapsed. -/
+private def bitRegisters : List (Var × Nat) → List Var
+  | [] => []
+  | bit :: rest =>
+    match bitRegisters rest with
+    | reg :: regs => if reg = bit.1 then reg :: regs else bit.1 :: reg :: regs
+    | [] => [bit.1]
+
+/-- The origin that denotes exactly these bits, if any can: a contiguous range of a register, or a
+concatenation of whole registers. Upstream's `Sub` of a wider alias reports a range outside of its
+base; such a register has no origin here. -/
+private def originOf (bits : List (Var × Nat)) : Option Origin :=
+  match bits with
+  | [] => none
+  | (reg, lo) :: _ =>
+    let sub := Origin.sub reg (lo + bits.length - 1) lo (regWidth reg == some bits.length)
+    let regs := (bitRegisters bits).reverse
+    if sub.locations = bits then
+      some sub
+    else if regs.reverse.flatMap wholeBits = bits then
+      if regs.all (·.sort == .bool) then some (.set regs)
+      else if regs.all (·.sort.bits.isSome) then some (.sup regs)
+      else none
+    else
+      none
+
+/-- The origin of an alias in terms of the basis registers, as upstream's `Target.unalias`: `reg` of a
+`sub` is a basis register, whatever the nesting, `hi` and `lo` are the inclusive bounds of the alias in
+it, and `isAlias` says that it is all of it; the registers of a `sup` or `set` are basis registers,
+most significant first. A basis register has no origin.
+
+Upstream solves the equations in `Target.declare`, and raises when they have no solution. That would
+make `declare` partial, so here they are solved on demand and an alias they do not define has no
+origin. -/
+def Target.unalias (target : Target) (var : Var) : Option Origin :=
+  if target.isAlias var then
+    match regWidth var with
+    | some width => ((List.range width).mapM (target.locate target.aliasFuel [] var)).bind originOf
+    | none => none
+  else
+    none
 
 structure Selection where
   parent : Target := unknown

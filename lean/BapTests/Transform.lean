@@ -33,6 +33,10 @@ def run : IO Unit := do
   match simplified.defs with
   | [defn] => assertEqual "block expression simplification" (expString (int 42)) (expString defn.rhs)
   | defs => throw <| IO.userError s!"unexpected definitions {repr defs}"
+  let killed : Blk := ⟨1, [⟨1, y, [(2, .var x)]⟩], [⟨2, x, .var y⟩], [⟨3, none, .ret (.indirect (.var x))⟩]⟩
+  assertEqual "a block's own writes hide what its jumps and definitions read" [x] killed.freeVars
+  let reads : Blk := ⟨1, [], [], [⟨3, some (.var y), .ret (.indirect (.var x))⟩]⟩
+  assertEqual "a jump read nothing writes is free" [y, x] reads.freeVars
   let sub : Sub := { tid := 1, name := "prune", blks := [block, ⟨2, [], [], []⟩] }
   assertEqual "unreachable subroutine block removed" 1 (pruneSub sub).blks.length
 

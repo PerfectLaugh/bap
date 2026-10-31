@@ -8,7 +8,7 @@ abbrev AnySlot := Σ kind, Slot kind
 def encodeValue (kind : PayloadKind) (value : kind.data) : Except String Sexp :=
   match kind with
   | .unit => .ok (.atom "unit")
-  | .bool => .ok (.atom (toString value))
+  | .bool => .ok (.atom (match value with | some flag => toString flag | none => "none"))
   | .nat => .ok (.atom (toString value))
   | .string => .ok (.atom value)
   | .bitvec width => .ok (.tagged "int" [.atom (toString width), .atom (Word.toHex value)])
@@ -21,8 +21,9 @@ def decodeValue : (kind : PayloadKind) → Sexp → Except String kind.data
     | _ => .error "invalid unit value"
   | .bool, input => do
     match ← Sexp.asAtom input with
-    | "true" => .ok true
-    | "false" => .ok false
+    | "true" => .ok (some true)
+    | "false" => .ok (some false)
+    | "none" => .ok none
     | _ => .error "invalid boolean value"
   | .nat, input => Sexp.nat input
   | .string, input => Sexp.asAtom input

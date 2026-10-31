@@ -104,10 +104,20 @@ def fetch (memory : Memory) (address : Nat) : Except MemoryError UInt8 := do
     else .ok (Bap.Memory.readByte memory.cells (BitVec.ofNat 64 address))
   | none => .error (.unmapped address)
 
+/-- The pieces of `region` after protecting the bytes from `lower` to `upper`: the bytes outside of the
+range keep their protection. -/
+def splitRegion (lower upper : Nat) (protection : Protection) (region : Region) : List Region :=
+  let first := max lower region.lower
+  let last := min upper region.upper
+  if last ≤ first then [region]
+  else
+    (if region.lower < first then [{ region with upper := first }] else []) ++
+      [{ lower := first, upper := last, protection }] ++
+      (if last < region.upper then [{ region with lower := last }] else [])
+
+/-- `mprotect`: only the mapped bytes in the range change protection. -/
 def protect (memory : Memory) (lower upper : Nat) (protection : Protection) : Memory :=
-  { memory with regions := memory.regions.map fun region =>
-    if lower ≤ region.lower && region.upper ≤ upper then { region with protection := protection } else region
-  }
+  { memory with regions := memory.regions.flatMap (splitRegion lower upper protection) }
 
 abbrev Snapshot := Memory
 

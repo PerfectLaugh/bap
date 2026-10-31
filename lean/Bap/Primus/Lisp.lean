@@ -2,8 +2,11 @@ import Bap.Core.Sexp
 import Bap.Core.Assoc
 import Bap.Core.Word
 import Bap.Bil.Syntax
+import Bap.Primus.Literal
 
 namespace Bap.Primus.Lisp
+
+open Bap.Primus.Literal
 
 mutual
   inductive Callable where
@@ -43,8 +46,9 @@ private def atomValue (atom : String) : Value :=
   else if atom = "false" then
     .bool false
   else
-    match atom.toInt? with
-    | some value => .int (BitVec.ofInt 64 value)
+    match parseInteger atom with
+    | some (value, some width) => .bil width (.int (BitVec.ofInt width value))
+    | some (value, none) => .int (BitVec.ofInt 64 value)
     | none => .symbol atom
 
 private def quotedValue : Sexp → Value
@@ -293,7 +297,8 @@ def evalExpr (fuel : Nat) (locals : Locals) (globals : Globals) (form : Sexp) :
         .ok (state.1 ++ [value], locals, globals)
     match form with
     | .atom atom =>
-      if atom = "true" || atom = "false" || atom.toInt?.isSome then
+      -- `Bad_word_literal` upstream: an atom that starts like a number is not a symbol
+      if atom = "true" || atom = "false" || (← readLiteral atom).isSome then
         .ok (atomValue atom, locals, globals)
       else
         .ok (← lookup atom locals globals, locals, globals)

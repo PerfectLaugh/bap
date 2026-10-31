@@ -19,8 +19,9 @@ def udiv (left right : Word width) : Word width :=
 def urem (left right : Word width) : Word width :=
   if right = 0 then left else left % right
 
-def sdiv (left right : Word width) : Word width :=
-  if right = 0 then ones width else BitVec.sdiv left right
+/-- Upstream's documented definition and SMT-LIB `bvsdiv`: `udiv` of the magnitudes, by cases on the signs, and so
+`x /$ 0` is all ones for `x ≥ 0` and `1` for `x < 0`. -/
+def sdiv (left right : Word width) : Word width := BitVec.smtSDiv left right
 
 def srem (left right : Word width) : Word width :=
   if right = 0 then left else BitVec.srem left right

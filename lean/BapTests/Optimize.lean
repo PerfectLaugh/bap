@@ -84,8 +84,35 @@ private def outputChain : Sub :=
 private def readByJump : Sub :=
   ⟨1, "read-by-jump", [], [⟨1, [], [defn 1 x (.var z)], [⟨2, none, .ret (.indirect (.var x))⟩]⟩]⟩
 
+/-- `goto L; L: ret z`: only the jump of `L` reads `z`, and nothing writes it. -/
+private def readOnJump : Sub :=
+  ⟨1, "read-on-jump", [], [⟨1, [], [], [goto 1 2]⟩, ⟨2, [], [], [⟨2, none, .ret (.indirect (.var z))⟩]⟩]⟩
+
+/-- `if z goto A else B; A: x := 1; goto J; B: x := 2; goto J; J: ret y`: `x` is an output with a version per arm. -/
+private def branchOutput : Sub :=
+  ⟨1, "branch-output", [], [
+    ⟨1, [], [], [⟨1, some (.var z), .goto (.direct 2)⟩, goto 2 3]⟩,
+    ⟨2, [], [defn 3 x (int 1)], [goto 4 4]⟩,
+    ⟨3, [], [defn 5 x (int 2)], [goto 6 4]⟩,
+    ⟨4, [], [], [⟨7, none, .ret (.indirect (.var y))⟩]⟩]⟩
+
 private def definedVars (sub : Sub) (tid : Tid) : List String :=
   (sub.block tid).map (fun blk => blk.defs.map (·.var.name)) |>.getD []
+
+/-- The protected names of an SSA form: an unversioned output covers all its versions. -/
+private def ssaRegressions : IO Unit := do
+  let ssa := toSsa branchOutput
+  let deadSsa := optimize ssa
+  assertEqual "without protection the SSA output dies" [] (definedVars deadSsa 2)
+  assertEqual "without protection its phi dies too" 0 ((deadSsa.block 4).map (·.phis.length) |>.getD 999)
+  let kept := optimize ssa [x]
+  assertEqual "an unversioned output protects its versions" ["x"] (definedVars kept 2)
+  assertEqual "in every arm" ["x"] (definedVars kept 3)
+  assertEqual "and its phi at the join" 1 ((kept.block 4).map (·.phis.length) |>.getD 0)
+  let exact := optimize ssa [x.version 1]
+  assertEqual "a versioned output protects just that version" [(1 : Nat)]
+    (((exact.block 2).map (fun blk => blk.defs.map (·.var.index)) |>.getD []))
+  assertEqual "not the other arm" [] (definedVars exact 3)
 
 private def protectedRegressions : IO Unit := do
   assertEqual "protected write survives" ["x"] (definedVars (optimize deadOutputs [x]) 1)
@@ -115,6 +142,7 @@ private def protectedRegressions : IO Unit := do
 
 private def regressions : IO Unit := do
   protectedRegressions
+  ssaRegressions
   match (propagateConstants (Cfg.fromSub stableLoop)).block 2 with
   | some block =>
     match block.defs with
@@ -145,10 +173,20 @@ private def regressions : IO Unit := do
 
 def run : IO Unit := do
   regressions
+  -- a definition that would fail is gone from the output, which is why `optimize` only refines runs
+  let failing : Sub := ⟨1, "failing", [], [⟨1, [], [defn 10 x (.var y)], []⟩]⟩
+  match Bap.IR.optimize failing with
+  | { blks := [block], .. } =>
+    assertEqual "a dead definition that would fail is removed" 0 block.defs.length
+    assertTrue "the definition does fail" (match Bil.evalExp [] (.var y) with | .error _ => true | .ok _ => false)
+  | _ => throw <| IO.userError "missing optimized block"
   let cfg := Cfg.fromSub sample
   let (ins, outs) := cfg.liveness
   assertTrue "liveness propagates across blocks" ((Assoc.get 2 outs).getD [] |>.contains y)
-  assertTrue "jump target is live" ((Assoc.get 3 ins).getD [] |>.contains z)
+  -- Block 3 writes `z` before its jump reads it, so the jump sees the block's own write.
+  assertTrue "a jump read after a write in the block is not live in" (!((Assoc.get 3 ins).getD [] |>.contains z))
+  assertTrue "what the block reads first is live in" ((Assoc.get 3 ins).getD [] |>.contains y)
+  assertTrue "a jump read nothing in the block writes is live in" ((Assoc.get 2 ((Cfg.fromSub readOnJump).liveness.1)).getD [] |>.contains z)
   let propagated := propagateConstants cfg
   match propagated.block 2 with
   | some block =>

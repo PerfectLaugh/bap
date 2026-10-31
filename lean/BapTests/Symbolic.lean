@@ -1,4 +1,5 @@
 import BapTests.Support
+import Bap.Proofs.SmtReader
 
 namespace Bap.Tests.Symbolic
 
@@ -14,6 +15,18 @@ private def bit : Bap.Var := ⟨"c", .imm 1, 0, false⟩
 private def bitExpr : Expr := .var "c" 1
 private def equal (left right : Expr) : Expr := .app "=" 1 [left, right]
 private def different (left right : Expr) : Expr := .app "distinct" 1 [left, right]
+
+/-- The text given to Z3 reads as the script it is the printing of. -/
+private def reader : IO Unit := do
+  let path := [equal xExpr (.const (BitVec.ofNat 64 7)), equal (.select "mem" xExpr) (.const (BitVec.ofNat 8 1)),
+    .app "bvult" 1 [.extract 7 0 xExpr, .concat (.extract 3 0 xExpr) (.extract 3 0 (.var "with space|bar" 64))]]
+  match Proofs.Symbolic.SmtReader.readScript (renderScript path) with
+  | none => throw <| IO.userError "a script should be read"
+  | some script =>
+    assertEqual "a script reads back to its commands" 8 script.length
+    assertEqual "reading then printing is the text" (renderScript path)
+      (String.intercalate "\n" (script.map Proofs.Symbolic.SmtCommand.print))
+  assertTrue "a script with a stray parenthesis isn't one" (Proofs.Symbolic.SmtReader.readScript ")(").isNone
 
 private def paths : IO Unit := do
   let env : Env := [(bit, bitExpr)]
@@ -129,7 +142,7 @@ private def inputs : IO Unit := do
   | .ok [⟨state, .normal⟩] =>
     match Assoc.get y state.env with
     | some value =>
-      let input : Expr := .var "x#0" 64
+      let input : Expr := .var (inputName x) 64
       assertEqual "unset register is an input" true
         (← FFI.Z3.isUnsat [different value (.app "bvadd" 64 [input, .const (BitVec.ofNat 64 2)])])
       assertEqual "input is unconstrained" true
@@ -161,6 +174,77 @@ private def zeroWidth : IO Unit := do
     (Bap.Symbolic.run [.move ⟨"small", .mem 1 8, 0, false⟩
       (.store (.var ⟨"small", .mem 1 8, 0, false⟩) (.int (BitVec.ofNat 1 0)) (.int (BitVec.ofNat 24 1)) .little 3)])
 
+/-- What the proofs of `Bap/Proofs/Symbolic.lean` found: operands the sort system has no term for are rejected. -/
+private def wellSorted : IO Unit := do
+  let wide : Bap.Var := ⟨"wide", .imm 16, 0, false⟩
+  let narrow : Bap.Var := ⟨"narrow", .imm 8, 0, false⟩
+  rejected "operands of different widths rejected" (evalExp {} (.bin .add (.var wide) (.var narrow)))
+  rejected "comparison of different widths rejected" (evalExp {} (.bin .eq (.var wide) (.var narrow)))
+  let mem : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let written := Bap.Symbolic.Memory.empty.writeByte (.var "at32" 32) (.const (BitVec.ofNat 8 7))
+  let read64 := written.readByte (.var "at64" 64)
+  assertEqual "addresses of different widths are different locations"
+    (Bap.Symbolic.Memory.empty.readByte (.var "at64" 64)).render read64.render
+  assertEqual "reading another width is well sorted" true (← FFI.Z3.isSat [Expr.eqOne (equal read64 read64)])
+  rejected "reading no bytes rejected" (Bap.Symbolic.Memory.empty.read (.var "at" 64) .little 0)
+  rejected "loading no bytes rejected" (evalExp {} (.load (.var mem) (int 0) .big 0))
+  match Bap.Symbolic.Memory.empty.read (.var "at" 64) .little 1 with
+  | .ok byte => assertEqual "reading a byte has eight bits" 8 byte.width
+  | .error error => throw <| IO.userError error
+
+/-- Different variables are different inputs, whatever part of them differs, and no input is an unknown. -/
+private def inputNames : IO Unit := do
+  let base : Bap.Var := ⟨"v", .imm 8, 0, false⟩
+  let others : List Bap.Var := [{ base with isVirtual := true }, { base with index := 1 }, { base with name := "w" },
+    { base with typ := .imm 16 }, { base with typ := .unit }, { base with typ := .mem 64 8 },
+    { base with typ := .mem 32 8 }, { base with typ := .mem 64 16 }, { base with typ := .unknown }]
+  for other in base :: others do
+    for another in base :: others do
+      assertEqual s!"{repr other} and {repr another}" (other == another) (inputName other == inputName another)
+  let virtual : Bap.Var := { base with isVirtual := true }
+  match evalExp {} (.var base), evalExp {} (.var virtual) with
+  | .ok first, .ok second =>
+    assertEqual "a variable and its virtual namesake are separate inputs" true (← FFI.Z3.isSat [different first second])
+  | _, _ => throw <| IO.userError "input evaluation failed"
+  let flag : Bap.Var := ⟨"f", .unit, 0, false⟩
+  let bitFlag : Bap.Var := ⟨"f", .imm 1, 0, false⟩
+  match evalExp {} (.var flag), evalExp {} (.var bitFlag) with
+  | .ok first, .ok second =>
+    assertEqual "one width and another type are separate inputs" true (← FFI.Z3.isSat [different first second])
+  | _, _ => throw <| IO.userError "input evaluation failed"
+  let trap : Bap.Var := ⟨"unknown_a#0?", .imm 8, 0, false⟩
+  match evalExp {} (.var trap), evalExp {} (.unknown "a#0" (.imm 8)) with
+  | .ok first, .ok second =>
+    assertEqual "an input is not an unknown of the same spelling" true (← FFI.Z3.isSat [different first second])
+  | _, _ => throw <| IO.userError "input evaluation failed"
+
+/-- Soundness covers unknowns: a run that doesn't reach one is covered as ever, and one that does under any oracle. -/
+private def unknowns : IO Unit := do
+  let u : Bap.Var := ⟨"u", .imm 8, 0, false⟩
+  let program : Bil.Program := [
+    .ifElse (.bin .eq (.var x) (int 0)) [.move u (.int (BitVec.ofNat 8 1))] [.move u (.unknown "drawn" (.imm 8))]]
+  match Bil.run program { env := [(x, .bits (BitVec.ofNat 64 0))] } with
+  | .ok (final, _) => assertBits "a run past an unknown it doesn't reach" (BitVec.ofNat 8 1) (Bil.lookup final.env u)
+  | .error error => throw <| IO.userError error
+  match Bap.Symbolic.run program with
+  | .ok [yes, no] =>
+    assertEqual "both paths are explored" true
+      (← FFI.Z3.isSat yes.state.constraints <&&> FFI.Z3.isSat no.state.constraints)
+    match Assoc.get u no.state.env with
+    | some value =>
+      assertEqual "an unknown may be any value" true
+        (← FFI.Z3.isSat (equal value (.const (BitVec.ofNat 8 7)) :: no.state.constraints))
+    | none => throw <| IO.userError "missing unknown"
+  | _ => throw <| IO.userError "unexpected unknown paths"
+  let mem : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
+  match Bap.Symbolic.run [.move mem (.unknown "image" (.mem 64 8)), .move u (.load (.var mem) (int 0) .little 1)] with
+  | .ok [⟨state, .normal⟩] =>
+    match Assoc.get u state.env with
+    | some value =>
+      assertEqual "an unknown memory is well sorted" true (← FFI.Z3.isSat [equal value (.const (BitVec.ofNat 8 7))])
+    | none => throw <| IO.userError "missing load"
+  | _ => throw <| IO.userError "unexpected unknown memory results"
+
 private def memoryChoice : IO Unit := do
   let mem : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
   let result : Bap.Var := ⟨"r", .imm 8, 0, false⟩
@@ -169,7 +253,7 @@ private def memoryChoice : IO Unit := do
   let byteAt (value : Nat) : Expr := .const (BitVec.ofNat 8 value)
   match evalExp {} (.load (.ite (.var bit) (stored 1) (stored 2)) at0 .little 1) with
   | .ok loaded =>
-    let c : Expr := .var "c#0" 1
+    let c : Expr := .var (inputName bit) 1
     assertEqual "conditional memory, then" true (← FFI.Z3.isUnsat [Expr.eqOne c, different loaded (byteAt 1)])
     assertEqual "conditional memory, else" true (← FFI.Z3.isUnsat [Expr.eqZero c, different loaded (byteAt 2)])
     assertEqual "conditional memory, either" true (← FFI.Z3.isSat [equal loaded (byteAt 1)])
@@ -219,6 +303,7 @@ private def fuelStability : IO Unit := do
   | _, _ => throw <| IO.userError "fuel stability run failed"
 
 def run : IO Unit := do
+  reader
   let script := renderScript [Expr.eqOne xExpr]
   assertTrue "SMT declares symbolic xExpr" ((script.splitOn "declare-const |x!64| (_ BitVec 64)").length > 1)
   assertTrue "SMT uses bitvector logic" ((script.splitOn "(set-logic QF_BV)").length > 1)
@@ -269,6 +354,9 @@ def run : IO Unit := do
   paths
   inputs
   zeroWidth
+  wellSorted
+  inputNames
+  unknowns
   memoryChoice
   sameBase
   fuelStability

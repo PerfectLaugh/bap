@@ -4,6 +4,8 @@ import Bap.Emu.Diff
 import Bap.Emu.Shell
 import Bap.Emu.Project
 import Bap.Emu.Jni
+import Bap.Emu.CoreProofs
+import Bap.Emu.ObserveProofs
 import Std.Data.String.ToNat
 
 open Lean Elab Command in
@@ -278,7 +280,7 @@ end Pages
 
 section Regions
 
-open_private Bap.Emu Bap.Emu overlaps lookupRegion memoryWidth initializeMemory syscallRegisters callAbi mipsWord
+open_private Bap.Emu Bap.Emu overlaps memoryWidth initializeMemory syscallRegisters callAbi mipsWord
   mipsDelayed mipsLikely mipsCompact
 
 theorem region_contains_iff (region : Bap.Emu.Region) (address : Nat) :
@@ -454,7 +456,7 @@ end Regions
 
 section Audit
 
-open_private Bap.Emu Bap.Emu overlaps lookupRegion memoryWidth initializeMemory regionPiece persistentRegionData
+open_private Bap.Emu Bap.Emu overlaps memoryWidth initializeMemory regionPiece persistentRegionData
   coversRange.loop fetchSpan.extend
 
 /-- A region past the end of the address space is refused at construction. -/
@@ -545,6 +547,103 @@ theorem persistentRegionData_size (cells : List (Nat × UInt8)) (address size : 
           · exact ih _ (by simp only [Array.size_push]; omega) _ _ (by simp only [Array.size_push]; omega) rfl
           · exact ih _ (by simp only [List.length_cons, Array.size_push]; omega) _ _
               (by simp only [Array.size_push]; omega) rfl
+
+/-- The byte of a sparse cell list at `address`. -/
+def cellAt (cells : List (Nat × UInt8)) (address : Nat) : UInt8 :=
+  match cells.find? fun cell => cell.1 == address with
+  | some cell => cell.2
+  | none => 0
+
+private theorem cellAt_of_lt {current : Nat} {value : UInt8} {rest : List (Nat × UInt8)} {address : Nat}
+    (h : address ≠ current) : cellAt ((current, value) :: rest) address = cellAt rest address := by
+  have : (current == address) = false := by simpa using fun he => h he.symm
+  simp [cellAt, List.find?_cons, this]
+
+private theorem cellAt_same (current : Nat) (value : UInt8) (rest : List (Nat × UInt8)) :
+    cellAt ((current, value) :: rest) current = value := by
+  simp [cellAt]
+
+private theorem cellAt_below {cells : List (Nat × UInt8)} {address : Nat} (h : ∀ cell ∈ cells, address < cell.1) :
+    cellAt cells address = 0 := by
+  have : cells.find? (fun cell => cell.1 == address) = none := by
+    rw [List.find?_eq_none]
+    intro cell hc
+    have := h cell hc
+    simp only [beq_iff_eq]
+    omega
+  simp [cellAt, this]
+
+/-- The bytes of `persistentRegionData`: with cells in strictly ascending order of address, as `dumpMemory`
+returns them, it keeps what is there, and fills the rest with the cells at those addresses, or zeros. -/
+theorem persistentRegionData_get (cells : List (Nat × UInt8)) (address size : Nat) (output : Array UInt8)
+    (hs : output.size ≤ size) (hsorted : cells.Pairwise fun a b => a.1 < b.1) :
+    (∀ index, index < output.size → (persistentRegionData cells address size output)[index]? = output[index]?) ∧
+    ∀ index, output.size ≤ index → index < size →
+      (persistentRegionData cells address size output)[index]? = some (cellAt cells (address + index)) := by
+  induction hm : cells.length + (size - output.size) using Nat.strongRecOn generalizing cells output with
+  | ind measure ih =>
+    rw [persistentRegionData]
+    by_cases hg : output.size ≥ size
+    · simp only [hg, ↓reduceDIte]
+      exact ⟨fun _ _ => trivial, fun index h1 h2 => by omega⟩
+    · simp only [hg, ↓reduceDIte]
+      cases cells with
+      | nil =>
+        refine ⟨fun index h => ?_, fun index h1 h2 => ?_⟩
+        · simp [Array.getElem?_append, h]
+        · have : ¬ index < output.size := by omega
+          have hlt : index - output.size < size - output.size := by omega
+          simp [Array.getElem?_append, this, Array.getElem?_replicate, hlt, cellAt]
+      | cons cell rest =>
+        obtain ⟨current, value⟩ := cell
+        simp only [List.length_cons] at hm
+        have hrest : rest.Pairwise fun a b => a.1 < b.1 := (List.pairwise_cons.1 hsorted).2
+        have hhead : ∀ cell ∈ rest, current < cell.1 := (List.pairwise_cons.1 hsorted).1
+        simp only
+        split
+        · rename_i hlt
+          obtain ⟨h1, h2⟩ := ih _ (by omega) rest output hs hrest rfl
+          refine ⟨h1, fun index hi hl => ?_⟩
+          rw [h2 index hi hl, cellAt_of_lt (by omega)]
+        · split
+          · rename_i hnlt heq
+            have hsize : (output.push value).size = output.size + 1 := Array.size_push ..
+            obtain ⟨h1, h2⟩ := ih _ (by rw [hsize]; omega) rest (output.push value) (by omega) hrest rfl
+            refine ⟨fun index hi => ?_, fun index hi hl => ?_⟩
+            · rw [h1 index (by omega)]
+              simp [Array.getElem?_push, show index ≠ output.size by omega]
+            · by_cases he : index = output.size
+              · subst he
+                rw [h1 _ (by omega), heq, cellAt_same]
+                simp [Array.getElem?_push]
+              · rw [h2 index (by omega) hl, cellAt_of_lt (by omega)]
+          · rename_i hnlt hne
+            have hsize : (output.push 0).size = output.size + 1 := Array.size_push ..
+            obtain ⟨h1, h2⟩ := ih _ (by simp only [List.length_cons]; omega) ((current, value) :: rest) (output.push 0)
+              (by omega) hsorted rfl
+            refine ⟨fun index hi => ?_, fun index hi hl => ?_⟩
+            · rw [h1 index (by omega)]
+              simp [Array.getElem?_push, show index ≠ output.size by omega]
+            · by_cases he : index = output.size
+              · subst he
+                rw [h1 _ (by omega)]
+                have hzero : cellAt ((current, value) :: rest) (address + output.size) = 0 := by
+                  apply cellAt_below
+                  intro cell hc
+                  rcases List.mem_cons.1 hc with rfl | hc
+                  · simp only
+                    omega
+                  · have := hhead cell hc
+                    omega
+                rw [hzero]
+                simp [Array.getElem?_push]
+              · exact h2 index (by omega) hl
+
+/-- What a region holds after a snapshot of native memory: exactly the bytes of the dump at its addresses. -/
+theorem persistentRegionData_bytes (cells : List (Nat × UInt8)) (address size : Nat)
+    (hsorted : cells.Pairwise fun a b => a.1 < b.1) {index : Nat} (h : index < size) :
+    (persistentRegionData cells address size #[])[index]? = some (cellAt cells (address + index)) :=
+  (persistentRegionData_get cells address size #[] (Nat.zero_le _) hsorted).2 index (Nat.zero_le _) h
 
 /-! `mprotect` splitting. -/
 
@@ -1318,7 +1417,7 @@ section TextCheckpoint
 open_private Bap.Bil.Wire Bap.Bil.Wire hexDigit parseHexLoop
 open_private Bap.Emu.Checkpoint Bap.Emu nat bool hex boolValue encodeTyp decodeTyp encodeValue decodeValue decodeCells
   encodeBinding decodeBinding encodeBytes decodeHex decodeHex.loop decodeRegionBytes encodeRegion decodeRegion encodePending
-  decodePending encodeThread decodeThread encodeProcess decodeProcess
+  decodePending encodeSkip decodeSkip encodeThread decodeThread encodeProcess decodeProcess
 
 theorem toNat?_toString (n : Nat) : (toString n).toNat? = some n := by
   have hdig : ∀ c ∈ Nat.toDigits 10 n, c.isDigit = true := fun c hc =>
@@ -1559,12 +1658,19 @@ theorem pending_roundtrip (pending : Option PendingBranch) : decodePending (enco
 def normalizeThread (context : ThreadContext) : ThreadContext :=
   { context with state := { env := context.state.env.map normalizeBinding } }
 
+theorem skip_roundtrip (skip : Option Nat) : decodeSkip (encodeSkip skip) = .ok skip := by
+  cases skip with
+  | none => rfl
+  | some address =>
+    simp only [encodeSkip, decodeSkip, Sexp.tagged, Sexp.expectTagged, Sexp.asList, bind, Except.bind]
+    simp [sexp_nat_roundtrip, pure, Except.pure]
+
 theorem thread_roundtrip (context : ThreadContext) :
     decodeThread (encodeThread context) = .ok (normalizeThread context) := by
-  obtain ⟨id, ⟨env⟩, pc, stopped, pending⟩ := context
+  obtain ⟨id, ⟨env⟩, pc, stopped, pending, skip⟩ := context
   simp only [encodeThread, decodeThread, Sexp.tagged, Sexp.expectTagged, Sexp.asList, bind, Except.bind]
-  simp [sexp_nat_roundtrip, boolValue_roundtrip, pending_roundtrip, mapM_map_ok (fun x _ => binding_roundtrip x),
-    normalizeThread, pure, Except.pure]
+  simp [sexp_nat_roundtrip, boolValue_roundtrip, pending_roundtrip, skip_roundtrip,
+    mapM_map_ok (fun x _ => binding_roundtrip x), normalizeThread, pure, Except.pure]
 
 theorem process_roundtrip (process : ThreadId × List Bap.Emu.Region) :
     decodeProcess (encodeProcess process) = .ok process := by
@@ -1582,9 +1688,9 @@ def normalizeSnapshot (snapshot : Snapshot) : Snapshot :=
 rebuilt from their sparse cells (see `readByte_normalizeValue`). -/
 theorem snapshot_roundtrip (snapshot : Snapshot) :
     decodeSnapshot (encodeSnapshot snapshot) = .ok (normalizeSnapshot snapshot) := by
-  obtain ⟨⟨env⟩, pc, regions, stopped, threads, current, next, pending, processes⟩ := snapshot
+  obtain ⟨⟨env⟩, pc, regions, stopped, threads, current, next, pending, processes, skip⟩ := snapshot
   simp only [encodeSnapshot, decodeSnapshot, Sexp.tagged, Sexp.asList, bind, Except.bind]
-  simp [sexp_nat_roundtrip, boolValue_roundtrip, pending_roundtrip, mapM_map_ok (fun x _ => binding_roundtrip x),
+  simp [sexp_nat_roundtrip, boolValue_roundtrip, pending_roundtrip, skip_roundtrip, mapM_map_ok (fun x _ => binding_roundtrip x),
     mapM_map_ok (fun x _ => thread_roundtrip x), mapM_map_self (fun x _ => region_roundtrip x),
     mapM_map_self (fun x _ => process_roundtrip x), normalizeSnapshot, pure, Except.pure]
 
@@ -1595,9 +1701,9 @@ end TextCheckpoint
 section BinaryCheckpoint
 
 open_private Bap.Emu.Checkpoint Bap.Emu encodeBinaryUnchecked fitsWord pendingFits typFits valueFits bindingFits regionFits
-  threadFits processFits Writer Writer.mk Writer.data Reader Reader.mk Reader.data Reader.offset
-  putBytes putByte natBytes putNat putBool putText putPendingBin putTypBin putCellsBin putValueBin putBindingBin
-  putRegionBin putThreadBin putProcessBin takeBytes getByte getNat getBool getText getList getList.loop getPendingBin
+  threadFits processFits skipFits Writer Writer.mk Writer.data Reader Reader.mk Reader.data Reader.offset
+  putBytes putByte natBytes putNat putBool putText putPendingBin putSkipBin putTypBin putCellsBin putValueBin putBindingBin
+  putRegionBin putThreadBin putProcessBin takeBytes getByte getNat getBool getText getList getList.loop getPendingBin getSkipBin
   getTypBin getValueBin getBindingBin getRegionBin getThreadBin getProcessBin binaryMagic
 
 /-- `encoded` sits in `data` at `offset`. -/
@@ -1796,6 +1902,37 @@ theorem getPending_decodes (pending : Option PendingBranch) (h : PendingSafe pen
     simp only [getPendingBin, bind, Except.bind, d1, d2, d3, encPending, ByteArray.size_append, byteEnc_size, natBytes_size,
       Nat.add_assoc]
 
+private def encSkip : Option Nat → ByteArray
+  | none => byteEnc 0
+  | some address => byteEnc 1 ++ natBytes address
+
+private def SkipSafe : Option Nat → Prop
+  | none => True
+  | some address => address < 2 ^ 64
+
+private theorem data_putSkip (writer : Writer) (skip : Option Nat) :
+    Writer.data (putSkipBin writer skip) = Writer.data writer ++ encSkip skip := by
+  cases skip with
+  | none => rfl
+  | some address =>
+    simp only [putSkipBin, data_putNat, data_putByte, encSkip, ByteArray.append_assoc]
+
+theorem getSkip_decodes (skip : Option Nat) (h : SkipSafe skip) :
+    Decodes getSkipBin (encSkip skip) skip := by
+  intro data offset hat
+  cases skip with
+  | none =>
+    have hd := getByte_decodes 0 (by decide) data offset hat
+    simp only [getSkipBin, bind, Except.bind, hd]
+    rfl
+  | some address =>
+    obtain ⟨h1, h2⟩ := At.split hat
+    have d1 := getByte_decodes 1 (by decide) data offset h1
+    have d2 := natBytes_decodes _ h data _ h2
+    simp only [ByteArray.size_append, byteEnc_size, natBytes_size, Nat.add_assoc] at d1 d2
+    simp only [getSkipBin, bind, Except.bind, d1, d2, encSkip, ByteArray.size_append, byteEnc_size, natBytes_size,
+      Nat.add_assoc]
+
 private def encTyp : Typ → ByteArray
   | .unknown => byteEnc 0
   | .unit => byteEnc 1
@@ -1846,14 +1983,14 @@ private def encCell {width : Nat} (cell : BitVec width × UInt8) : ByteArray := 
 
 private def encValue : Value → ByteArray
   | .undefined => byteEnc 0
-  | @Value.bits width value => byteEnc 1 ++ natBytes width ++ bytesOf 32 value.toNat
+  | @Value.bits width value => byteEnc 1 ++ natBytes width ++ bytesOf (valueBytes width) value.toNat
   | @Value.memory width memory => byteEnc 2 ++ natBytes width ++
       (natBytes (Bap.Memory.cells memory).length ++ body encCell (Bap.Memory.cells memory))
 
-/-- A value the binary format can represent: at most 256 bits, or memory with 64-bit addresses. -/
+/-- A value the binary format can represent: a width that fits a word, or memory with 64-bit addresses. -/
 private def ValueSafe : Value → Prop
   | .undefined => True
-  | @Value.bits width _ => width ≤ 256
+  | @Value.bits width _ => width < 2 ^ 64
   | @Value.memory width memory => width ≤ 64 ∧ (Bap.Memory.cells memory).length < 2 ^ 64
 
 private theorem foldl_push_bytesOf (count value : Nat) :
@@ -1892,21 +2029,23 @@ theorem getValue_decodes (value : Value) (h : ValueSafe value) :
     simp only [getValueBin, bind, Except.bind, hd]
     rfl
   | @bits width value =>
-    have hw : width ≤ 256 := h
+    have hw : width < 2 ^ 64 := h
     obtain ⟨h12, h3⟩ := At.split hat
     obtain ⟨h1, h2⟩ := At.split h12
     have d1 := getByte_decodes 1 (by decide) data offset h1
-    have d2 := natBytes_decodes _ (by omega : width < 2 ^ 64) data _ h2
+    have d2 := natBytes_decodes _ hw data _ h2
     have d3 := takeBytes_at h3
     rw [bytesOf_size] at d3
     simp only [ByteArray.size_append, byteEnc_size, natBytes_size, Nat.add_assoc] at d1 d2 d3
     simp only [getValueBin, bind, Except.bind, d1, d2, d3, encValue, ByteArray.size_append, byteEnc_size, natBytes_size,
       bytesOf_size, Nat.add_assoc]
-    rw [sum_bytesOf 32 _ 32 (by omega)]
-    have hlt : value.toNat < 256 ^ 32 := by
+    rw [sum_bytesOf (valueBytes width) _ (valueBytes width) (Nat.le_refl _)]
+    have hlt : value.toNat < 256 ^ valueBytes width := by
       have h1 := value.isLt
-      have h2 : 2 ^ width ≤ 2 ^ 256 := Nat.pow_le_pow_right (by decide) hw
-      have h3 : (2 : Nat) ^ 256 = 256 ^ 32 := by decide
+      have h2 : 2 ^ width ≤ 2 ^ (8 * valueBytes width) :=
+        Nat.pow_le_pow_right (by decide) (by simp only [valueBytes]; omega)
+      have h3 : (2 : Nat) ^ (8 * valueBytes width) = 256 ^ valueBytes width := by
+        rw [Nat.pow_mul]
       omega
     rw [Nat.mod_eq_of_lt hlt]
     simp [normalizeValue, pure, Except.pure]
@@ -2001,26 +2140,28 @@ theorem getRegion_decodes (region : Bap.Emu.Region) (h : RegionSafe region) :
 
 private def encThread (context : ThreadContext) : ByteArray :=
   natBytes context.id ++ natBytes context.pc ++ byteEnc (if context.stopped then 1 else 0) ++
-    (natBytes context.state.env.length ++ body encBinding context.state.env) ++ encPending context.pending
+    (natBytes context.state.env.length ++ body encBinding context.state.env) ++ encPending context.pending ++
+    encSkip context.skip
 
 /-- A thread representable in the binary format. -/
 def ThreadSafe (context : ThreadContext) : Prop :=
   context.id < 2 ^ 64 ∧ context.pc < 2 ^ 64 ∧ context.state.env.length < 2 ^ 64 ∧
-    (∀ binding ∈ context.state.env, BindingSafe binding) ∧ PendingSafe context.pending
+    (∀ binding ∈ context.state.env, BindingSafe binding) ∧ PendingSafe context.pending ∧ SkipSafe context.skip
 
 private theorem data_putThread (writer : Writer) (context : ThreadContext) :
     Writer.data (putThreadBin writer context) = Writer.data writer ++ encThread context := by
-  simp only [putThreadBin, data_putPending, data_putBool, data_putNat, encThread, ByteArray.append_assoc]
+  simp only [putThreadBin, data_putSkip, data_putPending, data_putBool, data_putNat, encThread, ByteArray.append_assoc]
   rw [foldl_writer _ encBinding data_putBinding]
   simp only [data_putBool, data_putNat, ByteArray.append_assoc]
 
 theorem getThread_decodes (context : ThreadContext) (h : ThreadSafe context) :
     Decodes getThreadBin (encThread context) (normalizeThread context) := by
   intro data offset hat
-  obtain ⟨id, ⟨env⟩, pc, stopped, pending⟩ := context
-  obtain ⟨hi, hp, hl, hb, hq⟩ := h
+  obtain ⟨id, ⟨env⟩, pc, stopped, pending, skip⟩ := context
+  obtain ⟨hi, hp, hl, hb, hq, hs⟩ := h
   simp only [encThread] at hat
-  obtain ⟨h4, h5⟩ := At.split hat
+  obtain ⟨h45, h6⟩ := At.split hat
+  obtain ⟨h4, h5⟩ := At.split h45
   obtain ⟨h3, h34⟩ := At.split h4
   obtain ⟨h2, h23⟩ := At.split h3
   obtain ⟨h1, h12⟩ := At.split h2
@@ -2030,8 +2171,9 @@ theorem getThread_decodes (context : ThreadContext) (h : ThreadSafe context) :
   have d4 := getList_decodes (decode := getBindingBin) encBinding normalizeBinding env hl h34
     fun b hb' => getBinding_decodes b (hb b hb')
   have d5 := getPending_decodes pending hq data _ h5
-  simp only [ByteArray.size_append, Nat.add_assoc] at d1 d2 d3 d4 d5
-  simp only [getThreadBin, bind, Except.bind, d1, d2, d3, d4, d5, encThread, ByteArray.size_append, Nat.add_assoc,
+  have d6 := getSkip_decodes skip hs data _ h6
+  simp only [ByteArray.size_append, Nat.add_assoc] at d1 d2 d3 d4 d5 d6
+  simp only [getThreadBin, bind, Except.bind, d1, d2, d3, d4, d5, d6, encThread, ByteArray.size_append, Nat.add_assoc,
     normalizeThread]
 
 private def encProcess (process : ThreadId × List Bap.Emu.Region) : ByteArray :=
@@ -2058,7 +2200,7 @@ theorem getProcess_decodes (process : ThreadId × List Bap.Emu.Region) (h : Proc
   simp only [ByteArray.size_append, Nat.add_assoc, List.map_id] at d1 d2
   simp only [getProcessBin, bind, Except.bind, d1, d2, encProcess, ByteArray.size_append, Nat.add_assoc]
 
-/-- A snapshot representable in the binary format: 64-bit counters, at most 256-bit values, 64-bit addresses. -/
+/-- A snapshot representable in the binary format: 64-bit counters and 64-bit addresses. -/
 structure SnapshotSafe (snapshot : Snapshot) : Prop where
   pc : snapshot.pc < 2 ^ 64
   regionsLength : snapshot.regions.length < 2 ^ 64
@@ -2072,6 +2214,7 @@ structure SnapshotSafe (snapshot : Snapshot) : Prop where
   pending : PendingSafe snapshot.pending
   processesLength : snapshot.processMemory.length < 2 ^ 64
   processes : ∀ process ∈ snapshot.processMemory, ProcessSafe process
+  skip : SkipSafe snapshot.skip
 
 private def encBody (snapshot : Snapshot) : ByteArray :=
   natBytes snapshot.pc ++ byteEnc (if snapshot.stopped then 1 else 0) ++
@@ -2079,11 +2222,11 @@ private def encBody (snapshot : Snapshot) : ByteArray :=
     (natBytes snapshot.state.env.length ++ body encBinding snapshot.state.env) ++
     (natBytes snapshot.threads.length ++ body encThread snapshot.threads) ++
     natBytes snapshot.currentThread ++ natBytes snapshot.nextThread ++ encPending snapshot.pending ++
-    (natBytes snapshot.processMemory.length ++ body encProcess snapshot.processMemory)
+    (natBytes snapshot.processMemory.length ++ body encProcess snapshot.processMemory) ++ encSkip snapshot.skip
 
 private theorem encodeBinary_eq (snapshot : Snapshot) :
     encodeBinaryUnchecked snapshot = binaryMagic ++ encBody snapshot := by
-  simp only [encodeBinaryUnchecked, encBody]
+  simp only [encodeBinaryUnchecked, encBody, data_putSkip]
   rw [foldl_writer _ encProcess data_putProcess]
   simp only [data_putPending, data_putNat]
   rw [foldl_writer _ encThread data_putThread]
@@ -2115,9 +2258,10 @@ private theorem unchecked_roundtrip (snapshot : Snapshot) (h : SnapshotSafe snap
   simp only [decodeBinarySnapshot, hmagic, hne, Bool.false_eq_true, ↓reduceIte]
   clear hmagic hdata hne
   generalize binaryMagic.size = start at hat hsize ⊢
-  obtain ⟨⟨env⟩, pc, regions, stopped, threads, current, next, pending, processes⟩ := snapshot
+  obtain ⟨⟨env⟩, pc, regions, stopped, threads, current, next, pending, processes, skip⟩ := snapshot
   simp only [encBody] at hat hsize
-  obtain ⟨h8, h9⟩ := At.split hat
+  obtain ⟨h89, h10⟩ := At.split hat
+  obtain ⟨h8, h9⟩ := At.split h89
   obtain ⟨h7, h78⟩ := At.split h8
   obtain ⟨h6, h67⟩ := At.split h7
   obtain ⟨h5, h56⟩ := At.split h6
@@ -2138,7 +2282,8 @@ private theorem unchecked_roundtrip (snapshot : Snapshot) (h : SnapshotSafe snap
   have d8 := getPending_decodes pending h.pending data _ h78
   have d9 := getList_decodes (decode := getProcessBin) encProcess id processes h.processesLength h9
     fun p hp => getProcess_decodes p (h.processes p hp)
-  simp only [ByteArray.size_append, natBytes_size, byteEnc_size, Nat.add_assoc, List.map_id] at d1 d2 d3 d4 d5 d6 d7 d8 d9 hsize
+  have d10 := getSkip_decodes skip h.skip data _ h10
+  simp only [ByteArray.size_append, natBytes_size, byteEnc_size, Nat.add_assoc, List.map_id] at d1 d2 d3 d4 d5 d6 d7 d8 d9 d10 hsize
   rw [bind_ok_eq d1]
   dsimp only
   rw [bind_ok_eq d2]
@@ -2157,6 +2302,8 @@ private theorem unchecked_roundtrip (snapshot : Snapshot) (h : SnapshotSafe snap
   dsimp only
   rw [bind_ok_eq d9]
   dsimp only
+  rw [bind_ok_eq d10]
+  dsimp only
   simp only [hsize, Reader.offset, bne_self_eq_false, Bool.false_eq_true, ↓reduceIte]
   rfl
 
@@ -2164,6 +2311,11 @@ private theorem fits_pending {pending : Option PendingBranch} (h : pendingFits p
   cases pending with
   | none => trivial
   | some p => simpa [pendingFits, fitsWord, PendingSafe] using h
+
+private theorem fits_skip {skip : Option Nat} (h : skipFits skip = true) : SkipSafe skip := by
+  cases skip with
+  | none => trivial
+  | some address => simpa [skipFits, fitsWord, SkipSafe] using h
 
 private theorem fits_typ {typ : Typ} (h : typFits typ = true) : TypSafe typ := by
   cases typ <;> first | trivial | simpa [typFits, fitsWord, TypSafe] using h
@@ -2182,9 +2334,9 @@ private theorem fits_region {region : Bap.Emu.Region} (h : regionFits region = t
 
 private theorem fits_thread {context : ThreadContext} (h : threadFits context = true) : ThreadSafe context := by
   simp only [threadFits, Bool.and_eq_true, List.all_eq_true] at h
-  obtain ⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩ := h
+  obtain ⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩ := h
   exact ⟨by simpa [fitsWord] using h1, by simpa [fitsWord] using h2, by simpa [fitsWord] using h3,
-    fun b hb => fits_binding (h4 b hb), fits_pending h5⟩
+    fun b hb => fits_binding (h4 b hb), fits_pending h5, fits_skip h6⟩
 
 private theorem fits_process {process : ThreadId × List Bap.Emu.Region} (h : processFits process = true) :
     ProcessSafe process := by
@@ -2194,11 +2346,11 @@ private theorem fits_process {process : ThreadId × List Bap.Emu.Region} (h : pr
 
 private theorem fits_snapshot {snapshot : Snapshot} (h : binaryFits snapshot = true) : SnapshotSafe snapshot := by
   simp only [binaryFits, Bool.and_eq_true, List.all_eq_true] at h
-  obtain ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩, h8⟩, h9⟩, h10⟩, h11⟩, h12⟩ := h
+  obtain ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩, h8⟩, h9⟩, h10⟩, h11⟩, h12⟩, h13⟩ := h
   exact ⟨by simpa [fitsWord] using h1, by simpa [fitsWord] using h2, fun r hr => fits_region (h3 r hr),
     by simpa [fitsWord] using h4, fun b hb => fits_binding (h5 b hb), by simpa [fitsWord] using h6,
     fun t ht => fits_thread (h7 t ht), by simpa [fitsWord] using h8, by simpa [fitsWord] using h9, fits_pending h10,
-    by simpa [fitsWord] using h11, fun p hp => fits_process (h12 p hp)⟩
+    by simpa [fitsWord] using h11, fun p hp => fits_process (h12 p hp), fits_skip h13⟩
 
 private theorem encode_rejects {snapshot : Snapshot} (h : binaryFits snapshot = false) :
     ∃ error, encodeBinarySnapshot snapshot = .error error :=
@@ -2214,19 +2366,11 @@ theorem binary_lossless_or_rejecting (snapshot : Snapshot) :
   | false => exact Or.inl ⟨rfl, encode_rejects h⟩
   | true => exact Or.inr ⟨_, by simp [encodeBinarySnapshot, h], unchecked_roundtrip snapshot (fits_snapshot h)⟩
 
-/-- Values wider than the format's 256-bit slot are refused, not cut down. -/
-theorem binary_rejects_wide_bits (snapshot : Snapshot) (var : Bap.Var) {width : Nat} (value : BitVec width)
-    (hm : (var, Value.bits value) ∈ snapshot.state.env) (hw : 256 < width) :
-    ∃ error, encodeBinarySnapshot snapshot = .error error := by
-  have hfits : binaryFits snapshot = false := by
-    cases h : binaryFits snapshot with
-    | false => rfl
-    | true =>
-      have := (fits_snapshot h).env _ hm
-      have hv : ValueSafe (Value.bits value) := this.2.2.2
-      have : width ≤ 256 := hv
-      omega
-  exact encode_rejects hfits
+/-- The format has no width limit of its own: a value is refused only for a width that does not fit the
+field holding it, so a 512-bit register round-trips like any other. -/
+theorem binary_accepts_wide_bits {width : Nat} (value : BitVec width) (hw : width < 2 ^ 64) :
+    valueFits (Value.bits value) = true := by
+  simpa [valueFits, fitsWord] using hw
 
 /-- Fixed-width fields past 64 bits are refused, not wrapped. -/
 theorem binary_rejects_wide_pc (snapshot : Snapshot) (hp : 2 ^ 64 ≤ snapshot.pc) :
@@ -2238,6 +2382,101 @@ theorem binary_rejects_wide_pc (snapshot : Snapshot) (hp : 2 ^ 64 ≤ snapshot.p
       have := (fits_snapshot h).pc
       omega
   exact encode_rejects hfits
+
+/-! Save and restore. -/
+
+private theorem find_map_normalize (env : Bil.Env) (var : Bap.Var) :
+    (env.map normalizeBinding).find? (fun binding => binding.1 == var) =
+      (env.find? fun binding => binding.1 == var).map normalizeBinding := by
+  induction env with
+  | nil => rfl
+  | cons head tail ih =>
+    simp only [List.map_cons, List.find?_cons]
+    have : (normalizeBinding head).1 = head.1 := rfl
+    rw [this]
+    cases head.1 == var <;> simp [ih]
+
+/-- Normalizing changes no register's bits: a lookup finds the same binding, with memory values rebuilt. -/
+theorem lookup_normalize (env : Bil.Env) (var : Bap.Var) :
+    Bil.lookup (env.map normalizeBinding) var = (Bil.lookup env var).map normalizeValue := by
+  simp only [Bil.lookup, find_map_normalize]
+  cases env.find? (fun binding => binding.1 == var) <;> rfl
+
+private theorem find_filter_other (env : Bil.Env) (memoryVar var : Bap.Var) (h : var ≠ memoryVar) :
+    (env.filter fun binding => binding.1 != memoryVar).find? (fun binding => binding.1 == var) =
+      env.find? fun binding => binding.1 == var := by
+  induction env with
+  | nil => rfl
+  | cons head tail ih =>
+    simp only [List.filter_cons, List.find?_cons]
+    by_cases hm : head.1 = memoryVar
+    · have h1 : (head.1 != memoryVar) = false := by simp [hm]
+      have h2 : (head.1 == var) = false := by
+        simp only [beq_eq_false_iff_ne, ne_eq, hm]
+        exact fun he => h he.symm
+      simp [h1, h2, ih]
+    · have h1 : (head.1 != memoryVar) = true := by simpa using hm
+      simp [h1, List.find?_cons, ih]
+
+/-- `save` leaves the memory variable out, and every other variable as it is. -/
+theorem lookup_withoutMemory (env : Bil.Env) (memoryVar var : Bap.Var) (h : var ≠ memoryVar) :
+    Bil.lookup (env.filter fun binding => binding.1 != memoryVar) var = Bil.lookup env var := by
+  simp only [Bil.lookup, find_filter_other env memoryVar var h]
+
+private theorem lookup_cons_other (env : Bil.Env) (memoryVar var : Bap.Var) (value : Value) (h : var ≠ memoryVar) :
+    Bil.lookup ((memoryVar, value) :: env) var = Bil.lookup env var := by
+  have hne : (memoryVar == var) = false := by
+    simp only [beq_eq_false_iff_ne, ne_eq]
+    exact fun he => h he.symm
+  simp [Bil.lookup, List.find?_cons, hne]
+
+/-- Saving and restoring through the binary format gives back exactly the emulator that was saved: pc,
+stopped flag, regions, thread ids, pending branch, skip marker and forked memories, all threads with their
+own pcs, pending branches, skip markers, registers, and the memory of their address space.
+Hooks are closures, which `restore` leaves as they are (see `Bap.Emu.Model.restore_keeps_hooks`). -/
+theorem checkpoint_restores (memoryVar : Bap.Var) (width : Nat) (snapshot : Snapshot)
+    (hfits : binaryFits (withoutMemory memoryVar snapshot) = true) :
+    ∃ data, encodeBinarySnapshot (withoutMemory memoryVar snapshot) = .ok data ∧
+      ∃ decoded, decodeBinarySnapshot data = .ok decoded ∧
+        let restored := materializeState memoryVar width decoded
+        restored.pc = snapshot.pc ∧ restored.stopped = snapshot.stopped ∧ restored.regions = snapshot.regions ∧
+        restored.currentThread = snapshot.currentThread ∧ restored.nextThread = snapshot.nextThread ∧
+        restored.pending = snapshot.pending ∧ restored.skip = snapshot.skip ∧
+        restored.processMemory = snapshot.processMemory ∧
+        (∀ var, var ≠ memoryVar →
+          Bil.lookup restored.state.env var = (Bil.lookup snapshot.state.env var).map normalizeValue) ∧
+        Bil.lookup restored.state.env memoryVar =
+          .ok (.memory (regionsMemory width (spaceRegions snapshot snapshot.currentThread))) ∧
+        restored.threads.map (fun thread => (thread.id, thread.pc, thread.stopped, thread.pending, thread.skip)) =
+          snapshot.threads.map (fun thread => (thread.id, thread.pc, thread.stopped, thread.pending, thread.skip)) ∧
+        ∀ thread ∈ snapshot.threads, ∃ back ∈ restored.threads, back.id = thread.id ∧
+          (∀ var, var ≠ memoryVar → Bil.lookup back.state.env var = (Bil.lookup thread.state.env var).map normalizeValue) ∧
+          Bil.lookup back.state.env memoryVar = .ok (.memory (regionsMemory width (spaceRegions snapshot thread.id))) := by
+  obtain ⟨data, hencode, hdecode⟩ : ∃ data, encodeBinarySnapshot (withoutMemory memoryVar snapshot) = .ok data ∧
+      decodeBinarySnapshot data = .ok (normalizeSnapshot (withoutMemory memoryVar snapshot)) := by
+    rcases binary_lossless_or_rejecting (withoutMemory memoryVar snapshot) with ⟨h, _⟩ | h
+    · rw [hfits] at h
+      cases h
+    · exact h
+  refine ⟨data, hencode, _, hdecode, ?_⟩
+  have hspace : ∀ id, spaceRegions (normalizeSnapshot (withoutMemory memoryVar snapshot)) id = spaceRegions snapshot id :=
+    fun _ => rfl
+  simp only [materializeState, hspace]
+  refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, ?_, ?_, ?_, ?_⟩
+  · intro var hvar
+    show Bil.lookup ((memoryVar, _) :: ((snapshot.state.env.filter fun binding => binding.1 != memoryVar).map normalizeBinding)) var = _
+    rw [lookup_cons_other _ _ _ _ hvar, lookup_normalize, lookup_withoutMemory _ _ _ hvar]
+  · show Bil.lookup ((memoryVar, _) :: _) memoryVar = _
+    simp [Bil.lookup]
+    rfl
+  · simp [normalizeSnapshot, withoutMemory, normalizeThread, List.map_map, Function.comp_def]
+  · intro thread hm
+    refine ⟨_, List.mem_map.2 ⟨_, List.mem_map.2 ⟨_, List.mem_map.2 ⟨thread, hm, rfl⟩, rfl⟩, rfl⟩, rfl, ?_, ?_⟩
+    · intro var hvar
+      simp only [Proofs.Bil.lookup_bind_other _ _ hvar, normalizeThread]
+      rw [lookup_normalize, lookup_withoutMemory _ _ _ hvar]
+    · simp only [Proofs.Bil.lookup_bind_eq, ite_true]
+      rfl
 
 end BinaryCheckpoint
 
@@ -2461,6 +2700,571 @@ theorem branch_reaches_target (source target : Nat) (aligned : ((target : Int) -
   · simp only [hc, ↓reduceIte]
     omega
 
+/-- The element sizes of the JNI table, for each `Get<Type>ArrayElements`: long is 8 bytes, float is 4. -/
+theorem arrayElementWidth_table :
+    (List.range 8).map (fun offset => arrayElementWidth (183 + offset)) =
+      [some 1, some 1, some 2, some 2, some 4, some 8, some 4, some 8] := rfl
+
+theorem arrayElementWidth_none (index : Nat) (h : index < 183 ∨ 190 < index) : arrayElementWidth index = none := by
+  simp only [arrayElementWidth]
+  split <;> first | rfl | omega
+
+theorem primitiveArrayClass_table :
+    (List.range 8).map (fun offset => primitiveArrayClass (175 + offset)) =
+      [some "[Z", some "[B", some "[C", some "[S", some "[I", some "[J", some "[F", some "[D"] := rfl
+
+/-- `New<Type>Array` and `Get<Type>ArrayElements` agree on the element type, index by index. -/
+theorem array_tables_agree :
+    (List.range 8).map (fun offset =>
+      match primitiveArrayClass (175 + offset), arrayElementWidth (183 + offset) with
+      | some name, some width => some (name, width)
+      | _, _ => none) =
+    [some ("[Z", 1), some ("[B", 1), some ("[C", 2), some ("[S", 2), some ("[I", 4), some ("[J", 8), some ("[F", 4),
+      some ("[D", 8)] := rfl
+
+/-- `Call<Type>Method`: the method is the third argument. -/
+theorem familyOf_call (index : Nat) (h : (28 ≤ index ∧ index ≤ 30) ∨ (34 ≤ index ∧ index ≤ 63)) :
+    familyOf index = .callMethod false 2 := by
+  simp only [familyOf]
+  rcases h with h | h <;> simp <;> omega
+
+/-- `CallNonvirtual<Type>Method`: the class comes first, and the method is the fourth argument. -/
+theorem familyOf_nonvirtual (index : Nat) (h : 64 ≤ index ∧ index ≤ 93) : familyOf index = .callMethod false 3 := by
+  have h1 : ¬ (28 ≤ index ∧ index ≤ 30) := by omega
+  have h2 : ¬ (34 ≤ index ∧ index ≤ 63) := by omega
+  simp [familyOf, h1, h2, h.1, h.2]
+
+/-- `CallStatic<Type>Method`. -/
+theorem familyOf_static (index : Nat) (h : 114 ≤ index ∧ index ≤ 143) : familyOf index = .callMethod true 2 := by
+  have h1 : ¬ (28 ≤ index ∧ index ≤ 30) := by omega
+  have h2 : ¬ (34 ≤ index ∧ index ≤ 63) := by omega
+  have h3 : ¬ (64 ≤ index ∧ index ≤ 93) := by omega
+  have h4 : ¬ (95 ≤ index ∧ index ≤ 103) := by omega
+  simp [familyOf, h1, h2, h3, h4, h.1, h.2]
+
+/-- `Get<Type>Field` and `GetStatic<Type>Field`. -/
+theorem familyOf_field (index : Nat) (h : 95 ≤ index ∧ index ≤ 103) : familyOf index = .getField false := by
+  have h1 : ¬ (28 ≤ index ∧ index ≤ 30) := by omega
+  have h2 : ¬ (34 ≤ index ∧ index ≤ 63) := by omega
+  have h3 : ¬ (64 ≤ index ∧ index ≤ 93) := by omega
+  simp [familyOf, h1, h2, h3, h.1, h.2]
+
+theorem familyOf_static_field (index : Nat) (h : 145 ≤ index ∧ index ≤ 153) : familyOf index = .getField true := by
+  have h1 : ¬ (28 ≤ index ∧ index ≤ 30) := by omega
+  have h2 : ¬ (34 ≤ index ∧ index ≤ 63) := by omega
+  have h3 : ¬ (64 ≤ index ∧ index ≤ 93) := by omega
+  have h4 : ¬ (95 ≤ index ∧ index ≤ 103) := by omega
+  have h5 : ¬ (114 ≤ index ∧ index ≤ 143) := by omega
+  simp [familyOf, h1, h2, h3, h4, h5, h.1, h.2]
+
+/-- Setters and everything outside the served families go to the fallback. -/
+theorem familyOf_setter (index : Nat) (h : (104 ≤ index ∧ index ≤ 112) ∨ (154 ≤ index ∧ index ≤ 162)) :
+    familyOf index = .other := by
+  have h1 : ¬ (28 ≤ index ∧ index ≤ 30) := by omega
+  have h2 : ¬ (34 ≤ index ∧ index ≤ 63) := by omega
+  have h3 : ¬ (64 ≤ index ∧ index ≤ 93) := by omega
+  have h4 : ¬ (95 ≤ index ∧ index ≤ 103) := by omega
+  have h5 : ¬ (114 ≤ index ∧ index ≤ 143) := by omega
+  have h6 : ¬ (145 ≤ index ∧ index ≤ 153) := by omega
+  simp [familyOf, h1, h2, h3, h4, h5, h6]
+
+/-- `GetEnv`: a known version succeeds, a newer one is `JNI_EVERSION`, which is -3 and not `JNI_EDETACHED`. -/
+theorem getEnvResult_ok (requested supported : Nat) (h : requested ≤ supported) : getEnvResult requested supported = 0 := by
+  simp [getEnvResult, h]
+
+theorem getEnvResult_version (requested supported : Nat) (h : supported < requested) :
+    getEnvResult requested supported = 2 ^ 64 - 3 := by
+  have : ¬ requested ≤ supported := by omega
+  simp [getEnvResult, this]
+
+private theorem utf16_char_length (char : Char) :
+    (if char.toNat < 0x10000 then [char.toNat]
+     else [0xD800 + (char.toNat - 0x10000) / 0x400, 0xDC00 + (char.toNat - 0x10000) % 0x400]).length =
+      if char.toNat < 0x10000 then 1 else 2 := by
+  split <;> rfl
+
+/-- `GetStringLength` counts UTF-16 units: one per character, two for those past the basic plane. -/
+theorem utf16Units_length (text : String) :
+    (utf16Units text).length = (text.toList.map fun char => if char.toNat < 0x10000 then 1 else 2).sum := by
+  simp only [utf16Units]
+  induction text.toList with
+  | nil => rfl
+  | cons head tail ih =>
+    simp only [List.flatMap_cons, List.length_append, List.map_cons, List.sum_cons, ih]
+    rw [utf16_char_length]
+
+/-- Past the basic plane, the two units are a surrogate pair, which decodes to the character. -/
+theorem utf16_surrogate_decodes (code : Nat) (hlow : 0x10000 ≤ code) (hhigh : code < 0x110000) :
+    let high := 0xD800 + (code - 0x10000) / 0x400
+    let low := 0xDC00 + (code - 0x10000) % 0x400
+    0xD800 ≤ high ∧ high < 0xDC00 ∧ 0xDC00 ≤ low ∧ low < 0xE000 ∧
+      (high - 0xD800) * 0x400 + (low - 0xDC00) + 0x10000 = code := by
+  intro high low
+  have hh : high = 0xD800 + (code - 0x10000) / 0x400 := rfl
+  have hl : low = 0xDC00 + (code - 0x10000) % 0x400 := rfl
+  omega
+
+/-- A unit of a UTF-16 buffer, read back from its two little-endian bytes. -/
+theorem utf16_unit_bytes (unit : Nat) (h : unit < 0x10000) :
+    (UInt8.ofNat (unit % 256)).toNat + (UInt8.ofNat (unit / 256)).toNat * 256 = unit := by
+  simp only [UInt8.toNat_ofNat']
+  omega
+
+/-- The stub of JNI index `index` loads the index into `w8`: `movz w8, #index` keeps it in bits 5 to 20. -/
+theorem stub_movz_index (index : Nat) (h : index < 2 ^ 16) :
+    (0x52800008 + index * 32) / 32 % 2 ^ 16 = index ∧ (0x52800008 + index * 32) % 32 = 8 := by
+  omega
+
 end Jni
+
+/-! ### The memory of a checkpoint -/
+
+section RegionMemory
+
+open Proofs.Core.MemoryLaws
+
+private theorem foldl_pagesSized {width : Nat} (regions : List Bap.Emu.Region) (memory : Bap.Memory width)
+    (h : PagesSized memory) :
+    PagesSized (regions.foldl (init := memory) fun memory region =>
+      Bap.Memory.writeRegion memory region.address region.data) := by
+  induction regions generalizing memory with
+  | nil => exact h
+  | cons head tail ih => exact ih _ (writeRegion_pagesSized h _ _)
+
+private theorem foldl_outside {width : Nat} (regions : List Bap.Emu.Region) (memory : Bap.Memory width)
+    (h : PagesSized memory) (target : BitVec width)
+    (hspace : ∀ region ∈ regions, regionInSpace width region = true)
+    (hout : ∀ region ∈ regions, region.contains target.toNat = false) :
+    Bap.Memory.readByte (regions.foldl (init := memory) fun memory region =>
+      Bap.Memory.writeRegion memory region.address region.data) target = Bap.Memory.readByte memory target := by
+  induction regions generalizing memory with
+  | nil => rfl
+  | cons head tail ih =>
+    simp only [List.foldl_cons]
+    rw [ih _ (writeRegion_pagesSized h _ _) (fun r hr => hspace r (List.mem_cons_of_mem _ hr))
+      (fun r hr => hout r (List.mem_cons_of_mem _ hr))]
+    apply readByte_writeRegion_outside h
+    intro j hj he
+    have hin : head.address + head.data.size ≤ 2 ^ width := by
+      simpa [regionInSpace] using hspace head (List.mem_cons_self ..)
+    rw [Nat.mod_eq_of_lt (by omega)] at he
+    have := hout head (List.mem_cons_self ..)
+    simp [Bap.Emu.Region.contains] at this
+    omega
+
+/-- The memory of a checkpoint holds the bytes of its regions: when no two regions share an address, each
+byte of each region is what a load of it reads. -/
+theorem regionsMemory_byte {width : Nat} (regions : List Bap.Emu.Region)
+    (hspace : ∀ region ∈ regions, regionInSpace width region = true)
+    (hdisjoint : regions.Pairwise fun left right => ∀ address, ¬ (left.contains address = true ∧ right.contains address = true))
+    {region : Bap.Emu.Region} (hm : region ∈ regions) {offset : Nat} (ho : offset < region.data.size) :
+    Bap.Memory.readByte (regionsMemory width regions) (BitVec.ofNat width (region.address + offset)) =
+      region.data[offset]! := by
+  have hin : region.address + region.data.size ≤ 2 ^ width := by simpa [regionInSpace] using hspace region hm
+  have hlt : region.address + offset < 2 ^ width := by omega
+  have htarget : (BitVec.ofNat width (region.address + offset)).toNat = region.address + offset := by
+    simp [Nat.mod_eq_of_lt hlt]
+  have hcontains : region.contains (region.address + offset) = true := by
+    simp [Bap.Emu.Region.contains]
+    omega
+  simp only [regionsMemory]
+  generalize hmem : Bap.Memory.empty width = memory
+  have hsized : PagesSized memory := by
+    rw [← hmem]
+    exact empty_pagesSized
+  clear hmem
+  induction regions generalizing memory with
+  | nil => cases hm
+  | cons head tail ih =>
+    simp only [List.foldl_cons]
+    rcases List.mem_cons.1 hm with rfl | hm'
+    · rw [foldl_outside tail _ (writeRegion_pagesSized hsized _ _) _ (fun r hr => hspace r (List.mem_cons_of_mem _ hr))]
+      · apply readByte_writeRegion_inside hsized _ _ (by omega) ho
+        rw [htarget, Nat.mod_eq_of_lt hlt]
+      · intro other ho'
+        have hnot := (List.pairwise_cons.1 hdisjoint).1 other ho' (region.address + offset)
+        rw [htarget]
+        cases hc : other.contains (region.address + offset) with
+        | false => rfl
+        | true => exact absurd ⟨hcontains, hc⟩ hnot
+    · exact ih (fun r hr => hspace r (List.mem_cons_of_mem _ hr)) (List.pairwise_cons.1 hdisjoint).2 hm' _
+        (writeRegion_pagesSized hsized _ _)
+
+/-- A forked process finds its own bytes in a restored checkpoint, not its parent's. -/
+theorem spaceRegions_process (snapshot : Snapshot) {id : ThreadId} {regions : List Bap.Emu.Region}
+    (h : snapshot.processMemory.lookup id = some regions) : spaceRegions snapshot id = regions := by
+  simp [spaceRegions, h]
+
+/-- A thread without a process of its own finds the shared bytes. -/
+theorem spaceRegions_shared (snapshot : Snapshot) {id : ThreadId} (h : snapshot.processMemory.lookup id = none) :
+    spaceRegions snapshot id = snapshot.regions := by
+  simp [spaceRegions, h]
+
+end RegionMemory
+
+/-! ### The running emulator -/
+
+section Links
+
+open_private Bap.Emu Bap.Emu stepOps rangeLimitOf
+
+/-- The operations of the emulator are made by `stepOpsOf` from its references, as those of the model are from its cells
+(`Bap.Emu.Model.ops_is_stepOpsOf`). -/
+theorem stepOps_is_stepOpsOf (emu : Bap.Emu.Emu) : (stepOps emu).pc = emu.pc.get ∧ (stepOps emu).skip = emu.skipCode.get ∧
+    (stepOps emu).setSkip = emu.skipCode.set ∧ (stepOps emu).stopped = emu.stopped.get ∧ (stepOps emu).pending = emu.pendingRef.get ∧
+    (stepOps emu).halt = emu.stopped.set true :=
+  ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- The emulator's step is the generic step of `Bap.Emu.Core`, which `Bap.Emu.Model` is about. -/
+theorem step_is_stepM (emu : Bap.Emu.Emu) : Bap.Emu.step emu = stepM (ε := IO.Error) (stepOps emu) := rfl
+
+/-- And its run is the generic run of that step. -/
+theorem run_is_runM (emu : Bap.Emu.Emu) (fuel : Nat) (h : rangeLimitOf emu.config ≤ 1) :
+    Bap.Emu.run emu fuel = runM (stepM (ε := IO.Error) (stepOps emu)) fuel 0 := by
+  simp [Bap.Emu.run, h]
+
+/-- With compiled ranges, the same step, with the fuel counting the instructions it chains. -/
+theorem run_is_runChainedM (emu : Bap.Emu.Emu) (fuel : Nat) (h : ¬ rangeLimitOf emu.config ≤ 1) :
+    Bap.Emu.run emu fuel = runChainedM (stepM (ε := IO.Error) (stepOps emu)) emu.budget.set
+      emu.engine.chained.get fuel fuel 0 := by
+  simp [Bap.Emu.run, h]
+
+end Links
+
+/-! ### The debugger -/
+
+section ShellCommands
+
+open_private Bap.Emu.Shell Bap.Emu hex byteHex
+
+theorem parseNumber_hex (value : Nat) : parseNumber ("0x" ++ hex value) = .ok value := by
+  have hlist : ("0x" ++ hex value).toList = '0' :: 'x' :: (hex value).toList := by
+    simp [String.toList_append]
+  simp only [parseNumber, hlist]
+  rw [String.ofList_toList]
+  exact shell_hex_roundtrip value
+
+/-- A decimal number reads back, as no decimal number starts with `0x`. -/
+theorem parseNumber_decimal (value : Nat) : parseNumber (toString value) = .ok value := by
+  have hnot : ∀ rest, (toString value).toList ≠ '0' :: 'x' :: rest := by
+    intro rest he
+    have hdigit : ∀ c ∈ (toString value).toList, c.isDigit = true := by
+      intro c hc
+      rw [Nat.toString_eq_ofList_toDigits, String.toList_ofList] at hc
+      exact Nat.isDigit_of_mem_toDigits (by decide) (by decide) hc
+    have := hdigit 'x' (by rw [he]; simp)
+    exact absurd this (by decide)
+  simp only [parseNumber]
+  rw [toNat?_toString value]
+
+private theorem parseNumber_repr (value : Nat) : parseNumber value.repr = .ok value := parseNumber_decimal value
+
+/-- The prefix alone is no number. -/
+theorem parseNumber_prefix_only : parseNumber "0x" = .error "empty hexadecimal value" := rfl
+
+/-- A byte of the debugger reads back; anything above a byte does not. -/
+theorem parseByte_byteHex (byte : UInt8) : parseByte (byteHex byte) = .ok byte := by
+  have hlt := byte.toNat_lt
+  simp only [parseByte, byteHex_roundtrip, bind, Except.bind]
+  have : ¬ byte.toNat ≥ 256 := by omega
+  simp only [this, ↓reduceIte, Except.ok.injEq]
+  exact UInt8.ofNat_toNat
+
+theorem parseByte_range {input : String} {value : Nat} (h : Bil.Wire.parseHex input = .ok value) (hv : 256 ≤ value) :
+    ∃ error, parseByte input = .error error := by
+  simp only [parseByte, h, bind, Except.bind, ge_iff_le, hv, ↓reduceIte]
+  exact ⟨_, rfl⟩
+
+/-- A line for each command, with its numbers in decimal, which is what a user may type. -/
+def commandWords : Command → List String
+  | .nothing => []
+  | .quit => ["q"]
+  | .help => ["help"]
+  | .pc => ["pc"]
+  | .regs => ["regs"]
+  | .reg name => ["reg", name]
+  | .set name value => ["set", name, toString value]
+  | .examine address size => ["x", toString address, toString size]
+  | .write address bytes => "write" :: toString address :: bytes.map byteHex
+  | .step => ["step"]
+  | .proceed => ["continue"]
+  | .proceedTo address => ["continue", toString address]
+  | .stop => ["stop"]
+  | .breakAt address => ["break", toString address]
+  | .breaks => ["breaks"]
+  | .delete address => ["delete", toString address]
+  | .snap => ["snap"]
+  | .restore => ["restore"]
+  | .save path => ["save", path]
+
+private theorem mapM_parseByte (bytes : List UInt8) : (bytes.map byteHex).mapM parseByte = .ok bytes := by
+  induction bytes with
+  | nil => rfl
+  | cons head tail ih =>
+    simp only [List.map_cons, List.mapM_cons, parseByte_byteHex, bind, Except.bind, ih]
+    rfl
+
+/-- Every command can be typed: the parser reads the words of each command back as that command. -/
+theorem parseCommand_words (command : Command) (hwrite : ∀ address bytes, command = .write address bytes → bytes ≠ []) :
+    parseCommand (commandWords command) = .ok command := by
+  cases command with
+  | nothing => rfl
+  | quit => rfl
+  | help => rfl
+  | pc => rfl
+  | regs => rfl
+  | step => rfl
+  | proceed => rfl
+  | stop => rfl
+  | breaks => rfl
+  | snap => rfl
+  | restore => rfl
+  | reg name => simp [commandWords, parseCommand]
+  | save path => simp [commandWords, parseCommand]
+  | set name value => simp [commandWords, parseCommand, parseNumber_repr, bind, Except.bind, pure, Except.pure]
+  | examine address size => simp [commandWords, parseCommand, parseNumber_repr, bind, Except.bind, pure, Except.pure]
+  | proceedTo address => simp [commandWords, parseCommand, parseNumber_repr, bind, Except.bind, pure, Except.pure]
+  | breakAt address => simp [commandWords, parseCommand, parseNumber_repr, bind, Except.bind, pure, Except.pure]
+  | delete address => simp [commandWords, parseCommand, parseNumber_repr, bind, Except.bind, pure, Except.pure]
+  | write address bytes =>
+    have hne := hwrite address bytes rfl
+    cases bytes with
+    | nil => exact absurd rfl hne
+    | cons head tail =>
+      have := mapM_parseByte (head :: tail)
+      simp only [commandWords, parseCommand, List.isEmpty, parseNumber_decimal, List.map_cons]
+      simp only [List.map_cons] at this
+      simp [bind, Except.bind, this, pure, Except.pure, parseNumber_repr]
+
+/-- `x ADDR` examines one byte. -/
+theorem parseCommand_examine_one (address : Nat) :
+    parseCommand ["x", toString address] = .ok (.examine address 1) := by
+  simp [parseCommand, parseNumber_repr, bind, Except.bind, pure, Except.pure]
+
+/-- `write` without bytes is refused. -/
+theorem parseCommand_write_nothing (address : String) : ∃ error, parseCommand ["write", address] = .error error :=
+  ⟨_, rfl⟩
+
+/-- A register of any width is found under its name, unless it is memory. -/
+theorem registerVar_found {env : Bil.Env} {name : String} (width : Nat) {binding : Bap.Var × Value}
+    (h : env.find? (fun binding => binding.1.name == name && !isMemoryType binding.1.typ) = some binding) :
+    registerVar env width name = binding.1 := by
+  simp only [registerVar]
+  rw [h]
+
+theorem registerVar_new {env : Bil.Env} {name : String} (width : Nat)
+    (h : env.find? (fun binding => binding.1.name == name && !isMemoryType binding.1.typ) = none) :
+    registerVar env width name = ⟨name, .imm width, 0, false⟩ := by
+  simp only [registerVar]
+  rw [h]
+
+/-- A value that fits goes in, at the width of the register. -/
+theorem registerValue_ok (name : String) (width index : Nat) (isVirtual : Bool) {value : Nat} (h : value < 2 ^ width) :
+    registerValue ⟨name, .imm width, index, isVirtual⟩ value = .ok (.bits (BitVec.ofNat width value)) := by
+  simp [registerValue, h]
+
+/-- A value that does not fit is refused, and not silently cut down. -/
+theorem registerValue_too_wide (name : String) (width index : Nat) (isVirtual : Bool) {value : Nat}
+    (h : 2 ^ width ≤ value) : ∃ error, registerValue ⟨name, .imm width, index, isVirtual⟩ value = .error error := by
+  have : ¬ value < 2 ^ width := by omega
+  simp [registerValue, this]
+
+private theorem registerNames_foldl (env : Bil.Env) (names : List String) (hnodup : names.Nodup) :
+    let result := env.foldl (init := names) fun names binding =>
+      if isMemoryType binding.1.typ || names.contains binding.1.name then names
+      else binding.1.name :: names
+    result.Nodup ∧ ∀ name, name ∈ result ↔ name ∈ names ∨
+      ∃ binding ∈ env, binding.1.name = name ∧ isMemoryType binding.1.typ = false := by
+  induction env generalizing names with
+  | nil => simpa using hnodup
+  | cons head tail ih =>
+    simp only [List.foldl_cons]
+    split
+    · rename_i hskip
+      obtain ⟨h1, h2⟩ := ih names hnodup
+      refine ⟨h1, fun name => ?_⟩
+      rw [h2 name]
+      constructor
+      · rintro (h | ⟨b, hb, hn, hm⟩)
+        · exact Or.inl h
+        · exact Or.inr ⟨b, List.mem_cons_of_mem _ hb, hn, hm⟩
+      · rintro (h | ⟨b, hb, hn, hm⟩)
+        · exact Or.inl h
+        · rcases List.mem_cons.1 hb with rfl | hb
+          · simp only [Bool.or_eq_true, List.contains_iff_mem] at hskip
+            rcases hskip with hs | hs
+            · rw [hs] at hm
+              cases hm
+            · exact Or.inl (hn ▸ hs)
+          · exact Or.inr ⟨b, hb, hn, hm⟩
+    · rename_i hkeep
+      have hnot : ¬ (isMemoryType head.1.typ || names.contains head.1.name) = true := hkeep
+      simp only [Bool.or_eq_true, not_or, List.contains_iff_mem] at hnot
+      obtain ⟨h1, h2⟩ := ih (head.1.name :: names) (List.nodup_cons.2 ⟨hnot.2, hnodup⟩)
+      refine ⟨h1, fun name => ?_⟩
+      rw [h2 name]
+      constructor
+      · rintro (h | ⟨b, hb, hn, hm⟩)
+        · rcases List.mem_cons.1 h with rfl | h
+          · exact Or.inr ⟨head, List.mem_cons_self .., rfl, by simpa using hnot.1⟩
+          · exact Or.inl h
+        · exact Or.inr ⟨b, List.mem_cons_of_mem _ hb, hn, hm⟩
+      · rintro (h | ⟨b, hb, hn, hm⟩)
+        · exact Or.inl (List.mem_cons_of_mem _ h)
+        · rcases List.mem_cons.1 hb with rfl | hb
+          · exact Or.inl (hn ▸ List.mem_cons_self ..)
+          · exact Or.inr ⟨b, hb, hn, hm⟩
+
+/-- `regs` lists each register once, and memories not at all. -/
+theorem registerNames_spec (env : Bil.Env) :
+    (registerNames env).Nodup ∧ ∀ name, name ∈ registerNames env ↔
+      ∃ binding ∈ env, binding.1.name = name ∧ isMemoryType binding.1.typ = false := by
+  obtain ⟨h1, h2⟩ := registerNames_foldl env [] List.nodup_nil
+  simp only [registerNames, List.mem_reverse]
+  refine ⟨(List.reverse_perm _).nodup_iff.2 h1, fun name => ?_⟩
+  rw [h2 name]
+  simp
+
+end ShellCommands
+
+/-! ### Live projects -/
+
+section ProjectParts
+
+private theorem roots_foldl (roots init : List Nat) (hnodup : init.Nodup) :
+    let result := roots.foldl (init := init) fun roots root => if roots.contains root then roots else roots ++ [root]
+    result.Nodup ∧ init <+: result ∧ ∀ root, root ∈ result ↔ root ∈ init ∨ root ∈ roots := by
+  induction roots generalizing init with
+  | nil => simpa using hnodup
+  | cons head tail ih =>
+    simp only [List.foldl_cons]
+    split
+    · rename_i hc
+      obtain ⟨h1, h2, h3⟩ := ih init hnodup
+      refine ⟨h1, h2, fun root => ?_⟩
+      rw [h3 root]
+      simp only [List.mem_cons]
+      constructor
+      · rintro (h | h)
+        · exact Or.inl h
+        · exact Or.inr (Or.inr h)
+      · rintro (h | rfl | h)
+        · exact Or.inl h
+        · exact Or.inl (List.contains_iff_mem.1 hc)
+        · exact Or.inr h
+    · rename_i hc
+      have hn : head ∉ init := fun hm => hc (List.contains_iff_mem.2 hm)
+      have hnd : (init ++ [head]).Nodup := by
+        rw [List.nodup_append]
+        refine ⟨hnodup, by simp, ?_⟩
+        intro a ha b hb
+        simp only [List.mem_singleton] at hb
+        subst hb
+        exact fun he => hn (he ▸ ha)
+      obtain ⟨h1, h2, h3⟩ := ih (init ++ [head]) hnd
+      refine ⟨h1, List.IsPrefix.trans (List.prefix_append _ _) h2, fun root => ?_⟩
+      rw [h3 root]
+      simp only [List.mem_append, List.mem_cons, List.not_mem_nil, or_false]
+      constructor
+      · rintro ((h | rfl) | h)
+        · exact Or.inl h
+        · exact Or.inr (Or.inl rfl)
+        · exact Or.inr (Or.inr h)
+      · rintro (h | rfl | h)
+        · exact Or.inl (Or.inl h)
+        · exact Or.inl (Or.inr rfl)
+        · exact Or.inr h
+
+/-- The roots of a live project are each scanned once. -/
+theorem projectRoots_nodup (entry : Nat) (roots : List Nat) (symbols : List (String × Nat)) :
+    (projectRoots entry roots symbols).Nodup :=
+  (roots_foldl _ [] List.nodup_nil).1
+
+/-- They are the pc, the given roots and the symbols, and nothing else. -/
+theorem mem_projectRoots (entry : Nat) (roots : List Nat) (symbols : List (String × Nat)) (root : Nat) :
+    root ∈ projectRoots entry roots symbols ↔ root = entry ∨ root ∈ roots ∨ ∃ symbol ∈ symbols, symbol.2 = root := by
+  have := (roots_foldl (entry :: roots ++ symbols.map Prod.snd) [] List.nodup_nil).2.2 root
+  simp only [projectRoots]
+  rw [this]
+  simp [List.mem_append, or_assoc]
+
+/-- The pc comes first. -/
+theorem projectRoots_head (entry : Nat) (roots : List Nat) (symbols : List (String × Nat)) :
+    (projectRoots entry roots symbols).head? = some entry := by
+  have h := (roots_foldl (roots ++ symbols.map Prod.snd) [entry] (by simp)).2.1
+  obtain ⟨tail, ht⟩ := h
+  have hfirst : projectRoots entry roots symbols =
+      (roots ++ symbols.map Prod.snd).foldl (init := [entry])
+        fun roots root => if roots.contains root then roots else roots ++ [root] := by
+    simp [projectRoots]
+  rw [hfirst, ← ht]
+  rfl
+
+private theorem foldl_add_entries (mapped : List Bap.Emu.Region) (map : Image.MemoryMap Unit) :
+    (mapped.foldl (init := map) fun memory region =>
+      memory.add ⟨region.address, region.data, region.protection.readable,
+        region.protection.writable, region.protection.executable⟩ ()).entries =
+      (mapped.map fun region => ((⟨region.address, region.data, region.protection.readable,
+        region.protection.writable, region.protection.executable⟩ : Image.MemRegion), ())).reverse ++ map.entries := by
+  induction mapped generalizing map with
+  | nil => rfl
+  | cons head tail ih =>
+    simp only [List.foldl_cons, ih, List.map_cons, List.reverse_cons, List.append_assoc]
+    rfl
+
+/-- The image of a live project has a memory region for each mapped region. -/
+theorem projectMemory_entries (mapped : List Bap.Emu.Region) :
+    (projectMemory mapped).entries =
+      (mapped.map fun region => ((⟨region.address, region.data, region.protection.readable,
+        region.protection.writable, region.protection.executable⟩ : Image.MemRegion), ())).reverse := by
+  simp [projectMemory, foldl_add_entries, Image.MemoryMap.empty]
+
+/-- With regions that do not overlap, the image reads what the regions hold, byte by byte. -/
+theorem projectMemory_readByte (mapped : List Bap.Emu.Region) (hd : Bap.Emu.Model.Disjoint mapped)
+    {region : Bap.Emu.Region} (hm : region ∈ mapped) {offset : Nat} (ho : offset < region.data.size) :
+    (projectMemory mapped).readByte (region.address + offset) = some (region.data.get! offset) := by
+  let image : Bap.Emu.Region → Image.MemRegion := fun region =>
+    ⟨region.address, region.data, region.protection.readable, region.protection.writable, region.protection.executable⟩
+  have hcontains : ∀ r address, (image r).contains address = r.contains address := fun _ _ => rfl
+  have hc : region.contains (region.address + offset) = true := by
+    simp [Bap.Emu.Region.contains]
+    omega
+  simp only [Image.MemoryMap.readByte, Image.MemoryMap.lookup, projectMemory_entries]
+  split
+  · rename_i first _ _ hlookup
+    have hmem : (first, ()) ∈ List.filter (fun entry => entry.1.contains (region.address + offset))
+        (mapped.map fun region => (image region, ())).reverse := by
+      rw [hlookup]
+      exact List.mem_cons_self ..
+    simp only [List.mem_filter, List.mem_reverse, List.mem_map, Prod.mk.injEq, and_true] at hmem
+    obtain ⟨⟨other, hother, hfirst⟩, hin⟩ := hmem
+    subst hfirst
+    rw [hcontains] at hin
+    have := hd other hother region hm _ hin hc
+    subst this
+    have hread : (image other).contains (other.address + offset) = true := hin
+    simp only [Image.MemRegion.readByte, hread, ↓reduceIte, Option.some.injEq]
+    congr 1
+    show other.address + offset - other.address = offset
+    omega
+  · rename_i hnone
+    have : (image region, ()) ∈ List.filter (fun entry => entry.1.contains (region.address + offset))
+        (mapped.map fun region => (image region, ())).reverse := by
+      simp only [List.mem_filter, List.mem_reverse, List.mem_map]
+      exact ⟨⟨region, hm, rfl⟩, by rw [hcontains]; exact hc⟩
+    exact absurd (hnone ▸ this : (image region, ()) ∈ ([] : List _)) (by simp)
+
+/-- A segment for each region, in order, with its address, size and permissions. -/
+theorem projectSegments_spec (mapped : List Bap.Emu.Region) :
+    (projectSegments mapped).map (fun segment => (segment.addr, segment.size, segment.readable, segment.writable, segment.executable)) =
+      mapped.map fun region => (region.address, region.data.size, region.protection.readable,
+        region.protection.writable, region.protection.executable) := by
+  simp [projectSegments, List.map_map, Function.comp_def]
+
+theorem projectSymbols_spec (symbols : List (String × Nat)) :
+    (projectSymbols symbols).map (fun symbol => (symbol.name, symbol.addr)) = symbols := by
+  simp [projectSymbols, List.map_map, Function.comp_def]
+
+end ProjectParts
 
 end Bap.Proofs.Emu

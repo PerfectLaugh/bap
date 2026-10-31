@@ -141,20 +141,103 @@ def run : IO Unit := do
   assertTrue "deflattening rejects undeclared external targets" !missingRecovery.complete
   let memorySlice := Analysis.Slice.backwardProject xrefProject 0x1000 [.mem 0x3000 8]
   assertEqual "backward slice follows memory stores" [0x1004, 0x1008] memorySlice.sites
-  assertEqual "backward slice preserves memory input" [Analysis.Slice.Location.mem 0x3000 8] memorySlice.live
+  assertEqual "backward slice preserves memory input" [Analysis.Slice.Location.memOf mem 0x3000 8] memorySlice.live
   assertTrue "constant memory slice is determined" memorySlice.determined
   assertEqual "slice reports the call it crosses with memory live" [0x1000] memorySlice.calls
   assertTrue "slice across a live call is incomplete" !memorySlice.complete
+  -- several memory variables: a store to the second doesn't hide the store to the first at the same address
+  let memOne : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let memTwo : Bap.Var := ⟨"other", .mem 64 8, 0, false⟩
+  let cell : Bil.Exp := .int (BitVec.ofNat 64 0x3000)
+  let storeTo (memory : Bap.Var) (value : Nat) : Bil.Stmt :=
+    .move memory (.store (.var memory) cell (.int (BitVec.ofNat 8 value)) .little 1)
+  let aliased : List Disasm.Insn := [
+    { address := 0, size := 1, asm := "", bil := [storeTo memOne 1] },
+    { address := 1, size := 1, asm := "", bil := [storeTo memTwo 2] }]
+  assertEqual "the memory variables of the code" [memOne, memTwo] (Analysis.Slice.memories aliased)
+  let firstMemory := Analysis.Slice.backward aliased [.memOf memOne 0x3000 1]
+  assertEqual "a store to another memory is no site" [0] firstMemory.sites
+  assertTrue "code with two memories can be complete" firstMemory.complete
+  let bothMemories := Analysis.Slice.backward aliased [.mem 0x3000 1]
+  assertEqual "a criterion naming no memory is about each of them" [0, 1] bothMemories.sites
+  assertTrue "a criterion naming no memory is complete with two memories" bothMemories.complete
+  let moved : List Disasm.Insn := [
+    { address := 0, size := 1, asm := "", bil := [storeTo memOne 1] },
+    { address := 1, size := 1, asm := "", bil := [.move memTwo (.var memOne)] },
+    { address := 2, size := 1, asm := "", bil := [storeTo memOne 9] }]
+  let movedSlice := Analysis.Slice.backward moved [.memOf memTwo 0x3000 1]
+  assertEqual "a move between memories carries what is live" [0, 1] movedSlice.sites
+  assertEqual "nothing is live before the store that a move carries" [] movedSlice.live
+  assertTrue "a slice through a move between memories is complete" movedSlice.complete
+  let unmoved := Analysis.Slice.backward moved.tail [.memOf memTwo 0x3000 1]
+  assertEqual "a move renames a live range" [Analysis.Slice.Location.memOf memOne 0x3000 1] unmoved.live
   let noCallSlice := Analysis.Slice.backward instructions.tail [.mem 0x3000 8]
   assertTrue "constant memory slice without calls is complete" noCallSlice.complete
   let registerSlice := Analysis.Slice.backwardProject xrefProject 0x1000 [.reg rax]
-  assertEqual "backward slice follows stored register" [0x1004, 0x1008] registerSlice.sites
-  assertEqual "backward slice replaces register with memory input" [Analysis.Slice.Location.mem 0x3000 8] registerSlice.live
+  -- the store only reads the register, so it has no part in its value
+  assertEqual "backward slice takes the definition of a register, not what reads it" [0x1004] registerSlice.sites
+  assertEqual "backward slice replaces register with memory input" [Analysis.Slice.Location.memOf mem 0x3000 8] registerSlice.live
   let unrelatedSlice := Analysis.Slice.backwardProject xrefProject 0x1000
     [.reg ⟨"RDX", .imm 64, 0, false⟩]
   assertEqual "backward slice excludes unrelated instructions" [] unrelatedSlice.sites
   assertEqual "backward slice keeps unrelated live register" [Analysis.Slice.Location.reg ⟨"RDX", .imm 64, 0, false⟩]
     unrelatedSlice.live
+  -- control flow: a branch is in the slice exactly when what runs next depends on it
+  let sliceX : Bap.Var := ⟨"x", .imm 64, 0, false⟩
+  let sliceY : Bap.Var := ⟨"y", .imm 64, 0, false⟩
+  let sliceC : Bap.Var := ⟨"c", .imm 1, 0, false⟩
+  let word (value : Nat) : Bil.Exp := .int (BitVec.ofNat 64 value)
+  let setTo (var : Bap.Var) (value : Nat) : Bil.Program := [.move var (word value)]
+  let branch (address target : Nat) : Disasm.Insn :=
+    ⟨address, 1, "branch", .conditionalJump, some target, [.ifElse (.var sliceC) [.jmp (word target)] []]⟩
+  let jump (address target : Nat) : Disasm.Insn := ⟨address, 1, "jump", .jump, some target, [.jmp (word target)]⟩
+  let plain (address : Nat) (bil : Bil.Program) : Disasm.Insn := ⟨address, 1, "plain", .normal, none, bil⟩
+  let chooses : List Disasm.Insn :=
+    [branch 0 3, plain 1 (setTo sliceX 1), jump 2 4, plain 3 (setTo sliceX 2), plain 4 (setTo sliceY 3)]
+  let chosen := Analysis.Slice.backward chooses [.reg sliceX]
+  assertEqual "a branch choosing a definition and both definitions are the slice" [0, 1, 3] chosen.sites
+  assertEqual "the branch condition is what is live" [Analysis.Slice.Location.reg sliceC] chosen.live
+  assertTrue "a slice of a diamond is complete" chosen.complete
+  assertEqual "what follows a definition without another site is the end" none (chosen.nextSite 2)
+  let around : List Disasm.Insn :=
+    [plain 0 (setTo sliceX 5), branch 1 3, plain 2 (setTo sliceY 1), plain 3 [.move sliceY (.var sliceX)]]
+  let aroundSlice := Analysis.Slice.backward around [.reg sliceX]
+  assertEqual "a branch nothing depends on stays out" [0] aroundSlice.sites
+  assertEqual "no site follows the definition" none (aroundSlice.nextSite 1)
+  assertTrue "a slice past an irrelevant branch is complete" aroundSlice.complete
+  let joined : List Disasm.Insn :=
+    [branch 0 2, plain 1 (setTo sliceY 1), plain 2 (setTo sliceX 7), plain 3 (setTo sliceY 2)]
+  let joinedSlice := Analysis.Slice.backward joined [.reg sliceX]
+  assertEqual "arms joining before the definition leave the branch out" [2] joinedSlice.sites
+  assertEqual "both arms go on at the definition" (some 2) (joinedSlice.nextSite 1)
+  assertEqual "the branch goes on at the definition" (some 2) (joinedSlice.nextSite 0)
+  assertTrue "a slice after a join is complete" joinedSlice.complete
+  let bump : Bil.Stmt := .move sliceX (.bin .add (.var sliceX) (word 1))
+  let loop : List Disasm.Insn := [plain 0 (setTo sliceX 0), branch 1 4, plain 2 [bump], jump 3 1, plain 4 (setTo sliceY 2)]
+  let loopSlice := Analysis.Slice.backward loop [.reg sliceX]
+  assertEqual "a loop computing the criterion is in the slice" [0, 1, 2] loopSlice.sites
+  assertEqual "only the loop condition is live before it" [Analysis.Slice.Location.reg sliceC] loopSlice.live
+  assertTrue "a slice of a loop is complete" loopSlice.complete
+  assertEqual "the back edge goes on at the loop head" (some 1) (loopSlice.nextSite 3)
+  let loopOther := Analysis.Slice.backward loop [.reg sliceY]
+  assertEqual "a loop nothing depends on stays out" [4] loopOther.sites
+  assertTrue "a slice skipping a loop is complete" loopOther.complete
+  let indirect : List Disasm.Insn := [plain 0 (setTo sliceX 1), ⟨1, 1, "jmp", .indirectJump, none, [.jmp (.var sliceY)]⟩]
+  assertTrue "an indirect jump leaves a slice incomplete" !(Analysis.Slice.backward indirect [.reg sliceX]).complete
+  assertTrue "an indirect jump leaves a slice undetermined" !(Analysis.Slice.backward indirect [.reg sliceX]).determined
+  let noEdge : List Disasm.Insn := [plain 0 [.ifElse (.var sliceC) [.jmp (word 2)] []], plain 1 (setTo sliceX 1), plain 2 (setTo sliceY 1)]
+  assertTrue "a jump the CFG has no edge for leaves a slice incomplete" !(Analysis.Slice.backward noEdge [.reg sliceX]).complete
+  let withEdge := Analysis.Slice.backwardCfg noEdge [(0, 1), (0, 2), (1, 2)] none [.reg sliceX]
+  assertTrue "the edges of the CFG describe the same code" withEdge.complete
+  assertEqual "a site follows its branch with the edges of the CFG" [0, 1] withEdge.sites
+  let unknownOther : List Disasm.Insn := [{ address := 0, size := 1, asm := "", bil :=
+    [.move memTwo (.store (.var memTwo) (.var rax) (.int (BitVec.ofNat 8 1)) .little 1)] }]
+  assertEqual "an unknown store to another memory is no site" []
+    (Analysis.Slice.backward unknownOther [.memOf memOne 0x3000 1]).sites
+  assertEqual "an unknown store to this memory is a site" [0]
+    (Analysis.Slice.backward unknownOther [.memOf memTwo 0x3000 1]).sites
+  assertTrue "an unknown store to this memory leaves it incomplete"
+    !(Analysis.Slice.backward unknownOther [.memOf memTwo 0x3000 1]).complete
   let partialDynamic := Analysis.DynamicSlice.backward xrefProject 0x1000 [0x1008] [.mem 0x3000 8]
   assertEqual "dynamic slice keeps traced site" [0x1008] partialDynamic.sites
   assertEqual "dynamic slice reports missing producer" [0x1004] partialDynamic.gaps
@@ -241,14 +324,20 @@ def run : IO Unit := do
   assertEqual "backward slice finds overlapping stores" [0] overlapping.sites
   assertEqual "backward slice lets a covering store end liveness" [] overlapping.live
   let partialStore := Analysis.Slice.backward [insn 0 [store address 2]] [.mem 0x3000 4]
-  assertEqual "backward slice keeps a partly overwritten location" [Analysis.Slice.Location.mem 0x3000 4] partialStore.live
+  assertEqual "backward slice keeps a partly overwritten location" [Analysis.Slice.Location.memOf mem 0x3000 4] partialStore.live
   let dynamicStore := Analysis.Slice.backward [insn 0 [store (.var rax) 8]] [.mem 0x3000 4]
   assertEqual "backward slice includes stores that may alias" [0] dynamicStore.sites
   assertTrue "backward slice with a dynamic store is incomplete" !dynamicStore.complete
   let branching : Project.Project := { xrefProject with
     disasm := some { entry := 0x1000, instructions := instructions.dropLast ++ [⟨0x100c, 4, "jcc", .conditionalJump, some 0x1004, []⟩] } }
-  assertTrue "project slice over branches is incomplete"
-    !(Analysis.Slice.backwardProject branching 0x1000 [.mem 0x3000 8]).complete
+  let branchingSlice := Analysis.Slice.backwardProject branching 0x1000 [.mem 0x3000 8]
+  assertEqual "project slice follows a loop over its CFG" [0x1004, 0x1008, 0x100c] branchingSlice.sites
+  assertTrue "project slice with a live call stays incomplete over branches" !branchingSlice.complete
+  let withoutCall : Project.Project := { branching with
+    disasm := branching.disasm.map fun disasm => { disasm with instructions := disasm.instructions.tail } }
+  let loopingSlice := Analysis.Slice.backwardProject withoutCall 0x1004 [.mem 0x3000 8]
+  assertEqual "project slice of a loop without calls has its sites" [0x1004, 0x1008, 0x100c] loopingSlice.sites
+  assertTrue "project slice of a loop without calls is complete" loopingSlice.complete
   let overlappingWriter : Bap.Emu.TraceAccess := { outsideAccess with address := 0x3004, size := 8 }
   assertEqual "dynamic slice reports overlapping writer" [0x2000]
     (Analysis.DynamicSlice.backwardWithAccesses xrefProject 0x1000 [0x1004, 0x1008] [overlappingWriter] [.mem 0x3000 8]).gaps

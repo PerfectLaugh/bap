@@ -246,6 +246,34 @@ def run : IO Unit := do
     0x24, 0x63, 0, 0x01]) 0
   assertEqual "scan of an assembler b" [0, 4, 8, 12] (reached.instructions.map Insn.address)
   assertEqual "scan of an assembler b edges" [(0, 4), (4, 8), (8, 12)] reached.edges
+  -- a conditional branch runs its slot and decides after it: bne $2, $0, 16 with a nop in the slot, then jr $ra twice
+  let beq ← Recursive.scan mips (bytes [0x14, 0x40, 0, 0x03, 0, 0, 0, 0, 0x03, 0xe0, 0, 0x08, 0, 0, 0, 0,
+    0x03, 0xe0, 0, 0x08, 0, 0, 0, 0]) 0
+  assertEqual "conditional branch goes through its slot, both ways"
+    [(0, 4), (4, 8), (4, 16)] (beq.edges.take 3)
+  assertEqual "conditional branch has no edge of its own to the target" false (beq.edges.contains (0, 16))
+  -- beql: taken it goes through the slot to the target, not taken it skips the slot and nothing leaves it otherwise
+  let beql ← Recursive.scan mips (bytes [0x50, 0x40, 0, 0x03, 0x24, 0x42, 0, 0x01, 0x03, 0xe0, 0, 0x08, 0, 0, 0, 0,
+    0x03, 0xe0, 0, 0x08, 0, 0, 0, 0]) 0
+  assertEqual "likely branch lists its slot" true (beql.instructions.any (·.address == 4))
+  assertEqual "likely branch has an edge into its slot" true (beql.edges.contains (0, 4))
+  assertEqual "likely branch not taken skips its slot" true (beql.edges.contains (0, 8))
+  assertEqual "likely branch taken goes from its slot to the target" true (beql.edges.contains (4, 16))
+  assertEqual "likely branch has no edge from its slot past it" false (beql.edges.contains (4, 8))
+  assertEqual "likely branch has no edge of its own to the target" false (beql.edges.contains (0, 16))
+  assertEqual "likely branch scan has no errors" [] beql.errors
+  -- bltzall $2, 16: a likely call, taken it goes through the slot and comes back after it, not taken it skips the slot
+  let bltzall ← Recursive.scan mips (bytes [0x04, 0x52, 0, 0x03, 0x24, 0x42, 0, 0x01, 0x03, 0xe0, 0, 0x08, 0, 0, 0, 0,
+    0x03, 0xe0, 0, 0x08, 0, 0, 0, 0]) 0
+  assertEqual "likely call is a call" (some Disasm.Flow.call) ((bltzall.instructions.find? (·.address == 0)).map (·.flow))
+  assertEqual "likely call lists its slot" true (bltzall.instructions.any (·.address == 4))
+  assertEqual "likely call has an edge into its slot" true (bltzall.edges.contains (0, 4))
+  assertEqual "likely call not taken skips its slot" true (bltzall.edges.contains (0, 8))
+  assertEqual "likely call goes on from its slot past it" true (bltzall.edges.contains (4, 8))
+  assertEqual "likely call scan has no errors" [] bltzall.errors
+  -- bgezall $2, 16 the same
+  let bgezall ← Recursive.scan mips (bytes [0x04, 0x53, 0, 0x03, 0x24, 0x42, 0, 0x01, 0x03, 0xe0, 0, 0x08, 0, 0, 0, 0]) 0
+  assertEqual "the other likely call skips its slot" true (bgezall.edges.contains (0, 8))
   let slotTwice : Disassembler := {
     name := "slot", decode := fun address _ => pure <| .ok <|
       match address with

@@ -806,6 +806,164 @@ theorem dominators_eq_nil_of_not_mem (h : s ∉ g.nodes) : dominators g s = [] :
   rw [reachable_eq_nil_of_not_mem h] at this
   simpa using this
 
+/-! ### The dominator table, row by row -/
+
+private theorem foldl_intersect_eq (sets : List (List α)) (init : List α) :
+    sets.foldl (fun result values => intersect result values) init =
+      init.filter fun x => sets.all fun v => decide (x ∈ v) := by
+  induction sets generalizing init with
+  | nil => exact (List.filter_eq_self.2 (by simp)).symm
+  | cons v vs ih =>
+    rw [List.foldl_cons, ih, intersect, List.filter_filter]
+    apply List.filter_congr
+    intro x _
+    simp only [List.all_cons]
+    rw [Bool.and_comm]
+
+/-- `eraseDups` does nothing to a list without repeats. -/
+theorem eraseDups_of_nodup {l : List α} (h : l.Nodup) : l.eraseDups = l := by
+  induction l with
+  | nil => rfl
+  | cons x xs ih =>
+    obtain ⟨hx, hxs⟩ := List.nodup_cons.1 h
+    rw [List.eraseDups_cons]
+    congr 1
+    have : xs.filter (fun b => !b == x) = xs := by
+      apply List.filter_eq_self.2
+      intro y hy
+      have : y ≠ x := fun e => hx (e ▸ hy)
+      simpa using this
+    rw [this]
+    exact ih hxs
+
+/-- `eraseDups` keeps the first of each, so it doesn't matter whether a filter goes first. -/
+theorem eraseDups_filter (P : α → Bool) (l : List α) : (l.filter P).eraseDups = l.eraseDups.filter P := by
+  induction l generalizing P with
+  | nil => simp
+  | cons x xs ih =>
+    rw [List.eraseDups_cons, List.filter_cons]
+    split
+    · rename_i hx
+      rw [List.eraseDups_cons, List.filter_cons, ite_eq_left hx]
+      congr 1
+      rw [List.filter_filter, ih, ih, List.filter_filter]
+      apply List.filter_congr
+      intro y _
+      simp [Bool.and_comm]
+    · rename_i hx
+      rw [ih, List.filter_cons, ite_eq_right hx, ih, List.filter_filter]
+      apply List.filter_congr
+      intro y _
+      by_cases hy : y = x
+      · subst hy
+        simp [hx]
+      · simp [hy]
+
+/-- A table that is exact, whichever way it was reached. -/
+private structure Exact (g : Graph α) (s : α) (T : List (α × List α)) : Prop where
+  keys : T.map Prod.fst = reachable g s
+  mem : ∀ n ds, (n, ds) ∈ T → ∀ d, d ∈ ds ↔ Dom g s n d
+
+private theorem aux_prior {T : List (α × List α)} {m : Nat} (fuel : Nat) (h : AuxInv g s T m)
+    (hm : (reachable g s).length ≤ m + fuel) :
+    ∃ T', Exact g s T' ∧ dominatorsAux g s (fuel + 1) T = dominatorStep g s T' := by
+  have hexact : ∀ {T : List (α × List α)} {m : Nat}, AuxInv g s T m → (reachable g s).length ≤ m → Exact g s T := by
+    intro T m h hm
+    refine ⟨h.keys, fun n ds hmem d => ⟨fun hd p hp => ?_, h.complete n ds hmem d⟩⟩
+    obtain ⟨q, hq, hnd, hsub⟩ := hp.simple
+    refine hsub (h.sound n ds hmem d hd q hq ?_)
+    have := hnd.length_le_of_subset hq.subset_reachable
+    omega
+  induction fuel generalizing T m with
+  | zero =>
+    refine ⟨T, hexact h (by omega), ?_⟩
+    unfold_dominatorsAux
+    split
+    · rename_i hfix
+      exact hfix.symm
+    · unfold_dominatorsAux
+  | succ fuel ih =>
+    have hfuel : dominatorsAux g s (fuel + 1 + 1) T =
+        if dominatorStep g s T = T then T else dominatorsAux g s (fuel + 1) (dominatorStep g s T) := by
+      unfold_dominatorsAux
+    rw [hfuel]
+    split
+    · rename_i hfix
+      refine ⟨T, ?_, hfix.symm⟩
+      have hs := sound_of_fix h.keys hfix h.sound (reachable g s).length
+      exact hexact ⟨h.keys, hs, h.complete⟩ (by omega)
+    · exact ih ⟨by rw [Keys, keys_step]; exact h.keys, step_sound h.keys h.sound, step_complete h.keys h.complete⟩
+        (by omega)
+
+open Classical in
+/-- What a row of the dominator table is, in terms of `Dom`: the node, then its other dominators in the
+order of `reachable`. -/
+theorem dominators_rows :
+    dominators g s = (reachable g s).map fun n =>
+      (n, if n = s then [s] else n :: ((reachable g s).eraseDups.filter fun d => decide (Dom g s n d ∧ d ≠ n))) := by
+  have hlen : (reachable g s).length ≤ 1 + (initialDominators g s).length := by
+    rw [initial_length]
+    omega
+  obtain ⟨T, hT, heq⟩ := aux_prior (g := g) (s := s) (initialDominators g s).length initial_inv hlen
+  have hd : dominators g s = dominatorStep g s T := dominators_eq.trans heq
+  rw [hd]
+  conv => rhs; rw [← hT.keys]
+  unfold_dominatorStep
+  rw [List.map_map]
+  apply List.map_congr_left
+  rintro ⟨n, old⟩ hold
+  simp only [Function.comp, Prod.mk.injEq, true_and]
+  have hn : n ∈ reachable g s := by
+    rw [← hT.keys]
+    exact List.mem_map.2 ⟨_, hold, rfl⟩
+  by_cases hns : n = s
+  · simp [hns]
+  · simp only [hns, ite_false]
+    have hpne := reachPreds_ne_nil hn hns
+    split
+    · rename_i hnil
+      exact absurd hnil hpne
+    · rename_i hne
+      rw [List.eraseDups_cons]
+      congr 1
+      rw [foldl_intersect_eq]
+      have hkey : ∀ d, ((((predecessors g n).filter fun pred => pred ∈ reachable g s).filterMap fun pred =>
+          Assoc.get pred T).all fun v => decide (d ∈ v)) = true ↔ ∀ a, (a, n) ∈ g.edges → a ∈ reachable g s → Dom g s a d := by
+        intro d
+        simp only [List.all_eq_true, decide_eq_true_eq, List.mem_filterMap, List.mem_filter, mem_predecessors]
+        constructor
+        · intro h a he ha
+          obtain ⟨v, hv⟩ := get_exists (T := T) (k := a) (by rw [hT.keys]; exact ha)
+          exact (hT.mem a v (get_mem hv) d).1 (h v ⟨a, ⟨he, by simpa using ha⟩, hv⟩)
+        · rintro h v ⟨a, ⟨he, ha⟩, hv⟩
+          exact (hT.mem a v (get_mem hv) d).2 (h a he (by simpa using ha))
+      have hdom : ∀ d, d ≠ n → (Dom g s n d ↔ ∀ a, (a, n) ∈ g.edges → a ∈ reachable g s → Dom g s a d) := by
+        intro d hdn
+        constructor
+        · intro h a he ha q hq
+          rcases List.mem_cons.1 (h _ (.cons hq he ((mem_reachable_iff_walk n).1 hn).choose_spec.mem_nodes)) with h' | h'
+          · exact absurd h' hdn
+          · exact h'
+        · intro h p hp
+          cases hp with
+          | nil _ => exact absurd rfl hns
+          | @cons a _ q w he _ =>
+            exact List.mem_cons_of_mem _ (h a he ((mem_reachable_iff_walk a).2 ⟨_, w⟩) q w)
+      rw [List.filter_filter, eraseDups_filter, hT.keys]
+      refine congrArg (n :: ·) (List.filter_congr ?_)
+      intro d _
+      by_cases hdn : d = n
+      · subst hdn
+        simp
+      · have h1 := hkey d
+        have h2 := hdom d hdn
+        rw [Bool.eq_iff_iff, Bool.and_eq_true, decide_eq_true_eq]
+        constructor
+        · rintro ⟨_, h⟩
+          exact ⟨h2.2 (h1.1 h), hdn⟩
+        · rintro ⟨h, _⟩
+          exact ⟨by simpa using hdn, h1.2 (h2.1 h)⟩
+
 /-! ### Immediate dominators -/
 
 /-- Size of the dominator set recorded for a node. -/
@@ -1285,5 +1443,112 @@ theorem idomChain_exists {n : α} (hn : n ∈ reachable g s) :
         exact ⟨k + 1, by omega, .step hp hc⟩
   obtain ⟨k, hk, hc⟩ := key _ n rfl hn
   exact ⟨k, Nat.lt_of_lt_of_le hk domSize_le_nodes, hc⟩
+
+/-! ### Shape of the computed tables -/
+
+private theorem closure_nodup (hn : g.nodes.Nodup) (fuel : Nat) (seen : List α) (hs : seen.Nodup) :
+    (closure g fuel seen).Nodup := by
+  induction fuel generalizing seen with
+  | zero => exact hs
+  | succ fuel ih =>
+    rw [closure_succ]
+    split
+    · exact hs
+    · apply ih
+      rw [closureStep_eq]
+      refine List.nodup_append.2 ⟨hs, hn.filter _, ?_⟩
+      rintro a ha b hb rfl
+      exact (of_decide_eq_true (List.mem_filter.1 hb).2).1 ha
+
+/-- With distinct nodes each reachable node is listed once. -/
+theorem reachable_nodup (hn : g.nodes.Nodup) : (reachable g s).Nodup :=
+  closure_nodup hn _ _ (nodup_eraseDups _)
+
+/-- Each node has at most one row in the immediate dominator table. -/
+theorem immediateDominators_keys_nodup (hn : g.nodes.Nodup) : ((immediateDominators g s).map Prod.fst).Nodup := by
+  have key : ∀ l : List (α × List α), (l.map Prod.fst).Nodup → ((l.filterMap fun entry =>
+      if entry.1 = s then none else
+        (entry.2.filter fun candidate => candidate != entry.1).foldl (pick g s entry.1) none).map Prod.fst).Nodup := by
+    have hsub : ∀ l : List (α × List α), ((l.filterMap fun entry =>
+        if entry.1 = s then none else
+          (entry.2.filter fun candidate => candidate != entry.1).foldl (pick g s entry.1) none).map Prod.fst).Sublist
+        (l.map Prod.fst) := by
+      intro l
+      induction l with
+      | nil => exact List.Sublist.refl _
+      | cons e es ih =>
+        simp only [List.filterMap_cons, List.map_cons]
+        split
+        · exact ih.cons _
+        · rename_i x hx
+          obtain ⟨a, b⟩ := x
+          have hk : a = e.1 := by
+            split at hx
+            · cases hx
+            · exact foldl_pick_eq (g := g) (s := s) (n := e.1) (r := none) (by simp) hx
+          simp only [hk]
+          exact ih.cons_cons _
+    exact fun l hl => (hsub l).nodup hl
+  rw [immediateDominators_eq]
+  apply key
+  rw [dominators_keys]
+  exact reachable_nodup hn
+
+private theorem frontierWalk_target (idom : List (α × α)) (stop : Option α) (tid : α) (fuel : Nat) (r : α)
+    (res : List (α × α)) {x y : α} (h : (x, y) ∈ frontierWalk g idom stop tid fuel r res) :
+    (x, y) ∈ res ∨ y = tid := by
+  induction fuel generalizing r res with
+  | zero => exact Or.inl h
+  | succ fuel ih =>
+    rw [frontierWalk_succ] at h
+    split at h
+    · exact Or.inl h
+    · split at h
+      · rcases ih _ _ h with h | h
+        · rcases List.mem_cons.1 h with h | h
+          · exact Or.inr (Prod.mk.inj h).2
+          · exact Or.inl h
+        · exact Or.inr h
+      · rcases List.mem_cons.1 h with h | h
+        · exact Or.inr (Prod.mk.inj h).2
+        · exact Or.inl h
+
+/-- Everything in a dominance frontier is a reachable node that has a predecessor. -/
+theorem dominanceFrontier_target {x y : α} {f : List α} (hf : (x, f) ∈ dominanceFrontier g s)
+    (hy : y ∈ f) : y ∈ reachable g s ∧ ∃ pred, (pred, y) ∈ g.edges := by
+  have hp : (x, y) ∈ frontierPairs g s := (mem_frontier hf).1 hy
+  have hinner : ∀ (b : α) (qs : List α) (acc : List (α × α)), (x, y) ∈ qs.foldl (fun result pred =>
+      frontierWalk g (immediateDominators g s) (Assoc.get b (immediateDominators g s)) b
+        (g.nodes.length + 1) pred result) acc → (x, y) ∈ acc ∨ (y = b ∧ ∃ q, q ∈ qs) := by
+    intro b qs
+    induction qs with
+    | nil => exact fun _ h => Or.inl h
+    | cons q qs ih =>
+      intro acc h
+      simp only [List.foldl_cons] at h
+      rcases ih _ h with h | ⟨h, r, hr⟩
+      · rcases frontierWalk_target _ _ _ _ _ _ h with h | h
+        · exact Or.inl h
+        · exact Or.inr ⟨h, q, by simp⟩
+      · exact Or.inr ⟨h, r, List.mem_cons_of_mem _ hr⟩
+  have houter : ∀ (l : List α) (acc : List (α × α)), (∀ b ∈ l, b ∈ reachable g s) →
+      (x, y) ∈ l.foldl (fun result tid => (predecessors g tid).foldl (fun result pred =>
+        frontierWalk g (immediateDominators g s) (Assoc.get tid (immediateDominators g s)) tid
+          (g.nodes.length + 1) pred result) result) acc →
+      (x, y) ∈ acc ∨ (y ∈ reachable g s ∧ ∃ pred, (pred, y) ∈ g.edges) := by
+    intro l
+    induction l with
+    | nil => exact fun _ _ h => Or.inl h
+    | cons b bs ih =>
+      intro acc hl h
+      simp only [List.foldl_cons] at h
+      rcases ih _ (fun c hc => hl c (List.mem_cons_of_mem _ hc)) h with h | h
+      · rcases hinner _ _ _ h with h | ⟨rfl, q, hq⟩
+        · exact Or.inl h
+        · exact Or.inr ⟨hl y (by simp), q, (mem_predecessors g q y).1 hq⟩
+      · exact Or.inr h
+  rcases houter _ [] (fun _ h => h) hp with h | h
+  · simp at h
+  · exact h
 
 end Bap.Proofs.Graph

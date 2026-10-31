@@ -1,4 +1,5 @@
 import Bap.Image.Basic
+import Bap.Image.ElfLinker
 import Bap.IO.Reader
 
 namespace Bap.Image.Coff
@@ -128,6 +129,8 @@ private def writeNat (data : ByteArray) (offset size value : Nat) : Except Strin
 
 /-- What a relocation stores. The numbers are `IMAGE_REL_*` of the machine. -/
 inductive RelocationKind where
+  /-- `ABSOLUTE`: nothing. -/
+  | ignored
   /-- `S + A` in `size` bytes: an object has no image base, so `ADDR` and `ADDR_NB` agree. -/
   | absolute (size : Nat)
   /-- `S + A - (P + extra)`: displacements count from the end of the instruction. -/
@@ -136,11 +139,31 @@ inductive RelocationKind where
   | section
   /-- `S + A` from the start of the symbol's section (debug information and thread-local storage). -/
   | sectionRelative
+  /-- AArch64 `ADR` and `ADRP`: `(S + A) >> shift` from `P >> shift`, in their split immediate. -/
+  | arm64Adr (shift : Nat)
+  /-- AArch64 `ADD`: the low 12 bits of the symbol's address or of its offset in its section, plus the immediate. -/
+  | arm64Add (inSection : Bool)
+  /-- AArch64 `ADD`: bits 12 to 23 of the offset in the symbol's section, plus the immediate. -/
+  | arm64AddHigh
+  /-- AArch64 loads and stores: the low 12 bits of the address or the offset, scaled by the size of the access. -/
+  | arm64Load (inSection : Bool)
+  /-- AArch64 branches: `S + A - P` in words, in the `n` bits from `lo`. -/
+  | arm64Branch (lo n : Nat)
+  /-- Thumb `MOVW` and `MOVT` in a row: `S + A` in 32 bits, with `A` in their immediates. -/
+  | armMov32T
+  /-- A32 `MOVW` and `MOVT` in a row. -/
+  | armMov32A
+  /-- Thumb conditional `B.W`: `S + A - (P + 4)`. -/
+  | armBranch20T
+  /-- Thumb `B.W`, `BL` and `BLX`: `S + A - (P + 4)`, from the aligned pc for `BLX`. -/
+  | armBranch24T
   deriving DecidableEq, Repr
 
-/-- The relocations that can be applied; ARM and AArch64 ones patch instructions and are reported instead. -/
+/-- The relocations that can be applied. Of ARM, the ones of old A32 and Thumb-1 branches and of the CLR are reported
+instead. -/
 def relocationKind (machine kind : Nat) : Option RelocationKind :=
   match machine, kind with
+  | 0x8664, 0 => some .ignored
   | 0x8664, 1 => some (.absolute 8)
   | 0x8664, 2 => some (.absolute 4)
   | 0x8664, 3 => some (.absolute 4)
@@ -152,28 +175,119 @@ def relocationKind (machine kind : Nat) : Option RelocationKind :=
   | 0x8664, 9 => some (.relative 9)
   | 0x8664, 0xa => some .section
   | 0x8664, 0xb => some .sectionRelative
+  | 0x014c, 0 => some .ignored
   | 0x014c, 6 => some (.absolute 4)
   | 0x014c, 7 => some (.absolute 4)
   | 0x014c, 0xa => some .section
   | 0x014c, 0xb => some .sectionRelative
   | 0x014c, 0x14 => some (.relative 4)
+  | 0xaa64, 0 => some .ignored
+  | 0xaa64, 1 => some (.absolute 4)
+  | 0xaa64, 2 => some (.absolute 4)
+  | 0xaa64, 3 => some (.arm64Branch 0 26)
+  | 0xaa64, 4 => some (.arm64Adr 12)
+  | 0xaa64, 5 => some (.arm64Adr 0)
+  | 0xaa64, 6 => some (.arm64Add false)
+  | 0xaa64, 7 => some (.arm64Load false)
+  | 0xaa64, 8 => some .sectionRelative
+  | 0xaa64, 9 => some (.arm64Add true)
+  | 0xaa64, 0xa => some .arm64AddHigh
+  | 0xaa64, 0xb => some (.arm64Load true)
+  | 0xaa64, 0xd => some .section
+  | 0xaa64, 0xe => some (.absolute 8)
+  | 0xaa64, 0xf => some (.arm64Branch 5 19)
+  | 0xaa64, 0x10 => some (.arm64Branch 5 14)
+  | 0xaa64, 0x11 => some (.relative 4)
+  | 0x01c0, kind | 0x01c2, kind | 0x01c4, kind =>
+    match kind with
+    | 0 => some .ignored
+    | 1 | 2 => some (.absolute 4)
+    | 0xa => some (.relative 4)
+    | 0xe => some .section
+    | 0xf => some .sectionRelative
+    | 0x10 => some .armMov32A
+    | 0x11 => some .armMov32T
+    | 0x12 => some .armBranch20T
+    | 0x14 | 0x15 => some .armBranch24T
+    | _ => none
   | _, _ => none
+
+open ElfLinker in
+/-- The size of the access of an AArch64 load or store, as the logarithm of its bytes: its top two bits, or 4 for the
+128-bit form of the SIMD registers. -/
+def arm64LoadScale (word : Nat) : Nat :=
+  if field word 26 1 == 1 && field word 23 1 == 1 then field word 30 2 + 4 else field word 30 2
+
+open ElfLinker in
+/-- The instruction words after a relocation that patches them, from the little-endian `old` words and the symbol's
+address or, in a relocation counted from the section, its offset. The immediate of the instructions is the addend. -/
+def patchedInstruction (kind : RelocationKind) (symbol place sectionAddr old : Nat) : Nat :=
+  let s : Int := symbol
+  let p : Int := place
+  let inSection : Nat := symbol - sectionAddr
+  let hw1 := field old 0 16
+  let hw2 := field old 16 16
+  let halves (first second : Nat) : Nat := first + second * 2 ^ 16
+  match kind with
+  | .arm64Adr shift =>
+    let imm := sext (field old 5 19 * 4 + field old 29 2 : Nat) 21
+    aarch64Adr (((s + imm) >>> shift) - (p >>> shift)) old
+  | .arm64Add within =>
+    let base := if within then inSection else symbol
+    setBits old 10 12 (field old 10 12 + base % 4096 : Nat)
+  | .arm64AddHigh => setBits old 10 12 ((inSection + field old 10 12) >>> 12 : Nat)
+  | .arm64Load within =>
+    let base := if within then inSection else symbol
+    let scale := arm64LoadScale old
+    setBits old 10 12 (field ((field old 10 12 + (base % 4096) >>> scale : Nat) : Int) 0 (12 - scale) : Nat)
+  | .arm64Branch lo n =>
+    setBits old lo n ((s + sext (field old lo n * 4 : Nat) (n + 2) - p) >>> 2)
+  | .armMov32T =>
+    let hw3 := field old 32 16
+    let hw4 := field old 48 16
+    let v := s + (thumbMovImm hw1 hw2 + thumbMovImm hw3 hw4 * 2 ^ 16 : Nat)
+    halves (thumbMovSet1 hw1 v) (thumbMovSet2 hw2 v) +
+      halves (thumbMovSet1 hw3 (v >>> 16)) (thumbMovSet2 hw4 (v >>> 16)) * 2 ^ 32
+  | .armMov32A =>
+    let w1 := field old 0 32
+    let w2 := field old 32 32
+    let v := s + (armMovImm w1 + armMovImm w2 * 2 ^ 16 : Nat)
+    armMovSet w1 v + armMovSet w2 (v >>> 16) * 2 ^ 32
+  | .armBranch20T =>
+    let v := s + thumbJump19Imm hw1 hw2 - (p + 4)
+    halves (thumbJump19Set1 hw1 v) (thumbJump19Set2 hw2 v)
+  | .armBranch24T =>
+    let pc := p + 4
+    let v := s + thumbBranchImm hw1 hw2 - (if field hw2 12 1 == 0 then pc - pc % 4 else pc)
+    halves (thumbBranchSet1 hw1 v) (thumbBranchSet2 hw2 v)
+  | _ => old
 
 /-- The value and width that a relocation stores. -/
 def relocationValue (kind : RelocationKind) (symbol place addend sectionNumber sectionAddr : Nat) : Nat × Nat :=
   match kind with
+  | .ignored => (addend, 0)
   | .absolute size => ((symbol + addend) % 2 ^ (size * 8), size)
   | .relative extra =>
     let modulus := 2 ^ 32
     ((symbol % modulus + addend % modulus + modulus - (place + extra) % modulus) % modulus, 4)
   | .section => ((sectionNumber + addend) % 2 ^ 16, 2)
   | .sectionRelative => ((symbol - sectionAddr + addend) % 2 ^ 32, 4)
+  | .armMov32T | .armMov32A => (patchedInstruction kind symbol place sectionAddr addend, 8)
+  | _ => (patchedInstruction kind symbol place sectionAddr addend, 4)
 
 private def relocationSize : RelocationKind → Nat
+  | .ignored => 0
   | .absolute size => size
   | .relative _ => 4
   | .section => 2
   | .sectionRelative => 4
+  | .armMov32T | .armMov32A => 8
+  | _ => 4
+
+/-- A pointer to Thumb code has the low bit set, except that a section-relative value is an offset. -/
+def withThumbBit (machine : Nat) (kind : RelocationKind) (flags symbol : Nat) : Nat :=
+  if (machine == 0x01c0 || machine == 0x01c2 || machine == 0x01c4) && flags &&& 0x20000000 != 0 &&
+      kind != .sectionRelative && symbol % 2 == 0 then symbol + 1 else symbol
 
 private def applyRelocation (data : ByteArray) (header : Header) (sections : List Section)
     (symbols : List (Nat × Symbol)) (object : ObjectSection) (region : MemRegion) (index : Nat) :
@@ -189,11 +303,12 @@ private def applyRelocation (data : ByteArray) (header : Header) (sections : Lis
     | none => .error s!"COFF relocation references missing symbol {symbolIndex}"
     | some (_, symbol) =>
       let sectionNumber ← IO.Reader.u16 data .little (header.symbolOffset + symbolIndex * 18 + 12)
-      let sectionAddr := match sectionOfNumber sections sectionNumber with
-        | some sec => sec.addr
-        | none => 0
+      let (sectionAddr, flags) := match sectionOfNumber sections sectionNumber with
+        | some sec => (sec.addr, sec.flags)
+        | none => (0, 0)
+      let symbolAddr := withThumbBit header.machine kind flags symbol.addr
       let addend ← IO.Reader.read region.data .little rva (relocationSize kind)
-      let (value, size) := relocationValue kind symbol.addr (object.info.addr + rva) addend sectionNumber sectionAddr
+      let (value, size) := relocationValue kind symbolAddr (object.info.addr + rva) addend sectionNumber sectionAddr
       let bytes ← writeNat region.data rva size value
       .ok { region with data := bytes }
 
@@ -243,7 +358,7 @@ private def architecture (machine : Nat) : Arch × Nat :=
   | 0x8664 => (.x86_64, 64)
   | 0xaa64 => (.aarch64, 64)
   | 0x014c => (.x86, 32)
-  | 0x01c0 | 0x01c4 => (.arm, 32)
+  | 0x01c0 | 0x01c2 | 0x01c4 => (.arm, 32)
   | 0x5032 => (.riscv, 32)
   | 0x5064 => (.riscv, 64)
   | _ => (.unknown, 32)

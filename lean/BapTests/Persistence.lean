@@ -33,6 +33,27 @@ def run : IO Unit := do
   match provideWith unrelatedEnv address object 10 {} with
   | .ok _ => IO.println "ok: unrelated observer not invoked"
   | .error error => throw <| IO.userError s!"unrelated observer invoked: {repr error}"
+  let observed ← provideOrFail address 10 {}
+  match provideWith rejectingEnv address object 10 observed with
+  | .ok next => assertEqual "unchanged provide does not notify and keeps the version" observed.version next.version
+  | .error error => throw <| IO.userError s!"observer notified of no change: {repr error}"
+  match provideWith rejectingEnv address object 5 observed with
+  | .ok next => assertEqual "provide of an implied value does not notify" observed.version next.version
+  | .error error => throw <| IO.userError s!"observer notified of no change: {repr error}"
+  match provideWith rejectingEnv address object 0 {} with
+  | .ok next => assertEqual "empty provide does not notify" 0 next.version
+  | .error error => throw <| IO.userError s!"observer notified of nothing: {repr error}"
+  match provideWith rejectingEnv address object 11 observed with
+  | .error (.failed "observer rejected update") => IO.println "ok: refinement notifies"
+  | .error error => throw <| IO.userError s!"wrong observer error: {repr error}"
+  | .ok _ => throw <| IO.userError "observer not notified of a refinement"
+  for value in [some true, some false, none] do
+    match encodeValue .bool value with
+    | .ok encoded =>
+      match decodeValue .bool encoded with
+      | .ok decoded => assertEqual "tribool round trip" value decoded
+      | .error error => throw <| IO.userError s!"tribool decode failed: {error}"
+    | .error error => throw <| IO.userError s!"tribool encode failed: {error}"
   let state ← provideOrFail address 42 {}
   let wide : Nat := 2 ^ 127 + 1
   let state ← provideOrFail bits wide state

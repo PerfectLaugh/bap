@@ -365,7 +365,7 @@ private def diffAndCodecRegressions : IO Unit := do
     (Bap.Emu.diffRanges [region 0x10 [1, 2]] [region 0x10 [1, 2]])
   let register (name : String) : Bap.Var := ⟨name, .imm 256, 0, false⟩
   let snapshotOf (env : Bil.Env) (pc : Nat := 0x1000) : Bap.Emu.Snapshot :=
-    ⟨{ env := env }, pc, [region 0x10 [1, 2]], false, [], 0, 0, none, []⟩
+    ⟨{ env := env }, pc, [region 0x10 [1, 2]], false, [], 0, 0, none, [], none⟩
   let wide := BitVec.ofNat 256 (2 ^ 255 + 7)
   match Bap.Emu.encodeBinarySnapshot (snapshotOf [(register "ymm", .bits wide)]) with
   | .error error => throw <| IO.userError error
@@ -375,10 +375,15 @@ private def diffAndCodecRegressions : IO Unit := do
     | .ok decoded =>
       assertBits "binary checkpoint keeps a 256-bit value" wide (Bil.lookup decoded.state.env (register "ymm"))
       assertEqual "binary checkpoint keeps the pc" 0x1000 decoded.pc
-  let tooWide : Value := .bits (BitVec.ofNat 257 (2 ^ 256))
-  match Bap.Emu.encodeBinarySnapshot (snapshotOf [(register "zmm", tooWide)]) with
-  | .error _ => IO.println "ok: binary checkpoint refuses a value over 256 bits"
-  | .ok _ => throw <| IO.userError "binary checkpoint accepted a 257-bit value"
+  -- Values take as many bytes as their width: nothing is too wide for the format any more.
+  let zmm : Bap.Var := ⟨"zmm", .imm 512, 0, false⟩
+  let widest := BitVec.ofNat 512 (2 ^ 511 + 3)
+  match Bap.Emu.encodeBinarySnapshot (snapshotOf [(zmm, .bits widest)]) with
+  | .error error => throw <| IO.userError s!"binary checkpoint refused a 512-bit value: {error}"
+  | .ok data =>
+    match Bap.Emu.decodeBinarySnapshot data with
+    | .error error => throw <| IO.userError error
+    | .ok decoded => assertBits "binary checkpoint keeps a 512-bit value" widest (Bil.lookup decoded.state.env zmm)
   match Bap.Emu.encodeBinarySnapshot (snapshotOf [] (2 ^ 64)) with
   | .error _ => IO.println "ok: binary checkpoint refuses a pc over 64 bits"
   | .ok _ => throw <| IO.userError "binary checkpoint accepted a 65-bit pc"
@@ -462,6 +467,302 @@ private def regionAudit : IO Unit := do
   let _ ← Bap.Emu.spawnThread failing 0x7000 0
   expectThrow "Emu parallel round reports a worker failure" (Bap.Emu.runPreemptiveParallel failing 1)
   assertBits "Emu parallel failure rolls the first worker back" (BitVec.ofNat 64 0) (.ok (← Bap.Emu.threadReg failing 1 a0))
+
+set_option maxRecDepth 8000 in
+/-- Regressions of the bugs that the proofs of `Bap.Emu.CoreProofs` found. -/
+private def coreRegressions : IO Unit := do
+  let zeros (size : Nat) := ByteArray.mk (List.replicate size 0).toArray
+  let rw : Primus.Protection := ⟨true, true, false⟩
+  let bits (value : Nat) : Value := .bits (BitVec.ofNat 64 value)
+  let rv (text : String) := LLVM.assemble "riscv64" text
+  let a0 := reg "X10"
+  let a1 := reg "X11"
+  let a2 := reg "X12"
+  -- An interpreted delayed branch enters its slot like a native one (advance_delayed).
+  let branch := (ByteArray.mk #[0x10, 0x43, 0x00, 0x02]) ++ (← LLVM.assemble "mips64" "addiu $4, $4, 1") ++
+    (← LLVM.assemble "mips64" "addiu $4, $4, 100") ++ (← LLVM.assemble "mips64" "addiu $5, $5, 1")
+  let mipsConfig : Bap.Emu.Config := {
+    disassembler := ← Target.MIPS.disassembler 0
+    disassemblerAt := some (fun base => Target.MIPS.disassembler base)
+    memory := ⟨"mem", .mem 64 8, 0, false⟩
+    endian := .big
+    syscallAbi := .mips
+    delayPolicy := .mips false
+    hotThreshold := 5
+  }
+  let interpreted ← Bap.Emu.create mipsConfig [⟨0, branch, ⟨true, true, true⟩⟩] {} 0
+  for name in ["R2", "R3"] do Bap.Emu.setReg interpreted (reg name) (bits 1)
+  for name in ["R4", "R5"] do Bap.Emu.setReg interpreted (reg name) (bits 0)
+  let _ ← Bap.Emu.run interpreted 1
+  assertEqual "Emu interpreted delayed branch enters the slot" 4 (← Bap.Emu.pc interpreted)
+  let _ ← Bap.Emu.run interpreted 1
+  assertEqual "Emu interpreted delay slot reaches the target" 12 (← Bap.Emu.pc interpreted)
+  assertBits "Emu interpreted delay slot runs" (BitVec.ofNat 64 1) (.ok (← Bap.Emu.reg interpreted (reg "R4")))
+  -- A compiled range would run past a delay slot, so that delay slots keep ranges off.
+  let ranged ← Bap.Emu.create { mipsConfig with hotThreshold := 1, rangeLimit := 8 } [⟨0, branch, ⟨true, true, true⟩⟩] {} 0
+  for name in ["R2", "R3"] do Bap.Emu.setReg ranged (reg name) (bits 1)
+  for name in ["R4", "R5"] do Bap.Emu.setReg ranged (reg name) (bits 0)
+  let _ ← Bap.Emu.run ranged 2
+  assertEqual "Emu delay slots keep compiled ranges off" 12 (← Bap.Emu.pc ranged)
+  assertEqual "Emu delayed code has no compiled range" 0 (← Bap.Primus.Lifted.stats ranged.engine).graphBlocks
+  -- A special nobody serves in a slot is a precise exception (advance_unhandled).
+  let slotCall := (ByteArray.mk #[0x10, 0x43, 0x00, 0x02]) ++ (← LLVM.assemble "mips64" "syscall") ++
+    (← LLVM.assemble "mips64" "addiu $4, $4, 100") ++ (← LLVM.assemble "mips64" "addiu $5, $5, 1")
+  let slotEmu ← Bap.Emu.mips64 slotCall 0 0
+  for name in ["R2", "R3"] do Bap.Emu.setReg slotEmu (reg name) (bits 1)
+  for name in ["R4", "R5", "R6", "R7", "R8", "R9"] do Bap.Emu.setReg slotEmu (reg name) (bits 0)
+  let _ ← Bap.Emu.run slotEmu 5
+  assertEqual "Emu unhandled slot special keeps the pc" 4 (← Bap.Emu.pc slotEmu)
+  let _ ← Bap.Emu.onSyscall slotEmu fun _ _ => pure (.returnValue 0)
+  Bap.Emu.resume slotEmu
+  let _ ← Bap.Emu.run slotEmu 1
+  assertEqual "Emu served slot special completes the branch" 12 (← Bap.Emu.pc slotEmu)
+  -- Faults name the thread that took them.
+  let faulting ← Bap.Emu.riscv64 (← rv "lw a0, 0(a1)") 0 0
+  Bap.Emu.setReg faulting a1 (bits 0x9000)
+  let second ← Bap.Emu.spawnThread faulting 0 0
+  Bap.Emu.switchThread faulting second
+  expectThrow "Emu second thread faults" (Bap.Emu.step faulting)
+  assertEqual "Emu fault names its thread" (some second) ((← Bap.Emu.failure faulting).map (·.thread))
+  -- A hook that moves the pc keeps the instruction from running (afterHooks_redirect).
+  let moving ← Bap.Emu.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "addi a0, a0, 2") ++ (← rv "addi a0, a0, 4")) 0 0
+  Bap.Emu.setReg moving a0 (bits 0)
+  let _ ← Bap.Emu.onCodeWith moving (0, 0) fun current _ => Bap.Emu.setPc current 8
+  let _ ← Bap.Emu.run moving 2
+  assertEqual "Emu hook redirect reaches the new pc" 12 (← Bap.Emu.pc moving)
+  assertBits "Emu hook redirect skips the instruction" (BitVec.ofNat 64 4) (.ok (← Bap.Emu.reg moving a0))
+  -- So does a syscall hook that moves the pc (commit_redirect).
+  let longjmp ← Bap.Emu.riscv64 ((← rv "ecall") ++ (← rv "addi a0, a0, 2") ++ (← rv "addi a0, a0, 4")) 0 0
+  Bap.Emu.setReg longjmp a0 (bits 0)
+  (List.range 6).forM fun index => Bap.Emu.setReg longjmp (reg s!"X{11 + index}") (bits 0)
+  Bap.Emu.setReg longjmp (reg "X17") (bits 1)
+  let _ ← Bap.Emu.onIntrinsic longjmp "*" fun _ => do
+    Bap.Emu.setPc longjmp 8
+    pure .proceed
+  let _ ← Bap.Emu.run longjmp 1
+  assertEqual "Emu handler moves the pc" 8 (← Bap.Emu.pc longjmp)
+  -- A thread that a hook creates during a parallel round survives it (mergeRound_new_thread).
+  let spawning ← Bap.Emu.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "jal 0")) 0 0
+  Bap.Emu.setReg spawning a0 (bits 0)
+  let _ ← Bap.Emu.spawnThread spawning 0 0
+  let spawned ← IO.mkRef false
+  let _ ← Bap.Emu.onCodeWith spawning (4, 4) fun current _ => do
+    if !(← spawned.get) then
+      spawned.set true
+      let _ ← Bap.Emu.spawnThread current 0 0
+  let _ ← Bap.Emu.runPreemptiveParallel spawning 4
+  assertEqual "Emu parallel round keeps a thread a hook spawned" [1, 2, 3] ((← Bap.Emu.threads spawning).map (·.id))
+  -- Sequentially scheduled forks have memories of their own (SpaceMachine.isolation).
+  let store := (← rv "addi a0, a0, 1") ++ (← rv "sb a0, 0(a1)") ++ (← rv "jal -8")
+  let forking ← Bap.Emu.riscv64 store 0 0
+  Bap.Emu.map forking ⟨0x1000, zeros 8, rw⟩
+  Bap.Emu.setReg forking a0 (bits 0)
+  Bap.Emu.setReg forking a1 (bits 0x1000)
+  let child ← Bap.Emu.forkThread forking 0
+  Bap.Emu.setThreadReg forking child a0 (bits 100)
+  Bap.Emu.setThreadReg forking child a1 (bits 0x1000)
+  Bap.Emu.resumeThread forking child
+  Bap.Emu.cloneProcessMemory forking child
+  let _ ← Bap.Emu.run forking 2
+  Bap.Emu.switchThread forking child
+  let _ ← Bap.Emu.run forking 2
+  assertEqual "Emu fork stores to its own memory" 101 (← Bap.Emu.read forking 0x1000 1)[0]!.toNat
+  Bap.Emu.switchThread forking 1
+  assertEqual "Emu fork leaves the parent's memory" 1 (← Bap.Emu.read forking 0x1000 1)[0]!.toNat
+  let _ ← Bap.Emu.runPreemptive forking 3 6
+  assertEqual "Emu preemption stores to the fork's memory" 102 (← Bap.Emu.read forking 0x1000 1)[0]!.toNat
+  Bap.Emu.switchThread forking 1
+  assertEqual "Emu preemption stores to the parent's memory" 2 (← Bap.Emu.read forking 0x1000 1)[0]!.toNat
+  -- The state of a thread of the shared address space follows it, also behind a process (parkShared).
+  let sharing ← Bap.Emu.riscv64 store 0 0
+  Bap.Emu.map sharing ⟨0x1000, zeros 8, rw⟩
+  Bap.Emu.setReg sharing a0 (bits 0)
+  Bap.Emu.setReg sharing a1 (bits 0x1000)
+  let sibling ← Bap.Emu.spawnThread sharing 0 0
+  let process ← Bap.Emu.forkThread sharing 0
+  Bap.Emu.resumeThread sharing process
+  Bap.Emu.cloneProcessMemory sharing process
+  let _ ← Bap.Emu.run sharing 2
+  Bap.Emu.switchThread sharing process
+  Bap.Emu.switchThread sharing sibling
+  Bap.Emu.refreshRegions sharing
+  assertEqual "Emu sibling state follows the shared memory" 1 (← Bap.Emu.read sharing 0x1000 1)[0]!.toNat
+  match Bil.lookup (← sharing.state.get).env sharing.config.memory with
+  | .ok (.memory memory) =>
+    assertEqual "Emu state memory is exact after leaving a process" 1
+      (Bap.Memory.readRegion memory 0x1000 1)[0]!.toNat
+  | _ => throw <| IO.userError "memory variable is missing"
+  -- A failed parallel round keeps what earlier rounds wrote (the exact rollback).
+  let round ← Bap.Emu.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "sb a0, 0(a1)") ++ (← rv "lb a3, 0(a2)") ++ (← rv "jal -12")) 0 0
+  Bap.Emu.map round ⟨0x1000, zeros 8, rw⟩
+  Bap.Emu.setReg round a0 (bits 0)
+  Bap.Emu.setReg round a1 (bits 0x1000)
+  Bap.Emu.setReg round a2 (bits 0x1000)
+  let roundSecond ← Bap.Emu.spawnThread round 0 0
+  Bap.Emu.setThreadReg round roundSecond a1 (bits 0x1004)
+  let _ ← Bap.Emu.runPreemptiveParallel round 4
+  let written := (← Bap.Emu.read round 0x1000 1)[0]!
+  assertEqual "Emu parallel round wrote" 1 written.toNat
+  Bap.Emu.setThreadReg round roundSecond a2 (bits 0x9000)
+  expectThrow "Emu parallel round fails" (Bap.Emu.runPreemptiveParallel round 4)
+  assertEqual "Emu failed round keeps earlier writes" written.toNat (← Bap.Emu.read round 0x1000 1)[0]!.toNat
+  assertEqual "Emu failed round reports the fault" (some 0x9000) ((← Bap.Emu.failure round).map (·.address))
+  -- A breakpoint stops the worker that hits it.
+  let breaking ← Bap.Emu.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "addi a0, a0, 1") ++ (← rv "jal 0")) 0 0
+  Bap.Emu.setReg breaking a0 (bits 0)
+  let _ ← Bap.Emu.spawnThread breaking 0 0
+  let _ ← Bap.Emu.addBreakpoint breaking 4
+  let _ ← Bap.Emu.runPreemptiveParallel breaking 10
+  assertEqual "Emu breakpoint stops parallel workers" [⟨1, 4, true⟩, ⟨2, 4, true⟩] (← Bap.Emu.threads breaking)
+  -- A stopped current thread does not hold up the only active one of a parallel round.
+  let blocked ← Bap.Emu.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "jal 0")) 0 0
+  Bap.Emu.setReg blocked a0 (bits 0)
+  let blockedSecond ← Bap.Emu.spawnThread blocked 0 0
+  Bap.Emu.stop blocked
+  assertEqual "Emu parallel round runs past a stopped thread" 2 (← Bap.Emu.runPreemptiveParallel blocked 2)
+  assertEqual "Emu parallel round switched to the active thread" blockedSecond (← Bap.Emu.thread blocked)
+  -- No re-fires: hooks fire once per instruction, across all that may happen in between.
+  let code := (← rv "addi a0, a0, 1") ++ (← rv "addi a0, a0, 1")
+  let hits ← IO.mkRef 0
+  let fresh : IO Bap.Emu.Emu := do
+    let emu ← Bap.Emu.riscv64 code 0 0
+    Bap.Emu.setReg emu a0 (bits 0)
+    hits.set 0
+    let _ ← Bap.Emu.onCode emu (0, 0) fun _ => do
+      hits.modify (· + 1)
+      Bap.Emu.stop emu
+    let _ ← Bap.Emu.step emu
+    pure emu
+  let afterSnapshot ← fresh
+  let saved ← Bap.Emu.snapshot afterSnapshot
+  Bap.Emu.restore afterSnapshot saved
+  Bap.Emu.resume afterSnapshot
+  let _ ← Bap.Emu.step afterSnapshot
+  assertEqual "Emu snapshot and restore cause no re-fire" 1 (← hits.get)
+  assertEqual "Emu restored breakpoint resumes" 4 (← Bap.Emu.pc afterSnapshot)
+  let afterSwitch ← fresh
+  let other ← Bap.Emu.spawnThread afterSwitch 4 0
+  Bap.Emu.switchThread afterSwitch other
+  Bap.Emu.switchThread afterSwitch 1
+  Bap.Emu.resume afterSwitch
+  let _ ← Bap.Emu.step afterSwitch
+  assertEqual "Emu thread switches cause no re-fire" 1 (← hits.get)
+  let afterSave ← fresh
+  Bap.Emu.save afterSave "native/build/emu-refire-checkpoint.sexp"
+  Bap.Emu.load afterSave "native/build/emu-refire-checkpoint.sexp"
+  Bap.Emu.resume afterSave
+  let _ ← Bap.Emu.step afterSave
+  assertEqual "Emu checkpoints cause no re-fire" 1 (← hits.get)
+  let afterParallel ← fresh
+  let _ ← Bap.Emu.spawnThread afterParallel 4 0
+  Bap.Emu.resume afterParallel
+  let _ ← Bap.Emu.runPreemptiveParallel afterParallel 1
+  assertEqual "Emu parallel workers cause no re-fire" 1 (← hits.get)
+  -- A fault retries its instruction without firing its hooks again (rollback_no_pending).
+  let retry ← Bap.Emu.riscv64 (← rv "lw a0, 0(a1)") 0 0
+  Bap.Emu.setReg retry a1 (bits 0x9000)
+  let retries ← IO.mkRef 0
+  let _ ← Bap.Emu.onCode retry (0, 0) fun _ => retries.modify (· + 1)
+  expectThrow "Emu retried load faults" (Bap.Emu.step retry)
+  Bap.Emu.map retry ⟨0x9000, zeros 8, rw⟩
+  let _ ← Bap.Emu.step retry
+  assertEqual "Emu retry after a fault causes no re-fire" 1 (← retries.get)
+  assertEqual "Emu retry runs the instruction" 4 (← Bap.Emu.pc retry)
+  -- An unhandled special stops once; resuming retries it without firing hooks again.
+  let special ← Bap.Emu.riscv64 (← rv "ecall") 0 0
+  let specials ← IO.mkRef 0
+  let _ ← Bap.Emu.onCode special (0, 0) fun _ => specials.modify (· + 1)
+  let _ ← Bap.Emu.step special
+  Bap.Emu.resume special
+  let _ ← Bap.Emu.step special
+  assertEqual "Emu unhandled special causes no re-fire" 1 (← specials.get)
+  -- A rolled back trace holds only instructions that completed.
+  let traced ← Bap.Emu.riscv64 ((← rv "sw a0, 0(a2)") ++ (← rv "lw a0, 0(a1)")) 0 0
+  Bap.Emu.map traced ⟨0x1000, zeros 8, rw⟩
+  Bap.Emu.setReg traced a0 (bits 0)
+  Bap.Emu.setReg traced a1 (bits 0x9000)
+  Bap.Emu.setReg traced a2 (bits 0x1000)
+  Bap.Emu.traceStartAccesses traced 8
+  let _ ← Bap.Emu.step traced
+  expectThrow "Emu traced load faults" (Bap.Emu.step traced)
+  assertEqual "Emu trace excludes a failed instruction" [0] (← Bap.Emu.tracePcs traced)
+  -- Compiled ranges: hooks fire once, the trace is in order, and a stop leaves the block unexecuted.
+  let rangeConfig : Bap.Emu.Config := {
+    disassembler := ← Target.RISCV.disassembler 0
+    disassemblerAt := some (fun base => Target.RISCV.disassembler base)
+    memory := ⟨"mem", .mem 64 8, 0, false⟩
+    endian := .little
+    rangeLimit := 8
+  }
+  let rangeCode := (← rv "jal 4") ++ (← rv "jal 4") ++ (← rv "jal 4") ++ (← rv "jal 4") ++ (← rv "addi a0, a0, 1")
+  let ranging ← Bap.Emu.create rangeConfig [⟨0, rangeCode, ⟨true, true, true⟩⟩] { env := [(a0, bits 0)] } 0
+  Bap.Emu.traceStart ranging
+  let rangeHits ← IO.mkRef 0
+  let _ ← Bap.Emu.onCode ranging (8, 8) fun _ => do
+    rangeHits.modify (· + 1)
+    Bap.Emu.stop ranging
+  let _ ← Bap.Emu.run ranging 10
+  assertEqual "Emu compiled range stops at the hook" 8 (← Bap.Emu.pc ranging)
+  assertEqual "Emu compiled range trace holds what ran" [0, 4] (← Bap.Emu.tracePcs ranging)
+  Bap.Emu.resume ranging
+  let _ ← Bap.Emu.step ranging
+  assertEqual "Emu compiled range causes no re-fire" 1 (← rangeHits.get)
+  assertEqual "Emu compiled range resumes" [0, 4, 8] ((← Bap.Emu.tracePcs ranging).take 3)
+  -- A process that a hook forks in a parallel round has its memory in its state too.
+  let forkingRound ← Bap.Emu.riscv64 ((← rv "sb a0, 0(a1)") ++ (← rv "addi a0, a0, 1") ++ (← rv "jal -8")) 0 0
+  Bap.Emu.map forkingRound ⟨0x1000, zeros 8, rw⟩
+  Bap.Emu.setReg forkingRound a0 (bits 5)
+  Bap.Emu.setReg forkingRound a1 (bits 0x1000)
+  let _ ← Bap.Emu.spawnThread forkingRound 4 6
+  let forkedRound ← IO.mkRef none
+  let _ ← Bap.Emu.onCodeWith forkingRound (4, 4) fun current _ => do
+    if (← Bap.Emu.thread current) == 1 && (← forkedRound.get).isNone then
+      let id ← Bap.Emu.forkThread current 4
+      Bap.Emu.cloneProcessMemory current id
+      forkedRound.set (some id)
+  let _ ← Bap.Emu.runPreemptiveParallel forkingRound 2
+  let some forkId := ← forkedRound.get | throw <| IO.userError "the hook did not fork"
+  Bap.Emu.resumeThread forkingRound forkId
+  Bap.Emu.switchThread forkingRound forkId
+  match Bil.lookup (← forkingRound.state.get).env forkingRound.config.memory with
+  | .ok (.memory memory) =>
+    assertEqual "Emu fork in a round has its memory in its state" 5 (Bap.Memory.readRegion memory 0x1000 1)[0]!.toNat
+  | _ => throw <| IO.userError "memory variable is missing"
+  assertEqual "Emu fork in a round reads its native memory" 5 (← Bap.Emu.read forkingRound 0x1000 1)[0]!.toNat
+  -- Hooks fire in the order of their registration, whatever their kind.
+  let ordered ← Bap.Emu.riscv64 (← rv "sw a0, 0(a1)") 0 0
+  Bap.Emu.map ordered ⟨0x1000, zeros 8, rw⟩
+  Bap.Emu.setReg ordered a0 (bits 0)
+  Bap.Emu.setReg ordered a1 (bits 0x1000)
+  let order ← IO.mkRef ([] : List Nat)
+  let _ ← Bap.Emu.onCode ordered (0, 0) fun _ => order.modify (· ++ [1])
+  let _ ← Bap.Emu.onCode ordered (0, 0) fun _ => order.modify (· ++ [2])
+  let _ ← Bap.Emu.onWrite ordered (0x1000, 0x1003) fun _ _ _ => order.modify (· ++ [3])
+  let _ ← Bap.Emu.onWrite ordered (0x1000, 0x1003) fun _ _ _ => order.modify (· ++ [4])
+  let _ ← Bap.Emu.step ordered
+  assertEqual "Emu hooks fire in registration order" [1, 2, 3, 4] (← order.get)
+  -- A fork keeps its memory across a failed step of its own, and a checkpoint keeps both memories.
+  let failing ← Bap.Emu.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "sb a0, 0(a1)") ++ (← rv "lb a3, 0(a2)") ++ (← rv "jal -12")) 0 0
+  Bap.Emu.map failing ⟨0x1000, zeros 8, rw⟩
+  Bap.Emu.setReg failing a0 (bits 0)
+  Bap.Emu.setReg failing a1 (bits 0x1000)
+  Bap.Emu.setReg failing a2 (bits 0x1000)
+  let forked ← Bap.Emu.forkThread failing 0
+  Bap.Emu.setThreadReg failing forked a0 (bits 100)
+  Bap.Emu.resumeThread failing forked
+  Bap.Emu.cloneProcessMemory failing forked
+  Bap.Emu.switchThread failing forked
+  let _ ← Bap.Emu.run failing 3
+  Bap.Emu.setReg failing a2 (bits 0x9000)
+  Bap.Emu.setPc failing 8
+  expectThrow "Emu fork faults" (Bap.Emu.step failing)
+  assertEqual "Emu fork keeps its memory across a fault" 101 (← Bap.Emu.read failing 0x1000 1)[0]!.toNat
+  Bap.Emu.save failing "native/build/emu-fork-checkpoint.sexp"
+  Bap.Emu.write failing 0x1000 (ByteArray.mk #[7])
+  Bap.Emu.load failing "native/build/emu-fork-checkpoint.sexp"
+  assertEqual "Emu checkpoint keeps a fork's memory" 101 (← Bap.Emu.read failing 0x1000 1)[0]!.toNat
+  Bap.Emu.switchThread failing 1
+  assertEqual "Emu checkpoint keeps the parent's memory" 0 (← Bap.Emu.read failing 0x1000 1)[0]!.toNat
 
 set_option maxRecDepth 4000 in
 private def runEmulator : IO Unit := do
@@ -866,6 +1167,21 @@ private def runEmulator : IO Unit := do
     (.ok (← Bap.Emu.reg shellEmu output))
   assertEqual "Emu shell deletes breakpoints" [] (← Bap.Emu.breakpoints shellEmu)
   assertTrue "Emu shell leaves resumed program running" !(← Bap.Emu.stopped shellEmu)
+  -- The registers of the debugger have the widths of their target, and values that do not fit are refused.
+  let narrowShell ← Bap.Emu.riscv32 shellCode 0 0
+  let (narrowInput, narrowOutput, narrowText) ← shellStreams [
+    "set X10 7", "reg X10", "set X10 0x1ffffffff", "reg X10", "x 0 99999999999", "x 0x 1", "set X11 0x", "regs", "q"
+  ]
+  Bap.Emu.shell narrowShell narrowInput narrowOutput
+  let narrowOutputText ← narrowText.get
+  assertTrue "Emu shell reads a 32-bit register" ((narrowOutputText.splitOn "X10=32:0x7").length == 3)
+  assertTrue "Emu shell refuses a value that does not fit" ((narrowOutputText.splitOn "does not fit").length > 1)
+  assertTrue "Emu shell fails on an absurd size" ((narrowOutputText.splitOn "unmapped Emu address in").length > 1)
+  assertTrue "Emu shell refuses the bare prefix" ((narrowOutputText.splitOn "empty hexadecimal value").length == 3)
+  assertEqual "Emu shell parses hexadecimal" (some (Bap.Emu.Command.breakAt 16))
+    (Bap.Emu.parseCommand ["break", "0x10"]).toOption
+  assertEqual "Emu shell parses decimal" (some (Bap.Emu.Command.examine 16 2))
+    (Bap.Emu.parseCommand ["x", "16", "2"]).toOption
 
   testThreads
   testDelaySlots
@@ -878,9 +1194,183 @@ private def runEmulator : IO Unit := do
   Bap.Emu.resume emu
   assertTrue "Emu resumed state" !(← Bap.Emu.stopped emu)
 
+/-- Compiled ranges: they form on what a lifter makes of a real loop, they run around it natively, and the
+fuel, the hooks and the code they run stay exact. -/
+private def rangeRegressions : IO Unit := do
+  let rv (text : String) := LLVM.assemble "riscv64" text
+  let bits (value : Nat) : Value := .bits (BitVec.ofNat 64 value)
+  let a0 := reg "X10"
+  let a1 := reg "X11"
+  let a2 := reg "X12"
+  let a3 := reg "X13"
+  let rw : Primus.Protection := ⟨true, true, false⟩
+  let zeros (size : Nat) := ByteArray.mk (List.replicate size 0).toArray
+  let decoders ← Bap.Emu.riscv64Decoders
+  let make (code : ByteArray) : IO Bap.Emu.Emu := do
+    let emu ← Bap.Emu.create {
+        disassembler := ← decoders 0
+        disassemblerAt := some decoders
+        memory := ⟨"mem", .mem 64 8, 0, false⟩
+        rangeLimit := 8 } [⟨0, code, ⟨true, true, true⟩⟩] {} 0
+    for index in [0:32] do Bap.Emu.setReg emu (reg s!"X{index}") (bits 0)
+    pure emu
+  let loop := (← rv "addi a0, a0, 1") ++ (← rv "addi a1, a1, 2") ++ (← rv "bne a0, a3, -8") ++ (← rv "addi a2, a2, 1")
+  -- A pc-relative branch with no else, and blocks that fall through, chain into one native run.
+  let chaining ← make loop
+  Bap.Emu.setReg chaining a3 (bits 1000)
+  assertEqual "Emu range runs what it is told to" 2500 (← Bap.Emu.run chaining 2500)
+  let chainingStats ← Primus.Lifted.stats chaining.engine
+  assertEqual "Emu range forms on a lifted loop" 4 chainingStats.graphBlocks
+  assertEqual "Emu range goes around a loop in one native run" 1 chainingStats.nativeRuns
+  assertBits "Emu range computes what the loop does" (BitVec.ofNat 64 834) (.ok (← Bap.Emu.reg chaining a0))
+  assertBits "Emu range computes the rest of the loop" (BitVec.ofNat 64 1666) (.ok (← Bap.Emu.reg chaining a1))
+  assertEqual "Emu range ends with the pc at the next instruction" 4 (← Bap.Emu.pc chaining)
+  -- The fuel counts instructions, wherever it runs out, and resuming goes on from there.
+  for fuel in [1, 2, 3, 4, 5, 7, 11] do
+    let exact ← make loop
+    Bap.Emu.setReg exact a3 (bits 1000)
+    let single ← make loop
+    Bap.Emu.setReg single a3 (bits 1000)
+    let mut stepped := 0
+    for _ in [0:fuel] do
+      if ← Bap.Emu.step single then stepped := stepped + 1
+    assertEqual s!"Emu range fuel {fuel} is exact" stepped (← Bap.Emu.run exact fuel)
+    assertEqual s!"Emu range fuel {fuel} stops at the pc of single steps" (← Bap.Emu.pc single) (← Bap.Emu.pc exact)
+    assertEqual s!"Emu range fuel {fuel} has the registers of single steps"
+      (repr (← Bap.Emu.reg single a0)).pretty
+      (repr (← Bap.Emu.reg exact a0)).pretty
+    assertEqual s!"Emu range fuel {fuel} has the other register of single steps"
+      (repr (← Bap.Emu.reg single a1)).pretty (repr (← Bap.Emu.reg exact a1)).pretty
+  -- A range that runs off its end has the pc of the block it ended in, and not the one after its seed.
+  let ending ← make ((← rv "jal 4") ++ (← rv "jal 4") ++ (← rv "addi a0, a0, 7") ++ (← rv "ecall"))
+  assertEqual "Emu range ending in a fall-through counts its instructions" 3 (← Bap.Emu.run ending 3)
+  assertEqual "Emu range ending in a fall-through has its pc" 12 (← Bap.Emu.pc ending)
+  assertBits "Emu range ending in a fall-through ran it" (BitVec.ofNat 64 7) (.ok (← Bap.Emu.reg ending a0))
+  -- A block that needs the interpreter stays out of the range, and the range forms around it.
+  let special ← make ((← rv "addi a0, a0, 1") ++ (← rv "ecall") ++ (← rv "jal -8"))
+  let served ← IO.mkRef 0
+  let _ ← Bap.Emu.onSyscall special fun _ _ => do
+    served.modify (· + 1)
+    pure (.returnValue 0)
+  let _ ← Bap.Emu.run special 30
+  assertEqual "Emu range leaves for a special" 10 (← served.get)
+  -- Preemption is exact as well: each thread gets its quantum.
+  let round ← make ((← rv "addi a0, a0, 1") ++ (← rv "jal -4"))
+  let other ← Bap.Emu.spawnThread round 0 0
+  assertEqual "Emu range preempts at its quantum" 100 (← Bap.Emu.runPreemptive round 10 100)
+  assertBits "Emu range quantum: first thread" (BitVec.ofNat 64 25) (.ok (← Bap.Emu.threadReg round 1 a0))
+  assertBits "Emu range quantum: second thread" (BitVec.ofNat 64 25) (.ok (← Bap.Emu.threadReg round other a0))
+  -- A code hook sees every instruction it is on, and all stop where single steps do.
+  let hooked ← make loop
+  Bap.Emu.setReg hooked a3 (bits 1000)
+  let hits ← IO.mkRef 0
+  let _ ← Bap.Emu.onCode hooked (4, 4) fun _ => hits.modify (· + 1)
+  let _ ← Bap.Emu.run hooked 300
+  assertEqual "Emu range fires the hooks of its blocks" 100 (← hits.get)
+  -- A hook that a write hook adds fires at the very next instruction, in a range that started with no hooks.
+  let storing := (← rv "sb a0, 0(a2)") ++ (← rv "addi a0, a0, 1") ++ (← rv "addi a1, a1, 1") ++ (← rv "jal -12")
+  let late ← make storing
+  Bap.Emu.map late ⟨0x1000, zeros 8, rw⟩
+  Bap.Emu.setReg late a2 (bits 0x1000)
+  let lateHits ← IO.mkRef ([] : List Nat)
+  let added ← IO.mkRef false
+  let _ ← Bap.Emu.onWrite late (0x1000, 0x1000) fun _ _ _ => do
+    if !(← added.get) then
+      added.set true
+      let _ ← Bap.Emu.onCode late (0, 12) fun pc => lateHits.modify (· ++ [pc])
+  let _ ← Bap.Emu.run late 4
+  assertEqual "Emu range fires a hook added on the way" [4, 8, 12] (← lateHits.get)
+  -- A store into the code that a range runs next takes effect at the next instruction.
+  let patching ← make ((← rv "sw a1, 0(a2)") ++ (← rv "addi a0, a0, 1") ++ (← rv "addi a3, a3, 5") ++ (← rv "jal -12"))
+  Bap.Emu.setReg patching a2 (bits 8)
+  let addi9 := (← rv "addi a3, a3, 9")
+  let word := (List.range 4).foldl (init := 0) fun word index => word + addi9[index]!.toNat * 256 ^ index
+  Bap.Emu.setReg patching a1 (bits word)
+  let _ ← Bap.Emu.run patching 3
+  assertBits "Emu range sees the code it wrote" (BitVec.ofNat 64 9) (.ok (← Bap.Emu.reg patching a3))
+  -- A memory set through its variable is what the next access reads, native memory or not.
+  let replaced ← Bap.Emu.riscv64 (← rv "lb a0, 0(a1)") 0 0
+  Bap.Emu.map replaced ⟨0x1000, zeros 8, rw⟩
+  Bap.Emu.setReg replaced a1 (bits 0x1000)
+  Bap.Emu.setReg replaced a0 (bits 0)
+  let _ ← Bap.Emu.step replaced
+  Bap.Emu.setPc replaced 0
+  let fresh := Bap.Memory.writeRegion (Bap.Memory.writeRegion (Bap.Memory.empty 64) 0 (← rv "lb a0, 0(a1)")) 0x1000 (ByteArray.mk #[42])
+  Bap.Emu.setReg replaced replaced.config.memory (.memory fresh)
+  let _ ← Bap.Emu.step replaced
+  assertBits "Emu reads the memory that was set" (BitVec.ofNat 64 42) (.ok (← Bap.Emu.reg replaced a0))
+  -- A checkpoint brings back the code a compiled range has to forget.
+  let rewinding ← make ((← rv "addi a0, a0, 1") ++ (← rv "addi a0, a0, 1") ++ (← rv "jal -8"))
+  let start ← Bap.Emu.snapshot rewinding
+  let _ ← Bap.Emu.run rewinding 3
+  Bap.Emu.write rewinding 4 (← rv "addi a0, a0, 5")
+  let _ ← Bap.Emu.run rewinding 3
+  assertBits "Emu range runs written code" (BitVec.ofNat 64 8) (.ok (← Bap.Emu.reg rewinding a0))
+  let _ ← Bap.Emu.restore rewinding start
+  let _ ← Bap.Emu.run rewinding 3
+  assertBits "Emu range after a restore runs the restored code" (BitVec.ofNat 64 2) (.ok (← Bap.Emu.reg rewinding a0))
+  -- A fault in a range leaves the emulator where it started the run, as a failed step does, with the fault's pc.
+  let faulting ← make ((← rv "addi a0, a0, 1") ++ (← rv "addi a1, a1, 1") ++ (← rv "lb a2, 0(a3)"))
+  Bap.Emu.setReg faulting a3 (bits 0x9000)
+  expectThrow "Emu range faults" (do let _ ← Bap.Emu.run faulting 10)
+  let some fault := ← Bap.Emu.failure faulting | throw <| IO.userError "the range recorded no fault"
+  assertEqual "Emu range fault has the pc of the access" 8 fault.pc
+  assertEqual "Emu range fault has the address of the access" 0x9000 fault.address
+
+/-- A parallel worker reads what native code wrote in the same round, also in an instruction that it interprets. -/
+private def parallelReadThrough : IO Unit := do
+  let rv (text : String) := LLVM.assemble "riscv64" text
+  let bits (value : Nat) : Value := .bits (BitVec.ofNat 64 value)
+  let a0 := reg "X10"
+  let a1 := reg "X11"
+  let a2 := reg "X12"
+  let a3 := reg "X13"
+  let a4 := reg "X14"
+  let decoders ← Bap.Emu.riscv64Decoders
+  -- With a threshold of two, the second store runs natively, and the first load is interpreted.
+  let code := (← rv "sb a0, 0(a1)") ++ (← rv "addi a0, a0, 1") ++ (← rv "addi a2, a2, 1") ++ (← rv "bne a2, a3, -12") ++
+    (← rv "lb a4, 0(a1)") ++ (← rv "jal 0")
+  let emu ← Bap.Emu.create {
+      disassembler := ← decoders 0
+      disassemblerAt := some decoders
+      memory := ⟨"mem", .mem 64 8, 0, false⟩
+      hotThreshold := 2 } [⟨0, code, ⟨true, true, true⟩⟩, ⟨0x1000, ByteArray.mk (List.replicate 16 0).toArray, ⟨true, true, false⟩⟩] {} 0
+  for (var, value) in [(a0, 5), (a1, 0x1000), (a2, 0), (a3, 2), (a4, 0)] do Bap.Emu.setReg emu var (bits value)
+  let second ← Bap.Emu.spawnThread emu 20 0
+  let _ ← Bap.Emu.runPreemptiveParallel emu 9
+  let stats ← Primus.Lifted.stats emu.engine
+  assertTrue "the store runs natively and the load is interpreted" (stats.nativeRuns > 0 && stats.interpretedRuns > 0)
+  assertBits "a parallel worker's interpreted load reads what its native store wrote" (BitVec.ofNat 64 6)
+    (.ok (← Bap.Emu.threadReg emu 1 a4))
+  assertEqual "the memory has what the native store wrote" 6 (← Bap.Emu.read emu 0x1000 1)[0]!.toNat
+  let _ := second
+
+/-- On a 32-bit space an access past the end faults, in the interpreter and in native code alike. -/
+private def wrapRegressions : IO Unit := do
+  let code := (← LLVM.assemble "riscv32" "lw a0, 0(a1)") ++ (← LLVM.assemble "riscv32" "jal 0")
+  let a0 : Var := ⟨"X10", .imm 32, 0, false⟩
+  let a1 : Var := ⟨"X11", .imm 32, 0, false⟩
+  let bits (value : Nat) : Value := .bits (BitVec.ofNat 32 value)
+  let emu ← Bap.Emu.riscv32 code 0 0
+  Bap.Emu.map emu ⟨0xfffff000, ByteArray.mk (List.replicate 4096 1).toArray, ⟨true, true, false⟩⟩
+  Bap.Emu.setReg emu a0 (bits 0)
+  Bap.Emu.setReg emu a1 (bits 0xffffff00)
+  let _ ← Bap.Emu.step emu
+  assertBits "Emu 32-bit load in range" (BitVec.ofNat 32 0x01010101) (.ok (← Bap.Emu.reg emu a0))
+  assertEqual "Emu 32-bit load runs natively" 1 (← Primus.Lifted.stats emu.engine).nativeRuns
+  Bap.Emu.setPc emu 0
+  Bap.Emu.setReg emu a1 (bits 0xfffffffe)
+  expectThrow "Emu 32-bit load that passes the end faults" (Bap.Emu.step emu)
+  let some fault := ← Bap.Emu.failure emu | throw <| IO.userError "the load recorded no fault"
+  assertEqual "Emu 32-bit load faults at the end of the space" (2 ^ 32) fault.address
+
 def run : IO Unit := do
+  rangeRegressions
+  parallelReadThrough
+  wrapRegressions
   diffAndCodecRegressions
   regionAudit
+  coreRegressions
   runEmulator
 
 end Bap.Tests.Emu

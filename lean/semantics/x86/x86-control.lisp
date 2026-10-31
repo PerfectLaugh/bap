@@ -82,27 +82,28 @@
 ;; moved by the size of the operation, backward if DF is set. With the
 ;; REP prefix, 0xf3, the operation is repeated while the count register
 ;; is not zero, CMPS and SCAS also stop if ZF is clear, or with the REPNE
-;; prefix, 0xf2, if ZF is set. Only the segment of the source may be
-;; overridden.
+;; prefix, 0xf2, if ZF is set. The count register has the size of the
+;; address, which the prefix 0x67 changes, and a 32-bit count clears the
+;; upper half of RCX. Only the segment of the source may be overridden.
 
 (defun string-step (r n)
-  (set$ r (if DF (- r (/ n 8)) (+ r (/ n 8)))))
+  (set-gpr r (cast-low (word-width r) (if DF (- r (/ n 8)) (+ r (/ n 8))))))
 
 (defun count-register ()
   (declare (context (bits 64)))
-  RCX)
+  (if (x86-prefix 0x67) ECX RCX))
 
 (defun count-register ()
   (declare (context (bits 32)))
-  ECX)
+  (if (x86-prefix 0x67) CX ECX))
 
 (defun set-count-register (x)
   (declare (context (bits 64)))
-  (set RCX x))
+  (if (x86-prefix 0x67) (set-ecx (cast-low 32 x)) (set RCX x)))
 
 (defun set-count-register (x)
   (declare (context (bits 32)))
-  (set ECX x))
+  (if (x86-prefix 0x67) (set CX (cast-low 16 x)) (set ECX x)))
 
 (defun repeated () (logor (x86-prefix 0xf3) (x86-prefix 0xf2)))
 
@@ -126,27 +127,30 @@
           (set go (continues))))
     body))
 
+;; the address of a register of the size of the address
+(defun string-address (r) (cast-unsigned (word-width) r))
+
 (defun movs (n di si seg)
   (repeat
    (prog
-     (store-n n di (load-n n (+ (segment-base seg) si)))
+     (store-n n (string-address di) (load-n n (+ (segment-base seg) si)))
      (string-step di n)
      (string-step si n))))
 
 (defun stos (n di x)
-  (repeat (prog (store-n n di x) (string-step di n))))
+  (repeat (prog (store-n n (string-address di) x) (string-step di n))))
 
 (defun cmps (n di si seg)
   (repeat-while
    (prog
-     (sub-op (load-n n (+ (segment-base seg) si)) (load-n n di))
+     (sub-op (load-n n (+ (segment-base seg) si)) (load-n n (string-address di)))
      (string-step di n)
      (string-step si n))))
 
 (defun scas (x n di)
   (repeat-while
    (prog
-     (sub-op x (load-n n di))
+     (sub-op x (load-n n (string-address di)))
      (string-step di n))))
 
 (defun MOVSB (di si seg) (movs 8 di si seg))

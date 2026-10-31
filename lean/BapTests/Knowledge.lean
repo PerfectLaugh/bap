@@ -78,10 +78,10 @@ def run : IO Unit := do
   let a := natSlot "a"
   let b := natSlot "b"
   let cyclic : Environment := { promises := [
-    promise a fun obj facts => do
+    promise a (deps := [b.name]) fun obj facts => do
       let value ← lookupFact b obj facts
       .ok (some (value.getD 0 + 1)),
-    promise b fun obj facts => do
+    promise b (deps := [a.name]) fun obj facts => do
       let value ← lookupFact a obj facts
       .ok (some (value.getD 0 + 1))
   ] }
@@ -90,5 +90,57 @@ def run : IO Unit := do
   | .error error => throw <| IO.userError s!"wrong cycle error: {repr error}"
   | .ok _ => throw <| IO.userError "cyclic promise unexpectedly normalized"
   assertEqual "objects enumerated from facts" [object] (objects state)
+  let unrelated := natSlot "unrelated"
+  let boom : Promise := promise unrelated fun _ _ => .error (.failed "boom")
+  match collect { promises := [boom, computedAnswer] } answer object state with
+  | .ok (value, _) => assertEqual "an unrelated failure cannot fail a collect" 21 value
+  | .error error => throw <| IO.userError s!"unrelated promise failed a collect: {repr error}"
+  let clashing : Environment := { promises := [
+    promise (stringSlot "unrelated") fun _ _ => .ok (some "left"),
+    promise (stringSlot "unrelated") fun _ _ => .ok (some "right"),
+    computedAnswer
+  ] }
+  match collect clashing answer object state with
+  | .ok (value, _) => assertEqual "an unrelated conflict cannot fail a collect" 21 value
+  | .error error => throw <| IO.userError s!"unrelated conflict failed a collect: {repr error}"
+  match collect clashing (stringSlot "unrelated") object state with
+  | .error (.incompatible "unrelated") => IO.println "ok: a slot's own conflict fails its collect"
+  | .error error => throw <| IO.userError s!"wrong conflict: {repr error}"
+  | .ok _ => throw <| IO.userError "a slot's own conflict was ignored"
+  match collect { cyclic with promises := computedAnswer :: cyclic.promises } answer object state 10 with
+  | .ok (value, _) => assertEqual "unrelated divergence cannot fail a collect" 21 value
+  | .error error => throw <| IO.userError s!"unrelated divergence failed a collect: {repr error}"
+  let doubled : Promise := promise (natSlot "doubled") (deps := [answer.name]) fun obj facts => do
+    let value ← lookupFact answer obj facts
+    .ok (some (value.getD 0 * 2))
+  match collect { promises := [doubled, computedAnswer] } (natSlot "doubled") object state with
+  | .ok (value, next) =>
+    assertEqual "a dependency's promise runs, whatever the order" 42 value
+    match lookupFact answer object next.facts with
+    | .ok stored => assertEqual "a dependency's value is stored" (some 21) stored
+    | .error error => throw <| IO.userError s!"lookup failed: {repr error}"
+  | .error error => throw <| IO.userError s!"dependent collect failed: {repr error}"
+  let failingDep : Promise := promise answer fun _ _ => .error (.failed "dep")
+  match collect { promises := [doubled, failingDep] } (natSlot "doubled") object state with
+  | .error (.failed "dep") => IO.println "ok: a dependency's failure fails the collect"
+  | .error error => throw <| IO.userError s!"wrong dependency failure: {repr error}"
+  | .ok _ => throw <| IO.userError "a dependency's failure was ignored"
+  let peeking : Promise := promise (natSlot "peeking") fun obj facts => do
+    let value ← lookupFact answer obj facts
+    .ok (some (value.getD 0 + 1))
+  match collect { promises := [peeking, computedAnswer] } (natSlot "peeking") object state with
+  | .ok (value, _) => assertEqual "an undeclared slot is read as it is, as upstream's current" 1 value
+  | .error error => throw <| IO.userError s!"peeking collect failed: {repr error}"
+  let known : Slot .bool := ⟨"known", boolDomain⟩
+  let tribool ← provideOrFail known (some false) {}
+  match lookupFact known object tribool.facts with
+  | .ok value => assertEqual "false is knowledge" (some (some false)) value
+  | .error error => throw <| IO.userError s!"lookup failed: {repr error}"
+  assertEqual "providing false refines unknown" 1 tribool.version
+  assertEqual "unknown is the empty element" 1 (← provideOrFail known none tribool).version
+  match provide known object (some true) tribool with
+  | .error (.incompatible "known") => IO.println "ok: true contradicts false"
+  | .error error => throw <| IO.userError s!"wrong tribool conflict: {repr error}"
+  | .ok _ => throw <| IO.userError "true was joined with false"
 
 end Bap.Tests.Knowledge

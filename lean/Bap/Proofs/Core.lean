@@ -30,7 +30,9 @@ theorem urem_of_ne {left right : BitVec width} (h : right ≠ 0#width) :
 
 theorem sdiv_of_ne {left right : BitVec width} (h : right ≠ 0#width) :
     Word.sdiv left right = BitVec.sdiv left right := by
-  simp [Word.sdiv, h]
+  have hn : right.neg ≠ 0#width := fun e => h (by simpa using (BitVec.neg_eq_zero_iff (x := right)).mp e)
+  simp only [Word.sdiv, BitVec.smtSDiv, BitVec.smtUDiv, BitVec.sdiv]
+  split <;> simp_all
 
 theorem srem_of_ne {left right : BitVec width} (h : right ≠ 0#width) :
     Word.srem left right = BitVec.srem left right := by
@@ -792,68 +794,6 @@ private def readAt (pages : Std.TreeMap Nat ByteArray) (address : Nat) : UInt8 :
 private def Sized (pages : Std.TreeMap Nat ByteArray) : Prop :=
   ∀ index page, pages.get? index = some page → page.size = pageSize
 
-private theorem bang_eq (page : ByteArray) (j : Nat) : page[j]! = (page.data[j]?).getD 0 := by
-  rw [page_getBang, getElem!_def]
-  cases page.data[j]? <;> rfl
-
-private theorem get!_extract (page : ByteArray) (b e j : Nat) (hj : j < e - b) (he : e ≤ page.size) :
-    (page.extract b e)[j]! = page[b + j]! := by
-  have hmin : min e page.size = e := by omega
-  have hd : min e page.data.size = e := hmin
-  rw [bang_eq, bang_eq, ByteArray.data_extract, Array.getElem?_extract, hd, ite_eq_left hj]
-
-/-- The page `writePages` builds for one chunk. -/
-private theorem chunk_page (data existing : ByteArray) (offset count po : Nat)
-    (hsize : existing.size = pageSize) (hcount : po + count ≤ pageSize) (hdata : offset + count ≤ data.size) :
-    let page := if count = pageSize then data.extract offset (offset + count) else
-      existing.extract 0 po ++ data.extract offset (offset + count) ++ existing.extract (po + count) pageSize
-    page.size = pageSize ∧ ∀ o, o < pageSize →
-      page[o]! = if po ≤ o ∧ o < po + count then data[offset + (o - po)]! else existing[o]! := by
-  intro page
-  have hps : pageSize = 256 := rfl
-  have hchunk : (data.extract offset (offset + count)).size = count := by
-    simp only [ByteArray.size_extract]; omega
-  by_cases hfull : count = pageSize
-  · have hpage : page = data.extract offset (offset + count) := ite_eq_left hfull
-    rw [hpage]
-    have h0 : po = 0 := by omega
-    subst h0
-    refine ⟨by rw [hchunk, hfull], fun o ho => ?_⟩
-    rw [ite_eq_left (by omega), get!_extract _ _ _ _ (by omega) (by omega)]
-    simp
-  · have hpage : page = existing.extract 0 po ++ data.extract offset (offset + count) ++
-        existing.extract (po + count) pageSize := ite_eq_right hfull
-    rw [hpage]
-    have hl : (existing.extract 0 po).size = po := by
-      simp only [ByteArray.size_extract]; omega
-    have hr : (existing.extract (po + count) pageSize).size = pageSize - (po + count) := by
-      simp only [ByteArray.size_extract, hsize]; omega
-    refine ⟨by simp only [ByteArray.size_append, hl, hr, hchunk]; omega, fun o ho => ?_⟩
-    have hsplit : ∀ (a b c : ByteArray), (a ++ b ++ c)[o]! =
-        if o < a.size then a[o]! else if o < a.size + b.size then b[o - a.size]! else c[o - a.size - b.size]! := by
-      intro a b c
-      have h1 : (a.data ++ b.data).size = a.size + b.size := by
-        rw [Array.size_append]
-        rfl
-      have h2 : a.data.size = a.size := rfl
-      simp only [bang_eq, ByteArray.data_append, Array.getElem?_append, h1, h2]
-      by_cases h3 : o < a.size
-      · simp only [h3, ite_true, show o < a.size + b.size by omega]
-      · by_cases h4 : o < a.size + b.size
-        · simp only [h3, h4, ite_true, ite_false]
-        · simp only [h3, h4, ite_false, Nat.sub_add_eq]
-    rw [hsplit, hl, hchunk]
-    by_cases h1 : o < po
-    · rw [ite_eq_left h1, ite_eq_right (by omega), get!_extract _ _ _ _ (by omega) (by omega)]
-      simp
-    · by_cases h2 : o < po + count
-      · rw [ite_eq_right h1, ite_eq_left h2, ite_eq_left (by omega),
-          get!_extract _ _ _ _ (by omega) (by omega)]
-      · rw [ite_eq_right h1, ite_eq_right h2, ite_eq_right (by omega),
-          get!_extract _ _ _ _ (by omega) (by omega)]
-        congr 1
-        omega
-
 open_private Bap.Core.Memory Bap.Memory.writePages Bap.Memory.readPages
 
 private theorem readAt_insert (pages : Std.TreeMap Nat ByteArray) (index : Nat) (page : ByteArray) (a : Nat) :
@@ -1059,17 +999,11 @@ private theorem byteArray_toList (page : ByteArray) : page.toList = page.data.to
         simp [this]
   simpa [ByteArray.toList] using key 0 [] (Nat.zero_le _)
 
-private theorem foldl_push (bytes : List UInt8) (output : Array UInt8) :
-    (bytes.foldl (init := output) fun output byte => output.push byte).toList = output.toList ++ bytes := by
-  induction bytes generalizing output with
-  | nil => simp
-  | cons byte rest ih => simp [ih]
-
 /-- `readPages` emits exactly the byte at each wrapped address, in order. -/
 private theorem readPages_toList (limit : Nat) (hlimit : 0 < limit) (pages : Std.TreeMap Nat ByteArray)
-    (address size offset : Nat) (output : Array UInt8) (h : Sized pages) :
-    (readPages limit hlimit pages address size offset output).toList =
-      output.toList ++ (List.range' offset (size - offset)).map fun j => readAt pages ((address + j) % limit) := by
+    (address size offset : Nat) (output : ByteArray) (h : Sized pages) :
+    (readPages limit hlimit pages address size offset output).data.toList =
+      output.data.toList ++ (List.range' offset (size - offset)).map fun j => readAt pages ((address + j) % limit) := by
   induction hn : size - offset using Nat.strongRecOn generalizing offset output with
   | ind n ih =>
     subst hn
@@ -1085,7 +1019,7 @@ private theorem readPages_toList (limit : Nat) (hlimit : 0 < limit) (pages : Std
       generalize hcount : min (min (pageSize - (address + offset) % limit % pageSize) (size - offset))
         (limit - (address + offset) % limit) = count
       have hpos : 0 < count := by omega
-      rw [ih _ (by omega) _ _ rfl, foldl_push, byteArray_toList, List.append_assoc]
+      rw [ih _ (by omega) _ _ rfl, ByteArray.data_append, Array.toList_append, List.append_assoc]
       congr 1
       have hsplit : size - offset = count + (size - (offset + count)) := by omega
       conv => rhs; rw [hsplit]
@@ -1115,10 +1049,12 @@ private theorem readPages_toList (limit : Nat) (hlimit : 0 < limit) (pages : Std
 theorem readRegion_toList {memory : Memory addressWidth} (h : PagesSized memory) (address size : Nat) :
     (readRegion memory address size).data.toList =
       (List.range size).map fun j => readByte memory (BitVec.ofNat addressWidth (address + j)) := by
-  have := readPages_toList (2 ^ addressWidth) (Nat.two_pow_pos _) memory.pages address size 0 #[] h
+  have := readPages_toList (2 ^ addressWidth) (Nat.two_pow_pos _) memory.pages address size 0
+    (ByteArray.emptyWithCapacity size) h
   simp only [readRegion]
-  rw [this, List.range_eq_range']
-  simp
+  rw [this, List.range_eq_range', show (ByteArray.emptyWithCapacity size).data.toList = [] from rfl, List.nil_append]
+  simp only [Nat.sub_zero]
+  apply List.map_congr_left
   intro a _
   simp only [readByte, readAt, BitVec.toNat_ofNat]
   rfl

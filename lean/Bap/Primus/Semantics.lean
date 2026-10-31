@@ -3,9 +3,12 @@ import Bap.Core.Sexp
 import Bap.Bil.Syntax
 import Bap.Bil.Eval
 import Bap.LLVM
+import Bap.Primus.Literal
 import Std.Data.HashMap
 
 namespace Bap.Primus.Semantics
+
+open Bap.Primus.Literal
 
 mutual
   inductive CExp where
@@ -23,6 +26,8 @@ mutual
     | compiled (params : List String) (body : List CExp) (env : List (String × Value))
     | macro (params : List String) (body : List Sexp)
     | primitive (name : String)
+    /-- The definitions of one name, selected by the number of arguments or operands. -/
+    | overloads (candidates : List Callable)
 
   inductive Value where
     | unit
@@ -52,7 +57,8 @@ def ofGlobals (globals : Globals) : Environment :=
   let operations := globals.reverse.foldl (init := ({} : Std.HashMap String Callable)) fun result binding =>
     match binding.2 with
     | .callable callable => result.insert binding.1 callable
-    | _ => result
+    -- It shadows what a later binding of the name defined.
+    | _ => result.erase binding.1
   { globals, operations }
 
 def ofMachine (globals : Globals) (opcodes : List (Nat × Callable))
@@ -70,6 +76,8 @@ structure Context where
   nextPc : Nat := 0
   endian : Endian := .little
   memory : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
+  /-- The prefix bytes of the instruction, when the decoder provides them. -/
+  prefixes : Option (List Nat) := none
 
 structure State where
   globals : Globals := []
@@ -81,7 +89,7 @@ private def indexGlobals (globals : Globals) : Std.HashMap String Callable :=
   globals.reverse.foldl (init := ({} : Std.HashMap String Callable)) fun result binding =>
     match binding.2 with
     | .callable callable => result.insert binding.1 callable
-    | _ => result
+    | _ => result.erase binding.1
 
 private def primitiveNames : List String :=
   ["+", "-", "*", "/", "s/", "mod", "=", "/=", "<", "<=", ">", ">=", "not", "list",
@@ -91,7 +99,10 @@ private def primitiveNames : List String :=
     "word-width", "set", "set$", "set-symbol-value", "alias-base-register", "symbol", "empty",
     "load-bits", "load-byte", "load-hword", "load-word", "store-word", "store-byte", "exec-addr", "intrinsic",
     "get-program-counter", "get-current-program-counter", "get-next-program-counter",
-    "is-zero", "non-zero", "neg", "s<", "s<=", "s>", "s>=", "replicate", "clz", "signed-mod", "signed-rem"]
+    "is-zero", "non-zero", "neg", "s<", "s<=", "s>", "s>=", "replicate", "clz", "signed-mod", "signed-rem",
+    "unquote", "symbol-concat", "cast-saturate", "x86-prefix",
+    "+.", "-.", "*.", "/.", "fsqrt", "fround", "fconvert", "cast-float", "cast-sfloat", "cast-int", "cast-sint",
+    "<.", ">.", ">=.", "=.", "is-nan", "is-inf", "is-fzero"]
 
 private def lookup (name : String) (locals : Locals) (globals : Globals) : Except String Value :=
   let primitiveName := if name.startsWith "core:" then (name.drop 5).toString else name
@@ -121,57 +132,6 @@ private def lookupState (name : String) (locals : Locals) (state : State) : Exce
         | none =>
           if primitiveNames.contains primitiveName then .ok (.callable (.primitive primitiveName))
           else .error s!"unknown Primus symbol {name}"
-
-private def parseBasedNat (digits : String) (base : Nat) : Option Nat :=
-  digits.toList.foldlM (fun value c => do
-    let lower := c.toLower
-    let digit := if c.isDigit then c.toNat - '0'.toNat
-      else if lower ≥ 'a' && lower ≤ 'f' then lower.toNat - 'a'.toNat + 10
-      else base
-    if digit < base then some (value * base + digit) else none) 0
-
-/-- `Z.of_string` of Zarith: optional sign, then an optional `0x`/`0o`/`0b` prefix, then digits that
-may contain underscores but not start with one. No digits after a prefix reads as zero. -/
-private def parseZ (text : List Char) : Option Int :=
-  let (negative, chars) := match text with
-    | '-' :: rest => (true, rest)
-    | '+' :: rest => (false, rest)
-    | chars => (false, chars)
-  let (base, digits) := match chars with
-    | '0' :: 'x' :: rest | '0' :: 'X' :: rest => (16, rest)
-    | '0' :: 'o' :: rest | '0' :: 'O' :: rest => (8, rest)
-    | '0' :: 'b' :: rest | '0' :: 'B' :: rest => (2, rest)
-    | _ => (10, chars)
-  if digits.head? = some '_' then none
-  else
-    (parseBasedNat (String.ofList (digits.filter (· != '_'))) base).map fun value =>
-      if negative then -Int.ofNat value else Int.ofNat value
-
-/-- Whether an atom starts like a number, which commits it to being one. -/
-private def startsNumeric : List Char → Bool
-  | c :: rest => c.isDigit || (c = '-' && match rest with | d :: _ => d.isDigit | [] => false)
-  | [] => false
-
-/-- Reads an atom like `bap_primus_lisp_word.ml`: `.ok none` is not a number and so a symbol, and an
-atom that starts like a number but does not parse is an error, not a symbol. -/
-private def readLiteral (atom : String) : Except String (Option (Int × Option Nat)) :=
-  if !startsNumeric atom.toList then .ok none
-  else
-    let malformed : Except String (Option (Int × Option Nat)) := .error s!"malformed Primus literal {atom}"
-    match atom.toList.span (· != ':') with
-    | (value, []) =>
-      match parseZ value with
-      | some value => .ok (some (value, none))
-      | none => malformed
-    | (value, _ :: width) =>
-      match parseZ value, parseZ width with
-      | some value, some (.ofNat width) => .ok (some (value, some width))
-      | _, _ => malformed
-
-private def parseInteger (atom : String) : Option (Int × Option Nat) :=
-  match readLiteral atom with
-  | .ok literal => literal
-  | .error _ => none
 
 mutual
   /-- Rejects malformed literals in a parsed form, wherever they are, as the upstream parser does.
@@ -309,7 +269,9 @@ private def cast (context : Context) (kind : Bil.Cast) (args : List Value) : Exc
       if width > sourceWidth then .ok (.bil width (.cast .unsigned width value))
       else .ok (.bil width (.cast .low width value))
     | .high =>
-      if width = 0 || width > sourceWidth then .error "invalid Primus high cast"
+      -- the empty high part of a value, as when a whole register is assigned with its high part kept
+      if width = 0 then .ok (.bil 0 (.int 0#0))
+      else if width > sourceWidth then .error "invalid Primus high cast"
       else .ok (.bil width (.cast .high width value))
     | _ => .ok (.bil width (.cast kind width value))
   | _ => .error "Primus cast expects width and value"
@@ -378,7 +340,141 @@ private def storeMemory (context : Context) (args : List Value) : Except String 
     return [.move context.memory (.store (.var context.memory) address value context.endian (valueWidth / 8))]
   | _ => throw "Primus store expects address and value"
 
+private def concatStep (context : Context) (current : Nat × Bil.Exp) (value : Value) : Except String (Nat × Bil.Exp) := do
+  let (rightWidth, right) ← expectBil context value
+  -- an empty part leaves the other as it is
+  if rightWidth = 0 then .ok current
+  else if current.1 = 0 then .ok (rightWidth, right)
+  else .ok (current.1 + rightWidth, Bil.Exp.concat current.2 right)
+
 private def valueOnly (value : Value) : Except String (Value × Bil.Program) := pure (value, [])
+
+private def intrinsicVar (kind : String) (index width : Nat) : Bap.Var :=
+  ⟨s!"intrinsic:{kind}{index}", .imm width, 0, false⟩
+
+/-- Splits the arguments of `intrinsic` at its keywords, as `Intrinsic.parse_args` does upstream. -/
+private def intrinsicParams (key : String) (current : List Value) :
+    List Value → List (String × List Value)
+  | [] => [(key, current.reverse)]
+  | .symbol keyword :: rest =>
+    if keyword = ":result" || keyword = ":writes" || keyword = ":stores" || keyword = ":aborts" then
+      (key, current.reverse) :: intrinsicParams keyword [] rest
+    else intrinsicParams key (.symbol keyword :: current) rest
+  | value :: rest => intrinsicParams key (value :: current) rest
+
+private def intrinsicGroup (key : String) (params : List (String × List Value)) : List (List Value) :=
+  params.filterMap fun param => if param.1 = key then some param.2 else none
+
+private def mapIndexedM (f : Nat → α → Except String β) (index : Nat) : List α → Except String (List β)
+  | [] => .ok []
+  | item :: rest => do
+    let item ← f index item
+    return item :: (← mapIndexedM f (index + 1) rest)
+
+private def assignInputs (context : Context) (inputs : List Value) : Except String Bil.Program :=
+  mapIndexedM (fun index input => do
+    let (width, input) ← expectBil context input
+    return .move (intrinsicVar "x" index width) input) 0 inputs
+
+/-- `(intrinsic 'NAME ARG .. :result W :writes REG WIDTH? :stores PTR WIDTH? :aborts)`: a call of the
+subroutine NAME with the arguments in `intrinsic:x0`.., and the outputs in `intrinsic:y0`.. in the order
+of the result, the writes and the stores. The result is a variable, which the callers copy. -/
+private def intrinsicCall (context : Context) (name : String) (args : List Value) :
+    Except String (Value × Bil.Program) := do
+  let params := intrinsicParams ":inputs" [] args
+  let inputs ← assignInputs context (intrinsicGroup ":inputs" params).flatten
+  let results := intrinsicGroup ":result" params
+  let base := results.length
+  let writes ← mapIndexedM (fun index write => match write with
+    | [.register reg width baseWidth] =>
+      assignRegister context reg width baseWidth (.bil width (.var (intrinsicVar "y" (base + index) width)))
+    | _ => throw "incorrect :writes parameters") 0 (intrinsicGroup ":writes" params)
+  let base := base + writes.length
+  let stores ← mapIndexedM (fun index store => match store with
+    | [address] =>
+      storeMemory context [address, .bil context.bits (.var (intrinsicVar "y" (base + index) context.bits))]
+    | [address, width] => do
+      let width ← expectNat width
+      storeMemory context [address, .bil width (.var (intrinsicVar "y" (base + index) width))]
+    | _ => throw "incorrect :stores parameters") 0 (intrinsicGroup ":stores" params)
+  let code := inputs ++ [.special name] ++ writes.flatten ++ stores.flatten
+  match results with
+  | [] => pure (.unit, code)
+  | [[width]] =>
+    let width ← expectNat width
+    pure (.bil width (.var (intrinsicVar "y" 0 width)), code)
+  | _ => throw ":result may occur once and with a single argument"
+
+private def symbolText : Value → Except String String
+  | .symbol name | .register name _ _ => .ok name
+  | .int value => .ok (toString value.toNat)
+  | _ => .error "symbol-concat requires symbols"
+
+/-- `(symbol-concat S1 .. SN :sep SEP)` joins the symbols with the optional separator. -/
+private def symbolConcat (args : List Value) : Except String Value := do
+  let names ← args.mapM symbolText
+  match names.span (· != ":sep") with
+  | (names, []) => .ok (.symbol (String.join names))
+  | (names, [_, separator]) => .ok (.symbol (String.intercalate separator names))
+  | _ => .error ":sep must be last and followed by an argument"
+
+/-- The call of the IEEE 754 intrinsic that stands for a floating-point primitive, as `ieee754.lisp`
+names them: BIL has no floating-point operations. -/
+private def floatCall (context : Context) (name : String) (result : Nat) (inputs : List Value) :
+    Except String (Value × Bil.Program) :=
+  intrinsicCall context name (inputs ++ [.symbol ":result", .int (BitVec.ofNat 64 result)])
+
+private def roundingMode : Value → Except String String
+  | .symbol mode =>
+    match mode.toList with
+    | ':' :: mode => .ok (String.ofList mode)
+    | _ => .error "expected a rounding mode"
+  | _ => .error "expected a rounding mode"
+
+private def floatOperation (context : Context) (name : String) (args : List Value) :
+    Except String (Value × Bil.Program) := do
+  let binaryName : Option String := match name with
+    | "+." => some "fadd" | "-." => some "fsub" | "*." => some "fmul" | "/." => some "fdiv"
+    | "fsqrt" => some "fsqrt" | "fround" => some "fround" | _ => none
+  let castName : Option String := match name with
+    | "fconvert" => some "fconvert" | "cast-float" => some "cast_float" | "cast-sfloat" => some "cast_sfloat"
+    | "cast-int" => some "cast_int" | "cast-sint" => some "cast_sint" | _ => none
+  let orderName : Option String := match name with
+    | "<." => some "forder" | ">." => some "fgt" | ">=." => some "fge" | "=." => some "feq"
+    | "is-nan" => some "is_nan" | "is-inf" => some "is_inf" | "is-fzero" => some "is_fzero" | _ => none
+  match binaryName, castName, orderName, args with
+  | some base, _, _, mode :: inputs@(first :: _) =>
+    let mode ← roundingMode mode
+    let width ← widthOf context first
+    floatCall context s!"{base}_{mode}_ieee754_binary_{width}" width inputs
+  | _, some base, _, [mode, width, value] =>
+    let mode ← roundingMode mode
+    let width ← expectNat width
+    let source ← widthOf context value
+    floatCall context s!"{base}_{mode}_ieee754_binary_{source}_{width}" width [value]
+  | _, _, some base, inputs@(first :: _) =>
+    let width ← widthOf context first
+    floatCall context s!"{base}_ieee754_binary_{width}" 1 inputs
+  | _, _, _, _ => throw s!"{name} has invalid arguments"
+
+/-- `(cast-saturate :signed W X)` is X in W bits, or the closest W-bit value when X does not fit. An
+`:unsigned` cast reads X as signed, as upstream's `Saturate.cast`, so a negative X saturates to zero. -/
+private def castSaturate (context : Context) (args : List Value) : Except String Value := do
+  match args with
+  | [.symbol kind, width, value] =>
+    let width ← expectNat width
+    let (source, value) ← expectBil context value
+    if width = 0 || source ≤ width then throw "cast-saturate requires a narrowing cast"
+    let word (bits : Nat) : Bil.Exp := .int (BitVec.ofNat source bits)
+    let sign := Bil.Exp.cast .unsigned source (.extract (source - 1) (source - 1) value)
+    let signed := kind = ":signed"
+    if !signed && kind != ":unsigned" then throw "expected :signed or :unsigned"
+    let top := Bil.Exp.bin .ashift value (word (if signed then width - 1 else width))
+    let isZero : Bil.Exp := .bin .eq top (word 0)
+    let fits := if signed then Bil.Exp.bin .or isZero (.bin .eq top (word (2 ^ source - 1))) else isZero
+    let upper := word (2 ^ (if signed then width - 1 else width) - 1)
+    .ok (.bil width (.cast .low width (.ite fits value (.bin .add upper sign))))
+  | _ => throw "cast-saturate expects a kind, width, and value"
 
 private def applyPrimitive (context : Context) (name : String) (args : List Value) :
     Except String (Value × Bil.Program) := do
@@ -446,9 +542,7 @@ private def applyPrimitive (context : Context) (name : String) (args : List Valu
     match args with
     | first :: rest =>
       let (width, first) ← expectBil context first
-      let (width, concatenated) ← rest.foldlM (init := (width, first)) fun current value => do
-        let (rightWidth, right) ← expectBil context value
-        .ok (current.1 + rightWidth, Bil.Exp.concat current.2 right)
+      let (width, concatenated) ← rest.foldlM (init := (width, first)) (concatStep context)
       valueOnly (.bil width concatenated)
     | [] => throw "concat expects at least one value"
   | "replicate" =>
@@ -492,10 +586,9 @@ private def applyPrimitive (context : Context) (name : String) (args : List Valu
       pure (.unit, ← storeMemory context [address, .bil 8 (.cast .low 8 value)])
     | _ => throw "store-byte expects address and value"
   | "intrinsic" =>
-    let name := match args with
-      | .symbol name :: _ => name
-      | _ => "unknown"
-    pure (.unit, [.special name])
+    match args with
+    | .symbol name :: args => intrinsicCall context name args
+    | _ => throw "intrinsic expects a symbol"
   | "exec-addr" =>
     match args with
     | [target] =>
@@ -503,6 +596,21 @@ private def applyPrimitive (context : Context) (name : String) (args : List Valu
       if width != context.bits then throw "Primus jump target has the wrong width"
       pure (.unit, [.jmp target])
     | _ => throw "exec-addr expects a target"
+  | "unquote" =>
+    match args with
+    | [value@(.register ..)] => valueOnly value
+    | [.symbol name] => throw s!"unquote of {name}, which is not a register"
+    | _ => throw "unquote expects a symbol"
+  | "symbol-concat" => valueOnly (← symbolConcat args)
+  | "cast-saturate" => valueOnly (← castSaturate context args)
+  | "x86-prefix" =>
+    match args, context.prefixes with
+    | [byte], some prefixes => valueOnly (.bool (prefixes.contains (← expectNat byte)))
+    | [_], none => throw "the instruction prefixes are not available"
+    | _, _ => throw "x86-prefix expects a byte"
+  | "+." | "-." | "*." | "/." | "fsqrt" | "fround" | "fconvert" | "cast-float" | "cast-sfloat" | "cast-int"
+  | "cast-sint" | "<." | ">." | ">=." | "=." | "is-nan" | "is-inf" | "is-fzero" =>
+    floatOperation context name args
   | "get-program-counter" | "get-current-program-counter" =>
     valueOnly (.bil context.bits (.int (BitVec.ofNat context.bits context.pc)))
   | "get-next-program-counter" =>
@@ -590,9 +698,7 @@ private def applyPrimitiveIndex (context : Context) (operation : Nat) (args : Li
     match args with
     | first :: rest =>
       let (width, first) ← expectBil context first
-      let (width, concatenated) ← rest.foldlM (init := (width, first)) fun current value => do
-        let (rightWidth, right) ← expectBil context value
-        .ok (current.1 + rightWidth, Bil.Exp.concat current.2 right)
+      let (width, concatenated) ← rest.foldlM (init := (width, first)) (concatStep context)
       valueOnly (.bil width concatenated)
     | [] => throw "concat expects at least one value"
   | 33 => valueOnly (← cast context .low args)
@@ -635,11 +741,6 @@ private def applyPrimitiveIndex (context : Context) (operation : Nat) (args : Li
       if width != context.bits then throw "Primus jump target has the wrong width"
       pure (.unit, [.jmp target])
     | _ => throw "exec-addr expects a target"
-  | 51 =>
-    let name := match args with
-      | .symbol name :: _ => name
-      | _ => "unknown"
-    pure (.unit, [.special name])
   | 52 | 53 =>
     valueOnly (.bil context.bits (.int (BitVec.ofNat context.bits context.pc)))
   | 54 => valueOnly (.bil context.bits (.int (BitVec.ofNat context.bits context.nextPc)))
@@ -692,16 +793,111 @@ private def bindAssignable (context : Context) (state : State) (value : Value) :
     nextTemp := state.nextTemp + 1
   })
 
-private def substitute (bindings : List (String × Sexp)) (form : Sexp) : Sexp :=
-  match form with
-  | .atom atom => (Assoc.get atom bindings).getD form
-  | .list items => .list (items.map (substitute bindings))
+/-- `take_rest` of `bap_primus_lisp_def.ml`: binds parameters to operands one to one, and the last
+parameter takes all remaining operands when there are several. -/
+private def bindMacro : List String → List Sexp → Option (List (String × List Sexp))
+  | [], [] => some []
+  | [param], operands@(_ :: _ :: _) => some [(param, operands)]
+  | param :: params, operand :: operands => ((param, [operand]) :: ·) <$> bindMacro params operands
+  | _, _ => none
 
-private def contextMatches (bits : Nat) (body : List Sexp) : Bool :=
+/-- How many operands the last parameter takes: the fewer, the more specific the definition. -/
+private def macroRest (bindings : List (String × List Sexp)) : Nat :=
+  match bindings.getLast? with
+  | some binding => binding.2.length
+  | none => 0
+
+mutual
+/-- `subst` of `bap_primus_lisp_def.ml`: a parameter inside of a list is spliced with its operands. -/
+private def substitute (bindings : List (String × List Sexp)) : Sexp → List Sexp
+  | .atom atom => (Assoc.get atom bindings).getD [.atom atom]
+  | .list items => [.list (substituteList bindings items)]
+
+private def substituteList (bindings : List (String × List Sexp)) : List Sexp → List Sexp
+  | [] => []
+  | form :: rest => substitute bindings form ++ substituteList bindings rest
+end
+
+/-- The macro definitions among a name's definitions. -/
+private def macroCandidates : Callable → List Callable
+  | candidate@(.macro ..) => [candidate]
+  | .overloads candidates => candidates.filter fun candidate =>
+    match candidate with
+    | .macro .. => true
+    | _ => false
+  | _ => []
+
+/-- Resolve a macro: the definition that accepts the operands with the fewest operands in the last
+parameter. `overload_macro` of `bap_primus_lisp_resolve.ml`. -/
+private def resolveMacro (operands : List Sexp) :
+    List Callable → Option (Nat × List Sexp × List (String × List Sexp))
+  | [] => none
+  | .macro params body :: rest =>
+    match bindMacro params operands, resolveMacro operands rest with
+    | some bindings, some other =>
+      if other.1 < macroRest bindings then some other else some (macroRest bindings, body, bindings)
+    | some bindings, none => some (macroRest bindings, body, bindings)
+    | none, other => other
+  | _ :: rest => resolveMacro operands rest
+
+/-- A macro body is a form, so a parameter alone in it must be bound to one operand. -/
+private def expandBody (bindings : List (String × List Sexp)) (body : List Sexp) : Option (List Sexp) :=
+  body.mapM fun form =>
+    match substitute bindings form with
+    | [expanded] => some expanded
+    | _ => none
+
+/-- The expansion of a call of a name with macro definitions; `none` if the name has no macros. As
+upstream, macro definitions hide the functions of the same name. -/
+private def macroExpansion (callable : Callable) (operands : List Sexp) :
+    Except String (Option (List Sexp)) :=
+  match macroCandidates callable with
+  | [] => .ok none
+  | candidates =>
+    match resolveMacro operands candidates with
+    | some (_, body, bindings) =>
+      match expandBody bindings body with
+      | some expanded => .ok (some expanded)
+      | none => .error "a Primus macro parameter with several operands is the whole body"
+    | none => .error "no Primus macro definition accepts these operands"
+
+/-- The function a call with `count` arguments selects; `overload_defun` of
+`bap_primus_lisp_resolve.ml` without the type check, since Primus values are not typed here. -/
+private def resolveFunction (count : Nat) : List Callable → Option Callable
+  | [] => none
+  | candidate :: rest =>
+    match candidate with
+    | .function params .. | .compiled params .. =>
+      if params.length = count then some candidate else resolveFunction count rest
+    | _ => resolveFunction count rest
+
+/-- Whether two definitions are alternatives of the same call, so that the later hides the earlier. -/
+private def sameArity : Callable → Callable → Bool
+  | .macro left _, .macro right _ => left.length == right.length
+  | .function left .., .function right .. => left.length == right.length
+  | .function left .., .compiled right .. => left.length == right.length
+  | .compiled left .., .function right .. => left.length == right.length
+  | .compiled left .., .compiled right .. => left.length == right.length
+  | _, _ => false
+
+/-- The definitions of a name after adding `callable`: a definition of the same arity is replaced,
+which is how a later file overrides an earlier one, and one definition stays a plain callable. -/
+private def addDefinition (callable : Callable) (previous : Option Value) : Callable :=
+  let others := match previous with
+    | some (.callable (.overloads candidates)) => candidates
+    | some (.callable candidate) => [candidate]
+    | _ => []
+  match others.filter fun other => !sameArity callable other with
+  | [] => callable
+  | others => .overloads (callable :: others)
+
+private def contextMatches (context : Context) (body : List Sexp) : Bool :=
   body.all fun form => match form with
     | .list [.atom "declare", .list (.atom "context" :: conditions)] =>
       conditions.all fun condition => match condition with
-        | .list [.atom "bits", .atom width] => width.toNat? = some bits
+        | .list [.atom "bits", .atom width] => width.toNat? = some context.bits
+        | .list [.atom "endianness", .atom "le"] => context.endian == .little
+        | .list [.atom "endianness", .atom "eb"] => context.endian == .big
         | _ => false
     | _ => true
 
@@ -717,18 +913,48 @@ private def definitionBody (body : List Sexp) : List Sexp :=
 private def assignsLocal (globals : Globals) (name : String) : Nat → Sexp → Bool
   | 0, _ => true
   | _ + 1, .atom _ => false
-  | _ + 1, .list (.atom "quote" :: _) => false
   | fuel + 1, .list (.atom operator :: operands) =>
+    if operator = "quote" then false else
     let assigned := match operator, operands with
       | "set", .atom target :: _ | "set$", .atom target :: _ | "set-symbol-value", .atom target :: _ => target = name
       | _, _ => false
     assigned ||
       (match Assoc.get operator globals with
-       | some (.callable (.macro params body)) =>
-         (body.map (substitute (params.zip operands))).attach.any fun form => assignsLocal globals name fuel form.1
+       | some (.callable callable) =>
+         match resolveMacro operands (macroCandidates callable) with
+         | some (_, body, bindings) =>
+           (substituteList bindings body).attach.any fun form => assignsLocal globals name fuel form.1
+         | none => false
        | _ => false) ||
       operands.attach.any fun form => assignsLocal globals name fuel form.1
   | fuel + 1, .list items => items.attach.any fun form => assignsLocal globals name fuel form.1
+
+/-- The target of an assignment or an `unquote` may be named by a symbol. -/
+private def resolveSymbol (state : State) : List Value → List Value
+  | value@(.symbol name) :: rest =>
+    match Assoc.get name state.globals with
+    | some register@(.register ..) => register :: rest
+    | _ => value :: rest
+  | args => args
+
+private def resolveDestination (state : State) (name : String) (args : List Value) : List Value :=
+  match args with
+  | .symbol _ :: _ =>
+    if name = "set" || name = "set$" || name = "set-symbol-value" || name = "unquote" then
+      resolveSymbol state args
+    else args
+  | _ => args
+
+/-- The primitives whose result is the output variable of an intrinsic. -/
+private def intrinsicResult (name : String) : Bool :=
+  name = "intrinsic" || name = "+." || name = "-." || name = "*." || name = "/." || name = "fsqrt" ||
+    name = "fround" || name = "fconvert" || name = "cast-float" || name = "cast-sfloat" || name = "cast-int" ||
+    name = "cast-sint" || name = "<." || name = ">." || name = ">=." || name = "=." || name = "is-nan" ||
+    name = "is-inf" || name = "is-fzero"
+
+private def quotedValue : Sexp → Value
+  | .atom atom => atomValue atom
+  | .list items => .list (items.map quotedValue)
 
 private def caseMatches (key : Value) (form : Sexp) : Except String Bool := do
   match form with
@@ -802,8 +1028,14 @@ mutual
     | fuel + 1 =>
       match value with
       | .callable (.primitive name) =>
-        let (value, code) ← applyPrimitive context name args
-        .ok (value, emit state code)
+        let (value, code) ← applyPrimitive context name (resolveDestination state name args)
+        let state := emit state code
+        -- the next call of an intrinsic overwrites its output variable
+        if intrinsicResult name then .ok (freeze context state value) else .ok (value, state)
+      | .callable (.overloads candidates) =>
+        match resolveFunction args.length candidates with
+        | some candidate => apply fuel context state (.callable candidate) args
+        | none => .error "no Primus function definition accepts this number of arguments"
       | .callable (.function params body env) =>
         if params.length != args.length then .error "Primus function arity mismatch"
         else evalSequence fuel (params.zip args ++ env) context state body
@@ -820,15 +1052,14 @@ mutual
     | fuel + 1 =>
       match form with
       | .atom atom =>
-        if atom = "true" || atom = "false" || atom.startsWith ":" || (← readLiteral atom).isSome then
-          .ok (atomValue atom, state)
-        else .ok (← lookupState atom locals state, state)
+        if atom = "true" || atom = "false" || atom.startsWith ":" then .ok (atomValue atom, state)
+        else
+          match ← readLiteral atom with
+          | some _ => .ok (atomValue atom, state)
+          | none => .ok (← lookupState atom locals state, state)
       | .list [] => .ok (.list [], state)
       | .list (.atom "quote" :: [value]) =>
-        let rec quoted : Sexp → Value
-          | .atom atom => atomValue atom
-          | .list items => .list (items.map quoted)
-        .ok (quoted value, state)
+        .ok (quotedValue value, state)
       | .list [.atom "sizeof", .atom typeName] =>
         let bits := match typeName with
           | "word" | "ptr_t" | "int64_t" => context.bits
@@ -864,6 +1095,21 @@ mutual
         evalConditional fuel locals context state test [] body
       | .list (.atom "progn" :: body) | .list (.atom "prog" :: body) =>
         evalSequence fuel locals context state body
+      | .list (.atom "while" :: test :: body) =>
+        let (test, testState) ← eval fuel locals context { state with code := [] } test
+        match ← truth test with
+        | some false => .ok (.unit, emit { testState with code := state.code } testState.code)
+        | _ =>
+          let condition ← condition context test
+          let (_, bodyState) ← evalSequence fuel locals context { testState with code := [] } body
+          -- the code computing the condition runs before every test of the condition
+          .ok (.unit, emit { bodyState with code := state.code }
+            (testState.code ++ [.while condition (bodyState.code ++ testState.code)]))
+      | .list (.atom "error" :: _) =>
+        match form with
+        | .list [_, .atom message] => .error message
+        | _ => .error "Primus error"
+      | .list (.atom "msg" :: _) => .ok (.unit, state)
       | .list (.atom "let" :: .list bindings :: body) =>
         let (locals, state) ← bindings.foldlM (init := (locals, state)) fun current binding => do
           match binding with
@@ -880,18 +1126,6 @@ mutual
       | .list (.atom "lambda" :: .list params :: body) =>
         let params ← params.mapM Sexp.asAtom
         .ok (.callable (.function params (definitionBody body) locals), state)
-      | .list (.atom "defun" :: .atom name :: .list params :: body) =>
-        let params ← params.mapM Sexp.asAtom
-        if !contextMatches context.bits body then .ok (.unit, state)
-        else
-          let callable := Callable.function params (definitionBody body) []
-          .ok (.callable callable, { state with globals := Assoc.put name (.callable callable) state.globals })
-      | .list (.atom "defmacro" :: .atom name :: .list params :: body) =>
-        let params ← params.mapM Sexp.asAtom
-        if !contextMatches context.bits body then .ok (.unit, state)
-        else
-          let callable := Callable.macro params (definitionBody body)
-          .ok (.callable callable, { state with globals := Assoc.put name (.callable callable) state.globals })
       | .list (.atom "case" :: key :: branches) =>
         let (key, state) ← eval fuel locals context state key
         let rec select : List Sexp → Except String (List Sexp)
@@ -901,13 +1135,14 @@ mutual
             if ← caseMatches key label then .ok [body] else select rest
         evalSequence fuel locals context state (← select branches)
       | .list (.atom operator :: operands) =>
-        match ← lookupState operator locals state with
-        | .callable (.macro params body) =>
-          if params.length != operands.length then .error "Primus macro arity mismatch"
-          else
-            let expanded := body.map (substitute (params.zip operands))
-            evalSequence fuel locals context state expanded
-        | _ =>
+        let expansion ← match ← lookupState operator locals state with
+          | .callable callable =>
+            -- a local is a value, and macros are not values
+            if (Assoc.get operator locals).isSome then .ok none else macroExpansion callable operands
+          | _ => .ok none
+        match expansion with
+        | some expanded => evalSequence fuel locals context state expanded
+        | none =>
           let (callable, state) ← eval fuel locals context state (.atom operator)
           let (args, state) ← evalList fuel locals context state operands
           apply fuel context state callable args
@@ -979,6 +1214,7 @@ mutual
         | none => .error "compiled Primus global slot is out of range"
       | .primitive operation operands =>
         let (args, state) ← evalCompiledList fuel locals context state operands
+        let args := if operation = 38 || operation = 39 || operation = 40 then resolveSymbol state args else args
         let (value, code) ← applyPrimitiveIndex context operation args
         .ok (value, emit state code)
       | .apply callable operands =>
@@ -996,11 +1232,12 @@ end
 private def primitiveIndex (name : String) : Option Nat := primitiveNames.findIdx? (· == name)
 
 private def compilablePrimitive (operation : Nat) : Bool :=
-  operation ≤ 12 || (20 ≤ operation && operation ≤ 61) || operation = 63
+  operation ≤ 12 || (20 ≤ operation && operation ≤ 50) || (52 ≤ operation && operation ≤ 61) || operation = 63
 
-private def quotedValue : Sexp → Value
-  | .atom atom => atomValue atom
-  | .list items => .list (items.map quotedValue)
+private def isSymbol (atom : String) : Bool :=
+  match readLiteral atom with
+  | .ok none => true
+  | _ => false
 
 mutual
   private def compileExp (globals : Globals) (locals : List String) : Nat → Sexp → Option CExp
@@ -1008,12 +1245,19 @@ mutual
     | fuel + 1, form =>
       match form with
       | .atom atom =>
-        if atom = "true" || atom = "false" || atom.startsWith ":" || (parseInteger atom).isSome then
+        if atom = "true" || atom = "false" || atom.startsWith ":" then
           some (.value (atomValue atom))
         else
-          match locals.findIdx? (· == atom) with
-          | some slot => some (.local slot)
-          | none => (globals.findIdx? fun binding => binding.1 == atom).map .global
+          match readLiteral atom with
+          | .error _ => none
+          | .ok (some _) => some (.value (atomValue atom))
+          | .ok none =>
+            match locals.findIdx? (· == atom) with
+            | some slot => some (.local slot)
+            | none =>
+              -- the name of the built-in, which no definition hides
+              if (if atom.startsWith "core:" then (atom.drop 5).toString else atom) = "replicate" then none
+              else (globals.findIdx? fun binding => binding.1 == atom).map .global
       | .list [] => some (.value (.list []))
       | .list [.atom "quote", value] => some (.value (quotedValue value))
       | .list [.atom "replicate", _, _] | .list [.atom "core:replicate", _, _] => none
@@ -1034,18 +1278,30 @@ mutual
       | .list (.atom "progn" :: body) | .list (.atom "prog" :: body) =>
         .sequence <$> compileSequence globals locals fuel body
       | .list (.atom "let" :: .list bindings :: body) =>
-        compileBindings globals locals fuel bindings body
+        compileBindings globals locals bindings fuel bindings body
+      | .list (.atom "quote" :: _) | .list (.atom "sizeof" :: _) | .list (.atom "assert-msg" :: _)
+      | .list (.atom "replicate" :: _) | .list (.atom "core:replicate" :: _)
+      | .list (.atom "lambda" :: _) | .list (.atom "case" :: _) | .list (.atom "while" :: _)
+      | .list (.atom "error" :: _) | .list (.atom "msg" :: _) | .list (.atom "let" :: _) => none
       | .list (.atom operator :: operands) =>
         let visible := locals.map fun name => (name, Value.unit)
+        -- a literal does not name a function, whatever a definition says
+        if operator = "true" || operator = "false" || operator.startsWith ":" || !isSymbol operator then none else
         match lookup operator visible globals with
-        | .ok (.callable (.macro params body)) =>
-          if params.length != operands.length then none
-          else .sequence <$> compileSequence globals locals fuel (body.map (substitute (params.zip operands)))
         | .ok (.callable (.primitive name)) => do
           let operation ← primitiveIndex name
           if !compilablePrimitive operation then none
           let args ← operands.mapM (compileExp globals locals fuel)
           some (.primitive operation args)
+        | .ok (.callable callable) => do
+          -- a macro of a compiled function is expanded here, once
+          match macroExpansion callable operands with
+          | .ok (some expanded) => .sequence <$> compileSequence globals locals fuel expanded
+          | .ok none =>
+            let callable ← compileExp globals locals fuel (.atom operator)
+            let args ← operands.mapM (compileExp globals locals fuel)
+            some (.apply callable args)
+          | .error _ => none
         | _ => do
           let callable ← compileExp globals locals fuel (.atom operator)
           let args ← operands.mapM (compileExp globals locals fuel)
@@ -1059,7 +1315,7 @@ mutual
       (forms : List Sexp) : Option (List CExp) :=
     forms.mapM (compileExp globals locals fuel)
 
-  private def compileBindings (globals : Globals) (locals : List String) :
+  private def compileBindings (globals : Globals) (locals : List String) (all : List Sexp) :
       Nat → List Sexp → List Sexp → Option CExp
     | 0, _, _ => none
     | fuel + 1, bindings, body =>
@@ -1067,23 +1323,58 @@ mutual
       | [] => .sequence <$> compileSequence globals locals fuel body
       | .list [.atom name, value] :: rest => do
         -- Compiled locals are immutable slots, so assigned ones stay with the interpreter.
-        if (bindings ++ body).any (assignsLocal globals name 64) then none
+        if (all ++ body).any (assignsLocal globals name 64) then none
         let value ← compileExp globals locals fuel value
-        .letIn value <$> compileBindings globals (name :: locals) fuel rest body
+        .letIn value <$> compileBindings globals (name :: locals) all fuel rest body
       | _ => none
 end
 
-private def compileValue (globals : Globals) (value : Value) : Value :=
-  match value with
-  | .callable (.function params body env) =>
+private def compileFunction (globals : Globals) : Callable → Callable
+  | callable@(.function params body env) =>
     let locals := params ++ env.map Prod.fst
     match body.mapM (compileExp globals locals 1000) with
-    | some body => .callable (.compiled params body env)
-    | none => value
+    | some body => .compiled params body env
+    | none => callable
+  | callable => callable
+
+private def compileCallable (globals : Globals) : Callable → Callable
+  | .overloads candidates => .overloads (candidates.map (compileFunction globals))
+  | callable => compileFunction globals callable
+
+private def compileValue (globals : Globals) (value : Value) : Value :=
+  match value with
+  | .callable callable => .callable (compileCallable globals callable)
   | _ => value
 
 def compileGlobals (globals : Globals) : Globals :=
   globals.map fun binding => (binding.1, compileValue globals binding.2)
+
+private def define (state : State) (name : String) (callable : Callable) : State :=
+  let callable := addDefinition callable (Assoc.get name state.globals)
+  { state with
+    globals := Assoc.put name (.callable callable) state.globals
+    operations := state.operations.insert name callable }
+
+/-- A form of a source file. Only here definitions extend the globals, as upstream reads them with the
+parser, so evaluating a form leaves the globals as they are. Methods handle the signals of the machine
+and are not semantics. -/
+private def evalTopLevel (context : Context) (state : State) (form : Sexp) : Except String State := do
+  match form with
+  | .list (.atom "defun" :: .atom name :: .list params :: body) =>
+    let params ← params.mapM Sexp.asAtom
+    if !contextMatches context body then .ok state
+    else .ok (define state name (.function params (definitionBody body) []))
+  | .list (.atom "defmacro" :: .atom name :: .list params :: body) =>
+    let params ← params.mapM Sexp.asAtom
+    if !contextMatches context body then .ok state
+    else .ok (define state name (.macro params (definitionBody body)))
+  | .list (.atom "defparameter" :: .atom name :: value :: _) =>
+    let (value, state) ← eval 100000 [] context state value
+    .ok { state with globals := Assoc.put name value state.globals }
+  | .list (.atom "defmethod" :: _) => .ok state
+  | form =>
+    let (_, state) ← eval 100000 [] context state form
+    .ok state
 
 def evalForms (context : Context) (globals : Globals) (forms : List Sexp) :
     Except String State := do
@@ -1092,8 +1383,7 @@ def evalForms (context : Context) (globals : Globals) (forms : List Sexp) :
       kind != "declare" && kind != "defpackage" && kind != "in-package" && kind != "require"
     | _ => true
   forms.forM checkLiterals
-  let (_, state) ← evalSequence 100000 [] context { globals := globals, operations := indexGlobals globals } forms
-  .ok state
+  forms.foldlM (evalTopLevel context) { globals := globals, operations := indexGlobals globals }
 
 private def readForms (path : String) : IO (List Sexp) := do
   let source ← IO.FS.readFile path
@@ -1126,7 +1416,13 @@ private def loadFiles (directories : List String) (visited : List String)
         | .error error => throw <| IO.userError s!"{path}: {error}"
       loadFiles directories visited context state fuel rest
 
+/-- The core macros, which every program has upstream. -/
+private def preludeName : String := "init"
+
 def loadMany (directories entries : List String) (context : Context) : IO Globals := do
+  let candidates : List System.FilePath := directories.map fun directory => s!"{directory}/{preludeName}.lisp"
+  let prelude ← candidates.anyM fun path => System.FilePath.pathExists path
+  let entries := if prelude then preludeName :: entries else entries
   let (_, state) ← loadFiles directories [] context { } 1000 entries
   pure state.globals
 
@@ -1164,6 +1460,124 @@ def liftMC (environment : Environment) (context : Context) (opcode : Nat)
   match apply 100000 context { globals := environment.globals, operations := environment.operations } (.callable callable) operands with
   | .ok (_, state) => pure state.code
   | .error error => throw <| IO.userError s!"LLVM opcode {opcode}: {error}"
+
+/-- The number of arguments a primitive takes, at least and, if bounded, at most. -/
+private def primitiveArity (name : String) : Nat × Option Nat :=
+  match name with
+  | "not" | "lnot" | "neg" | "clz" | "car" | "cdr" | "length" | "null?" | "list?" | "load-byte" | "load-hword"
+  | "load-word" | "is-zero" | "non-zero" | "unquote" | "alias-base-register" | "symbol" | "exec-addr"
+  | "x86-prefix" | "fsqrt" | "fround" | "is-nan" | "is-inf" | "is-fzero" =>
+    if name = "fsqrt" || name = "fround" then (2, some 2) else (1, some 1)
+  | "=" | "/=" | "<" | "<=" | ">" | ">=" | "s<" | "s<=" | "s>" | "s>=" | "lshift" | "rshift" | "arshift"
+  | "cast-low" | "cast-high" | "cast-signed" | "cast-unsigned" | "replicate" | "select" | "set" | "set$"
+  | "set-symbol-value" | "cons" | "load-bits" | "store-word" | "store-byte" | "<." | ">." | ">=." | "=." =>
+    (2, some 2)
+  | "extract" | "cast-saturate" | "fconvert" | "cast-float" | "cast-sfloat" | "cast-int" | "cast-sint" =>
+    (3, some 3)
+  | "empty" | "get-program-counter" | "get-current-program-counter" | "get-next-program-counter" => (0, some 0)
+  | "word-width" | "list" | "symbol-concat" => (0, none)
+  | "+." | "-." | "*." | "/." => (2, none)
+  | _ => (1, none)
+
+mutual
+  /-- Every name a form calls or reads, as the evaluator would resolve it, that has no definition, no
+  definition of the right arity, or a body that cannot be expanded. Macros are checked as expanded. -/
+  private def auditForm (context : Context) (globals : Globals) (locals : List String) :
+      Nat → Sexp → List String
+    | 0, _ => ["expansion too deep"]
+    | fuel + 1, form =>
+      let forms (items : List Sexp) := auditForms context globals locals fuel items
+      match form with
+      | .atom atom =>
+        if atom = "true" || atom = "false" || atom.startsWith ":" || locals.contains atom then []
+        else
+          match readLiteral atom with
+          | .error error => [error]
+          | .ok (some _) => []
+          | .ok none =>
+            match lookup atom (locals.map fun name => (name, Value.unit)) globals with
+            | .ok _ => []
+            | .error _ => [s!"unknown symbol {atom}"]
+      | .list [] => []
+      | .list (.atom "quote" :: _) | .list (.atom "sizeof" :: _) | .list (.atom "msg" :: _)
+      | .list (.atom "error" :: _) => []
+      | .list [.atom "assert-msg", test, _] => forms [test]
+      | .list [.atom "clz", value] => forms [value]
+      | .list (.atom "if" :: items) | .list (.atom "when" :: items) | .list (.atom "unless" :: items)
+      | .list (.atom "progn" :: items) | .list (.atom "prog" :: items) | .list (.atom "while" :: items) => forms items
+      | .list (.atom "lambda" :: .list params :: body) =>
+        let params := params.filterMap fun param => match param with
+          | .atom name => some name
+          | _ => none
+        auditForms context globals (params ++ locals) fuel (definitionBody body)
+      | .list (.atom "let" :: .list bindings :: body) => auditLet context globals locals fuel bindings body
+      | .list (.atom "case" :: key :: branches) =>
+        forms [key] ++ auditBranches context globals locals fuel branches
+      | .list (.atom operator :: operands) =>
+        let visible := locals.map fun name => (name, Value.unit)
+        let call := match lookup operator visible globals with
+          | .error _ => [s!"unknown function {operator}"]
+          | .ok (.callable callable) =>
+            if locals.contains operator then [] else
+            match macroExpansion callable operands, callable with
+            | .ok (some expanded), _ => auditForms context globals locals fuel expanded
+            | .error error, _ => [s!"{operator} with {operands.length} operands: {error}"]
+            | .ok none, .primitive name =>
+              let (least, most) := primitiveArity name
+              if least ≤ operands.length && (match most with
+                  | some most => decide (operands.length ≤ most)
+                  | none => decide (0 = 0)) then []
+              else [s!"primitive {name} with {operands.length} arguments"]
+            | .ok none, .function params .. | .ok none, .compiled params .. =>
+              if params.length = operands.length then []
+              else [s!"function {operator} with {operands.length} arguments, expects {params.length}"]
+            | .ok none, .overloads candidates =>
+              match resolveFunction operands.length candidates with
+              | some _ => []
+              | none => [s!"function {operator} has no definition for {operands.length} arguments"]
+            | .ok none, .macro .. => []
+          | .ok _ => if locals.contains operator then [] else [s!"{operator} is not a function"]
+        let expandsMacro := match lookup operator visible globals with
+          | .ok (.callable callable) => !locals.contains operator && !(macroCandidates callable).isEmpty
+          | _ => false
+        call ++ (if expandsMacro then [] else forms operands)
+      | .list items => forms items
+
+  private def auditForms (context : Context) (globals : Globals) (locals : List String) (fuel : Nat) :
+      List Sexp → List String
+    | [] => []
+    | form :: rest => auditForm context globals locals fuel form ++ auditForms context globals locals fuel rest
+
+  private def auditLet (context : Context) (globals : Globals) (locals : List String) (fuel : Nat)
+      (bindings body : List Sexp) : List String :=
+    match bindings with
+    | [] => auditForms context globals locals fuel body
+    | .list [.atom name, value] :: rest =>
+      auditForm context globals locals fuel value ++ auditLet context globals (name :: locals) fuel rest body
+    | _ :: _ => ["invalid let binding"]
+
+  private def auditBranches (context : Context) (globals : Globals) (locals : List String) (fuel : Nat) :
+      List Sexp → List String
+    | [] => []
+    | [fallback] => auditForm context globals locals fuel fallback
+    | _ :: body :: rest =>
+      auditForm context globals locals fuel body ++ auditBranches context globals locals fuel rest
+end
+
+/-- The findings of a static check of all loaded functions against the names of `globals`. -/
+def auditGlobals (context : Context) (globals : Globals) : List (String × String) :=
+  let functions (callable : Callable) : List Callable := match callable with
+    | .overloads candidates => candidates
+    | callable => [callable]
+  globals.flatMap fun binding =>
+    match binding.2 with
+    | .callable callable =>
+      (functions callable).flatMap fun candidate =>
+        match candidate with
+        | .function params body env =>
+          (auditForms context globals (params ++ env.map Prod.fst) 64 body).map fun finding => (binding.1, finding)
+        | _ => []
+    | _ => []
 
 def register (name : String) (width baseWidth : Nat) : Value := .register name width baseWidth
 

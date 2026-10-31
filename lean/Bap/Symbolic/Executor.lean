@@ -35,8 +35,20 @@ def typeWidth : Typ → Nat
   | .imm width => width
   | _ => 1
 
-/-- The name of the input a variable holds until it is first assigned. -/
-def inputName (var : Bap.Var) : String := s!"{var.name}#{var.index}"
+/-- A spelling of a type, different for each type. -/
+def typeName : Typ → String
+  | .unknown => "x"
+  | .unit => "u"
+  | .mem addressWidth valueWidth => s!"m{addressWidth}_{valueWidth}"
+  | .imm width => s!"b{width}"
+
+/-- The name of the input a variable holds until it is first assigned, different for each variable. The name may
+contain `#`, the other parts can't, and so the last three `#` separate them. -/
+def inputName (var : Bap.Var) : String :=
+  s!"{var.name}#{var.index}#{typeName var.typ}#{if var.isVirtual then "v" else "r"}"
+
+/-- The name of the value of an `unknown`, which no input has: those don't end in `?`. -/
+def unknownName (message : String) : String := s!"unknown_{message}?"
 
 private def lookup (env : Env) (var : Bap.Var) : Except String Expr :=
   if var.typ matches .mem _ _ then
@@ -82,22 +94,13 @@ private def binaryApp (op : Bil.BinOp) (left right : Expr) : Expr :=
     | .sge => "bvsge"
   .app name (if op matches .eq | .neq | .lt | .le | .gt | .ge | .slt | .sle | .sgt | .sge then 1 else left.width) [left, right]
 
-/-- BIL defines signed division by zero as all ones, SMT-LIB as a value that depends on the sign. -/
-private def signedDivision (left right : Expr) : Expr :=
-  .ite (.app "=" 1 [right, .const (BitVec.ofNat right.width 0)]) (.const (BitVec.allOnes left.width))
-    (binaryApp .sdiv left right)
-
 private def binary (op : Bil.BinOp) (left right : Expr) : Expr :=
-  let symbolic :=
-    match op with
-    | .sdiv => signedDivision left right
-    | _ => binaryApp op left right
   match left, right with
   | @Expr.const leftWidth leftValue, @Expr.const rightWidth rightValue =>
     match Bil.evalBin op ⟨leftWidth, leftValue⟩ ⟨rightWidth, rightValue⟩ with
     | .ok (.bits value) => .const value
-    | _ => symbolic
-  | _, _ => symbolic
+    | _ => binaryApp op left right
+  | _, _ => binaryApp op left right
 
 private def evalCast (kind : Bil.Cast) (width : Nat) (value : Expr) : Except String Expr :=
   if width = 0 then
@@ -159,7 +162,7 @@ mutual
       | some true => .ok yes
       | some false => .ok no
       | none => .ok { name := yes.name, branch := some (condition, yes, no) }
-  | .unknown message _ => .ok { name := s!"unknown_{message}?" }
+  | .unknown message _ => .ok { name := unknownName message }
   | _ => .error "expected symbolic memory"
 
 def evalExp (state : State) : Bil.Exp → Except String Expr
@@ -169,7 +172,10 @@ def evalExp (state : State) : Bil.Exp → Except String Expr
   | .bin op left right => do
     let left ← evalExp state left
     let right ← evalExp state right
-    .ok (binary op left right)
+    if left.width ≠ right.width then
+      .error "binary operands have different widths"
+    else
+      .ok (binary op left right)
   | .un op value => do
     let value ← evalExp state value
     .ok (.app (match op with | .neg => "bvneg" | .not => "bvnot") value.width [value])
@@ -207,14 +213,11 @@ def evalExp (state : State) : Bil.Exp → Except String Expr
     .ok (.concat left right)
   | .unknown message typ =>
     if typeWidth typ = 0 then .error "an unknown value must have at least one bit"
-    else .ok (.var s!"unknown_{message}?" (typeWidth typ))
+    else .ok (.var (unknownName message) (typeWidth typ))
   | .load memory address endian size => do
     let memory ← evalMemory state memory
     let address ← evalExp state address
-    if size = 0 then
-      .error "a load must have at least one byte"
-    else
-      .ok (Memory.read memory address endian size)
+    Memory.read memory address endian size
   | .store _ _ _ _ _ => .error "memory expression used as a bitvector"
 end
 

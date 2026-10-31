@@ -32,10 +32,11 @@
 
 (defmacro set-sse (rd x)
   "(set-sse RD X) sets the lower bits of RD to X keeping the others"
-  (let ((wd (word-width rd))
-        (wx (word-width x)))
+  (let ((value x)
+        (wd (word-width rd))
+        (wx (word-width value)))
     (set$ rd (concat (cast-high (- wd wx) rd)
-                     (cast-low wx x)))))
+                     (cast-low wx value)))))
 
 ;; scalar operations, the operands are the lowest bits of the arguments
 
@@ -113,7 +114,7 @@
   (set-sse rd (sse-binary name rt rn rm)))
 (defmacro scalar-rm (name rt rd rn base scale index off)
   (set-sse rd (sse-binary name rt rn (sse-load rt base scale index off))))
-(defmacro packed-rr (name rt rd rn rm)
+(defmacro fp-packed-rr (name rt rd rn rm)
   (set-sse rd (sse-packed name rt rn rm)))
 (defmacro packed-rm (name rt rd rn base scale index off)
   (set-sse rd (sse-packed name rt rn (sse-load 128 base scale index off))))
@@ -135,14 +136,14 @@
 (defun MULSSrm_Int (rd rn b s i off _) (scalar-rm 'fmul 32 rd rn b s i off))
 (defun DIVSSrm_Int (rd rn b s i off _) (scalar-rm 'fdiv 32 rd rn b s i off))
 
-(defun ADDPDrr (rd rn rm) (packed-rr 'fadd 64 rd rn rm))
-(defun SUBPDrr (rd rn rm) (packed-rr 'fsub 64 rd rn rm))
-(defun MULPDrr (rd rn rm) (packed-rr 'fmul 64 rd rn rm))
-(defun DIVPDrr (rd rn rm) (packed-rr 'fdiv 64 rd rn rm))
-(defun ADDPSrr (rd rn rm) (packed-rr 'fadd 32 rd rn rm))
-(defun SUBPSrr (rd rn rm) (packed-rr 'fsub 32 rd rn rm))
-(defun MULPSrr (rd rn rm) (packed-rr 'fmul 32 rd rn rm))
-(defun DIVPSrr (rd rn rm) (packed-rr 'fdiv 32 rd rn rm))
+(defun ADDPDrr (rd rn rm) (fp-packed-rr 'fadd 64 rd rn rm))
+(defun SUBPDrr (rd rn rm) (fp-packed-rr 'fsub 64 rd rn rm))
+(defun MULPDrr (rd rn rm) (fp-packed-rr 'fmul 64 rd rn rm))
+(defun DIVPDrr (rd rn rm) (fp-packed-rr 'fdiv 64 rd rn rm))
+(defun ADDPSrr (rd rn rm) (fp-packed-rr 'fadd 32 rd rn rm))
+(defun SUBPSrr (rd rn rm) (fp-packed-rr 'fsub 32 rd rn rm))
+(defun MULPSrr (rd rn rm) (fp-packed-rr 'fmul 32 rd rn rm))
+(defun DIVPSrr (rd rn rm) (fp-packed-rr 'fdiv 32 rd rn rm))
 (defun ADDPDrm (rd rn b s i off _) (packed-rm 'fadd 64 rd rn b s i off))
 (defun SUBPDrm (rd rn b s i off _) (packed-rm 'fsub 64 rd rn b s i off))
 (defun MULPDrm (rd rn b s i off _) (packed-rm 'fmul 64 rd rn b s i off))

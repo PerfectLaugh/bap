@@ -1,5 +1,5 @@
 import Bap.Analysis.Xrefs
-import Bap.Graph.Basic
+import Bap.Graph.Fast
 
 namespace Bap.Analysis.Callgraph
 
@@ -34,6 +34,20 @@ def stronglyConnected (callgraph : Callgraph) : List (List Nat) :=
         (Graph.reachable callgraph.graph candidate).contains node
       (current.1.filter fun candidate => !component.contains candidate, current.2 ++ [component])
   components.2
+
+private def stronglyConnectedFast (callgraph : Callgraph) : List (List Nat) :=
+  let components := callgraph.graph.nodes.foldl (init := (callgraph.graph.nodes, [])) fun current node =>
+    if !current.1.contains node then current
+    else
+      let forward := Graph.Fast.reachable callgraph.graph node
+      let component := forward.filter fun candidate =>
+        (Graph.Fast.reachable callgraph.graph candidate).contains node
+      (current.1.filter fun candidate => !component.contains candidate, current.2 ++ [component])
+  components.2
+
+@[csimp] private theorem stronglyConnected_eq_fast : @stronglyConnected = @stronglyConnectedFast := by
+  funext callgraph
+  simp only [stronglyConnected, stronglyConnectedFast, Graph.Fast.reachable_eq]
 
 def recursiveFunctions (callgraph : Callgraph) : List Nat :=
   let components := stronglyConnected callgraph

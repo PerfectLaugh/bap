@@ -1574,11 +1574,8 @@ open Bap.Theory
 local notation "T" => Bap.Theory.Target
 local notation "RV" => Bap.Theory.Var
 
-open_private Bap.Theory.Target Bap.Theory.aliasPartVar as aliasPartVar
-open_private Bap.Theory.Target Bap.Theory.partWidth as partWidth
-open_private Bap.Theory.Target Bap.Theory.findSub as findSub
-open_private Bap.Theory.Target Bap.Theory.findSub.find as findSubFind
-open_private Bap.Theory.Target Bap.Theory.resolveBase as resolveBase
+open_private Bap.Theory.Target Bap.Theory.originOf as originOf
+open_private Bap.Theory.Target Bap.Theory.bitRegisters as bitRegisters
 
 /-! ### Declarations -/
 
@@ -2161,263 +2158,659 @@ theorem var_isSome_iff (target : T) (name : String) :
 
 /-! ### Aliases -/
 
-private theorem find_sub_layout (var : RV) (alias : Alias) (parts : List AliasPart)
-    {origin : Origin} (h : findSubFind var alias parts = some origin) :
-    ∃ pre part tail widths width reg hi lo isAlias,
-      origin = .sub reg hi lo isAlias ∧ reg = alias.target ∧
-      parts = pre ++ part :: tail ∧ aliasPartVar part = some var ∧
-      partWidth part = some width ∧ tail.mapM partWidth = some widths ∧
-      lo = widths.sum ∧ hi = lo + width - 1 := by
-  induction parts with
-  | nil => simp [findSubFind] at h
-  | cons part tail ih =>
-    cases part with
-    | unknown =>
-      simp only [findSubFind] at h
-      obtain ⟨pre, part, rest, widths, width, reg, hi, lo, isAlias, h₁, h₂, h₃, h₄⟩ := ih h
-      exact ⟨.unknown :: pre, part, rest, widths, width, reg, hi, lo, isAlias, h₁, h₂, by simp [h₃], h₄⟩
-    | reg partValue =>
-      simp only [findSubFind] at h
-      split at h
-      · rename_i heq
-        split at h
-        · rename_i width low hw hl
-          simp only [Option.some.injEq] at h
-          simp only [Option.map_eq_some_iff] at hl
-          obtain ⟨widths, hws, rfl⟩ := hl
-          exact ⟨[], .reg partValue, tail, widths, width, _, _, _, _, h.symm, rfl, rfl,
-            by simp [aliasPartVar, heq], hw, hws, rfl, rfl⟩
-        · cases h
-      · obtain ⟨pre, part, rest, widths, width, reg, hi, lo, isAlias, h₁, h₂, h₃, h₄⟩ := ih h
-        exact ⟨.reg partValue :: pre, part, rest, widths, width, reg, hi, lo, isAlias, h₁, h₂,
-          by simp [h₃], h₄⟩
-    | bit partValue =>
-      simp only [findSubFind] at h
-      split at h
-      · rename_i heq
-        split at h
-        · rename_i width low hw hl
-          simp only [Option.some.injEq] at h
-          simp only [Option.map_eq_some_iff] at hl
-          obtain ⟨widths, hws, rfl⟩ := hl
-          exact ⟨[], .bit partValue, tail, widths, width, _, _, _, _, h.symm, rfl, rfl,
-            by simp [aliasPartVar, heq], hw, hws, rfl, rfl⟩
-        · cases h
-      · obtain ⟨pre, part, rest, widths, width, reg, hi, lo, isAlias, h₁, h₂, h₃, h₄⟩ := ih h
-        exact ⟨.bit partValue :: pre, part, rest, widths, width, reg, hi, lo, isAlias, h₁, h₂,
-          by simp [h₃], h₄⟩
+/-- A valuation of the bits of the registers satisfies the aliasing equations of a target. -/
+def Model (target : T) (value : RV → Nat → Bool) : Prop :=
+  ∀ alias ∈ target.aliases, ∀ span ∈ alias.spans.getD [], ∀ index < span.width,
+    value span.var index = value alias.target (span.offset + index)
 
-private theorem findSub_layout (var : RV) (aliases : List Alias) {origin : Origin}
-    (h : findSub var aliases = some origin) :
-    ∃ alias ∈ aliases, ∃ pre part tail widths width hi lo isAlias,
-      origin = .sub alias.target hi lo isAlias ∧
-      alias.parts = pre ++ part :: tail ∧ aliasPartVar part = some var ∧
-      partWidth part = some width ∧ tail.mapM partWidth = some widths ∧
-      lo = widths.sum ∧ hi = lo + width - 1 := by
-  induction aliases with
-  | nil => simp [findSub] at h
-  | cons alias rest ih =>
-    simp only [findSub] at h
-    split at h
-    · rename_i found hfound
-      cases h
-      obtain ⟨pre, part, tail, widths, width, reg, hi, lo, isAlias, h₁, rfl, h₃⟩ :=
-        find_sub_layout var alias alias.parts hfound
-      exact ⟨alias, List.mem_cons_self, pre, part, tail, widths, width, hi, lo, isAlias, h₁, h₃⟩
-    · obtain ⟨found, hmem, hrest⟩ := ih h
-      exact ⟨found, List.mem_cons_of_mem _ hmem, hrest⟩
+theorem linked_sound {target : T} {value : RV → Nat → Bool} (hm : Model target value) {var other : RV}
+    {index at' : Nat} (h : (other, at') ∈ target.linked var index) : value var index = value other at' := by
+  obtain ⟨alias, halias, hin⟩ := List.mem_flatMap.1 h
+  obtain ⟨span, hspan, hfound⟩ := List.mem_filterMap.1 hin
+  have heq := hm alias halias span hspan
+  split at hfound
+  · rename_i hc
+    obtain ⟨rfl, hlo, hhi⟩ := hc
+    simp only [Option.some.injEq, Prod.mk.injEq] at hfound
+    obtain ⟨rfl, rfl⟩ := hfound
+    have hbit := heq (index - span.offset) (by omega)
+    rw [Nat.add_sub_cancel' hlo] at hbit
+    exact hbit.symm
+  · split at hfound
+    · rename_i hc
+      obtain ⟨rfl, hhi⟩ := hc
+      simp only [Option.some.injEq, Prod.mk.injEq] at hfound
+      obtain ⟨rfl, rfl⟩ := hfound
+      exact heq index hhi
+    · cases hfound
 
-/-- `Inside target var base offset`: following alias definitions from `var` reaches `base`, with
-`var` starting `offset` bits into it. -/
-inductive Inside (target : T) : RV → RV → Nat → Prop where
-  | refl (var : RV) : Inside target var var 0
-  | step {var outer base : RV} {hi inner offset : Nat} {flag : Bool} :
-      findSub var target.aliases = some (.sub outer hi inner flag) →
-      Inside target outer base offset → Inside target var base (inner + offset)
-
-private theorem Inside.append {target : T} {a b c : RV} {m n : Nat} (hab : Inside target a b m)
-    (hbc : Inside target b c n) : Inside target a c (m + n) := by
-  induction hab with
-  | refl => simpa using hbc
-  | step hsub _ ih =>
-    rw [Nat.add_assoc]
-    exact .step hsub (ih hbc)
-
-private theorem resolveBase_inside (target : T) (fuel : Nat) (base : RV) (low : Nat) :
-    let result := resolveBase target fuel base low
-    ∃ offset, Inside target base result.1 offset ∧ result.2 = low + offset := by
-  induction fuel generalizing base low with
-  | zero => exact ⟨0, .refl _, rfl⟩
+/-- A located bit is a bit of a basis register, and the equations make it equal to the bit asked for. -/
+theorem locate_sound {target : T} {fuel : Nat} {seen : List (RV × Nat)} {var base : RV} {index at' : Nat}
+    (h : target.locate fuel seen var index = some (base, at')) :
+    target.isAlias base = false ∧ (∃ width, regWidth base = some width ∧ at' < width) ∧
+      ∀ value, Model target value → value var index = value base at' := by
+  induction fuel generalizing seen var index with
+  | zero => simp [Target.locate] at h
   | succ fuel ih =>
-    simp only [resolveBase]
-    split
-    · rename_i outer _ inner _ hsub
-      obtain ⟨offset, hin, heq⟩ := ih outer (low + inner)
-      refine ⟨inner + offset, .step hsub hin, ?_⟩
-      rw [heq, Nat.add_assoc]
-    · exact ⟨0, .refl _, rfl⟩
+    rw [Target.locate] at h
+    split at h
+    · obtain ⟨⟨other, at''⟩, hmem, hfound⟩ := List.exists_of_findSome?_eq_some h
+      split at hfound
+      · cases hfound
+      · obtain ⟨hbasis, hwidth, hval⟩ := ih hfound
+        exact ⟨hbasis, hwidth, fun value hm => (linked_sound hm hmem).trans (hval value hm)⟩
+    · rename_i hbasis
+      split at h
+      · rename_i hrange
+        simp only [Option.some.injEq, Prod.mk.injEq] at h
+        obtain ⟨rfl, rfl⟩ := h
+        refine ⟨by simpa using hbasis, ?_, fun _ _ => rfl⟩
+        cases hw : regWidth var with
+        | none => simp [hw] at hrange
+        | some width => exact ⟨width, rfl, by simpa [hw] using hrange⟩
+      · cases h
 
-/-- A `sub` origin locates the register inside the original register, through a real alias: its
-own width comes from the part that defines it, and the bits sit `lo` into the base. -/
-theorem unalias_sub_layout {target : T} {var reg : RV} {hi lo : Nat} {isAlias : Bool}
-    (h : target.unalias var = some (.sub reg hi lo isAlias)) :
-    Inside target var reg lo ∧ ∃ alias ∈ target.aliases, ∃ pre part tail widths width,
-      alias.parts = pre ++ part :: tail ∧ aliasPartVar part = some var ∧
-      partWidth part = some width ∧ tail.mapM partWidth = some widths ∧
-      hi = lo + (widths.sum + width - 1 - widths.sum) := by
-  unfold Target.unalias at h
-  split at h
-  · rename_i base hi' lo' flag hfound
-    simp only [Option.some.injEq] at h
-    obtain ⟨alias, hmem, pre, part, tail, widths, width, hi'', lo'', isAlias', h₁, h₂, h₃, h₄, h₅, h₆, h₇⟩ :=
-      findSub_layout var target.aliases hfound
-    simp only [Origin.sub.injEq] at h₁
-    obtain ⟨rfl, rfl, rfl, rfl⟩ := h₁
-    obtain ⟨offset, hin, heq⟩ := resolveBase_inside target target.aliases.length alias.target lo'
-    generalize hres : resolveBase target target.aliases.length alias.target lo' = result at h hin heq
-    obtain ⟨root, low⟩ := result
-    simp only [Origin.sub.injEq] at h
-    obtain ⟨rfl, rfl, rfl, _⟩ := h
-    simp only at hin heq
-    refine ⟨?_, alias, hmem, pre, part, tail, widths, width, h₂, h₃, h₄, h₅, ?_⟩
-    · rw [heq]
-      exact .step hfound hin
-    · subst h₆ h₇
-      rfl
-  · rename_i origin hne hfound
-    obtain ⟨alias, _, _, _, _, _, _, hi', lo', flag, h₁, _⟩ := findSub_layout var target.aliases hfound
-    exact (hne _ _ _ _ h₁).elim
-  · obtain ⟨alias, _, hval⟩ := List.exists_of_findSome?_eq_some h
-    repeat' split at hval
-    all_goals cases hval
-
-/-- `isAlias` says that the register covers the whole of its base, as upstream's `Origin.is_alias`. -/
-theorem unalias_isAlias {target : T} {var reg : RV} {hi lo : Nat} {isAlias : Bool}
-    (h : target.unalias var = some (.sub reg hi lo isAlias)) :
-    isAlias = true ↔ reg.sort.bits = some (hi - lo + 1) := by
-  unfold Target.unalias at h
-  split at h
-  · rename_i base hi' lo' flag hfound
-    simp only [Option.some.injEq] at h
-    generalize resolveBase target target.aliases.length base lo' = result at h
-    obtain ⟨root, low⟩ := result
-    simp only [Origin.sub.injEq] at h
-    obtain ⟨rfl, rfl, rfl, rfl⟩ := h
-    have hsub : low + (hi' - lo') - low = hi' - lo' := by omega
-    simp [hsub]
-  · rename_i origin hne hfound
-    obtain ⟨alias, _, _, _, _, _, _, hi', lo', flag, h₁, _⟩ := findSub_layout var target.aliases hfound
-    exact (hne _ _ _ _ h₁).elim
-  · obtain ⟨alias, _, hval⟩ := List.exists_of_findSome?_eq_some h
-    repeat' split at hval
-    all_goals cases hval
-
-private theorem parts_of_all_reg (parts : List AliasPart) {vars : List RV}
-    (hm : parts.mapM aliasPartVar = some vars)
-    (ha : (parts.all fun part => match part with | .reg _ => true | _ => false) = true) :
-    parts = vars.map AliasPart.reg := by
-  induction parts generalizing vars with
+private theorem mapM_some {f : Nat → Option β} {values : List Nat} {results : List β}
+    (h : values.mapM f = some results) :
+    results.length = values.length ∧ ∀ i (hi : i < values.length), ∃ result, results[i]? = some result ∧
+      f values[i] = some result := by
+  induction values generalizing results with
   | nil =>
-    simp at hm
-    simp [← hm]
-  | cons part tail ih =>
-    cases part with
-    | reg var =>
-      simp only [List.mapM_cons, aliasPartVar, Option.pure_def, Option.bind_eq_bind, Option.bind_some,
-        Option.bind_eq_some_iff, Option.some.injEq] at hm
-      obtain ⟨rest, hrest, rfl⟩ := hm
-      simp only [List.all_cons, Bool.true_and] at ha
-      simp [ih hrest ha]
-    | bit var => simp at ha
-    | unknown => simp at ha
+    simp only [List.mapM_nil, pure, Option.some.injEq] at h
+    simp [← h]
+  | cons head tail ih =>
+    simp only [List.mapM_cons, bind, Option.bind_eq_some_iff, pure, Option.some.injEq] at h
+    obtain ⟨first, hfirst, rest, hrest, rfl⟩ := h
+    obtain ⟨hlen, hall⟩ := ih hrest
+    refine ⟨by simp [hlen], fun i hi => ?_⟩
+    cases i with
+    | zero => exact ⟨first, by simp, hfirst⟩
+    | succ i => simpa using hall i (by simpa using hi)
 
-private theorem parts_of_all_bit (parts : List AliasPart) {vars : List RV}
-    (hm : parts.mapM aliasPartVar = some vars)
-    (ha : (parts.all fun part => match part with | .bit _ => true | _ => false) = true) :
-    parts = vars.map AliasPart.bit := by
-  induction parts generalizing vars with
-  | nil =>
-    simp at hm
-    simp [← hm]
-  | cons part tail ih =>
-    cases part with
-    | bit var =>
-      simp only [List.mapM_cons, aliasPartVar, Option.pure_def, Option.bind_eq_bind, Option.bind_some,
-        Option.bind_eq_some_iff, Option.some.injEq] at hm
-      obtain ⟨rest, hrest, rfl⟩ := hm
-      simp only [List.all_cons, Bool.true_and] at ha
-      simp [ih hrest ha]
-    | reg var => simp at ha
-    | unknown => simp at ha
+private theorem mapM_of_all {f : Nat → Option β} {g : Nat → β} {values : List Nat}
+    (h : ∀ value ∈ values, f value = some (g value)) : values.mapM f = some (values.map g) := by
+  induction values with
+  | nil => rfl
+  | cons head tail ih =>
+    simp only [List.mem_cons, forall_eq_or_imp] at h
+    simp [List.mapM_cons, h.1, ih h.2]
 
-/-- A whole-register origin comes from an alias defining the register itself. -/
-private theorem unalias_whole {target : T} {var : RV} {origin : Origin}
-    (hshape : (∃ regs, origin = .sup regs) ∨ (∃ bits, origin = .set bits))
-    (h : target.unalias var = some origin) :
-    target.aliases.findSome? (fun alias =>
-      if alias.target = var then
-        match alias.parts.mapM aliasPartVar with
-        | some vars =>
-          if alias.parts.all fun part => match part with | .reg _ => true | _ => false then
-            some (.sup vars)
-          else if alias.parts.all fun part => match part with | .bit _ => true | _ => false then
-            some (.set vars)
-          else
-            none
-        | none => none
-      else
-        none) = some origin := by
-  unfold Target.unalias at h
+private theorem originOf_locations {bits : List (RV × Nat)} {origin : Origin} (h : originOf bits = some origin) :
+    origin.locations = bits := by
+  unfold originOf at h
   split at h
-  · rcases hshape with ⟨_, rfl⟩ | ⟨_, rfl⟩ <;> cases h
-  · rename_i other hne hfound
-    obtain ⟨alias, _, _, _, _, _, _, _, _, _, h₁, _⟩ := findSub_layout var target.aliases hfound
-    exact (hne _ _ _ _ h₁).elim
-  · exact h
+  · cases h
+  · simp only at h
+    split at h
+    · rename_i hsub
+      cases h
+      exact hsub
+    · split at h
+      · rename_i hregs
+        split at h
+        · cases h
+          simpa [Origin.locations] using hregs
+        · split at h
+          · cases h
+            simpa [Origin.locations] using hregs
+          · cases h
+      · cases h
 
-/-- A `sup` origin reads off an alias of this very register whose parts are all whole registers. -/
-theorem unalias_sup_sound {target : T} {var : RV} {regs : List RV}
-    (h : target.unalias var = some (.sup regs)) :
-    ∃ alias ∈ target.aliases, alias.target = var ∧ alias.parts = regs.map AliasPart.reg := by
-  obtain ⟨alias, hmem, hval⟩ := List.exists_of_findSome?_eq_some (unalias_whole (.inl ⟨regs, rfl⟩) h)
-  refine ⟨alias, hmem, ?_⟩
-  split at hval
-  · rename_i heq
-    split at hval
-    · rename_i vars hvars
-      split at hval
-      · rename_i hall
-        simp only [Option.some.injEq, Origin.sup.injEq] at hval
-        subst hval
-        exact ⟨heq, parts_of_all_reg _ hvars hall⟩
-      · split at hval <;> cases hval
-    · cases hval
-  · cases hval
+private theorem originOf_sub {bits : List (RV × Nat)} {reg : RV} {hi lo : Nat} {whole : Bool}
+    (h : originOf bits = some (.sub reg hi lo whole)) :
+    bits ≠ [] ∧ hi = lo + bits.length - 1 ∧ whole = (regWidth reg == some bits.length) := by
+  unfold originOf at h
+  split at h
+  · cases h
+  · simp only at h
+    split at h
+    · simp only [Option.some.injEq, Origin.sub.injEq] at h
+      obtain ⟨rfl, rfl, rfl, rfl⟩ := h
+      exact ⟨by simp, rfl, rfl⟩
+    · split at h
+      · split at h
+        · cases h
+        · split at h <;> cases h
+      · cases h
 
-/-- A `set` origin reads off an alias of this very register whose parts are all single bits. -/
-theorem unalias_set_sound {target : T} {var : RV} {bits : List RV}
-    (h : target.unalias var = some (.set bits)) :
-    ∃ alias ∈ target.aliases, alias.target = var ∧ alias.parts = bits.map AliasPart.bit := by
-  obtain ⟨alias, hmem, hval⟩ := List.exists_of_findSome?_eq_some (unalias_whole (.inr ⟨bits, rfl⟩) h)
-  refine ⟨alias, hmem, ?_⟩
-  split at hval
-  · rename_i heq
-    split at hval
-    · rename_i vars hvars
-      split at hval
-      · cases hval
-      · split at hval
+private theorem mem_bitRegisters {bits : List (RV × Nat)} {reg : RV} (h : reg ∈ bitRegisters bits) :
+    ∃ at', (reg, at') ∈ bits := by
+  induction bits with
+  | nil => cases h
+  | cons head tail ih =>
+    have hgrow : reg = head.1 ∨ reg ∈ bitRegisters tail := by
+      simp only [bitRegisters] at h
+      cases hrest : bitRegisters tail with
+      | nil =>
+        simp only [hrest, List.mem_singleton] at h
+        exact .inl h
+      | cons first rest =>
+        simp only [hrest] at h
+        split at h
+        · exact .inr h
+        · rcases List.mem_cons.1 h with h | h
+          · exact .inl h
+          · exact .inr h
+    rcases hgrow with rfl | hin
+    · exact ⟨head.2, List.mem_cons_self⟩
+    · obtain ⟨at', hat⟩ := ih hin
+      exact ⟨at', List.mem_cons_of_mem _ hat⟩
+
+private theorem originOf_regs {bits : List (RV × Nat)} {origin : Origin} {regs : List RV} (h : originOf bits = some origin)
+    (hshape : origin = .sup regs ∨ origin = .set regs) :
+    (∀ reg ∈ regs, ∃ at', (reg, at') ∈ bits) ∧ (origin = .sup regs → ∀ reg ∈ regs, reg.sort.bits.isSome = true) ∧
+      (origin = .set regs → ∀ reg ∈ regs, reg.sort = .bool) := by
+  unfold originOf at h
+  split at h
+  · cases h
+  · simp only at h
+    split at h
+    · cases h
+      rcases hshape with h | h <;> cases h
+    · split at h
+      · split at h
         · rename_i hall
-          simp only [Option.some.injEq, Origin.set.injEq] at hval
-          subst hval
-          exact ⟨heq, parts_of_all_bit _ hvars hall⟩
-        · cases hval
-    · cases hval
-  · cases hval
+          cases h
+          rcases hshape with h | h
+          · cases h
+          · simp only [Origin.set.injEq] at h
+            subst h
+            refine ⟨fun reg hreg => mem_bitRegisters (by simpa using hreg), fun h => (by cases h), fun _ reg hreg => ?_⟩
+            simpa using List.all_eq_true.1 hall reg hreg
+        · split at h
+          · rename_i hall
+            cases h
+            rcases hshape with h | h
+            · simp only [Origin.sup.injEq] at h
+              subst h
+              refine ⟨fun reg hreg => mem_bitRegisters (by simpa using hreg), fun _ reg hreg => ?_, fun h => (by cases h)⟩
+              exact List.all_eq_true.1 hall reg hreg
+            · cases h
+          · cases h
+      · cases h
 
-theorem unalias_no_aliases {target : T} (h : target.aliases = []) (var : RV) :
-    target.unalias var = none := by
-  simp [Target.unalias, h, findSub]
+private theorem unalias_origin {target : T} {var : RV} {origin : Origin} (h : target.unalias var = some origin) :
+    ∃ bits, originOf bits = some origin := by
+  unfold Target.unalias at h
+  by_cases halias : target.isAlias var = true
+  · simp only [halias, ↓reduceIte] at h
+    cases hw : regWidth var with
+    | none => simp [hw] at h
+    | some width =>
+      simp only [hw] at h
+      obtain ⟨bits, _, hor⟩ := Option.bind_eq_some_iff.1 h
+      exact ⟨bits, hor⟩
+  · simp [halias] at h
+
+/-- What an origin means: it has a bit of a basis register for each bit of the alias, and in every
+valuation that satisfies the equations these bits are equal. Whatever the nesting of the definitions. -/
+theorem unalias_sound {target : T} {var : RV} {origin : Origin} (h : target.unalias var = some origin) :
+    target.isAlias var = true ∧ ∃ width, regWidth var = some width ∧ origin.locations.length = width ∧
+      ∀ index, index < width → ∃ base at', origin.locations[index]? = some (base, at') ∧
+        target.isAlias base = false ∧ (∃ size, regWidth base = some size ∧ at' < size) ∧
+        ∀ value, Model target value → value var index = value base at' := by
+  unfold Target.unalias at h
+  split at h
+  · rename_i halias
+    refine ⟨halias, ?_⟩
+    split at h
+    · rename_i width hw
+      obtain ⟨bits, hbits, hor⟩ := Option.bind_eq_some_iff.1 h
+      obtain ⟨hlen, hall⟩ := mapM_some hbits
+      have hloc := originOf_locations hor
+      refine ⟨width, hw, by simpa [hloc] using hlen, fun index hi => ?_⟩
+      obtain ⟨⟨base, at'⟩, hget, hfound⟩ := hall index (by simpa using hi)
+      rw [List.getElem_range] at hfound
+      obtain ⟨hbasis, hsize, hval⟩ := locate_sound hfound
+      exact ⟨base, at', by rw [hloc]; exact hget, hbasis, hsize, hval⟩
+    · cases h
+  · cases h
+
+/-- A sub-register is exactly the bits `hi..lo` of a basis register, where they are in range, and
+`hi - lo + 1` is its width: `isAlias` says that these are all the bits of that register. -/
+theorem unalias_sub_bits {target : T} {var reg : RV} {hi lo : Nat} {whole : Bool}
+    (h : target.unalias var = some (.sub reg hi lo whole)) :
+    target.isAlias var = true ∧ target.isAlias reg = false ∧ lo ≤ hi ∧ regWidth var = some (hi - lo + 1) ∧
+      (∃ size, regWidth reg = some size ∧ hi < size) ∧ (whole = true ↔ regWidth reg = some (hi - lo + 1)) ∧
+      ∀ value, Model target value → ∀ index ≤ hi - lo, value var index = value reg (lo + index) := by
+  have hshape : ∃ bits, originOf bits = some (.sub reg hi lo whole) ∧ bits.length = hi - lo + 1 ∧ bits ≠ [] ∧
+      hi = lo + bits.length - 1 ∧ whole = (regWidth reg == some bits.length) := by
+    obtain ⟨bits, hor⟩ := unalias_origin h
+    obtain ⟨hne, hhi, hw⟩ := originOf_sub hor
+    have hpos : 0 < bits.length := List.length_pos_iff.2 hne
+    exact ⟨bits, hor, by omega, hne, hhi, hw⟩
+  obtain ⟨bits, hor, hlen, hne, hhi, hwhole⟩ := hshape
+  obtain ⟨halias, width, hw, hl, hall⟩ := unalias_sound h
+  have hloc : (Origin.sub reg hi lo whole).locations.length = hi - lo + 1 := by simp [Origin.locations]
+  have hwidth : width = hi - lo + 1 := by omega
+  subst hwidth
+  have hget : ∀ index (hi' : index < hi - lo + 1), ∃ at', (Origin.sub reg hi lo whole).locations[index]? = some (reg, at') ∧
+      at' = lo + index := by
+    intro index hi'
+    exact ⟨lo + index, by simp [Origin.locations, hi'], rfl⟩
+  obtain ⟨base, at', hgetLast, hbasis, ⟨size, hsize, hrange⟩, _⟩ := hall (hi - lo) (by omega)
+  obtain ⟨at'', hget', hat''⟩ := hget (hi - lo) (by omega)
+  rw [hget'] at hgetLast
+  simp only [Option.some.injEq, Prod.mk.injEq] at hgetLast
+  obtain ⟨rfl, rfl⟩ := hgetLast
+  refine ⟨halias, hbasis, by omega, hw, ⟨size, hsize, by omega⟩, ?_, fun value hm index hindex => ?_⟩
+  · rw [hwhole, hlen]
+    simp
+  · obtain ⟨base', at₁, hget₁, _, _, hval⟩ := hall index (by omega)
+    obtain ⟨at₂, hget₂, hat₂⟩ := hget index (by omega)
+    rw [hget₂] at hget₁
+    simp only [Option.some.injEq, Prod.mk.injEq] at hget₁
+    obtain ⟨rfl, rfl⟩ := hget₁
+    rw [← hat₂]
+    exact hval value hm
+
+/-- The registers of a `sup` or `set` are bits of the basis. -/
+private theorem unalias_regs_basis {target : T} {var : RV} {origin : Origin} {regs : List RV}
+    (h : target.unalias var = some origin) (hshape : origin = .sup regs ∨ origin = .set regs) {reg : RV}
+    (hreg : reg ∈ regs) : target.isAlias reg = false := by
+  obtain ⟨bits, hor⟩ := unalias_origin h
+  obtain ⟨at', hat⟩ := (originOf_regs hor hshape).1 reg hreg
+  rw [← originOf_locations hor] at hat
+  obtain ⟨_, width, _, hl, hall⟩ := unalias_sound h
+  obtain ⟨index, hindex, hget⟩ := List.getElem_of_mem hat
+  obtain ⟨base, _, hb, hbasis, _⟩ := hall index (hl ▸ hindex)
+  rw [List.getElem?_eq_getElem hindex, hget] at hb
+  simp only [Option.some.injEq, Prod.mk.injEq] at hb
+  rw [hb.1]
+  exact hbasis
+
+/-- A super-register is the concatenation of its registers, which are bit vector basis registers. -/
+theorem unalias_sup_bits {target : T} {var : RV} {regs : List RV} (h : target.unalias var = some (.sup regs)) :
+    (∀ reg ∈ regs, target.isAlias reg = false ∧ reg.sort.bits.isSome = true) ∧
+      regWidth var = some (regs.reverse.flatMap wholeBits).length ∧
+      ∀ value, Model target value → ∀ index bit, (regs.reverse.flatMap wholeBits)[index]? = some bit →
+        value var index = value bit.1 bit.2 := by
+  obtain ⟨_, width, hw, hl, hall⟩ := unalias_sound h
+  obtain ⟨bits, hor⟩ := unalias_origin h
+  simp only [Origin.locations] at hl hall
+  subst hl
+  refine ⟨fun reg hreg => ⟨unalias_regs_basis h (.inl rfl) hreg, (originOf_regs hor (.inl rfl)).2.1 rfl reg hreg⟩, hw,
+    fun value hm index bit hbit => ?_⟩
+  obtain ⟨hindex, _⟩ := List.getElem?_eq_some_iff.1 hbit
+  obtain ⟨base, at', hb, _, _, hval⟩ := hall index hindex
+  rw [hbit] at hb
+  rw [Option.some.inj hb]
+  exact hval value hm
+
+/-- A set of flags is the concatenation of its one-bit basis registers. -/
+theorem unalias_set_bits {target : T} {var : RV} {bits : List RV} (h : target.unalias var = some (.set bits)) :
+    (∀ reg ∈ bits, reg.sort = .bool ∧ target.isAlias reg = false) ∧ regWidth var = some bits.length ∧
+      ∀ value, Model target value → ∀ index reg, bits.reverse[index]? = some reg → value var index = value reg 0 := by
+  obtain ⟨_, width, hw, hl, hall⟩ := unalias_sound h
+  obtain ⟨list, hor⟩ := unalias_origin h
+  have hsorts := (originOf_regs hor (.inr rfl)).2.2 rfl
+  have hwhole : ∀ reg ∈ bits.reverse, wholeBits reg = [(reg, 0)] := by
+    intro reg hreg
+    simp [wholeBits, regWidth, hsorts reg (by simpa using hreg)]
+  have hlocs : (Origin.set bits).locations = bits.reverse.map (·, 0) := by
+    simp only [Origin.locations]
+    generalize bits.reverse = values at hwhole
+    induction values with
+    | nil => rfl
+    | cons head tail ih =>
+      simp only [List.mem_cons, forall_eq_or_imp] at hwhole
+      simp [List.flatMap_cons, hwhole.1, ih hwhole.2]
+  have hlength : (Origin.set bits).locations.length = bits.length := by simp [hlocs]
+  have hwidth : width = bits.length := by omega
+  subst hwidth
+  refine ⟨fun reg hreg => ⟨hsorts reg hreg, unalias_regs_basis h (.inr rfl) hreg⟩, hw, fun value hm index reg hget => ?_⟩
+  obtain ⟨hindex, _⟩ := List.getElem?_eq_some_iff.1 hget
+  have hloc : (Origin.set bits).locations[index]? = some (reg, 0) := by rw [hlocs, List.getElem?_map, hget]; rfl
+  obtain ⟨base, at', hb, _, _, hval⟩ := hall index (by simpa using hindex)
+  rw [hloc] at hb
+  simp only [Option.some.injEq, Prod.mk.injEq] at hb
+  rw [hb.1, hb.2]
+  exact hval value hm
+
+/-- A basis register has no origin: origins do not go in circles. -/
+theorem unalias_basis {target : T} {var : RV} (h : target.isAlias var = false) : target.unalias var = none := by
+  simp [Target.unalias, h]
+
+/-- Nothing has an origin without equations. -/
+theorem unalias_no_aliases {target : T} (h : target.aliases = []) (var : RV) : target.unalias var = none := by
+  cases hor : target.unalias var with
+  | none => rfl
+  | some origin =>
+    exfalso
+    obtain ⟨halias, width, _, hlen, _⟩ := unalias_sound hor
+    have hlocated : ∀ {fuel seen index}, target.locate fuel seen var index = none := by
+      intro fuel seen index
+      cases fuel with
+      | zero => rfl
+      | succ fuel => simp [Target.locate, halias, Target.linked, h]
+    unfold Target.unalias at hor
+    simp only [halias, ↓reduceIte] at hor
+    split at hor
+    · rename_i size hsize
+      obtain ⟨bits, hbits, hbind⟩ := Option.bind_eq_some_iff.1 hor
+      obtain ⟨hl, hall⟩ := mapM_some hbits
+      have hne := (List.length_pos_iff.2 (show bits ≠ [] by
+        rintro rfl
+        simp [originOf] at hbind))
+      obtain ⟨_, _, hfound⟩ := hall 0 (by simp at hl ⊢; omega)
+      rw [hlocated] at hfound
+      cases hfound
+    · cases hor
+
+/-! ### Completeness on well-formed equations -/
+
+/-- A path through the equations from a bit of an alias to a bit of a basis register. -/
+inductive Chain (target : T) : RV × Nat → List (RV × Nat) → RV × Nat → Prop where
+  | stop {base : RV} {at' size : Nat} (hbasis : target.isAlias base = false) (hsize : regWidth base = some size)
+      (hrange : at' < size) : Chain target (base, at') [] (base, at')
+  | link {bit next final : RV × Nat} {rest : List (RV × Nat)} (halias : target.isAlias bit.1 = true)
+      (hlinked : next ∈ target.linked bit.1 bit.2) (hrest : Chain target next rest final) :
+      Chain target bit (next :: rest) final
+
+/-- The end of a chain is a bit of the basis and equal to its beginning. -/
+theorem Chain.sound {target : T} {bit final : RV × Nat} {path : List (RV × Nat)} (h : Chain target bit path final)
+    {value : RV → Nat → Bool} (hm : Model target value) : value bit.1 bit.2 = value final.1 final.2 := by
+  induction h with
+  | stop => rfl
+  | link _ hlinked _ ih => exact (linked_sound hm hlinked).trans ih
+
+theorem Chain.final {target : T} {bit final : RV × Nat} {path : List (RV × Nat)} (h : Chain target bit path final) :
+    target.isAlias final.1 = false ∧ ∃ size, regWidth final.1 = some size ∧ final.2 < size := by
+  induction h with
+  | stop hbasis hsize hrange => exact ⟨hbasis, _, hsize, hrange⟩
+  | link _ _ _ ih => exact ih
+
+/-- The search finds something if there is a simple path that it is allowed to walk. -/
+theorem locate_of_chain {target : T} {bit final : RV × Nat} {path : List (RV × Nat)} (h : Chain target bit path final)
+    {fuel : Nat} {seen : List (RV × Nat)} (hfuel : path.length < fuel) (hnodup : (bit :: path).Nodup)
+    (hseen : ∀ node ∈ bit :: path, node ∉ seen) : (target.locate fuel seen bit.1 bit.2).isSome = true := by
+  induction h generalizing fuel seen with
+  | stop hbasis hsize hrange =>
+    cases fuel with
+    | zero => simp at hfuel
+    | succ fuel => simp [Target.locate, hbasis, hsize, hrange]
+  | @link bit next final rest halias hlinked _ ih =>
+    cases fuel with
+    | zero => simp at hfuel
+    | succ fuel =>
+      simp only [List.nodup_cons, List.mem_cons, not_or] at hnodup
+      simp only [Target.locate, halias, ↓reduceIte]
+      rw [List.findSome?_isSome_iff]
+      refine ⟨next, hlinked, ?_⟩
+      have hfresh : next ∉ (bit.1, bit.2) :: seen := by
+        simp only [List.mem_cons, not_or]
+        exact ⟨hnodup.1.1 ∘ Eq.symm, hseen next (by simp)⟩
+      simp only [hfresh, ↓reduceIte]
+      refine ih (by simpa using hfuel) (by simpa using hnodup.2) ?_
+      intro node hnode hin
+      rcases List.mem_cons.1 hin with rfl | hin
+      · rcases List.mem_cons.1 hnode with rfl | hnode
+        · exact hnodup.1.1 rfl
+        · exact hnodup.1.2 hnode
+      · exact hseen node (List.mem_cons_of_mem _ hnode) hin
+
+/-- The basis bits are independent: the equations do not constrain them. This is upstream's
+well-formedness: each alias has a unique definition in terms of the basis. -/
+def Free (target : T) : Prop :=
+  ∀ basis : RV → Nat → Bool, ∃ value, Model target value ∧
+    ∀ base, target.isAlias base = false → ∀ at' size, regWidth base = some size → at' < size →
+      value base at' = basis base at'
+
+/-- A map of each bit to a bit of the basis that respects the equations shows the basis independent. -/
+theorem Free.of_resolution {target : T} (resolve : RV → Nat → RV × Nat)
+    (hbasis : ∀ base, target.isAlias base = false → ∀ at' size, regWidth base = some size → at' < size →
+      resolve base at' = (base, at'))
+    (hequations : ∀ alias ∈ target.aliases, ∀ span ∈ alias.spans.getD [], ∀ index < span.width,
+      resolve span.var index = resolve alias.target (span.offset + index)) : Free target := fun basis =>
+  ⟨fun reg index => basis (resolve reg index).1 (resolve reg index).2,
+    fun alias halias span hspan index hindex => by simp only [hequations alias halias span hspan index hindex],
+    fun base hb at' size hsize hrange => by simp only [hbasis base hb at' size hsize hrange]⟩
+
+/-- On independent basis bits the search can only find the end of any chain. -/
+theorem locate_eq_of_chain {target : T} (hfree : Free target) {bit final : RV × Nat} {path : List (RV × Nat)}
+    (h : Chain target bit path final) {fuel : Nat} {seen : List (RV × Nat)} {found : RV × Nat}
+    (hfound : target.locate fuel seen bit.1 bit.2 = some found) : found = final := by
+  obtain ⟨base, at'⟩ := found
+  obtain ⟨hb, ⟨size, hsize, hrange⟩, hval⟩ := locate_sound hfound
+  obtain ⟨hb', size', hsize', hrange'⟩ := h.final
+  refine Classical.byContradiction fun hne => ?_
+  obtain ⟨value, hm, hbasis⟩ := hfree fun reg index => decide ((reg, index) = final)
+  have h₁ := hbasis _ hb _ _ hsize hrange
+  have h₂ := hbasis _ hb' _ _ hsize' hrange'
+  have h₃ := (hval value hm).symm.trans (h.sound hm)
+  rw [h₁, h₂] at h₃
+  simp [hne] at h₃
+
+/-- Completeness for nested sub-registers: when the equations are well-formed and each bit of an
+alias has a chain of definitions to the corresponding bit of a basis register, however long, then
+`unalias` finds that range. -/
+theorem unalias_sub_of_chains {target : T} (hfree : Free target) {var reg : RV} {width lo : Nat}
+    (halias : target.isAlias var = true) (hwidth : regWidth var = some width) (hpos : 0 < width)
+    (hchains : ∀ index < width, ∃ path, Chain target (var, index) path (reg, lo + index) ∧
+      ((var, index) :: path).Nodup ∧ path.length < target.aliasFuel) :
+    target.unalias var = some (.sub reg (lo + width - 1) lo (regWidth reg == some width)) := by
+  have hlocate : ∀ index ∈ List.range width,
+      target.locate target.aliasFuel [] var index = some (reg, lo + index) := by
+    intro index hindex
+    obtain ⟨path, hchain, hnodup, hfuel⟩ := hchains index (List.mem_range.1 hindex)
+    have hsome := locate_of_chain (seen := []) hchain hfuel hnodup (by simp)
+    obtain ⟨found, hfound⟩ := Option.isSome_iff_exists.1 hsome
+    rw [hfound, locate_eq_of_chain hfree hchain hfound]
+  have hmap := mapM_of_all (g := fun index => (reg, lo + index)) hlocate
+  have hbits : (List.range width).map (fun index => (reg, lo + index)) =
+      (reg, lo) :: ((List.range width).map fun index => (reg, lo + index)).tail := by
+    cases width with
+    | zero => omega
+    | succ width => simp [List.range_succ_eq_map]
+  have hlocs : (Origin.sub reg (lo + width - 1) lo (regWidth reg == some width)).locations =
+      (List.range width).map fun index => (reg, lo + index) := by
+    have : lo + width - 1 - lo + 1 = width := by omega
+    simp [Origin.locations, this]
+  have horigin : originOf ((List.range width).map fun index => (reg, lo + index)) =
+      some (.sub reg (lo + width - 1) lo (regWidth reg == some width)) := by
+    rw [hbits]
+    simp only [originOf]
+    rw [← hbits]
+    simp only [List.length_map, List.length_range, hlocs, ↓reduceIte]
+  simp only [Target.unalias, halias, ↓reduceIte, hwidth]
+  rw [hmap]
+  exact horigin
+
+/-! ### Discharging `Free` and the fuel bound
+
+`Free` has one checkable form, for any concrete table: following the equations from either side of each equation gets to
+the same bit of the basis. And a chain that doesn't come back to a register fits in the fuel. -/
+
+/-- The bit of the basis the search finds for a bit, or the bit itself. -/
+def resolveBit (target : T) (reg : RV) (index : Nat) : RV × Nat :=
+  (target.locate target.aliasFuel [] reg index).getD (reg, index)
+
+/-- Both sides of each equation of a table find the same bit of the basis. -/
+def Resolves (target : T) : Bool :=
+  target.aliases.all fun alias => (alias.spans.getD []).all fun span =>
+    (List.range span.width).all fun index =>
+      resolveBit target span.var index == resolveBit target alias.target (span.offset + index)
+
+theorem aliasFuel_pos (target : T) : 0 < target.aliasFuel := by
+  simp [Target.aliasFuel]
+
+/-- A table on which the search agrees with the equations leaves the basis free. -/
+theorem free_of_resolves {target : T} (h : Resolves target = true) : Free target := by
+  refine Free.of_resolution (resolveBit target) ?_ ?_
+  · intro base hb at' size hsize hrange
+    obtain ⟨fuel, hfuel⟩ : ∃ fuel, target.aliasFuel = fuel + 1 :=
+      ⟨target.aliasFuel - 1, by have := aliasFuel_pos target; omega⟩
+    simp only [resolveBit, hfuel, Target.locate, hb, Bool.false_eq_true, ↓reduceIte, hsize, Option.any_some,
+      decide_eq_true_eq, hrange, Option.getD_some]
+  · intro alias halias span hspan index hindex
+    simp only [Resolves, List.all_eq_true, beq_iff_eq, List.mem_range] at h
+    exact h alias halias span hspan index hindex
+
+/-- Without aliases there is nothing to constrain the basis. -/
+theorem free_of_no_aliases {target : T} (h : target.aliases = []) : Free target :=
+  free_of_resolves (by simp [Resolves, h])
+
+/-- The registers the equations mention. -/
+def mentioned (target : T) : List RV :=
+  target.aliases.flatMap fun alias => alias.target :: (alias.spans.getD []).map (·.var)
+
+open_private Bap.Theory.Target Bap.Theory.layoutParts as layoutParts
+
+private theorem layoutParts_length (hole : Nat) (parts : List AliasPart) {size : Nat} {spans : List AliasSpan}
+    (h : layoutParts hole parts = some (size, spans)) : spans.length ≤ parts.length := by
+  induction parts generalizing size spans with
+  | nil =>
+    simp only [layoutParts, Option.some.injEq, Prod.mk.injEq] at h
+    simp [← h.2]
+  | cons part rest ih =>
+    unfold layoutParts at h
+    cases hrest : layoutParts hole rest with
+    | none => simp [hrest] at h
+    | some inner =>
+      obtain ⟨low, inner⟩ := inner
+      have := ih hrest
+      simp only [hrest, Option.bind_eq_bind, Option.bind_some] at h
+      cases part with
+      | unknown =>
+        simp only [Option.some.injEq, Prod.mk.injEq] at h
+        simp only [List.length_cons, ← h.2]
+        omega
+      | reg var | bit var =>
+        cases hw : regWidth var with
+        | none => simp [hw] at h
+        | some width =>
+          simp only [hw, Option.bind_some, Option.some.injEq, Prod.mk.injEq] at h
+          simp only [List.length_cons, ← h.2]
+          omega
+
+private theorem spans_length (alias : Alias) : (alias.spans.getD []).length ≤ alias.parts.length := by
+  unfold Alias.spans
+  cases regWidth alias.target with
+  | none => simp
+  | some total =>
+    simp only [Option.bind_eq_bind, Option.bind_some]
+    cases layoutParts 0 alias.parts with
+    | none => simp
+    | some known =>
+      simp only [Option.bind_some]
+      cases hs : layoutParts (if alias.parts.countP (fun part => part == .unknown) = 0 then 0
+          else (total - known.1) / alias.parts.countP fun part => part == .unknown) alias.parts with
+      | none => simp
+      | some laid =>
+        obtain ⟨size, spans⟩ := laid
+        simp only [Option.bind_some]
+        split
+        · exact layoutParts_length _ _ hs
+        · simp
+
+theorem length_mentioned (target : T) : (mentioned target).length < target.aliasFuel := by
+  have key : ∀ aliases : List Alias, (aliases.flatMap fun alias => alias.target :: (alias.spans.getD []).map (·.var)).length ≤
+      (aliases.map fun alias => alias.parts.length + 1).sum := by
+    intro aliases
+    induction aliases with
+    | nil => simp
+    | cons alias rest ih =>
+      have := spans_length alias
+      simp only [List.flatMap_cons, List.length_append, List.length_cons, List.length_map, List.map_cons, List.sum_cons]
+      omega
+  have := key target.aliases
+  simp only [mentioned, Target.aliasFuel]
+  omega
+
+/-- The bits a bit is linked to are of registers the equations mention. -/
+theorem linked_mentioned {target : T} {var other : RV} {index at' : Nat} (h : (other, at') ∈ target.linked var index) :
+    other ∈ mentioned target := by
+  simp only [Target.linked, List.mem_flatMap, List.mem_filterMap] at h
+  obtain ⟨alias, halias, span, hspan, hif⟩ := h
+  simp only [mentioned, List.mem_flatMap, List.mem_cons, List.mem_map]
+  refine ⟨alias, halias, ?_⟩
+  split at hif
+  · simp only [Option.some.injEq, Prod.mk.injEq] at hif
+    exact .inr ⟨span, hspan, hif.1⟩
+  · split at hif
+    · simp only [Option.some.injEq, Prod.mk.injEq] at hif
+      exact .inl hif.1.symm
+    · cases hif
+
+private theorem length_le_of_subset {l m : List RV} (hl : l.Nodup) (hsub : ∀ x ∈ l, x ∈ m) : l.length ≤ m.length := by
+  induction l generalizing m with
+  | nil => simp
+  | cons a t ih =>
+    have ha := hsub a (by simp)
+    have hsub' : ∀ x ∈ t, x ∈ m.erase a := fun x hx => by
+      have hne : x ≠ a := fun he => (List.nodup_cons.mp hl).1 (he ▸ hx)
+      exact (List.mem_erase_of_ne hne).mpr (hsub x (List.mem_cons_of_mem _ hx))
+    have := ih (List.nodup_cons.mp hl).2 hsub'
+    rw [List.length_erase_of_mem ha] at this
+    have hpos : 0 < m.length := List.length_pos_of_mem ha
+    simp only [List.length_cons]
+    omega
+
+/-- A chain that doesn't come back to a register fits in the fuel of the search. -/
+theorem Chain.length_lt_aliasFuel {target : T} {bit final : RV × Nat} {path : List (RV × Nat)}
+    (h : Chain target bit path final) (hregs : (path.map Prod.fst).Nodup) : path.length < target.aliasFuel := by
+  have hsub : ∀ reg ∈ path.map Prod.fst, reg ∈ mentioned target := by
+    clear hregs
+    induction h with
+    | stop => simp
+    | link _ hlinked _ ih =>
+      intro reg hreg
+      rcases List.mem_cons.mp hreg with rfl | hreg
+      · exact linked_mentioned hlinked
+      · exact ih reg hreg
+  have hlen := length_le_of_subset hregs hsub
+  have := length_mentioned target
+  simp only [List.length_map] at hlen
+  omega
+
+/-- **Completeness for nested sub-registers, on a table that resolves**: `Free` and the fuel bound of
+`unalias_sub_of_chains` hold when the table passes the check and the chains don't come back to a register. -/
+theorem unalias_sub_of_resolving_chains {target : T} (hresolves : Resolves target = true) {var reg : RV} {width lo : Nat}
+    (halias : target.isAlias var = true) (hwidth : regWidth var = some width) (hpos : 0 < width)
+    (hchains : ∀ index < width, ∃ path, Chain target (var, index) path (reg, lo + index) ∧
+      (((var, index) :: path).map Prod.fst).Nodup) :
+    target.unalias var = some (.sub reg (lo + width - 1) lo (regWidth reg == some width)) := by
+  refine unalias_sub_of_chains (free_of_resolves hresolves) halias hwidth hpos fun index hindex => ?_
+  obtain ⟨path, hchain, hnodup⟩ := hchains index hindex
+  have hpath : (path.map Prod.fst).Nodup := by
+    simp only [List.map_cons] at hnodup
+    exact (List.nodup_cons.mp hnodup).2
+  refine ⟨path, hchain, ?_, hchain.length_lt_aliasFuel hpath⟩
+  exact (List.pairwise_map.mp hnodup).imp fun hne he => hne (congrArg Prod.fst he)
+
+/-! The x86 general registers. No target of this port declares a table of aliases: the semantics of the lifters know the
+sub-registers themselves, see `x86_low_half_aliases` of `Bap.Proofs.Target`. So this is the table of the upstream's
+documentation of `Origin`, of RAX, as a concrete instance of the above. -/
+
+namespace X86Table
+
+private def reg (name : String) (width : Nat) : RV := ⟨name, .bitv width, 0, false, false⟩
+
+def rax := reg "RAX" 64
+def upper := reg "UPPER" 32
+def eax := reg "EAX" 32
+def ax := reg "AX" 16
+def ah := reg "AH" 8
+def al := reg "AL" 8
+
+def table : T := declare {
+  name := "x86-rax"
+  regs := some [([.general], [rax]), ([.alias], [upper, eax, ax, ah, al])]
+  aliases := some [⟨rax, [.reg upper, .reg eax]⟩, ⟨eax, [.unknown, .reg ax]⟩, ⟨ax, [.reg ah, .reg al]⟩]
+}
+
+theorem table_resolves : Resolves table = true := by decide +kernel
+
+theorem table_free : Free table := free_of_resolves table_resolves
+
+theorem unalias_eax : table.unalias eax = some (.sub rax 31 0 false) := by decide +kernel
+theorem unalias_upper : table.unalias upper = some (.sub rax 63 32 false) := by decide +kernel
+theorem unalias_ax : table.unalias ax = some (.sub rax 15 0 false) := by decide +kernel
+theorem unalias_ah : table.unalias ah = some (.sub rax 15 8 false) := by decide +kernel
+theorem unalias_al : table.unalias al = some (.sub rax 7 0 false) := by decide +kernel
+theorem unalias_rax : table.unalias rax = none := by decide +kernel
+
+end X86Table
 
 end TargetLaws
 

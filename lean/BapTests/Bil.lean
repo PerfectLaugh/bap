@@ -119,6 +119,25 @@ def run : IO Unit := do
   assertEqual "decompiler renders unsigned comparison" "(x < y)" (Decompile.exp (.bin .lt (.var x) (.var y)))
   assertEqual "decompiler escapes punctuation" "a_0x2e_b" (Decompile.exp (.var (reg "a.b")))
   assertEqual "decompiler keeps underscores" "a_b" (Decompile.exp (.var (reg "a_b")))
+  -- a register cannot redefine what the output means by a type or an operation
+  assertEqual "decompiler escapes a type name" "_0x75_int32_t" (Decompile.exp (.var (reg "uint32_t")))
+  assertEqual "decompiler escapes an operation name" "_0x72_ead32_le" (Decompile.exp (.var (reg "read32_le")))
+  assertEqual "decompiler escapes concat" "_0x63_oncat" (Decompile.exp (.var (reg "concat")))
+  assertTrue "decompiler keeps a parameter from shadowing its type"
+    ((Decompile.function "f" [reg "uint32_t"] []).startsWith "void f(uint32_t _0x75_int32_t)")
+  assertTrue "decompiler keeps main" ((Decompile.function "main" [] []).startsWith "void main()")
+  -- what a literal's width changes is shown where nothing else tells it
+  let lit8 : Bil.Exp := .int (BitVec.ofNat 8 0x80)
+  let lit16 : Bil.Exp := .int (BitVec.ofNat 16 0x80)
+  assertEqual "decompiler shows the width of a complemented literal" "(~(uint8_t)0x80)" (Decompile.exp (.un .not lit8))
+  assertEqual "decompiler tells widths apart" "(~(uint16_t)0x80)" (Decompile.exp (.un .not lit16))
+  assertEqual "decompiler shows the width of a shifted literal" "((uint8_t)0x80 << x)"
+    (Decompile.exp (.bin .lshift lit8 (.var x)))
+  assertEqual "decompiler shows the width in concat" "concat((uint8_t)0x80, (uint16_t)0x80)"
+    (Decompile.exp (.concat lit8 lit16))
+  assertEqual "decompiler shows the width of a cast" "signed((uint8_t)0x80, 32)" (Decompile.exp (.cast .signed 32 lit8))
+  assertEqual "decompiler shows the width of two literals" "((uint8_t)0x80 + 0x80)" (Decompile.exp (.bin .add lit8 lit8))
+  assertEqual "decompiler leaves the literal that an operand types" "(x + 0x80)" (Decompile.exp (.bin .add (.var x) lit8))
   assertEqual "decompiler escapes a leading digit" "_0x31_x" (Decompile.exp (.var (reg "1x")))
   assertEqual "decompiler separates variable versions" "x_0v1" (Decompile.exp (.var ⟨"x", .imm 32, 1, false⟩))
   assertEqual "decompiler keeps a variable that looks like a version" "x_1" (Decompile.exp (.var (reg "x_1")))
@@ -153,6 +172,17 @@ def run : IO Unit := do
   assertEqual "taint propagates through loads" [2] (Analysis.Taint.labelsOfVar tainted z)
   assertEqual "taint ite ignores condition" [] (Analysis.Taint.labelsOfVar tainted result)
   assertEqual "taint constant assignment sanitizes" [] (Analysis.Taint.labelsOfVar tainted y)
+  -- memory over a run: a byte ends up with the labels of its last store, and no other byte changes
+  let cleanMem : Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let wordAt (address : Nat) : Exp := .int (BitVec.ofNat 64 address)
+  let storeOf (address : Nat) (source : Var) : Stmt :=
+    .move cleanMem (.store (.var cleanMem) (wordAt address) (.var source) .little 1)
+  let byteVar (name : String) : Var := ⟨name, .imm 8, 0, false⟩
+  let labelled := Analysis.Taint.sourceVar (Analysis.Taint.sourceVar {} (byteVar "a") [1]) (byteVar "b") [2]
+  let afterStores := Analysis.Taint.run labelled [storeOf 0x10 (byteVar "a"), storeOf 0x20 (byteVar "b"), storeOf 0x10 (byteVar "b")]
+  assertEqual "a byte has the labels of its last store" [2] (Analysis.Taint.labelsOfMemory afterStores 0x10)
+  assertEqual "a byte stored once has its labels" [2] (Analysis.Taint.labelsOfMemory afterStores 0x20)
+  assertEqual "a byte not stored to has no labels" [] (Analysis.Taint.labelsOfMemory afterStores 0x30)
   let retainted := Analysis.Taint.sourceVar tainted y [3]
   assertEqual "taint source is reported" [3] (Analysis.Taint.labelsOfVar retainted y)
   assertEqual "taint clear removes labels" [] (Analysis.Taint.labelsOfVar (Analysis.Taint.clearVar retainted y) y)
@@ -314,6 +344,52 @@ def run : IO Unit := do
     (match Wire.parseExp (.list [.atom "int", .atom "8", .atom "ff"]) with
       | .ok _ => true
       | .error _ => false)
+  let smallMemory : Var := ⟨"small", .mem 1 8, 0, false⟩
+  assertTrue "zero-width constant is rejected" (rejected (.int (BitVec.ofNat 0 0)))
+  assertTrue "zero-width variable is rejected" (rejected (.var ⟨"empty", .imm 0, 0, false⟩))
+  assertTrue "zero-width unknown is rejected" (rejected (.unknown "u" (.imm 0)))
+  assertTrue "memory without addresses is rejected" (rejected (.var ⟨"m", .mem 0 8, 0, false⟩))
+  assertTrue "memory without cells is rejected" (rejected (.var ⟨"m", .mem 64 0, 0, false⟩))
+  assertTrue "zero-size load is rejected" (rejected (.load (.var memoryVar) (int 64 0) .little 0))
+  assertTrue "zero-size store is rejected"
+    (rejected (.store (.var memoryVar) (int 64 0) (.int (BitVec.ofNat 0 0)) .little 0))
+  assertTrue "store covering an address twice is rejected"
+    (rejected (.store (.var smallMemory) (int 1 0) (int 24 1) .little 3))
+  assertTrue "store covering the whole of a small memory is accepted"
+    (!rejected (.store (.var smallMemory) (int 1 0) (int 16 1) .little 2))
+  assertTrue "load wrapping around a small memory is accepted" (!rejected (.load (.var smallMemory) (int 1 0) .little 3))
+  let word8 (op : BinOp) (x y : Nat) := evalBin op ⟨8, BitVec.ofNat 8 x⟩ ⟨8, BitVec.ofNat 8 y⟩
+  let expect8 (name : String) (value : Nat) (actual : Except String Value) :=
+    assertBits name (BitVec.ofNat 8 value) actual
+  let expect1 (name : String) (value : Nat) (actual : Except String Value) :=
+    assertBits name (BitVec.ofNat 1 value) actual
+  expect8 "udiv by zero is all ones" 0xff (word8 .div 5 0)
+  expect8 "urem by zero is the dividend" 5 (word8 .rem 5 0)
+  expect8 "sdiv by zero is all ones for a positive dividend" 0xff (word8 .sdiv 5 0)
+  expect8 "sdiv by zero is one for a negative dividend" 1 (word8 .sdiv 0xfb 0)
+  expect8 "srem by zero is the dividend" 0xfb (word8 .srem 0xfb 0)
+  expect8 "smod by zero is the dividend" 0xfb (word8 .smod 0xfb 0)
+  expect8 "intMin / -1 wraps to intMin" 0x80 (word8 .sdiv 0x80 0xff)
+  expect8 "intMin srem -1 is zero" 0 (word8 .srem 0x80 0xff)
+  expect8 "intMin smod -1 is zero" 0 (word8 .smod 0x80 0xff)
+  expect8 "sdiv truncates" 0xfe (word8 .sdiv 0xfb 2)
+  expect8 "-5 srem 3 follows the dividend" 0xfe (word8 .srem 0xfb 3)
+  expect8 "-5 smod 3 follows the divisor" 1 (word8 .smod 0xfb 3)
+  expect8 "5 srem -3 follows the dividend" 2 (word8 .srem 5 0xfd)
+  expect8 "5 smod -3 follows the divisor" 0xff (word8 .smod 5 0xfd)
+  expect8 "-5 smod -3 is negative" 0xfe (word8 .smod 0xfb 0xfd)
+  expect8 "lshift past the width" 0 (word8 .lshift 0xff 8)
+  expect8 "rshift past the width" 0 (word8 .rshift 0xff 8)
+  expect8 "ashift of a negative past the width" 0xff (word8 .ashift 0x80 8)
+  expect8 "ashift of a positive past the width" 0 (word8 .ashift 0x7f 200)
+  expect8 "ashift floors" 0xfd (word8 .ashift 0xfb 1)
+  expect1 "lt is unsigned" 0 (word8 .lt 0x80 0x7f)
+  expect1 "slt is signed" 1 (word8 .slt 0x80 0x7f)
+  expect1 "sge is signed" 0 (word8 .sge 0x80 0x7f)
+  assertBits "one bit sdiv by zero" (BitVec.ofNat 1 1) (evalBin .sdiv ⟨1, BitVec.ofNat 1 1⟩ ⟨1, BitVec.ofNat 1 0⟩)
+  assertBits "zero bits are no error" (BitVec.ofNat 0 0) (evalBin .sdiv ⟨0, 0#0⟩ ⟨0, 0#0⟩)
+  assertTrue "different widths are an error"
+    (match evalBin .add ⟨8, BitVec.ofNat 8 1⟩ ⟨16, BitVec.ofNat 16 1⟩ with | .error _ => true | _ => false)
   let failing : Exp := .load (int 8 0) (.unknown "a" .unit) .little 1
   let observedResult ← evalExpObserved none [] failing
   assertTrue "observed evaluation reports the same first error"

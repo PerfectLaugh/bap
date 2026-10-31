@@ -10,6 +10,8 @@ structure Convention where
   syscallArguments : List Bap.Var
   stackPointer : Bap.Var
   returnAddress : Option Bap.Var
+  /-- From the stack pointer on entry to the first argument in memory: what the caller reserves below them. -/
+  stackArgumentsStart : Nat := 0
   deriving Repr
 
 inductive Location where
@@ -62,7 +64,9 @@ private def aarch64 : Convention := {
   returnAddress := some (reg "X30" 64)
 }
 
-/-- o32 passes four arguments in registers, n32 and n64 pass eight. -/
+/-- o32 passes four arguments in registers, n32 and n64 pass eight. Under o32 the caller also reserves a home for each
+register argument, so the first argument in memory is 16 bytes above the stack pointer, as in the psABI and in LLVM's
+`GetCalleeAllocdArgSizeInBytes`. Upstream's `mips_abi.ml` starts them at 0, which is not where they are. -/
 private def mips (width : Nat) : Convention := {
   wordSize := width
   functionArguments := numbered "R" width 4 (if width = 32 then 7 else 11)
@@ -71,6 +75,7 @@ private def mips (width : Nat) : Convention := {
   syscallArguments := numbered "R" width 4 9
   stackPointer := reg "R29" width
   returnAddress := some (reg "R31" width)
+  stackArgumentsStart := if width = 32 then 16 else 0
 }
 
 private def arm : Convention := {
@@ -118,7 +123,7 @@ def convention (arch : Image.Arch) (wordSize : Nat := 64) : Option Convention :=
 def argumentLocation (abi : Convention) (index : Nat) : Location :=
   match abi.functionArguments[index]? with
   | some var => .register var
-  | none => .stack ((index - abi.functionArguments.length) * (abi.wordSize / 8))
+  | none => .stack (abi.stackArgumentsStart + (index - abi.functionArguments.length) * (abi.wordSize / 8))
 
 def alignStack (alignment : Nat) (address : Nat) : Nat :=
   if alignment = 0 then address else address / alignment * alignment

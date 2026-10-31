@@ -11,26 +11,93 @@ private def byteHex (value : UInt8) : String :=
 private def print (output : IO.FS.Stream) (text : String) : IO Unit :=
   output.putStr (text ++ "\n")
 
-private def parseNat (input : String) : IO Nat := do
-  if input.startsWith "0x" then
-    match Bil.Wire.parseHex (input.drop 2).toString with
-    | .ok value => pure value
-    | .error error => throw <| IO.userError error
-  else
+/-- A number of the debugger: decimal, or hexadecimal after `0x`. -/
+def parseNumber (input : String) : Except String Nat :=
+  match input.toList with
+  | '0' :: 'x' :: digits => Bil.Wire.parseHex (String.ofList digits)
+  | _ =>
     match input.toNat? with
-    | some value => pure value
-    | none => throw <| IO.userError s!"invalid number: {input}"
+    | some value => .ok value
+    | none => .error s!"invalid number: {input}"
 
-private def parseBytes (inputs : List String) : IO ByteArray := do
-  let bytes ← inputs.mapM fun input => do
-    let value ← match Bil.Wire.parseHex input with
-      | .ok value => pure value
-      | .error error => throw <| IO.userError error
-    if value ≥ 256 then
-      throw <| IO.userError s!"byte is out of range: {input}"
-    else
-      pure (UInt8.ofNat value)
-  pure (ByteArray.mk bytes.toArray)
+/-- A byte of the debugger, always in hexadecimal. -/
+def parseByte (input : String) : Except String UInt8 := do
+  let value ← Bil.Wire.parseHex input
+  if value ≥ 256 then .error s!"byte is out of range: {input}"
+  else .ok (UInt8.ofNat value)
+
+inductive Command where
+  | nothing
+  | quit
+  | help
+  | pc
+  | regs
+  | reg (name : String)
+  | set (name : String) (value : Nat)
+  | examine (address size : Nat)
+  | write (address : Nat) (bytes : List UInt8)
+  | step
+  | proceed
+  | proceedTo (address : Nat)
+  | stop
+  | breakAt (address : Nat)
+  | breaks
+  | delete (address : Nat)
+  | snap
+  | restore
+  | save (path : String)
+  deriving DecidableEq, Repr
+
+/-- The words of a line of the debugger, which `parseCommand` reads. -/
+def parseCommand : List String → Except String Command
+  | [] | [""] => .ok .nothing
+  | ["q"] | ["quit"] => .ok .quit
+  | ["help"] | ["?"] => .ok .help
+  | ["pc"] => .ok .pc
+  | ["regs"] => .ok .regs
+  | ["reg", name] => .ok (.reg name)
+  | ["set", name, value] => do .ok (.set name (← parseNumber value))
+  | ["x", address] => do .ok (.examine (← parseNumber address) 1)
+  | ["x", address, size] => do .ok (.examine (← parseNumber address) (← parseNumber size))
+  | "write" :: address :: bytes =>
+    if bytes.isEmpty then .error "write needs at least one byte"
+    else do .ok (.write (← parseNumber address) (← bytes.mapM parseByte))
+  | ["step"] | ["s"] => .ok .step
+  | ["continue"] | ["c"] => .ok .proceed
+  | ["continue", address] | ["c", address] => do .ok (.proceedTo (← parseNumber address))
+  | ["stop"] => .ok .stop
+  | ["break", address] => do .ok (.breakAt (← parseNumber address))
+  | ["breaks"] => .ok .breaks
+  | ["delete", address] => do .ok (.delete (← parseNumber address))
+  | ["snap"] => .ok .snap
+  | ["restore"] => .ok .restore
+  | ["save", path] => .ok (.save path)
+  | command :: _ => .error s!"unknown debugger command: {command}"
+
+def isMemoryType : Typ → Bool
+  | .mem _ _ => true
+  | _ => false
+
+/-- The variable of a register of the debugger: the one in the environment, whatever its width, or else a
+new one of the width of a word. -/
+def registerVar (env : Bil.Env) (width : Nat) (name : String) : Bap.Var :=
+  match env.find? fun binding => binding.1.name == name && !isMemoryType binding.1.typ with
+  | some binding => binding.1
+  | none => ⟨name, .imm width, 0, false⟩
+
+/-- The value of a register, unless it does not fit. -/
+def registerValue (var : Bap.Var) (value : Nat) : Except String Value :=
+  match var.typ with
+  | .imm width =>
+    if value < 2 ^ width then .ok (.bits (BitVec.ofNat width value))
+    else .error s!"value {value} does not fit register {var.name}"
+  | _ => .error s!"{var.name} is not a register"
+
+/-- The names of the registers, in order of their first appearance. -/
+def registerNames (env : Bil.Env) : List String :=
+  (env.foldl (init := []) fun names binding =>
+    if isMemoryType binding.1.typ || names.contains binding.1.name then names
+    else binding.1.name :: names).reverse
 
 private def formatValue (value : Value) : String :=
   match Value.asBits value with
@@ -47,81 +114,70 @@ private def shellHelp : String :=
 
 private def execute (emu : Emu) (output : IO.FS.Stream) (saved : IO.Ref (Option Snapshot))
     (words : List String) : IO Bool := do
-  match words with
-  | [] | [""] => pure true
-  | ["q"] | ["quit"] => pure false
-  | ["help"] | ["?"] => print output shellHelp; pure true
-  | ["pc"] => printPc emu output; pure true
-  | ["regs"] =>
+  let width ← match emu.config.memory.typ with
+    | .mem width _ => pure width
+    | _ => pure 64
+  match ← IO.ofExcept (parseCommand words) with
+  | .nothing => pure true
+  | .quit => pure false
+  | .help => print output shellHelp; pure true
+  | .pc => printPc emu output; pure true
+  | .regs =>
     let state ← emu.state.get
-    let names := state.env.foldl (init := []) fun names binding =>
-      if binding.1.typ matches Typ.mem _ _ || names.contains binding.1.name then names
-      else binding.1.name :: names
-    print output (String.intercalate " " names.reverse)
+    print output (String.intercalate " " (registerNames state.env))
     pure true
-  | ["reg", name] =>
-    let value ← reg emu ⟨name, .imm 64, 0, false⟩
+  | .reg name =>
+    let state ← emu.state.get
+    let value ← Bap.Emu.reg emu (registerVar state.env width name)
     print output s!"{name}={formatValue value}"
     pure true
-  | ["set", name, value] =>
-    let value ← parseNat value
-    setReg emu ⟨name, .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 value))
+  | .set name value =>
+    let state ← emu.state.get
+    let var := registerVar state.env width name
+    setReg emu var (← IO.ofExcept (registerValue var value))
     pure true
-  | ["x", address] | ["x", address, "1"] =>
-    let address ← parseNat address
-    let bytes ← read emu address 1
-    print output (String.intercalate " " (bytes.toList.map byteHex))
-    pure true
-  | ["x", address, size] =>
-    let address ← parseNat address
-    let size ← parseNat size
+  | .examine address size =>
     let bytes ← read emu address size
     print output (String.intercalate " " (bytes.toList.map byteHex))
     pure true
-  | "write" :: address :: bytes =>
-    if bytes.isEmpty then
-      throw <| IO.userError "write needs at least one byte"
-    let address ← parseNat address
-    write emu address (← parseBytes bytes)
+  | .write address bytes =>
+    Bap.Emu.write emu address (ByteArray.mk bytes.toArray)
     pure true
-  | ["step"] | ["s"] =>
+  | .step =>
     resume emu
-    let _ ← step emu
+    let _ ← Bap.Emu.step emu
     printPc emu output
     pure true
-  | ["continue"] | ["c"] =>
+  | .proceed =>
     resume emu
     let steps ← run emu
     print output s!"steps={steps}"
     printPc emu output
     pure true
-  | ["continue", address] | ["c", address] =>
-    let address ← parseNat address
+  | .proceedTo address =>
     resume emu
     let steps ← runUntil emu address
     print output s!"steps={steps}"
     printPc emu output
     pure true
-  | ["stop"] => stop emu; pure true
-  | ["break", address] =>
-    let address ← parseNat address
+  | .stop => Bap.Emu.stop emu; pure true
+  | .breakAt address =>
     let _ ← addBreakpoint emu address
     pure true
-  | ["breaks"] =>
+  | .breaks =>
     let addresses ← breakpoints emu
     print output (String.intercalate " " (addresses.map hex))
     pure true
-  | ["delete", address] =>
-    removeBreakpoint emu (← parseNat address)
+  | .delete address =>
+    removeBreakpoint emu address
     pure true
-  | ["snap"] => saved.set (some (← snapshot emu)); pure true
-  | ["restore"] =>
+  | .snap => saved.set (some (← snapshot emu)); pure true
+  | .restore =>
     match ← saved.get with
-    | some saved => restore emu saved; printPc emu output
+    | some saved => Bap.Emu.restore emu saved; printPc emu output
     | none => throw <| IO.userError "no shell snapshot"
     pure true
-  | ["save", path] => save emu path; pure true
-  | command :: _ => throw <| IO.userError s!"unknown debugger command: {command}"
+  | .save path => Bap.Emu.save emu path; pure true
 
 def shell (emu : Emu) (input output : IO.FS.Stream) (prompt : String := "(emu) ")
     (fuel : Nat := 100000) : IO Unit := do

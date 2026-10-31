@@ -10,6 +10,8 @@
 (defpackage llvm-mips64r6 (:use mips))
 (defpackage llvm-mips64r6le (:use mips))
 
+(require bits)
+
 (in-package mips)
 
 ;; the release 6 targets, whose instructions are defined at the end of
@@ -372,6 +374,10 @@
     (set RA (link))
     (branch cnd off)))
 
+;; the likely calls nullify their delay slots if they are not taken
+(defun BGEZALL (rs off) (BGEZAL rs off))
+(defun BLTZALL (rs off) (BLTZAL rs off))
+
 (defun region (target)
   "the target of J and JAL, whose upper bits are of the address of the
    delay slot, as the instruction encodes only the lower 28 bits, e.g.,
@@ -497,20 +503,24 @@
   "(get-hi R) is the high word of the double of the operand R"
   (cast-high 32 (get-d r)))
 
+;; the register is named by a symbol, so it is an argument, and not a
+;; variable of a let, which a set$ would assign instead
+(defun set-fpr (s x) (set$ s x))
+
 (defun set-s (r x)
   "(set-s R X) writes the single X to the operand R"
   (let ((s (fpr r)))
     (if (fpr64)
-        (set$ s (concat (cast-high 32 (unquote s)) (cast-low 32 x)))
-      (set$ s (cast-low 32 x)))))
+        (set-fpr s (concat (cast-high 32 (unquote s)) (cast-low 32 x)))
+      (set-fpr s (cast-low 32 x)))))
 
 (defun set-d (r x)
   "(set-d R X) writes the double X to the operand R"
   (let ((s (fpr r)))
     (if (fpr64)
-        (set$ s (cast-low 64 x))
-      (prog (set$ s (cast-low 32 x))
-            (set$ (fpr-next s) (cast-high 32 x))))))
+        (set-fpr s (cast-low 64 x))
+      (prog (set-fpr s (cast-low 32 x))
+            (set-fpr (fpr-next s) (cast-high 32 x))))))
 
 (defun set-hi (r x)
   "(set-hi R X) writes X to the high word of the double of the operand R"

@@ -52,15 +52,68 @@ private def fixture : ByteArray :=
   let b := appendNat b 0 1
   appendNat b 4 4
 
+/-- A PE32 for i386, laid out as `lld-link /machine:x86` does: the image base in the 32-bit field at offset 28 of the
+optional header, 224 bytes of it with the data directories, `BaseOfData` at offset 24. -/
+private def pe32Fixture : ByteArray :=
+  let b := appendNat ByteArray.empty 0x5a4d 2
+  let b := appendNat b 0 58
+  let b := appendNat b 64 4
+  let b := appendNat b 0x00004550 4
+  let b := appendNat b 0x014c 2
+  let b := appendNat b 1 2
+  let b := appendNat b 0 12
+  let b := appendNat b 224 2
+  let b := appendNat b 0x102 2
+  let b := appendNat b 0x10b 2
+  let b := appendNat b 0 2
+  let b := appendNat b 0x20 4
+  let b := appendNat b 0 8
+  let b := appendNat b 0x1010 4
+  let b := appendNat b 0x1000 4
+  let b := appendNat b 0x2000 4
+  let b := appendNat b 0x400000 4
+  let b := appendNat b 0x1000 4
+  let b := appendNat b 0x200 4
+  let b := appendNat b 0 184
+  let b := appendFixed b ".text" 8
+  let b := appendNat b 0x20 4
+  let b := appendNat b 0x1000 4
+  let b := appendNat b 0x20 4
+  let b := appendNat b 0x160 4
+  let b := appendNat b 0 12
+  let b := appendNat b 0x60000020 4
+  let b := appendNat b 0 16
+  let b := appendNat b 0xc3 1
+  appendNat b 0 15
+
 def run : IO Unit := do
   assertEqual "PE fixture size" 394 fixture.size
   match Pe.decode (ByteArray.mk #[1, 2, 3, 4]) with
   | .error _ => IO.println "ok: malformed PE rejected"
   | .ok _ => throw <| IO.userError "malformed PE accepted"
-  let pe32 := fixture.set! 88 0x0b |>.set! 89 0x01
-  match Pe.decode pe32 with
-  | .error _ => IO.println "ok: PE32 rejected explicitly"
-  | .ok _ => throw <| IO.userError "PE32 accepted as PE32+"
+  -- the same headers read as PE32: the image base is the 32-bit field past `BaseOfData`, not the one of PE32+
+  match Pe.decode (fixture.set! 88 0x0b |>.set! 89 0x01) with
+  | .error error => throw <| IO.userError error
+  | .ok image =>
+    assertEqual "PE32 address width" 32 image.addrWidth
+    assertEqual "PE32 entry point" 0x1000 image.entryPoint
+    assertEqual "PE32 section is at the 32-bit image base" (some 0x1000) (image.sections[0]?.map (·.addr))
+  -- an unknown optional header
+  match Pe.decode (fixture.set! 88 0x07 |>.set! 89 0x01) with
+  | .error _ => IO.println "ok: unknown PE optional header rejected"
+  | .ok _ => throw <| IO.userError "unknown PE optional header accepted"
+  match Pe.decode pe32Fixture with
+  | .error error => throw <| IO.userError error
+  | .ok image =>
+    assertEqual "PE32 i386 architecture" Arch.x86 image.arch
+    assertEqual "PE32 i386 address width" 32 image.addrWidth
+    assertEqual "PE32 i386 entry point" 0x401010 image.entryPoint
+    assertEqual "PE32 i386 sections" [".text"] (image.sections.map (·.name))
+    assertEqual "PE32 i386 section address" [0x401000] (image.sections.map (·.addr))
+    assertEqual "PE32 i386 instruction" (some 0xc3) (image.memory.readByte 0x401010)
+  match Pe.decode (pe32Fixture.set! 70 8) with
+  | .error _ => IO.println "ok: PE32 section table past the input rejected"
+  | .ok _ => throw <| IO.userError "PE32 section table past the input accepted"
   match Pe.decode fixture with
   | .error error => throw <| IO.userError error
   | .ok image =>

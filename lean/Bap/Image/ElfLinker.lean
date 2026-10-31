@@ -29,6 +29,8 @@ structure Sym where
   size : Nat
   typ : Nat
   bind : Nat
+  /-- `st_other`, whose top bits give the local entry of a PowerPC64 ELFv2 function. -/
+  other : Nat := 0
   deriving Inhabited
 
 structure Rel where
@@ -50,6 +52,8 @@ structure Input where
   /-- By symbol index. -/
   symbols : Array Sym
   relocations : List Rel
+  /-- The global pointer the object was assembled for, of its `.reginfo` or `.MIPS.options`. -/
+  gp0 : Int := 0
 
 structure Region where
   name : String
@@ -77,6 +81,7 @@ structure Output where
 def shfWrite : Nat := 1
 def shfAlloc : Nat := 2
 def shfExecinstr : Nat := 4
+def shfTls : Nat := 0x400
 def shtNobits : Nat := 8
 def shnUndef : Nat := 0
 def shnLoreserve : Nat := 0xff00
@@ -148,6 +153,7 @@ def linkerSymbol (machine : Nat) (sym : Sym) : Option Nat :=
   if sym.name == "_GLOBAL_OFFSET_TABLE_" then some 0
   else if machine == emMips && (sym.name == "_gp" || sym.name == "_gp_disp" || sym.name == "__gnu_local_gp") then
     some 0x7ff0
+  else if machine == emPpc64 && sym.name == ".TOC." then some 0x8000
   else none
 
 def isExternal (machine : Nat) (sym : Sym) : Bool :=
@@ -178,6 +184,12 @@ structure Write where
   value : Int
   little : Bool
 
+/-- The thread-local storage of the image, as a `PT_TLS` segment says it. -/
+structure TlsBlock where
+  start : Nat := 0
+  size : Nat := 0
+  align : Nat := 1
+
 structure Env where
   machine : Nat
   width : Nat
@@ -186,6 +198,9 @@ structure Env where
   codeLittle : Bool
   gotBase : Nat
   gotOff : Nat
+  tls : TlsBlock := {}
+  /-- What a MIPS object's local `GPREL` addends are relative to. -/
+  gp0 : Int := 0
 
 structure LinkState where
   memory : ByteArray
@@ -244,6 +259,22 @@ def gotEntry (env : Env) (value : Int) : LinkM Int := do
       gotCount := state.gotCount + 1 }
     pure slot
 
+/-- A symbol's address as an offset from the thread pointer. The thread pointer is where each psABI puts it relative to
+the thread-local block: past it in variant II, before it in variant I, and with a bias on MIPS and PowerPC. -/
+def tpOff (env : Env) (s : Int) : Int :=
+  let start : Int := env.tls.start
+  let align : Int := max 1 env.tls.align
+  let offset := s - start
+  match env.machine with
+  | 40 | 183 =>
+    let tcb : Int := env.width / 4
+    offset + tcb + (start - tcb) % align
+  | 8 | 20 | 21 => offset + start % align - 0x7000
+  | 243 => offset + start % align
+  | _ =>
+    let size := (alignUp env.tls.size (max 1 env.tls.align) : Nat)
+    offset - size - (-start - size) % align
+
 /-! ### Relocation handlers
 
 The relocation types are the numbers of the `R_<ARCH>_*` constants of each psABI; S is the symbol's address,
@@ -270,6 +301,9 @@ def x86_64 (env : Env) (site : Site) : Outcome := do
   | 0 => done []
   | 1 => store 8 (s + a)
   | 2 | 4 => store 4 (s + a - p)
+  | 18 => store 8 (tpOff env s + a)
+  | 22 | 44 | 50 => store 4 ((← gotEntry env (tpOff env s)) + a - p)
+  | 23 => store 4 (tpOff env s + a)
   | 3 => store 4 ((← gotEntry env s) - got + a)
   | 9 | 41 | 42 | 43 => store 4 ((← gotEntry env s) + a - p)
   | 10 | 11 => store 4 (s + a)
@@ -280,9 +314,10 @@ def x86_64 (env : Env) (site : Site) : Outcome := do
   | 24 => store 8 (s + a - p)
   | 25 => store 8 (s + a - got)
   | 26 => store 4 (got + a - p)
-  | 27 => store 8 ((← gotEntry env s) - got + a)
+  | 27 | 30 => store 8 ((← gotEntry env s) - got + a)
   | 28 => store 8 ((← gotEntry env s) + a - p)
   | 29 => store 8 (got + a - p)
+  | 31 => store 8 (s + a - got)
   | 32 => store 4 (site.sym.size + a)
   | 33 => store 8 (site.sym.size + a)
   | _ => pure none
@@ -300,12 +335,33 @@ def i386 (env : Env) (site : Site) : Outcome := do
   | 2 | 4 => store 4 (s + (← addend 4) - p)
   | 3 | 43 => store 4 ((← gotEntry env s) + (← addend 4) - got)
   | 9 => store 4 (s + (← addend 4) - got)
+  | 15 => store 4 ((← gotEntry env (tpOff env s)) + (← addend 4))
+  | 16 => store 4 ((← gotEntry env (tpOff env s)) + (← addend 4) - got)
+  | 17 => store 4 (tpOff env s + (← addend 4))
+  | 33 => store 4 ((← gotEntry env (-tpOff env s)) + (← addend 4) - got)
+  | 34 => store 4 (-(tpOff env s) + (← addend 4))
   | 10 => store 4 (got + (← addend 4) - p)
   | 20 => store 2 (s + (← addend 2))
   | 21 => store 2 (s + (← addend 2) - p)
   | 22 => store 1 (s + (← addend 1))
   | 23 => store 1 (s + (← addend 1) - p)
   | _ => pure none
+
+/-- An AArch64 page: the value with its low 12 bits cleared. -/
+def aarch64Page (value : Int) : Int := value - value % 4096
+
+/-- `immlo` and `immhi` of ADR and ADRP. -/
+def aarch64Adr (value : Int) (insn : Nat) : Nat := setBits (setBits insn 29 2 value) 5 19 (value >>> 2)
+
+/-- The scaled 12-bit offset of an ADD or a load, from the low bits of a value. -/
+def aarch64Lo12 (shift : Nat) (value : Int) (insn : Nat) : Nat :=
+  setBits insn 10 12 (field value 0 12 >>> shift : Nat)
+
+/-- A signed MOVW: the sign bit above the 16 bits of the value says whether the instruction is a MOVZ of the value or a
+MOVN, which takes it inverted. -/
+def aarch64SMov (value : Int) (insn : Nat) : Nat :=
+  if field value 16 1 == 1 then setBits (setBits insn 30 1 0) 5 16 ((field value 0 16 ^^^ 0xffff : Nat) : Int)
+  else setBits (setBits insn 30 1 1) 5 16 value
 
 def aarch64 (env : Env) (site : Site) : Outcome := do
   let s := site.s
@@ -315,10 +371,9 @@ def aarch64 (env : Env) (site : Site) : Outcome := do
   let store n value := done [stAt env site 0 n value]
   let update (f : Nat → Nat) : Outcome := do
     done [stiAt env site 0 4 (f (← ldi env site 0))]
-  let page (value : Int) : Int := value - value % 4096
-  let adr (value : Int) (insn : Nat) : Nat := setBits (setBits insn 29 2 value) 5 19 (value >>> 2)
-  let lo12 (shift : Nat) (value : Int) : Outcome :=
-    update fun insn => setBits insn 10 12 (field value 0 12 >>> shift : Nat)
+  let page := aarch64Page
+  let adr := aarch64Adr
+  let lo12 (shift : Nat) (value : Int) : Outcome := update (aarch64Lo12 shift value)
   match site.rel.typ with
   | 0 => done []
   | 0x101 => store 8 x
@@ -336,9 +391,16 @@ def aarch64 (env : Env) (site : Site) : Outcome := do
   | 0x115 | 0x116 => lo12 0 x
   | 0x117 => update fun insn => setBits insn 5 14 ((x - p) >>> 2)
   | 0x11a | 0x11b => update fun insn => setBits insn 0 26 ((x - p) >>> 2)
+  | 0x10e => update (aarch64SMov x)
+  | 0x10f => update (aarch64SMov (x >>> 16))
+  | 0x110 => update (aarch64SMov (x >>> 32))
   | 0x11c => lo12 1 x
   | 0x11d => lo12 2 x
   | 0x11e => lo12 3 x
+  | 0x11f | 0x120 => update (aarch64SMov (x - p))
+  | 0x121 | 0x122 => update (aarch64SMov ((x - p) >>> 16))
+  | 0x123 | 0x124 => update (aarch64SMov ((x - p) >>> 32))
+  | 0x125 => update (aarch64SMov ((x - p) >>> 48))
   | 0x12b => lo12 4 x
   | 0x135 =>
     let entry ← gotEntry env x
@@ -350,9 +412,89 @@ def aarch64 (env : Env) (site : Site) : Outcome := do
     let entry ← gotEntry env x
     lo12 3 entry
   | 0x13b => store 4 ((← gotEntry env s) + a - p)
+  | 0x21d =>
+    let entry ← gotEntry env (tpOff env s + a)
+    update (adr ((page entry - page p) >>> 12))
+  | 0x21e =>
+    let entry ← gotEntry env (tpOff env s + a)
+    lo12 3 entry
+  | 0x21f =>
+    let entry ← gotEntry env (tpOff env s + a)
+    update fun insn => setBits insn 5 19 ((entry - p) >>> 2)
+  | 0x220 => update (aarch64SMov ((tpOff env s + a) >>> 32))
+  | 0x221 | 0x222 => update (aarch64SMov ((tpOff env s + a) >>> 16))
+  | 0x223 | 0x224 => update (aarch64SMov (tpOff env s + a))
+  | 0x225 => update (aarch64Lo12 0 ((tpOff env s + a) >>> 12))
+  | 0x226 | 0x227 => lo12 0 (tpOff env s + a)
+  | 0x228 | 0x229 => lo12 0 (tpOff env s + a)
+  | 0x22a | 0x22b => lo12 1 (tpOff env s + a)
+  | 0x22c | 0x22d => lo12 2 (tpOff env s + a)
+  | 0x22e | 0x22f => lo12 3 (tpOff env s + a)
+  | 0x23a | 0x23b => lo12 4 (tpOff env s + a)
   | _ => pure none
 
 def isThumb (sym : Sym) : Bool := isFunctionSym sym && sym.value % 2 == 1
+
+/-! `R_ARM_TARGET2` means what its platform says. On Linux it is `R_ARM_GOT_PREL`, which is what unwinders there read
+back through the GOT and what lld and GNU ld do by default; bare-metal systems use `R_ARM_REL32` instead. -/
+
+/-! Instruction fields of ARM and Thumb. A word holds what its bits say whatever else the word holds, which is what
+the theorems about these say. -/
+
+/-- The 16-bit immediate of an A32 MOVW or MOVT. -/
+def armMovImm (insn : Nat) : Nat := field insn 16 4 * 2 ^ 12 + field insn 0 12
+
+def armMovSet (insn : Nat) (value : Int) : Nat := setBits (setBits insn 16 4 (value >>> 12)) 0 12 value
+
+/-- The 16-bit immediate of a T32 MOVW or MOVT, `imm4:i:imm3:imm8`. -/
+def thumbMovImm (hw1 hw2 : Nat) : Nat :=
+  field hw1 0 4 * 2 ^ 12 + field hw1 10 1 * 2 ^ 11 + field hw2 12 3 * 2 ^ 8 + field hw2 0 8
+
+def thumbMovSet1 (hw1 : Nat) (value : Int) : Nat := setBits (setBits hw1 0 4 (value >>> 12)) 10 1 (value >>> 11)
+def thumbMovSet2 (hw2 : Nat) (value : Int) : Nat := setBits (setBits hw2 12 3 (value >>> 8)) 0 8 value
+
+/-- The offset of an A32 branch: the 24-bit immediate, in words. -/
+def armBranchImm (insn : Nat) : Int := sext (field insn 0 24 * 4 : Nat) 26
+
+def armBranchSet (insn : Nat) (value : Int) : Nat := setBits insn 0 24 (value >>> 2)
+
+/-- The offset of a T32 BL, BLX or B.W, `S:I1:I2:imm10:imm11:0` with `I = NOT(J XOR S)`. -/
+def thumbBranchImm (hw1 hw2 : Nat) : Int :=
+  let sign := field hw1 10 1
+  let i1 := 1 - (field hw2 13 1 ^^^ sign)
+  let i2 := 1 - (field hw2 11 1 ^^^ sign)
+  sext (sign * 2 ^ 24 + i1 * 2 ^ 23 + i2 * 2 ^ 22 + field hw1 0 10 * 2 ^ 12 + field hw2 0 11 * 2 : Nat) 25
+
+def thumbBranchSet1 (hw1 : Nat) (value : Int) : Nat := setBits (setBits hw1 10 1 (value >>> 24)) 0 10 (value >>> 12)
+
+def thumbBranchSet2 (hw2 : Nat) (value : Int) : Nat :=
+  let sign := field value 24 1
+  setBits (setBits (setBits hw2 13 1 ((1 - (field value 23 1 ^^^ sign) : Nat) : Int))
+    11 1 ((1 - (field value 22 1 ^^^ sign) : Nat) : Int)) 0 11 (value >>> 1)
+
+/-- The offset of a T32 conditional B.W, `S:J2:J1:imm6:imm11:0`. -/
+def thumbJump19Imm (hw1 hw2 : Nat) : Int :=
+  sext (field hw1 10 1 * 2 ^ 20 + field hw2 11 1 * 2 ^ 19 + field hw2 13 1 * 2 ^ 18 + field hw1 0 6 * 2 ^ 12 +
+    field hw2 0 11 * 2 : Nat) 21
+
+def thumbJump19Set1 (hw1 : Nat) (value : Int) : Nat := setBits (setBits hw1 10 1 (value >>> 20)) 0 6 (value >>> 12)
+
+def thumbJump19Set2 (hw2 : Nat) (value : Int) : Nat :=
+  setBits (setBits (setBits hw2 13 1 (value >>> 18)) 11 1 (value >>> 19)) 0 11 (value >>> 1)
+
+/-- The offset of a narrow Thumb branch with an `n`-bit immediate, in halfwords. -/
+def thumbShortImm (n hw : Nat) : Int := sext (field hw 0 n * 2 : Nat) (n + 1)
+
+def thumbShortSet (n hw : Nat) (value : Int) : Nat := setBits hw 0 n (value >>> 1)
+
+/-- The address of a symbol without its Thumb bit. -/
+def armS (site : Site) : Int := if isThumb site.sym then site.s - site.s % 2 else site.s
+
+/-- `(S + A) | T`: a value with the Thumb bit of the symbol. -/
+def armWithT (site : Site) (value : Int) : Int := if isThumb site.sym && value % 2 == 0 then value + 1 else value
+
+/-- The addend: the one of the record, or the one in the place. -/
+def addendOf (site : Site) (decoded : Int) : Int := if site.rel.isExplicit then site.a else decoded
 
 def arm (env : Env) (site : Site) : Outcome := do
   let sym := site.sym
@@ -360,75 +502,57 @@ def arm (env : Env) (site : Site) : Outcome := do
   let p := site.p
   let got : Int := env.gotBase
   let thumb := isThumb sym
-  let s : Int := if thumb then site.s - site.s % 2 else site.s
-  let withT (value : Int) : Int := if thumb && value % 2 == 0 then value + 1 else value
-  let addend (decoded : Int) : Int := if site.rel.isExplicit then site.a else decoded
+  let s : Int := armS site
+  let withT := armWithT site
+  let addend := addendOf site
   let a32 : LinkM Int := do pure (addend (sext (← ld env site 0 4) 32))
   let store n value := done [stAt env site 0 n value]
-  let movw (kind : Nat) (imm : Nat) : Nat :=
+  let movw (kind : Nat) (imm : Nat) : Int :=
     let a := addend (sext imm 16)
     match kind with
-    | 0 => field (withT (s + a)) 0 16
-    | 1 => field (s + a) 16 16
-    | 2 => field (withT (s + a) - p) 0 16
-    | _ => field (s + a - p) 16 16
+    | 0 => withT (s + a)
+    | 1 => (s + a) >>> 16
+    | 2 => withT (s + a) - p
+    | _ => (s + a - p) >>> 16
   let armMovw (kind : Nat) : Outcome := do
     let insn ← ld env site 0 4
-    let imm := ((insn >>> 4) &&& 0xf000) ||| (insn &&& 0xfff)
-    let v := movw kind imm
-    store 4 (((insn &&& 0xfff0f000) ||| ((v &&& 0xf000) <<< 4) ||| (v &&& 0xfff) : Nat) : Int)
+    store 4 (armMovSet insn (movw kind (armMovImm insn)) : Nat)
   let thumbMovw (kind : Nat) : Outcome := do
     let hw1 ← ld env site 0 2
     let hw2 ← ld env site 2 2
-    let imm := (field hw1 0 4 <<< 12) ||| (field hw1 10 1 <<< 11) ||| (field hw2 12 3 <<< 8) ||| field hw2 0 8
-    let v := movw kind imm
-    done [stAt env site 0 2 (((hw1 &&& 0xfbf0) ||| field v 12 4 ||| (field v 11 1 <<< 10) : Nat) : Int),
-      stAt env site 2 2 (((hw2 &&& 0x8f00) ||| (field v 8 3 <<< 12) ||| field v 0 8 : Nat) : Int)]
+    let v := movw kind (thumbMovImm hw1 hw2)
+    done [stAt env site 0 2 (thumbMovSet1 hw1 v : Nat), stAt env site 2 2 (thumbMovSet2 hw2 v : Nat)]
   let armBranch : Outcome := do
     let insn ← ld env site 0 4
-    let a := addend (sext ((insn &&& 0xffffff) <<< 2 : Nat) 26)
-    let v := s + a - p
-    let imm24 := field v 2 24
+    let v := s + addend (armBranchImm insn) - p
     if typ == 0x1c && thumb then
-      store 4 ((0xfa000000 ||| (field v 1 1 <<< 24) ||| imm24 : Nat) : Int)
+      store 4 (setBits (armBranchSet 0xfa000000 v) 24 1 (v >>> 1) : Nat)
     else if typ == 0x1c && isFunctionSym sym && field insn 28 4 == 0xf then
-      store 4 ((0xeb000000 ||| imm24 : Nat) : Int)
+      store 4 (armBranchSet 0xeb000000 v : Nat)
     else
-      store 4 (((insn &&& 0xff000000) ||| imm24 : Nat) : Int)
+      store 4 (armBranchSet insn v : Nat)
   let thumbBranch : Outcome := do
     let hw1 ← ld env site 0 2
     let hw2 ← ld env site 2 2
-    let sign := field hw1 10 1
-    let i1 := 1 - (field hw2 13 1 ^^^ sign)
-    let i2 := 1 - (field hw2 11 1 ^^^ sign)
-    let a := addend (sext ((sign <<< 24) ||| (i1 <<< 23) ||| (i2 <<< 22) ||| (field hw1 0 10 <<< 12) |||
-      (field hw2 0 11 <<< 1) : Nat) 25)
+    let a := addend (thumbBranchImm hw1 hw2)
     let call := typ == 0xa
     let blx := call && (if isFunctionSym sym then !thumb else field hw2 12 1 == 0)
     let v := if blx then s + a - (p - p % 4) else s + a - p
-    let sign := field v 24 1
-    let j1 := 1 - (field v 23 1 ^^^ sign)
-    let j2 := 1 - (field v 22 1 ^^^ sign)
-    let hw2 := if !call then hw2 else if blx then hw2 &&& 0xefff else hw2 ||| 0x1000
-    done [stAt env site 0 2 (((hw1 &&& 0xf800) ||| (sign <<< 10) ||| field v 12 10 : Nat) : Int),
-      stAt env site 2 2 (((hw2 &&& 0xd000) ||| (j1 <<< 13) ||| (j2 <<< 11) ||| field v 1 11 : Nat) : Int)]
+    let hw2 := if !call then hw2 else setBits hw2 12 1 (if blx then 0 else 1)
+    done [stAt env site 0 2 (thumbBranchSet1 hw1 v : Nat), stAt env site 2 2 (thumbBranchSet2 hw2 v : Nat)]
   let thumbJump19 : Outcome := do
     let hw1 ← ld env site 0 2
     let hw2 ← ld env site 2 2
-    let a := addend (sext ((field hw1 10 1 <<< 20) ||| (field hw2 11 1 <<< 19) ||| (field hw2 13 1 <<< 18) |||
-      (field hw1 0 6 <<< 12) ||| (field hw2 0 11 <<< 1) : Nat) 21)
-    let v := s + a - p
-    done [stAt env site 0 2 (((hw1 &&& 0xfbc0) ||| (field v 20 1 <<< 10) ||| field v 12 6 : Nat) : Int),
-      stAt env site 2 2 (((hw2 &&& 0xd000) ||| (field v 18 1 <<< 13) ||| (field v 19 1 <<< 11) ||| field v 1 11 : Nat) : Int)]
+    let v := s + addend (thumbJump19Imm hw1 hw2) - p
+    done [stAt env site 0 2 (thumbJump19Set1 hw1 v : Nat), stAt env site 2 2 (thumbJump19Set2 hw2 v : Nat)]
   let thumbShortBranch (n : Nat) : Outcome := do
     let hw ← ld env site 0 2
-    let a := addend (sext (field hw 0 n <<< 1 : Nat) (n + 1))
-    store 2 ((hw - field hw 0 n + field (s + a - p) 1 n : Nat) : Int)
+    store 2 (thumbShortSet n hw (s + addend (thumbShortImm n hw) - p) : Nat)
   match typ with
   | 0 | 0x28 => done []
   | 1 | 0x1c | 0x1d => armBranch
   | 2 | 0x26 => store 4 (withT (s + (← a32)))
-  | 3 | 0x29 => store 4 (withT (s + (← a32)) - p)
+  | 3 => store 4 (withT (s + (← a32)) - p)
   | 5 => store 2 (s + addend (sext (← ld env site 0 2) 16))
   | 8 => store 1 (s + addend (sext (← ld env site 0 1) 8))
   | 0xa | 0x1e => thumbBranch
@@ -437,8 +561,8 @@ def arm (env : Env) (site : Site) : Outcome := do
   | 0x1a => store 4 ((← gotEntry env (withT s)) + (← a32) - got)
   | 0x2a =>
     let old ← ld env site 0 4
-    let a := addend (sext (old &&& 0x7fffffff : Nat) 31)
-    store 4 (((old &&& 0x80000000) ||| field (withT (s + a) - p) 0 31 : Nat) : Int)
+    let a := addend (sext (field old 0 31) 31)
+    store 4 (setBits old 0 31 (withT (s + a) - p) : Nat)
   | 0x2b => armMovw 0
   | 0x2c => armMovw 1
   | 0x2d => armMovw 2
@@ -448,9 +572,11 @@ def arm (env : Env) (site : Site) : Outcome := do
   | 0x31 => thumbMovw 2
   | 0x32 => thumbMovw 3
   | 0x33 => thumbJump19
-  | 0x60 => store 4 ((← gotEntry env (withT s)) + (← a32) - p)
+  | 0x29 | 0x60 => store 4 ((← gotEntry env (withT s)) + (← a32) - p)
   | 0x66 => thumbShortBranch 11
   | 0x67 => thumbShortBranch 8
+  | 0x6b => store 4 ((← gotEntry env (tpOff env s)) + (← a32) - p)
+  | 0x6c => store 4 (tpOff env s + (← a32))
   | _ => pure none
 
 def mipsGp (env : Env) : Int := env.gotBase + 0x7ff0
@@ -476,6 +602,77 @@ def mipsFlush (env : Env) (lo : Int) (symbol : Nat) : LinkM Unit := do
   for entry in matched.reverse do
     mipsApplyHi env entry.1 (((entry.2 : Int) * 65536) + lo)
 
+/-- The high half of a 16-bit pair: `HI16 << 16` and the sign-extended `LO16` add up to the value. -/
+def mipsHi (value : Int) : Int := (value + 0x8000) >>> 16
+
+/-- The two highest halves of a four-instruction 64-bit constant, each carrying the halves below it. -/
+def mipsHigher (value : Int) : Int := (value + 0x80008000) >>> 32
+def mipsHighest (value : Int) : Int := (value + 0x800080008000) >>> 48
+
+/-- A middle relocation of a compound record of the N64 ABI, on `S`, the special symbol of the record, and whose addend
+is the result so far: `R_MIPS_SUB` is `S - A`, `R_MIPS_64` is `S + A`, and `R_MIPS_NONE` leaves it. -/
+def mipsCompoundStep (s value : Int) : Nat → Option Int
+  | 0 => some value
+  | 18 => some (s + value)
+  | 24 => some (s - value)
+  | _ => none
+
+/-- The address the special symbol of a compound record stands for: `RSS_UNDEF`, `RSS_GP`, `RSS_GP0` or `RSS_LOC`. -/
+def mipsSpecial (env : Env) (site : Site) : Nat → Option Int
+  | 0 => some 0
+  | 1 => some (mipsGp env)
+  | 2 => some env.gp0
+  | 3 => some site.p
+  | _ => none
+
+/-- The last relocation of a compound record, on the result so far: the size of its store and what it stores. -/
+def mipsCompoundField (insn : Nat) (s value : Int) : Nat → Option (Nat × Int)
+  | 2 => some (4, s + value)
+  | 18 => some (8, s + value)
+  | 24 => some (8, s - value)
+  | 5 => some (4, setLo16 insn (mipsHi (s + value)))
+  | 6 => some (4, setLo16 insn (s + value))
+  | 28 => some (4, setLo16 insn (mipsHigher (s + value)))
+  | 29 => some (4, setLo16 insn (mipsHighest (s + value)))
+  | _ => none
+
+/-- What a local symbol's `GPREL` addend is relative to, in the object it came from. -/
+def mipsGp0 (env : Env) (sym : Sym) : Int := if sym.bind == stbLocal then env.gp0 else 0
+
+/-- The value of the first relocation of a compound record, which is the only one with a symbol. -/
+def mipsCompoundBase (env : Env) (site : Site) (typ : Nat) : LinkM (Option Int) := do
+  let x := site.s + site.a
+  let gp := mipsGp env
+  match typ with
+  | 2 | 3 | 18 => pure (some x)
+  | 7 | 12 => pure (some (x + mipsGp0 env site.sym - gp))
+  | 248 => pure (some (x - site.p))
+  | 19 => pure (some ((← gotEntry env x) - gp))
+  | 9 | 11 => pure (some ((← gotEntry env site.s) - gp))
+  | _ => pure none
+
+/-- A record of the N64 ABI that packs up to three relocations, its type holding the bytes `ssym:type3:type2:type`, or the
+same relocations of N32 in successive records, which the reader of the file packs. Each relocation's result is the addend of
+the next, the second one's symbol is the special one and the third one has none, and the last one stores it. Unlike lld's two
+fixed combinations, and its `RSS_UNDEF` only, this is the ABI's general rule. -/
+def mipsCompound (env : Env) (site : Site) : Outcome := do
+  let typ := site.rel.typ
+  let second := (typ >>> 8) % 256
+  let third := (typ >>> 16) % 256
+  match mipsSpecial env site (typ >>> 24) with
+  | none => pure none
+  | some special =>
+    match ← mipsCompoundBase env site (typ % 256) with
+    | none => pure none
+    | some base =>
+      match if third != 0 then mipsCompoundStep special base second else some base with
+      | none => pure none
+      | some value =>
+        match mipsCompoundField (← ld env site 0 4) (if third != 0 then 0 else special) value
+            (if third != 0 then third else second) with
+        | some (n, stored) => done [stAt env site 0 n stored]
+        | none => pure none
+
 def mips (env : Env) (site : Site) : Outcome := do
   let rel := site.rel
   let sym := site.sym
@@ -495,6 +692,7 @@ def mips (env : Env) (site : Site) : Outcome := do
       let stored := (← ld env site 0 4) &&& 0xffff
       modify fun state => { state with mipsPending := (site, stored) :: state.mipsPending }
     done []
+  let gotOffset (value : LinkM Int) : LinkM Int := do pure ((← value) - gp)
   match rel.typ with
   | 0 | 37 => done []
   | 2 => store 4 (s + (← a32))
@@ -515,12 +713,12 @@ def mips (env : Env) (site : Site) : Outcome := do
     mipsFlush env lo rel.symbol
     let s := if sym.name == "_gp_disp" then gp - p + 4 else s
     store 4 (setLo16 (← ld env site 0 4) (s + lo))
-  | 7 => store 4 (setLo16 (← ld env site 0 4) (s + (← a16) - gp))
+  | 7 | 8 => store 4 (setLo16 (← ld env site 0 4) (s + (← a16) + mipsGp0 env sym - gp))
   | 10 =>
     let insn ← ld env site 0 4
     let a := sext ((insn &&& 0xffff) <<< 2 : Nat) 18
     store 4 (setLo16 insn ((s + a - p) >>> 2))
-  | 12 => store 4 (s + (← a32) - gp)
+  | 12 => store 4 (s + (← a32) + mipsGp0 env sym - gp)
   | 18 => if env.width == 64 then store 8 (s + (← a32)) else pure none
   | 20 =>
     if env.width == 64 then
@@ -539,8 +737,18 @@ def mips (env : Env) (site : Site) : Outcome := do
       let page := (x + 0x8000) - (x + 0x8000) % 65536
       store 4 (setLo16 (← ld env site 0 4) (if isLocal && sext x 32 == x then x else x - page))
     else pure none
+  | 19 => store 4 (setLo16 (← ld env site 0 4) (← gotOffset (gotEntry env (s + (← a16)))))
+  | 22 | 30 => store 4 (setLo16 (← ld env site 0 4) (mipsHi (← gotOffset (gotEntry env (s + (← a16))))))
+  | 23 | 31 => store 4 (setLo16 (← ld env site 0 4) (← gotOffset (gotEntry env (s + (← a16)))))
+  | 28 => store 4 (setLo16 (← ld env site 0 4) (mipsHigher (s + (← a16))))
+  | 29 => store 4 (setLo16 (← ld env site 0 4) (mipsHighest (s + (← a16))))
+  | 46 => store 4 (setLo16 (← ld env site 0 4) ((← gotEntry env (tpOff env s)) + (← a16) - gp))
+  | 47 => store 4 (tpOff env s + (← a32))
+  | 48 => if env.width == 64 then store 8 (tpOff env s + (← a32)) else pure none
+  | 49 => store 4 (setLo16 (← ld env site 0 4) (mipsHi (tpOff env s + (← a16))))
+  | 50 => store 4 (setLo16 (← ld env site 0 4) (tpOff env s + (← a16)))
   | 248 => store 4 (s + (← a32) - p)
-  | _ => pure none
+  | typ => if typ < 256 then pure none else mipsCompound env site
 
 def mipsFinish (env : Env) : LinkM Unit := do
   let symbols := (← get).mipsPending.map (·.1.rel.symbol)
@@ -555,18 +763,15 @@ def riscvU (value : Int) (insn : Nat) : Int := setBits insn 12 20 ((value + 0x80
 def riscvI (value : Int) (insn : Nat) : Int := setBits insn 20 12 value
 def riscvS (value : Int) (insn : Nat) : Int := setBits (setBits insn 25 7 (value >>> 5)) 7 5 value
 def riscvB (value : Int) (insn : Nat) : Int :=
-  ((insn &&& 0x1fff07f) ||| (bit value 12 <<< 31) ||| (field value 5 6 <<< 25) ||| (field value 1 4 <<< 8) |||
-    (bit value 11 <<< 7) : Nat)
+  setBits (setBits (setBits (setBits insn 31 1 (value >>> 12)) 25 6 (value >>> 5)) 8 4 (value >>> 1)) 7 1 (value >>> 11)
 def riscvJ (value : Int) (insn : Nat) : Int :=
-  ((insn &&& 0xfff) ||| (bit value 20 <<< 31) ||| (field value 1 10 <<< 21) ||| (bit value 11 <<< 20) |||
-    (field value 12 8 <<< 12) : Nat)
+  setBits (setBits (setBits (setBits insn 31 1 (value >>> 20)) 21 10 (value >>> 1)) 20 1 (value >>> 11)) 12 8 (value >>> 12)
 def riscvCB (value : Int) (insn : Nat) : Int :=
-  ((insn &&& 0xe383) ||| (bit value 8 <<< 12) ||| (field value 3 2 <<< 10) ||| (field value 6 2 <<< 5) |||
-    (field value 1 2 <<< 3) ||| (bit value 5 <<< 2) : Nat)
+  setBits (setBits (setBits (setBits (setBits insn 12 1 (value >>> 8)) 10 2 (value >>> 3)) 5 2 (value >>> 6))
+    3 2 (value >>> 1)) 2 1 (value >>> 5)
 def riscvCJ (value : Int) (insn : Nat) : Int :=
-  ((insn &&& 0xe003) ||| (bit value 11 <<< 12) ||| (bit value 4 <<< 11) ||| (field value 8 2 <<< 9) |||
-    (bit value 10 <<< 8) ||| (bit value 6 <<< 7) ||| (bit value 7 <<< 6) ||| (field value 1 3 <<< 3) |||
-    (bit value 5 <<< 2) : Nat)
+  setBits (setBits (setBits (setBits (setBits (setBits (setBits (setBits insn 12 1 (value >>> 11)) 11 1 (value >>> 4))
+    9 2 (value >>> 8)) 8 1 (value >>> 10)) 7 1 (value >>> 6)) 6 1 (value >>> 7)) 3 3 (value >>> 1)) 2 1 (value >>> 5)
 
 /-- The pc-relative values of the AUIPC instructions, collected before the relocations are applied, because
 a `PCREL_LO12` relocation refers to the label of its AUIPC rather than to the target. -/
@@ -575,6 +780,9 @@ def riscvPrescan (env : Env) (site : Site) : LinkM Unit := do
   | 20 =>
     let entry ← gotEntry env site.s
     modify fun state => { state with riscvHi := state.riscvHi.insert site.p (entry + site.a - site.p) }
+  | 21 =>
+    let entry ← gotEntry env (tpOff env site.s + site.a)
+    modify fun state => { state with riscvHi := state.riscvHi.insert site.p (entry - site.p) }
   | 23 =>
     modify fun state => { state with riscvHi := state.riscvHi.insert site.p (site.s + site.a - site.p) }
   | _ => pure ()
@@ -608,7 +816,7 @@ def riscv (env : Env) (site : Site) : Outcome := do
     | some value => update (f value)
     | none => pure none
   match site.rel.typ with
-  | 0 | 43 | 51 => done []
+  | 0 | 32 | 43 | 51 => done []
   | 1 => store 4 x
   | 2 => store 8 x
   | 16 => update (riscvB (x - p))
@@ -618,7 +826,10 @@ def riscv (env : Env) (site : Site) : Outcome := do
     let first ← ldi env site 0
     let second ← ldi env site 4
     done [stiAt env site 0 4 (riscvU v first), stiAt env site 4 4 (riscvI v second)]
-  | 20 | 23 =>
+  | 29 => update (riscvU (tpOff env s + a))
+  | 30 => update (riscvI (tpOff env s + a))
+  | 31 => update (riscvS (tpOff env s + a))
+  | 20 | 21 | 23 =>
     match (← get).riscvHi[p]? with
     | some value => update (riscvU value)
     | none => pure none
@@ -652,30 +863,128 @@ def riscv (env : Env) (site : Site) : Outcome := do
   | 61 => rewriteUleb env site fun old => (old : Int) - x
   | _ => pure none
 
+/-- The TOC pointer of PowerPC64: 32 KiB into the TOC, which starts with the GOT, as with `.TOC.`. -/
+def ppcToc (env : Env) : Int := env.gotBase + 0x8000
+
+/-- The halves of a value: `@h` is plain, and `@ha` carries the sign of what is below it. -/
+def ppcHi (value : Int) : Int := value >>> 16
+def ppcHa (value : Int) : Int := (value + 0x8000) >>> 16
+def ppcHigher (value : Int) : Int := value >>> 32
+def ppcHighera (value : Int) : Int := (value + 0x8000) >>> 32
+def ppcHighest (value : Int) : Int := value >>> 48
+def ppcHighesta (value : Int) : Int := (value + 0x8000) >>> 48
+
+/-- Whether an instruction's offset is DQ-form, with four low bits that are not the offset: `lq`, `lxvp` and `stxvp`,
+and `lxv` and `stxv` among opcode 61. -/
+def ppcIsDq (insn : Nat) : Bool :=
+  let opcode := field insn 26 6
+  opcode == 6 || opcode == 56 || (opcode == 61 && field insn 0 2 == 1)
+
+/-- A DS-form or DQ-form offset, the low bits of whose halfword belong to the instruction. -/
+def ppcDsHalf (dq : Bool) (old : Nat) (value : Int) : Nat :=
+  if dq then setBits old 4 12 (value >>> 4) else setBits old 2 14 (value >>> 2)
+
+/-- The word of the instruction whose low halfword is at the place: the place is in its second half on big-endian. -/
+def ppcInsnOfHalf (env : Env) (site : Site) : LinkM Nat := do
+  if env.little then ldi env site 0
+  else pure (readNat (← get).memory false (site.off - 2) 4)
+
 def powerpc (env : Env) (site : Site) : Outcome := do
   let p := site.p
   let x := site.s + site.a
   let store n value := done [stAt env site 0 n value]
   let update (f : Nat → Nat) : Outcome := do done [stiAt env site 0 4 (f (← ldi env site 0))]
+  let ds (value : Int) : Outcome := do
+    let old ← ld env site 0 2
+    store 2 (ppcDsHalf (ppcIsDq (← ppcInsnOfHalf env site)) old value : Nat)
   match site.rel.typ with
   | 0 => done []
   | 1 => store 4 x
-  | 2 => update fun i => (i &&& 0xfc000003) ||| (field x 0 26 &&& 0x3fffffc)
-  | 3 | 4 => store 2 (field x 0 16 : Nat)
-  | 5 => store 2 (field x 16 16 : Nat)
-  | 6 => store 2 (field (x + 0x8000) 16 16 : Nat)
-  | 7 => update fun i => (i &&& 0xffff0003) ||| (field x 0 16 &&& 0xfffc)
-  | 10 | 18 => update fun i => (i &&& 0xfc000003) ||| (field (x - p) 0 26 &&& 0x3fffffc)
-  | 11 => update fun i => (i &&& 0xffff0003) ||| (field (x - p) 0 16 &&& 0xfffc)
+  | 2 => update fun i => setBits i 2 24 (x >>> 2)
+  | 3 | 4 => store 2 x
+  | 5 => store 2 (ppcHi x)
+  | 6 => store 2 (ppcHa x)
+  | 7 => update fun i => setBits i 2 14 (x >>> 2)
+  | 10 | 18 => update fun i => setBits i 2 24 ((x - p) >>> 2)
+  | 11 => update fun i => setBits i 2 14 ((x - p) >>> 2)
   | 26 => store 4 (x - p)
   | 38 => store 8 x
   | 44 => store 8 (x - p)
-  | _ => pure none
+  | 67 => done []
+  | 69 | 70 => store 2 (tpOff env site.s + site.a)
+  | 71 => store 2 (ppcHi (tpOff env site.s + site.a))
+  | 72 => store 2 (ppcHa (tpOff env site.s + site.a))
+  | typ =>
+    if env.machine != emPpc64 then
+      let got : LinkM Int := do pure ((← gotEntry env (tpOff env site.s + site.a)) - (env.gotBase + 0x8000))
+      match typ with
+      | 73 => store 4 (tpOff env site.s + site.a)
+      | 87 | 88 => store 2 (← got)
+      | 89 => store 2 (ppcHi (← got))
+      | 90 => store 2 (ppcHa (← got))
+      | _ => pure none
+    else
+      let toc := ppcToc env
+      let got : LinkM Int := do pure ((← gotEntry env x) - toc)
+      let tp := tpOff env site.s + site.a
+      let gotTp : LinkM Int := do pure ((← gotEntry env tp) - toc)
+      match typ with
+      | 73 => store 8 tp
+      | 87 | 88 => ds (← gotTp)
+      | 89 => store 2 (ppcHi (← gotTp))
+      | 90 => store 2 (ppcHa (← gotTp))
+      | 95 | 96 => ds tp
+      | 97 => store 2 (ppcHigher tp)
+      | 98 => store 2 (ppcHighera tp)
+      | 99 => store 2 (ppcHighest tp)
+      | 100 => store 2 (ppcHighesta tp)
+      | 112 => store 2 (ppcHi tp)
+      | 113 => store 2 (ppcHa tp)
+      | 14 | 15 => store 2 (← got)
+      | 16 => store 2 (ppcHi (← got))
+      | 17 => store 2 (ppcHa (← got))
+      | 39 => store 2 (ppcHigher x)
+      | 40 => store 2 (ppcHighera x)
+      | 41 => store 2 (ppcHighest x)
+      | 42 => store 2 (ppcHighesta x)
+      | 47 | 48 => store 2 (x - toc)
+      | 49 => store 2 (ppcHi (x - toc))
+      | 50 => store 2 (ppcHa (x - toc))
+      | 51 => store 8 (toc + site.a)
+      | 56 | 57 => ds x
+      | 58 | 59 => ds (← got)
+      | 63 | 64 => ds (x - toc)
+      | 249 | 250 => store 2 (x - p)
+      | 251 => store 2 (ppcHi (x - p))
+      | 252 => store 2 (ppcHa (x - p))
+      | _ => pure none
 
 def systemz (env : Env) (site : Site) : Outcome := do
+  let x := site.s + site.a
+  let pc := x - site.p
+  let store n value := done [stAt env site 0 n value]
   match site.rel.typ with
   | 0 => done []
-  | 20 => done [stiAt env site 0 4 ((site.s + site.a - site.p) >>> 1)]
+  | 1 => store 1 x
+  | 2 =>
+    let old ← ld env site 0 2
+    store 2 (setBits old 0 12 x : Nat)
+  | 3 => store 2 x
+  | 4 => store 4 x
+  | 5 | 8 => store 4 pc
+  | 16 => store 2 pc
+  | 17 | 18 => store 2 (pc >>> 1)
+  | 19 | 20 => store 4 (pc >>> 1)
+  | 22 => store 8 x
+  | 23 | 25 => store 8 pc
+  | 37 => done []
+  | 43 => store 4 ((← gotEntry env (tpOff env site.s)) - env.gotBase + site.a)
+  | 44 => store 8 ((← gotEntry env (tpOff env site.s)) - env.gotBase + site.a)
+  | 47 => store 4 ((← gotEntry env (tpOff env site.s)) + site.a)
+  | 48 => store 8 ((← gotEntry env (tpOff env site.s)) + site.a)
+  | 49 => store 4 (((← gotEntry env (tpOff env site.s)) + site.a - site.p) >>> 1)
+  | 50 => store 4 (tpOff env site.s + site.a)
+  | 51 => store 8 (tpOff env site.s + site.a)
   | _ => pure none
 
 /-- The handler of a machine, if the machine has one. -/
@@ -701,7 +1010,7 @@ structure Tables where
   commons : Array (Option Nat)
   externals : Std.HashMap String Nat
 
-def nullSym : Sym := ⟨"", shnUndef, false, 0, 0, 0, 0⟩
+def nullSym : Sym := ⟨"", shnUndef, false, 0, 0, 0, 0, 0⟩
 
 /-- The address of a symbol, if it has one. -/
 def resolve (tables : Tables) (index : Nat) (sym : Sym) : Option Nat :=
@@ -721,9 +1030,22 @@ def relocatedSection (tables : Tables) (index : Nat) : Option (Section × Nat) :
   let addr ← (tables.addrs[index]?).join
   if sec.typ != shtNobits then some (sec, addr) else none
 
-/-- The symbol of a PowerPC64 branch through a function descriptor in `.opd` is the code it points to. -/
+/-- From the global to the local entry of an ELFv2 function, as the top bits of `st_other` say. All the code shares
+one TOC here, so a call takes the local entry. Values 0 and 1 mean none, and 7 is reserved. -/
+def ppcLocalEntry (other : Nat) : Nat :=
+  match (other >>> 5) % 8 with
+  | 2 => 4
+  | 3 => 8
+  | 4 => 16
+  | 5 => 32
+  | 6 => 64
+  | _ => 0
+
+/-- The symbol of a PowerPC64 branch through a function descriptor in `.opd` is the code it points to, and an ELFv2
+function is entered past what sets up its TOC pointer. -/
 def resolveBranchTarget (tables : Tables) (rel : Rel) (sym : Sym) : Option Nat :=
-  let plain := resolve tables rel.symbol sym
+  let plain := (resolve tables rel.symbol sym).map (· + if tables.input.machine == emPpc64 && (rel.typ == 10 || rel.typ == 18)
+    then ppcLocalEntry sym.other else 0)
   if tables.input.machine == emPpc64 && (rel.typ == 10 || rel.typ == 18) then
     let descriptor := match relocatedSection tables sym.shndx with
       | some (sec, _) =>
@@ -765,14 +1087,273 @@ def siteOf (tables : Tables) (report : Bool) (rel : Rel) : LinkM (Option Site) :
         pure (some ⟨rel, sym, sec.name, p, s, if rel.isExplicit then rel.addend else 0,
           sec.off + rel.offset, min (sec.off + sec.size) tables.env.gotOff⟩)
 
+/-! ### Field overflow
+
+What a relocation stores is cut to the bits of its field, and most psABIs make it an error if that loses anything, for the
+fields that are not explicitly a part of a bigger value (the `_NC`, `LO` and `HA` ones). These are the same checks as `ld.lld`'s
+`checkInt`, `checkUInt` and `checkIntUInt`, on values as wide as the machine's word. -/
+
+/-- How a field holds its value. -/
+inductive FieldKind where
+  | signed
+  | unsigned
+  /-- Whichever the user meant, as a data field of the size of a C `int` can be either. -/
+  | either
+  deriving DecidableEq, Repr
+
+/-- A value that must fit in the `bits` bits of a field. -/
+structure FieldCheck where
+  kind : FieldKind
+  bits : Nat
+  value : Int
+
+/-- Whether a value fits in a field, as the range of the kind says. -/
+def fits (kind : FieldKind) (bits : Nat) (value : Int) : Bool :=
+  match kind with
+  | .signed => -((2 ^ (bits - 1) : Nat) : Int) ≤ value && value < ((2 ^ (bits - 1) : Nat) : Int)
+  | .unsigned => 0 ≤ value && value < ((2 ^ bits : Nat) : Int)
+  | .either => -((2 ^ (bits - 1) : Nat) : Int) ≤ value && value < ((2 ^ bits : Nat) : Int)
+
+/-- A value as the machine computes it: in a word, sign-extended. -/
+def wordValue (env : Env) (value : Int) : Int := sext value (if env.width == 32 then 32 else 64)
+
+/-- The GOT slot of a value that has one by now. -/
+def slotOf (state : LinkState) (value : Int) : Int := ((state.got[field value 0 64]?).getD 0 : Nat)
+
+/-- The field a relocation of x86-64 is cut to. -/
+def x86_64Field (env : Env) (state : LinkState) (site : Site) : Option FieldCheck :=
+  let x := site.s + site.a
+  let got : Int := env.gotBase
+  let tp := tpOff env site.s + site.a
+  match site.rel.typ with
+  | 2 | 4 => some ⟨.signed, 32, x - site.p⟩
+  | 3 => some ⟨.signed, 32, slotOf state site.s - got + site.a⟩
+  | 9 | 41 | 42 | 43 => some ⟨.signed, 32, slotOf state site.s + site.a - site.p⟩
+  | 10 => some ⟨.unsigned, 32, x⟩
+  | 11 => some ⟨.signed, 32, x⟩
+  | 12 => some ⟨.either, 16, x⟩
+  | 13 => some ⟨.signed, 16, x - site.p⟩
+  | 14 => some ⟨.either, 8, x⟩
+  | 15 => some ⟨.signed, 8, x - site.p⟩
+  | 22 | 44 | 50 => some ⟨.signed, 32, slotOf state (tpOff env site.s) + site.a - site.p⟩
+  | 23 => some ⟨.signed, 32, tp⟩
+  | 26 => some ⟨.signed, 32, got + site.a - site.p⟩
+  | 32 => some ⟨.signed, 32, site.sym.size + site.a⟩
+  | _ => none
+
+/-- The field a relocation of i386 is cut to. -/
+def i386Field (env : Env) (state : LinkState) (site : Site) : Option FieldCheck :=
+  let addend (n : Nat) : Int :=
+    addendOf site (sext (readNat state.memory env.little site.off n) (8 * n))
+  let got : Int := env.gotBase
+  let tp := tpOff env site.s
+  match site.rel.typ with
+  | 2 | 4 => some ⟨.signed, 32, site.s + addend 4 - site.p⟩
+  | 20 => some ⟨.either, 16, site.s + addend 2⟩
+  | 21 => some ⟨.signed, 17, site.s + addend 2 - site.p⟩
+  | 22 => some ⟨.either, 8, site.s + addend 1⟩
+  | 23 => some ⟨.signed, 8, site.s + addend 1 - site.p⟩
+  | 16 => some ⟨.signed, 32, slotOf state tp + addend 4 - got⟩
+  | 17 => some ⟨.signed, 32, tp + addend 4⟩
+  | 34 => some ⟨.signed, 32, -tp + addend 4⟩
+  | _ => none
+
+/-- The field a relocation of AArch64 is cut to. -/
+def aarch64Field (env : Env) (state : LinkState) (site : Site) : Option FieldCheck :=
+  let x := site.s + site.a
+  let p := site.p
+  let tp := tpOff env site.s + site.a
+  let page := aarch64Page
+  match site.rel.typ with
+  | 0x102 => some ⟨.either, 32, x⟩
+  | 0x103 => some ⟨.either, 16, x⟩
+  | 0x105 => some ⟨.either, 32, x - p⟩
+  | 0x13a => some ⟨.signed, 32, x - p⟩
+  | 0x106 => some ⟨.either, 16, x - p⟩
+  | 0x107 => some ⟨.unsigned, 16, x⟩
+  | 0x109 => some ⟨.unsigned, 32, x⟩
+  | 0x10b => some ⟨.unsigned, 48, x⟩
+  | 0x10e => some ⟨.signed, 17, x⟩
+  | 0x10f => some ⟨.signed, 33, x⟩
+  | 0x110 => some ⟨.signed, 49, x⟩
+  | 0x111 | 0x118 => some ⟨.signed, 21, x - p⟩
+  | 0x112 => some ⟨.signed, 21, x - p⟩
+  | 0x113 => some ⟨.signed, 33, page x - page p⟩
+  | 0x117 => some ⟨.signed, 16, x - p⟩
+  | 0x11a | 0x11b => some ⟨.signed, 28, x - p⟩
+  | 0x135 => some ⟨.signed, 21, slotOf state x - p⟩
+  | 0x137 => some ⟨.signed, 33, page (slotOf state x) - page p⟩
+  | 0x13b => some ⟨.signed, 32, slotOf state site.s + site.a - p⟩
+  | 0x21d => some ⟨.signed, 33, page (slotOf state tp) - page p⟩
+  | 0x21f => some ⟨.signed, 21, slotOf state tp - p⟩
+  | 0x225 => some ⟨.unsigned, 24, tp⟩
+  | _ => none
+
+/-- The field a relocation of ARM is cut to. -/
+def armField (env : Env) (state : LinkState) (site : Site) : Option FieldCheck :=
+  let sym := site.sym
+  let s := armS site
+  let p := site.p
+  let addend := addendOf site
+  let hw1 := readNat state.memory env.little site.off 2
+  let hw2 := readNat state.memory env.little (site.off + 2) 2
+  let word := readNat state.memory env.little site.off 4
+  match site.rel.typ with
+  | 1 | 0x1c | 0x1d => some ⟨.signed, 26, s + addend (armBranchImm word) - p⟩
+  | 5 => some ⟨.either, 16, s + addend (sext hw1 16)⟩
+  | 8 => some ⟨.either, 8, s + addend (sext (readNat state.memory env.little site.off 1) 8)⟩
+  | 0xa | 0x1e =>
+    let a := addend (thumbBranchImm hw1 hw2)
+    let blx := site.rel.typ == 0xa && (if isFunctionSym sym then !isThumb sym else field hw2 12 1 == 0)
+    some ⟨.signed, 25, if blx then s + a - (p - p % 4) else s + a - p⟩
+  | 0x2a => some ⟨.signed, 31, armWithT site (s + addend (sext (field word 0 31) 31)) - p⟩
+  | 0x33 => some ⟨.signed, 21, s + addend (thumbJump19Imm hw1 hw2) - p⟩
+  | 0x66 => some ⟨.signed, 12, s + addend (thumbShortImm 11 hw1) - p⟩
+  | 0x67 => some ⟨.signed, 9, s + addend (thumbShortImm 8 hw1) - p⟩
+  | _ => none
+
+/-- The field a relocation of MIPS is cut to. -/
+def mipsField (env : Env) (state : LinkState) (site : Site) : Option FieldCheck :=
+  let gp := mipsGp env
+  let insn := readNat state.memory env.little site.off 4
+  let a16 : Int := addendOf site (sext (insn &&& 0xffff : Nat) 16)
+  match site.rel.typ with
+  | 7 | 8 => some ⟨.signed, 16, site.s + a16 + mipsGp0 env site.sym - gp⟩
+  | 10 => some ⟨.signed, 18, site.s + sext ((insn &&& 0xffff) <<< 2 : Nat) 18 - site.p⟩
+  | 11 => some ⟨.signed, 16, slotOf state site.s - gp⟩
+  | 19 => some ⟨.signed, 16, slotOf state (site.s + a16) - gp⟩
+  | 46 => some ⟨.signed, 16, slotOf state (tpOff env site.s) + a16 - gp⟩
+  | _ => none
+
+/-- The length of the ULEB128 number at an offset, in at most ten bytes. -/
+def ulebSize (memory : ByteArray) (off : Nat) : Nat → Nat
+  | 0 => 1
+  | fuel + 1 => if (memory.get! off).toNat &&& 0x80 == 0 then 1 else ulebSize memory (off + 1) fuel + 1
+
+/-- The ULEB128 number of `n` bytes at an offset. -/
+def ulebValue (memory : ByteArray) (off n : Nat) : Int :=
+  ((List.range n).foldl (init := 0) fun old i => old + ((memory.get! (off + i)).toNat &&& 0x7f) * 2 ^ (7 * i) : Nat)
+
+/-- The field a relocation of RISC-V is cut to. -/
+def riscvField (env : Env) (state : LinkState) (site : Site) : Option FieldCheck :=
+  let x := site.s + site.a
+  let p := site.p
+  let hi (value : Int) : Int := wordValue env (value + 0x800) >>> 12
+  match site.rel.typ with
+  | 16 => some ⟨.signed, 13, x - p⟩
+  | 17 => some ⟨.signed, 21, x - p⟩
+  | 18 | 19 => some ⟨.signed, 20, hi (x - p)⟩
+  | 20 | 21 | 23 => (state.riscvHi[p]?).map fun value => ⟨.signed, 20, hi value⟩
+  | 26 => some ⟨.signed, 20, hi x⟩
+  | 29 => some ⟨.signed, 20, hi (tpOff env site.s + site.a)⟩
+  | 41 => some ⟨.signed, 32, slotOf state site.s + site.a - p⟩
+  | 44 => some ⟨.signed, 9, x - p⟩
+  | 45 => some ⟨.signed, 12, x - p⟩
+  | 56 => some ⟨.signed, 32, x⟩
+  | 57 | 59 => some ⟨.signed, 32, x - p⟩
+  | 60 => some ⟨.unsigned, 7 * ulebSize state.memory site.off 9, x⟩
+  | 61 => some ⟨.unsigned, 7 * ulebSize state.memory site.off 9, ulebValue state.memory site.off (ulebSize state.memory site.off 9) - x⟩
+  | _ => none
+
+/-- The field a relocation of PowerPC is cut to. -/
+def powerpcField (env : Env) (state : LinkState) (site : Site) : Option FieldCheck :=
+  let x := site.s + site.a
+  let p := site.p
+  let toc := ppcToc env
+  let tp := tpOff env site.s + site.a
+  match site.rel.typ with
+  | 3 => some ⟨.either, 16, x⟩
+  | 10 | 18 => some ⟨.signed, 26, x - p⟩
+  | 11 => some ⟨.signed, 16, x - p⟩
+  | 69 => some ⟨.signed, 16, tp⟩
+  | typ =>
+    if env.machine != emPpc64 then none
+    else
+      let got := slotOf state x - toc
+      let gotTp := slotOf state tp - toc
+      match typ with
+      | 1 => some ⟨.either, 32, x⟩
+      | 5 => some ⟨.signed, 32, x⟩
+      | 6 => some ⟨.signed, 32, x + 0x8000⟩
+      | 14 | 58 => some ⟨.signed, 16, got⟩
+      | 16 => some ⟨.signed, 32, got⟩
+      | 17 => some ⟨.signed, 32, got + 0x8000⟩
+      | 26 => some ⟨.signed, 32, x - p⟩
+      | 47 | 63 => some ⟨.signed, 16, x - toc⟩
+      | 49 => some ⟨.signed, 32, x - toc⟩
+      | 50 => some ⟨.signed, 32, x - toc + 0x8000⟩
+      | 56 => some ⟨.signed, 16, x⟩
+      | 71 => some ⟨.signed, 32, tp⟩
+      | 72 => some ⟨.signed, 32, tp + 0x8000⟩
+      | 87 => some ⟨.signed, 16, gotTp⟩
+      | 89 => some ⟨.signed, 32, gotTp⟩
+      | 90 => some ⟨.signed, 32, gotTp + 0x8000⟩
+      | 95 => some ⟨.signed, 16, tp⟩
+      | 251 => some ⟨.signed, 32, x - p⟩
+      | 252 => some ⟨.signed, 32, x - p + 0x8000⟩
+      | _ => none
+
+/-- The field a relocation of SystemZ is cut to. -/
+def systemzField (_env : Env) (_state : LinkState) (site : Site) : Option FieldCheck :=
+  let x := site.s + site.a
+  let pc := x - site.p
+  match site.rel.typ with
+  | 1 => some ⟨.either, 8, x⟩
+  | 2 => some ⟨.unsigned, 12, x⟩
+  | 3 => some ⟨.either, 16, x⟩
+  | 4 => some ⟨.either, 32, x⟩
+  | 5 | 8 => some ⟨.signed, 32, pc⟩
+  | 16 => some ⟨.signed, 16, pc⟩
+  | 17 | 18 => some ⟨.signed, 17, pc⟩
+  | 19 | 20 => some ⟨.signed, 33, pc⟩
+  | _ => none
+
+/-- The field a relocation is cut to, if its psABI says that it must fit. -/
+def fieldOf (env : Env) (state : LinkState) (site : Site) : Option FieldCheck :=
+  match env.machine with
+  | 62 => x86_64Field env state site
+  | 3 => i386Field env state site
+  | 183 => aarch64Field env state site
+  | 40 => armField env state site
+  | 8 => mipsField env state site
+  | 243 => riscvField env state site
+  | 20 | 21 => powerpcField env state site
+  | 22 => systemzField env state site
+  | _ => none
+
+/-- Whether what a relocation stores fits in its field. -/
+def fieldFits (env : Env) (state : LinkState) (site : Site) : Bool :=
+  match fieldOf env state site with
+  | some check => fits check.kind check.bits (wordValue env check.value)
+  | none => true
+
+/-- Warns if a relocation has to cut its value to its field. -/
+def checkField (env : Env) (site : Site) : LinkM Unit := do
+  if !fieldFits env (← get) site then
+    warn s!"relocation of type {site.rel.typ} at {site.p} is out of range of its field"
+
 /-- Runs a pass, a failed relocation becoming a warning. -/
 def guard (action : LinkM Unit) : LinkM Unit :=
   EStateM.tryCatch action warn
 
 def applySite (env : Env) (apply : Site → Outcome) (site : Site) : LinkM Unit := do
   match ← apply site with
-  | some writes => commit site writes
+  | some writes =>
+    checkField env site
+    commit site writes
   | none => warn s!"relocation of type {site.rel.typ} (machine {env.machine}) at {site.p} was not applied"
+
+/-- A relocation in the first pass: tells about the ones that won't be applied, and what the second pass will need. -/
+def prescanOne (tables : Tables) (rel : Rel) : LinkM Unit :=
+  guard do
+    if let some site ← siteOf tables true rel then
+      if tables.env.machine == 243 then riscvPrescan tables.env site
+
+/-- A relocation in the second pass. -/
+def applyOne (tables : Tables) (apply : Site → Outcome) (rel : Rel) : LinkM Unit :=
+  guard do
+    if let some site ← siteOf tables false rel then
+      applySite tables.env apply site
 
 def relocate (tables : Tables) : LinkM Unit := do
   let env := tables.env
@@ -785,13 +1366,9 @@ def relocate (tables : Tables) : LinkM Unit := do
       warn s!"relocations of the machine {env.machine} are not supported, the code is left unrelocated"
   | some apply =>
     for rel in tables.input.relocations do
-      guard do
-        if let some site ← siteOf tables true rel then
-          if env.machine == 243 then riscvPrescan env site
+      prescanOne tables rel
     for rel in tables.input.relocations do
-      guard do
-        if let some site ← siteOf tables false rel then
-          applySite env apply site
+      applyOne tables apply rel
     if env.machine == emMips then guard (mipsFinish env)
 
 /-- The commons and externals, placed after the sections, and the word-aligned cursor following them. -/
@@ -836,6 +1413,17 @@ def outputSymbols (tables : Tables) (memory : ByteArray) : List Symbol :=
       else
         some ⟨sym.name, value, sym.size, false, false⟩
 
+/-- The segment of the thread-local sections: from the first one to the end of the last one, as aligned as the most
+aligned one. -/
+def tlsBlock (sections : List Section) (addrs : Array (Option Nat)) : TlsBlock :=
+  let tls := sections.zipIdx.filterMap fun (sec, index) =>
+    if hasFlag sec.flags shfTls then (addrs[index]?).join.map (sec, ·) else none
+  match tls with
+  | [] => {}
+  | (_, start) :: _ =>
+    let stop := tls.foldl (fun stop (sec, addr) => max stop (addr + sec.size)) start
+    { start, size := stop - start, align := tls.foldl (fun align (sec, _) => max align sec.align) 1 }
+
 /-- Assigns the addresses and applies the relocations. -/
 def link (input : Input) : Output :=
   let word := input.width / 8
@@ -846,7 +1434,9 @@ def link (input : Input) : Output :=
   let externalsStart := alignUp commonsEnd word
   let (externals, externalsEnd) := placeExternals input.machine word symbols externalsStart
   let gotBase := alignUp externalsEnd word
-  let env : Env := ⟨input.machine, input.width, input.little, input.little || input.machine == 183, gotBase, input.data.size⟩
+  let env : Env := { machine := input.machine, width := input.width, little := input.little
+                     codeLittle := input.little || input.machine == 183, gotBase, gotOff := input.data.size
+                     tls := tlsBlock input.sections.toList layout.addrs, gp0 := input.gp0 }
   let tables : Tables := ⟨input, env, layout.addrs, commons, externals⟩
   let start : LinkState := { memory := input.data }
   let state := match (relocate tables).run start with

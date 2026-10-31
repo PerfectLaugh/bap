@@ -34,7 +34,7 @@ theorem stmtInduction {P : Bap.Bil.Stmt → Prop}
 open Bap.Bil (Exp Stmt BinOp)
 open Bap.Decompile (exp stmt program function project expIn stmtIn)
 
-open_private Bap.Decompile in Bap.Decompile : hex identifier varName quote endianName binName
+open_private Bap.Decompile in Bap.Decompile : hex identifier varName quote endianName binName withWidth leftOperand leftNeedsWidth
   signedBinName unName castName indentation ctype escape escapeChars keywords typeCode expVars stmtVars
 open_private Bap.Decompile.Project in Bap.Decompile : usedStmt usedInsns functionDisasm
 open_private Bap.Analysis.Xrefs in Bap.Analysis.Xrefs : spans nearestStart
@@ -1022,6 +1022,22 @@ theorem balanced_ctype (typ : Bap.Typ) : Balanced (ctype typ) := by
   unfold ctype
   split <;> (intro stack; simp [toString_string, String.toList_append, scan_append, scan, scan_digits])
 
+/-- A literal's width is written with brackets that nest. -/
+theorem balanced_withWidth (e : Exp) {rendered : String} (h : Balanced rendered) : Balanced (withWidth e rendered) := by
+  cases e with
+  | @int w value =>
+    intro stack
+    have ht := balanced_ctype (.imm w)
+    simp [withWidth, toString_string, String.toList_append, scan_append, scan, ht _, h _]
+  | _ => exact h
+
+theorem balanced_leftOperand (op : BinOp) (left right : Exp) {rendered : String} (h : Balanced rendered) :
+    Balanced (leftOperand op left right rendered) := by
+  unfold leftOperand
+  split
+  · exact balanced_withWidth left h
+  · exact h
+
 /-- Round and curly brackets of `exp` always nest properly when the free text does. -/
 theorem expIn_balanced (scope : List Bap.Var) (e : Exp) (h : ∀ m ∈ messages e, Balanced (quote m)) :
     Balanced (expIn scope e) := by
@@ -1044,7 +1060,7 @@ theorem expIn_balanced (scope : List Bap.Var) (e : Exp) (h : ∀ m ∈ messages 
     intro stack
     simp [toString_string, expIn, String.toList_append, scan_append, scan, scan_digits, hm _, ha _, hv _, he _]
   | bin op left right ihl ihr =>
-    have hl := ihl fun m hm => h m (by simp [messages, hm])
+    have hl := balanced_leftOperand op left right (ihl fun m hm => h m (by simp [messages, hm]))
     have hr := ihr fun m hm => h m (by simp [messages, hm])
     intro stack
     cases hs : signedBinName op with
@@ -1055,11 +1071,11 @@ theorem expIn_balanced (scope : List Bap.Var) (e : Exp) (h : ∀ m ∈ messages 
       have hn := balanced_signedBinName hs
       simp [toString_string, expIn, hs, String.toList_append, scan_append, scan, hl _, hr _, hn _]
   | un op value ih =>
-    have hv := ih fun m hm => h m (by simp [messages, hm])
+    have hv := balanced_withWidth value (ih fun m hm => h m (by simp [messages, hm]))
     intro stack
     cases op <;> simp [toString_string, expIn, unName, String.toList_append, scan_append, scan, hv _]
   | cast kind width value ih =>
-    have hv := ih fun m hm => h m (by simp [messages, hm])
+    have hv := balanced_withWidth value (ih fun m hm => h m (by simp [messages, hm]))
     intro stack
     cases kind <;> simp [toString_string, expIn, castName, String.toList_append, scan_append, scan, scan_digits, hv _]
   | letIn var value body ihv ihb =>
@@ -1075,12 +1091,12 @@ theorem expIn_balanced (scope : List Bap.Var) (e : Exp) (h : ∀ m ∈ messages 
     intro stack
     simp [toString_string, expIn, String.toList_append, scan_append, scan, hc _, hy _, hn _]
   | extract high low value ih =>
-    have hv := ih fun m hm => h m (by simp [messages, hm])
+    have hv := balanced_withWidth value (ih fun m hm => h m (by simp [messages, hm]))
     intro stack
     simp [toString_string, expIn, String.toList_append, scan_append, scan, scan_digits, hv _]
   | concat left right ihl ihr =>
-    have hl := ihl fun m hm => h m (by simp [messages, hm])
-    have hr := ihr fun m hm => h m (by simp [messages, hm])
+    have hl := balanced_withWidth left (ihl fun m hm => h m (by simp [messages, hm]))
+    have hr := balanced_withWidth right (ihr fun m hm => h m (by simp [messages, hm]))
     intro stack
     simp [toString_string, expIn, String.toList_append, scan_append, scan, hl _, hr _]
   | unknown message typ =>
@@ -1163,6 +1179,19 @@ private theorem no_newline_ctype (typ : Bap.Typ) : '\n' ∉ (ctype typ).toList :
   split <;> simp [toString_string, String.toList_append, no_newline_digits]
 
 /-- Free text is escaped and names are sanitised, so an expression renders on one line. -/
+theorem no_newline_withWidth (e : Exp) {rendered : String} (h : '\n' ∉ rendered.toList) :
+    '\n' ∉ (withWidth e rendered).toList := by
+  cases e with
+  | int value => simp [withWidth, toString_string, String.toList_append, no_newline_ctype, h]
+  | _ => exact h
+
+theorem no_newline_leftOperand (op : BinOp) (left right : Exp) {rendered : String} (h : '\n' ∉ rendered.toList) :
+    '\n' ∉ (leftOperand op left right rendered).toList := by
+  unfold leftOperand
+  split
+  · exact no_newline_withWidth left h
+  · exact h
+
 theorem expIn_no_newline (scope : List Bap.Var) (e : Exp) : '\n' ∉ (expIn scope e).toList := by
   induction e with
   | int value => simp [toString_string, expIn, String.toList_append, hex, no_newline_digits]
@@ -1174,20 +1203,23 @@ theorem expIn_no_newline (scope : List Bap.Var) (e : Exp) : '\n' ∉ (expIn scop
     cases endian <;>
       simp [toString_string, expIn, endianName, String.toList_append, no_newline_digits, ihm, iha, ihv]
   | bin op left right ihl ihr =>
-    cases op <;> simp [toString_string, expIn, signedBinName, binName, String.toList_append, ihl, ihr]
+    have hl := no_newline_leftOperand op left right ihl
+    cases op <;> simp [toString_string, expIn, signedBinName, binName, String.toList_append, hl, ihr]
   | un op value ih =>
-    cases op <;> simp [toString_string, expIn, unName, String.toList_append, ih]
+    have hv := no_newline_withWidth value ih
+    cases op <;> simp [toString_string, expIn, unName, String.toList_append, hv]
   | cast kind width value ih =>
+    have hv := no_newline_withWidth value ih
     cases kind <;>
-      simp [toString_string, expIn, castName, String.toList_append, no_newline_digits, ih]
+      simp [toString_string, expIn, castName, String.toList_append, no_newline_digits, hv]
   | letIn var value body ihv ihb =>
     simp [toString_string, expIn, String.toList_append, no_newline_varName scope, ihv, ihb]
   | ite condition yes no ihc ihy ihn =>
     simp [toString_string, expIn, String.toList_append, ihc, ihy, ihn]
   | extract high low value ih =>
-    simp [toString_string, expIn, String.toList_append, no_newline_digits, ih]
+    simp [toString_string, expIn, String.toList_append, no_newline_digits, no_newline_withWidth value ih]
   | concat left right ihl ihr =>
-    simp [toString_string, expIn, String.toList_append, ihl, ihr]
+    simp [toString_string, expIn, String.toList_append, no_newline_withWidth left ihl, no_newline_withWidth right ihr]
   | unknown message typ =>
     simp [toString_string, expIn, String.toList_append, no_newline_quote, no_newline_ctype]
 
@@ -1696,9 +1728,14 @@ private theorem signedBinName_no_paren {op : BinOp} {name : String} (h : signedB
 
 /-- A binary operation's rendering determines its operator: `slt` is not `<`. -/
 theorem expIn_bin_op_injective (scope : List Bap.Var) (left right : Exp) {a b : BinOp}
+    (hw : leftNeedsWidth a right = leftNeedsWidth b right)
     (h : expIn scope (.bin a left right) = expIn scope (.bin b left right)) : a = b := by
   have hl := congrArg String.toList h
   simp only [expIn] at hl
+  have hsame : leftOperand b left right (expIn scope left) = leftOperand a left right (expIn scope left) := by
+    simp only [leftOperand, hw]
+  rw [hsame] at hl
+  generalize leftOperand a left right (expIn scope left) = shown at hl
   apply opName_injective
   cases ha : signedBinName a with
   | some na =>
@@ -1733,28 +1770,110 @@ theorem expIn_bin_op_injective (scope : List Bap.Var) (left right : Exp) {a b : 
       simp [opName, ha, hb, String.toList_inj.mp e]
 
 theorem exp_bin_op_injective (left right : Exp) {a b : BinOp}
+    (hw : leftNeedsWidth a right = leftNeedsWidth b right)
     (h : exp (.bin a left right) = exp (.bin b left right)) : a = b :=
-  expIn_bin_op_injective _ left right h
+  expIn_bin_op_injective _ left right hw h
 
 /-- Signed comparisons render distinctly from their unsigned twins. -/
 theorem exp_signed_distinct (left right : Exp) {signed unsigned : BinOp}
     (h : (signed, unsigned) ∈ [(BinOp.slt, BinOp.lt), (.sle, .le), (.sgt, .gt), (.sge, .ge)]) :
     exp (.bin signed left right) ≠ exp (.bin unsigned left right) := by
   intro e
-  have := exp_bin_op_injective left right e
+  have hw : leftNeedsWidth signed right = leftNeedsWidth unsigned right := by
+    simp only [List.mem_cons, Prod.mk.injEq, List.not_mem_nil, or_false] at h
+    rcases h with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ <;> (cases right <;> rfl)
+  have := exp_bin_op_injective left right hw e
   subst this
   simp at h
   rcases h with ⟨h1, h2⟩ | ⟨h1, h2⟩ | ⟨h1, h2⟩ | ⟨h1, h2⟩ <;> (rw [h1] at h2; cases h2)
 
 theorem exp_slt (scope : List Bap.Var) (left right : Exp) :
-    expIn scope (.bin .slt left right) = "slt(" ++ expIn scope left ++ ", " ++ expIn scope right ++ ")" := by
+    expIn scope (.bin .slt left right) =
+      "slt(" ++ leftOperand .slt left right (expIn scope left) ++ ", " ++ expIn scope right ++ ")" := by
   simp [expIn, signedBinName, toString_string, String.append_assoc]
 
-/-- Literal widths are intentionally not rendered: a C literal takes its type from the context,
-and the operand widths of a well-typed expression agree. -/
+/-- A literal on its own says nothing of its width: it takes its type from the context, and the operand widths of a
+well-typed expression agree. Where nothing else tells the width, `expIn_tells_width` says it is written. -/
 theorem exp_int_forgets_width (n w w' : Nat) (h : n < 2 ^ w) (h' : n < 2 ^ w') :
     exp (.int (BitVec.ofNat w n)) = exp (.int (BitVec.ofNat w' n)) := by
   simp [exp, expIn, BitVec.toNat_ofNat, Nat.mod_eq_of_lt h, Nat.mod_eq_of_lt h']
+
+private theorem bitInt_toList (w : Nat) :
+    (s!"unsigned _BitInt({w})").toList = "unsigned _BitInt(".toList ++ (toString w).toList ++ [')'] := by
+  simp [toString_string, String.toList_append]
+
+private theorem bitInt_ne {w : Nat} {fixed : String} (h : (fixed.toList.take 2) ≠ ['u', 'n']) :
+    s!"unsigned _BitInt({w})" ≠ fixed := by
+  intro e
+  have := congrArg (fun s : String => s.toList.take 2) e
+  simp only [bitInt_toList] at this
+  exact h (by rw [← this]; rfl)
+
+private theorem toString_nat_injective {a b : Nat} (h : toString a = toString b) : a = b := by
+  have ha : (toString a).toList = Nat.toDigits 10 a := by rw [Nat.toString_eq_ofList_toDigits]; simp
+  have hb : (toString b).toList = Nat.toDigits 10 b := by rw [Nat.toString_eq_ofList_toDigits]; simp
+  have e : Nat.toDigits 10 a = Nat.toDigits 10 b := by rw [← ha, ← hb, h]
+  have := congrArg (Nat.ofDigitChars 10 · 0) e
+  simpa [Nat.ofDigitChars_ten_toDigits] using this
+
+/-- The widths are different types. -/
+theorem ctype_imm_injective {a b : Nat} (h : ctype (.imm a) = ctype (.imm b)) : a = b := by
+  have hb8 : ∀ {w}, s!"unsigned _BitInt({w})" ≠ "uint8_t" := bitInt_ne (by decide)
+  have hb16 : ∀ {w}, s!"unsigned _BitInt({w})" ≠ "uint16_t" := bitInt_ne (by decide)
+  have hb32 : ∀ {w}, s!"unsigned _BitInt({w})" ≠ "uint32_t" := bitInt_ne (by decide)
+  have hb64 : ∀ {w}, s!"unsigned _BitInt({w})" ≠ "uint64_t" := bitInt_ne (by decide)
+  have spec : ∀ w, ctype (.imm w) = if w = 8 then "uint8_t" else if w = 16 then "uint16_t" else if w = 32 then "uint32_t"
+      else if w = 64 then "uint64_t" else s!"unsigned _BitInt({w})" := by
+    intro w
+    unfold ctype
+    split <;> simp_all
+  rw [spec, spec] at h
+  repeat' split at h
+  all_goals first
+    | omega
+    | exact absurd h (by decide)
+    | exact absurd h hb8
+    | exact absurd h hb16
+    | exact absurd h hb32
+    | exact absurd h hb64
+    | exact absurd h.symm hb8
+    | exact absurd h.symm hb16
+    | exact absurd h.symm hb32
+    | exact absurd h.symm hb64
+    | skip
+  have e : "unsigned _BitInt(".toList ++ (toString a).toList ++ [')'] =
+      "unsigned _BitInt(".toList ++ (toString b).toList ++ [')'] := by
+    rw [← bitInt_toList, ← bitInt_toList, h]
+  have e2 := List.append_cancel_left (List.append_cancel_right e)
+  exact toString_nat_injective (String.toList_inj.mp e2)
+
+/-- Where nothing else tells the width of a literal, its rendering does: under an operator or a cast, in an `extract` or a
+`concat`, and to the left of a shift or of another literal. A complement of the zero of 8 bits is not that of 16. -/
+theorem withWidth_literal (width : Nat) (value : BitVec width) (rendered : String) :
+    withWidth (.int value) rendered = "(" ++ (ctype (.imm width) ++ (")" ++ rendered)) := by
+  simp [withWidth, toString_string, String.append_assoc]
+
+/-- A complement shows the width of its literal. -/
+theorem expIn_not_literal (scope : List Bap.Var) (width : Nat) (value : BitVec width) :
+    expIn scope (.un .not (.int value)) =
+      "(~" ++ ("(" ++ (ctype (.imm width) ++ (")" ++ ("0x" ++ (hex value.toNat ++ ")"))))) := by
+  simp [expIn, withWidth, unName, toString_string, String.append_assoc]
+
+/-- The left of a shift shows the width of its literal, as nothing on the right tells it. -/
+theorem expIn_shift_literal (scope : List Bap.Var) (width : Nat) (value : BitVec width) (right : Exp) :
+    expIn scope (.bin .lshift (.int value) right) =
+      "(" ++ ("(" ++ (ctype (.imm width) ++ (")" ++ ("0x" ++ (hex value.toNat ++ (" << " ++ (expIn scope right ++ ")"))))))) := by
+  have hw : leftNeedsWidth .lshift right = true := by cases right <;> rfl
+  simp [expIn, leftOperand, hw, withWidth, signedBinName, binName, toString_string, String.append_assoc]
+
+/-- A name the output uses for itself, its types and its operations included, is not left to mean something else. -/
+theorem identifier_reserved {name : String} (h : name ∈ keywords) : identifier name ≠ name :=
+  fun e => identifier_not_keyword name (by rw [e]; exact h)
+
+/-- These are some of those names. -/
+theorem reserved_names : ["uint8_t", "uint16_t", "uint32_t", "uint64_t", "read32_le", "write8_be", "concat", "extract", "slt",
+    "low", "high", "unknown", "special"].all keywords.contains = true := by
+  decide +kernel
 
 /-- An unknown value renders with its type. -/
 theorem exp_unknown (message : String) (typ : Bap.Typ) :

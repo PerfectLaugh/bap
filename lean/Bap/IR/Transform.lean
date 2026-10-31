@@ -47,12 +47,35 @@ def Blk.definedVars (blk : Blk) : List Bap.Var :=
 
 def Blk.defines (blk : Blk) (var : Bap.Var) : Bool := blk.definedVars.contains var
 
+/-- Variables a block reads before writing them. Phis assign on entry, so they and the definitions
+kill what later definitions and the jumps read; a phi's inputs are read on the incoming edge. -/
 def Blk.freeVars (blk : Blk) : List Bap.Var :=
-  let step := blk.defs.foldl (init := ([], [])) fun state defn =>
+  let step := blk.defs.foldl (init := ([], blk.phis.map Phi.var)) fun state defn =>
     let free := state.1 ++ (Bil.freeVars defn.rhs).filter fun var => var ∉ state.2
     (free, defn.var :: state.2)
   ((step.1 ++ blk.phis.flatMap (fun phi => phi.values.flatMap (Bil.freeVars ∘ Prod.snd)) ++
-    blk.jmps.flatMap Jmp.freeVars)).eraseDups
+    (blk.jmps.flatMap Jmp.freeVars).filter fun var => var ∉ step.2)).eraseDups
+
+instance : Hashable Bap.Var where
+  hash var := mixHash (hash var.name) (hash var.index)
+
+/-- `Blk.definedVars`, without comparing every pair: a phi per variable makes for long lists. -/
+private def Blk.definedVarsFast (blk : Blk) : List Bap.Var :=
+  Bap.Graph.Fast.dedup ((blk.phis.map Phi.var) ++ (blk.defs.map Def.var))
+
+@[csimp] private theorem Blk.definedVars_eq_fast : @Blk.definedVars = @Blk.definedVarsFast :=
+  funext fun blk => (Bap.Graph.Fast.dedup_eq _).symm
+
+/-- `Blk.freeVars`, without comparing every pair. -/
+private def Blk.freeVarsFast (blk : Blk) : List Bap.Var :=
+  let step := blk.defs.foldl (init := ([], blk.phis.map Phi.var)) fun state defn =>
+    let free := state.1 ++ (Bil.freeVars defn.rhs).filter fun var => var ∉ state.2
+    (free, defn.var :: state.2)
+  Bap.Graph.Fast.dedup ((step.1 ++ blk.phis.flatMap (fun phi => phi.values.flatMap (Bil.freeVars ∘ Prod.snd)) ++
+    (blk.jmps.flatMap Jmp.freeVars).filter fun var => var ∉ step.2))
+
+@[csimp] private theorem Blk.freeVars_eq_fast : @Blk.freeVars = @Blk.freeVarsFast :=
+  funext fun blk => (Bap.Graph.Fast.dedup_eq _).symm
 
 def pruneSub (sub : Sub) : Sub := (Cfg.fromSub sub).prune.intoSub sub
 

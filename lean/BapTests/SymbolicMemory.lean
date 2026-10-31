@@ -27,8 +27,9 @@ private def regressions : IO Unit := do
   assertEqual "distinct write leaves the byte" true
     (← FFI.Z3.isUnsat [different x y, different readX (byte 1)])
   let overlap := Bap.Symbolic.Memory.write Bap.Symbolic.Memory.empty (address64 4) (.const (BitVec.ofNat 16 0xbbaa)) .little 2
-  assertEqual "concrete overlap resolved statically" "((_ extract 15 8) (_ bv48042 16))"
-    (Bap.Symbolic.Memory.read overlap (address64 5) .little 1).render
+  match Bap.Symbolic.Memory.read overlap (address64 5) .little 1 with
+  | .ok byte => assertEqual "concrete overlap resolved statically" "((_ extract 15 8) (_ bv48042 16))" byte.render
+  | .error error => throw <| IO.userError error
   assertEqual "concrete distinct write is skipped" "(|mem@64| (_ bv9 64))"
     (overlap.readByte (address64 9)).render
   let unwritten := Bap.Symbolic.Memory.empty.readByte (address64 0x1000)
@@ -56,10 +57,11 @@ private def regressions : IO Unit := do
 
 def run : IO Unit := do
   let written := Bap.Symbolic.Memory.write Bap.Symbolic.Memory.empty address value .little 4
-  let little := Bap.Symbolic.Memory.read written address .little 4
-  let big := Bap.Symbolic.Memory.read written address .big 4
-  assertEqual "symbolic memory little endian" true (← FFI.Z3.isUnsat [different little expectedLittle])
-  assertEqual "symbolic memory big endian" true (← FFI.Z3.isUnsat [different big expectedBig])
+  match Bap.Symbolic.Memory.read written address .little 4, Bap.Symbolic.Memory.read written address .big 4 with
+  | .ok little, .ok big =>
+    assertEqual "symbolic memory little endian" true (← FFI.Z3.isUnsat [different little expectedLittle])
+    assertEqual "symbolic memory big endian" true (← FFI.Z3.isUnsat [different big expectedBig])
+  | _, _ => throw <| IO.userError "symbolic memory read failed"
   assertEqual "symbolic unwritten byte is unconstrained" "(|mem@64| (_ bv4096 64))"
     (Bap.Symbolic.Memory.readByte Bap.Symbolic.Memory.empty address |>.render)
   let byteMemory := Bap.Symbolic.Memory.writeByte Bap.Symbolic.Memory.empty address (.const (BitVec.ofNat 8 9))

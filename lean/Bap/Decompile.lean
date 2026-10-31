@@ -17,7 +17,10 @@ private def escapeChars : List Char → List Char
   | '_' :: '0' :: 't' :: rest => escape '_' ++ '0' :: 't' :: escapeChars rest
   | c :: rest => if c.isAlphanum || c = '_' then c :: escapeChars rest else escape c ++ escapeChars rest
 
-/-- The keywords of C up to C23, with the common `asm` and `fortran` extensions. -/
+/-- What a name must not be to mean itself in the output: the keywords of C up to C23, with the common `asm` and `fortran`
+extensions, and what the output itself uses, that is the fixed-width types and the operations that are written as calls.
+A register with one of these names would otherwise silently redefine the type or the operation in its scope. `main` and the
+names of libraries are not here: a function of that name is what the program calls it, and it means the same. -/
 private def keywords : List String := [
   "alignas", "alignof", "auto", "bool", "break", "case", "char", "const", "constexpr", "continue",
   "default", "do", "double", "else", "enum", "extern", "false", "float", "for", "goto", "if",
@@ -26,7 +29,14 @@ private def keywords : List String := [
   "typeof", "typeof_unqual", "union", "unsigned", "void", "volatile", "while",
   "_Alignas", "_Alignof", "_Atomic", "_BitInt", "_Bool", "_Complex", "_Decimal128", "_Decimal32",
   "_Decimal64", "_Generic", "_Imaginary", "_Noreturn", "_Static_assert", "_Thread_local",
-  "asm", "fortran"
+  "asm", "fortran",
+  "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+  "sdiv", "srem", "smod", "ashr", "slt", "sle", "sgt", "sge",
+  "low", "high", "let", "extract", "concat", "unknown", "special", "cpu_exception",
+  "read8_le", "read16_le", "read32_le", "read64_le", "read128_le", "read256_le", "read512_le",
+  "read8_be", "read16_be", "read32_be", "read64_be", "read128_be", "read256_be", "read512_be",
+  "write8_le", "write16_le", "write32_le", "write64_le", "write128_le", "write256_le", "write512_le",
+  "write8_be", "write16_be", "write32_be", "write64_be", "write128_be", "write256_be", "write512_be"
 ]
 
 /-- A valid C identifier, distinct for distinct names and equal to `name` if it already is one. -/
@@ -97,6 +107,21 @@ private def ctype : Typ → String
   | .mem _ _ => "uint8_t *"
   | _ => "void *"
 
+/-- A literal where nothing else tells its width has it written as a C cast: an operator's result depends on it. -/
+private def withWidth : Bil.Exp → String → String
+  | .int (width := width) _, rendered => s!"({ctype (.imm width)}){rendered}"
+  | _, rendered => rendered
+
+/-- Whether the left operand of an operator takes its width from nowhere else: its right one is a literal too, and a shift
+says nothing of what it shifts. -/
+private def leftNeedsWidth (op : Bil.BinOp) : Bil.Exp → Bool
+  | .int _ => true
+  | _ => op == .lshift || op == .rshift || op == .ashift
+
+/-- The left operand of an operator, as `withWidth` wants it. -/
+private def leftOperand (op : Bil.BinOp) (left right : Bil.Exp) (rendered : String) : String :=
+  if leftNeedsWidth op right then withWidth left rendered else rendered
+
 def expIn (scope : List Bap.Var) : Bil.Exp → String
   | .int value => s!"0x{hex value.toNat}"
   | .var var => varName scope var
@@ -106,14 +131,14 @@ def expIn (scope : List Bap.Var) : Bil.Exp → String
     s!"write{size * 8}_{endianName endian}({expIn scope memory}, {expIn scope address}, {expIn scope value})"
   | .bin op left right =>
     match signedBinName op with
-    | some name => s!"{name}({expIn scope left}, {expIn scope right})"
-    | none => s!"({expIn scope left} {binName op} {expIn scope right})"
-  | .un op value => s!"({unName op}{expIn scope value})"
-  | .cast kind width value => s!"{castName kind}({expIn scope value}, {width})"
+    | some name => s!"{name}({leftOperand op left right (expIn scope left)}, {expIn scope right})"
+    | none => s!"({leftOperand op left right (expIn scope left)} {binName op} {expIn scope right})"
+  | .un op value => s!"({unName op}{withWidth value (expIn scope value)})"
+  | .cast kind width value => s!"{castName kind}({withWidth value (expIn scope value)}, {width})"
   | .letIn var value body => s!"let({varName scope var}, {expIn scope value}, {expIn scope body})"
   | .ite condition yes no => s!"({expIn scope condition} ? {expIn scope yes} : {expIn scope no})"
-  | .extract high low value => s!"extract({expIn scope value}, {high}, {low})"
-  | .concat left right => s!"concat({expIn scope left}, {expIn scope right})"
+  | .extract high low value => s!"extract({withWidth value (expIn scope value)}, {high}, {low})"
+  | .concat left right => s!"concat({withWidth left (expIn scope left)}, {withWidth right (expIn scope right)})"
   | .unknown message typ => s!"unknown({quote message}, {ctype typ})"
 
 private def expVars : Bil.Exp → List Bap.Var

@@ -13,6 +13,13 @@ private def state (var : Var) (value : Nat) : State :=
 private def fixed (block : Primus.Lifted.Block) : Primus.Lifted.Fetch × Primus.Lifted.Lift :=
   (fun _ => pure (ByteArray.mk #[1]), fun _ _ => pure block)
 
+private def expectThrow (name : String) (action : IO Unit) : IO Unit := do
+  let threw ← try
+      action
+      pure false
+    catch _ => pure true
+  assertTrue name threw
+
 set_option maxRecDepth 4000 in
 def run : IO Unit := do
   let program ← Jit.compile [.set 0 40, .add 1 0 2, .jumpSlot 1]
@@ -309,6 +316,12 @@ def run : IO Unit := do
   assertBits "native signed remainder overflow is zero" (BitVec.ofNat 64 0) (lookup overflow.state.env r)
   let divisionStats ← Primus.Lifted.stats divisionEngine
   assertEqual "native division guards execute twice" 2 divisionStats.nativeRuns
+  let negativeInitial : Bil.State := { env := [
+    (x, .bits (BitVec.ofInt 64 (-40))),
+    (y, .bits (BitVec.ofNat 64 0))
+  ] }
+  let negative ← Primus.Lifted.runBlock divisionEngine divisionFetch divisionLift negativeInitial 0xa000
+  assertBits "native signed division of a negative by zero" (BitVec.ofNat 64 1) (lookup negative.state.env s)
 
   let riscvEngine ← Primus.Lifted.Engine.create
   let riscvBytes ← LLVM.assemble "riscv64" "slt a0, a1, a2"
@@ -459,6 +472,106 @@ def run : IO Unit := do
   | _, _ => throw <| IO.userError "BIL while result is missing"
   let loopStats ← Primus.Lifted.stats loopEngine
   assertEqual "native while avoids fallback" 0 loopStats.interpretedRuns
+
+  -- a finished loop goes on with the next statement
+  let afterLoop := reg "afterLoop"
+  let followedBlock : Primus.Lifted.Block := {
+    address := 0x10100
+    next := 0x10101
+    program := [
+      .move a (int32 0),
+      .while (.bin .neq (.var a) (int32 3)) [.move a (.bin .add (.var a) (int32 1))],
+      .move afterLoop (int 7)
+    ]
+  }
+  let followedEngine ← Primus.Lifted.Engine.create
+  let (followedFetch, followedLift) := fixed followedBlock
+  let followed ← Primus.Lifted.runBlock followedEngine followedFetch followedLift {} 0x10100
+  assertBits "a statement after a native loop runs" (BitVec.ofNat 64 7) (lookup followed.state.env afterLoop)
+  assertBits "the native loop ran" (BitVec.ofNat 32 3) (lookup followed.state.env a)
+  assertEqual "a native loop falls through to the next block" 0x10101 followed.pc
+  assertEqual "the loop stayed native" 0 (← Primus.Lifted.stats followedEngine).interpretedRuns
+
+  -- the else branch that jumps keeps its slots and labels: the inputs it reads, and what follows
+  let elseInput := reg "elseInput"
+  let elseFollow := reg "elseFollow"
+  let terminatingElse : Primus.Lifted.Block := {
+    address := 0x10200
+    next := 0x10201
+    program := [
+      .ifElse (.bin .eq (.var elseInput) (int 0))
+        [.move elseFollow (int 1)]
+        [.move elseFollow (int 2), .jmp (.bin .add (.var elseInput) (int 0x100))],
+      .move elseFollow (.bin .add (.var elseFollow) (int 10))
+    ]
+  }
+  let elseEngine ← Primus.Lifted.Engine.create
+  let (elseFetch, elseLift) := fixed terminatingElse
+  let taken ← Primus.Lifted.runBlock elseEngine elseFetch elseLift (state elseInput 5) 0x10200
+  assertEqual "a jump in the else branch reads its input" 0x105 taken.pc
+  assertBits "the else branch writes" (BitVec.ofNat 64 2) (lookup taken.state.env elseFollow)
+  let fallen ← Primus.Lifted.runBlock elseEngine elseFetch elseLift (state elseInput 0) 0x10200
+  assertBits "code after a terminating else runs" (BitVec.ofNat 64 11) (lookup fallen.state.env elseFollow)
+  assertEqual "the conditional stayed native" 0 (← Primus.Lifted.stats elseEngine).interpretedRuns
+
+  -- narrow operators against the interpreter, on every sign and on a zero divisor
+  let narrowLeft : Var := ⟨"narrowLeft", .imm 8, 0, false⟩
+  let narrowRight : Var := ⟨"narrowRight", .imm 8, 0, false⟩
+  let narrowResult : Var := ⟨"narrowResult", .imm 8, 0, false⟩
+  let narrowBit : Var := ⟨"narrowBit", .imm 1, 0, false⟩
+  for (leftValue, rightValue) in [(7, 3), (0xf9, 3), (7, 0xfd), (0xf9, 0xfd), (6, 3), (0xfa, 3), (6, 0xfd),
+      (0xfa, 0xfd), (0x80, 0xff), (0x7f, 0xff), (5, 0), (0xfb, 0), (0, 0), (0x80, 1), (1, 9), (0x80, 9), (0x80, 8)] do
+    let initial : State := { env := [(narrowLeft, .bits (BitVec.ofNat 8 leftValue)),
+      (narrowRight, .bits (BitVec.ofNat 8 rightValue))] }
+    for op in [BinOp.add, .sub, .mul, .div, .sdiv, .rem, .srem, .smod, .lshift, .rshift, .ashift, .and, .or, .xor] do
+      let block : Primus.Lifted.Block := {
+        address := 0x10300, next := 0x10301,
+        program := [.move narrowResult (.bin op (.var narrowLeft) (.var narrowRight))]
+      }
+      let engine ← Primus.Lifted.Engine.create
+      let (fetch, lift) := fixed block
+      let native ← Primus.Lifted.runBlock engine fetch lift initial 0x10300
+      assertEqual "a narrow operator is native" 0 (← Primus.Lifted.stats engine).interpretedRuns
+      match Bil.run block.program initial with
+      | .ok (expected, _) =>
+        match lookup expected.env narrowResult with
+        | .ok (.bits value) => assertBits s!"narrow {repr op} {leftValue} {rightValue}" value (lookup native.state.env narrowResult)
+        | _ => throw <| IO.userError "narrow result is not bits"
+      | .error error => throw <| IO.userError error
+    for op in [BinOp.eq, .neq, .lt, .le, .gt, .ge, .slt, .sle, .sgt, .sge] do
+      let block : Primus.Lifted.Block := {
+        address := 0x10300, next := 0x10301,
+        program := [.move narrowBit (.bin op (.var narrowLeft) (.var narrowRight))]
+      }
+      let engine ← Primus.Lifted.Engine.create
+      let (fetch, lift) := fixed block
+      let native ← Primus.Lifted.runBlock engine fetch lift initial 0x10300
+      match Bil.run block.program initial with
+      | .ok (expected, _) =>
+        match lookup expected.env narrowBit with
+        | .ok (.bits value) => assertBits s!"narrow {repr op} {leftValue} {rightValue}" value (lookup native.state.env narrowBit)
+        | _ => throw <| IO.userError "narrow result is not bits"
+      | .error error => throw <| IO.userError error
+
+  -- what the interpreter must decide stays with the interpreter
+  let wideMemory : Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let wordMemory : Var := ⟨"mem32", .mem 32 8, 0, false⟩
+  let interpretedOnly : List (String × Bil.Program) := [
+    ("an address of the wrong width", [.move narrowResult (.load (.var wordMemory) (int 0) .little 1)]),
+    ("a store to an address of the wrong width",
+      [.move wordMemory (.store (.var wordMemory) (int 0) (.int (BitVec.ofNat 8 0)) .little 1)]),
+    ("a load in an alternative of ite", [.move narrowResult
+      (.ite (.int (BitVec.ofNat 1 0)) (.load (.var wideMemory) (int 0) .little 1) (.int (BitVec.ofNat 8 0)))]),
+    ("a memory of wider cells", [.move narrowResult (.load (.var ⟨"mem", .mem 64 16, 0, false⟩) (int 0) .little 1)]),
+    ("a jump target wider than a slot", [.jmp (.int (BitVec.ofNat 128 0))])]
+  for (name, program) in interpretedOnly do
+    let engine ← Primus.Lifted.Engine.create
+    let (fetch, lift) := fixed { address := 0x10400, next := 0x10401, program }
+    let memory := Bap.Memory.empty 64
+    let initial : State := { env := [(wideMemory, .memory memory), (wordMemory, .memory (Bap.Memory.empty 32))] }
+    match (← (Primus.Lifted.runBlock engine fetch lift initial 0x10400).toBaseIO) with
+    | _ => pure ()
+    assertEqual s!"{name} is not native" 0 (← Primus.Lifted.stats engine).nativeRuns
 
   let memoryEngine ← Primus.Lifted.Engine.create
   let memoryBlock : Primus.Lifted.Block := {
@@ -712,14 +825,14 @@ def run : IO Unit := do
     | 0x20004 => ⟨0x20004, 0x20008, [cycleBack 5 0x20000 0x30000]⟩
     | _ => cycleExit
   let twoStats ← runCycle "two-block cycle through the seed" 0x20000 twoCycle 5
-  assertEqual "two-block cycle compiles one acyclic range" (1, 3) (twoStats.nativeCompilations, twoStats.graphBlocks)
+  assertEqual "two-block cycle compiles one range" (1, 3) (twoStats.nativeCompilations, twoStats.graphBlocks)
   let threeCycle : Nat → Primus.Lifted.Block
     | 0x21000 => ⟨0x21000, 0x21004, cycleStep 0x21004⟩
     | 0x21004 => ⟨0x21004, 0x21008, cycleStep 0x21008⟩
     | 0x21008 => ⟨0x21008, 0x2100c, [cycleBack 6 0x21000 0x30000]⟩
     | _ => cycleExit
   let threeStats ← runCycle "three-block cycle through the seed" 0x21000 threeCycle 6
-  assertEqual "three-block cycle compiles one acyclic range" (1, 4) (threeStats.nativeCompilations, threeStats.graphBlocks)
+  assertEqual "three-block cycle compiles one range" (1, 4) (threeStats.nativeCompilations, threeStats.graphBlocks)
   let innerCycle : Nat → Primus.Lifted.Block
     | 0x22000 => ⟨0x22000, 0x22004, [.jmp (int 0x22004)]⟩
     | 0x22004 => ⟨0x22004, 0x22008, cycleStep 0x22008⟩
@@ -727,6 +840,77 @@ def run : IO Unit := do
     | 0x2200c => ⟨0x2200c, 0x22010, [cycleBack 6 0x22004 0x30000]⟩
     | _ => cycleExit
   let innerStats ← runCycle "cycle behind the seed" 0x22000 innerCycle 6
-  assertEqual "inner back edge returns to the dispatcher" 4 innerStats.nativeRuns
+  assertEqual "a cycle behind the seed stays in its range" 1 innerStats.nativeRuns
+
+  -- An interpreted jump reports its fall-through as its next, as a native one does, and its target as its pc.
+  let jumpEngine ← Primus.Lifted.Engine.create (hotThreshold := 2)
+  let jumpBlock : Primus.Lifted.Block := ⟨0x45000, 0x45004, [.jmp (int 0x46000)]⟩
+  let (jumpFetch, jumpLift) := fixed jumpBlock
+  let jumped ← Primus.Lifted.runBlock jumpEngine jumpFetch jumpLift {} 0x45000
+  assertEqual "an interpreted jump has its target for a pc" 0x46000 jumped.pc
+  assertEqual "an interpreted jump has its fall-through for next" 0x45004 jumped.next
+  -- A range ends wherever a block leaves it, with what that way through it wrote.
+  let pathX := reg "path_x"
+  let pathY := reg "path_y"
+  let pathZ := reg "path_z"
+  let pathFetch : Primus.Lifted.Fetch := fun _ => pure (ByteArray.mk #[1])
+  let pathLift : Primus.Lifted.Lift := fun pc _ =>
+    match pc with
+    | 0x40000 => pure ⟨pc, 0x40004, [.ifElse (.bin .eq (.var pathX) (int 1)) [.jmp (int 0x40004)] [.jmp (int 0x40008)]]⟩
+    | 0x40004 => pure ⟨pc, 0x40008, [.move pathY (int 7), .jmp (int 0x40008)]⟩
+    | 0x40008 => pure ⟨pc, 0x4000c, [.move pathZ (int 9), .jmp (int 0x50000)]⟩
+    | _ => pure ⟨pc, pc + 4, []⟩
+  let pathEngine ← Primus.Lifted.Engine.create 1 128 8 16 0 false
+  let skipped ← Primus.Lifted.run pathEngine pathFetch pathLift (state pathX 0) 0x40000 20
+  assertBits "a range writes what the way through it does" (BitVec.ofNat 64 9) (lookup skipped.state.env pathZ)
+  match lookup skipped.state.env pathY with
+  | .error _ => pure ()
+  | .ok value => throw <| IO.userError s!"a way around a write bound its variable to {repr value}"
+  assertTrue "the way around ran natively" ((← Primus.Lifted.stats pathEngine).interpretedRuns == 0)
+  let through ← Primus.Lifted.run pathEngine pathFetch pathLift (state pathX 1) 0x40000 20
+  assertBits "the way through a write has its value" (BitVec.ofNat 64 7) (lookup through.state.env pathY)
+  -- A read of what only one way wrote is an input: unbound, it fails as in the interpreter.
+  let readLift : Primus.Lifted.Lift := fun pc _ =>
+    match pc with
+    | 0x41000 => pure ⟨pc, 0x41004, [.ifElse (.bin .eq (.var pathX) (int 1)) [.jmp (int 0x41004)] [.jmp (int 0x41008)]]⟩
+    | 0x41004 => pure ⟨pc, 0x41008, [.move pathY (int 7), .jmp (int 0x41008)]⟩
+    | 0x41008 => pure ⟨pc, 0x4100c, [.move pathZ (.var pathY), .jmp (int 0x50000)]⟩
+    | _ => pure ⟨pc, pc + 4, []⟩
+  let readEngine ← Primus.Lifted.Engine.create 1 128 8 16 0 false
+  expectThrow "a read of what the way there did not write fails"
+    (do let _ ← Primus.Lifted.run readEngine pathFetch readLift (state pathX 0) 0x41000 20)
+  let readThere ← Primus.Lifted.run readEngine pathFetch readLift (state pathX 1) 0x41000 20
+  assertBits "a read on the way that wrote it has its value" (BitVec.ofNat 64 7) (lookup readThere.state.env pathZ)
+  -- The fuel of `run` counts the blocks of a range: a loop that never ends runs out of it.
+  let spinLift : Primus.Lifted.Lift := fun pc _ =>
+    match pc with
+    | 0x42000 => pure ⟨pc, 0x42004, [.move pathX (.bin .add (.var pathX) (int 1)), .jmp (int 0x42004)]⟩
+    | _ => pure ⟨pc, pc + 4, [.jmp (int 0x42000)]⟩
+  let spinEngine ← Primus.Lifted.Engine.create 1 128 8 16 0 false
+  expectThrow "a range runs out of the fuel of `run`"
+    (do let _ ← Primus.Lifted.run spinEngine pathFetch spinLift (state pathX 0) 0x42000 100)
+  -- An access of several bytes on a narrower memory is the interpreter's, which wraps, unless the runner rejects it.
+  let mem32 : Var := ⟨"mem", .mem 32 8, 0, false⟩
+  let address32 : Var := ⟨"address", .imm 32, 0, false⟩
+  let value32 : Var := ⟨"value", .imm 32, 0, false⟩
+  let wrapBlock : Primus.Lifted.Block := ⟨0x43000, 0x43004, [
+    .move mem32 (.store (.var mem32) (.var address32) (.int 0x04030201#32) .little 4),
+    .move value32 (.load (.var mem32) (.var address32) .little 4)]⟩
+  let (wrapFetch, wrapLift) := fixed wrapBlock
+  let wrapEngine ← Primus.Lifted.Engine.create
+  let wrapInitial : State := { env := [(mem32, .memory (Memory.empty 32)), (address32, .bits 0xfffffffe#32)] }
+  let wrapped ← Primus.Lifted.runBlock wrapEngine wrapFetch wrapLift wrapInitial 0x43000
+  assertBits "a load that wraps reads what the store wrote" 0x04030201#32 (lookup wrapped.state.env value32)
+  match Bil.lookup wrapped.state.env mem32 with
+  | .ok (.memory memory) =>
+    assertEqual "a store that wraps goes to the start of memory" 3 (Bap.Memory.readRegion memory 0 1)[0]!.toNat
+  | _ => throw <| IO.userError "memory is missing"
+  assertEqual "an access that may wrap is interpreted" 1 (← Primus.Lifted.stats wrapEngine).interpretedRuns
+  let byteBlock : Primus.Lifted.Block := ⟨0x44000, 0x44004, [
+    .move mem32 (.store (.var mem32) (.var address32) (.int 7#8) .little 1)]⟩
+  let (byteFetch, byteLift) := fixed byteBlock
+  let byteEngine ← Primus.Lifted.Engine.create
+  let _ ← Primus.Lifted.runBlock byteEngine byteFetch byteLift wrapInitial 0x44000
+  assertEqual "an access of one byte cannot wrap, and runs natively" 1 (← Primus.Lifted.stats byteEngine).nativeRuns
 
 end Bap.Tests.Lifted

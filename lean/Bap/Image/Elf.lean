@@ -214,13 +214,14 @@ private def rawSymbols (data : ByteArray) (header : Header) (sections : List Sec
       let shndx ← IO.Reader.u16 data header.endian (offset + if header.is64 then 6 else 14)
       let value ← word data header.endian header.is64 (offset + if header.is64 then 8 else 4)
       let size ← word data header.endian header.is64 (offset + if header.is64 then 16 else 8)
+      let other ← IO.Reader.get8 data (offset + if header.is64 then 5 else 13)
       let name := match strings with
         | some table => (IO.Reader.cstring data (table.offset + nameOffset)).toOption.getD ""
         | none => ""
       let extended := if shndx == 0xffff then
           indices.bind fun table => (IO.Reader.u32 data header.endian (table + index * 4)).toOption
         else none
-      .ok ⟨name, extended.getD shndx, extended.isSome, value, size, info % 16, info / 16⟩
+      .ok ⟨name, extended.getD shndx, extended.isSome, value, size, info % 16, info / 16, other⟩
   let table := (sections.zipIdx.find? fun entry => entry.1.kind == 2).map fun entry =>
     (read entry.1 entry.2).toOption.getD []
   (table.getD []).toArray
@@ -253,6 +254,47 @@ private def rawRelocations (data : ByteArray) (header : Header) (sections : List
   (sections.filter (relocatesMemory sections)).flatMap fun sec =>
     (sectionRelocations data header sec).toOption.getD []
 
+/-- The ABI2 flag of a MIPS file, of N32. -/
+private def isN32 (data : ByteArray) (header : Header) : Bool :=
+  header.machine == ElfLinker.emMips && !header.is64 &&
+    ((IO.Reader.u32 data header.endian 36).toOption.getD 0) &&& 0x20 != 0
+
+/-- N32's records of one place are the relocations of a compound record, each one a byte of the type of the first. -/
+def packCompound (relocations : List ElfLinker.Rel) : List ElfLinker.Rel :=
+  relocations.foldr (init := []) fun rel packed =>
+    match packed with
+    | next :: rest =>
+      if next.target == rel.target && next.offset == rel.offset && next.typ < 2 ^ 16 then
+        { rel with typ := rel.typ + next.typ * 256 } :: rest
+      else rel :: packed
+    | [] => [rel]
+
+/-- The global pointer of an options section, whose descriptors start with their kind and size: `ODK_REGINFO` is the one
+with the registers, and the value follows its masks. -/
+private def optionsGp0 (data : ByteArray) (header : Header) (sec : SectionHeader) : Nat → Nat → Option Int
+  | 0, _ => none
+  | fuel + 1, at' =>
+    if at' + 8 > sec.size then none
+    else
+      let kind := data.get! (sec.offset + at')
+      let size := (data.get! (sec.offset + at' + 1)).toNat
+      if kind == 1 then
+        (IO.Reader.u64 data header.endian (sec.offset + at' + 32)).toOption.map fun gp =>
+          ElfLinker.sext (gp : Nat) 64
+      else if size == 0 then none
+      else optionsGp0 data header sec fuel (at' + size)
+
+/-- The global pointer a MIPS object was assembled for: lld takes it from these sections, and they aren't relocated. -/
+private def mipsGp0 (data : ByteArray) (header : Header) (sections : List SectionHeader) : Int :=
+  if header.machine != ElfLinker.emMips then 0
+  else
+    let gp0 := sections.findSome? fun sec =>
+      if sec.kind == 0x70000006 && !header.is64 then
+        (IO.Reader.u32 data header.endian (sec.offset + 20)).toOption.map fun gp => ElfLinker.sext (gp : Nat) 32
+      else if sec.kind == 0x7000000d then optionsGp0 data header sec (sec.size + 1) 0
+      else none
+    gp0.getD 0
+
 /-- The input of the linker for a relocatable file. -/
 private def linkInput (data : ByteArray) (header : Header) (sections : List SectionHeader) (names : List Section) :
     ElfLinker.Input :=
@@ -264,7 +306,9 @@ private def linkInput (data : ByteArray) (header : Header) (sections : List Sect
     sections := (sections.zip names).toArray.map fun (sec, named) =>
       ⟨named.name, sec.kind, sec.flags, sec.offset, sec.size, sec.align⟩
     symbols := rawSymbols data header sections
-    relocations := rawRelocations data header sections }
+    relocations :=
+      if isN32 data header then packCompound (rawRelocations data header sections) else rawRelocations data header sections
+    gp0 := mipsGp0 data header sections }
 
 /-- Links a relocatable file: its layout, the relocations applied, and what could not be applied as warnings. -/
 def linkObject (data : ByteArray) : Except String ElfLinker.Output := do

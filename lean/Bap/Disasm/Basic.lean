@@ -1,6 +1,7 @@
 import Bap.Image.Basic
 import Bap.Bil.Syntax
 import Bap.Graph.Basic
+import Std.Data.HashSet
 
 namespace Bap.Disasm
 
@@ -48,6 +49,8 @@ structure Disassembler where
   /-- The next instruction runs before this one transfers control, although control doesn't fall
   through to it, as in the delay slot of a MIPS `J`. -/
   hasDelaySlot : Insn → Bool := fun _ => false
+  /-- Of a delayed conditional branch: the slot only runs if the branch is taken, as in a MIPS `BEQL`. -/
+  annulsSlot : Insn → Bool := fun _ => false
 
 structure Disasm where
   entry : Nat
@@ -60,33 +63,34 @@ structure Block where
   instructions : List Insn
   deriving Repr
 
-private def insertInsn (insn : Insn) : List Insn → List Insn
-  | [] => [insn]
-  | head :: tail =>
-    if insn.address ≤ head.address then insn :: head :: tail else head :: insertInsn insn tail
-
 def sortedInstructions (disasm : Disasm) : List Insn :=
-  disasm.instructions.foldl (fun result insn => insertInsn insn result) []
+  disasm.instructions.mergeSort fun left right => left.address ≤ right.address
 
-def Disasm.blocks (disasm : Disasm) : List Block :=
-  let instructions := sortedInstructions disasm
-  let leaders := disasm.entry :: instructions.flatMap fun insn =>
+/-- The addresses where a block has to start. -/
+def Disasm.leaders (disasm : Disasm) (instructions : List Insn) : List Nat :=
+  disasm.entry :: instructions.flatMap fun insn =>
     match insn.flow with
     | .normal => insn.target.toList
     | _ => insn.next :: insn.target.toList
-  let rec build (current : List Insn) (blocks : List Block) : List Insn → List Block
-    | [] =>
-      match current with
-      | [] => blocks
-      | head :: _ => blocks ++ [⟨head.address, current⟩]
-    | insn :: rest =>
-      if insn.address ∈ leaders && !current.isEmpty then
-        match current with
-        | [] => build [insn] blocks rest
-        | head :: _ => build [insn] (blocks ++ [⟨head.address, current⟩]) rest
-      else
-        build (current ++ [insn]) blocks rest
-  build [] [] instructions
+
+/-- The blocks of the instructions, and the current block, both from the last one. -/
+private def buildBlocks (leaders : Std.HashSet Nat) (current : List Insn) (blocks : List Block) : List Insn → List Block
+  | [] =>
+    match current.getLast? with
+    | none => blocks
+    | some head => ⟨head.address, current.reverse⟩ :: blocks
+  | insn :: rest =>
+    if leaders.contains insn.address then
+      match current.getLast? with
+      | none => buildBlocks leaders [insn] blocks rest
+      | some head => buildBlocks leaders [insn] (⟨head.address, current.reverse⟩ :: blocks) rest
+    else
+      buildBlocks leaders (insn :: current) blocks rest
+
+def Disasm.blocks (disasm : Disasm) : List Block :=
+  let instructions := sortedInstructions disasm
+  let leaders := (disasm.leaders instructions).foldl (init := ({} : Std.HashSet Nat)) fun set address => set.insert address
+  (buildBlocks leaders [] [] instructions).reverse
 
 def Disasm.render (disasm : Disasm) : String :=
   let lines := (sortedInstructions disasm).map fun insn =>

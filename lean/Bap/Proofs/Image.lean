@@ -861,11 +861,11 @@ theorem writeNat_spec {memory : ByteArray} {little : Bool} {off n : Nat} {value 
         field value (8 * bytePosition little n i) 8 :=
   writesUpTo_spec n h
 
-private def foldWrites (memory : ByteArray) (writes : List Write) : ByteArray :=
+def foldWrites (memory : ByteArray) (writes : List Write) : ByteArray :=
   writes.foldl (init := memory) fun memory write =>
     writeNat memory write.little write.off write.n write.value
 
-private theorem commit_run (site : Site) (writes : List Write) (state : LinkState) :
+theorem commit_run (site : Site) (writes : List Write) (state : LinkState) :
     (commit site writes).run state =
       if writes.all (fun write => site.off ≤ write.off && write.off + write.n ≤ site.limit &&
           write.off + write.n ≤ state.memory.size) = true then
@@ -875,7 +875,7 @@ private theorem commit_run (site : Site) (writes : List Write) (state : LinkStat
   simp only [commit, bind, EStateM.bind, get, getThe, MonadStateOf.get, EStateM.get]
   split <;> rfl
 
-private theorem commit_fold : ∀ (writes : List Write) (memory : ByteArray),
+theorem commit_fold : ∀ (writes : List Write) (memory : ByteArray),
     (∀ write ∈ writes, write.off + write.n ≤ memory.size) →
     let result := writes.foldl (init := memory) fun memory write =>
       writeNat memory write.little write.off write.n write.value
@@ -1001,6 +1001,2912 @@ theorem gotEntry_new {env : Env} {value : Int} {state after : LinkState} {slot :
   simp only [gotEntry, bind, EStateM.bind, get, getThe, MonadStateOf.get, EStateM.get, h] at hr
   cases hr
   exact ⟨rfl, rfl⟩
+
+/-! ### Fields as bits
+
+`field` and `setBits` are what the handlers cut values and patch instructions with. The theorems about instructions below
+all come from what they say of bits: a field holds what was put in it, and the rest of the word is left alone. -/
+
+theorem shiftRight_toDiv (v : Int) (lo : Nat) : v >>> lo = v / ((2 ^ lo : Nat) : Int) := by
+  rw [Int.shiftRight_eq_div_pow]
+
+theorem field_natCast (x lo n : Nat) : field (x : Int) lo n = x / 2 ^ lo % 2 ^ n := by
+  unfold field
+  rw [shiftRight_toDiv]
+  have : ((x : Int) / ((2 ^ lo : Nat) : Int)) % ((2 ^ n : Nat) : Int) = ((x / 2 ^ lo % 2 ^ n : Nat) : Int) := by
+    rw [Int.natCast_emod, Int.natCast_ediv]
+  rw [this, Int.toNat_natCast]
+
+theorem testBit_field (x j m i : Nat) :
+    (field (x : Int) j m).testBit i = (decide (i < m) && x.testBit (j + i)) := by
+  rw [field_natCast, Nat.testBit_mod_two_pow, Nat.testBit_div_two_pow, Nat.add_comm i j]
+
+/-- A number below `2 ^ n` is its own low `n` bits. -/
+theorem field_of_lt {x n : Nat} (h : x < 2 ^ n) : field (x : Int) 0 n = x := by
+  rw [field_natCast]
+  simp [Nat.mod_eq_of_lt h]
+
+/-- Replacing the bits leaves the bits below and above them, as a sum of its parts. -/
+theorem setBits_eq (w lo n : Nat) (v : Int) :
+    setBits w lo n v = 2 ^ lo * (2 ^ n * (w / 2 ^ lo / 2 ^ n) + field v 0 n) + w % 2 ^ lo := by
+  unfold setBits
+  rw [field_natCast]
+  have h1 := Nat.div_add_mod w (2 ^ lo)
+  have h2 := Nat.div_add_mod (w / 2 ^ lo) (2 ^ n)
+  generalize w / 2 ^ lo % 2 ^ n = m at *
+  generalize w / 2 ^ lo / 2 ^ n = t at *
+  generalize w % 2 ^ lo = r at *
+  generalize w / 2 ^ lo = d at *
+  subst h2
+  subst h1
+  simp only [Nat.mul_add, Nat.mul_comm m, Nat.mul_comm (field v 0 n)]
+  omega
+
+theorem testBit_setBits (w lo n : Nat) (v : Int) (i : Nat) :
+    (setBits w lo n v).testBit i =
+      if i < lo then w.testBit i else if i < lo + n then (field v 0 n).testBit (i - lo) else w.testBit i := by
+  rw [setBits_eq, Nat.testBit_two_pow_mul_add _ (Nat.mod_lt _ (Nat.two_pow_pos lo)),
+    Nat.testBit_two_pow_mul_add _ (field_lt v 0 n), Nat.testBit_mod_two_pow, Nat.testBit_div_two_pow,
+    Nat.testBit_div_two_pow]
+  by_cases h : i < lo
+  · simp [h]
+  · simp only [h, ite_false]
+    by_cases h2 : i < lo + n
+    · have : i - lo < n := by omega
+      simp [h2, this]
+    · have : ¬ i - lo < n := by omega
+      simp only [h2, this, ite_false]
+      congr 1
+      omega
+
+/-- A replaced field holds the low bits of the value. -/
+theorem field_setBits_self (w lo n : Nat) (v : Int) : field (setBits w lo n v : Nat) lo n = field v 0 n := by
+  apply Nat.eq_of_testBit_eq
+  intro i
+  rw [testBit_field, testBit_setBits]
+  by_cases h : i < n
+  · have h1 : ¬ lo + i < lo := by omega
+    have h2 : lo + i < lo + n := by omega
+    simp [h, h1, h2]
+  · simp only [h, decide_false, Bool.false_and]
+    exact (Nat.testBit_lt_two_pow (Nat.lt_of_lt_of_le (field_lt v 0 n) (Nat.pow_le_pow_right (by decide) (by omega)))).symm
+
+/-- The other bits stay: a field that does not overlap the replaced one. -/
+theorem field_setBits_other (w lo n : Nat) (v : Int) (j m : Nat) (h : j + m ≤ lo ∨ lo + n ≤ j) :
+    field (setBits w lo n v : Nat) j m = field (w : Int) j m := by
+  apply Nat.eq_of_testBit_eq
+  intro i
+  rw [testBit_field, testBit_field, testBit_setBits]
+  by_cases hi : i < m
+  · have : ¬ (j + i < lo) → ¬ (j + i < lo + n) := by omega
+    by_cases h1 : j + i < lo
+    · simp [h1]
+    · simp [h1, this h1]
+  · simp [hi]
+
+/-- Patching a word never makes it wider than its field reach. -/
+theorem setBits_lt {w lo n k : Nat} (v : Int) (hw : w < 2 ^ k) (h : lo + n ≤ k) : setBits w lo n v < 2 ^ k := by
+  apply Nat.lt_pow_two_of_testBit
+  intro j hj
+  rw [testBit_setBits]
+  have h1 : ¬ j < lo := by omega
+  have h2 : ¬ j < lo + n := by omega
+  simp only [h1, h2, ite_false]
+  exact Nat.testBit_lt_two_pow (Nat.lt_of_lt_of_le hw (Nat.pow_le_pow_right (by decide) hj))
+
+/-- A shift only moves the bits a field reads. -/
+theorem field_shiftRight (v : Int) (k lo n : Nat) : field (v >>> k) lo n = field v (k + lo) n := by
+  unfold field
+  rw [Int.shiftRight_add]
+
+/-- Fields split: the bits of a run are those of its low part and those above them. -/
+theorem field_split (value : Int) (a n m : Nat) :
+    field value a (n + m) = field value a n + field value (a + n) m * 2 ^ n := by
+  have hP : (0 : Int) < ((2 ^ n : Nat) : Int) := by exact_mod_cast Nat.pow_pos (by decide)
+  have hQ : (0 : Int) < ((2 ^ m : Nat) : Int) := by exact_mod_cast Nat.pow_pos (by decide)
+  have hcast : ((2 ^ (n + m) : Nat) : Int) = ((2 ^ n : Nat) : Int) * ((2 ^ m : Nat) : Int) := by
+    rw [Nat.pow_add]; simp
+  have hshift : value >>> (a + n) = (value >>> a) / ((2 ^ n : Nat) : Int) := by
+    rw [Int.shiftRight_add, shiftRight_toDiv]
+  unfold field
+  rw [hshift, hcast]
+  generalize value >>> a = u
+  generalize hPdef : ((2 ^ n : Nat) : Int) = P at *
+  generalize hQdef : ((2 ^ m : Nat) : Int) = Q at *
+  have h1 := Int.emod_add_mul_ediv u P
+  have h2 := Int.emod_add_mul_ediv (u / P) Q
+  have ha0 := Int.emod_nonneg u (Int.ne_of_gt hP)
+  have ha1 := Int.emod_lt_of_pos u hP
+  have hb0 := Int.emod_nonneg (u / P) (Int.ne_of_gt hQ)
+  have hb1 := Int.emod_lt_of_pos (u / P) hQ
+  generalize ha : u % P = a' at *
+  generalize hb : (u / P) % Q = b at *
+  generalize hc : (u / P) / Q = c at *
+  generalize hq : u / P = q at *
+  have hvalue : u = (a' + P * b) + P * Q * c := by
+    rw [← h1, ← h2, Int.mul_add, Int.mul_assoc, Int.add_assoc]
+  have hbound : P * b ≤ P * (Q - 1) := Int.mul_le_mul_of_nonneg_left (by omega) (by omega)
+  have hb0' : 0 ≤ P * b := Int.mul_nonneg (by omega) hb0
+  rw [Int.mul_sub, Int.mul_one] at hbound
+  have hmod : u % (P * Q) = a' + P * b := by
+    rw [hvalue, Int.add_mul_emod_self_left, Int.emod_eq_of_lt (by omega) (by omega)]
+  rw [hmod]
+  have e1 : ((a'.toNat : Nat) : Int) = a' := Int.toNat_of_nonneg ha0
+  have e2 : ((b.toNat : Nat) : Int) = b := Int.toNat_of_nonneg hb0
+  have hcast2 : ((a' + P * b).toNat : Int) = ((a'.toNat + b.toNat * 2 ^ n : Nat) : Int) := by
+    rw [Int.toNat_of_nonneg (by omega), Int.natCast_add, Int.natCast_mul, e1, e2, hPdef, Int.mul_comm b P]
+  exact Int.ofNat.inj hcast2
+
+/-- The low bits of a value, shifted down, are the middle bits of the value. -/
+theorem field_low_shift (value : Int) (s m : Nat) : field value 0 (s + m) >>> s = field value s m := by
+  rw [Nat.shiftRight_eq_div_pow, field_split, Nat.zero_add]
+  have hlt := field_lt value 0 s
+  rw [Nat.add_mul_div_right _ _ (Nat.two_pow_pos s), Nat.div_eq_of_lt hlt, Nat.zero_add]
+
+/-- What `sext` of a value says, in the arithmetic of integers. -/
+theorem sext_eq (value : Int) {n : Nat} (hn : 0 < n) :
+    sext value n = (value + ((2 ^ (n - 1) : Nat) : Int)) % ((2 ^ n : Nat) : Int) - ((2 ^ (n - 1) : Nat) : Int) := by
+  have hp : 2 ^ n = 2 * 2 ^ (n - 1) := by
+    rw [← Nat.pow_succ']
+    congr 1
+    omega
+  have hzero : value >>> 0 = value := by rw [Int.shiftRight_eq_div_pow]; simp
+  have hHalf : (0 : Int) < ((2 ^ (n - 1) : Nat) : Int) := by exact_mod_cast Nat.two_pow_pos (n - 1)
+  have hP : ((2 ^ n : Nat) : Int) = 2 * ((2 ^ (n - 1) : Nat) : Int) := by rw [hp]; simp
+  have hfield : field value 0 n = (value % ((2 ^ n : Nat) : Int)).toNat := by
+    unfold field
+    rw [hzero]
+  unfold sext
+  rw [hfield]
+  dsimp only
+  rw [hP] at hfield ⊢
+  have hnat : (2 ^ n : Nat) = 2 ^ n := rfl
+  generalize hH : ((2 ^ (n - 1) : Nat) : Int) = H at *
+  have h0 := Int.emod_nonneg value (by omega : 2 * H ≠ 0)
+  have h1 := Int.emod_lt_of_pos value (by omega : 0 < 2 * H)
+  have hto : ((value % (2 * H)).toNat : Int) = value % (2 * H) := Int.toNat_of_nonneg h0
+  have hdiv := Int.emod_add_mul_ediv value (2 * H)
+  have hmodAdd : (value + H) % (2 * H) = if value % (2 * H) < H then value % (2 * H) + H else value % (2 * H) - H := by
+    generalize value % (2 * H) = r at *
+    generalize value / (2 * H) = q at *
+    have hv : value + H = (if r < H then r + H else r - H) + (2 * H) * (if r < H then q else q + 1) := by
+      split
+      · rw [← hdiv]; omega
+      · rw [← hdiv, Int.mul_add, Int.mul_one]; omega
+    rw [hv, Int.add_mul_emod_self_left]
+    split <;> exact Int.emod_eq_of_lt (by omega) (by omega)
+  rw [hmodAdd]
+  have hcast : ((2 ^ n : Nat) : Int) = 2 * H := hP
+  split
+  · rename_i hc
+    have hc' : ((2 ^ n : Nat) : Int) ≤ 2 * ((value % (2 * H)).toNat : Int) := by exact_mod_cast hc
+    rw [hcast, hto] at hc'
+    have hr : ¬ value % (2 * H) < H := by omega
+    simp only [hr, ite_false, hto]
+    omega
+  · rename_i hc
+    have hc' : ¬ ((2 ^ n : Nat) : Int) ≤ 2 * ((value % (2 * H)).toNat : Int) := by
+      intro h
+      exact hc (by exact_mod_cast h)
+    rw [hcast, hto] at hc'
+    have hr : value % (2 * H) < H := by omega
+    simp only [hr, ite_true, hto]
+    omega
+
+
+/-! ### Reading back -/
+
+private theorem readNat_big_fold {memory : ByteArray} {off n : Nat} {value : Int} :
+    ∀ k, k ≤ n → (∀ i, i < k → (memory.get! (off + i)).toNat = field value (8 * (n - i - 1)) 8) →
+      (List.range k).foldl (init := 0)
+          (fun sum index => sum + (memory.get! (off + index)).toNat * 256 ^ (n - index - 1)) =
+        field value (8 * (n - k)) (8 * k) * 256 ^ (n - k)
+  | 0, _, _ => by
+    simp [field]
+  | k + 1, hk, h => by
+    rw [List.range_succ, List.foldl_append, readNat_big_fold k (by omega) (fun i hi => h i (by omega))]
+    simp only [List.foldl_cons, List.foldl_nil]
+    rw [h k (by omega)]
+    have hr : n - k = (n - k - 1) + 1 := by omega
+    have hr2 : n - (k + 1) = n - k - 1 := by omega
+    rw [hr2, hr]
+    generalize n - k - 1 = r
+    have e1 : 8 * (r + 1) = 8 * r + 8 := by omega
+    have e2 : 8 * (k + 1) = 8 + 8 * k := by omega
+    have hs : r + 1 - 1 = r := by omega
+    rw [e1, e2, field_split, Nat.pow_succ]
+    simp only [hs]
+    have : (2 : Nat) ^ 8 = 256 := rfl
+    rw [this, Nat.add_mul, Nat.mul_assoc, Nat.mul_comm 256 (256 ^ r), ← Nat.mul_assoc, Nat.add_comm]
+
+/-- A store reads back as the value cut to its width, in either byte order. -/
+theorem readNat_writeNat {memory : ByteArray} {little : Bool} {off n : Nat} {value : Int} (h : off + n ≤ memory.size) :
+    readNat (writeNat memory little off n value) little off n = field value 0 (8 * n) := by
+  cases little with
+  | true => exact readNat_writeNat_little h
+  | false =>
+    have ⟨_, _, hw⟩ := writeNat_spec (little := false) (value := value) h
+    simp only [readNat, Bool.false_eq_true, ↓reduceIte]
+    have hb : ∀ i, i < n → ((writeNat memory false off n value).get! (off + i)).toNat =
+        field value (8 * (n - i - 1)) 8 := fun i hi => by rw [hw i hi]; simp [bytePosition]
+    rw [readNat_big_fold n (Nat.le_refl n) hb]
+    simp
+
+/-- A big-endian store reads back as the value cut to its width. -/
+theorem readNat_writeNat_big {memory : ByteArray} {off n : Nat} {value : Int} (h : off + n ≤ memory.size) :
+    readNat (writeNat memory false off n value) false off n = field value 0 (8 * n) :=
+  readNat_writeNat h
+
+/-- Reads of a range are not affected by what is written outside of it. -/
+theorem readNat_congr {a b : ByteArray} {little : Bool} {off n : Nat}
+    (h : ∀ i, i < n → a.get! (off + i) = b.get! (off + i)) : readNat a little off n = readNat b little off n := by
+  unfold readNat
+  have key : ∀ (l : List Nat) (init : Nat), (∀ i ∈ l, i < n) →
+      l.foldl (init := init) (fun value index => value + (a.get! (off + index)).toNat * 256 ^ (if little then index else n - index - 1)) =
+      l.foldl (init := init) (fun value index => value + (b.get! (off + index)).toNat * 256 ^ (if little then index else n - index - 1)) := by
+    intro l
+    induction l with
+    | nil => intros; rfl
+    | cons x xs ih =>
+      intro init hl
+      simp only [List.foldl_cons]
+      rw [h x (hl x (by simp))]
+      exact ih _ fun i hi => hl i (by simp [hi])
+  exact key _ _ fun i hi => List.mem_range.1 hi
+
+private theorem foldWrites_read : ∀ (writes : List Write) (memory : ByteArray) (write : Write),
+    write ∈ writes → (∀ w ∈ writes, w.off + w.n ≤ memory.size) →
+    writes.Pairwise (fun a b => a.off + a.n ≤ b.off ∨ b.off + b.n ≤ a.off) →
+    readNat (writes.foldl (init := memory) fun memory write =>
+      writeNat memory write.little write.off write.n write.value) write.little write.off write.n =
+        field write.value 0 (8 * write.n)
+  | [], _, _, hm, _, _ => by cases hm
+  | w :: rest, memory, write, hm, hb, hp => by
+    have ⟨s1, f1, _⟩ := writeNat_spec (little := w.little) (value := w.value) (hb w (by simp))
+    have hb' : ∀ x ∈ rest, x.off + x.n ≤ (writeNat memory w.little w.off w.n w.value).size := by
+      intro x hx
+      rw [s1]
+      exact hb x (by simp [hx])
+    have ⟨hd, hrest⟩ := List.pairwise_cons.1 hp
+    rw [List.foldl_cons]
+    rcases List.mem_cons.1 hm with rfl | hmem
+    · rw [readNat_congr (b := writeNat memory write.little write.off write.n write.value)]
+      · exact readNat_writeNat (hb _ (by simp))
+      · intro i hi
+        have ⟨_, hf⟩ := (commit_fold rest _ hb')
+        exact hf _ fun o ho => by
+          rcases hd o ho with h | h <;> omega
+    · exact foldWrites_read rest _ write hmem hb' hrest
+
+/-- The stores of a site that do not overlap each read back as their values, whatever their byte order. -/
+theorem commit_read_back {site : Site} {writes : List Write} {state after : LinkState} {result : Unit} {write : Write}
+    (h : (commit site writes).run state = .ok result after) (hw : write ∈ writes)
+    (hp : writes.Pairwise (fun a b => a.off + a.n ≤ b.off ∨ b.off + b.n ≤ a.off)) :
+    readNat after.memory write.little write.off write.n = field write.value 0 (8 * write.n) := by
+  rw [commit_run] at h
+  split at h
+  · rename_i hall
+    cases h
+    exact foldWrites_read writes state.memory write hw (fun w hx => by
+      have := List.all_eq_true.mp hall w hx
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at this
+      exact this.2) hp
+  · cases h
+
+/-- A value stored at a place, end to end: once committed, the place holds it cut to the width of the store. -/
+theorem store_resolves {env : Env} {site : Site} {n : Nat} {value : Int} {state after : LinkState} {result : Unit}
+    (h : (commit site [stAt env site 0 n value]).run state = .ok result after) :
+    readNat after.memory env.little (site.off + 0) n = field value 0 (8 * n) :=
+  commit_read_back (write := stAt env site 0 n value) h (by simp) (by simp)
+
+/-- The same of an instruction word, in the byte order of instructions. -/
+theorem code_resolves {env : Env} {site : Site} {n : Nat} {value : Int} {state after : LinkState} {result : Unit}
+    (h : (commit site [stiAt env site 0 n value]).run state = .ok result after) :
+    readNat after.memory env.codeLittle (site.off + 0) n = field value 0 (8 * n) :=
+  commit_read_back (write := stiAt env site 0 n value) h (by simp) (by simp)
+
+/-- A new entry of the GOT is written at the end of what the file and the GOT so far take up, and holds its value. -/
+theorem gotEntry_new_holds {env : Env} {value : Int} {state after : LinkState} {slot : Int}
+    (h : state.got[field value 0 64]? = none) (hr : (gotEntry env value).run state = .ok slot after) :
+    readNat after.memory env.little (env.gotOff + state.gotCount * (env.width / 8)) (env.width / 8) =
+      field value 0 (8 * (env.width / 8)) := by
+  change gotEntry env value state = _ at hr
+  simp only [gotEntry, bind, EStateM.bind, get, getThe, MonadStateOf.get, EStateM.get, h] at hr
+  cases hr
+  apply readNat_writeNat
+  have key : ∀ (l : List Nat) (m : ByteArray), (l.foldl (init := m) fun memory _ => memory.push 0).size = m.size + l.length := by
+    intro l
+    induction l with
+    | nil => intro m; simp
+    | cons x xs ih =>
+      intro m
+      simp only [List.foldl_cons]
+      rw [ih]
+      simp [ByteArray.size_push]
+      omega
+  rw [key]
+  simp only [List.length_range]
+  omega
+
+/-! ### What the relocations store
+
+The tables are the calculation columns of each psABI, with `S`, `A`, `P` and `GOT`. A handler does what its table says. -/
+
+/-- Running a load inside of the section gives the bytes that are there, and changes nothing. -/
+theorem ld_ok {env : Env} {site : Site} {at' n : Nat} {state : LinkState}
+    (h : inSection site at' n state.memory.size = true) :
+    ld env site at' n state = .ok (readNat state.memory env.little (site.off + at') n) state := by
+  simp only [ld, ElfLinker.load, bind, EStateM.bind, get, getThe, MonadStateOf.get, EStateM.get, h, ite_true]
+  rfl
+
+/-- The relocations of x86-64 from the psABI, `Z` being the size of the symbol, that need no entry in the GOT. -/
+def x86_64Abi (s a p got z : Int) : Nat → Option (Nat × Int)
+  | 1 => some (8, s + a)
+  | 2 | 4 => some (4, s + a - p)
+  | 10 | 11 => some (4, s + a)
+  | 12 => some (2, s + a)
+  | 13 => some (2, s + a - p)
+  | 14 => some (1, s + a)
+  | 15 => some (1, s + a - p)
+  | 24 => some (8, s + a - p)
+  | 25 | 31 => some (8, s + a - got)
+  | 26 => some (4, got + a - p)
+  | 29 => some (8, got + a - p)
+  | 32 => some (4, z + a)
+  | 33 => some (8, z + a)
+  | _ => none
+
+theorem x86_64_abi {env : Env} {site : Site} {n : Nat} {value : Int} (state : LinkState)
+    (h : x86_64Abi site.s site.a site.p env.gotBase site.sym.size site.rel.typ = some (n, value)) :
+    (x86_64 env site).run state = .ok (some [stAt env site 0 n value]) state := by
+  generalize ht : site.rel.typ = t at h
+  unfold x86_64Abi at h
+  split at h <;> cases h <;> (simp only [x86_64, ht]; try rfl)
+
+/-- The relocations of x86-64 through the GOT: `G + GOT` is the address `slot` of the entry of the symbol. -/
+def x86_64GotAbi (slot a p got : Int) : Nat → Option (Nat × Int)
+  | 3 => some (4, slot - got + a)
+  | 9 | 41 | 42 | 43 => some (4, slot + a - p)
+  | 27 | 30 => some (8, slot - got + a)
+  | 28 => some (8, slot + a - p)
+  | _ => none
+
+theorem x86_64_got {env : Env} {site : Site} {n : Nat} {value slot : Int} {state after : LinkState}
+    (hg : gotEntry env site.s state = .ok slot after)
+    (h : x86_64GotAbi slot site.a site.p env.gotBase site.rel.typ = some (n, value)) :
+    (x86_64 env site).run state = .ok (some [stAt env site 0 n value]) after := by
+  generalize ht : site.rel.typ = t at h
+  unfold x86_64GotAbi at h
+  split at h <;> cases h <;> (simp only [x86_64, ht, EStateM.run, bind, EStateM.bind, hg, done, pure, EStateM.pure]; try rfl)
+
+/-- The relocations of i386 from the psABI, as a function of the addend. -/
+def i386Abi (s p got : Int) : Nat → Option (Nat × (Int → Int))
+  | 1 => some (4, fun a => s + a)
+  | 2 | 4 => some (4, fun a => s + a - p)
+  | 9 => some (4, fun a => s + a - got)
+  | 10 => some (4, fun a => got + a - p)
+  | 20 => some (2, fun a => s + a)
+  | 21 => some (2, fun a => s + a - p)
+  | 22 => some (1, fun a => s + a)
+  | 23 => some (1, fun a => s + a - p)
+  | _ => none
+
+/-- The addend of a place in `n` bytes: of the record, or sign-extended from the place. -/
+def placeAddend (env : Env) (site : Site) (state : LinkState) (n : Nat) : Int :=
+  if site.rel.isExplicit then site.a else sext (readNat state.memory env.little (site.off + 0) n) (8 * n)
+
+theorem i386_abi {env : Env} {site : Site} {n : Nat} {f : Int → Int} {state : LinkState}
+    (hb : inSection site 0 n state.memory.size = true)
+    (h : i386Abi site.s site.p env.gotBase site.rel.typ = some (n, f)) :
+    (i386 env site).run state = .ok (some [stAt env site 0 n (f (placeAddend env site state n))]) state := by
+  generalize ht : site.rel.typ = t at h
+  unfold i386Abi at h
+  split at h <;> cases h <;> (cases he : site.rel.isExplicit <;>
+         simp only [i386, ht, EStateM.run, bind, EStateM.bind, he, done, pure, EStateM.pure, placeAddend, ld, ElfLinker.load,
+           get, getThe, MonadStateOf.get, EStateM.get, hb, ite_true, ite_false, Bool.false_eq_true] <;> rfl)
+
+/-- `R_386_GOT32`, `R_386_GOT32X`: `G + A - GOT`, the same formula with or without relaxing. -/
+theorem i386_got {env : Env} {site : Site} {slot : Int} {state after : LinkState}
+    (hg : gotEntry env site.s state = .ok slot after) (ht : site.rel.typ = 3 ∨ site.rel.typ = 43)
+    (hb : inSection site 0 4 after.memory.size = true) :
+    (i386 env site).run state =
+      .ok (some [stAt env site 0 4 (slot + placeAddend env site after 4 - env.gotBase)]) after := by
+  rcases ht with ht | ht <;>
+    cases he : site.rel.isExplicit <;>
+      simp only [i386, ht, EStateM.run, bind, EStateM.bind, he, hg, done, pure, EStateM.pure, placeAddend, ld, ElfLinker.load,
+        get, getThe, MonadStateOf.get, EStateM.get, hb, ite_true, ite_false, Bool.false_eq_true] <;> rfl
+
+/-- The data relocations of AArch64, with `X = S + A`. -/
+def aarch64Data (x p : Int) : Nat → Option (Nat × Int)
+  | 0x101 => some (8, x)
+  | 0x102 => some (4, x)
+  | 0x103 => some (2, x)
+  | 0x104 => some (8, x - p)
+  | 0x105 | 0x13a => some (4, x - p)
+  | 0x106 => some (2, x - p)
+  | _ => none
+
+theorem aarch64_data {env : Env} {site : Site} {n : Nat} {value : Int} (state : LinkState)
+    (h : aarch64Data (site.s + site.a) site.p site.rel.typ = some (n, value)) :
+    (aarch64 env site).run state = .ok (some [stAt env site 0 n value]) state := by
+  generalize ht : site.rel.typ = t at h
+  unfold aarch64Data at h
+  split at h <;> cases h <;> (simp only [aarch64, ht]; try rfl)
+
+/-- The instruction relocations of AArch64: `MOVW_UABS_G*` take 16 bits of `X`, the branches and literals the displacement
+in words, `ADRP` the distance in pages, and the rest the low bits of `X` scaled by the access. -/
+def aarch64Code (x p : Int) : Nat → Option (Nat → Nat)
+  | 0x107 | 0x108 => some fun i => setBits i 5 16 (x >>> 0)
+  | 0x109 | 0x10a => some fun i => setBits i 5 16 (x >>> 16)
+  | 0x10b | 0x10c => some fun i => setBits i 5 16 (x >>> 32)
+  | 0x10d => some fun i => setBits i 5 16 (x >>> 48)
+  | 0x111 | 0x118 => some fun i => setBits i 5 19 ((x - p) >>> 2)
+  | 0x112 => some (aarch64Adr (x - p))
+  | 0x113 | 0x114 => some (aarch64Adr ((aarch64Page x - aarch64Page p) >>> 12))
+  | 0x115 | 0x116 => some (aarch64Lo12 0 x)
+  | 0x117 => some fun i => setBits i 5 14 ((x - p) >>> 2)
+  | 0x11a | 0x11b => some fun i => setBits i 0 26 ((x - p) >>> 2)
+  | 0x11c => some (aarch64Lo12 1 x)
+  | 0x11d => some (aarch64Lo12 2 x)
+  | 0x11e => some (aarch64Lo12 3 x)
+  | 0x12b => some (aarch64Lo12 4 x)
+  | _ => none
+
+theorem aarch64_code {env : Env} {site : Site} {f : Nat → Nat} {state : LinkState}
+    (hb : inSection site 0 4 state.memory.size = true)
+    (h : aarch64Code (site.s + site.a) site.p site.rel.typ = some f) :
+    (aarch64 env site).run state =
+      .ok (some [stiAt env site 0 4 (f (readNat state.memory env.codeLittle (site.off + 0) 4))]) state := by
+  generalize ht : site.rel.typ = t at h
+  unfold aarch64Code at h
+  split at h <;> cases h <;> (simp only [aarch64, ht, EStateM.run, ldi, ElfLinker.load, done, bind, EStateM.bind, get, getThe, MonadStateOf.get,
+         EStateM.get, hb, ite_true, pure, EStateM.pure]; try rfl)
+
+/-- The relocations of AArch64 through the GOT. The entry holds `X`, as `lld` also has it. -/
+def aarch64GotCode (slot p : Int) : Nat → Option (Nat → Nat)
+  | 0x135 => some fun i => setBits i 5 19 ((slot - p) >>> 2)
+  | 0x137 => some (aarch64Adr ((aarch64Page slot - aarch64Page p) >>> 12))
+  | 0x138 => some (aarch64Lo12 3 slot)
+  | _ => none
+
+theorem aarch64_got_code {env : Env} {site : Site} {f : Nat → Nat} {slot : Int} {state after : LinkState}
+    (hg : gotEntry env (site.s + site.a) state = .ok slot after)
+    (hb : inSection site 0 4 after.memory.size = true)
+    (h : aarch64GotCode slot site.p site.rel.typ = some f) :
+    (aarch64 env site).run state =
+      .ok (some [stiAt env site 0 4 (f (readNat after.memory env.codeLittle (site.off + 0) 4))]) after := by
+  generalize ht : site.rel.typ = t at h
+  unfold aarch64GotCode at h
+  split at h <;> cases h <;> (simp only [aarch64, ht, EStateM.run, ldi, ElfLinker.load, done, bind, EStateM.bind, get, getThe, MonadStateOf.get,
+         EStateM.get, hg, hb, ite_true, pure, EStateM.pure]; try rfl)
+
+/-- `R_AARCH64_GOTPCREL32`: the entry of `S` from the place, plus `A`. -/
+theorem aarch64_gotpcrel32 {env : Env} {site : Site} {slot : Int} {state after : LinkState}
+    (hg : gotEntry env site.s state = .ok slot after) (ht : site.rel.typ = 0x13b) :
+    (aarch64 env site).run state = .ok (some [stAt env site 0 4 (slot + site.a - site.p)]) after := by
+  simp only [aarch64, ht, EStateM.run, bind, EStateM.bind, hg, done, pure, EStateM.pure]
+
+/-! ### The instructions they patch -/
+
+/-- `ADR` and `ADRP` hold a value in `immhi:immlo`, and the rest of the instruction stays. -/
+theorem aarch64Adr_spec (value : Int) (insn : Nat) :
+    field (aarch64Adr value insn : Nat) 5 19 * 4 + field (aarch64Adr value insn : Nat) 29 2 = field value 0 21 ∧
+      ∀ j m, (j + m ≤ 5 ∨ (24 ≤ j ∧ j + m ≤ 29) ∨ 31 ≤ j) →
+        field (aarch64Adr value insn : Nat) j m = field (insn : Int) j m := by
+  unfold aarch64Adr
+  constructor
+  · rw [field_setBits_self, field_setBits_other _ _ _ _ _ _ (by omega), field_setBits_self, field_shiftRight,
+      Nat.add_zero]
+    have h : field value 0 21 = field value 0 2 + field value 2 19 * 2 ^ 2 := field_split value 0 2 19
+    omega
+  · intro j m h
+    rw [field_setBits_other _ _ _ _ _ _ (by omega), field_setBits_other _ _ _ _ _ _ (by omega)]
+
+/-- The offset of an `ADD` or a load is the bits of the low 12 of a value that the scale of the access does not drop,
+and the rest of the instruction stays. -/
+theorem aarch64Lo12_spec (shift m : Nat) (hm : shift + m = 12) (value : Int) (insn : Nat) :
+    field (aarch64Lo12 shift value insn : Nat) 10 12 = field value shift m ∧
+      ∀ j k, (j + k ≤ 10 ∨ 22 ≤ j) → field (aarch64Lo12 shift value insn : Nat) j k = field (insn : Int) j k := by
+  unfold aarch64Lo12
+  have h12 : field value 0 12 = field value 0 (shift + m) := by rw [hm]
+  constructor
+  · rw [field_setBits_self, h12, field_low_shift]
+    apply field_of_lt
+    exact Nat.lt_of_lt_of_le (field_lt value shift m) (Nat.pow_le_pow_right (by decide) (by omega))
+  · intro j k h
+    exact field_setBits_other _ _ _ _ _ _ (by omega)
+
+/-- A page is its value with the low bits clear, so the distance of `ADRP` and the low 12 bits rebuild the address. -/
+theorem aarch64_page_rebuild (x p : Int) :
+    ∃ q : Int, aarch64Page p + (aarch64Page x - aarch64Page p) + field x 0 12 = x ∧ aarch64Page x = 4096 * q := by
+  have hf : (field x 0 12 : Int) = x % 4096 := by
+    unfold field
+    have hzero : x >>> 0 = x := by rw [Int.shiftRight_eq_div_pow]; simp
+    rw [hzero]
+    have h0 : (0 : Int) ≤ x % ((2 ^ 12 : Nat) : Int) := Int.emod_nonneg _ (by decide)
+    rw [Int.toNat_of_nonneg h0]
+    rfl
+  refine ⟨x / 4096, ?_, ?_⟩
+  · unfold aarch64Page
+    omega
+  · unfold aarch64Page
+    omega
+
+
+/-! ### ARM and Thumb -/
+
+/-- Rewrites the fields of patched words to what they hold. -/
+local macro "bits_step" : tactic =>
+  `(tactic| first
+    | rw [field_setBits_self]
+    | rw [field_setBits_other _ _ _ _ _ _ (by omega)]
+    | rw [field_shiftRight])
+
+local macro "bits" : tactic =>
+  `(tactic| ((repeat bits_step); (try simp only [Nat.add_zero, Nat.reduceAdd, Nat.zero_add])))
+
+/-- Runs a handler, in terms of what it loads. -/
+local macro "link_run" "[" ts:Lean.Parser.Tactic.simpLemma,* "]" : tactic =>
+  `(tactic| simp only [EStateM.run, ldi, ld, ldInt, ElfLinker.load, done, bind, EStateM.bind, get, getThe,
+    MonadStateOf.get, EStateM.get, pure, EStateM.pure, ite_true, ite_false, Bool.false_eq_true, $ts,*])
+
+/-- A branch's immediate, doubled or more, holds an even value of its range. -/
+theorem sext_natCast_field (value : Int) (n : Nat) : sext (field value 0 n : Nat) n = sext value n := by
+  unfold sext
+  simp only []
+  rw [field_of_lt (field_lt value 0 n)]
+
+theorem sext_of_range {value : Int} {n : Nat} (hn : 0 < n)
+    (h1 : -((2 ^ (n - 1) : Nat) : Int) ≤ value) (h2 : value < ((2 ^ (n - 1) : Nat) : Int)) : sext value n = value := by
+  rw [sext_eq value hn]
+  have hp : ((2 ^ n : Nat) : Int) = 2 * ((2 ^ (n - 1) : Nat) : Int) := by
+    have : 2 ^ n = 2 * 2 ^ (n - 1) := by
+      rw [← Nat.pow_succ']
+      congr 1
+      omega
+    rw [this]
+    simp
+  rw [hp, Int.emod_eq_of_lt (by omega) (by omega)]
+  omega
+
+/-- What a branch or literal decodes to, when its value is aligned and in range, is the value: nothing was lost. -/
+theorem sext_scaled_of_range {value : Int} {k m : Nat} (hm : 0 < k + m) (hal : field value 0 k = 0)
+    (h1 : -((2 ^ (k + m - 1) : Nat) : Int) ≤ value) (h2 : value < ((2 ^ (k + m - 1) : Nat) : Int)) :
+    sext (field value k m * 2 ^ k : Nat) (k + m) = value := by
+  have : field value k m * 2 ^ k = field value 0 (k + m) := by
+    rw [field_split]
+    simp [hal]
+  rw [this, sext_natCast_field, sext_of_range hm h1 h2]
+
+private theorem bit_flip_lt (x s : Nat) : 1 - (x ^^^ s) < 2 ^ 1 := by
+  omega
+
+private theorem bit_flip_twice {x s : Nat} (hx : x < 2) (hs : s < 2) : 1 - ((1 - (x ^^^ s)) ^^^ s) = x := by
+  have h1 : x = 0 ∨ x = 1 := by omega
+  have h2 : s = 0 ∨ s = 1 := by omega
+  rcases h1 with rfl | rfl <;> rcases h2 with rfl | rfl <;> rfl
+
+/-- An A32 `MOVW` or `MOVT` holds 16 bits in `imm4:imm12`, and the rest of the instruction stays. -/
+theorem armMovSet_spec (word : Nat) (value : Int) :
+    armMovImm (armMovSet word value) = field value 0 16 ∧
+      ∀ j m, ((12 ≤ j ∧ j + m ≤ 16) ∨ 20 ≤ j) → field (armMovSet word value : Nat) j m = field (word : Int) j m := by
+  unfold armMovImm armMovSet
+  constructor
+  · bits
+    have h : field value 0 16 = field value 0 12 + field value 12 4 * 2 ^ 12 := field_split value 0 12 4
+    omega
+  · intro j m h
+    bits
+
+/-- A T32 `MOVW` or `MOVT` holds 16 bits in `imm4:i:imm3:imm8`, and the rest of the instructions stay. -/
+theorem thumbMovSet_spec (hw1 hw2 : Nat) (value : Int) :
+    thumbMovImm (thumbMovSet1 hw1 value) (thumbMovSet2 hw2 value) = field value 0 16 ∧
+      (∀ j m, ((4 ≤ j ∧ j + m ≤ 10) ∨ 11 ≤ j) → field (thumbMovSet1 hw1 value : Nat) j m = field (hw1 : Int) j m) ∧
+      (∀ j m, ((8 ≤ j ∧ j + m ≤ 12) ∨ 15 ≤ j) → field (thumbMovSet2 hw2 value : Nat) j m = field (hw2 : Int) j m) := by
+  unfold thumbMovImm thumbMovSet1 thumbMovSet2
+  refine ⟨?_, ?_, ?_⟩
+  · bits
+    have h1 : field value 0 16 = field value 0 8 + field value 8 8 * 2 ^ 8 := field_split value 0 8 8
+    have h2 : field value 8 8 = field value 8 3 + field value 11 5 * 2 ^ 3 := field_split value 8 3 5
+    have h3 : field value 11 5 = field value 11 1 + field value 12 4 * 2 ^ 1 := field_split value 11 1 4
+    omega
+  · intro j m h
+    bits
+  · intro j m h
+    bits
+
+/-- An A32 branch holds a value in words, and its condition and opcode stay. -/
+theorem armBranchSet_spec (word : Nat) (value : Int) :
+    armBranchImm (armBranchSet word value) = sext (field value 2 24 * 2 ^ 2 : Nat) 26 ∧
+      ∀ j m, 24 ≤ j → field (armBranchSet word value : Nat) j m = field (word : Int) j m := by
+  unfold armBranchImm armBranchSet
+  constructor
+  · bits
+  · intro j m h
+    bits
+
+/-- The offset of a T32 `BL` or `B.W`, undoing the `I = NOT(J XOR S)` of the encoding, and the opcode bits stay. -/
+theorem thumbBranchSet_spec (hw1 hw2 : Nat) (value : Int) :
+    thumbBranchImm (thumbBranchSet1 hw1 value) (thumbBranchSet2 hw2 value) = sext (field value 1 24 * 2 ^ 1 : Nat) (1 + 24) ∧
+      (∀ j m, 11 ≤ j → field (thumbBranchSet1 hw1 value : Nat) j m = field (hw1 : Int) j m) ∧
+      (∀ j m, (j = 12 ∧ m ≤ 1 ∨ 14 ≤ j) → field (thumbBranchSet2 hw2 value : Nat) j m = field (hw2 : Int) j m) := by
+  unfold thumbBranchImm thumbBranchSet1 thumbBranchSet2
+  refine ⟨?_, ?_, ?_⟩
+  · simp only []
+    bits
+    rw [field_of_lt (bit_flip_lt _ _), field_of_lt (bit_flip_lt _ _),
+      bit_flip_twice (field_lt value 23 1) (field_lt value 24 1), bit_flip_twice (field_lt value 22 1) (field_lt value 24 1)]
+    have h1 : field value 1 24 = field value 1 11 + field value 12 13 * 2 ^ 11 := field_split value 1 11 13
+    have h2 : field value 12 13 = field value 12 10 + field value 22 3 * 2 ^ 10 := field_split value 12 10 3
+    have h3 : field value 22 3 = field value 22 1 + field value 23 2 * 2 ^ 1 := field_split value 22 1 2
+    have h4 : field value 23 2 = field value 23 1 + field value 24 1 * 2 ^ 1 := field_split value 23 1 1
+    congr 2
+    omega
+  · intro j m h
+    bits
+  · intro j m h
+    simp only []
+    bits
+
+/-- The offset of a T32 conditional `B.W`, and the condition and opcode bits stay. -/
+theorem thumbJump19Set_spec (hw1 hw2 : Nat) (value : Int) :
+    thumbJump19Imm (thumbJump19Set1 hw1 value) (thumbJump19Set2 hw2 value) = sext (field value 1 20 * 2 ^ 1 : Nat) (1 + 20) ∧
+      (∀ j m, ((6 ≤ j ∧ j + m ≤ 10) ∨ 11 ≤ j) → field (thumbJump19Set1 hw1 value : Nat) j m = field (hw1 : Int) j m) ∧
+      (∀ j m, (j = 12 ∧ m ≤ 1 ∨ 14 ≤ j) → field (thumbJump19Set2 hw2 value : Nat) j m = field (hw2 : Int) j m) := by
+  unfold thumbJump19Imm thumbJump19Set1 thumbJump19Set2
+  refine ⟨?_, ?_, ?_⟩
+  · bits
+    have h1 : field value 1 20 = field value 1 11 + field value 12 9 * 2 ^ 11 := field_split value 1 11 9
+    have h2 : field value 12 9 = field value 12 6 + field value 18 3 * 2 ^ 6 := field_split value 12 6 3
+    have h3 : field value 18 3 = field value 18 1 + field value 19 2 * 2 ^ 1 := field_split value 18 1 2
+    have h4 : field value 19 2 = field value 19 1 + field value 20 1 * 2 ^ 1 := field_split value 19 1 1
+    congr 2
+    omega
+  · intro j m h
+    bits
+  · intro j m h
+    bits
+
+/-- The offset of a narrow Thumb branch. -/
+theorem thumbShortSet_spec (n word : Nat) (value : Int) :
+    thumbShortImm n (thumbShortSet n word value) = sext (field value 1 n * 2 : Nat) (n + 1) ∧
+      ∀ j m, n ≤ j → field (thumbShortSet n word value : Nat) j m = field (word : Int) j m := by
+  unfold thumbShortImm thumbShortSet
+  constructor
+  · rw [field_setBits_self, field_shiftRight, Nat.add_zero]
+  · intro j m h
+    exact field_setBits_other _ _ _ _ _ _ (by omega)
+
+/-- `(S + A) | T`. The Thumb bit is set if the symbol is Thumb code, and the value is otherwise as it was. -/
+theorem armWithT_spec (site : Site) (value : Int) :
+    armWithT site value = if isThumb site.sym = true && value % 2 == 0 then value + 1 else value := rfl
+
+/-- The relocations of ARM that store a value, from the ABI for the Arm architecture, as functions of the addend. -/
+def armData (site : Site) (got : Int) : Nat → Option (Nat × (Int → Int))
+  | 2 | 0x26 => some (4, fun a => armWithT site (armS site + a))
+  | 3 => some (4, fun a => armWithT site (armS site + a) - site.p)
+  | 5 => some (2, fun a => armS site + a)
+  | 8 => some (1, fun a => armS site + a)
+  | 0x18 => some (4, fun a => armS site + a - got)
+  | 0x19 => some (4, fun a => got + a - site.p)
+  | _ => none
+
+theorem arm_data {env : Env} {site : Site} {n : Nat} {f : Int → Int} {state : LinkState}
+    (hb : inSection site 0 n state.memory.size = true)
+    (h : armData site env.gotBase site.rel.typ = some (n, f)) :
+    (arm env site).run state = .ok (some [stAt env site 0 n
+      (f (addendOf site (sext (readNat state.memory env.little (site.off + 0) n) (8 * n))))]) state := by
+  generalize ht : site.rel.typ = t at h
+  unfold armData at h
+  split at h <;> cases h <;> (link_run [arm, ht, hb]; try rfl)
+
+/-- `R_ARM_GOT_BREL`: `GOT(S) + A - GOT_ORG`. -/
+theorem arm_got_brel {env : Env} {site : Site} {slot : Int} {state after : LinkState}
+    (hg : gotEntry env (armWithT site (armS site)) state = .ok slot after) (ht : site.rel.typ = 0x1a)
+    (hb : inSection site 0 4 after.memory.size = true) :
+    (arm env site).run state = .ok (some [stAt env site 0 4
+      (slot + addendOf site (sext (readNat after.memory env.little (site.off + 0) 4) 32) - env.gotBase)]) after := by
+  link_run [arm, ht, hb, hg]
+
+/-- `R_ARM_GOT_PREL`, and `R_ARM_TARGET2` that means it on Linux: `GOT(S) + A - P`. -/
+theorem arm_got_prel {env : Env} {site : Site} {slot : Int} {state after : LinkState}
+    (hg : gotEntry env (armWithT site (armS site)) state = .ok slot after) (ht : site.rel.typ = 0x60 ∨ site.rel.typ = 0x29)
+    (hb : inSection site 0 4 after.memory.size = true) :
+    (arm env site).run state = .ok (some [stAt env site 0 4
+      (slot + addendOf site (sext (readNat after.memory env.little (site.off + 0) 4) 32) - site.p)]) after := by
+  rcases ht with ht | ht <;> link_run [arm, ht, hb, hg]
+
+/-- `R_ARM_PREL31`: `((S + A) | T) - P` in 31 bits, keeping the top bit. -/
+theorem arm_prel31 {env : Env} {site : Site} {state : LinkState} (ht : site.rel.typ = 0x2a)
+    (hb : inSection site 0 4 state.memory.size = true) :
+    (arm env site).run state = .ok (some [stAt env site 0 4 (setBits (readNat state.memory env.little (site.off + 0) 4) 0 31
+      (armWithT site (armS site + addendOf site
+        (sext (field (readNat state.memory env.little (site.off + 0) 4 : Nat) 0 31) 31)) - site.p) : Nat)]) state := by
+  link_run [arm, ht, hb]
+  try rfl
+
+/-- The value of each of the `MOVW` and `MOVT` relocations of ARM, `R_ARM_MOVW_ABS_NC` to `R_ARM_MOVT_PREL` in order. -/
+def armMovValue (site : Site) (kind : Nat) (a : Int) : Int :=
+  match kind with
+  | 0 => armWithT site (armS site + a)
+  | 1 => (armS site + a) >>> 16
+  | 2 => armWithT site (armS site + a) - site.p
+  | _ => (armS site + a - site.p) >>> 16
+
+theorem arm_mov {env : Env} {site : Site} {state : LinkState} {kind : Nat} (hk : kind < 4)
+    (ht : site.rel.typ = 0x2b + kind) (hb : inSection site 0 4 state.memory.size = true) :
+    (arm env site).run state = .ok (some [stAt env site 0 4 (armMovSet (readNat state.memory env.little (site.off + 0) 4)
+      (armMovValue site kind (addendOf site (sext (armMovImm (readNat state.memory env.little (site.off + 0) 4)) 16))) : Nat)])
+      state := by
+  have : kind = 0 ∨ kind = 1 ∨ kind = 2 ∨ kind = 3 := by omega
+  rcases this with rfl | rfl | rfl | rfl <;> (link_run [arm, ht, hb]; try rfl)
+
+theorem arm_thumb_mov {env : Env} {site : Site} {state : LinkState} {kind : Nat} (hk : kind < 4)
+    (ht : site.rel.typ = 0x2f + kind) (hb1 : inSection site 0 2 state.memory.size = true)
+    (hb2 : inSection site 2 2 state.memory.size = true) :
+    let hw1 := readNat state.memory env.little (site.off + 0) 2
+    let hw2 := readNat state.memory env.little (site.off + 2) 2
+    let value := armMovValue site kind (addendOf site (sext (thumbMovImm hw1 hw2) 16))
+    (arm env site).run state = .ok (some [stAt env site 0 2 (thumbMovSet1 hw1 value : Nat),
+      stAt env site 2 2 (thumbMovSet2 hw2 value : Nat)]) state := by
+  have : kind = 0 ∨ kind = 1 ∨ kind = 2 ∨ kind = 3 := by omega
+  rcases this with rfl | rfl | rfl | rfl <;> (link_run [arm, ht, hb1, hb2]; try rfl)
+
+/-- `R_ARM_PC24`, `R_ARM_CALL`, `R_ARM_JUMP24`: `S + A - P` in words. A `BL` to Thumb code becomes `BLX`, with its halfword
+in the H bit, and a `BLX` to ARM code becomes `BL`. -/
+theorem arm_branch {env : Env} {site : Site} {state : LinkState}
+    (ht : site.rel.typ = 1 ∨ site.rel.typ = 0x1c ∨ site.rel.typ = 0x1d)
+    (hb : inSection site 0 4 state.memory.size = true) :
+    let insn := readNat state.memory env.little (site.off + 0) 4
+    let value := armS site + addendOf site (armBranchImm insn) - site.p
+    (arm env site).run state = .ok (some [stAt env site 0 4
+      (if site.rel.typ == 0x1c && isThumb site.sym then setBits (armBranchSet 0xfa000000 value) 24 1 (value >>> 1)
+       else if site.rel.typ == 0x1c && isFunctionSym site.sym && field insn 28 4 == 0xf then armBranchSet 0xeb000000 value
+       else armBranchSet insn value : Nat)]) state := by
+  rcases ht with ht | ht | ht <;> (link_run [arm, ht, hb]; try rfl) <;>
+    (try simp only [ht]) <;> (split <;> (try split) <;> rfl)
+
+/-- `R_ARM_THM_PC22`, `R_ARM_THM_JUMP24`: `S + A - P`. A call goes to the aligned pc when it is a `BLX`, to ARM code, and
+its H bit says so; a jump has none. -/
+theorem arm_thumb_branch {env : Env} {site : Site} {state : LinkState} (ht : site.rel.typ = 0xa ∨ site.rel.typ = 0x1e)
+    (hb1 : inSection site 0 2 state.memory.size = true) (hb2 : inSection site 2 2 state.memory.size = true) :
+    let hw1 := readNat state.memory env.little (site.off + 0) 2
+    let hw2 := readNat state.memory env.little (site.off + 2) 2
+    let a := addendOf site (thumbBranchImm hw1 hw2)
+    let call := site.rel.typ == 0xa
+    let blx := call && (if isFunctionSym site.sym then !isThumb site.sym else field hw2 12 1 == 0)
+    let value := if blx then armS site + a - (site.p - site.p % 4) else armS site + a - site.p
+    let hw2' := if !call then hw2 else setBits hw2 12 1 (if blx then 0 else 1)
+    (arm env site).run state = .ok (some [stAt env site 0 2 (thumbBranchSet1 hw1 value : Nat),
+      stAt env site 2 2 (thumbBranchSet2 hw2' value : Nat)]) state := by
+  rcases ht with ht | ht <;> (link_run [arm, ht, hb1, hb2]; try rfl)
+
+/-- `R_ARM_THM_JUMP19`: `S + A - P`. -/
+theorem arm_thumb_jump19 {env : Env} {site : Site} {state : LinkState} (ht : site.rel.typ = 0x33)
+    (hb1 : inSection site 0 2 state.memory.size = true) (hb2 : inSection site 2 2 state.memory.size = true) :
+    let hw1 := readNat state.memory env.little (site.off + 0) 2
+    let hw2 := readNat state.memory env.little (site.off + 2) 2
+    let value := armS site + addendOf site (thumbJump19Imm hw1 hw2) - site.p
+    (arm env site).run state = .ok (some [stAt env site 0 2 (thumbJump19Set1 hw1 value : Nat),
+      stAt env site 2 2 (thumbJump19Set2 hw2 value : Nat)]) state := by
+  link_run [arm, ht, hb1, hb2]
+  try rfl
+
+/-- `R_ARM_THM_JUMP11` and `R_ARM_THM_JUMP8`: `S + A - P` in halfwords. -/
+theorem arm_thumb_short {env : Env} {site : Site} {state : LinkState} {n : Nat}
+    (ht : (site.rel.typ = 0x66 ∧ n = 11) ∨ (site.rel.typ = 0x67 ∧ n = 8))
+    (hb : inSection site 0 2 state.memory.size = true) :
+    let hw := readNat state.memory env.little (site.off + 0) 2
+    (arm env site).run state = .ok (some [stAt env site 0 2
+      (thumbShortSet n hw (armS site + addendOf site (thumbShortImm n hw) - site.p) : Nat)]) state := by
+  rcases ht with ⟨ht, rfl⟩ | ⟨ht, rfl⟩ <;> (link_run [arm, ht, hb]; try rfl)
+
+
+/-! ### MIPS -/
+
+private theorem field16_int (value : Int) : (field value 0 16 : Int) = value % 65536 := by
+  unfold field
+  have hzero : value >>> 0 = value := by rw [Int.shiftRight_eq_div_pow]; simp
+  rw [hzero, Int.toNat_of_nonneg (Int.emod_nonneg _ (by decide))]
+  rfl
+
+private theorem sext16_eq (value : Int) : sext value 16 = (value + 32768) % 65536 - 32768 :=
+  sext_eq value (n := 16) (by decide)
+
+/-- `HI16` and `LO16` in a pair rebuild the value: `HI16 << 16` plus the sign-extended `LO16`. -/
+theorem mips_hi_lo (value : Int) : mipsHi value * 65536 + sext value 16 = value := by
+  rw [sext16_eq]
+  unfold mipsHi
+  rw [shiftRight_toDiv]
+  have : ((2 ^ 16 : Nat) : Int) = 65536 := rfl
+  rw [this]
+  omega
+
+/-- The sequence `lui %highest; daddiu %higher; dsll 16; daddiu %hi; dsll 16; daddiu %lo` rebuilds a 64-bit constant, every
+`daddiu` sign-extending its halfword, which is what each of the upper halves carries for. -/
+theorem mips_four_halves (value : Int) :
+    ((sext (mipsHighest value) 16 * 65536 + sext (mipsHigher value) 16) * 4294967296 +
+        sext (mipsHi value) 16 * 65536 + sext value 16) % 18446744073709551616 = value % 18446744073709551616 := by
+  simp only [sext16_eq, mipsHighest, mipsHigher, mipsHi, shiftRight_toDiv]
+  have e1 : ((2 ^ 48 : Nat) : Int) = 281474976710656 := rfl
+  have e2 : ((2 ^ 32 : Nat) : Int) = 4294967296 := rfl
+  have e3 : ((2 ^ 16 : Nat) : Int) = 65536 := rfl
+  rw [e1, e2, e3]
+  omega
+
+/-- A 16-bit immediate of an instruction takes the low bits of a value, and the opcode and registers stay. -/
+theorem setLo16_spec (insn : Nat) (value : Int) :
+    field (setLo16 insn value) 0 16 = field value 0 16 ∧
+      ∀ j m, 16 ≤ j → field (setLo16 insn value) j m = field (insn : Int) j m := by
+  unfold setLo16
+  exact ⟨field_setBits_self .., fun j m h => field_setBits_other _ _ _ _ _ _ (.inr (by omega))⟩
+
+/-- The relocations of MIPS that store a word, with the addend that is in the record or in the place. -/
+def mipsData (s p gp gp0 : Int) : Nat → Option (Int → Int)
+  | 2 => some fun a => s + a
+  | 12 => some fun a => s + a + gp0 - gp
+  | 248 => some fun a => s + a - p
+  | _ => none
+
+/-- The addend of a word: of the record, or the word in the place. -/
+def mipsA32 (env : Env) (site : Site) (state : LinkState) : Int :=
+  if site.rel.isExplicit then site.a else readNat state.memory env.little (site.off + 0) 4
+
+/-- The addend of an instruction's immediate: of the record, or sign-extended from the low half. -/
+def mipsA16 (env : Env) (site : Site) (state : LinkState) : Int :=
+  if site.rel.isExplicit then site.a else sext (readNat state.memory env.little (site.off + 0) 4 &&& 0xffff : Nat) 16
+
+theorem mips_data {env : Env} {site : Site} {f : Int → Int} {state : LinkState}
+    (hb : inSection site 0 4 state.memory.size = true)
+    (h : mipsData site.s site.p (mipsGp env) (mipsGp0 env site.sym) site.rel.typ = some f) :
+    (mips env site).run state = .ok (some [stAt env site 0 4 (f (mipsA32 env site state))]) state := by
+  generalize ht : site.rel.typ = t at h
+  unfold mipsData at h
+  split at h <;> cases h <;> cases he : site.rel.isExplicit <;> (link_run [mips, ht, hb, he, mipsA32]; try rfl)
+
+/-- `R_MIPS_64`: `S + A` in eight bytes, of a 64-bit file. -/
+theorem mips_64 {env : Env} {site : Site} {state : LinkState} (ht : site.rel.typ = 18) (hw : env.width = 64)
+    (hb : inSection site 0 4 state.memory.size = true) :
+    (mips env site).run state = .ok (some [stAt env site 0 8 (site.s + mipsA32 env site state)]) state := by
+  cases he : site.rel.isExplicit <;> (link_run [mips, ht, hb, he, mipsA32, hw, beq_self_eq_true]; try rfl)
+
+/-- The relocations of MIPS that take the immediate of an instruction, and need no entry of the GOT: `GPREL16` and the two
+highest halves of a 64-bit constant. -/
+def mipsCode (s gp gp0 : Int) : Nat → Option (Int → Int)
+  | 7 | 8 => some fun a => s + a + gp0 - gp
+  | 28 => some fun a => mipsHigher (s + a)
+  | 29 => some fun a => mipsHighest (s + a)
+  | _ => none
+
+theorem mips_code {env : Env} {site : Site} {f : Int → Int} {state : LinkState}
+    (hb : inSection site 0 4 state.memory.size = true)
+    (h : mipsCode site.s (mipsGp env) (mipsGp0 env site.sym) site.rel.typ = some f) :
+    (mips env site).run state = .ok (some [stAt env site 0 4
+      (setLo16 (readNat state.memory env.little (site.off + 0) 4) (f (mipsA16 env site state)))]) state := by
+  generalize ht : site.rel.typ = t at h
+  unfold mipsCode at h
+  split at h <;> cases h <;> cases he : site.rel.isExplicit <;> (link_run [mips, ht, hb, he, mipsA16]; try rfl)
+
+/-- The offset of an entry of the GOT from the global pointer, by the relocations that hold it whole or in halves. -/
+def mipsGotCode (offset : Int) : Nat → Option Int
+  | 19 | 23 | 31 => some offset
+  | 22 | 30 => some (mipsHi offset)
+  | _ => none
+
+/-- `R_MIPS_GOT_DISP`, `R_MIPS_GOT_HI16`, `R_MIPS_GOT_LO16`, `R_MIPS_CALL_HI16` and `R_MIPS_CALL_LO16`: the entry of `S + A`,
+from the global pointer. -/
+theorem mips_got_code {env : Env} {site : Site} {slot value : Int} {state after : LinkState}
+    (hb : inSection site 0 4 state.memory.size = true)
+    (hg : gotEntry env (site.s + mipsA16 env site state) state = .ok slot after)
+    (h : mipsGotCode (slot - mipsGp env) site.rel.typ = some value) :
+    (mips env site).run state = .ok (some [stAt env site 0 4
+      (setLo16 (readNat state.memory env.little (site.off + 0) 4) value)]) after := by
+  generalize ht : site.rel.typ = t at h
+  unfold mipsGotCode at h
+  split at h <;> cases h <;> cases he : site.rel.isExplicit <;>
+    (simp only [mipsA16, he, ite_true, ite_false, Bool.false_eq_true] at hg; link_run [mips, ht, hb, he, hg]; try rfl)
+
+/-- `R_MIPS_CALL16` and the `R_MIPS_GOT16` of a global symbol: the entry of `S` from the global pointer. -/
+theorem mips_got16 {env : Env} {site : Site} {slot : Int} {state after : LinkState}
+    (ht : site.rel.typ = 11 ∨ (site.rel.typ = 9 ∧ site.sym.bind ≠ stbLocal))
+    (hb : inSection site 0 4 state.memory.size = true)
+    (hg : gotEntry env site.s state = .ok slot after) :
+    (mips env site).run state = .ok (some [stAt env site 0 4
+      (setLo16 (readNat state.memory env.little (site.off + 0) 4) (slot - mipsGp env))]) after := by
+  rcases ht with ht | ⟨ht, hl⟩
+  · link_run [mips, ht, hb, hg]
+  · have hl' : (site.sym.bind == stbLocal) = false := by simpa using hl
+    link_run [mips, ht, hb, hg, hl']
+
+/-- `R_MIPS_PC16`: `S + A - P` in words, the addend being in the instruction. -/
+theorem mips_pc16 {env : Env} {site : Site} {state : LinkState} (ht : site.rel.typ = 10)
+    (hb : inSection site 0 4 state.memory.size = true) :
+    let insn := readNat state.memory env.little (site.off + 0) 4
+    (mips env site).run state = .ok (some [stAt env site 0 4 (setLo16 insn
+      ((site.s + sext ((insn &&& 0xffff) <<< 2 : Nat) 18 - site.p) >>> 2))]) state := by
+  link_run [mips, ht, hb]
+  try rfl
+
+/-- `R_MIPS_26`: a local symbol stays in the 256 MiB region of the delay slot, and the target of the others is sign-extended. -/
+theorem mips_26 {env : Env} {site : Site} {state : LinkState} (ht : site.rel.typ = 4)
+    (hb : inSection site 0 4 state.memory.size = true) :
+    let insn := readNat state.memory env.little (site.off + 0) 4
+    let a : Int := if site.rel.isExplicit then site.a else ((insn &&& 0x3ffffff) <<< 2 : Nat)
+    let target := if site.sym.bind == stbLocal then
+        (field a 0 28 + (field (site.p + 4) 28 36) * 2 ^ 28 : Nat) + site.s
+      else sext a 28 + site.s
+    (mips env site).run state = .ok (some [stAt env site 0 4 (setBits insn 0 26 (target >>> 2) : Nat)]) state := by
+  link_run [mips, ht, hb]
+  try rfl
+
+/-- `R_MIPS_HI16` when the pair is complete, with `AHL = (AHI << 16) + ALO`: `(AHL + S + 0x8000) >> 16`, and `_gp_disp` is
+`GP - P` for `S`. -/
+theorem mipsApplyHi_hi16 {env : Env} {site : Site} {ahl : Int} {state : LinkState} (ht : site.rel.typ = 5)
+    (hb : inSection site 0 4 state.memory.size = true) :
+    let insn := readNat state.memory env.little (site.off + 0) 4
+    let s := if site.sym.name == "_gp_disp" then mipsGp env - site.p else site.s
+    (mipsApplyHi env site ahl).run state =
+      (commit site [stAt env site 0 4 (setLo16 insn ((ahl + s + 0x8000) >>> 16))]).run state := by
+  link_run [mipsApplyHi, ht, hb]
+  try rfl
+
+/-- The `R_MIPS_GOT16` of a local symbol when the pair is complete: the entry of the page of `S + AHL`. -/
+theorem mipsApplyHi_got16 {env : Env} {site : Site} {ahl slot : Int} {state after : LinkState} (ht : site.rel.typ ≠ 5)
+    (hb : inSection site 0 4 state.memory.size = true)
+    (hg : gotEntry env ((site.s + ahl + 0x8000) - (site.s + ahl + 0x8000) % 65536) state = .ok slot after) :
+    (mipsApplyHi env site ahl).run state =
+      (commit site [stAt env site 0 4 (setLo16 (readNat state.memory env.little (site.off + 0) 4) (slot - mipsGp env))]).run after := by
+  have ht' : (site.rel.typ == 5) = false := by simpa using ht
+  link_run [mipsApplyHi, ht', hb, hg]
+  try rfl
+
+/-- `R_MIPS_LO16`: after the pending halves of its symbol are done, `S + A`, and for `_gp_disp` the `GP - P + 4` of the pair. -/
+theorem mips_lo16 {env : Env} {site : Site} {state after : LinkState} {result : Unit} (ht : site.rel.typ = 6)
+    (hb : inSection site 0 4 state.memory.size = true) (hb' : inSection site 0 4 after.memory.size = true)
+    (hf : mipsFlush env (mipsA16 env site state) site.rel.symbol state = .ok result after) :
+    (mips env site).run state = .ok (some [stAt env site 0 4 (setLo16 (readNat after.memory env.little (site.off + 0) 4)
+      ((if site.sym.name == "_gp_disp" then mipsGp env - site.p + 4 else site.s) + mipsA16 env site state))]) after := by
+  cases he : site.rel.isExplicit <;>
+    (simp only [mipsA16, he, ite_true, ite_false, Bool.false_eq_true] at hf ⊢; link_run [mips, ht, hb, hb', he, hf]; try rfl)
+
+/-- The middle of a compound record, on the special symbol: `R_MIPS_SUB` is `S - A`, `R_MIPS_64` is `S + A`, and `R_MIPS_NONE`
+leaves the value. -/
+theorem mipsCompoundStep_spec (s value : Int) :
+    mipsCompoundStep s value 24 = some (s - value) ∧ mipsCompoundStep s value 18 = some (s + value) ∧
+      mipsCompoundStep s value 0 = some value := ⟨rfl, rfl, rfl⟩
+
+/-- What the last of a compound record does with its result: 16-bit halves of it, or all of it. -/
+theorem mipsCompoundField_spec (insn : Nat) (s value : Int) :
+    mipsCompoundField insn s value 5 = some (4, setLo16 insn (mipsHi (s + value))) ∧
+      mipsCompoundField insn s value 6 = some (4, setLo16 insn (s + value)) ∧
+      mipsCompoundField insn s value 28 = some (4, setLo16 insn (mipsHigher (s + value))) ∧
+      mipsCompoundField insn s value 29 = some (4, setLo16 insn (mipsHighest (s + value))) ∧
+      mipsCompoundField insn s value 18 = some (8, s + value) ∧ mipsCompoundField insn s value 2 = some (4, s + value) ∧
+      mipsCompoundField insn s value 24 = some (8, s - value) := ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- The special symbols of the N64 ABI. -/
+theorem mipsSpecial_spec (env : Env) (site : Site) :
+    mipsSpecial env site 0 = some 0 ∧ mipsSpecial env site 1 = some (mipsGp env) ∧ mipsSpecial env site 2 = some env.gp0 ∧
+      mipsSpecial env site 3 = some site.p := ⟨rfl, rfl, rfl, rfl⟩
+
+/-- A compound record, in general: the first relocation's value goes through the middle one, on the special symbol, and the
+last one stores it. -/
+theorem mipsCompound_spec {env : Env} {site : Site} {special base value : Int} {n : Nat} {stored : Int} {state after : LinkState}
+    (hs : mipsSpecial env site (site.rel.typ >>> 24) = some special)
+    (hbase : mipsCompoundBase env site (site.rel.typ % 256) state = .ok (some base) after)
+    (hm : (if (site.rel.typ >>> 16) % 256 != 0 then mipsCompoundStep special base ((site.rel.typ >>> 8) % 256) else some base) = some value)
+    (hb : inSection site 0 4 after.memory.size = true)
+    (hl : mipsCompoundField (readNat after.memory env.little (site.off + 0) 4) (if (site.rel.typ >>> 16) % 256 != 0 then 0 else special) value
+      (if (site.rel.typ >>> 16) % 256 != 0 then (site.rel.typ >>> 16) % 256 else (site.rel.typ >>> 8) % 256) = some (n, stored)) :
+    (mipsCompound env site).run state = .ok (some [stAt env site 0 n stored]) after := by
+  link_run [mipsCompound, hs, hbase, hm, hb, hl, bne_self_eq_false]
+
+/-- The value of the first of a compound record: `GPREL16` and `GPREL32` count from the global pointer, as in a record of
+their own, and the others are as their formulas say. -/
+theorem mipsCompoundBase_spec (env : Env) (site : Site) (state : LinkState) :
+    mipsCompoundBase env site 7 state = .ok (some (site.s + site.a + mipsGp0 env site.sym - mipsGp env)) state ∧
+      mipsCompoundBase env site 12 state = .ok (some (site.s + site.a + mipsGp0 env site.sym - mipsGp env)) state ∧
+      mipsCompoundBase env site 248 state = .ok (some (site.s + site.a - site.p)) state ∧
+      mipsCompoundBase env site 18 state = .ok (some (site.s + site.a)) state ∧
+      mipsCompoundBase env site 2 state = .ok (some (site.s + site.a)) state := ⟨rfl, rfl, rfl, rfl, rfl⟩
+
+/-- The relocations of a record with the special symbol `RSS_UNDEF`, with a middle one of `R_MIPS_SUB`, of `GPREL16`, as
+`.cpsetup` has them: `%hi` or `%lo` of `GP - (S + A)`, with the first one's global pointer. -/
+private theorem compound_gp_rel_neg {env : Env} {site : Site} {state : LinkState} {last : Nat} {stored : Int}
+    (ht : site.rel.typ = 7 + 24 * 2 ^ 8 + last * 2 ^ 16) (hlast : 0 < last) (hl : last < 256) (hb : inSection site 0 4 state.memory.size = true)
+    (hf : mipsCompoundField (readNat state.memory env.little (site.off + 0) 4) 0 (0 - (site.s + site.a + mipsGp0 env site.sym - mipsGp env)) last =
+      some (4, stored)) :
+    (mipsCompound env site).run state = .ok (some [stAt env site 0 4 stored]) state := by
+  have h1 : site.rel.typ >>> 24 = 0 := by rw [ht, Nat.shiftRight_eq_div_pow]; omega
+  have h2 : (site.rel.typ >>> 16) % 256 = last := by rw [ht, Nat.shiftRight_eq_div_pow]; omega
+  have h3 : (site.rel.typ >>> 8) % 256 = 24 := by rw [ht, Nat.shiftRight_eq_div_pow]; omega
+  have h4 : site.rel.typ % 256 = 7 := by rw [ht]; omega
+  have hne : (last != 0) = true := by simp; omega
+  apply mipsCompound_spec (special := 0) (base := site.s + site.a + mipsGp0 env site.sym - mipsGp env)
+    (value := 0 - (site.s + site.a + mipsGp0 env site.sym - mipsGp env))
+  · rw [h1]; rfl
+  · rw [h4]; rfl
+  · simp only [h2, h3, hne, ↓reduceIte]; rfl
+  · exact hb
+  · simp only [h2, hne, ↓reduceIte]; exact hf
+
+/-- `%hi(%neg(%gp_rel(S + A)))`, as `R_MIPS_GPREL16 / R_MIPS_SUB / R_MIPS_HI16` of `.cpsetup`: the high half of `GP - (S + A)`. -/
+theorem mips_gp_rel_neg_hi {env : Env} {site : Site} {state : LinkState} (ht : site.rel.typ = 7 + 24 * 2 ^ 8 + 5 * 2 ^ 16)
+    (hb : inSection site 0 4 state.memory.size = true) :
+    (mipsCompound env site).run state = .ok (some [stAt env site 0 4 (setLo16 (readNat state.memory env.little (site.off + 0) 4)
+      (mipsHi (-(site.s + site.a + mipsGp0 env site.sym - mipsGp env))))]) state := by
+  apply compound_gp_rel_neg ht (by decide) (by decide) hb
+  simp only [mipsCompoundField, Int.zero_add, Int.zero_sub]
+
+/-- `%lo(%neg(%gp_rel(S + A)))`: the low half of `GP - (S + A)`. -/
+theorem mips_gp_rel_neg_lo {env : Env} {site : Site} {state : LinkState} (ht : site.rel.typ = 7 + 24 * 2 ^ 8 + 6 * 2 ^ 16)
+    (hb : inSection site 0 4 state.memory.size = true) :
+    (mipsCompound env site).run state = .ok (some [stAt env site 0 4 (setLo16 (readNat state.memory env.little (site.off + 0) 4)
+      (-(site.s + site.a + mipsGp0 env site.sym - mipsGp env)))]) state := by
+  apply compound_gp_rel_neg ht (by decide) (by decide) hb
+  simp only [mipsCompoundField, Int.zero_add, Int.zero_sub]
+
+/-- The second relocation is on the special symbol: with `RSS_GP`, `R_MIPS_GPREL16 / R_MIPS_SUB` is a value measured back from
+the global pointer. lld knows only `RSS_UNDEF`, so this is by the N64 ABI alone. -/
+theorem mips_special_gp {env : Env} {site : Site} {state : LinkState} {last : Nat}
+    (ht : site.rel.typ = 7 + 24 * 2 ^ 8 + last * 2 ^ 16 + 1 * 2 ^ 24) (hlast : 0 < last) (hl : last < 256)
+    (hb : inSection site 0 4 state.memory.size = true) {stored : Int}
+    (hf : mipsCompoundField (readNat state.memory env.little (site.off + 0) 4) 0
+      (mipsGp env - (site.s + site.a + mipsGp0 env site.sym - mipsGp env)) last = some (4, stored)) :
+    (mipsCompound env site).run state = .ok (some [stAt env site 0 4 stored]) state := by
+  have h1 : site.rel.typ >>> 24 = 1 := by rw [ht, Nat.shiftRight_eq_div_pow]; omega
+  have h2 : (site.rel.typ >>> 16) % 256 = last := by rw [ht, Nat.shiftRight_eq_div_pow]; omega
+  have h3 : (site.rel.typ >>> 8) % 256 = 24 := by rw [ht, Nat.shiftRight_eq_div_pow]; omega
+  have h4 : site.rel.typ % 256 = 7 := by rw [ht]; omega
+  have hne : (last != 0) = true := by simp; omega
+  apply mipsCompound_spec (special := mipsGp env) (base := site.s + site.a + mipsGp0 env site.sym - mipsGp env)
+    (value := mipsGp env - (site.s + site.a + mipsGp0 env site.sym - mipsGp env))
+  · rw [h1]; rfl
+  · rw [h4]; rfl
+  · simp only [h2, h3, hne, ↓reduceIte]; rfl
+  · exact hb
+  · simp only [h2, hne, ↓reduceIte]; exact hf
+
+/-- `R_MIPS_PC32 / R_MIPS_64`: `S + A - P` in eight bytes, as in the `.eh_frame` of N64. -/
+theorem mips_pc32_64 {env : Env} {site : Site} {state : LinkState} (ht : site.rel.typ = 248 + 18 * 2 ^ 8)
+    (hb : inSection site 0 4 state.memory.size = true) :
+    (mipsCompound env site).run state = .ok (some [stAt env site 0 8 (site.s + site.a - site.p)]) state := by
+  have : (mipsCompoundField (readNat state.memory env.little (site.off + 0) 4) 0 (site.s + site.a - site.p) 18) =
+      some (8, site.s + site.a - site.p) := by simp only [mipsCompoundField, Int.zero_add]
+  apply mipsCompound_spec (special := 0) (base := site.s + site.a - site.p) (value := site.s + site.a - site.p)
+  · rw [ht]; rfl
+  · rw [ht]; rfl
+  · rw [ht]; rfl
+  · exact hb
+  · rw [ht]; exact this
+
+/-- A record's type above 8 bits goes to the compound rule. -/
+theorem mips_of_compound {env : Env} {site : Site} (ht : 256 ≤ site.rel.typ) :
+    mips env site = mipsCompound env site := by
+  unfold mips
+  dsimp only
+  split <;> first
+    | omega
+    | (rename_i hk; rw [ite_eq_right (by omega)])
+
+
+/-! ### RISC-V -/
+
+/-- A field as integers, for arithmetic with literals. -/
+theorem field_int (value : Int) (lo n : Nat) :
+    (field value lo n : Int) = (value / ((2 ^ lo : Nat) : Int)) % ((2 ^ n : Nat) : Int) := by
+  unfold field
+  rw [shiftRight_toDiv, Int.toNat_of_nonneg (Int.emod_nonneg _ (by
+    have : (0 : Int) < ((2 ^ n : Nat) : Int) := by exact_mod_cast Nat.two_pow_pos n
+    omega))]
+
+/-- `AUIPC` or `LUI` and the 12-bit immediate that follows rebuild the value, which is what the high part is rounded for. -/
+theorem riscv_hi_lo (value : Int) (first second : Nat) :
+    ((field (riscvU value first) 12 20 : Int) * 4096 + sext (field (riscvI value second) 20 12 : Nat) 12) % 4294967296 =
+      value % 4294967296 := by
+  unfold riscvU riscvI
+  rw [field_setBits_self, field_setBits_self, field_shiftRight, sext_natCast_field, sext_eq value (n := 12) (by decide),
+    field_int]
+  have e1 : ((2 ^ (12 + 0) : Nat) : Int) = 4096 := rfl
+  have e2 : ((2 ^ 20 : Nat) : Int) = 1048576 := rfl
+  have e3 : ((2 ^ (12 - 1) : Nat) : Int) = 2048 := rfl
+  rw [e1, e2, e3]
+  omega
+
+/-- A U-type instruction keeps its opcode and register, an I-type also its other register and function. -/
+theorem riscvU_frame (value : Int) (insn j m : Nat) (h : j + m ≤ 12) : field (riscvU value insn) j m = field (insn : Int) j m :=
+  field_setBits_other _ _ _ _ _ _ (.inl h)
+
+theorem riscvI_frame (value : Int) (insn j m : Nat) (h : j + m ≤ 20) : field (riscvI value insn) j m = field (insn : Int) j m :=
+  field_setBits_other _ _ _ _ _ _ (.inl h)
+
+/-- An S-type instruction has its offset in two parts, and the rest stays. -/
+theorem riscvS_spec (value : Int) (insn : Nat) :
+    field (riscvS value insn) 25 7 * 2 ^ 5 + field (riscvS value insn) 7 5 = field value 0 12 ∧
+      ∀ j m, ((j + m ≤ 7) ∨ (12 ≤ j ∧ j + m ≤ 25)) → field (riscvS value insn) j m = field (insn : Int) j m := by
+  unfold riscvS
+  constructor
+  · bits
+    have h : field value 0 12 = field value 0 5 + field value 5 7 * 2 ^ 5 := field_split value 0 5 7
+    omega
+  · intro j m h
+    bits
+
+/-- A branch has `imm[12|10:5]` and `imm[4:1|11]` in two parts, and the rest stays. -/
+theorem riscvB_spec (value : Int) (insn : Nat) :
+    field (riscvB value insn) 31 1 * 2 ^ 12 + field (riscvB value insn) 7 1 * 2 ^ 11 + field (riscvB value insn) 25 6 * 2 ^ 5 +
+        field (riscvB value insn) 8 4 * 2 = field value 1 12 * 2 ∧
+      ∀ j m, ((j + m ≤ 7) ∨ (12 ≤ j ∧ j + m ≤ 25)) → field (riscvB value insn) j m = field (insn : Int) j m := by
+  unfold riscvB
+  constructor
+  · bits
+    have h1 : field value 1 12 = field value 1 4 + field value 5 8 * 2 ^ 4 := field_split value 1 4 8
+    have h2 : field value 5 8 = field value 5 6 + field value 11 2 * 2 ^ 6 := field_split value 5 6 2
+    have h3 : field value 11 2 = field value 11 1 + field value 12 1 * 2 ^ 1 := field_split value 11 1 1
+    omega
+  · intro j m h
+    bits
+
+/-- `JAL` has `imm[20|10:1|11|19:12]`, and the rest stays. -/
+theorem riscvJ_spec (value : Int) (insn : Nat) :
+    field (riscvJ value insn) 31 1 * 2 ^ 20 + field (riscvJ value insn) 12 8 * 2 ^ 12 + field (riscvJ value insn) 20 1 * 2 ^ 11 +
+        field (riscvJ value insn) 21 10 * 2 = field value 1 20 * 2 ∧
+      ∀ j m, j + m ≤ 12 → field (riscvJ value insn) j m = field (insn : Int) j m := by
+  unfold riscvJ
+  constructor
+  · bits
+    have h1 : field value 1 20 = field value 1 10 + field value 11 10 * 2 ^ 10 := field_split value 1 10 10
+    have h2 : field value 11 10 = field value 11 1 + field value 12 9 * 2 ^ 1 := field_split value 11 1 9
+    have h3 : field value 12 9 = field value 12 8 + field value 20 1 * 2 ^ 8 := field_split value 12 8 1
+    omega
+  · intro j m h
+    bits
+
+/-- `C.BEQZ` and `C.BNEZ` have `offset[8|4:3]` and `offset[7:6|2:1|5]`, and the rest stays. -/
+theorem riscvCB_spec (value : Int) (insn : Nat) :
+    field (riscvCB value insn) 12 1 * 2 ^ 8 + field (riscvCB value insn) 5 2 * 2 ^ 6 + field (riscvCB value insn) 2 1 * 2 ^ 5 +
+        field (riscvCB value insn) 10 2 * 2 ^ 3 + field (riscvCB value insn) 3 2 * 2 = field value 1 8 * 2 ∧
+      ∀ j m, (j + m ≤ 2 ∨ (7 ≤ j ∧ j + m ≤ 10) ∨ 13 ≤ j) → field (riscvCB value insn) j m = field (insn : Int) j m := by
+  unfold riscvCB
+  constructor
+  · bits
+    have h1 : field value 1 8 = field value 1 2 + field value 3 6 * 2 ^ 2 := field_split value 1 2 6
+    have h2 : field value 3 6 = field value 3 2 + field value 5 4 * 2 ^ 2 := field_split value 3 2 4
+    have h3 : field value 5 4 = field value 5 1 + field value 6 3 * 2 ^ 1 := field_split value 5 1 3
+    have h4 : field value 6 3 = field value 6 2 + field value 8 1 * 2 ^ 2 := field_split value 6 2 1
+    omega
+  · intro j m h
+    bits
+
+/-- `C.J` has `offset[11|4|9:8|10|6|7|3:1|5]`, and the rest stays. -/
+theorem riscvCJ_spec (value : Int) (insn : Nat) :
+    field (riscvCJ value insn) 12 1 * 2 ^ 11 + field (riscvCJ value insn) 8 1 * 2 ^ 10 + field (riscvCJ value insn) 9 2 * 2 ^ 8 +
+        field (riscvCJ value insn) 6 1 * 2 ^ 7 + field (riscvCJ value insn) 7 1 * 2 ^ 6 + field (riscvCJ value insn) 2 1 * 2 ^ 5 +
+        field (riscvCJ value insn) 11 1 * 2 ^ 4 + field (riscvCJ value insn) 3 3 * 2 = field value 1 11 * 2 ∧
+      ∀ j m, (j + m ≤ 2 ∨ 13 ≤ j) → field (riscvCJ value insn) j m = field (insn : Int) j m := by
+  unfold riscvCJ
+  constructor
+  · bits
+    have h1 : field value 1 11 = field value 1 3 + field value 4 8 * 2 ^ 3 := field_split value 1 3 8
+    have h2 : field value 4 8 = field value 4 1 + field value 5 7 * 2 ^ 1 := field_split value 4 1 7
+    have h3 : field value 5 7 = field value 5 1 + field value 6 6 * 2 ^ 1 := field_split value 5 1 6
+    have h4 : field value 6 6 = field value 6 1 + field value 7 5 * 2 ^ 1 := field_split value 6 1 5
+    have h5 : field value 7 5 = field value 7 1 + field value 8 4 * 2 ^ 1 := field_split value 7 1 4
+    have h6 : field value 8 4 = field value 8 2 + field value 10 2 * 2 ^ 2 := field_split value 8 2 2
+    have h7 : field value 10 2 = field value 10 1 + field value 11 1 * 2 ^ 1 := field_split value 10 1 1
+    omega
+  · intro j m h
+    bits
+
+/-- The relocations of RISC-V that store a value, with `X = S + A`. -/
+def riscvData (x p : Int) : Nat → Option (Nat × Int)
+  | 1 | 56 => some (4, x)
+  | 2 => some (8, x)
+  | 54 => some (1, x)
+  | 55 => some (2, x)
+  | 57 | 59 => some (4, x - p)
+  | _ => none
+
+theorem riscv_data {env : Env} {site : Site} {n : Nat} {value : Int} (state : LinkState)
+    (h : riscvData (site.s + site.a) site.p site.rel.typ = some (n, value)) :
+    (riscv env site).run state = .ok (some [stAt env site 0 n value]) state := by
+  generalize ht : site.rel.typ = t at h
+  unfold riscvData at h
+  split at h <;> cases h <;> (link_run [riscv, ht]; try rfl)
+
+/-- The relocations of RISC-V that patch an instruction word. -/
+def riscvCode (x p : Int) : Nat → Option (Nat × (Nat → Int))
+  | 16 => some (4, riscvB (x - p))
+  | 17 => some (4, riscvJ (x - p))
+  | 26 => some (4, riscvU x)
+  | 27 => some (4, riscvI x)
+  | 28 => some (4, riscvS x)
+  | 44 => some (2, riscvCB (x - p))
+  | 45 => some (2, riscvCJ (x - p))
+  | _ => none
+
+theorem riscv_code {env : Env} {site : Site} {n : Nat} {f : Nat → Int} {state : LinkState}
+    (hb : inSection site 0 n state.memory.size = true)
+    (h : riscvCode (site.s + site.a) site.p site.rel.typ = some (n, f)) :
+    (riscv env site).run state =
+      .ok (some [stiAt env site 0 n (f (readNat state.memory env.codeLittle (site.off + 0) n))]) state := by
+  generalize ht : site.rel.typ = t at h
+  unfold riscvCode at h
+  split at h <;> cases h <;> (link_run [riscv, ht, hb]; try rfl)
+
+/-- `R_RISCV_CALL` and `R_RISCV_CALL_PLT`: `S + A - P` in the `AUIPC` and the `JALR` after it. -/
+theorem riscv_call {env : Env} {site : Site} {state : LinkState} (ht : site.rel.typ = 18 ∨ site.rel.typ = 19)
+    (hb1 : inSection site 0 4 state.memory.size = true) (hb2 : inSection site 4 4 state.memory.size = true) :
+    let v := site.s + site.a - site.p
+    (riscv env site).run state = .ok (some [
+      stiAt env site 0 4 (riscvU v (readNat state.memory env.codeLittle (site.off + 0) 4)),
+      stiAt env site 4 4 (riscvI v (readNat state.memory env.codeLittle (site.off + 4) 4))]) state := by
+  rcases ht with ht | ht <;> (link_run [riscv, ht, hb1, hb2]; try rfl)
+
+/-- `R_RISCV_ADD*` and `R_RISCV_SUB*`: a value in the place, plus or minus `S + A`. -/
+def riscvArith (x : Int) : Nat → Option (Nat × (Int → Int))
+  | 33 => some (1, fun old => old + x)
+  | 34 => some (2, fun old => old + x)
+  | 35 => some (4, fun old => old + x)
+  | 36 => some (8, fun old => old + x)
+  | 37 => some (1, fun old => old - x)
+  | 38 => some (2, fun old => old - x)
+  | 39 => some (4, fun old => old - x)
+  | 40 => some (8, fun old => old - x)
+  | _ => none
+
+theorem riscv_arith {env : Env} {site : Site} {n : Nat} {f : Int → Int} {state : LinkState}
+    (hb : inSection site 0 n state.memory.size = true)
+    (h : riscvArith (site.s + site.a) site.rel.typ = some (n, f)) :
+    (riscv env site).run state = .ok (some [stAt env site 0 n
+      (f (readNat state.memory env.little (site.off + 0) n))]) state := by
+  generalize ht : site.rel.typ = t at h
+  unfold riscvArith at h
+  split at h <;> cases h <;> (link_run [riscv, ht, hb]; try rfl)
+
+/-- `R_RISCV_SUB6` and `R_RISCV_SET6`: the low 6 bits of a byte, and the top two stay. -/
+theorem riscv_sub6_set6 {env : Env} {site : Site} {state : LinkState} (hb : inSection site 0 1 state.memory.size = true) :
+    let old := readNat state.memory env.little (site.off + 0) 1
+    (site.rel.typ = 52 → (riscv env site).run state = .ok (some [stAt env site 0 1
+      (setBits old 0 6 ((old : Int) - (site.s + site.a)) : Nat)]) state) ∧
+    (site.rel.typ = 53 → (riscv env site).run state = .ok (some [stAt env site 0 1
+      (setBits old 0 6 (site.s + site.a) : Nat)]) state) := by
+  refine ⟨fun ht => ?_, fun ht => ?_⟩ <;> (link_run [riscv, ht, hb]; try rfl)
+
+/-- `R_RISCV_GOT32_PCREL`: the entry of `S` from the place, plus `A`. -/
+theorem riscv_got32 {env : Env} {site : Site} {slot : Int} {state after : LinkState} (ht : site.rel.typ = 41)
+    (hg : gotEntry env site.s state = .ok slot after) :
+    (riscv env site).run state = .ok (some [stAt env site 0 4 (slot + site.a - site.p)]) after := by
+  link_run [riscv, ht, hg]
+
+/-- `R_RISCV_PCREL_HI20` and `R_RISCV_GOT_HI20`: the value collected for the instruction before the relocations. -/
+theorem riscv_pcrel_hi {env : Env} {site : Site} {state : LinkState} {value : Int} (ht : site.rel.typ = 20 ∨ site.rel.typ = 23)
+    (hv : state.riscvHi[site.p]? = some value) (hb : inSection site 0 4 state.memory.size = true) :
+    (riscv env site).run state = .ok (some [stiAt env site 0 4
+      (riscvU value (readNat state.memory env.codeLittle (site.off + 0) 4))]) state := by
+  rcases ht with ht | ht <;> (link_run [riscv, ht, hb, hv]; try rfl)
+
+/-- `R_RISCV_PCREL_LO12_I` and `_S`: the symbol is the label of the `AUIPC`, and the value is the one of that instruction,
+so a pair adds up to what it should even though the two are at different places. -/
+theorem riscv_pcrel_lo {env : Env} {site : Site} {state : LinkState} {value : Int}
+    (hv : state.riscvHi[site.s]? = some value) (hb : inSection site 0 4 state.memory.size = true) :
+    let insn := readNat state.memory env.codeLittle (site.off + 0) 4
+    (site.rel.typ = 24 → (riscv env site).run state = .ok (some [stiAt env site 0 4 (riscvI value insn)]) state) ∧
+      (site.rel.typ = 25 → (riscv env site).run state = .ok (some [stiAt env site 0 4 (riscvS value insn)]) state) := by
+  refine ⟨fun ht => ?_, fun ht => ?_⟩ <;> (link_run [riscv, ht, hb, hv]; try rfl)
+
+/-- A `PCREL_HI20` is collected as `S + A - P`, and `GOT_HI20` through the entry of `S`. -/
+theorem riscvPrescan_pcrel {env : Env} {site : Site} (ht : site.rel.typ = 23) (state : LinkState) :
+    riscvPrescan env site state =
+      .ok () { state with riscvHi := state.riscvHi.insert site.p (site.s + site.a - site.p) } := by
+  link_run [riscvPrescan, ht, modify, modifyGet, MonadStateOf.modifyGet, EStateM.modifyGet]
+  try rfl
+
+theorem riscvPrescan_got {env : Env} {site : Site} {slot : Int} {state after : LinkState} (ht : site.rel.typ = 20)
+    (hg : gotEntry env site.s state = .ok slot after) :
+    riscvPrescan env site state =
+      .ok () { after with riscvHi := after.riscvHi.insert site.p (slot + site.a - site.p) } := by
+  link_run [riscvPrescan, ht, hg, modify, modifyGet, MonadStateOf.modifyGet, EStateM.modifyGet]
+  try rfl
+
+/-- The bytes of a ULEB128 number rewritten in its length: 7 bits each from the low end, and each but the last says that
+another one follows. -/
+def ulebBytes (value : Int) (n : Nat) : List Nat :=
+  (List.range n).map fun i => field value (7 * i) 7 + (if i + 1 < n then 0x80 else 0)
+
+/-- The continuation bit does not disturb the digit. -/
+theorem ulebBytes_getElem (value : Int) (n i : Nat) (h : i < n) :
+    (ulebBytes value n)[i]'(by simpa [ulebBytes] using h) % 128 = field value (7 * i) 7 ∧
+      ((ulebBytes value n)[i]'(by simpa [ulebBytes] using h) / 128 = 1 ↔ i + 1 < n) := by
+  have hl : field value (7 * i) 7 < 2 ^ 7 := field_lt ..
+  have e : (2 : Nat) ^ 7 = 128 := rfl
+  rw [e] at hl
+  simp only [ulebBytes, List.getElem_map, List.getElem_range]
+  split <;> simp_all <;> omega
+
+/-- Digit by digit they add up to the low `7 * n` bits of the value, so the number reads back as it was stored. -/
+theorem ulebBytes_value (value : Int) : ∀ k, (List.range k).foldl (init := 0)
+    (fun sum i => sum + field value (7 * i) 7 * 128 ^ i) = field value 0 (7 * k)
+  | 0 => by simp [field]
+  | k + 1 => by
+    rw [List.range_succ, List.foldl_append, ulebBytes_value value k]
+    simp only [List.foldl_cons, List.foldl_nil]
+    have e : 7 * (k + 1) = 7 * k + 7 := by omega
+    have e2 : (128 : Nat) = 2 ^ 7 := rfl
+    rw [e, field_split, Nat.zero_add, e2, ← Nat.pow_mul]
+
+private theorem uleb_read_loop {env : Env} {site : Site} {state : LinkState} :
+    ∀ (l : List Nat) (init : Nat), (∀ i ∈ l, inSection site i 1 state.memory.size = true) →
+      (forIn l init (fun i (r : Nat) =>
+        (do
+          let r' := r + ((← ld env site i 1) &&& 0x7f) * 2 ^ (7 * i)
+          pure PUnit.unit
+          pure (ForInStep.yield r') : LinkM (ForInStep Nat)))) state =
+        .ok (l.foldl (init := init) fun r i =>
+          r + (readNat state.memory env.little (site.off + i) 1 &&& 0x7f) * 2 ^ (7 * i)) state
+  | [], _, _ => rfl
+  | i :: rest, init, h => by
+    simp only [List.forIn_cons, List.foldl_cons]
+    have hi := ld_ok (env := env) (h i (by simp))
+    simp only [bind, EStateM.bind, hi, pure, EStateM.pure]
+    exact uleb_read_loop rest _ fun j hj => h j (by simp [hj])
+
+/-- What a ULEB128 relocation stores, as `R_RISCV_SET_ULEB128` and `R_RISCV_SUB_ULEB128` use it. -/
+theorem rewriteUleb_spec {env : Env} {site : Site} {state : LinkState} {f : Nat → Int} {n : Nat}
+    (hlen : ulebLength env site 9 0 state = .ok n state)
+    (hb : ∀ i, i < n → inSection site i 1 state.memory.size = true) :
+    let old := (List.range n).foldl (init := 0) fun r i =>
+      r + (readNat state.memory env.little (site.off + i) 1 &&& 0x7f) * 2 ^ (7 * i)
+    (rewriteUleb env site f).run state = .ok (some ((List.range n).map fun i =>
+      stAt env site i 1 ((field (f old) (7 * i) 7 + (if i + 1 < n then 0x80 else 0) : Nat) : Int))) state := by
+  intro old
+  have hloop := uleb_read_loop (env := env) (site := site) (state := state) (List.range n) 0
+    (fun i hi => hb i (List.mem_range.1 hi))
+  simp only [bind, pure] at hloop
+  simp only [rewriteUleb, EStateM.run, bind, EStateM.bind, hlen, done, pure, EStateM.pure]
+  rw [hloop]
+
+
+/-! ### PowerPC -/
+
+/-- `@ha` and `@l` in a pair rebuild the value: `addis` and a sign-extended offset. -/
+theorem ppc_ha_lo (value : Int) : ppcHa value * 65536 + sext value 16 = value := by
+  rw [sext16_eq]
+  unfold ppcHa
+  rw [shiftRight_toDiv]
+  have : ((2 ^ 16 : Nat) : Int) = 65536 := rfl
+  rw [this]
+  omega
+
+/-- The halves of the three 16-bit `@ha`, `@highera` and `@highesta` of a value carry only for the offset below them, that
+is the low half, as `lis`, `ori` and `rldicr` sequences of the ABI want. -/
+theorem ppc_high_halves (value : Int) :
+    ppcHigher value = value >>> 32 ∧ ppcHighest value = value >>> 48 ∧ ppcHi value = value >>> 16 ∧
+      ppcHighera value = (value + 0x8000) >>> 32 ∧ ppcHighesta value = (value + 0x8000) >>> 48 := ⟨rfl, rfl, rfl, rfl, rfl⟩
+
+/-- A DS-form offset keeps the two bits of the opcode extension, and a DQ-form offset the four of its own. -/
+theorem ppcDsHalf_spec (old : Nat) (value : Int) :
+    (field (ppcDsHalf false old value : Nat) 2 14 = field value 2 14 ∧
+        field (ppcDsHalf false old value : Nat) 0 2 = field (old : Int) 0 2) ∧
+      (field (ppcDsHalf true old value : Nat) 4 12 = field value 4 12 ∧
+        field (ppcDsHalf true old value : Nat) 0 4 = field (old : Int) 0 4) := by
+  unfold ppcDsHalf
+  simp only [Bool.false_eq_true, ite_false, ite_true]
+  refine ⟨⟨?_, ?_⟩, ?_, ?_⟩ <;> bits
+
+/-- `lq`, `lxvp` and `stxvp` are DQ-form, and `lxv` and `stxv` among primary opcode 61 by their low bits. -/
+theorem ppcIsDq_spec (insn : Nat) :
+    ppcIsDq insn = (field (insn : Int) 26 6 == 6 || field (insn : Int) 26 6 == 56 ||
+      (field (insn : Int) 26 6 == 61 && field (insn : Int) 0 2 == 1)) := rfl
+
+/-- The relocations that PowerPC and PowerPC64 share, with `X = S + A`. -/
+def ppcData (x p : Int) : Nat → Option (Nat × Int)
+  | 1 => some (4, x)
+  | 3 | 4 => some (2, x)
+  | 5 => some (2, ppcHi x)
+  | 6 => some (2, ppcHa x)
+  | 26 => some (4, x - p)
+  | 38 => some (8, x)
+  | 44 => some (8, x - p)
+  | _ => none
+
+theorem ppc_data {env : Env} {site : Site} {n : Nat} {value : Int} (state : LinkState)
+    (h : ppcData (site.s + site.a) site.p site.rel.typ = some (n, value)) :
+    (powerpc env site).run state = .ok (some [stAt env site 0 n value]) state := by
+  generalize ht : site.rel.typ = t at h
+  unfold ppcData at h
+  split at h <;> cases h <;> (link_run [powerpc, ht]; try rfl)
+
+/-- The branches: `LI` and `BD`, in words, keeping `AA` and `LK`. -/
+def ppcCode (x p : Int) : Nat → Option (Nat → Nat)
+  | 2 => some fun i => setBits i 2 24 (x >>> 2)
+  | 7 => some fun i => setBits i 2 14 (x >>> 2)
+  | 10 | 18 => some fun i => setBits i 2 24 ((x - p) >>> 2)
+  | 11 => some fun i => setBits i 2 14 ((x - p) >>> 2)
+  | _ => none
+
+theorem ppc_code {env : Env} {site : Site} {f : Nat → Nat} {state : LinkState}
+    (hb : inSection site 0 4 state.memory.size = true)
+    (h : ppcCode (site.s + site.a) site.p site.rel.typ = some f) :
+    (powerpc env site).run state =
+      .ok (some [stiAt env site 0 4 (f (readNat state.memory env.codeLittle (site.off + 0) 4))]) state := by
+  generalize ht : site.rel.typ = t at h
+  unfold ppcCode at h
+  split at h <;> cases h <;> (link_run [powerpc, ht, hb]; try rfl)
+
+/-- The relocations of the ELFv1 and ELFv2 ABIs of PowerPC64 that need no entry of the GOT, `.TOC.` being the TOC pointer. -/
+def ppc64Data (x p toc a : Int) : Nat → Option (Nat × Int)
+  | 39 => some (2, ppcHigher x)
+  | 40 => some (2, ppcHighera x)
+  | 41 => some (2, ppcHighest x)
+  | 42 => some (2, ppcHighesta x)
+  | 47 | 48 => some (2, x - toc)
+  | 49 => some (2, ppcHi (x - toc))
+  | 50 => some (2, ppcHa (x - toc))
+  | 51 => some (8, toc + a)
+  | 249 | 250 => some (2, x - p)
+  | 251 => some (2, ppcHi (x - p))
+  | 252 => some (2, ppcHa (x - p))
+  | _ => none
+
+theorem ppc64_data {env : Env} {site : Site} {n : Nat} {value : Int} (state : LinkState) (hm : env.machine = emPpc64)
+    (h : ppc64Data (site.s + site.a) site.p (ppcToc env) site.a site.rel.typ = some (n, value)) :
+    (powerpc env site).run state = .ok (some [stAt env site 0 n value]) state := by
+  generalize ht : site.rel.typ = t at h
+  unfold ppc64Data at h
+  split at h <;> cases h <;> (link_run [powerpc, ht, hm, bne_self_eq_false]; try rfl)
+
+/-- The TOC relocations only exist on PowerPC64: on 32 bits the numbers mean other things and are left alone. -/
+theorem ppc32_no_toc {env : Env} {site : Site} (state : LinkState) (hm : env.machine ≠ emPpc64)
+    (ht : site.rel.typ = 47 ∨ site.rel.typ = 48 ∨ site.rel.typ = 49 ∨ site.rel.typ = 50 ∨ site.rel.typ = 51) :
+    (powerpc env site).run state = .ok none state := by
+  have hm' : (env.machine != emPpc64) = true := by simpa using hm
+  rcases ht with ht | ht | ht | ht | ht <;> (link_run [powerpc, ht, hm']; try rfl)
+
+/-- The relocations of PowerPC64 through the GOT. -/
+theorem ppc64_got {env : Env} {site : Site} {slot : Int} {state after : LinkState} (hm : env.machine = emPpc64)
+    (hg : gotEntry env (site.s + site.a) state = .ok slot after) :
+    ((site.rel.typ = 14 ∨ site.rel.typ = 15) →
+      (powerpc env site).run state = .ok (some [stAt env site 0 2 (slot - ppcToc env)]) after) ∧
+    (site.rel.typ = 16 →
+      (powerpc env site).run state = .ok (some [stAt env site 0 2 (ppcHi (slot - ppcToc env))]) after) ∧
+    (site.rel.typ = 17 →
+      (powerpc env site).run state = .ok (some [stAt env site 0 2 (ppcHa (slot - ppcToc env))]) after) := by
+  refine ⟨fun ht => ?_, fun ht => ?_, fun ht => ?_⟩
+  · rcases ht with ht | ht <;> link_run [powerpc, ht, hm, hg, bne_self_eq_false]
+  · link_run [powerpc, ht, hm, hg, bne_self_eq_false]
+  · link_run [powerpc, ht, hm, hg, bne_self_eq_false]
+
+/-- The word of the instruction a little-endian halfword belongs to, for telling DS-form from DQ-form. -/
+theorem ppcInsnOfHalf_little {env : Env} {site : Site} {state : LinkState} (hl : env.little = true) (hc : env.codeLittle = true)
+    (hb : inSection site 0 4 state.memory.size = true) :
+    ppcInsnOfHalf env site state = .ok (readNat state.memory true (site.off + 0) 4) state := by
+  simp only [ppcInsnOfHalf, hl, ite_true, ldi, hc, ElfLinker.load, bind, EStateM.bind, get, getThe, MonadStateOf.get,
+    EStateM.get, hb]
+  rfl
+
+/-- On big-endian, the halfword is the second half of the word. -/
+theorem ppcInsnOfHalf_big {env : Env} {site : Site} (hl : env.little = false) (state : LinkState) :
+    ppcInsnOfHalf env site state = .ok (readNat state.memory false (site.off - 2) 4) state := by
+  simp only [ppcInsnOfHalf, hl, Bool.false_eq_true, ite_false, bind, EStateM.bind, get, getThe, MonadStateOf.get, EStateM.get,
+    pure, EStateM.pure]
+
+/-- `R_PPC64_ADDR16_DS`, `R_PPC64_TOC16_DS` and `R_PPC64_TOC16_LO_DS`: the value goes in the offset of a DS-form or DQ-form
+instruction. -/
+theorem ppc64_ds {env : Env} {site : Site} {state : LinkState} {insn : Nat} (hm : env.machine = emPpc64)
+    (hi : ppcInsnOfHalf env site state = .ok insn state) (hb : inSection site 0 2 state.memory.size = true) :
+    let old := readNat state.memory env.little (site.off + 0) 2
+    let x := site.s + site.a
+    ((site.rel.typ = 56 ∨ site.rel.typ = 57) → (powerpc env site).run state =
+      .ok (some [stAt env site 0 2 (ppcDsHalf (ppcIsDq insn) old x : Nat)]) state) ∧
+    ((site.rel.typ = 63 ∨ site.rel.typ = 64) → (powerpc env site).run state =
+      .ok (some [stAt env site 0 2 (ppcDsHalf (ppcIsDq insn) old (x - ppcToc env) : Nat)]) state) := by
+  refine ⟨fun ht => ?_, fun ht => ?_⟩ <;> rcases ht with ht | ht <;>
+    (link_run [powerpc, ht, hm, hi, hb, bne_self_eq_false]; try rfl)
+
+/-- `R_PPC64_GOT16_DS` and `R_PPC64_GOT16_LO_DS`. -/
+theorem ppc64_got_ds {env : Env} {site : Site} {state after : LinkState} {slot : Int} {insn : Nat} (hm : env.machine = emPpc64)
+    (ht : site.rel.typ = 58 ∨ site.rel.typ = 59) (hg : gotEntry env (site.s + site.a) state = .ok slot after)
+    (hi : ppcInsnOfHalf env site after = .ok insn after) (hb : inSection site 0 2 after.memory.size = true) :
+    (powerpc env site).run state = .ok (some [stAt env site 0 2 (ppcDsHalf (ppcIsDq insn)
+      (readNat after.memory env.little (site.off + 0) 2) (slot - ppcToc env) : Nat)]) after := by
+  rcases ht with ht | ht <;> (link_run [powerpc, ht, hm, hg, hi, hb, bne_self_eq_false]; try rfl)
+
+/-- The local entry of a function of ELFv2: none, or `1 << v` bytes for the three top bits `v` of `st_other`. -/
+theorem ppcLocalEntry_spec (other : Nat) :
+    let v := (other >>> 5) % 8
+    (v ≤ 1 ∨ v = 7 → ppcLocalEntry other = 0) ∧ (2 ≤ v → v ≤ 6 → ppcLocalEntry other = 2 ^ v) := by
+  intro v
+  have hv : v = (other >>> 5) % 8 := rfl
+  have hlt : v < 8 := Nat.mod_lt _ (by decide)
+  unfold ppcLocalEntry
+  rw [← hv]
+  constructor
+  · intro h
+    have : v = 0 ∨ v = 1 ∨ v = 7 := by omega
+    rcases this with h | h | h <;> rw [h] <;> rfl
+  · intro h1 h2
+    have : v = 2 ∨ v = 3 ∨ v = 4 ∨ v = 5 ∨ v = 6 := by omega
+    rcases this with h | h | h | h | h <;> rw [h] <;> rfl
+
+/-! ### SystemZ -/
+
+/-- The relocations of SystemZ, with `X = S + A` and halfword-scaled displacements for the `DBL` ones. -/
+def systemzData (x p : Int) : Nat → Option (Nat × Int)
+  | 1 => some (1, x)
+  | 3 => some (2, x)
+  | 4 => some (4, x)
+  | 5 | 8 => some (4, x - p)
+  | 16 => some (2, x - p)
+  | 17 | 18 => some (2, (x - p) >>> 1)
+  | 19 | 20 => some (4, (x - p) >>> 1)
+  | 22 => some (8, x)
+  | 23 | 25 => some (8, x - p)
+  | _ => none
+
+theorem systemz_data {env : Env} {site : Site} {n : Nat} {value : Int} (state : LinkState)
+    (h : systemzData (site.s + site.a) site.p site.rel.typ = some (n, value)) :
+    (systemz env site).run state = .ok (some [stAt env site 0 n value]) state := by
+  generalize ht : site.rel.typ = t at h
+  unfold systemzData at h
+  split at h <;> cases h <;> (link_run [systemz, ht]; try rfl)
+
+/-- `R_390_12`: `S + A` in the low 12 bits, keeping the base register. -/
+theorem systemz_12 {env : Env} {site : Site} {state : LinkState} (ht : site.rel.typ = 2)
+    (hb : inSection site 0 2 state.memory.size = true) :
+    (systemz env site).run state = .ok (some [stAt env site 0 2
+      (setBits (readNat state.memory env.little (site.off + 0) 2) 0 12 (site.s + site.a) : Nat)]) state := by
+  link_run [systemz, ht, hb]
+  try rfl
+
+/-! ### The rest of MIPS and the relocations that store nothing -/
+
+/-- `R_MIPS_GOT_PAGE` of a 64-bit file: a local symbol in 32 bits needs no page entry, and the instruction becomes the `LUI` of
+its page; the others take the entry of their page, from the global pointer. -/
+theorem mips_got_page {env : Env} {site : Site} {slot : Int} {state after : LinkState} (ht : site.rel.typ = 20)
+    (hw : env.width = 64) (hb : inSection site 0 4 state.memory.size = true) :
+    let x := site.s + mipsA16 env site state
+    let insn := readNat state.memory env.little (site.off + 0) 4
+    ((site.sym.bind == stbLocal && sext x 32 == x) = true → (mips env site).run state = .ok (some [stAt env site 0 4
+      ((0x3c000000 ||| (field (insn : Int) 16 5 <<< 16) ||| field (x + 0x8000) 16 16 : Nat) : Int)]) state) ∧
+    ((site.sym.bind == stbLocal && sext x 32 == x) = false →
+      gotEntry env ((x + 0x8000) - (x + 0x8000) % 65536) state = .ok slot after →
+      (mips env site).run state = .ok (some [stAt env site 0 4 (setLo16 insn (slot - mipsGp env))]) after) := by
+  intro x insn
+  refine ⟨fun hl => ?_, fun hl hg => ?_⟩ <;>
+    cases he : site.rel.isExplicit <;>
+    simp only [x, mipsA16, he, ite_true, ite_false, Bool.false_eq_true] at hl ⊢ <;>
+    (try simp only [x, mipsA16, he, ite_true, ite_false, Bool.false_eq_true] at hg) <;>
+    (link_run [mips, ht, hb, he, hw, hl, beq_self_eq_true]; try simp_all <;> try rfl)
+
+/-- `R_MIPS_GOT_OFST` of a 64-bit file: the offset from the page of `R_MIPS_GOT_PAGE`, or all of it where that was a `LUI`. -/
+theorem mips_got_ofst {env : Env} {site : Site} {state : LinkState} (ht : site.rel.typ = 21) (hw : env.width = 64)
+    (hb : inSection site 0 4 state.memory.size = true) :
+    let x := site.s + mipsA16 env site state
+    (mips env site).run state = .ok (some [stAt env site 0 4 (setLo16 (readNat state.memory env.little (site.off + 0) 4)
+      (if (site.sym.bind == stbLocal && sext x 32 == x) = true then x else x - ((x + 0x8000) - (x + 0x8000) % 65536)))]) state := by
+  intro x
+  cases he : site.rel.isExplicit <;>
+    simp only [x, mipsA16, he, ite_true, ite_false, Bool.false_eq_true] <;>
+    (link_run [mips, ht, hb, he, hw, beq_self_eq_true]; try rfl)
+
+/-- `R_MIPS_HI16` of a record with its addend is done at once, and the `R_MIPS_GOT16` of a local symbol likewise. -/
+theorem mips_hi16_explicit {env : Env} {site : Site} {state after : LinkState} {result : Unit}
+    (ht : site.rel.typ = 5 ∨ (site.rel.typ = 9 ∧ site.sym.bind = stbLocal)) (he : site.rel.isExplicit = true)
+    (ha : mipsApplyHi env site site.a state = .ok result after) :
+    (mips env site).run state = .ok (some []) after := by
+  rcases ht with ht | ⟨ht, hl⟩
+  · link_run [mips, ht, he, ha]
+  · have hl' : (site.sym.bind == stbLocal) = true := by simpa using hl
+    link_run [mips, ht, he, ha, hl']
+
+/-- Without an addend in the record, the half waits for its `R_MIPS_LO16`, with what it holds of the addend. -/
+theorem mips_hi16_pending {env : Env} {site : Site} {state : LinkState}
+    (ht : site.rel.typ = 5 ∨ (site.rel.typ = 9 ∧ site.sym.bind = stbLocal)) (he : site.rel.isExplicit = false)
+    (hb : inSection site 0 4 state.memory.size = true) :
+    (mips env site).run state = .ok (some []) { state with mipsPending :=
+      (site, readNat state.memory env.little (site.off + 0) 4 &&& 0xffff) :: state.mipsPending } := by
+  rcases ht with ht | ⟨ht, hl⟩
+  · link_run [mips, ht, he, hb, modify, modifyGet, MonadStateOf.modifyGet, EStateM.modifyGet]
+    try rfl
+  · have hl' : (site.sym.bind == stbLocal) = true := by simpa using hl
+    link_run [mips, ht, he, hb, hl', modify, modifyGet, MonadStateOf.modifyGet, EStateM.modifyGet]
+    try rfl
+
+/-- The relocations that store nothing: `NONE`, and the markers of `R_ARM_V4BX`, `R_MIPS_JALR`, `R_RISCV_ALIGN` and
+`R_RISCV_RELAX`. -/
+theorem relocations_of_nothing (env : Env) (site : Site) (state : LinkState) :
+    (site.rel.typ = 0 → (x86_64 env site).run state = .ok (some []) state) ∧
+      (site.rel.typ = 0 → (i386 env site).run state = .ok (some []) state) ∧
+      (site.rel.typ = 0 → (aarch64 env site).run state = .ok (some []) state) ∧
+      ((site.rel.typ = 0 ∨ site.rel.typ = 0x28) → (arm env site).run state = .ok (some []) state) ∧
+      ((site.rel.typ = 0 ∨ site.rel.typ = 37) → (mips env site).run state = .ok (some []) state) ∧
+      ((site.rel.typ = 0 ∨ site.rel.typ = 43 ∨ site.rel.typ = 51) → (riscv env site).run state = .ok (some []) state) ∧
+      (site.rel.typ = 0 → (powerpc env site).run state = .ok (some []) state) ∧
+      (site.rel.typ = 0 → (systemz env site).run state = .ok (some []) state) := by
+  refine ⟨fun ht => ?_, fun ht => ?_, fun ht => ?_, fun ht => ?_, fun ht => ?_, fun ht => ?_, fun ht => ?_, fun ht => ?_⟩
+  · simp only [x86_64, ht]; rfl
+  · simp only [i386, ht]; rfl
+  · simp only [aarch64, ht]; rfl
+  · rcases ht with ht | ht <;> (simp only [arm, ht]; rfl)
+  · rcases ht with ht | ht <;> (simp only [mips, ht]; rfl)
+  · rcases ht with ht | ht | ht <;> (simp only [riscv, ht]; rfl)
+  · simp only [powerpc, ht]; rfl
+  · simp only [systemz, ht]; rfl
+
+/-! ### The machines -/
+
+/-- Each machine has its handler. -/
+theorem handler_spec (env : Env) :
+    (env.machine = 62 → handler env = some (x86_64 env)) ∧ (env.machine = 3 → handler env = some (i386 env)) ∧
+      (env.machine = 183 → handler env = some (aarch64 env)) ∧ (env.machine = 40 → handler env = some (arm env)) ∧
+      (env.machine = 8 → handler env = some (mips env)) ∧ (env.machine = 243 → handler env = some (riscv env)) ∧
+      (env.machine = 20 → handler env = some (powerpc env)) ∧ (env.machine = 21 → handler env = some (powerpc env)) ∧
+      (env.machine = 22 → handler env = some (systemz env)) := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> (intro h; simp only [handler, h])
+
+
+/-! ### The instructions of ARM and AArch64 objects
+
+`lld-link` has the same instruction formats as ELF, and these patched words are built from the same encoders. -/
+
+open Coff in
+/-- The numbers of the relocations of ARM and AArch64, against `llvm/BinaryFormat/COFF.h`. -/
+theorem relocationKind_instructions :
+    relocationKind 0xaa64 0 = some .ignored ∧ relocationKind 0xaa64 1 = some (.absolute 4) ∧
+      relocationKind 0xaa64 2 = some (.absolute 4) ∧ relocationKind 0xaa64 3 = some (.arm64Branch 0 26) ∧
+      relocationKind 0xaa64 4 = some (.arm64Adr 12) ∧ relocationKind 0xaa64 5 = some (.arm64Adr 0) ∧
+      relocationKind 0xaa64 6 = some (.arm64Add false) ∧ relocationKind 0xaa64 7 = some (.arm64Load false) ∧
+      relocationKind 0xaa64 8 = some .sectionRelative ∧ relocationKind 0xaa64 9 = some (.arm64Add true) ∧
+      relocationKind 0xaa64 0xa = some .arm64AddHigh ∧ relocationKind 0xaa64 0xb = some (.arm64Load true) ∧
+      relocationKind 0xaa64 0xd = some .section ∧ relocationKind 0xaa64 0xe = some (.absolute 8) ∧
+      relocationKind 0xaa64 0xf = some (.arm64Branch 5 19) ∧ relocationKind 0xaa64 0x10 = some (.arm64Branch 5 14) ∧
+      relocationKind 0xaa64 0x11 = some (.relative 4) ∧
+      relocationKind 0x01c4 0 = some .ignored ∧ relocationKind 0x01c4 1 = some (.absolute 4) ∧
+      relocationKind 0x01c4 2 = some (.absolute 4) ∧ relocationKind 0x01c4 0xa = some (.relative 4) ∧
+      relocationKind 0x01c4 0xe = some .section ∧ relocationKind 0x01c4 0xf = some .sectionRelative ∧
+      relocationKind 0x01c4 0x10 = some .armMov32A ∧ relocationKind 0x01c4 0x11 = some .armMov32T ∧
+      relocationKind 0x01c4 0x12 = some .armBranch20T ∧ relocationKind 0x01c4 0x14 = some .armBranch24T ∧
+      relocationKind 0x01c4 0x15 = some .armBranch24T := by
+  decide
+
+open Coff in
+/-- `ADR` and `ADRP`: the address with the addend in the instruction, from the place, in the immediate; and the rest stays. -/
+theorem patched_adr (shift symbol place sectionAddr old : Nat) :
+    let imm := sext (field (old : Int) 5 19 * 4 + field (old : Int) 29 2 : Nat) 21
+    let value := ((symbol + imm) >>> shift) - ((place : Int) >>> shift)
+    let word := patchedInstruction (.arm64Adr shift) symbol place sectionAddr old
+    field (word : Int) 5 19 * 4 + field (word : Int) 29 2 = field value 0 21 ∧
+      ∀ j m, (j + m ≤ 5 ∨ (24 ≤ j ∧ j + m ≤ 29) ∨ 31 ≤ j) → field (word : Int) j m = field (old : Int) j m :=
+  aarch64Adr_spec _ _
+
+open Coff in
+/-- `ADD`: the page offset of the address, or of its offset in its section, plus the addend in the immediate. -/
+theorem patched_add (within : Bool) (symbol place sectionAddr old : Nat) :
+    let base := if within then symbol - sectionAddr else symbol
+    let word := patchedInstruction (.arm64Add within) symbol place sectionAddr old
+    field (word : Int) 10 12 = (field (old : Int) 10 12 + base % 4096) % 4096 ∧
+      ∀ j m, (j + m ≤ 10 ∨ 22 ≤ j) → field (word : Int) j m = field (old : Int) j m := by
+  refine ⟨?_, fun j m h => field_setBits_other _ _ _ _ _ _ (by omega)⟩
+  show field (setBits old 10 12 _ : Nat) 10 12 = _
+  rw [field_setBits_self, field_natCast]
+  simp
+
+open Coff in
+/-- `ADD` of `SECREL_HIGH12A`: the bits above the page offset, of the offset in the section with the addend. -/
+theorem patched_add_high (symbol place sectionAddr old : Nat) :
+    let word := patchedInstruction .arm64AddHigh symbol place sectionAddr old
+    field (word : Int) 10 12 = ((symbol - sectionAddr + field (old : Int) 10 12) / 4096) % 4096 ∧
+      ∀ j m, (j + m ≤ 10 ∨ 22 ≤ j) → field (word : Int) j m = field (old : Int) j m := by
+  refine ⟨?_, fun j m h => field_setBits_other _ _ _ _ _ _ (by omega)⟩
+  show field (setBits old 10 12 _ : Nat) 10 12 = _
+  rw [field_setBits_self, field_natCast, Nat.shiftRight_eq_div_pow]
+  simp
+
+open Coff in
+/-- Loads and stores: the page offset scaled by the size of the access, plus the addend in the immediate, cut to the range
+that the scale leaves in a page. -/
+theorem patched_load (within : Bool) (symbol place sectionAddr old : Nat) :
+    let base := if within then symbol - sectionAddr else symbol
+    let scale := arm64LoadScale old
+    let word := patchedInstruction (.arm64Load within) symbol place sectionAddr old
+    field (word : Int) 10 12 % 2 ^ (12 - scale) = (field (old : Int) 10 12 + (base % 4096) >>> scale) % 2 ^ (12 - scale) ∧
+      ∀ j m, (j + m ≤ 10 ∨ 22 ≤ j) → field (word : Int) j m = field (old : Int) j m := by
+  refine ⟨?_, fun j m h => field_setBits_other _ _ _ _ _ _ (by omega)⟩
+  show field (setBits old 10 12 _ : Nat) 10 12 % _ = _
+  rw [field_setBits_self]
+  simp only [field_natCast]
+  simp only [Nat.pow_zero, Nat.div_one]
+  exact Nat.mod_mod_of_dvd _ (Nat.pow_dvd_pow 2 (by omega)) |>.trans (Nat.mod_mod _ _)
+
+open Coff in
+/-- The scale of a load: the size bits, or 4 for a 128-bit access of the SIMD registers. -/
+theorem arm64LoadScale_spec (word : Nat) :
+    arm64LoadScale word = if field (word : Int) 26 1 == 1 && field (word : Int) 23 1 == 1 then field (word : Int) 30 2 + 4
+      else field (word : Int) 30 2 := rfl
+
+open Coff in
+/-- Branches: `S + A - P` in words, the addend being in the immediate, and the rest stays. -/
+theorem patched_branch (lo n symbol place sectionAddr old : Nat) :
+    let value := symbol + sext (field (old : Int) lo n * 4 : Nat) (n + 2) - (place : Int)
+    let word := patchedInstruction (.arm64Branch lo n) symbol place sectionAddr old
+    field (word : Int) lo n = field value 2 n ∧
+      ∀ j m, (j + m ≤ lo ∨ lo + n ≤ j) → field (word : Int) j m = field (old : Int) j m := by
+  refine ⟨?_, fun j m h => field_setBits_other _ _ _ _ _ _ h⟩
+  show field (setBits old lo n _ : Nat) lo n = _
+  rw [field_setBits_self, field_shiftRight, Nat.add_zero]
+
+/-- Halfwords put together give themselves back. -/
+theorem halves_spec {a b : Nat} (ha : a < 2 ^ 16) (hb : b < 2 ^ 16) :
+    field ((a + b * 2 ^ 16 : Nat) : Int) 0 16 = a ∧ field ((a + b * 2 ^ 16 : Nat) : Int) 16 16 = b := by
+  simp only [field_natCast]
+  omega
+
+open Coff in
+/-- Thumb conditional branches: `S + A - (P + 4)`, the addend being in the immediate. -/
+theorem patched_branch20T (symbol place sectionAddr old : Nat) :
+    let hw1 := field (old : Int) 0 16
+    let hw2 := field (old : Int) 16 16
+    let value := symbol + thumbJump19Imm hw1 hw2 - ((place : Int) + 4)
+    let word := patchedInstruction .armBranch20T symbol place sectionAddr old
+    thumbJump19Imm (field (word : Int) 0 16) (field (word : Int) 16 16) = sext (field value 1 20 * 2 ^ 1 : Nat) (1 + 20) := by
+  intro hw1 hw2 value word
+  have h1 : thumbJump19Set1 hw1 value < 2 ^ 16 :=
+    setBits_lt _ (setBits_lt _ (field_lt ..) (by omega)) (by omega)
+  have h2 : thumbJump19Set2 hw2 value < 2 ^ 16 :=
+    setBits_lt _ (setBits_lt _ (setBits_lt _ (field_lt ..) (by omega)) (by omega)) (by omega)
+  have ⟨e1, e2⟩ := halves_spec h1 h2
+  have hw : word = thumbJump19Set1 hw1 value + thumbJump19Set2 hw2 value * 2 ^ 16 := rfl
+  rw [hw, e1, e2]
+  exact (thumbJump19Set_spec hw1 hw2 value).1
+
+open Coff in
+/-- Thumb `B.W`, `BL` and `BLX`: `S + A - pc`, from the pc aligned to a word for a `BLX`, and the opcode bit stays. -/
+theorem patched_branch24T (symbol place sectionAddr old : Nat) :
+    let hw1 := field (old : Int) 0 16
+    let hw2 := field (old : Int) 16 16
+    let pc := (place : Int) + 4
+    let value := symbol + thumbBranchImm hw1 hw2 - (if field (hw2 : Int) 12 1 == 0 then pc - pc % 4 else pc)
+    let word := patchedInstruction .armBranch24T symbol place sectionAddr old
+    thumbBranchImm (field (word : Int) 0 16) (field (word : Int) 16 16) = sext (field value 1 24 * 2 ^ 1 : Nat) (1 + 24) ∧
+      field (field (word : Int) 16 16 : Int) 12 1 = field (hw2 : Int) 12 1 := by
+  intro hw1 hw2 pc value word
+  have h1 : thumbBranchSet1 hw1 value < 2 ^ 16 := setBits_lt _ (setBits_lt _ (field_lt ..) (by omega)) (by omega)
+  have h2 : thumbBranchSet2 hw2 value < 2 ^ 16 :=
+    setBits_lt _ (setBits_lt _ (setBits_lt _ (field_lt ..) (by omega)) (by omega)) (by omega)
+  have ⟨e1, e2⟩ := halves_spec h1 h2
+  have hw : word = thumbBranchSet1 hw1 value + thumbBranchSet2 hw2 value * 2 ^ 16 := rfl
+  rw [hw, e1, e2]
+  exact ⟨(thumbBranchSet_spec hw1 hw2 value).1, (thumbBranchSet_spec hw1 hw2 value).2.2 12 1 (by omega)⟩
+
+open Coff in
+/-- Thumb `MOVW` and `MOVT` in a row: `S + A`, whose addend is in their immediates, split between them. -/
+theorem patched_mov32T (symbol place sectionAddr old : Nat) :
+    let hw1 := field (old : Int) 0 16
+    let hw2 := field (old : Int) 16 16
+    let hw3 := field (old : Int) 32 16
+    let hw4 := field (old : Int) 48 16
+    let value : Int := symbol + (thumbMovImm hw1 hw2 + thumbMovImm hw3 hw4 * 2 ^ 16 : Nat)
+    let word := patchedInstruction .armMov32T symbol place sectionAddr old
+    thumbMovImm (field (word : Int) 0 16) (field (word : Int) 16 16) = field value 0 16 ∧
+      thumbMovImm (field (word : Int) 32 16) (field (word : Int) 48 16) = field value 16 16 := by
+  intro hw1 hw2 hw3 hw4 value word
+  have h1 : thumbMovSet1 hw1 value < 2 ^ 16 := setBits_lt _ (setBits_lt _ (field_lt ..) (by omega)) (by omega)
+  have h2 : thumbMovSet2 hw2 value < 2 ^ 16 := setBits_lt _ (setBits_lt _ (field_lt ..) (by omega)) (by omega)
+  have h3 : thumbMovSet1 hw3 (value >>> 16) < 2 ^ 16 := setBits_lt _ (setBits_lt _ (field_lt ..) (by omega)) (by omega)
+  have h4 : thumbMovSet2 hw4 (value >>> 16) < 2 ^ 16 := setBits_lt _ (setBits_lt _ (field_lt ..) (by omega)) (by omega)
+  have hw : word = (thumbMovSet1 hw1 value + thumbMovSet2 hw2 value * 2 ^ 16) +
+      (thumbMovSet1 hw3 (value >>> 16) + thumbMovSet2 hw4 (value >>> 16) * 2 ^ 16) * 2 ^ 32 := rfl
+  rw [hw]
+  simp only [field_natCast]
+  have ha := (thumbMovSet_spec hw1 hw2 value).1
+  have hb := (thumbMovSet_spec hw3 hw4 (value >>> 16)).1
+  rw [field_shiftRight] at hb
+  simp only [Nat.add_zero] at hb
+  have r1 : (thumbMovSet1 hw1 value + thumbMovSet2 hw2 value * 2 ^ 16 +
+      (thumbMovSet1 hw3 (value >>> 16) + thumbMovSet2 hw4 (value >>> 16) * 2 ^ 16) * 2 ^ 32) / 2 ^ 0 % 2 ^ 16 = thumbMovSet1 hw1 value := by omega
+  have r2 : (thumbMovSet1 hw1 value + thumbMovSet2 hw2 value * 2 ^ 16 +
+      (thumbMovSet1 hw3 (value >>> 16) + thumbMovSet2 hw4 (value >>> 16) * 2 ^ 16) * 2 ^ 32) / 2 ^ 16 % 2 ^ 16 = thumbMovSet2 hw2 value := by omega
+  have r3 : (thumbMovSet1 hw1 value + thumbMovSet2 hw2 value * 2 ^ 16 +
+      (thumbMovSet1 hw3 (value >>> 16) + thumbMovSet2 hw4 (value >>> 16) * 2 ^ 16) * 2 ^ 32) / 2 ^ 32 % 2 ^ 16 = thumbMovSet1 hw3 (value >>> 16) := by omega
+  have r4 : (thumbMovSet1 hw1 value + thumbMovSet2 hw2 value * 2 ^ 16 +
+      (thumbMovSet1 hw3 (value >>> 16) + thumbMovSet2 hw4 (value >>> 16) * 2 ^ 16) * 2 ^ 32) / 2 ^ 48 % 2 ^ 16 = thumbMovSet2 hw4 (value >>> 16) := by omega
+  rw [r1, r2, r3, r4]
+  exact ⟨ha, hb⟩
+
+open Coff in
+/-- A pointer to Thumb code has the low bit set unless it is an offset, as `lld-link` also does it. Elsewhere nothing changes. -/
+theorem withThumbBit_spec (machine flags symbol : Nat) (kind : RelocationKind) :
+    (machine ≠ 0x01c0 → machine ≠ 0x01c2 → machine ≠ 0x01c4 → withThumbBit machine kind flags symbol = symbol) ∧
+      withThumbBit machine .sectionRelative flags symbol = symbol ∧
+      (flags &&& 0x20000000 = 0 → withThumbBit machine kind flags symbol = symbol) ∧
+      (symbol % 2 = 1 → withThumbBit machine kind flags symbol = symbol) := by
+  unfold withThumbBit
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro h1 h2 h3
+    simp [h1, h2, h3]
+  · simp
+  · intro h
+    simp [h]
+  · intro h
+    simp [h]
+
+/-! ### The driver
+
+The theorems above are about one relocation. These are about `relocate` and `link`: the two passes go through all of the
+relocations in their order, what fails is a warning and doesn't stop them, and in the end the bytes of the input that no
+relocation is in are as they were. -/
+
+/-- The state an action leaves behind, whether it failed or not. -/
+def stateOf : EStateM.Result String LinkState α → LinkState
+  | .ok _ state => state
+  | .error _ state => state
+
+/-- What fails under `guard` is a warning, and `guard` itself never fails. -/
+theorem guard_run (action : LinkM Unit) (state : LinkState) :
+    guard action state = .ok () (match action state with
+      | .ok _ after => after
+      | .error message after => { after with warnings := message :: after.warnings }) := by
+  show EStateM.tryCatch action warn state = _
+  simp only [EStateM.tryCatch]
+  cases action state <;> rfl
+
+theorem guard_ok (action : LinkM Unit) (state : LinkState) :
+    guard action state = .ok () (stateOf (guard action state)) := by
+  rw [guard_run]; rfl
+
+theorem bind_ok {m : LinkM α} {f : α → LinkM β} {state after : LinkState} {result : α} (h : m state = .ok result after) :
+    (m >>= f) state = f result after := by
+  simp [bind, EStateM.bind, h]
+
+/-- A loop whose body doesn't fail is a fold. -/
+theorem forIn_fold (f : β → LinkM Unit) (hf : ∀ b state, f b state = .ok () (stateOf (f b state))) (list : List β)
+    (state : LinkState) :
+    (forIn list PUnit.unit fun b _ => do f b; pure (ForInStep.yield PUnit.unit) : LinkM PUnit) state =
+      .ok PUnit.unit (list.foldl (fun state b => stateOf (f b state)) state) := by
+  induction list generalizing state with
+  | nil => rfl
+  | cons b rest ih =>
+    rw [List.forIn_cons]
+    have hb : (do f b; pure (ForInStep.yield PUnit.unit) : LinkM _) state = .ok (ForInStep.yield PUnit.unit) (stateOf (f b state)) :=
+      bind_ok (hf b state)
+    exact (bind_ok hb).trans (ih _)
+
+/-- **The relocations of a machine with a handler**: both passes go through all of them in their order, whatever becomes of
+each, and then MIPS finishes what is pending. -/
+theorem relocate_run {tables : Tables} {apply : Site → Outcome} (h : handler tables.env = some apply) (state : LinkState) :
+    relocate tables state = .ok () (
+      let prescanned := tables.input.relocations.foldl (fun state rel => stateOf (prescanOne tables rel state)) state
+      let applied := tables.input.relocations.foldl (fun state rel => stateOf (applyOne tables apply rel state)) prescanned
+      if tables.env.machine == emMips then stateOf (guard (mipsFinish tables.env) applied) else applied) := by
+  simp only [relocate, h]
+  refine (bind_ok (forIn_fold (prescanOne tables) (fun _ _ => guard_ok _ _) _ state)).trans ?_
+  refine (bind_ok (forIn_fold (applyOne tables apply) (fun _ _ => guard_ok _ _) _ _)).trans ?_
+  split
+  · exact guard_ok _ _
+  · rfl
+
+theorem applyOne_ok (tables : Tables) (apply : Site → Outcome) (rel : Rel) (state : LinkState) :
+    applyOne tables apply rel state = .ok () (stateOf (applyOne tables apply rel state)) := guard_ok _ _
+
+/-! Memory: a byte can change only where some action may write. -/
+
+/-- An action that keeps the pending sites good, doesn't shrink the memory, and changes only bytes that `P` allows. -/
+def Frame (P : Nat → Prop) (S : Site → Prop) (m : LinkM α) : Prop :=
+  ∀ state : LinkState, (∀ entry ∈ state.mipsPending, S entry.1) →
+    let after := stateOf (m state)
+    (∀ entry ∈ after.mipsPending, S entry.1) ∧ state.memory.size ≤ after.memory.size ∧
+      ∀ o, o < state.memory.size → ¬ P o → after.memory.get! o = state.memory.get! o
+
+namespace Frame
+
+variable {P : Nat → Prop} {S : Site → Prop}
+
+theorem pure (a : α) : Frame P S (Pure.pure a : LinkM α) := fun _ h => ⟨h, Nat.le_refl _, fun _ _ _ => rfl⟩
+
+theorem throw (e : String) : Frame P S (MonadExcept.throw e : LinkM α) := fun _ h => ⟨h, Nat.le_refl _, fun _ _ _ => rfl⟩
+
+theorem get : Frame P S (MonadState.get : LinkM LinkState) := fun _ h => ⟨h, Nat.le_refl _, fun _ _ _ => rfl⟩
+
+theorem bind {m : LinkM α} {f : α → LinkM β} (hm : Frame P S m) (hf : ∀ a, Frame P S (f a)) : Frame P S (m >>= f) := by
+  intro state hp
+  have h1 := hm state hp
+  dsimp only at h1 ⊢
+  cases hr : m state with
+  | error e after =>
+    have he : (m >>= f) state = .error e after := by simp [Bind.bind, EStateM.bind, hr]
+    rw [he]
+    rw [hr] at h1
+    exact h1
+  | ok a after =>
+    rw [bind_ok hr]
+    rw [hr] at h1
+    obtain ⟨p1, s1, f1⟩ := h1
+    obtain ⟨p2, s2, f2⟩ := hf a after p1
+    refine ⟨p2, Nat.le_trans s1 s2, fun o ho hn => ?_⟩
+    exact (f2 o (Nat.lt_of_lt_of_le ho s1) hn).trans (f1 o ho hn)
+
+theorem modify {f : LinkState → LinkState} (hp : ∀ state : LinkState, (∀ entry ∈ state.mipsPending, S entry.1) →
+      ∀ entry ∈ (f state).mipsPending, S entry.1) (hm : ∀ state, (f state).memory = state.memory) :
+    Frame P S (_root_.modify f : LinkM PUnit) := fun state h =>
+  ⟨hp state h, by
+    show state.memory.size ≤ (f state).memory.size
+    rw [hm]
+    exact Nat.le_refl _, fun o _ _ => by
+    show (f state).memory.get! o = _
+    rw [hm]⟩
+
+theorem forIn {list : List β} {init : γ} {f : β → γ → LinkM (ForInStep γ)} (hf : ∀ b ∈ list, ∀ c, Frame P S (f b c)) :
+    Frame P S (ForIn.forIn list init f) := by
+  induction list generalizing init with
+  | nil => exact pure _
+  | cons b rest ih =>
+    rw [List.forIn_cons]
+    refine bind (hf b (by simp) init) fun step => ?_
+    cases step with
+    | done c => exact pure _
+    | yield c => exact ih fun b hb => hf b (by simp [hb])
+
+/-- An action that starts by looking at the state knows what the state is. -/
+theorem get_bind {f : LinkState → LinkM α} (h : ∀ state : LinkState, (∀ entry ∈ state.mipsPending, S entry.1) →
+      let after := stateOf (f state state)
+      (∀ entry ∈ after.mipsPending, S entry.1) ∧ state.memory.size ≤ after.memory.size ∧
+        ∀ o, o < state.memory.size → ¬ P o → after.memory.get! o = state.memory.get! o) :
+    Frame P S (MonadState.get >>= f) := fun state hp => h state hp
+
+end Frame
+
+variable {P : Nat → Prop} {S : Site → Prop}
+
+/-- The sites whose bytes `P` allows to change. -/
+def SiteIn (P : Nat → Prop) (site : Site) : Prop := ∀ o, site.off ≤ o → o < site.limit → P o
+
+theorem frame_load (site : Site) (at' n : Nat) (little : Bool) : Frame P S (load site at' n little) := by
+  unfold ElfLinker.load
+  refine Frame.bind Frame.get fun state => ?_
+  split
+  · exact Frame.pure _
+  · exact Frame.throw _
+
+theorem frame_commit {site : Site} (hs : SiteIn P site) (writes : List Write) : Frame P S (commit site writes) := by
+  unfold commit
+  refine Frame.get_bind fun state hp => ?_
+  split
+  · next hall =>
+    simp only [List.all_eq_true, Bool.and_eq_true, decide_eq_true_eq] at hall
+    obtain ⟨hsize, hkeep⟩ := commit_fold writes state.memory fun w hw => (hall w hw).2
+    refine ⟨hp, Nat.le_of_eq hsize.symm, fun o _ hn => hkeep o fun w hw => ?_⟩
+    have := hall w hw
+    by_cases h1 : o < w.off
+    · exact .inl h1
+    · refine .inr (Classical.byContradiction fun h2 => hn (hs o ?_ ?_)) <;> omega
+  · exact ⟨hp, Nat.le_refl _, fun _ _ _ => rfl⟩
+
+private theorem pushes_spec (memory : ByteArray) (list : List Nat) :
+    let padded := list.foldl (init := memory) fun memory _ => memory.push 0
+    padded.size = memory.size + list.length ∧ ∀ o, o < memory.size → padded.get! o = memory.get! o := by
+  induction list generalizing memory with
+  | nil => exact ⟨rfl, fun _ _ => rfl⟩
+  | cons x rest ih =>
+    have hs : (memory.push 0).size = memory.size + 1 := by simp
+    obtain ⟨h1, h2⟩ := ih (memory.push 0)
+    refine ⟨by simp only [List.foldl_cons, List.length_cons]; rw [h1, hs]; omega, fun o ho => ?_⟩
+    simp only [List.foldl_cons]
+    rw [h2 o (by omega)]
+    show (memory.data.push (0 : UInt8))[o]! = memory.data[o]!
+    have ho' : o < memory.data.size := ho
+    rw [getElem!_pos (memory.data.push (0 : UInt8)) o (by simp; omega), getElem!_pos memory.data o ho', Array.getElem_push_lt]
+
+theorem frame_gotEntry {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) (value : Int) : Frame P S (gotEntry env value) := by
+  unfold gotEntry
+  refine Frame.get_bind fun state hp => ?_
+  cases hc : state.got[field value 0 64]? with
+  | some slot =>
+    dsimp only
+    exact ⟨hp, Nat.le_refl _, fun _ _ _ => rfl⟩
+  | none =>
+    dsimp only
+    obtain ⟨hs, hk⟩ := pushes_spec state.memory (List.range (env.gotOff + state.gotCount * (env.width / 8) + env.width / 8 - state.memory.size))
+    simp only [List.length_range] at hs
+    generalize hp' : (List.range (env.gotOff + state.gotCount * (env.width / 8) + env.width / 8 - state.memory.size)).foldl (init := state.memory)
+      (fun memory _ => memory.push 0) = padded at hs hk
+    obtain ⟨w1, w2, _⟩ := writeNat_spec (memory := padded) (off := env.gotOff + state.gotCount * (env.width / 8)) (n := env.width / 8)
+      (little := env.little) (value := value) (by omega)
+    subst hp'
+    refine ⟨hp, by show _ ≤ (writeNat _ _ _ _ _).size; rw [w1]; omega, fun o ho hn => ?_⟩
+    show (writeNat _ _ _ _ _).get! o = _
+    have hlt : o < env.gotOff := Nat.lt_of_not_le fun h => hn (hg o h)
+    rw [w2 o (.inl (by omega)), hk o ho]
+
+/-- What every handler is made of. -/
+local macro "frame_auto" : tactic => `(tactic|
+  repeat' first
+    | assumption
+    | exact Frame.pure _
+    | exact Frame.throw _
+    | exact Frame.get
+    | exact frame_load _ _ _ _
+    | exact frame_gotEntry ‹_› _
+    | apply Frame.bind
+    | apply Frame.forIn
+    | (unfold ElfLinker.ld; skip)
+    | (unfold ElfLinker.ldInt; skip)
+    | (unfold ElfLinker.ldi; skip)
+    | (unfold ElfLinker.done; skip)
+    | split
+    | intro _)
+
+theorem frame_x86_64 {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) (site : Site) : Frame P S (x86_64 env site) := by
+  unfold x86_64
+  dsimp only
+  split <;> frame_auto
+
+theorem frame_i386 {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) (site : Site) : Frame P S (i386 env site) := by
+  unfold i386
+  dsimp only
+  split <;> frame_auto
+
+theorem frame_aarch64 {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) (site : Site) : Frame P S (aarch64 env site) := by
+  unfold aarch64
+  dsimp only
+  split <;> frame_auto
+
+theorem frame_arm {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) (site : Site) : Frame P S (arm env site) := by
+  unfold arm
+  dsimp only
+  split <;> frame_auto
+
+theorem frame_systemz {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) (site : Site) : Frame P S (systemz env site) := by
+  unfold systemz
+  dsimp only
+  split <;> frame_auto
+
+theorem frame_ppcInsnOfHalf {env : Env} {site : Site} : Frame P S (ppcInsnOfHalf env site) := by
+  unfold ppcInsnOfHalf
+  frame_auto
+
+theorem frame_powerpc {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) (site : Site) : Frame P S (powerpc env site) := by
+  unfold powerpc
+  dsimp only
+  have := @frame_ppcInsnOfHalf P S env site
+  split <;> frame_auto
+
+theorem frame_ulebLength {env : Env} {site : Site} (fuel n : Nat) : Frame P S (ulebLength env site fuel n) := by
+  induction fuel generalizing n with
+  | zero => exact Frame.pure _
+  | succ fuel ih =>
+    unfold ulebLength
+    refine Frame.bind (frame_load _ _ _ _) fun _ => ?_
+    split
+    · exact Frame.pure _
+    · exact ih _
+
+theorem frame_rewriteUleb {env : Env} {site : Site} (f : Nat → Int) : Frame P S (rewriteUleb env site f) := by
+  unfold rewriteUleb
+  refine Frame.bind (frame_ulebLength _ _) fun _ => ?_
+  frame_auto
+
+theorem frame_riscv {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) (site : Site) : Frame P S (riscv env site) := by
+  unfold riscv
+  dsimp only
+  split <;> first
+    | with_reducible exact frame_rewriteUleb _
+    | frame_auto
+
+/-- A deferred half is resolved at its own site. -/
+theorem frame_mipsApplyHi {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) {site : Site} (hs : SiteIn P site) (ahl : Int) :
+    Frame P S (mipsApplyHi env site ahl) := by
+  unfold mipsApplyHi
+  refine Frame.bind (frame_load _ _ _ _) fun _ => ?_
+  dsimp only
+  split
+  · exact frame_commit hs _
+  · exact Frame.bind (frame_gotEntry hg _) fun _ => frame_commit hs _
+
+theorem frame_mipsFlush {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) (lo : Int) (symbol : Nat) :
+    Frame P (SiteIn P) (mipsFlush env lo symbol) := by
+  unfold mipsFlush
+  refine Frame.get_bind fun state hp => ?_
+  dsimp only
+  generalize hpart : state.mipsPending.partition (fun entry => entry.1.rel.symbol == symbol) = parts
+  obtain ⟨matched, rest⟩ := parts
+  have hboth : (∀ entry ∈ matched, entry ∈ state.mipsPending) ∧ ∀ entry ∈ rest, entry ∈ state.mipsPending := by
+    rw [List.partition_eq_filter_filter] at hpart
+    simp only [Prod.mk.injEq] at hpart
+    rw [← hpart.1, ← hpart.2]
+    exact ⟨fun _ h => (List.mem_filter.mp h).1, fun _ h => (List.mem_filter.mp h).1⟩
+  have hloop : Frame P (SiteIn P) (forIn matched.reverse PUnit.unit
+      fun entry _ => do
+        mipsApplyHi env entry.1 ((entry.2 : Int) * 65536 + lo)
+        pure (ForInStep.yield PUnit.unit)) := by
+    apply Frame.forIn
+    intro entry hentry c
+    exact Frame.bind (frame_mipsApplyHi hg (hp entry (hboth.1 entry (List.mem_reverse.mp hentry))) _) fun _ => Frame.pure _
+  have hset : ∀ entry ∈ ({ state with mipsPending := rest } : LinkState).mipsPending, SiteIn P entry.1 :=
+    fun entry hentry => hp entry (hboth.2 entry hentry)
+  exact (Frame.bind hloop fun _ => Frame.pure _) _ hset
+
+theorem frame_mipsCompound {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) (site : Site) : Frame P S (mipsCompound env site) := by
+  unfold mipsCompound mipsCompoundBase
+  dsimp only
+  frame_auto
+
+private theorem frame_pending {site : Site} (hs : SiteIn P site) (stored : Nat) :
+    Frame P (SiteIn P) (modify fun state : LinkState => { state with mipsPending := (site, stored) :: state.mipsPending } : LinkM PUnit) :=
+  Frame.modify (fun _ hp entry hentry => by
+    rcases List.mem_cons.mp hentry with rfl | hentry
+    · exact hs
+    · exact hp _ hentry) (fun _ => rfl)
+
+set_option maxHeartbeats 4000000 in
+theorem frame_mips {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) {site : Site} (hs : SiteIn P site) :
+    Frame P (SiteIn P) (mips env site) := by
+  unfold mips
+  dsimp only
+  have hflush := fun lo symbol => frame_mipsFlush (P := P) hg lo symbol
+  have happly := fun ahl => frame_mipsApplyHi (P := P) (S := SiteIn P) hg hs ahl
+  have hcompound := frame_mipsCompound (P := P) (S := SiteIn P) hg site
+  have hpend := frame_pending (P := P) hs
+  split <;> repeat' first
+    | exact hflush _ _
+    | exact happly _
+    | exact hcompound
+    | exact hpend _
+    | exact Frame.pure _
+    | exact Frame.throw _
+    | exact Frame.get
+    | exact frame_load _ _ _ _
+    | exact frame_gotEntry ‹_› _
+    | apply Frame.bind
+    | (unfold ElfLinker.ld; skip)
+    | (unfold ElfLinker.ldInt; skip)
+    | (unfold ElfLinker.done; skip)
+    | split
+    | intro _
+
+theorem frame_handler {env : Env} {apply : Site → Outcome} (hh : handler env = some apply) (hg : ∀ o, env.gotOff ≤ o → P o)
+    {site : Site} (hs : SiteIn P site) : Frame P (SiteIn P) (apply site) := by
+  unfold handler at hh
+  split at hh <;> cases hh
+  · exact frame_x86_64 hg site
+  · exact frame_i386 hg site
+  · exact frame_aarch64 hg site
+  · exact frame_arm hg site
+  · exact frame_mips hg hs
+  · exact frame_riscv hg site
+  · exact frame_powerpc hg site
+  · exact frame_powerpc hg site
+  · exact frame_systemz hg site
+
+theorem frame_warn (message : String) : Frame P S (warn message) :=
+  Frame.modify (fun _ hp => hp) (fun _ => rfl)
+
+theorem frame_checkField (env : Env) (site : Site) : Frame P S (checkField env site) := by
+  unfold checkField
+  refine Frame.bind Frame.get fun _ => ?_
+  split
+  · exact frame_warn _
+  · exact Frame.pure _
+
+theorem frame_applySite {env : Env} {apply : Site → Outcome} (hh : handler env = some apply) (hg : ∀ o, env.gotOff ≤ o → P o)
+    {site : Site} (hs : SiteIn P site) : Frame P (SiteIn P) (applySite env apply site) := by
+  unfold applySite
+  refine Frame.bind (frame_handler hh hg hs) fun outcome => ?_
+  cases outcome with
+  | some writes => exact Frame.bind (frame_checkField _ _) fun _ => frame_commit hs _
+  | none => exact frame_warn _
+
+theorem frame_guard {action : LinkM Unit} (h : Frame P S action) : Frame P S (guard action) := by
+  intro state hp
+  have := h state hp
+  dsimp only at this ⊢
+  rw [guard_run]
+  cases hr : action state with
+  | ok _ after => rw [hr] at this; exact this
+  | error message after => rw [hr] at this; exact this
+
+theorem frame_siteOf (tables : Tables) (report : Bool) (rel : Rel) : Frame P S (siteOf tables report rel) := by
+  unfold siteOf
+  dsimp only
+  repeat' first
+    | exact Frame.pure _
+    | exact frame_warn _
+    | exact Frame.modify (fun _ hp => hp) (fun _ => rfl)
+    | apply Frame.bind
+    | split
+    | intro _
+
+/-- The bytes a link may change: its GOT, and the sections with a relocation. -/
+def MayChange (tables : Tables) (o : Nat) : Prop :=
+  tables.env.gotOff ≤ o ∨ ∃ rel ∈ tables.input.relocations, ∃ sec, tables.input.sections[rel.target]? = some sec ∧
+    sec.off ≤ o ∧ o < sec.off + sec.size
+
+/-- A site of a relocation is in the section of the relocation. -/
+private theorem relocatedSection_some {tables : Tables} {index : Nat} {sec : ElfLinker.Section} {addr : Nat}
+    (h : relocatedSection tables index = some (sec, addr)) : tables.input.sections[index]? = some sec := by
+  unfold relocatedSection at h
+  cases hs : tables.input.sections[index]? with
+  | none => simp [hs] at h
+  | some found =>
+    simp only [hs, Option.bind_eq_bind, Option.bind_some] at h
+    cases ha : (tables.addrs[index]?).join with
+    | none => simp [ha] at h
+    | some addr' =>
+      simp only [ha, Option.bind_some] at h
+      split at h
+      · simp only [Option.some.injEq, Prod.mk.injEq] at h
+        rw [h.1]
+      · cases h
+
+/-- What a site of a relocation is: its place and the bounds of the section of its relocation, whose file bytes stop at the GOT. -/
+theorem siteOf_some {tables : Tables} {report : Bool} {rel : Rel} {state after : LinkState} {site : Site}
+    (h : siteOf tables report rel state = .ok (some site) after) :
+    ∃ sec base s, relocatedSection tables rel.target = some (sec, base) ∧ rel.offset < sec.size ∧
+      resolveBranchTarget tables rel ((tables.input.symbols[rel.symbol]?).getD nullSym) = some s ∧
+      site = ⟨rel, (tables.input.symbols[rel.symbol]?).getD nullSym, sec.name, base + rel.offset, s,
+        if rel.isExplicit then rel.addend else 0, sec.off + rel.offset, min (sec.off + sec.size) tables.env.gotOff⟩ := by
+  unfold siteOf at h
+  dsimp only at h
+  cases hsec : relocatedSection tables rel.target with
+  | none =>
+    rw [hsec] at h
+    cases h
+  | some found =>
+    obtain ⟨sec, base⟩ := found
+    rw [hsec] at h
+    dsimp only at h
+    by_cases hoff : rel.offset ≥ sec.size
+    · rw [ite_eq_left hoff] at h
+      exfalso
+      revert h
+      cases report <;> simp [bind, EStateM.bind, pure, EStateM.pure, warn, modify, modifyGet, MonadStateOf.modifyGet, EStateM.modifyGet]
+    · rw [ite_eq_right hoff] at h
+      cases hs : resolveBranchTarget tables rel ((tables.input.symbols[rel.symbol]?).getD nullSym) with
+      | none =>
+        rw [hs] at h
+        exfalso
+        revert h
+        cases report <;> simp [bind, EStateM.bind, pure, EStateM.pure, warn, modify, modifyGet, MonadStateOf.modifyGet, EStateM.modifyGet]
+      | some s =>
+        rw [hs] at h
+        refine ⟨sec, base, s, rfl, by omega, rfl, ?_⟩
+        revert h
+        cases report <;> (try cases isExternal tables.input.machine ((tables.input.symbols[rel.symbol]?).getD nullSym)) <;>
+          simp [bind, EStateM.bind, pure, EStateM.pure, modify, modifyGet, MonadStateOf.modifyGet, EStateM.modifyGet] <;>
+          (intro h _; exact h.symm)
+
+/-- A site of a relocation is in the section of the relocation. -/
+theorem siteOf_in {tables : Tables} {report : Bool} {rel : Rel} (hrel : rel ∈ tables.input.relocations) {state after : LinkState}
+    {site : Site} (h : siteOf tables report rel state = .ok (some site) after) : SiteIn (MayChange tables) site := by
+  obtain ⟨sec, base, s, hsec, _, _, rfl⟩ := siteOf_some h
+  intro o hlo hhi
+  simp only at hlo hhi
+  exact .inr ⟨rel, hrel, sec, relocatedSection_some hsec, by omega, by omega⟩
+
+private theorem Frame.bind_some {m : LinkM (Option α)} {f : Option α → LinkM β} {Q : α → Prop} (hm : Frame P S m)
+    (hspec : ∀ state after a, m state = .ok (some a) after → Q a) (hnone : Frame P S (f none)) (hf : ∀ a, Q a → Frame P S (f (some a))) :
+    Frame P S (m >>= f) := by
+  intro state hp
+  have h1 := hm state hp
+  dsimp only at h1 ⊢
+  cases hr : m state with
+  | error e after =>
+    have he : (m >>= f) state = .error e after := by simp [Bind.bind, EStateM.bind, hr]
+    rw [he]
+    rw [hr] at h1
+    exact h1
+  | ok a after =>
+    rw [bind_ok hr]
+    rw [hr] at h1
+    obtain ⟨p1, s1, f1⟩ := h1
+    have hf' : Frame P S (f a) := by
+      cases a with
+      | none => exact hnone
+      | some a => exact hf a (hspec _ _ _ hr)
+    obtain ⟨p2, s2, f2⟩ := hf' after p1
+    exact ⟨p2, Nat.le_trans s1 s2, fun o ho hn => (f2 o (Nat.lt_of_lt_of_le ho s1) hn).trans (f1 o ho hn)⟩
+
+private theorem gotOff_may (tables : Tables) : ∀ o, tables.env.gotOff ≤ o → MayChange tables o := fun _ h => .inl h
+
+theorem frame_riscvPrescan {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) (site : Site) : Frame P S (riscvPrescan env site) := by
+  unfold riscvPrescan
+  split <;> repeat' first
+    | exact Frame.pure _
+    | exact frame_gotEntry hg _
+    | exact Frame.modify (fun _ hp => hp) (fun _ => rfl)
+    | apply Frame.bind
+    | intro _
+
+theorem frame_prescanOne (tables : Tables) (rel : Rel) (hrel : rel ∈ tables.input.relocations) :
+    Frame (MayChange tables) (SiteIn (MayChange tables)) (prescanOne tables rel) := by
+  unfold prescanOne
+  refine frame_guard (Frame.bind_some (frame_siteOf _ _ _) (fun _ _ _ h => siteOf_in hrel h) (Frame.pure _) fun site _ => ?_)
+  dsimp only
+  split
+  · exact frame_riscvPrescan (gotOff_may tables) site
+  · exact Frame.pure _
+
+theorem frame_applyOne {tables : Tables} {apply : Site → Outcome} (hh : handler tables.env = some apply) (rel : Rel)
+    (hrel : rel ∈ tables.input.relocations) :
+    Frame (MayChange tables) (SiteIn (MayChange tables)) (applyOne tables apply rel) := by
+  unfold applyOne
+  exact frame_guard (Frame.bind_some (frame_siteOf _ _ _) (fun _ _ _ h => siteOf_in hrel h) (Frame.pure _)
+    fun _ hs => frame_applySite hh (gotOff_may tables) hs)
+
+theorem frame_mipsFinish {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) : Frame P (SiteIn P) (mipsFinish env) := by
+  unfold mipsFinish
+  refine Frame.bind Frame.get fun _ => ?_
+  dsimp only
+  refine Frame.bind ?_ fun _ => Frame.pure _
+  apply Frame.forIn
+  intro _ _ _
+  exact Frame.bind (frame_mipsFlush hg _ _) fun _ => Frame.pure _
+
+/-- **The bytes of a link change only in its GOT and in the sections with a relocation**, for all machines and whatever
+becomes of the relocations. -/
+theorem relocate_frame (tables : Tables) : Frame (MayChange tables) (SiteIn (MayChange tables)) (relocate tables) := by
+  unfold relocate
+  dsimp only
+  split
+  · refine Frame.bind (Frame.forIn fun rel hrel _ => ?_) fun _ => ?_
+    · refine Frame.bind (frame_siteOf _ _ _) fun _ => ?_
+      split <;> exact Frame.pure _
+    · split
+      · exact frame_warn _
+      · exact Frame.pure _
+  · next apply hh =>
+    refine Frame.bind (Frame.forIn fun rel hrel _ => ?_) fun _ => ?_
+    · exact Frame.bind (frame_prescanOne tables rel hrel) fun _ => Frame.pure _
+    · refine Frame.bind (Frame.forIn fun rel hrel _ => ?_) fun _ => ?_
+      · exact Frame.bind (frame_applyOne hh rel hrel) fun _ => Frame.pure _
+      · split
+        · exact frame_guard (frame_mipsFinish (gotOff_may tables))
+        · exact Frame.pure _
+
+/-- `link` is `relocate` on the tables of its layout. -/
+theorem link_relocate (input : Input) :
+    ∃ tables : Tables, tables.input = input ∧ tables.env.gotOff = input.data.size ∧ tables.env.machine = input.machine ∧
+      tables.env.width = input.width ∧ tables.env.little = input.little ∧ tables.env.gp0 = input.gp0 ∧
+      tables.addrs = (layoutSections input.sections.toList input.base).addrs ∧
+      let after := stateOf (relocate tables { memory := input.data })
+      (link input).memory = after.memory ∧ (link input).warnings = after.warnings.reverse ∧
+        (link input).references = after.references.reverse ∧
+        (link input).sectionAddrs = (layoutSections input.sections.toList input.base).addrs := by
+  generalize hl : layoutSections input.sections.toList input.base = layout
+  cases hc : placeCommons input.symbols.toList (alignUp layout.cursor (input.width / 8)) with
+  | mk commons commonsEnd =>
+    cases he : placeExternals input.machine (input.width / 8) input.symbols.toList (alignUp commonsEnd (input.width / 8)) with
+    | mk externals externalsEnd =>
+      refine ⟨⟨input, { machine := input.machine, width := input.width, little := input.little
+                        codeLittle := input.little || input.machine == 183, gotBase := alignUp externalsEnd (input.width / 8)
+                        gotOff := input.data.size, tls := tlsBlock input.sections.toList layout.addrs, gp0 := input.gp0 },
+          layout.addrs, commons, externals⟩, rfl, rfl, rfl, rfl, rfl, rfl, rfl, ?_⟩
+      dsimp only [link]
+      rw [hl, hc]
+      dsimp only
+      rw [he]
+      dsimp only [EStateM.run]
+      split <;> (rename_i heq; rw [heq]; exact ⟨rfl, rfl, rfl, rfl⟩)
+
+/-- **What a link leaves of the input**: its bytes, but for the sections with a relocation; and the GOT goes after them. -/
+theorem link_keeps_bytes (input : Input) {o : Nat} (ho : o < input.data.size)
+    (hout : ∀ rel ∈ input.relocations, ∀ sec, input.sections[rel.target]? = some sec → ¬ (sec.off ≤ o ∧ o < sec.off + sec.size)) :
+    (link input).memory.get! o = input.data.get! o := by
+  obtain ⟨tables, rfl, hg, _, _, _, _, _, hmem, _⟩ := link_relocate input
+  obtain ⟨_, _, hkeep⟩ := relocate_frame tables { memory := tables.input.data } (by simp)
+  rw [hmem]
+  apply hkeep o ho
+  rintro (h | ⟨rel, hrel, sec, hsec, h1, h2⟩)
+  · omega
+  · exact hout rel hrel sec hsec ⟨h1, h2⟩
+
+/-- A link only adds to the bytes of the input. -/
+theorem link_memory_size (input : Input) : input.data.size ≤ (link input).memory.size := by
+  obtain ⟨tables, rfl, _, _, _, _, _, _, hmem, _⟩ := link_relocate input
+  obtain ⟨_, hs, _⟩ := relocate_frame tables { memory := tables.input.data } (by simp)
+  rw [hmem]
+  exact hs
+
+/-- **The check of a field is what warns, and the only thing that does**: it leaves all but the warnings as they are. -/
+theorem checkField_run (env : Env) (site : Site) (state : LinkState) :
+    checkField env site state = .ok () (if fieldFits env state site then state else
+      { state with warnings := s!"relocation of type {site.rel.typ} at {site.p} is out of range of its field" :: state.warnings }) := by
+  have : checkField env site state = (if !fieldFits env state site then
+      warn s!"relocation of type {site.rel.typ} at {site.p} is out of range of its field" else (pure () : LinkM Unit)) state := rfl
+  rw [this]
+  cases fieldFits env state site <;> rfl
+
+/-- **A relocation under the driver**: what its handler returns is stored if it is in bounds, and it warns exactly if it has to
+cut what it stores. -/
+theorem applySite_store {env : Env} {apply : Site → Outcome} {site : Site} {state after : LinkState} {writes : List Write}
+    (h : apply site state = .ok (some writes) after)
+    (hall : ∀ w ∈ writes, site.off ≤ w.off ∧ w.off + w.n ≤ site.limit ∧ w.off + w.n ≤ after.memory.size) :
+    ∃ final, applySite env apply site state = .ok () final ∧
+      final.memory = writes.foldl (init := after.memory) (fun memory w => writeNat memory w.little w.off w.n w.value) ∧
+      final.mipsPending = after.mipsPending ∧
+      final.warnings = (if fieldFits env after site then after.warnings else
+        s!"relocation of type {site.rel.typ} at {site.p} is out of range of its field" :: after.warnings) := by
+  unfold applySite
+  rw [bind_ok h]
+  dsimp only
+  rw [bind_ok (checkField_run env site after)]
+  have hsize : (if fieldFits env after site then after else
+      { after with warnings := s!"relocation of type {site.rel.typ} at {site.p} is out of range of its field" :: after.warnings }).memory = after.memory := by
+    split <;> rfl
+  generalize hmid : (if fieldFits env after site then after else
+      { after with warnings := s!"relocation of type {site.rel.typ} at {site.p} is out of range of its field" :: after.warnings }) = mid at hsize
+  have hc := commit_run site writes mid
+  rw [ite_eq_left (by
+    simp only [List.all_eq_true, Bool.and_eq_true, decide_eq_true_eq, hsize]
+    exact fun w hw => ⟨⟨(hall w hw).1, (hall w hw).2.1⟩, (hall w hw).2.2⟩)] at hc
+  refine ⟨_, hc, by simp only [hsize]; rfl, ?_, ?_⟩
+  · show mid.mipsPending = _
+    rw [← hmid]
+    split <;> rfl
+  · show mid.warnings = _
+    rw [← hmid]
+    split <;> rfl
+
+/-! An end to end theorem, of the commonest relocation of x86-64. -/
+
+/-- The file offset of the place of a relocation. -/
+def placeOf (tables : Tables) (rel : Rel) : Nat :=
+  ((tables.input.sections[rel.target]?).map (·.off + rel.offset)).getD 0
+
+/-- A relocation with a place of `n` bytes in the bytes of its section in the file, and a symbol with an address. -/
+structure Placed (tables : Tables) (rel : Rel) (n : Nat) (sec : ElfLinker.Section) (base s : Nat) : Prop where
+  located : relocatedSection tables rel.target = some (sec, base)
+  bounds : rel.offset + n ≤ sec.size
+  positive : 0 < n
+  file : sec.off + sec.size ≤ tables.env.gotOff
+  symbol : resolveBranchTarget tables rel ((tables.input.symbols[rel.symbol]?).getD nullSym) = some s
+
+/-- The site of a relocation that is placed. -/
+def placedSite (tables : Tables) (rel : Rel) (sec : ElfLinker.Section) (base s : Nat) : Site :=
+  ⟨rel, (tables.input.symbols[rel.symbol]?).getD nullSym, sec.name, ((base + rel.offset : Nat) : Int), s,
+    if rel.isExplicit then rel.addend else 0, sec.off + rel.offset, min (sec.off + sec.size) tables.env.gotOff⟩
+
+private theorem siteOf_placed {tables : Tables} {rel : Rel} {n : Nat} {sec : ElfLinker.Section} {base s : Nat}
+    (h : Placed tables rel n sec base s) (state : LinkState) :
+    siteOf tables false rel state = .ok (some (placedSite tables rel sec base s)) state := by
+  have hb := h.bounds
+  have hn := h.positive
+  unfold siteOf
+  dsimp only
+  rw [h.located]
+  dsimp only
+  rw [ite_eq_right (by omega), h.symbol]
+  rfl
+
+/-- The value of `R_X86_64_PC32`, `S + A - P`. -/
+def pc32Value (tables : Tables) (rel : Rel) (sec : ElfLinker.Section) (base s : Nat) : Int :=
+  let site := placedSite tables rel sec base s
+  site.s + site.a - site.p
+
+/-- `R_X86_64_PC32` under the driver: the place gets the value, and a warning if that doesn't fit. -/
+private theorem applyOne_pc32 {tables : Tables} {rel : Rel} {sec : ElfLinker.Section} {base s : Nat}
+    (ht : rel.typ = 2) (h : Placed tables rel 4 sec base s) (state : LinkState)
+    (hsize : tables.env.gotOff ≤ state.memory.size) :
+    (stateOf (applyOne tables (x86_64 tables.env) rel state)).memory =
+      writeNat state.memory tables.env.little (sec.off + rel.offset) 4 (pc32Value tables rel sec base s) := by
+  have hb := h.bounds
+  have hf := h.file
+  have hst := x86_64_pc32 (env := tables.env) (site := placedSite tables rel sec base s) ht state
+  obtain ⟨final, hfinal, hmem, _, _⟩ := applySite_store (env := tables.env) (apply := x86_64 tables.env) hst (by
+    intro w hw
+    simp only [List.mem_singleton] at hw
+    subst hw
+    simp only [stAt, placedSite]
+    omega)
+  rw [applyOne, guard_run, bind_ok (siteOf_placed h state)]
+  dsimp only
+  rw [hfinal]
+  simp only [stateOf]
+  rw [hmem]
+  rfl
+
+/-- **`R_X86_64_PC32` through all of `relocate`**: when the relocations of a file are all of this type, each with a place
+in its section and a symbol with an address, and no two places overlap, each place ends up holding `S + A - P`, cut to its 32
+bits. -/
+theorem relocate_x86_64_pc32 {tables : Tables} (hm : tables.env.machine = 62) (hl : tables.env.little = true) (state : LinkState)
+    (hsize : tables.env.gotOff ≤ state.memory.size)
+    (hplaced : ∀ rel ∈ tables.input.relocations, rel.typ = 2 ∧ ∃ sec base s, Placed tables rel 4 sec base s)
+    (hdisjoint : tables.input.relocations.Pairwise fun left right =>
+      placeOf tables left + 4 ≤ placeOf tables right ∨ placeOf tables right + 4 ≤ placeOf tables left)
+    {rel : Rel} (hrel : rel ∈ tables.input.relocations) {sec : ElfLinker.Section} {base s : Nat}
+    (hplace : Placed tables rel 4 sec base s) :
+    readNat (stateOf (relocate tables state)).memory true (sec.off + rel.offset) 4 =
+      field (pc32Value tables rel sec base s) 0 32 := by
+  have hhandler : handler tables.env = some (x86_64 tables.env) := by simp only [handler, hm]
+  rw [relocate_run hhandler]
+  simp only [stateOf, hm]
+  rw [show (62 == emMips) = false from rfl]
+  simp only [Bool.false_eq_true, ↓reduceIte]
+  have hunique : ∀ {r : Rel} {sec sec' : ElfLinker.Section} {base base' s s' : Nat}, Placed tables r 4 sec base s →
+      Placed tables r 4 sec' base' s' → sec = sec' ∧ base = base' ∧ s = s' := by
+    intro r sec sec' base base' s s' h h'
+    have h1 := h.located.symm.trans h'.located
+    have h2 := h.symbol.symm.trans h'.symbol
+    simp only [Option.some.injEq, Prod.mk.injEq] at h1 h2
+    exact ⟨h1.1, h1.2, h2⟩
+  have hplaceOf : ∀ {r : Rel} {sec : ElfLinker.Section} {base s : Nat}, Placed tables r 4 sec base s →
+      placeOf tables r = sec.off + r.offset := by
+    intro r sec base s h
+    simp only [placeOf, relocatedSection_some h.located, Option.map_some, Option.getD_some]
+  -- the first pass leaves the bytes alone on this machine
+  have hprescan : ∀ (list : List Rel) (st : LinkState), st.memory.size ≤
+      (list.foldl (fun state rel => stateOf (prescanOne tables rel state)) st).memory.size := by
+    intro list
+    induction list with
+    | nil => intro _; exact Nat.le_refl _
+    | cons r rest ih =>
+      intro st
+      refine Nat.le_trans ?_ (ih _)
+      have hf : Frame (fun _ => False) (fun _ => True) (prescanOne tables r) := by
+        unfold prescanOne
+        refine frame_guard (Frame.bind (frame_siteOf _ _ _) fun site => ?_)
+        cases site with
+        | none => exact Frame.pure _
+        | some site =>
+          dsimp only
+          rw [ite_eq_right (by simp [hm])]
+          exact Frame.pure _
+      exact (hf st fun _ _ => trivial).2.1
+  have key : ∀ (list : List Rel), (∀ r ∈ list, r ∈ tables.input.relocations) →
+      list.Pairwise (fun left right => placeOf tables left + 4 ≤ placeOf tables right ∨ placeOf tables right + 4 ≤ placeOf tables left) →
+      ∀ st : LinkState, tables.env.gotOff ≤ st.memory.size →
+      let after := list.foldl (fun state rel => stateOf (applyOne tables (x86_64 tables.env) rel state)) st
+      after.memory.size = st.memory.size ∧
+        (∀ o, (∀ r ∈ list, o < placeOf tables r ∨ placeOf tables r + 4 ≤ o) → after.memory.get! o = st.memory.get! o) ∧
+        ∀ r ∈ list, ∀ {sec base s}, Placed tables r 4 sec base s →
+          readNat after.memory true (sec.off + r.offset) 4 = field (pc32Value tables r sec base s) 0 32 := by
+    intro list
+    induction list with
+    | nil => intro _ _ st _; exact ⟨rfl, fun _ _ => rfl, fun _ hr => by simp at hr⟩
+    | cons head rest ih =>
+      intro hmem hpair st hst
+      obtain ⟨ht, sec, base, s, hp⟩ := hplaced head (hmem head (by simp))
+      have hwrite := applyOne_pc32 ht hp st hst
+      have hbound : sec.off + head.offset + 4 ≤ st.memory.size := by
+        have := hp.bounds
+        have := hp.file
+        omega
+      obtain ⟨w1, w2, _⟩ := writeNat_spec (memory := st.memory) (little := tables.env.little) (off := sec.off + head.offset) (n := 4)
+        (value := pc32Value tables head sec base s) hbound
+      have hstep : (stateOf (applyOne tables (x86_64 tables.env) head st)).memory.size = st.memory.size := by rw [hwrite, w1]
+      obtain ⟨hs, hk, hr⟩ := ih (fun r hr => hmem r (by simp [hr])) (List.pairwise_cons.mp hpair).2
+        (stateOf (applyOne tables (x86_64 tables.env) head st)) (by rw [hstep]; exact hst)
+      simp only [List.foldl_cons]
+      refine ⟨hs.trans hstep, fun o ho => ?_, fun r hmem' {sec' base' s'} hp' => ?_⟩
+      · rw [hk o fun r hr => ho r (by simp [hr]), hwrite]
+        apply w2
+        have := ho head (by simp)
+        rw [hplaceOf hp] at this
+        exact this
+      · rcases List.mem_cons.mp hmem' with rfl | hin
+        · obtain ⟨rfl, rfl, rfl⟩ := hunique hp hp'
+          have hread := readNat_writeNat_little (memory := st.memory) (off := sec.off + r.offset) (n := 4)
+            (value := pc32Value tables r sec base s) hbound
+          rw [hl] at hwrite
+          rw [readNat_congr (b := writeNat st.memory true (sec.off + r.offset) 4 (pc32Value tables r sec base s)), hread]
+          intro i hi
+          rw [hk _ (fun other hother => ?_), hwrite]
+          have hd := (List.pairwise_cons.mp hpair).1 other hother
+          rw [hplaceOf hp] at hd
+          omega
+        · exact hr r hin hp'
+  exact (key _ (fun _ h => h) hdisjoint _ (Nat.le_trans hsize (hprescan _ _))).2.2 rel hrel hplace
+
+/-- The same of `link`: in the linked memory, each place of a file of `R_X86_64_PC32` relocations holds `S + A - P`. -/
+theorem link_x86_64_pc32 (input : Input) (hm : input.machine = 62) (hl : input.little = true) :
+    ∃ tables : Tables, tables.input = input ∧ tables.addrs = (layoutSections input.sections.toList input.base).addrs ∧
+      ((∀ rel ∈ input.relocations, rel.typ = 2 ∧ ∃ sec base s, Placed tables rel 4 sec base s) →
+        input.relocations.Pairwise (fun left right =>
+          placeOf tables left + 4 ≤ placeOf tables right ∨ placeOf tables right + 4 ≤ placeOf tables left) →
+        ∀ rel ∈ input.relocations, ∀ {sec base s}, Placed tables rel 4 sec base s →
+          readNat (link input).memory true (sec.off + rel.offset) 4 = field (pc32Value tables rel sec base s) 0 32) := by
+  obtain ⟨tables, rfl, hg, hm', _, hl', _, ha, hmem, _⟩ := link_relocate input
+  refine ⟨tables, rfl, ha, fun hplaced hdisjoint rel hrel sec base s hplace => ?_⟩
+  rw [hmem]
+  exact relocate_x86_64_pc32 (hm'.trans hm) (hl'.trans hl) _ (by rw [hg]; exact Nat.le_refl _)
+    hplaced hdisjoint hrel hplace
+
+/-! `R_MIPS_LO16` resolves what is pending of its symbol, and that succeeds. -/
+
+private theorem commit_bounds {site : Site} {writes : List Write} {state : LinkState}
+    (h : ∀ w ∈ writes, site.off ≤ w.off ∧ w.off + w.n ≤ site.limit ∧ w.off + w.n ≤ state.memory.size) :
+    ∃ after, commit site writes state = .ok () after ∧ state.memory.size ≤ after.memory.size ∧
+      after.mipsPending = state.mipsPending := by
+  have hc := commit_run site writes state
+  rw [ite_eq_left (by
+    simp only [List.all_eq_true, Bool.and_eq_true, decide_eq_true_eq]
+    exact fun w hw => ⟨⟨(h w hw).1, (h w hw).2.1⟩, (h w hw).2.2⟩)] at hc
+  exact ⟨_, hc, Nat.le_of_eq (commit_fold writes state.memory fun w hw => (h w hw).2.2).1.symm, rfl⟩
+
+private theorem gotEntry_ok (env : Env) (value : Int) (state : LinkState) :
+    ∃ slot after, gotEntry env value state = .ok slot after ∧ state.memory.size ≤ after.memory.size ∧
+      after.mipsPending = state.mipsPending := by
+  have hf := (frame_gotEntry (P := fun o => env.gotOff ≤ o) (S := fun _ => True) (env := env) (fun _ h => h) value state (fun _ _ => trivial)).2.1
+  simp only [gotEntry, bind, EStateM.bind, get, getThe, MonadStateOf.get, EStateM.get] at hf ⊢
+  cases hc : state.got[field value 0 64]? with
+  | some slot => exact ⟨slot, state, by simp only [hc]; rfl, Nat.le_refl _, rfl⟩
+  | none =>
+    simp only [hc] at hf ⊢
+    exact ⟨_, _, rfl, hf, rfl⟩
+
+/-- A deferred half whose place is in bounds is resolved without fail. -/
+theorem mipsApplyHi_ok (env : Env) {site : Site} (ahl : Int) {state : LinkState}
+    (hb : inSection site 0 4 state.memory.size = true) :
+    ∃ after, mipsApplyHi env site ahl state = .ok () after ∧ state.memory.size ≤ after.memory.size ∧
+      after.mipsPending = state.mipsPending := by
+  have hs : site.off + 0 + 4 ≤ site.limit ∧ site.off + 0 + 4 ≤ state.memory.size := by
+    simpa [inSection] using hb
+  have hload : ld env site 0 4 state = .ok (readNat state.memory env.little (site.off + 0) 4) state := by
+    simp only [ld, ElfLinker.load, bind, EStateM.bind, get, getThe, MonadStateOf.get, EStateM.get, hb, ite_true]
+    rfl
+  unfold mipsApplyHi
+  rw [bind_ok hload]
+  dsimp only
+  have hcommit : ∀ (st : LinkState) (v : Int), state.memory.size ≤ st.memory.size →
+      ∃ after, commit site [stAt env site 0 4 v] st = .ok () after ∧ st.memory.size ≤ after.memory.size ∧
+        after.mipsPending = st.mipsPending := fun st v hsize => commit_bounds (by
+    intro w hw
+    simp only [List.mem_singleton] at hw
+    subst hw
+    simp only [stAt]
+    omega)
+  split
+  · exact hcommit state _ (Nat.le_refl _)
+  · obtain ⟨slot, mid, hg, h1, h2⟩ := gotEntry_ok env ((site.s + ahl + 0x8000) - (site.s + ahl + 0x8000) % 65536) state
+    rw [bind_ok hg]
+    obtain ⟨after, hc, h3, h4⟩ := hcommit mid (setLo16 (readNat state.memory env.little (site.off + 0) 4) (slot - mipsGp env)) h1
+    exact ⟨after, hc, Nat.le_trans h1 h3, h4.trans h2⟩
+
+/-- The sites that are pending can be resolved: their places were read when they were deferred, and memory only grows. -/
+def PendingOk (state : LinkState) : Prop := ∀ entry ∈ state.mipsPending, inSection entry.1 0 4 state.memory.size = true
+
+private theorem inSection_mono {site : Site} {at' n small large : Nat} (h : inSection site at' n small = true) (hle : small ≤ large) :
+    inSection site at' n large = true := by
+  simp only [inSection, Bool.and_eq_true, decide_eq_true_eq] at h ⊢
+  exact ⟨h.1, by omega⟩
+
+/-- **The pending halves of a symbol are all resolved**, and only those stop being pending: `mipsFlush` can't fail, so
+it isn't a hypothesis of `mips_lo16_resolves`. -/
+theorem mipsFlush_ok (env : Env) (lo : Int) (symbol : Nat) {state : LinkState} (h : PendingOk state) :
+    ∃ after, mipsFlush env lo symbol state = .ok () after ∧ state.memory.size ≤ after.memory.size ∧
+      after.mipsPending = state.mipsPending.filter fun entry => !(entry.1.rel.symbol == symbol) := by
+  have key : ∀ (list : List (Site × Nat)) (st : LinkState), (∀ entry ∈ list, inSection entry.1 0 4 st.memory.size = true) →
+      ∃ after, (forIn list PUnit.unit fun entry _ => do
+          mipsApplyHi env entry.1 ((entry.2 : Int) * 65536 + lo)
+          pure (ForInStep.yield PUnit.unit) : LinkM PUnit) st = .ok PUnit.unit after ∧
+        st.memory.size ≤ after.memory.size ∧ after.mipsPending = st.mipsPending := by
+    intro list
+    induction list with
+    | nil => exact fun st _ => ⟨st, rfl, Nat.le_refl _, rfl⟩
+    | cons entry rest ih =>
+      intro st hall
+      obtain ⟨mid, hm, h1, h2⟩ := mipsApplyHi_ok env ((entry.2 : Int) * 65536 + lo) (hall entry (by simp))
+      obtain ⟨after, ha, h3, h4⟩ := ih mid fun e he => inSection_mono (hall e (by simp [he])) h1
+      refine ⟨after, ?_, Nat.le_trans h1 h3, h4.trans h2⟩
+      rw [List.forIn_cons]
+      have hs : (do mipsApplyHi env entry.1 ((entry.2 : Int) * 65536 + lo); pure (ForInStep.yield PUnit.unit) : LinkM _) st =
+          .ok (ForInStep.yield PUnit.unit) mid := bind_ok hm
+      exact (bind_ok hs).trans ha
+  have hrest : state.mipsPending.partition (fun entry => entry.1.rel.symbol == symbol) =
+      (state.mipsPending.filter fun entry => entry.1.rel.symbol == symbol,
+        state.mipsPending.filter fun entry => !(entry.1.rel.symbol == symbol)) := by
+    rw [List.partition_eq_filter_filter]
+    rfl
+  obtain ⟨after, ha, h1, h2⟩ := key (state.mipsPending.filter fun entry => entry.1.rel.symbol == symbol).reverse
+    { state with mipsPending := state.mipsPending.filter fun entry => !(entry.1.rel.symbol == symbol) } (fun e he =>
+      h e (List.mem_filter.mp (List.mem_reverse.mp he)).1)
+  refine ⟨after, ?_, h1, h2⟩
+  unfold mipsFlush
+  have step : ∀ f : LinkState → LinkM Unit, ((get : LinkM LinkState) >>= f) state = f state state := fun _ => rfl
+  rw [step]
+  simp only [hrest]
+  exact Eq.trans rfl ((bind_ok ha).trans rfl)
+
+/-- **`R_MIPS_LO16`**: its place is in bounds and the pending sites are, so what `mips_lo16` assumed holds. It first resolves
+the pending halves of its symbol, then stores `S + A`, and for `_gp_disp` the `GP - P + 4` of the pair. -/
+theorem mips_lo16_resolves {env : Env} {site : Site} {state : LinkState} (ht : site.rel.typ = 6)
+    (hb : inSection site 0 4 state.memory.size = true) (hp : PendingOk state) :
+    ∃ after, mipsFlush env (mipsA16 env site state) site.rel.symbol state = .ok () after ∧
+      after.mipsPending = (state.mipsPending.filter fun entry => !(entry.1.rel.symbol == site.rel.symbol)) ∧
+      (mips env site).run state = .ok (some [stAt env site 0 4 (setLo16 (readNat after.memory env.little (site.off + 0) 4)
+        ((if site.sym.name == "_gp_disp" then mipsGp env - site.p + 4 else site.s) + mipsA16 env site state))]) after := by
+  obtain ⟨after, hf, hs, hpend⟩ := mipsFlush_ok env (mipsA16 env site state) site.rel.symbol hp
+  exact ⟨after, hf, hpend, mips_lo16 ht hb (inSection_mono hb hs) hf⟩
+
+/-- What is deferred stays good: the place of `R_MIPS_HI16` was read before it was deferred. -/
+theorem PendingOk.push {state : LinkState} (h : PendingOk state) {site : Site} (stored : Nat)
+    (hb : inSection site 0 4 state.memory.size = true) :
+    PendingOk { state with mipsPending := (site, stored) :: state.mipsPending } := by
+  intro entry he
+  rcases List.mem_cons.mp he with rfl | he
+  · exact hb
+  · exact h entry he
+
+/-! The range of a field is exactly when nothing is lost by cutting a value to it. -/
+
+/-- **A signed field**: it keeps a value exactly if the value is in its range. -/
+theorem fits_signed_iff {bits : Nat} (hb : 0 < bits) (value : Int) :
+    fits .signed bits value = true ↔ sext (field value 0 bits : Nat) bits = value := by
+  rw [sext_natCast_field]
+  simp only [fits, Bool.and_eq_true, decide_eq_true_eq]
+  constructor
+  · exact fun h => sext_of_range hb h.1 h.2
+  · intro h
+    rw [← h]
+    exact sext_range value hb
+
+/-- **An unsigned field**: it keeps a value exactly if the value is in its range. -/
+theorem fits_unsigned_iff (bits : Nat) (value : Int) :
+    fits .unsigned bits value = true ↔ ((field value 0 bits : Nat) : Int) = value := by
+  have hfield : ((field value 0 bits : Nat) : Int) = value % ((2 ^ bits : Nat) : Int) := by
+    unfold field
+    have hzero : value >>> 0 = value := by rw [Int.shiftRight_eq_div_pow]; simp
+    rw [hzero, Int.toNat_of_nonneg (Int.emod_nonneg _ (by
+      have : 0 < 2 ^ bits := Nat.two_pow_pos bits
+      omega))]
+  have hpos : (0 : Int) < ((2 ^ bits : Nat) : Int) := by
+    have : 0 < 2 ^ bits := Nat.two_pow_pos bits
+    omega
+  simp only [fits, Bool.and_eq_true, decide_eq_true_eq, hfield]
+  constructor
+  · exact fun h => Int.emod_eq_of_lt h.1 h.2
+  · intro h
+    rw [← h]
+    exact ⟨Int.emod_nonneg _ (by omega), Int.emod_lt_of_pos _ hpos⟩
+
+/-- **A field that holds both**: it keeps a value exactly if one of the readings of its bits is the value. -/
+theorem fits_either_iff {bits : Nat} (hb : 0 < bits) (value : Int) :
+    fits .either bits value = true ↔
+      sext (field value 0 bits : Nat) bits = value ∨ ((field value 0 bits : Nat) : Int) = value := by
+  rw [← fits_signed_iff hb, ← fits_unsigned_iff]
+  have hp : ((2 ^ bits : Nat) : Int) = 2 * ((2 ^ (bits - 1) : Nat) : Int) := by
+    have : 2 ^ bits = 2 * 2 ^ (bits - 1) := by
+      conv => lhs; rw [show bits = (bits - 1) + 1 by omega, Nat.pow_succ']
+    omega
+  simp only [fits, Bool.and_eq_true, decide_eq_true_eq]
+  omega
+
+/-- **The checks are of what is stored.** For every checked relocation of x86-64 that stores a value as it is, the check is of
+that value, in the bits of the store. -/
+theorem x86_64Field_stored {env : Env} {site : Site} {state : LinkState} {check : FieldCheck}
+    (ht : site.rel.typ = 2 ∨ site.rel.typ = 4 ∨ site.rel.typ = 10 ∨ site.rel.typ = 11 ∨ site.rel.typ = 12 ∨ site.rel.typ = 13 ∨
+      site.rel.typ = 14 ∨ site.rel.typ = 15 ∨ site.rel.typ = 23 ∨ site.rel.typ = 26)
+    (hc : x86_64Field env state site = some check) :
+    check.bits % 8 = 0 ∧ (x86_64 env site).run state = .ok (some [stAt env site 0 (check.bits / 8) check.value]) state := by
+  rcases ht with h | h | h | h | h | h | h | h | h | h <;>
+    (simp only [x86_64Field, h, Option.some.injEq] at hc; subst hc; refine ⟨by simp, ?_⟩; simp only [x86_64, h]; rfl)
+
+/-- **The same of i386**, whose addend is in the place unless the record has it. -/
+theorem i386Field_stored {env : Env} {site : Site} {state : LinkState} {check : FieldCheck}
+    (hb : ∀ n, n ≤ 4 → inSection site 0 n state.memory.size = true)
+    (ht : site.rel.typ = 2 ∨ site.rel.typ = 4 ∨ site.rel.typ = 17 ∨ site.rel.typ = 20 ∨ site.rel.typ = 22 ∨ site.rel.typ = 23)
+    (hc : i386Field env state site = some check) :
+    check.bits % 8 = 0 ∧ (i386 env site).run state = .ok (some [stAt env site 0 (check.bits / 8) check.value]) state := by
+  have h4 := hb 4 (by omega)
+  have h2 := hb 2 (by omega)
+  have h1 := hb 1 (by omega)
+  rcases ht with h | h | h | h | h | h <;> (simp only [i386Field, h, Option.some.injEq] at hc; subst hc; refine ⟨by simp, ?_⟩) <;>
+    cases he : site.rel.isExplicit <;> (link_run [i386, h, he, h4, h2, h1, addendOf]; try rfl)
+
+/-! The thread pointer of each psABI. -/
+
+/-- Variant II, of x86 and SystemZ: the block ends at the thread pointer, up to its alignment. -/
+theorem tpOff_variant2 {env : Env} (hm : env.machine = 62 ∨ env.machine = 3 ∨ env.machine = 22) (s : Int) :
+    tpOff env s = s - env.tls.start - (alignUp env.tls.size (max 1 env.tls.align) : Nat) -
+      (-(env.tls.start : Int) - (alignUp env.tls.size (max 1 env.tls.align) : Nat)) % (max 1 env.tls.align : Int) := by
+  rcases hm with hm | hm | hm <;> simp only [tpOff, hm]
+
+/-- Variant I, of AArch64 and ARM: after a control block of two words, up to its alignment. -/
+theorem tpOff_variant1 {env : Env} (hm : env.machine = 183 ∨ env.machine = 40) (s : Int) :
+    tpOff env s = s - env.tls.start + (env.width : Int) / 4 +
+      ((env.tls.start : Int) - (env.width : Int) / 4) % (max 1 env.tls.align : Int) := by
+  rcases hm with hm | hm <;> simp only [tpOff, hm]
+
+private theorem xor_ones {x : Nat} (hx : x < 65536) : x ^^^ 0xffff = 65535 - x := by
+  have h1 : (BitVec.ofNat 16 x ^^^ BitVec.allOnes 16).toNat = x ^^^ 65535 := by
+    rw [BitVec.toNat_xor, BitVec.toNat_allOnes, BitVec.toNat_ofNat, Nat.mod_eq_of_lt (by omega)]
+  have h2 : (BitVec.ofNat 16 x ^^^ BitVec.allOnes 16).toNat = 65535 - x := by
+    rw [BitVec.xor_allOnes, BitVec.toNat_not, BitVec.toNat_ofNat, Nat.mod_eq_of_lt (by omega)]
+  exact h1.symm.trans h2
+
+/-- A signed MOVW is a MOVZ of a value that fits and isn't negative. -/
+theorem aarch64SMov_movz {value : Int} {insn : Nat} (h : 0 ≤ value) (hl : value < 65536) :
+    field (aarch64SMov value insn) 30 1 = 1 ∧ (field (aarch64SMov value insn) 5 16 : Int) = value := by
+  obtain ⟨k, rfl⟩ := Int.eq_ofNat_of_zero_le h
+  have hk : k < 65536 := by omega
+  have hsign : field (k : Int) 16 1 = 0 := by
+    unfold field
+    rw [Int.shiftRight_eq_div_pow]
+    have : (k : Int) / ((2 ^ 16 : Nat) : Int) = 0 := by omega
+    rw [this]
+    rfl
+  have hmov : aarch64SMov (k : Int) insn = setBits (setBits insn 30 1 1) 5 16 k := by
+    simp [aarch64SMov, hsign]
+  rw [hmov]
+  refine ⟨?_, ?_⟩
+  · rw [field_setBits_other _ _ _ _ 30 1 (.inr (by omega)), field_setBits_self]
+    rfl
+  · rw [field_setBits_self, field_of_lt (show k < 2 ^ 16 from hk)]
+
+/-- A signed MOVW is a MOVN of a value that fits and is negative: the instruction holds the complement. -/
+theorem aarch64SMov_movn {value : Int} {insn : Nat} (h : value < 0) (hl : -65536 ≤ value) :
+    field (aarch64SMov value insn) 30 1 = 0 ∧ (-1 - (field (aarch64SMov value insn) 5 16 : Nat) : Int) = value := by
+  have hsign : field value 16 1 = 1 := by
+    unfold field
+    rw [Int.shiftRight_eq_div_pow]
+    have : value / ((2 ^ 16 : Nat) : Int) = -1 := by omega
+    rw [this]
+    rfl
+  have hlow : (field value 0 16 : Int) = value + 65536 := by
+    unfold field
+    have hzero : value >>> 0 = value := by rw [Int.shiftRight_eq_div_pow]; simp
+    rw [hzero, Int.toNat_of_nonneg (Int.emod_nonneg _ (by decide))]
+    show value % 65536 = _
+    omega
+  have hmov : aarch64SMov value insn =
+      setBits (setBits insn 30 1 0) 5 16 ((field value 0 16 ^^^ 0xffff : Nat) : Int) := by
+    simp [aarch64SMov, hsign]
+  have hlt : field value 0 16 < 65536 := field_lt value 0 16
+  rw [hmov]
+  refine ⟨?_, ?_⟩
+  · rw [field_setBits_other _ _ _ _ 30 1 (.inr (by omega)), field_setBits_self]
+    rfl
+  · rw [field_setBits_self, xor_ones hlt, field_of_lt (show 65535 - field value 0 16 < 2 ^ 16 by
+      show 65535 - field value 0 16 < 65536
+      omega)]
+    omega
+
+/-- A record of N32 at the place of the next one is one record with it: the types are the bytes of the type of the first, and
+the symbol and addend are the first one's. -/
+theorem packCompound_merge {rel next : Rel} {rest tail : List Rel} (h : Elf.packCompound rest = next :: tail)
+    (hsame : next.target = rel.target ∧ next.offset = rel.offset) (ht : next.typ < 2 ^ 16) :
+    Elf.packCompound (rel :: rest) = { rel with typ := rel.typ + next.typ * 256 } :: tail := by
+  have : Elf.packCompound (rel :: rest) = match Elf.packCompound rest with
+      | next :: rest' =>
+        if next.target == rel.target && next.offset == rel.offset && next.typ < 2 ^ 16 then
+          { rel with typ := rel.typ + next.typ * 256 } :: rest'
+        else rel :: Elf.packCompound rest
+      | [] => [rel] := rfl
+  rw [this, h]
+  simp [hsame.1, hsame.2, ht]
+
+/-- A record at another place is a record of its own. -/
+theorem packCompound_keep {rel next : Rel} {rest tail : List Rel} (h : Elf.packCompound rest = next :: tail)
+    (hother : ¬ (next.target = rel.target ∧ next.offset = rel.offset)) :
+    Elf.packCompound (rel :: rest) = rel :: next :: tail := by
+  have : Elf.packCompound (rel :: rest) = match Elf.packCompound rest with
+      | next :: rest' =>
+        if next.target == rel.target && next.offset == rel.offset && next.typ < 2 ^ 16 then
+          { rel with typ := rel.typ + next.typ * 256 } :: rest'
+        else rel :: Elf.packCompound rest
+      | [] => [rel] := rfl
+  rw [this, h]
+  have hne : ¬ ((next.target == rel.target && next.offset == rel.offset && decide (next.typ < 2 ^ 16)) = true) := by
+    simp only [Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq]
+    exact fun h' => hother h'.1
+  dsimp only
+  rw [ite_eq_right hne]
+
+/-- Without a handler nothing changes in memory, whatever the relocations are. -/
+theorem relocate_no_handler {tables : Tables} (h : handler tables.env = none) (state : LinkState) {o : Nat}
+    (ho : o < state.memory.size) : (stateOf (relocate tables state)).memory.get! o = state.memory.get! o := by
+  have hf : Frame (fun _ => False) (fun _ => True) (relocate tables) := by
+    unfold relocate
+    dsimp only
+    split
+    · refine Frame.bind (Frame.forIn fun _ _ _ => ?_) fun _ => ?_
+      · refine Frame.bind (frame_siteOf _ _ _) fun _ => ?_
+        split <;> exact Frame.pure _
+      · split
+        · exact frame_warn _
+        · exact Frame.pure _
+    · next heq => rw [h] at heq; cases heq
+  exact (hf state fun _ _ => trivial).2.2 o ho id
 
 end LinkerLaws
 
@@ -2564,16 +5470,66 @@ end MachoParser
 namespace PeParser
 
 open_private Bap.Image.Pe Bap.Image.Pe Header Header.mk Header.sectionOffset Header.sectionCount Header.imageBase
-  Header.entryPoint parseHeader parseSection parseSections parseSymbol parseSymbols
+  Header.entryPoint Header.width optionalLayout parseHeader parseSection parseSections parseSymbol parseSymbols
 
 open Reader
 
-/-- An accepted PE header has the DOS and PE signatures, the PE32+ magic and an in-bounds section table. -/
+/-- A PE32 optional header (magic `0x10b`) has a 32-bit `ImageBase` at offset 28, past `BaseOfData`, and at least the 96
+bytes of its fields before the data directories. A PE32+ one (magic `0x20b`) has a 64-bit one at offset 24 and at least
+112 bytes. There is no other. -/
+theorem optionalLayout_ok {data : ByteArray} {offset size width base : Nat}
+    (h : optionalLayout data offset size = .ok (width, base)) :
+    (IO.Reader.u16 data .little offset = .ok 0x10b ∧ width = 32 ∧ 96 ≤ size ∧
+        IO.Reader.u32 data .little (offset + 28) = .ok base) ∨
+      (IO.Reader.u16 data .little offset = .ok 0x20b ∧ width = 64 ∧ 112 ≤ size ∧
+        IO.Reader.u64 data .little (offset + 24) = .ok base) := by
+  simp only [optionalLayout, bind_ok_iff] at h
+  rcases h with ⟨magic, hm, h⟩
+  by_cases h1 : (magic == 0x10b) = true
+  · rw [ite_eq_left h1] at h
+    have hmagic : magic = 0x10b := by simpa using h1
+    subst hmagic
+    split at h
+    · cases h
+    · rename_i hs
+      simp only [bind_ok_iff] at h
+      rcases h with ⟨b, hb, h⟩
+      cases h
+      exact .inl ⟨hm, rfl, by omega, hb⟩
+  · rw [ite_eq_right h1] at h
+    by_cases h2 : (magic == 0x20b) = true
+    · rw [ite_eq_left h2] at h
+      have hmagic : magic = 0x20b := by simpa using h2
+      subst hmagic
+      split at h
+      · cases h
+      · rename_i hs
+        simp only [bind_ok_iff] at h
+        rcases h with ⟨b, hb, h⟩
+        cases h
+        exact .inr ⟨hm, rfl, by omega, hb⟩
+    · rw [ite_eq_right h2] at h
+      cases h
+
+/-- Any other magic is rejected. -/
+theorem optionalLayout_rejects {data : ByteArray} {offset size magic : Nat}
+    (hm : IO.Reader.u16 data .little offset = .ok magic) (h1 : magic ≠ 0x10b) (h2 : magic ≠ 0x20b) :
+    (optionalLayout data offset size).isOk = false := by
+  cases hl : optionalLayout data offset size with
+  | error e => rfl
+  | ok v =>
+    rcases optionalLayout_ok (width := v.1) (base := v.2) hl with ⟨h, _⟩ | ⟨h, _⟩ <;> rw [hm] at h <;> cases h <;> simp_all
+
+/-- An accepted PE header has the DOS and PE signatures, a known optional header and an in-bounds section table, and its
+width and image base are those of the optional header's kind. -/
 theorem parseHeader_ok {data : ByteArray} {header : Header} (h : parseHeader data = .ok header) :
     IO.Reader.u16 data .little 0 = .ok 0x5a4d ∧ 64 ≤ data.size ∧
       ∃ peOffset, IO.Reader.u32 data .little 60 = .ok peOffset ∧
         IO.Reader.u32 data .little peOffset = .ok 0x4550 ∧
-        IO.Reader.u16 data .little (peOffset + 24) = .ok 0x20b ∧
+        ((IO.Reader.u16 data .little (peOffset + 24) = .ok 0x10b ∧ Header.width header = 32 ∧
+            IO.Reader.u32 data .little (peOffset + 24 + 28) = .ok (Header.imageBase header)) ∨
+          (IO.Reader.u16 data .little (peOffset + 24) = .ok 0x20b ∧ Header.width header = 64 ∧
+            IO.Reader.u64 data .little (peOffset + 24 + 24) = .ok (Header.imageBase header))) ∧
         Header.sectionOffset header + Header.sectionCount header * 40 ≤ data.size ∧
         ∃ entryRva, IO.Reader.u32 data .little (peOffset + 24 + 16) = .ok entryRva ∧
           Header.entryPoint header = Header.imageBase header + entryRva := by
@@ -2592,17 +5548,9 @@ theorem parseHeader_ok {data : ByteArray} {header : Header} (h : parseHeader dat
   have hsg : signature = 0x4550 := by simpa using hs1
   subst hsg
   simp only [bind_ok_iff] at h
-  rcases h with ⟨machine, _, count, _, symOff, _, symCount, _, optSize, _, optMagic, hmagic, h⟩
-  by_cases hm1 : (optMagic != 0x20b) = true
-  · rw [ite_eq_left hm1] at h; cases h
-  rw [ite_eq_right hm1] at h
-  have hm2 : optMagic = 0x20b := by simpa using hm1
-  subst hm2
-  by_cases hsz : optSize < 112
-  · rw [ite_eq_left hsz] at h; cases h
-  rw [ite_eq_right hsz] at h
+  rcases h with ⟨machine, _, count, _, symOff, _, symCount, _, optSize, _, ⟨width, base⟩, hopt, h⟩
   simp only [bind_ok_iff] at h
-  rcases h with ⟨entryRva, hentry, base, _, h⟩
+  rcases h with ⟨entryRva, hentry, h⟩
   by_cases hsec : peOffset + 4 + 20 + optSize + count * 40 > data.size
   · rw [ite_eq_left hsec] at h; cases h
   rw [ite_eq_right hsec] at h
@@ -2610,7 +5558,10 @@ theorem parseHeader_ok {data : ByteArray} {header : Header} (h : parseHeader dat
   · cases h
   · cases h
     have hbound := read_bound hpe
-    exact ⟨hd, by omega, peOffset, hpe, hsig, hmagic, by simpa using hsec, entryRva, hentry, rfl⟩
+    refine ⟨hd, by omega, peOffset, hpe, hsig, ?_, by simpa using hsec, entryRva, hentry, rfl⟩
+    rcases optionalLayout_ok hopt with ⟨h1, h2, _, h3⟩ | ⟨h1, h2, _, h3⟩
+    · exact .inl ⟨h1, h2, h3⟩
+    · exact .inr ⟨h1, h2, h3⟩
 
 theorem parseHeader_rejects_short {data : ByteArray} (h : data.size < 64) : (parseHeader data).isOk = false := by
   cases hp : parseHeader data with
@@ -2681,7 +5632,7 @@ theorem parseSymbols_ok {data : ByteArray} {header : Header} {sections : List Se
 
 /-- Everything `Pe.decode` promises about an accepted file. -/
 theorem decode_ok {data : ByteArray} {image : Image} (h : Pe.decode data = .ok image) :
-    ∃ header, parseHeader data = .ok header ∧ image.data = data ∧ image.addrWidth = 64 ∧
+    ∃ header, parseHeader data = .ok header ∧ image.data = data ∧ image.addrWidth = Header.width header ∧
       image.endian = .little ∧ image.entryPoint = Header.entryPoint header ∧
       image.sections.length = Header.sectionCount header ∧ image.segments.length = Header.sectionCount header ∧
       ∃ entries : List (Section × Segment × MemRegion), image.segments = entries.map (·.2.1) ∧
@@ -2702,6 +5653,19 @@ theorem decode_rejects_short {data : ByteArray} (h : data.size < 64) : (Pe.decod
     have ⟨_, hp, _⟩ := decode_ok hd
     have := parseHeader_rejects_short (data := data) h
     simp [hp, Except.isOk, Except.toBool] at this
+
+/-- A PE32 file decodes to a 32-bit image, whose image base comes from its 32-bit field, and a PE32+ one to a 64-bit
+image. The rest is what `decode_ok` says of both. -/
+theorem decode_width {data : ByteArray} {image : Image} (h : Pe.decode data = .ok image) :
+    ∃ peOffset, IO.Reader.u32 data .little 60 = .ok peOffset ∧
+      ((IO.Reader.u16 data .little (peOffset + 24) = .ok 0x10b ∧ image.addrWidth = 32) ∨
+        (IO.Reader.u16 data .little (peOffset + 24) = .ok 0x20b ∧ image.addrWidth = 64)) := by
+  have ⟨header, hp, _, hw, _⟩ := decode_ok h
+  have ⟨_, _, peOffset, hpe, _, hk, _⟩ := parseHeader_ok hp
+  refine ⟨peOffset, hpe, ?_⟩
+  rcases hk with ⟨h1, h2, _⟩ | ⟨h1, h2, _⟩
+  · exact .inl ⟨h1, hw.trans h2⟩
+  · exact .inr ⟨h1, hw.trans h2⟩
 
 /-- A symbol in section `number + 1` is relative to it; a symbol with a reserved or missing number is not. -/
 theorem parseSymbol_address {data : ByteArray} {header : Header} {sections : List Section}
@@ -2953,7 +5917,7 @@ theorem relocationKind_numbers :
       Coff.relocationKind 0x8664 0xb = some .sectionRelative ∧ Coff.relocationKind 0x014c 6 = some (.absolute 4) ∧
       Coff.relocationKind 0x014c 7 = some (.absolute 4) ∧ Coff.relocationKind 0x014c 0xa = some .section ∧
       Coff.relocationKind 0x014c 0xb = some .sectionRelative ∧ Coff.relocationKind 0x014c 0x14 = some (.relative 4) ∧
-      Coff.relocationKind 0xaa64 3 = none ∧ Coff.relocationKind 0x01c4 3 = none := by
+      Coff.relocationKind 0xaa64 3 = some (.arm64Branch 0 26) ∧ Coff.relocationKind 0x01c4 3 = none := by
   decide
 
 /-- A successful relocation writes what `relocationValue` computes over the bytes at the place. -/
@@ -2965,9 +5929,10 @@ theorem applyRelocation_ok {data : ByteArray} {header : Header} {sections : List
         IO.Reader.u16 data .little (ObjectSection.relocationOffset object + index * 10 + 8) = .ok number ∧
         IO.Reader.u32 data .little (ObjectSection.relocationOffset object + index * 10) = .ok rva ∧
         Coff.relocationKind (Header.machine header) number = some kind ∧
+        ∃ flags, let address := Coff.withThumbBit (Header.machine header) kind flags symbol.addr
         writeNat region.data rva
-          (Coff.relocationValue kind symbol.addr ((ObjectSection.info object).addr + rva) addend sectionNumber sectionAddr).2
-          (Coff.relocationValue kind symbol.addr ((ObjectSection.info object).addr + rva) addend sectionNumber sectionAddr).1 =
+          (Coff.relocationValue kind address ((ObjectSection.info object).addr + rva) addend sectionNumber sectionAddr).2
+          (Coff.relocationValue kind address ((ObjectSection.info object).addr + rva) addend sectionNumber sectionAddr).1 =
           .ok out.data := by
   simp only [applyRelocation, bind_ok_iff] at h
   rcases h with ⟨rva, hrva, symbolIndex, _, number, hnumber, h⟩
@@ -2979,15 +5944,16 @@ theorem applyRelocation_ok {data : ByteArray} {header : Header} {sections : List
   rename_i symbol _
   simp only [bind_ok_iff] at h
   rcases h with ⟨sectionNumber, _, addend, _, h⟩
-  generalize hs : Coff.relocationValue kind symbol.addr _ addend sectionNumber _ = pair at h
+  generalize hs : Coff.relocationValue kind _ _ addend sectionNumber _ = pair at h
   obtain ⟨value, size⟩ := pair
-  simp only at h
   rcases h with ⟨bytes, hw, h⟩
   cases h
-  have ⟨sectionAddr, hs'⟩ : ∃ sectionAddr, Coff.relocationValue kind symbol.addr
-      ((ObjectSection.info object).addr + rva) addend sectionNumber sectionAddr = (value, size) := ⟨_, hs⟩
+  have ⟨sectionAddr, flags, hs'⟩ : ∃ sectionAddr flags, Coff.relocationValue kind
+      (Coff.withThumbBit (Header.machine header) kind flags symbol.addr)
+      ((ObjectSection.info object).addr + rva) addend sectionNumber sectionAddr = (value, size) := ⟨_, _, hs⟩
   refine ⟨rfl, (writeNat_ok hw).2.1, rva, number, kind, symbol, sectionNumber, sectionAddr, addend, hnumber, hrva,
-    hkind, ?_⟩
+    hkind, flags, ?_⟩
+  simp only
   rw [hs']
   exact hw
 

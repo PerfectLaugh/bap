@@ -5,6 +5,8 @@ namespace Bap.Image.Pe
 
 private structure Header where
   machine : Nat
+  /-- The address width of the image: 32 for PE32 and 64 for PE32+. -/
+  width : Nat
   imageBase : Nat
   entryPoint : Nat
   sectionOffset : Nat
@@ -12,6 +14,26 @@ private structure Header where
   symbolOffset : Nat
   symbolCount : Nat
   stringsOffset : Nat
+
+/-- The width and the image base of an optional header, by its magic. PE32 has a `BaseOfData` field where PE32+ has the
+upper half of a 64-bit `ImageBase`, and its windows-specific fields are smaller, 96 bytes in all up to the data
+directories against 112. -/
+private def optionalLayout (data : ByteArray) (offset size : Nat) : Except String (Nat × Nat) := do
+  let magic ← IO.Reader.u16 data .little offset
+  if magic == 0x10b then
+    if size < 96 then
+      .error "PE optional header is too small"
+    else
+      let base ← IO.Reader.u32 data .little (offset + 28)
+      .ok (32, base)
+  else if magic == 0x20b then
+    if size < 112 then
+      .error "PE optional header is too small"
+    else
+      let base ← IO.Reader.u64 data .little (offset + 24)
+      .ok (64, base)
+  else
+    .error "unknown PE optional header magic"
 
 private def parseHeader (data : ByteArray) : Except String Header := do
   let dosMagic ← IO.Reader.u16 data .little 0
@@ -30,24 +52,18 @@ private def parseHeader (data : ByteArray) : Except String Header := do
       let symbolCount ← IO.Reader.u32 data .little (coffOffset + 12)
       let optionalSize ← IO.Reader.u16 data .little (coffOffset + 16)
       let optionalOffset := coffOffset + 20
-      let optionalMagic ← IO.Reader.u16 data .little optionalOffset
-      if optionalMagic != 0x20b then
-        .error "only PE32+ images are supported"
-      else if optionalSize < 112 then
-        .error "PE optional header is too small"
+      let (width, imageBase) ← optionalLayout data optionalOffset optionalSize
+      let entryRva ← IO.Reader.u32 data .little (optionalOffset + 16)
+      let sectionOffset := optionalOffset + optionalSize
+      if sectionOffset + sectionCount * 40 > data.size then
+        .error "PE section table exceeds input"
       else
-        let entryRva ← IO.Reader.u32 data .little (optionalOffset + 16)
-        let imageBase ← IO.Reader.u64 data .little (optionalOffset + 24)
-        let sectionOffset := optionalOffset + optionalSize
-        if sectionOffset + sectionCount * 40 > data.size then
-          .error "PE section table exceeds input"
+        let stringsOffset := symbolOffset + symbolCount * 18
+        if symbolCount > 0 && stringsOffset + 4 > data.size then
+          .error "PE symbol table exceeds input"
         else
-          let stringsOffset := symbolOffset + symbolCount * 18
-          if symbolCount > 0 && stringsOffset + 4 > data.size then
-            .error "PE symbol table exceeds input"
-          else
-            .ok ⟨machine, imageBase, imageBase + entryRva, sectionOffset, sectionCount,
-              symbolOffset, symbolCount, stringsOffset⟩
+          .ok ⟨machine, width, imageBase, imageBase + entryRva, sectionOffset, sectionCount,
+            symbolOffset, symbolCount, stringsOffset⟩
 
 private def fixedString (data : ByteArray) (offset size : Nat) : Except String String := do
   let bytes ← IO.Reader.slice data offset size
@@ -120,6 +136,7 @@ private def architecture (machine : Nat) : Arch :=
   | 0x8664 => .x86_64
   | 0xaa64 => .aarch64
   | 0x014c => .x86
+  | 0x01c0 | 0x01c2 | 0x01c4 => .arm
   | _ => .unknown
 
 def decode (data : ByteArray) : Except String Image := do
@@ -129,7 +146,7 @@ def decode (data : ByteArray) : Except String Image := do
   let memory := regions.foldl (fun memory region => MemoryMap.add region () memory) {}
   .ok {
     arch := architecture header.machine
-    addrWidth := 64
+    addrWidth := header.width
     endian := .little
     entryPoint := header.entryPoint
     data := data

@@ -45,6 +45,16 @@ def run : IO Unit := do
     (← evaluate "(let ((y 1)) (setq z 3)) z")
   assertEqual "Lisp closure assignment stays in its call" "0x1"
     (← evaluate "(let ((x 1)) ((lambda (y) (setq x y)) 7) x)")
+  assertEqual "Lisp hexadecimal literal" "0x10" (← evaluate "0x10")
+  assertEqual "Lisp binary literal" "0x5" (← evaluate "(+ 0b101 0)")
+  assertEqual "Lisp character literal" "<bil 8>" (← evaluate "?a")
+  assertEqual "Lisp typed literal" "<bil 16>" (← evaluate "1:16")
+  assertEqual "Lisp quoted malformed atom is data" "12x" (← evaluate "'12x")
+  for source in ["12x", "0xzz", "1:2:3", "?ab", "?", "(defun f () 9z) (f)"] do
+    match evalString source with
+    | .error _ => IO.println s!"ok: Lisp rejects {source}"
+    | .ok _ => throw <| IO.userError s!"Lisp accepted {source}"
+  assertEqual "a symbol that does not start like a number stays one" "0x1" (← evaluate "(setq x1 1) x1")
   match evalString "(unknown-function 1)" with
   | .error _ => IO.println "ok: Lisp unknown symbol rejected"
   | .ok _ => throw <| IO.userError "Lisp unknown symbol accepted"

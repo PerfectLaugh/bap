@@ -19,7 +19,7 @@ inductive PayloadKind where
 
 abbrev PayloadKind.data : PayloadKind → Type
   | .unit => Unit
-  | .bool => Bool
+  | .bool => Option Bool
   | .nat => Nat
   | .string => String
   | .bitvec width => BitVec width
@@ -72,9 +72,14 @@ structure State where
   opinions : List Opinion := []
   version : Nat := 0
 
+/-- A rule that computes a slot from the table. `compute` is a pure function of the facts, so unlike
+upstream's promises it cannot call `collect`; instead `deps` names the slots whose promises must run
+first, what upstream's body would `collect`. Reading any other slot is upstream's `current`: it sees
+what is already known and runs nothing. -/
 structure Promise where
   slot : Σ kind, Slot kind
   compute : Object → List Fact → Except Conflict (Option slot.1.data)
+  deps : List String := []
 
 structure Observer where
   slot : Σ kind, Slot kind
@@ -89,15 +94,14 @@ def maxDomain : Domain Nat where
   eq := (· == ·)
   join left right := some (max left right)
 
+/-- Flat with the empty string at the bottom, as upstream documents `Domain.string`: two different
+names are a conflict. Upstream's code differs from its documentation: there the empty string is
+above everything and other strings are ordered lexicographically, so `""` would absorb any value and
+a name would silently replace another. -/
 def stringDomain : Domain String where
   empty := ""
   eq := (· == ·)
   join left right := if left.isEmpty then some right else if right.isEmpty || left = right then some left else none
-
-def boolDomain : Domain Bool where
-  empty := false
-  eq := (· == ·)
-  join left right := some (left || right)
 
 def unitDomain : Domain Unit where
   empty := ()
@@ -110,6 +114,10 @@ def optionDomain [DecidableEq α] : Domain (Option α) where
   join
     | none, value | value, none => some value
     | some left, some right => if left = right then some (some left) else none
+
+/-- The tribool, as upstream's `Domain.bool`: `none` is unknown, and `some false` is knowledge that
+contradicts `some true`. -/
+def boolDomain : Domain (Option Bool) := optionDomain
 
 def exactDomain [DecidableEq α] (empty : α) : Domain α where
   empty := empty
@@ -158,6 +166,10 @@ def notifyObservers (env : Environment) (slot : Slot kind) (object : Object) (st
     if observer.slot.2.name = slot.name then
       observer.notify object state.facts
 
+/-- Provides a value and tells the slot's observers, if that refined the cell. Upstream documents
+`observe` the same way ("calls `push` when the property changes"), although its `provide` calls them
+on every non-empty value. An observer here is a pure function of the table, so telling it about a
+table that did not change could only repeat an answer, and would make `provide` non-idempotent. -/
 def provideWith (env : Environment) (slot : Slot kind) (object : Object) (value : kind.data)
     (state : State) : Except Conflict State := do
   let next ← provide slot object value state
@@ -257,9 +269,44 @@ private def normalize (env : Environment) (object : Object) : Nat → List Fact 
     else
       .ok (false, facts)
 
+private theorem length_filter_not_lt (test : α → Bool) (values : List α) (h : values.filter test ≠ []) :
+    (values.filter fun value => !test value).length < values.length := by
+  induction values with
+  | nil => simp at h
+  | cons head tail ih =>
+    by_cases hhead : test head = true
+    · have := List.length_filter_le (fun value => !test value) tail
+      simp only [List.filter_cons, hhead, Bool.not_true, Bool.false_eq_true, ↓reduceIte, List.length_cons]
+      omega
+    · have hne : tail.filter test ≠ [] := by simpa [List.filter_cons, hhead] using h
+      have := ih hne
+      have hfalse : test head = false := by simpa using hhead
+      simp only [List.filter_cons, hfalse, Bool.not_false, ↓reduceIte, List.length_cons]
+      omega
+
+set_option wf.preprocess false in
+/-- The slot names that `names` depend on, through the `deps` of `pending`. Each promise is looked at
+once, so this terminates on cyclic dependencies. -/
+def demanded (pending : List Promise) (names : List String) : List String :=
+  if _h : pending.filter (fun promise => names.contains promise.slot.2.name) = [] then
+    names
+  else
+    demanded (pending.filter fun promise => !names.contains promise.slot.2.name)
+      (names ++ (pending.filter fun promise => names.contains promise.slot.2.name).flatMap Promise.deps)
+termination_by pending.length
+decreasing_by exact length_filter_not_lt _ _ _h
+
+/-- The environment of a collect of the named slot: the promises of that slot and of what it
+transitively depends on, in their order. As upstream, the others do not run, so their conflicts,
+failures and divergence are none of this slot's business. -/
+def Environment.demanding (env : Environment) (name : String) : Environment :=
+  let names := demanded env.promises [name]
+  { env with promises := env.promises.filter fun promise => names.contains promise.slot.2.name }
+
+/-- The slot's value at the least fixpoint of its promises and their dependencies. -/
 def collect (env : Environment) (slot : Slot kind) (object : Object) (state : State) (fuel : Nat := 1000) :
     Except Conflict (kind.data × State) := do
-  let (changed, facts) ← normalize env object fuel state.facts
+  let (changed, facts) ← normalize (env.demanding slot.name) object fuel state.facts
   let value ← lookupFact slot object facts
   .ok (value.getD slot.domain.empty,
     { state with facts := facts, version := state.version + changed.toNat })
@@ -274,9 +321,9 @@ def require (env : Environment) (slot : Slot kind) (object : Object) (state : St
 
 def objects (state : State) : List Object := (state.facts.map Fact.object).eraseDups
 
-def promise (slot : Slot kind)
-    (compute : Object → List Fact → Except Conflict (Option kind.data)) : Promise :=
-  ⟨⟨kind, slot⟩, compute⟩
+def promise (slot : Slot kind) (compute : Object → List Fact → Except Conflict (Option kind.data))
+    (deps : List String := []) : Promise :=
+  ⟨⟨kind, slot⟩, compute, deps⟩
 
 @[simp] theorem maxDomain_join (left right : Nat) :
     maxDomain.join left right = some (max left right) := by

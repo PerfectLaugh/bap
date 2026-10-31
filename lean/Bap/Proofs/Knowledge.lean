@@ -44,13 +44,6 @@ theorem maxDomain_lawful : Lawful maxDomain where
   idem value := by simp [maxDomain]
   empty_left value := by simp [maxDomain]
 
-theorem boolDomain_lawful : Lawful boolDomain where
-  eq_iff left right := by simp [boolDomain]
-  comm left right := by simp [boolDomain, Bool.or_comm]
-  assoc a b c := by simp [boolDomain, Bool.or_assoc]
-  idem value := by simp [boolDomain]
-  empty_left value := by simp [boolDomain]
-
 theorem unitDomain_lawful : Lawful unitDomain where
   eq_iff _ _ := by simp [unitDomain]
   comm _ _ := rfl
@@ -102,6 +95,31 @@ theorem optionDomain_lawful [DecidableEq α] : Lawful (optionDomain (α := α)) 
     · by_cases h₁ : x = y <;> by_cases h₂ : y = z <;> simp_all [optionDomain]
   idem value := by cases value <;> simp [optionDomain]
   empty_left value := by cases value <;> simp [optionDomain]
+
+/-- The tribool is a lawful domain with unknown at the bottom. -/
+theorem boolDomain_lawful : Lawful boolDomain := optionDomain_lawful
+
+/-- Knowing `false` and knowing `true` have no common refinement. -/
+theorem boolDomain_false_true : boolDomain.join (some false) (some true) = none := by decide
+
+/-- A string is only refined by itself: a slot of names never picks one of two different names. -/
+theorem stringDomain_flat {left right : String} (hleft : left ≠ "") (hright : right ≠ "") (hne : left ≠ right) :
+    stringDomain.join left right = none := by
+  simp [stringDomain, hleft, hright, hne]
+
+/-- Upstream's `Domain.string` as coded, not as documented: `make_join` over an order where the empty
+string is above everything and other strings are ordered lexicographically. -/
+def upstreamStringDomain : Domain String where
+  empty := ""
+  eq := (· == ·)
+  join left right :=
+    if left.isEmpty || right.isEmpty then some "" else if right < left then some left else some right
+
+/-- Why this port does not follow upstream's code: the empty value would not be the bottom, since a
+join with it forgets the other side. -/
+theorem upstreamStringDomain_unlawful : ¬Lawful upstreamStringDomain := fun h => by
+  have := h.empty_left "a"
+  simp [upstreamStringDomain] at this
 
 section Order
 
@@ -532,6 +550,27 @@ theorem provide_conflict {existing : kind.data} (hne : slot.domain.eq value slot
   simp only [provide, bind, Except.bind]
   rw [provideInFacts_conflict slot object hne hl hj]
 
+/-- `false` is a fact like any other: it is stored rather than taken for the absence of knowledge. -/
+theorem provide_false_stored {slot : Slot .bool} {source : State} (hd : slot.domain = boolDomain)
+    (hnone : lookupFact slot object source.facts = .ok none) :
+    ∃ target, provide slot object (some false) source = .ok target ∧
+      lookupFact slot object target.facts = .ok (some (some false)) ∧ target.version = source.version + 1 := by
+  have hne : slot.domain.eq (some false) slot.domain.empty = false := by rw [hd]; decide
+  have hp : provide slot object (some false) source = .ok
+      { source with
+        facts := putFact ⟨object, ⟨.bool, slot⟩, some false⟩ source.facts, version := source.version + 1 } := by
+    simp only [provide, bind, Except.bind, provideInFacts_fresh slot object _ hne hnone]
+    rfl
+  exact ⟨_, hp, provide_read_fresh hne hp hnone⟩
+
+/-- Knowing `true`, a claim of `false` is a conflict and not a no-op. -/
+theorem provide_false_conflicts {slot : Slot .bool} {source : State} (hd : slot.domain = boolDomain)
+    (htrue : lookupFact slot object source.facts = .ok (some (some true))) :
+    provide slot object (some false) source = .error (.incompatible slot.name) := by
+  apply provide_conflict _ htrue
+  · rw [hd]; decide
+  · rw [hd]; decide
+
 theorem mem_objects_iff (key : Object) (source : State) :
     key ∈ objects source ↔ ∃ fact ∈ source.facts, fact.object = key := by
   simp [objects, List.mem_eraseDups]
@@ -903,6 +942,18 @@ theorem provideWith_ok {env : Environment} (h : provideWith env slot object valu
 theorem provideWith_unchanged (env : Environment) (h : provide slot object value state = .ok next)
     (hv : next.version = state.version) : provideWith env slot object value state = .ok next := by
   simp [provideWith, h, bind, Except.bind, hv]
+
+/-- A change runs the observers of the slot, and they can veto it. -/
+theorem provideWith_changed (env : Environment) (h : provide slot object value state = .ok next)
+    (hv : next.version ≠ state.version) :
+    provideWith env slot object value state = (notifyObservers env slot object next).bind fun _ => .ok next := by
+  simp [provideWith, h, bind, Except.bind, hv]
+
+/-- Whatever the observers are, repeating an accepted provide neither runs them nor fails. -/
+theorem provideWith_idempotent {env : Environment} (hd : Lawful slot.domain)
+    (h : provideWith env slot object value state = .ok next) :
+    provideWith env slot object value next = .ok next :=
+  provideWith_unchanged env (provide_idempotent hd (provideWith_ok h)) rfl
 
 theorem provideWith_no_observers (env : Environment) (hempty : env.observers = []) :
     provideWith env slot object value state = provide slot object value state := by
@@ -1339,9 +1390,156 @@ theorem normalize_true_changed {env : Environment} {object : Object} (hw : Coord
       obtain ⟨hlaw, hcoh⟩ := hw promise hp
       exact (hgrows.refine hlaw (normalize_refines hlaw hcoh hinner)).ne
 
+/-! ### The promises a collect runs -/
+
+/-- `name` is reachable from `root` through the dependencies of `promises`. -/
+inductive Reaches (promises : List Promise) (root : String) : String → Prop where
+  | self : Reaches promises root root
+  | dep {promise : Promise} {name : String} (hreach : Reaches promises root promise.slot.2.name)
+      (hmem : promise ∈ promises) (hdep : name ∈ promise.deps) : Reaches promises root name
+
+private theorem Reaches.mono {small large : List Promise} (hsub : ∀ promise ∈ small, promise ∈ large) {root name : String}
+    (h : Reaches small root name) : Reaches large root name := by
+  induction h with
+  | self => exact .self
+  | dep _ hmem hdep ih => exact .dep ih (hsub _ hmem) hdep
+
+private theorem names_sub_demanded (pending : List Promise) (names : List String) :
+    ∀ name ∈ names, name ∈ demanded pending names := by
+  fun_induction demanded pending names with
+  | case1 => exact fun _ h => h
+  | case2 _ _ _ ih => exact fun name h => ih name (List.mem_append_left _ h)
+
+private theorem demanded_sound {promises : List Promise} {root : String} (pending : List Promise) (names : List String)
+    (hpending : ∀ promise ∈ pending, promise ∈ promises) (hnames : ∀ name ∈ names, Reaches promises root name) :
+    ∀ name ∈ demanded pending names, Reaches promises root name := by
+  fun_induction demanded pending names with
+  | case1 => exact hnames
+  | case2 pending names _ ih =>
+    refine ih (fun promise hp => hpending _ (List.mem_filter.1 hp).1) ?_
+    intro name hname
+    rcases List.mem_append.1 hname with hold | hnew
+    · exact hnames name hold
+    · obtain ⟨promise, hp, hdep⟩ := List.mem_flatMap.1 hnew
+      obtain ⟨hmem, hhit⟩ := List.mem_filter.1 hp
+      exact .dep (hnames _ (by simpa using hhit)) (hpending _ hmem) hdep
+
+private theorem demanded_closed {promises : List Promise} (pending : List Promise) (names : List String)
+    (hinv : ∀ promise ∈ promises, promise ∈ pending ∨ ∀ dep ∈ promise.deps, dep ∈ names) :
+    ∀ promise ∈ promises, promise.slot.2.name ∈ demanded pending names →
+      ∀ dep ∈ promise.deps, dep ∈ demanded pending names := by
+  fun_induction demanded pending names with
+  | case1 pending names hstop =>
+    intro promise hp hname
+    rcases hinv promise hp with hpend | hdeps
+    · have : promise ∈ pending.filter fun promise => names.contains promise.slot.2.name :=
+        List.mem_filter.2 ⟨hpend, by simpa using hname⟩
+      rw [hstop] at this
+      cases this
+    · exact hdeps
+  | case2 pending names _ ih =>
+    refine ih fun promise hp => ?_
+    rcases hinv promise hp with hpend | hdeps
+    · by_cases hname : names.contains promise.slot.2.name = true
+      · refine Or.inr fun dep hdep => List.mem_append_right _ (List.mem_flatMap.2 ⟨promise, ?_, hdep⟩)
+        exact List.mem_filter.2 ⟨hpend, hname⟩
+      · exact Or.inl (List.mem_filter.2 ⟨hpend, by simpa using hname⟩)
+    · exact Or.inr fun dep hdep => List.mem_append_left _ (hdeps dep hdep)
+
+/-- `demanded` computes exactly the slots reachable through declared dependencies. -/
+theorem mem_demanded_iff (promises : List Promise) (root name : String) :
+    name ∈ demanded promises [root] ↔ Reaches promises root name := by
+  constructor
+  · refine demanded_sound promises [root] (fun _ h => h) ?_ name
+    intro other hother
+    rw [List.mem_singleton.1 hother]
+    exact .self
+  · intro h
+    induction h with
+    | self => exact names_sub_demanded _ _ _ List.mem_cons_self
+    | dep _ hmem hdep ih =>
+      exact demanded_closed promises [root] (fun promise hp => .inl hp) _ hmem ih _ hdep
+
+theorem mem_demanding_iff (env : Environment) (root : String) (promise : Promise) :
+    promise ∈ (env.demanding root).promises ↔
+      promise ∈ env.promises ∧ Reaches env.promises root promise.slot.2.name := by
+  simp [Environment.demanding, List.mem_filter, mem_demanded_iff]
+
+/-- A slot's own promises run. -/
+theorem demanding_own {env : Environment} {promise : Promise} (hmem : promise ∈ env.promises) :
+    promise ∈ (env.demanding promise.slot.2.name).promises :=
+  (mem_demanding_iff ..).2 ⟨hmem, .self⟩
+
+/-- The promises of a declared dependency run whenever the promise that declares it does. -/
+theorem demanding_closed {env : Environment} {root dep : String} {promise other : Promise}
+    (hp : promise ∈ (env.demanding root).promises) (hdep : dep ∈ promise.deps)
+    (hmem : other ∈ env.promises) (hname : other.slot.2.name = dep) :
+    other ∈ (env.demanding root).promises :=
+  (mem_demanding_iff ..).2 ⟨hmem, hname ▸ .dep ((mem_demanding_iff ..).1 hp).2 ((mem_demanding_iff ..).1 hp).1 hdep⟩
+
+private theorem demanding_sub {env : Environment} {root : String} {promise : Promise}
+    (h : promise ∈ (env.demanding root).promises) : promise ∈ env.promises :=
+  ((mem_demanding_iff ..).1 h).1
+
+/-- Asking twice for the same slot's promises asks for the same promises. -/
+theorem demanding_idem (env : Environment) (root : String) :
+    (env.demanding root).demanding root = env.demanding root := by
+  have hreach : ∀ {name}, Reaches env.promises root name → Reaches (env.demanding root).promises root name := by
+    intro name h
+    induction h with
+    | self => exact .self
+    | dep hreach hmem hdep ih => exact .dep ih ((mem_demanding_iff ..).2 ⟨hmem, hreach⟩) hdep
+  have hsame : (env.demanding root).promises.filter
+      (fun promise => (demanded (env.demanding root).promises [root]).contains promise.slot.2.name) =
+      (env.demanding root).promises := by
+    apply List.filter_eq_self.2
+    intro promise hp
+    simpa [mem_demanded_iff] using hreach ((mem_demanding_iff ..).1 hp).2
+  simp only [Environment.demanding] at hsame ⊢
+  rw [hsame]
+
+/-- Whatever a promise outside the slot's dependencies does, the collect is as if it did not exist:
+its conflict, failure or divergence cannot fail the collect, nor can its value reach it. -/
+theorem demanding_unrelated (env : Environment) (pre post : List Promise) (extra : Promise) (root : String)
+    (hextra : ¬Reaches (pre ++ post) root extra.slot.2.name) :
+    ({ env with promises := pre ++ extra :: post } : Environment).demanding root =
+      ({ env with promises := pre ++ post } : Environment).demanding root := by
+  have hiff : ∀ name, Reaches (pre ++ extra :: post) root name ↔ Reaches (pre ++ post) root name := by
+    intro name
+    constructor
+    · intro h
+      induction h with
+      | self => exact .self
+      | @dep promise _ _ hmem hdep ih =>
+        have hne : promise ≠ extra := by
+          rintro rfl
+          exact hextra ih
+        refine .dep ih ?_ hdep
+        simp only [List.mem_append, List.mem_cons] at hmem ⊢
+        rcases hmem with h | h | h
+        · exact .inl h
+        · exact absurd h hne
+        · exact .inr h
+    · refine Reaches.mono fun promise hp => ?_
+      simp only [List.mem_append, List.mem_cons] at hp ⊢
+      rcases hp with h | h
+      · exact .inl h
+      · exact .inr (.inr h)
+  have hextraOut : ((demanded (pre ++ post) [root]).contains extra.slot.2.name) = false := by
+    simpa [mem_demanded_iff] using hextra
+  have hcontains : ∀ name, (demanded (pre ++ extra :: post) [root]).contains name =
+      (demanded (pre ++ post) [root]).contains name := by
+    intro name
+    apply Bool.eq_iff_iff.2
+    simp [mem_demanded_iff, hiff]
+  simp only [Environment.demanding, List.filter_append, List.filter_cons, hcontains, hextraOut, Bool.false_eq_true,
+    ↓reduceIte]
+
+/-! ### Collect -/
+
 private theorem collect_ok {env : Environment} {slot : Slot kind} {object : Object} {state next : State}
     {fuel : Nat} {value : kind.data} (h : collect env slot object state fuel = .ok (value, next)) :
-    ∃ changed facts found, normalize env object fuel state.facts = .ok (changed, facts) ∧
+    ∃ changed facts found, normalize (env.demanding slot.name) object fuel state.facts = .ok (changed, facts) ∧
       lookupFact slot object facts = .ok found ∧ value = found.getD slot.domain.empty ∧
       next = { state with facts := facts, version := state.version + changed.toNat } := by
   simp only [collect, bind, Except.bind] at h
@@ -1360,6 +1558,75 @@ theorem collect_zero_fuel (env : Environment) (slot : Slot kind) (object : Objec
     collect env slot object state 0 = .error .exhausted := by
   simp [collect, normalize_zero, bind, Except.bind]
 
+/-- A collect only ever runs the promises its slot demands. -/
+theorem collect_demanding (env : Environment) (slot : Slot kind) (object : Object) (state : State) (fuel : Nat) :
+    collect (env.demanding slot.name) slot object state fuel = collect env slot object state fuel := by
+  simp only [collect, demanding_idem]
+
+/-- A promise that the collected slot does not depend on cannot affect the collect, so in particular
+a conflicting one cannot fail it. -/
+theorem collect_unrelated (env : Environment) (pre post : List Promise) (extra : Promise) (slot : Slot kind)
+    (object : Object) (state : State) (fuel : Nat) (hextra : ¬Reaches (pre ++ post) slot.name extra.slot.2.name) :
+    collect { env with promises := pre ++ extra :: post } slot object state fuel =
+      collect { env with promises := pre ++ post } slot object state fuel := by
+  simp only [collect, demanding_unrelated env pre post extra slot.name hextra]
+
+/-- The failure of a demanded promise, its own or a dependency's, fails the collect, as a failing
+`collect` in the body of an upstream promise would. -/
+theorem collect_demanded_failure {env : Environment} {slot : Slot kind} {object : Object} {state : State}
+    {promise : Promise} {rest : List Promise} {conflict : Conflict} (fuel : Nat)
+    (hfirst : (env.demanding slot.name).promises = promise :: rest)
+    (hfail : promise.compute object state.facts = .error conflict) (hne : ∀ name, conflict ≠ .empty name) :
+    collect env slot object state (fuel + 1) = .error conflict := by
+  have hvalue : promiseValue promise object state.facts = .error conflict := by
+    cases conflict with
+    | empty name => exact absurd rfl (hne name)
+    | _ => simp [promiseValue, hfail]
+  simp only [collect, bind, Except.bind]
+  rw [normalize_succ, runPromises_eq, hfirst]
+  simp [runList, hvalue]
+
+private theorem runList_absorbed {env : Environment} {object : Object} {promises : List Promise} {facts : List Fact}
+    (h : runList env object promises false facts = .ok (false, facts)) {promise : Promise} (hmem : promise ∈ promises) :
+    ∃ found, promiseValue promise object facts = .ok found ∧
+      ∀ value, found = some value → provideInFacts promise.slot.2 object value facts = .ok (false, facts) := by
+  induction promises with
+  | nil => cases hmem
+  | cons head rest ih =>
+    simp only [runList] at h
+    split at h
+    · cases h
+    · rename_i hnone
+      rcases List.mem_cons.1 hmem with rfl | hmem
+      · exact ⟨none, hnone, by simp⟩
+      · exact ih h hmem
+    · rename_i found hsome
+      split at h
+      · cases h
+      · rename_i refined after hp
+        obtain ⟨hflag, hafter⟩ := runList_changed_mono h rfl
+        simp only [Bool.false_or] at hflag
+        subst hflag
+        have hunch := provideInFacts_unchanged (providePromised_ok hp)
+        subst hunch
+        rcases List.mem_cons.1 hmem with rfl | hmem
+        · refine ⟨some found, hsome, fun value hv => ?_⟩
+          cases hv
+          exact providePromised_ok hp
+        · exact ih h hmem
+
+/-- What makes dependencies sound: when a collect succeeds, each promise it demanded has succeeded on
+the final table, and has nothing left to add to it. -/
+theorem collect_absorbed {env : Environment} {slot : Slot kind} {object : Object} {state next : State}
+    {fuel : Nat} {value : kind.data} (h : collect env slot object state fuel = .ok (value, next))
+    {promise : Promise} (hmem : promise ∈ (env.demanding slot.name).promises) :
+    ∃ found, promiseValue promise object next.facts = .ok found ∧
+      ∀ value, found = some value → provideInFacts promise.slot.2 object value next.facts = .ok (false, next.facts) := by
+  obtain ⟨_, facts, _, hn, _, _, rfl⟩ := collect_ok h
+  have hfix := normalize_fixpoint hn
+  rw [runPromises_eq] at hfix
+  exact runList_absorbed hfix hmem
+
 /-- `collect` raises the version by at most one and keeps the opinions. -/
 theorem collect_version {env : Environment} {slot : Slot kind} {object : Object} {state next : State}
     {fuel : Nat} {value : kind.data} (h : collect env slot object state fuel = .ok (value, next)) :
@@ -1376,6 +1643,10 @@ theorem collect_facts_of_version_eq {env : Environment} {slot : Slot kind} {obje
   | false => exact normalize_false_unchanged hn
   | true => simp at hv
 
+private theorem Coordinated.demanding {env : Environment} (hw : Coordinated env.promises) (root : String) :
+    Coordinated (env.demanding root).promises := fun promise hp =>
+  ⟨(hw promise (demanding_sub hp)).1, fun other ho => (hw promise (demanding_sub hp)).2 other (demanding_sub ho)⟩
+
 /-- On coordinated promises, `collect` bumps the version exactly when the facts changed. -/
 theorem collect_version_iff {env : Environment} {slot : Slot kind} {object : Object} {state next : State}
     {fuel : Nat} {value : kind.data} (hw : Coordinated env.promises)
@@ -1384,7 +1655,7 @@ theorem collect_version_iff {env : Environment} {slot : Slot kind} {object : Obj
   obtain ⟨changed, facts, _, hn, _, _, rfl⟩ := collect_ok h
   cases changed with
   | false => simpa using normalize_false_unchanged hn
-  | true => simpa using normalize_true_changed hw hn
+  | true => simpa using normalize_true_changed (hw.demanding slot.name) hn
 
 /-- The value `collect` returns refines anything the cell held beforehand. -/
 theorem collect_refines {env : Environment} {slot : Slot kind} (hd : Lawful slot.domain) {object : Object}
@@ -1393,7 +1664,7 @@ theorem collect_refines {env : Environment} {slot : Slot kind} (hd : Lawful slot
     (hex : lookupFact slot object state.facts = .ok (some existing)) :
     Refines slot.domain existing value := by
   obtain ⟨_, facts, found, hn, hl, rfl, rfl⟩ := collect_ok h
-  obtain ⟨result, hr, hre⟩ := normalize_refines hd hc hn existing hex
+  obtain ⟨result, hr, hre⟩ := normalize_refines hd (fun promise hp => hc promise (demanding_sub hp)) hn existing hex
   rw [hr] at hl
   cases hl
   exact hre
@@ -1413,7 +1684,7 @@ theorem collect_no_promises (env : Environment) (hempty : env.promises = []) (sl
     (hl : lookupFact slot object state.facts = .ok found) :
     collect env slot object state (fuel + 1) = .ok (found.getD slot.domain.empty, state) := by
   simp only [collect, bind, Except.bind]
-  rw [normalize_no_promises env hempty]
+  rw [normalize_no_promises _ (by simp [Environment.demanding, hempty])]
   simp [hl]
 
 /-- A value that `require` returns is never the domain's empty value. -/
@@ -1432,6 +1703,16 @@ theorem require_nonempty {env : Environment} {slot : Slot kind} {object : Object
       simp only [Except.ok.injEq, Prod.mk.injEq] at h
       obtain ⟨rfl, rfl⟩ := h
       exact ⟨by simpa using he, hc⟩
+
+/-- `provide` bumps the version exactly when it changed the table, so `provideWith` tells observers
+exactly about changes. -/
+theorem provide_version_iff {slot : Slot kind} {object : Object} {value : kind.data} {state next : State}
+    (hd : Lawful slot.domain) (h : provide slot object value state = .ok next) :
+    next.version = state.version + 1 ↔ next.facts ≠ state.facts := by
+  obtain ⟨changed, facts, hp, rfl⟩ := provide_ok_iff.1 h
+  cases changed with
+  | false => simpa using provideInFacts_unchanged hp
+  | true => simpa using (provideInFacts_grows hd hp).ne
 
 end Normalize
 
@@ -1530,7 +1811,7 @@ theorem decodeValue_encodeValue {kind : PayloadKind} {value : kind.data} {encode
   | bool =>
     simp only [encodeValue, Except.ok.injEq] at h
     subst h
-    cases value <;> rfl
+    rcases value with _ | _ | _ <;> rfl
   | nat =>
     simp only [encodeValue, Except.ok.injEq] at h
     subst h
