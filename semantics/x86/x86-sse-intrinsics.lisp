@@ -1045,24 +1045,25 @@
 
 ;; the comparisons
 
-(defun CMPPSrri (rd x y imm) (set$ rd (fp-lanes-i fp-cmp 32 x y imm)))
-(defun CMPPSrmi (rd x b s i off seg imm) (set$ rd (fp-lanes-i fp-cmp 32 x (fp-load 128 b s i off seg) imm)))
+;; The encodings of SSE use only the low 3 bits of the predicate, where those of AVX use 5.
+(defun CMPPSrri (rd x y imm) (set$ rd (fp-lanes-i fp-cmp 32 x y (logand imm 7))))
+(defun CMPPSrmi (rd x b s i off seg imm) (set$ rd (fp-lanes-i fp-cmp 32 x (fp-load 128 b s i off seg) (logand imm 7))))
 (defun VCMPPSrri (rd x y imm) (set-vex rd (fp-lanes-i fp-cmp 32 x y imm)))
 (defun VCMPPSrmi (rd x b s i off seg imm) (set-vex rd (fp-lanes-i fp-cmp 32 x (fp-load 128 b s i off seg) imm)))
 (defun VCMPPSYrri (rd x y imm) (set-vex rd (fp-ylanes-i fp-cmp 32 x y imm)))
 (defun VCMPPSYrmi (rd x b s i off seg imm) (set-vex rd (fp-ylanes-i fp-cmp 32 x (fp-load 256 b s i off seg) imm)))
-(defun CMPPDrri (rd x y imm) (set$ rd (fp-lanes-i fp-cmp 64 x y imm)))
-(defun CMPPDrmi (rd x b s i off seg imm) (set$ rd (fp-lanes-i fp-cmp 64 x (fp-load 128 b s i off seg) imm)))
+(defun CMPPDrri (rd x y imm) (set$ rd (fp-lanes-i fp-cmp 64 x y (logand imm 7))))
+(defun CMPPDrmi (rd x b s i off seg imm) (set$ rd (fp-lanes-i fp-cmp 64 x (fp-load 128 b s i off seg) (logand imm 7))))
 (defun VCMPPDrri (rd x y imm) (set-vex rd (fp-lanes-i fp-cmp 64 x y imm)))
 (defun VCMPPDrmi (rd x b s i off seg imm) (set-vex rd (fp-lanes-i fp-cmp 64 x (fp-load 128 b s i off seg) imm)))
 (defun VCMPPDYrri (rd x y imm) (set-vex rd (fp-ylanes-i fp-cmp 64 x y imm)))
 (defun VCMPPDYrmi (rd x b s i off seg imm) (set-vex rd (fp-ylanes-i fp-cmp 64 x (fp-load 256 b s i off seg) imm)))
-(defun CMPSSrri_Int (rd x y imm) (set$ rd (fp-scalar-i fp-cmp 32 x y imm)))
-(defun CMPSSrmi_Int (rd x b s i off seg imm) (set$ rd (fp-scalar-i fp-cmp 32 x (fp-load 32 b s i off seg) imm)))
+(defun CMPSSrri_Int (rd x y imm) (set$ rd (fp-scalar-i fp-cmp 32 x y (logand imm 7))))
+(defun CMPSSrmi_Int (rd x b s i off seg imm) (set$ rd (fp-scalar-i fp-cmp 32 x (fp-load 32 b s i off seg) (logand imm 7))))
 (defun VCMPSSrri_Int (rd x y imm) (set-vex rd (fp-scalar-i fp-cmp 32 x y imm)))
 (defun VCMPSSrmi_Int (rd x b s i off seg imm) (set-vex rd (fp-scalar-i fp-cmp 32 x (fp-load 32 b s i off seg) imm)))
-(defun CMPSDrri_Int (rd x y imm) (set$ rd (fp-scalar-i fp-cmp 64 x y imm)))
-(defun CMPSDrmi_Int (rd x b s i off seg imm) (set$ rd (fp-scalar-i fp-cmp 64 x (fp-load 64 b s i off seg) imm)))
+(defun CMPSDrri_Int (rd x y imm) (set$ rd (fp-scalar-i fp-cmp 64 x y (logand imm 7))))
+(defun CMPSDrmi_Int (rd x b s i off seg imm) (set$ rd (fp-scalar-i fp-cmp 64 x (fp-load 64 b s i off seg) (logand imm 7))))
 (defun VCMPSDrri_Int (rd x y imm) (set-vex rd (fp-scalar-i fp-cmp 64 x y imm)))
 (defun VCMPSDrmi_Int (rd x b s i off seg imm) (set-vex rd (fp-scalar-i fp-cmp 64 x (fp-load 64 b s i off seg) imm)))
 

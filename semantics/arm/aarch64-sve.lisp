@@ -767,8 +767,9 @@
         (ni (a64-lane zdn es (+ (* 2 p) 1)))
         (mr (a64-lane zm es (* 2 p)))
         (mi (a64-lane zm es (+ (* 2 p) 1)))
-        (r (if (= rot 0) (a64-fop2 'fsub nr mi) (a64-fop2 'fadd nr mi)))
-        (i (if (= rot 0) (a64-fop2 'fadd ni mr) (a64-fop2 'fsub ni mr)))
+        ;; FPNeg, then FPAdd: the negated operand can be a NaN, which has that sign
+        (r (if (= rot 0) (a64-fop2 'fadd nr (fp-neg mi)) (a64-fop2 'fadd nr mi)))
+        (i (if (= rot 0) (a64-fop2 'fadd ni mr) (a64-fop2 'fadd ni (fp-neg mr))))
         (v (concat (fp-select (sve-active pg es (+ (* 2 p) 1)) i ni)
                    (fp-select (sve-active pg es (* 2 p)) r nr))))
     (if (= p 0) v (concat v (sve-fcadd/p es zdn pg zm rot (- p 1))))))

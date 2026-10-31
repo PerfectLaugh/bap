@@ -93,9 +93,9 @@ Fast implementations are proved equal to the plain definitions they replace, and
 trusted or only tested, with file and line. The main items are these:
 
 - **That the Lisp semantics are what hardware does.** No proof can say so. `tools/difftest` tests
-  it: 2,171 x86-64 and 1,920 i686 opcodes against a Ryzen 9 5950X, and the other targets against
-  qemu, which is a second implementation and not silicon. Floating point lifts to named
-  intrinsics, so it has no value to compare, though on x86-64 `bap run` runs them. AVX-512 was checked only against a hand-written model,
+  it: 2,731 x86-64 and 2,449 i686 opcodes against a Ryzen 9 5950X, and the other targets against
+  qemu, which is a second implementation and not silicon. Some PowerPC and legacy MIPS opcodes
+  disagree on the edges of NaNs, as the list says. AVX-512 was checked only against a hand-written model,
   as that machine doesn't have it.
 - **The C++ JIT, LLVM and Z3.** `Bap/Jit.lean` states the obligations the proofs rest on.
 - **The Lean kernel, compiler and runtime**, and `IO.Ref`, tasks and mutexes behaving as modelled.

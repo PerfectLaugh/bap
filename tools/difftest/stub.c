@@ -9,6 +9,11 @@
 #define SLOT 32
 #define WINDOW 512
 
+/* The sticky flags of the last run don't leak into the next, as nothing models them. */
+#if defined(__x86_64__) || defined(__i386__)
+unsigned mxcsr_clean = 0x1f80;
+#endif
+
 #if defined(__x86_64__)
 #define WORD unsigned long long
 #define NGPR 16
@@ -259,6 +264,7 @@ _start:
 enter:
   push %rbx; push %rbp; push %r12; push %r13; push %r14; push %r15
   mov %rsp, host_sp
+  ldmxcsr mxcsr_clean
   mov $st_in+128, %rsp
   popfq
   .irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
@@ -323,6 +329,7 @@ _start:
 enter:
   push %ebx; push %ebp; push %esi; push %edi
   mov %esp, host_sp
+  ldmxcsr mxcsr_clean
   mov $st_in+32, %esp
   popfl
   .irp r,0,1,2,3,4,5,6,7

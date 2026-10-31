@@ -53,17 +53,25 @@
 ;; FPMin and FPMax. A NaN operand is returned quieted, and of equal
 ;; operands -0.0 is the smaller one. The NaN of the first operand is
 ;; returned when both are NaN, regardless of which one is signaling.
+;; FPProcessNaNs: a signaling NaN comes before a quiet one, whichever is first.
+(defun fp-is-signaling-nan (x f)
+  (logand (is-nan x) (not (fp-is-quiet-nan x f))))
+
 (defun fp-min (x y f)
-  (fp-select (is-nan x) (fp-quiet x f)
-    (fp-select (is-nan y) (fp-quiet y f)
-      (fp-select (<. x y) x
-        (fp-select (<. y x) y (logor x y))))))
+  (fp-select (fp-is-signaling-nan x f) (fp-quiet x f)
+    (fp-select (fp-is-signaling-nan y f) (fp-quiet y f)
+      (fp-select (is-nan x) (fp-quiet x f)
+        (fp-select (is-nan y) (fp-quiet y f)
+          (fp-select (<. x y) x
+            (fp-select (<. y x) y (logor x y))))))))
 
 (defun fp-max (x y f)
-  (fp-select (is-nan x) (fp-quiet x f)
-    (fp-select (is-nan y) (fp-quiet y f)
-      (fp-select (<. x y) y
-        (fp-select (<. y x) x (logand x y))))))
+  (fp-select (fp-is-signaling-nan x f) (fp-quiet x f)
+    (fp-select (fp-is-signaling-nan y f) (fp-quiet y f)
+      (fp-select (is-nan x) (fp-quiet x f)
+        (fp-select (is-nan y) (fp-quiet y f)
+          (fp-select (<. x y) y
+            (fp-select (<. y x) x (logand x y))))))))
 
 ;; FPMinNum and FPMaxNum prefer a number to a quiet NaN.
 (defun fp-minnm (x y f)

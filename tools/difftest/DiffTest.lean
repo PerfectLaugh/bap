@@ -1,3 +1,4 @@
+import Bap.Float
 import Bap.Target.LLVMLift
 
 /-! # The lifter's side of the differential test
@@ -126,13 +127,64 @@ structure Window where
   size : Nat := 0
   bits : Nat := 64
 
-private def runCase (vars : List Bap.Var) (window : Window) (address : Nat) (code : ByteArray) (program : Bil.Program) (index : String)
+/-- Whether a program calls an intrinsic of floating point, to this depth of branches, or one of anything else. -/
+private def specialsOf : Nat → Bil.Program → List String
+  | 0, _ => []
+  | fuel + 1, program => program.flatMap fun stmt =>
+    match stmt with
+    | .special name => [name]
+    | .ifElse _ yes no => specialsOf fuel yes ++ specialsOf fuel no
+    | .while _ body => specialsOf fuel body
+    | _ => []
+
+/-- A program with each intrinsic of floating point served where it is, by `Bap.Float`, as the Linux machine does. -/
+private def runServed (rules : Bap.Float.NaNRules) (state : Bil.State) (program : Bil.Program) :
+    Except String (Bil.State × Bil.Effect) :=
+  let rec go : Nat → Bil.State → List Nat → Bil.Program → Except String (Bil.State × List Nat × Bil.Effect)
+    | 0, _, _, _ => .error "out of fuel"
+    | _ + 1, state, operands, [] => .ok (state, operands, .normal)
+    | fuel + 1, state, operands, stmt :: rest => do
+      match stmt with
+      | .move var value =>
+        let value ← Bil.evalExp state.env value
+        let operands ← if var.name.startsWith "intrinsic:x" then do
+            let bits ← Value.asBits value
+            pure (operands ++ [bits.2.toNat])
+          else pure operands
+        go fuel { env := Bil.bind state.env var value } operands rest
+      | .special name =>
+        match Bap.Float.evaluateWith rules name operands with
+        | some (width, bits) =>
+          go fuel { env := Bil.bind state.env ⟨"intrinsic:y0", .imm width, 0, false⟩ (.bits (BitVec.ofNat width bits)) } [] rest
+        | none => .ok (state, [], .special name)
+      | .ifElse condition yes no =>
+        let bits ← Value.asBits (← Bil.evalExp state.env condition)
+        let (state, operands, effect) ← go fuel state operands (if bits.2.toNat != 0 then yes else no)
+        match effect with
+        | .normal => go fuel state operands rest
+        | other => .ok (state, operands, other)
+      | .while condition body =>
+        let bits ← Value.asBits (← Bil.evalExp state.env condition)
+        if bits.2.toNat == 0 then go fuel state operands rest
+        else
+          let (state, operands, effect) ← go fuel state operands body
+          match effect with
+          | .normal => go fuel state operands (stmt :: rest)
+          | other => .ok (state, operands, other)
+      | .jmp target =>
+        let bits ← Value.asBits (← Bil.evalExp state.env target)
+        .ok (state, operands, .jump (BitVec.ofNat bits.1 bits.2.toNat))
+      | .cpuExn number => .ok (state, operands, .cpuExn number)
+  (go 100000 state [] program).map fun result => (result.1, result.2.2)
+
+private def runCase (rules : Bap.Float.NaNRules) (vars : List Bap.Var) (window : Window) (address : Nat) (code : ByteArray) (program : Bil.Program) (index : String)
     (memoryBytes : String) (values : List String) : String :=
   let memoryVar : Bap.Var := ⟨"mem", .mem window.bits 8, 0, false⟩
   let memory := memoryOf window.bits window.base (bytesOf memoryBytes) (memoryOf window.bits address code)
   let env : Bil.Env := (memoryVar, .memory memory) ::
     (vars.zip values).map fun (var, value) => (var, .bits (BitVec.ofNat (widthOf var) (parseHex value)))
-  match Bil.run program { env := env } with
+  let floats := (specialsOf 64 program).any Bap.Float.serves
+  match (if floats then runServed rules { env := env } program else Bil.run program { env := env }) with
   | .error message => s!"X {index} {message}"
   | .ok (state, effect) =>
     let shown := vars.map fun var =>
@@ -149,6 +201,7 @@ private def runCase (vars : List Bap.Var) (window : Window) (address : Nat) (cod
 
 private def serve (stdin stdout stderr : IO.FS.Stream) : IO Unit := do
   let mut target : Option Target := none
+  let mut rulesNow := Bap.Float.NaNRules.x86
   let mut vars : List Bap.Var := []
   let mut window : Window := {}
   let mut current : Option Disasm.Insn := none
@@ -161,6 +214,12 @@ private def serve (stdin stdout stderr : IO.FS.Stream) : IO Unit := do
     match (line.trimAscii.toString.splitOn " ").filter (!·.isEmpty) with
     | ["T", name] =>
       target := some (← targetOf name)
+      rulesNow := match name.take 3 |>.toString with
+        | "x86" | "i68" => .x86
+        | "aar" | "arm" | "thu" => .arm
+        | "ris" => .riscv
+        | "mip" => if (name.splitOn "r6").length > 1 then .powerpc else .mips
+        | _ => .powerpc
       current := none
     | "V" :: specs => vars := specs.map varOf
     | ["W", base, size, bits] => window := ⟨parseHex base, parseHex size, parseHex bits⟩
@@ -173,7 +232,10 @@ private def serve (stdin stdout stderr : IO.FS.Stream) : IO Unit := do
         try
           let insn ← chosen.decode address bytes
           let decoded ← LLVM.disassemble chosen.triple bytes address
-          let intrinsic := ((reprStr insn.bil).splitOn "intrinsic:").length > 1
+          -- An intrinsic of floating point has a value, which `Bap.Float` computes, and any other has none.
+          let specials := specialsOf 64 insn.bil
+          let served := !specials.isEmpty && specials.all Bap.Float.serves
+          let intrinsic := !served && ((reprStr insn.bil).splitOn "intrinsic:").length > 1
           stdout.putStrLn s!"D {id} {decoded.opcode} {hexOf insn.size 2} {if intrinsic then 1 else 0} {if insn.flow == .normal then 0 else 1} {insn.asm}"
           current := some insn
           codeAddress := address
@@ -188,7 +250,7 @@ private def serve (stdin stdout stderr : IO.FS.Stream) : IO Unit := do
     | "R" :: index :: memoryBytes :: values =>
       match current with
       | none => stdout.putStrLn s!"X {index} not decoded"
-      | some insn => stdout.putStrLn (runCase vars window codeAddress code insn.bil index memoryBytes values)
+      | some insn => stdout.putStrLn (runCase rulesNow vars window codeAddress code insn.bil index memoryBytes values)
     | [] => stdout.flush
     | _ => throw <| IO.userError s!"bad request: {line}"
 

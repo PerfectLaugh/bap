@@ -504,7 +504,11 @@
 
 (defun a64-frsqrts (a b)
   (fp-select (a64-fspecial a b) (a64-fthree-halves a)
-             (*. :rne (a64-fhalf a) (a64-muladd (a64-fthree a) (fp-neg a) b))))
+             ;; halved before it is rounded, so that it doesn't overflow on its way
+             (let ((r (a64-muladd (a64-fthree a) (fp-neg a) b)))
+               (fp-select (is-nan r) r
+                 (intrinsic (symbol-concat 'fmadh 'rne 'ieee754_binary (a64-fsize-symbol a) :sep '_)
+                            (fp-neg a) b (a64-fthree a) :result (word-width a))))))
 
 (defun a64-frint (mode a)
   "rounds to an integral value, FRINTX and FRINTI use the rounding

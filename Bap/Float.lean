@@ -233,6 +233,15 @@ def fma (format : Format) (mode : Mode) (left right addend : Nat) : Nat :=
   | .finite a m e, .finite b n f, .zero _ => pack format mode (a != b) (m * n) (e + f)
   | .finite a m e, .finite b n f, .finite c k g => packSum format mode (a != b, m * n, e + f) (c, k, g)
 
+/-- `(left * right + addend) / 2`, rounded once. -/
+def fmaHalved (format : Format) (mode : Mode) (left right addend : Nat) : Nat :=
+  let half (bits : Nat) : Nat := div format mode bits (pack format .rne false 1 1)
+  match unpack format left, unpack format right, unpack format addend with
+  | .finite a m e, .finite b n f, .finite c k g =>
+    packSum format mode (a != b, m * n, e + f - 1) (c, k, g - 1)
+  | .finite a m e, .finite b n f, .zero _ => pack format mode (a != b) (m * n) (e + f - 1)
+  | _, _, _ => half (fma format mode left right addend)
+
 /-- To an integer, in the same format. -/
 def round (format : Format) (mode : Mode) (bits : Nat) : Nat :=
   match unpack format bits with
@@ -295,10 +304,55 @@ def compare (format : Format) (left right : Nat) : Option (Bool × Bool) :=
         some (if a then y < x else x < y, x == y)
   order (unpack format left) (unpack format right)
 
+/-- What an architecture does with NaNs, which is all that differs between them here. The arithmetic above is that of x86. -/
+structure NaNRules where
+  /-- Whether a signaling NaN comes before a quiet one that is before it. -/
+  signalingFirst : Bool := false
+  /-- Whether the result is always the default NaN, whatever the operands. -/
+  canonical : Bool := false
+  /-- The sign of the default NaN. -/
+  negativeDefault : Bool := false
+  /-- Whether a conversion to an integer saturates, and a NaN is the largest. Otherwise, the semantics says what it is. -/
+  saturating : Bool := false
+  /-- The NaNs of MIPS before NaN2008, as qemu has them: any NaN that goes in makes the default, whose top bit of the fraction
+  is clear. An implementation may do otherwise. -/
+  legacyMips : Bool := false
+  deriving DecidableEq, Repr
+
+/-- The first NaN operand, made quiet, and a default that is negative. -/
+def NaNRules.x86 : NaNRules := { negativeDefault := true }
+/-- A signaling NaN first, and a default that is positive: Arm, unless `FPCR.DN` is set. -/
+def NaNRules.arm : NaNRules := { signalingFirst := true }
+/-- The first NaN operand, and a default that is positive. -/
+def NaNRules.powerpc : NaNRules := {}
+/-- Always the default, which is positive. -/
+def NaNRules.riscv : NaNRules := { canonical := true, saturating := true }
+/-- Any NaN makes the default. -/
+def NaNRules.mips : NaNRules := { legacyMips := true }
+
+private def isNaN (format : Format) (bits : Nat) : Bool :=
+  match unpack format bits with
+  | .nan _ => true
+  | _ => false
+
+private def isSignaling (format : Format) (bits : Nat) : Bool :=
+  isNaN format bits && (bits >>> (format.fractionBits - 1)) % 2 == 0
+
+/-- The result of an operation with a NaN among its operands, by these rules. -/
+def chooseNaN (rules : NaNRules) (format : Format) (operands : List Nat) : Nat :=
+  if rules.legacyMips then format.maxExponent * 2 ^ format.fieldBits + (2 ^ (format.fractionBits - 1) - 1)
+  else
+  let positive := if rules.negativeDefault then defaultNaN format else defaultNaN format - 2 ^ (format.width - 1)
+  if rules.canonical then positive else
+  let signaling := if rules.signalingFirst then operands.find? (isSignaling format) else none
+  match signaling, operands.find? (isNaN format) with
+  | some bits, _ | none, some bits => quiet format bits
+  | none, none => positive
+
 private def bool (value : Bool) : Nat := if value then 1 else 0
 
 /-- An intrinsic by its name, on the bits of its operands, as its width and its bits. -/
-def evaluate (name : String) (inputs : List Nat) : Option (Nat × Nat) := do
+private def evaluateX86 (name : String) (inputs : List Nat) : Option (Nat × Nat) := do
   let parts := name.splitOn "_"
   let at_ ← parts.findIdx? (· == "ieee754")
   let before := parts.take at_
@@ -320,6 +374,7 @@ def evaluate (name : String) (inputs : List Nat) : Option (Nat × Nat) := do
   | "fdiv", [x, y] => same fun format mode => div format mode x y
   | "fsqrt", [x] => same fun format mode => sqrt format mode x
   | "fmad", [x, y, z] => same fun format mode => fma format mode x y z
+  | "fmadh", [x, y, z] => same fun format mode => fmaHalved format mode x y z
   | "fround", [x] => same fun format mode => round format mode x
   | "fconvert", [x] =>
     pure (last, convert (← formatOf first) (← formatOf last) (mode.getD .rne) x)
@@ -335,5 +390,59 @@ def evaluate (name : String) (inputs : List Nat) : Option (Nat × Nat) := do
   | "is_inf", [x] => test fun format => pure (match unpack format x with | .infinity _ => true | _ => false)
   | "is_fzero", [x] => test fun format => pure (match unpack format x with | .zero _ => true | _ => false)
   | _, _ => none
+
+/-- An intrinsic by its name, by the rules of an architecture for NaNs. The arithmetic is the same. A NaN that an operation makes
+out of nothing is the default of x86 there, and this says what it is here. -/
+def evaluateWith (rules : NaNRules) (name : String) (inputs : List Nat) : Option (Nat × Nat) := do
+  let (width, bits) ← evaluateX86 name inputs
+  let parts := name.splitOn "_"
+  let widths := (parts.reverse.takeWhile fun part => part.toNat?.isSome).reverse.filterMap String.toNat?
+  if parts.headD "" == "cast" && ["sint", "int"].contains (parts.getD 1 "") && rules.saturating then
+    if let (some source, some target, [input]) := (widths.head?, widths.getLast?, inputs) then
+      if let some format := formatOf source then
+        let signed := parts.getD 1 "" == "sint"
+        let highest := if signed then 2 ^ (target - 1) - 1 else 2 ^ target - 1
+        let lowest := if signed then 2 ^ (target - 1) else 0
+        let mode := (parts.getD 2 "" |> Mode.ofName).getD .rtz
+        match unpack format input with
+        | .nan _ => return (target, highest)
+        | .infinity negative => return (target, if negative then lowest else highest)
+        | .zero _ => return (target, 0)
+        | .finite negative m e =>
+          let magnitude := if e ≥ 0 then m <<< e.toNat else roundBits mode negative m (-e).toNat false
+          if negative then
+            if signed then
+              return (target, if magnitude ≥ 2 ^ (target - 1) then lowest else (2 ^ target - magnitude) % 2 ^ target)
+            else return (target, 0)
+          else return (target, if magnitude > highest then highest else magnitude)
+  -- A NaN that is converted is by the rules of the format that it goes to.
+  if parts.headD "" == "fconvert" then
+    if let (some source, some target, [input]) := (widths.head?, widths.getLast?, inputs) then
+      if let (some from_, some to_) := (formatOf source, formatOf target) then
+        if isNaN from_ input && rules.canonical then
+          return (target, chooseNaN rules to_ [])
+        if isNaN from_ input && rules.legacyMips then
+          return (target, chooseNaN rules to_ [])
+  let arithmetic := ["fadd", "fsub", "fmul", "fdiv", "fsqrt", "fmad", "fmadh", "fround"].contains (parts.headD "")
+  match formatOf width with
+  | some format =>
+    if arithmetic && (inputs.any (isNaN format) || bits == defaultNaN format) then
+      pure (width, chooseNaN rules format inputs)
+    else pure (width, bits)
+  | none => pure (width, bits)
+
+/-- By the rules of x86. -/
+def evaluate : String → List Nat → Option (Nat × Nat) := evaluateWith .x86
+
+/-- Whether `evaluate` knows an operation of this name. -/
+def serves (name : String) : Bool :=
+  let parts := name.splitOn "_"
+  match parts.findIdx? (· == "ieee754") with
+  | none => false
+  | some at_ =>
+    let before := parts.take at_
+    let before := if (before.getLast?.bind Mode.ofName).isSome then before.dropLast else before
+    ["fadd", "fsub", "fmul", "fdiv", "fsqrt", "fmad", "fmadh", "fround", "fconvert", "cast_sint", "cast_int", "cast_sfloat", "cast_float",
+      "forder", "fgt", "fge", "feq", "is_nan", "is_inf", "is_fzero"].contains ("_".intercalate before)
 
 end Bap.Float

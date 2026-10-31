@@ -130,7 +130,7 @@ CONDS = ["o", "no", "b", "ae", "e", "ne", "be", "a", "s", "ns", "p", "np", "l", 
 
 X86_SKIP_PREFIX = ("SYSCALL", "SYSENTER", "SYSEXIT", "SYSRET", "INT", "HLT", "CPUID", "RDTSC", "RDRAND", "RDSEED", "XGETBV", "RDPID",
     "RDPMC", "RDPKRU", "WRPKRU", "IN8", "IN16", "IN32", "OUT8", "OUT16", "OUT32", "INSB", "INSW", "INSL", "OUTSB", "OUTSW", "OUTSL", "CLI", "STI", "FX", "XSAVE",
-    "XRSTOR", "LDMXCSR", "VLDMXCSR", "LAR", "LSL", "SGDT", "SIDT", "SLDT", "STR", "SMSW", "IRET", "UD", "WBINVD", "INVD", "VER", "ARPL", "LGS", "LFS",
+    "XRSTOR", "LDMXCSR", "VLDMXCSR", "FRNDINT", "LAR", "LSL", "SGDT", "SIDT", "SLDT", "STR", "SMSW", "IRET", "UD", "WBINVD", "INVD", "VER", "ARPL", "LGS", "LFS",
     "LSS", "LDS", "LES", "MOVSEG", "MOV16sr", "MOV32sr", "MOV64sr", "POPDS", "POPES", "POPFS", "POPGS", "POPSS", "PUSHCS", "PUSHDS", "PUSHES", "PUSHFS", "PUSHGS",
     "PUSHSS", "LRET", "FARCALL", "FARJMP", "MONITOR", "MWAIT", "PREFETCH", "CLFLUSH", "CLWB", "CLZERO", "ENCL", "XBEGIN", "XEND", "XABORT", "XTEST",
     "RDFSBASE", "RDGSBASE", "WRFSBASE", "WRGSBASE", "WRSSD", "WRSSQ", "RDSSP", "INCSSP", "SAVEPREV", "RSTOR", "SETSSBSY", "CLRSSBSY", "SWAPGS", "LLDT", "LTR", "LIDT", "LGDT", "LMSW",
@@ -468,7 +468,7 @@ class X8664(X86):
         self.lean_vars = [(n, 512 if n.startswith("ZMM") else w) for n, w in self.lean_vars]
 
     def aux_spec(self):
-        spec = {"MXCSR": (0x1F80, 32), "IF": (1, 1), "FS_BASE": (0, 64), "GS_BASE": (0, 64), "RIP": (0, 64), **EFLAGS_AUX}
+        spec = {"MXCSR": (0x1F80, 32), "FPU_CONTROL": (0x37F, 16), "IF": (1, 1), "FS_BASE": (0, 64), "GS_BASE": (0, 64), "RIP": (0, 64), **EFLAGS_AUX}
         for i in range(16, 32):
             spec[f"ZMM{i}"] = (0, 512)
         return spec
@@ -519,7 +519,7 @@ class X8632(X86):
         self.lean_vars = [(n, 512 if n.startswith("ZMM") else w) for n, w in self.lean_vars]
 
     def aux_spec(self):
-        return {"MXCSR": (0x1F80, 32), "IF": (1, 1), "FS_BASE": (0, 32), "GS_BASE": (0, 32), "EIP": (0, 32), **EFLAGS_AUX}
+        return {"MXCSR": (0x1F80, 32), "FPU_CONTROL": (0x37F, 16), "IF": (1, 1), "FS_BASE": (0, 32), "GS_BASE": (0, 32), "EIP": (0, 32), **EFLAGS_AUX}
 
     def shape(self, case, values, index, rng):
         x86_shape(case, values, index, "EAX", "EDX", "ECX")
@@ -1348,6 +1348,9 @@ class Mips(Risc):
                     values[name] = word_value(values[name])
         # what the stub can start with: no Cause nor Enables, as those would fault in the stub
         values["FCSR"] &= 0x0100007F
+        # to nearest, and subnormals kept: the semantics say that they don't look at FCSR.RM and FS
+        if case.opcode not in ("CTC1", "CFC1"):
+            values["FCSR"] &= 0x0000007C
         # the comparisons of the traps, on the edge of being true, in R2 and in the immediate or R3
         if self.traps(case.opcode) and case.opcode != "CTC1":
             mask = (1 << (self.word * 8)) - 1
@@ -1429,6 +1432,14 @@ class Mips(Risc):
     def cases(self, opcodes, assemble, layout):
         # only `hand` has the numbers of the control registers that exist: the manual leaves the others unpredictable
         return [case for case in super().cases(opcodes, assemble, layout) if case.always or not case.text.startswith(("cfc1", "ctc1"))]
+
+
+def mips_undefined(self, case, values, final):
+    # the Flags and the Cause of FCSR, that the operations set and the semantics don't model
+    return set() if case.opcode in ("CTC1", "CFC1") else {"FCSR"}
+
+
+Mips.undefined = mips_undefined
 
 
 class MipsBe(Mips):
