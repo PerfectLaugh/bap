@@ -155,6 +155,8 @@ def run : IO Unit := do
   assertEqual "four-bit wraparound" 1 (BitVec.ofNat 4 15 + BitVec.ofNat 4 2).toNat
   assertEqual "wide bitvector normalization" 0 (BitVec.ofNat 128 (2 ^ 128)).toNat
   assertEqual "unsigned division by zero" 15 (Word.udiv (BitVec.ofNat 4 7) 0).toNat
+  assertEqual "a shift by an amount no Nat shift can do is zero" 0
+    (Word.shl (BitVec.ofNat 64 1) (BitVec.ofNat 64 (2 ^ 63))).toNat
   assertEqual "unsigned remainder by zero" 7 (Word.urem (BitVec.ofNat 4 7) 0).toNat
   assertEqual "left shift" 0xc4 (Word.shl (BitVec.ofNat 8 0xb1) (BitVec.ofNat 8 2)).toNat
   assertEqual "arithmetic right shift" 0xec

@@ -43,8 +43,8 @@ private def aarch64Register (name : String) : Primus.Semantics.Value :=
   else
     .register name 64 64
 
-/-- XMM and YMM are the low bits of ZMM, the one register they name. A mask register is a register of its own, of the
-64 bits it has in both modes. -/
+/-- XMM and YMM are the low bits of ZMM, the one register they name. A mask register and an MMX register are registers of
+their own, of the 64 bits they have in both modes. -/
 private def x86VectorRegister (name : String) : Option Primus.Semantics.Value :=
   match name.toList with
   | 'X' :: 'M' :: 'M' :: digit :: digits =>
@@ -58,6 +58,7 @@ private def x86VectorRegister (name : String) : Option Primus.Semantics.Value :=
   | 'Z' :: 'M' :: 'M' :: digit :: digits =>
     if (digit :: digits).all Char.isDigit then some (.register name 512 512) else none
   | ['K', digit] => if digit.isDigit then some (.register name 64 64) else none
+  | ['M', 'M', digit] => if digit.isDigit then some (.register name 64 64) else none
   | _ => none
 
 /-- The 64-bit base and the width of a low partial x86 general purpose register. -/
@@ -79,6 +80,22 @@ private def x86LowRegister (name : String) : Option (String × Nat) :=
   | "R13D" => some ("R13", 32) | "R13W" => some ("R13", 16) | "R13B" => some ("R13", 8)
   | "R14D" => some ("R14", 32) | "R14W" => some ("R14", 16) | "R14B" => some ("R14", 8)
   | "R15D" => some ("R15", 32) | "R15W" => some ("R15", 16) | "R15B" => some ("R15", 8)
+  | "R16D" => some ("R16", 32) | "R16W" => some ("R16", 16) | "R16B" => some ("R16", 8)
+  | "R17D" => some ("R17", 32) | "R17W" => some ("R17", 16) | "R17B" => some ("R17", 8)
+  | "R18D" => some ("R18", 32) | "R18W" => some ("R18", 16) | "R18B" => some ("R18", 8)
+  | "R19D" => some ("R19", 32) | "R19W" => some ("R19", 16) | "R19B" => some ("R19", 8)
+  | "R20D" => some ("R20", 32) | "R20W" => some ("R20", 16) | "R20B" => some ("R20", 8)
+  | "R21D" => some ("R21", 32) | "R21W" => some ("R21", 16) | "R21B" => some ("R21", 8)
+  | "R22D" => some ("R22", 32) | "R22W" => some ("R22", 16) | "R22B" => some ("R22", 8)
+  | "R23D" => some ("R23", 32) | "R23W" => some ("R23", 16) | "R23B" => some ("R23", 8)
+  | "R24D" => some ("R24", 32) | "R24W" => some ("R24", 16) | "R24B" => some ("R24", 8)
+  | "R25D" => some ("R25", 32) | "R25W" => some ("R25", 16) | "R25B" => some ("R25", 8)
+  | "R26D" => some ("R26", 32) | "R26W" => some ("R26", 16) | "R26B" => some ("R26", 8)
+  | "R27D" => some ("R27", 32) | "R27W" => some ("R27", 16) | "R27B" => some ("R27", 8)
+  | "R28D" => some ("R28", 32) | "R28W" => some ("R28", 16) | "R28B" => some ("R28", 8)
+  | "R29D" => some ("R29", 32) | "R29W" => some ("R29", 16) | "R29B" => some ("R29", 8)
+  | "R30D" => some ("R30", 32) | "R30W" => some ("R30", 16) | "R30B" => some ("R30", 8)
+  | "R31D" => some ("R31", 32) | "R31W" => some ("R31", 16) | "R31B" => some ("R31", 8)
   | _ => none
 
 /-- The 64-bit base of a high byte register. -/
@@ -228,6 +245,12 @@ private def x86Aliases (base : String → Option String) (width : Nat) (name : S
   else
     (base name).map fun base => (⟨base, width, 15, 8⟩, [])
 
+/-- The list of consecutive registers, e.g., `Q31_Q0` or `D2_D3_D4`. -/
+private def aarch64RegisterList (name : String) : Bool :=
+  match name.splitOn "_" with
+  | first :: _ :: _ => first.startsWith "Q" || first.startsWith "D"
+  | _ => false
+
 private def aarch64Globals : Primus.Semantics.Globals :=
   let registers := (List.range 31).map fun n => s!"X{n}"
   let vectors := (List.range 32).flatMap fun n => [s!"B{n}", s!"H{n}", s!"S{n}", s!"D{n}", s!"Q{n}"]
@@ -242,6 +265,13 @@ private def x86FloatNames : List String :=
 /-- The vector registers that the semantics can name directly, e.g., the implicit result of `PCMPISTRM`. -/
 private def x86VectorNames (count : Nat) : List String :=
   (List.range count).flatMap fun n => [s!"XMM{n}", s!"YMM{n}", s!"ZMM{n}"]
+
+/-- The state that only the semantics of what is loaded with AVX-512 name: the tiles of AMX and their configuration, and the
+selectors that the far pointers load. -/
+private def x86TileGlobals : Primus.Semantics.Globals :=
+  ("TILECFG", .register "TILECFG" 512 512) :: ("FS", .register "FS" 16 16) :: ("GS", .register "GS" 16 16) ::
+    ("SS", .register "SS" 16 16) :: ("DS", .register "DS" 16 16) :: ("ES", .register "ES" 16 16) ::
+    ("CS", .register "CS" 16 16) :: (List.range 8).map fun n => (s!"TMM{n}", .register s!"TMM{n}" 8192 8192)
 
 private def x86Globals : Primus.Semantics.Globals :=
   let registers := ["RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP",
@@ -308,6 +338,12 @@ private def powerpcAliases (name : String) : Option Alias :=
     some (flagPart s!"{name}LT", [flagPart s!"{name}GT", flagPart s!"{name}EQ", flagPart s!"{name}UN"])
   else none
 
+/-- A register of AltiVec, which has 128 bits, and a floating point one, which has 64, in both word sizes. -/
+private def powerpcNumbered (first : Char) (name : String) : Bool :=
+  match name.toList with
+  | letter :: digit :: digits => letter == first && (digit :: digits).all Char.isDigit
+  | _ => false
+
 private def powerpcRegister (name : String) : Primus.Semantics.Value :=
   let isConditionBit := (name.startsWith "CR" &&
     (name.endsWith "LT" || name.endsWith "GT" || name.endsWith "EQ" || name.endsWith "UN")) ||
@@ -318,6 +354,7 @@ private def powerpcRegister (name : String) : Primus.Semantics.Value :=
   else if name = "ZERO" then .register "XZR" 64 64
   else if name.startsWith "X" && (name.drop 1).all Char.isDigit then
     .register ("R" ++ (name.drop 1).toString) 64 64
+  else if powerpcNumbered 'V' name then .register name 128 128
   else .register name 64 64
 
 private def powerpcGlobals : Primus.Semantics.Globals :=
@@ -338,6 +375,8 @@ private def powerpc32Register (name : String) : Primus.Semantics.Value :=
   else if name = "ZERO" then .register "XZR" 32 32
   else if name.startsWith "X" && (name.drop 1).all Char.isDigit then
     .register ("R" ++ (name.drop 1).toString) 32 32
+  else if powerpcNumbered 'V' name then .register name 128 128
+  else if powerpcNumbered 'F' name then .register name 64 64
   else .register name 32 32
 
 private def powerpc32Globals : Primus.Semantics.Globals :=
@@ -532,7 +571,9 @@ def aarch64Environment : IO Primus.Semantics.Environment := cached aarch64Cache 
     let llvmName := if name = "X29" then "FP" else if name = "X30" then "LR" else name
     let id ← LLVM.registerId "aarch64" llvmName
     pure (id, aarch64Register name)
-  pure (environment.withRegisters registers)
+  -- the lists of registers of the loads and stores of structures and of TBL, which the semantics take by their names
+  let lists := (← LLVM.registerNames "aarch64").filter fun entry => aarch64RegisterList entry.2
+  pure (environment.withRegisters (registers ++ lists.map fun entry => (entry.1, aarch64Register entry.2)))
 
 private initialize x86Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
@@ -541,7 +582,7 @@ private def x86EnvironmentWith (extra : List String) : IO Primus.Semantics.Envir
   let definitions ← Primus.Semantics.loadMany (← pluginDirectories "x86")
     (["bits", "x86-64", "x86-bits", "x86-move", "x86-arith", "x86-control", "x86-shift", "x86-bmi", "x86-sse", "x86-simd",
       "x86-pcmpstr", "x86-sse-intrinsics"] ++ extra) context
-  let environment ← compiledDefinitions [("RETQ", "RET64"), ("NOP", "NOOP")] "x86_64" x86Globals definitions
+  let environment ← compiledDefinitions [("RETQ", "RET64"), ("NOP", "NOOP")] "x86_64" (x86TileGlobals ++ x86Globals) definitions
   let registers ← LLVM.registerNames "x86_64"
   let registers := (0, x86Register "Nil") ::
     (registers.map fun binding => (binding.1, x86Register binding.2))
@@ -557,7 +598,7 @@ def x86Environment : IO Primus.Semantics.Environment := cached x86Cache (x86Envi
 private initialize x86AvxCache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
 /-- With AVX-512. It is loaded when an instruction first needs it, as most programs have none of them. -/
-def x86AvxEnvironment : IO Primus.Semantics.Environment := cached x86AvxCache (x86EnvironmentWith ["x86-avx512"])
+def x86AvxEnvironment : IO Primus.Semantics.Environment := cached x86AvxCache (x86EnvironmentWith ["x86-avx512", "x86-amx", "x86-more"])
 
 /-- The names that LLVM has for the formats of a floating point register, e.g., `F10_D`, which `fpr-name` of the
 semantics takes to the register. -/
@@ -671,7 +712,7 @@ private def x8632EnvironmentWith (extra : List String) : IO Primus.Semantics.Env
     (["bits", "x86-32", "x86-bits", "x86-move", "x86-arith", "x86-control", "x86-shift", "x86-bmi", "x86-sse", "x86-simd",
       "x86-pcmpstr", "x86-sse-intrinsics"] ++ extra) context
   let environment ← compiledDefinitions
-    [("RETQ", "RET32"), ("RETL", "RET32"), ("NOP", "NOOP")] "i386" x8632Globals definitions
+    [("RETQ", "RET32"), ("RETL", "RET32"), ("NOP", "NOOP")] "i386" (x86TileGlobals ++ x8632Globals) definitions
   let registers ← LLVM.registerNames "i386"
   let registers := (0, x8632Register "Nil") ::
     (registers.map fun binding => (binding.1, x8632Register binding.2))
@@ -683,7 +724,7 @@ def x8632Environment : IO Primus.Semantics.Environment := cached x8632Cache (x86
 private initialize x8632AvxCache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
 /-- With AVX-512, as `x86AvxEnvironment`. -/
-def x8632AvxEnvironment : IO Primus.Semantics.Environment := cached x8632AvxCache (x8632EnvironmentWith ["x86-avx512"])
+def x8632AvxEnvironment : IO Primus.Semantics.Environment := cached x8632AvxCache (x8632EnvironmentWith ["x86-avx512", "x86-amx", "x86-more"])
 
 private initialize riscv32Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
@@ -1168,6 +1209,159 @@ def evexOpcode? (name : String) : Option EvexOpcode :=
       if char.isLower then some ⟨String.ofList family, width, String.ofList suffix⟩ else none
     | _, _ => none
 
+/-- The code of an opcode of a family of AVX-512. A merging move in the other direction has its destination once, as the mask
+is its first source. -/
+private def evexFamilyCode (globals : Primus.Semantics.Environment) (context : Primus.Semantics.Context) (opcode : EvexOpcode)
+    (family : String) (operands : List Primus.Semantics.Value) : Except String Bil.Program :=
+  let word (value : Nat) : Primus.Semantics.Value := .int (BitVec.ofNat 64 value)
+  let operands := match opcode.masking, opcode.suffix.endsWith "_REV", operands with
+    | 1, true, [destination, mask, source] => [destination, destination, mask, source]
+    | _, _, _ => operands
+  -- a static rounding mode is the last operand of the forms that have it, and BF16 is a format of its own
+  let rounding := match opcode.memory, opcode.immediate, operands.getLast? with
+    | 4, 0, some (.bil _ (.int mode)) =>
+      let name := match mode.toNat % 4 with
+        | 0 => "rne"
+        | 1 => "rdn"
+        | 2 => "rup"
+        | _ => "rtz"
+      [("*sse-rmode*", Primus.Semantics.Value.symbol name)]
+    | _, _, _ => []
+  let format := if (opcode.family.splitOn "BF16").length > 1 then [("*sse-format*", Primus.Semantics.Value.symbol "bfloat")] else []
+  let globals := match rounding ++ format with
+    | [] => globals
+    | bound => { globals with globals := bound ++ globals.globals }
+  Primus.Semantics.liftWithCode globals context family
+    [.list (word opcode.width :: word opcode.memory :: word opcode.masking :: word opcode.immediate :: operands)]
+
+/-- What the name of an opcode of APX says of the opcode that it is a variant of, which is of the same operands: no flags with
+`_NF`, a new destination with `_ND`, and `_EVEX` and `_REV` are other encodings of it. `IMULZU` is `IMUL` that clears the upper
+bits of its destination, as `_ND` does. -/
+structure ApxOpcode where
+  base : String
+  noFlags : Bool
+  newDestination : Bool
+  zeroUpper : Bool
+  deriving DecidableEq, Repr
+
+namespace ApxOpcode
+
+/-- Whether its operand of memory is what the instruction without `_ND` writes: the form after the size starts with an `m`. -/
+def memoryDestination (opcode : ApxOpcode) : Bool :=
+  opcode.newDestination &&
+    ((opcode.base.toList.dropWhile fun char => !char.isDigit).dropWhile Char.isDigit).head? == some 'm'
+
+end ApxOpcode
+
+def apxOpcode? (name : String) : Option ApxOpcode :=
+  match name.splitOn "_" with
+  | [] | [_] =>
+    if name.startsWith "IMULZU" then some ⟨"IMUL" ++ (name.drop 6).toString, false, false, true⟩ else none
+  | base :: suffixes =>
+    if suffixes.all (["ND", "NF", "EVEX", "REV"].contains ·) then
+      some ⟨base, suffixes.contains "NF", suffixes.contains "ND", suffixes.contains "ND"⟩
+    else none
+
+/-- What the code of the opcode that an opcode of APX is a variant of is to be for it. -/
+def apxStatement (noFlags : Bool) (destination : Option (Bap.Var × Nat)) : Bil.Stmt → List Bil.Stmt
+  | .move var value =>
+    if noFlags && ["CF", "OF", "SF", "ZF", "AF", "PF"].contains var.name then []
+    else
+      match destination, value with
+      | some (register, base), .store _ _ stored _ _ => [.move register (.cast .unsigned base stored)]
+      | _, _ => [.move var value]
+  | .while condition body => [.while condition (body.flatMap (apxStatement noFlags destination))]
+  | .ifElse condition yes no =>
+    [.ifElse condition (yes.flatMap (apxStatement noFlags destination)) (no.flatMap (apxStatement noFlags destination))]
+  | statement => [statement]
+
+/-- The code of the opcode that an opcode of APX is a variant of, as its variant. A destination of 8 or 16 bits has the upper
+bits of its register clear. A 32-bit immediate of a 64-bit operation is signed. -/
+private def apxCode (globals : Primus.Semantics.Environment) (context : Primus.Semantics.Context) (name : String)
+    (operands : List Primus.Semantics.Value) (undefined : String) : Except String Bil.Program :=
+  match apxOpcode? name with
+  | none => .error undefined
+  | some opcode =>
+    if globals.instructions.contains opcode.base then
+      let memory := opcode.memoryDestination
+      let sources := if memory then operands.drop 1 else operands
+      let sources := if opcode.base.endsWith "i32" then
+          sources.dropLast ++ sources.getLast?.toList.map fun operand =>
+            match operand with
+            | .bil width (.int value) =>
+              .bil width (.int (BitVec.signExtend width (BitVec.ofInt 32 value.toInt)))
+            | other => other
+        else sources
+      let target : Option (Bap.Var × Nat) := match operands.head? with
+        | some (.register register _ base) => some (⟨register, .imm base, 0, false⟩, base)
+        | _ => none
+      let clear : List Bil.Stmt := match opcode.zeroUpper && !memory, operands.head? with
+        | true, some (.register register width base) =>
+          if width < base then
+            [.move ⟨register, .imm base, 0, false⟩ (.cast .unsigned base (.cast .low width (.var ⟨register, .imm base, 0, false⟩)))]
+          else []
+        | _, _ => []
+      (Primus.Semantics.liftWithCode globals context opcode.base sources).map fun code =>
+        code.flatMap (apxStatement opcode.noFlags (if memory then target else none)) ++ clear
+    else .error undefined
+
+/-- What the name of an opcode without a `Z` says: its family, up to the first small letter, and its form, as for those of
+AVX-512. Its size is that of its first operand, as a name without a size only has `Y` or nothing. -/
+def plainOpcode? (name : String) (operands : List Primus.Semantics.Value) : Option EvexOpcode :=
+  let family := name.toList.takeWhile fun char => !char.isLower
+  let suffix := name.toList.dropWhile fun char => !char.isLower
+  let width := match operands.head? with
+    | some (.register _ width _) => width
+    | _ => 128
+  if family.isEmpty || suffix.isEmpty then none
+  else some ⟨String.ofList family, width, String.ofList suffix⟩
+
+/-- A family for an opcode without a `Z`, also of the opcodes of VEX whose family is one of AVX-512, of the same operands and
+meaning with no mask: a `Y` after the family is their size. -/
+private def plainCode (globals : Primus.Semantics.Environment) (context : Primus.Semantics.Context) (name : String)
+    (operands : List Primus.Semantics.Value) (undefined : String) : Except String Bil.Program :=
+  match plainOpcode? name operands with
+  | none => apxCode globals context name operands undefined
+  | some opcode =>
+    let family := s!"evex:{opcode.family}"
+    if globals.operations.contains family then
+      evexFamilyCode globals context opcode family operands
+    else
+      let short := s!"evex:{(opcode.family.dropEnd 1).toString}"
+      if opcode.family.endsWith "Y" && globals.operations.contains short then
+        evexFamilyCode globals context opcode short operands
+      else apxCode globals context name operands undefined
+
+/-- A register of the form of a block or a pair, as the semantics have it. A tile is its register and its number, of the
+configuration that it has. Each of a pair of masks is a register, also in the 32-bit mode. -/
+def x86ExpandRegister (name : String) (value : Primus.Semantics.Value) : List Primus.Semantics.Value :=
+  match name.toList with
+  | ['T', 'M', 'M', digit] =>
+    [.register name 8192 8192, .int (BitVec.ofNat 64 (digit.toNat - '0'.toNat))]
+  | ['K', first, '_', 'K', second] =>
+    [.register s!"K{first}" 64 64, .register s!"K{second}" 64 64]
+  | _ => [value]
+
+/-- The block of four registers that an instruction of Knights Mill names by the one it is in, and the four 512-bit registers. -/
+def x86RegisterBlock (value : Primus.Semantics.Value) : List Primus.Semantics.Value :=
+  match value with
+  | .register name width base =>
+    let first := ((name.drop 3).toString.toNat! / 4) * 4
+    (List.range 4).map fun index => .register s!"ZMM{first + index}" width base
+  | _ => [value]
+
+/-- The operands as the semantics have them: the tiles and the pairs, and the block that is before the five operands of the
+memory of what has one. -/
+def x86ExpandOperands (name : String) (operands : List Primus.Semantics.Value) : List Primus.Semantics.Value :=
+  let spread := operands.flatMap fun operand =>
+    match operand with
+    | .register register _ _ => x86ExpandRegister register operand
+    | _ => [operand]
+  if name.startsWith "V4F" || name.startsWith "VP4DP" then
+    let at' := spread.length - 6
+    spread.take at' ++ (spread.drop at').head?.toList.flatMap x86RegisterBlock ++ spread.drop (at' + 1)
+  else spread
+
 /-- The instructions that aren't defined in the environment of a program: those of AVX-512, whose semantics it loads now.
 A mask instruction is defined by its name. Another opcode is a form of a family, which is a definition that takes the form
 and the operands, or the same as an opcode without EVEX, unless it has a register that only AVX-512 has. Anything else has
@@ -1175,6 +1369,7 @@ no semantics, which is an error. -/
 private def avxCode (globals : Primus.Semantics.Environment) (context : Primus.Semantics.Context) (name : String)
     (operands : List Primus.Semantics.Value) : Except String Bil.Program :=
   let undefined := s!"Primus semantics has no definition for LLVM opcode {name}"
+  let operands := x86ExpandOperands name operands
   if globals.instructions.contains name then
     Primus.Semantics.liftWithCode globals context name operands
   else if name.endsWith "_EVEX" && globals.instructions.contains ((name.dropEnd 5).toString) then
@@ -1182,31 +1377,11 @@ private def avxCode (globals : Primus.Semantics.Environment) (context : Primus.S
     Primus.Semantics.liftWithCode globals context ((name.dropEnd 5).toString) operands
   else
     match evexOpcode? name with
-    | none => .error undefined
+    | none => plainCode globals context name operands undefined
     | some opcode =>
       let family := s!"evex:{opcode.family}"
       if globals.operations.contains family then
-        let word (value : Nat) : Primus.Semantics.Value := .int (BitVec.ofNat 64 value)
-        -- a merging move in the other direction has its destination once, as the mask is its first source
-        let operands := match opcode.masking, opcode.suffix.endsWith "_REV", operands with
-          | 1, true, [destination, mask, source] => [destination, destination, mask, source]
-          | _, _, _ => operands
-        -- a static rounding mode is the last operand of the forms that have it, and BF16 is a format of its own
-        let rounding := match opcode.memory, opcode.immediate, operands.getLast? with
-          | 4, 0, some (.bil _ (.int mode)) =>
-            let name := match mode.toNat % 4 with
-              | 0 => "rne"
-              | 1 => "rdn"
-              | 2 => "rup"
-              | _ => "rtz"
-            [("*sse-rmode*", Primus.Semantics.Value.symbol name)]
-          | _, _, _ => []
-        let format := if (opcode.family.splitOn "BF16").length > 1 then [("*sse-format*", Primus.Semantics.Value.symbol "bfloat")] else []
-        let globals := match rounding ++ format with
-          | [] => globals
-          | bound => { globals with globals := bound ++ globals.globals }
-        Primus.Semantics.liftWithCode globals context family
-          [.list (word opcode.width :: word opcode.memory :: word opcode.masking :: word opcode.immediate :: operands)]
+        evexFamilyCode globals context opcode family operands
       else
         let vexRegisters := operands.all fun operand =>
           match operand with

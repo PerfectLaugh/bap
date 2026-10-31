@@ -276,11 +276,13 @@
 (defun RCR64mCL (base scale index off seg) (shift-m rcr-op 64 CL base scale index off seg))
 (defun RCR64mi (base scale index off seg c) (shift-m rcr-op 64 c base scale index off seg))
 
-;; SHLD and SHRD shift X filled with the bits of Y, the count is masked
-;; to the size less one
+;; SHLD and SHRD shift X filled with the bits of Y. The count is masked
+;; as that of the other shifts, to 5 bits or 6 of a 64-bit operation, so
+;; a count of 16 of a 16-bit operation is all of Y, and not nothing. The
+;; result of a greater count is undefined.
 (defun shld-op (x y c)
   (let ((n (word-width x))
-        (k (resize n (logand (cast-low 8 c) (resize 8 (- n 1)))))
+        (k (masked-count x c))
         (r (logor (lshift x k) (rshift y (- (resize n n) k)))))
     (when (non-zero k)
       (set CF (lsb (rshift x (- (resize n n) k))))
@@ -290,7 +292,7 @@
 
 (defun shrd-op (x y c)
   (let ((n (word-width x))
-        (k (resize n (logand (cast-low 8 c) (resize 8 (- n 1)))))
+        (k (masked-count x c))
         (r (logor (rshift x k) (lshift y (- (resize n n) k)))))
     (when (non-zero k)
       (set CF (msb (lshift x (- (resize n n) k))))

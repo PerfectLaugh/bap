@@ -1167,9 +1167,16 @@
 (defun STVX (vs ra rb) (store-word (vector-ea ra rb) vs))
 (defun STVXL (vs ra rb) (STVX vs ra rb))
 
-;; the bit offset of the element of SIZE bytes at the address A
+;; the bit offset of the element of SIZE bytes at the address A: the
+;; byte 0 of a register is the most significant in the big-endian mode
+;; and the least significant in the little-endian one
 (defun element-shift (a size)
+  (declare (context (endianness eb)))
   (cast-unsigned 128 (* 8 (- 16 size (logand a (- 16 size))))))
+
+(defun element-shift (a size)
+  (declare (context (endianness le)))
+  (cast-unsigned 128 (* 8 (logand a (- 16 size)))))
 
 (defun load-element (vd size a)
   (let ((ea (logand a (lnot (- size 1))))

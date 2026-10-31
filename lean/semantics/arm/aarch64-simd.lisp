@@ -264,7 +264,10 @@
 ;; the shifts by a register, that round, if ROUND, and saturate, if
 ;; SAT, the signed, if SIGNED, or the unsigned lanes, by the signed
 ;; lowest byte of B, a negative one shifts to the right, as the shifts
-;; of the Arm ARM, which compute in the infinite precision
+;; of the Arm ARM, which compute in the infinite precision. The amounts
+;; of the left shifts are of the byte, so a negative S, whose left shift
+;; isn't taken, isn't an amount of 2^64 less a little, that BIL can't
+;; compute, in a width as great as that of W.
 (defun a64-vshl (a b signed round sat)
   (let ((e (word-width a))
         (w (+ (* 2 e) 2))
@@ -272,7 +275,7 @@
         (x (if signed (cast-signed w a) (cast-unsigned w a)))
         (n (neg s))
         (fits (< s (cast-unsigned w e)))
-        (l (lshift x s))
+        (l (lshift x (cast-unsigned w (cast-low 8 s))))
         (big (a64-sel (is-zero x) (a64-zero a)
                       (if signed
                           (a64-sel (msb x)
@@ -284,7 +287,7 @@
                            (if signed (a64-sat-s l e) (a64-sat-u l e))
                            big)
                 (a64-sel fits (cast-low e l) (a64-zero a))))
-        (rbit (if round (lshift (cast-unsigned w 1) (- n 1)) (cast-unsigned w 0)))
+        (rbit (if round (lshift (cast-unsigned w 1) (cast-unsigned w (cast-low 8 (- n 1)))) (cast-unsigned w 0)))
         (far (< (cast-unsigned w (+ e 1)) n))
         (r (if signed (arshift (+ x rbit) n) (rshift (+ x rbit) n)))
         (right (a64-sel far

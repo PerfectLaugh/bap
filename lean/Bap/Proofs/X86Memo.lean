@@ -23,9 +23,56 @@ open Bap.Proofs.Primus (Anywhere liftWithCode_anywhere liftMCCode_anywhere)
 
 local notation "SV" => Bap.Primus.Semantics.Value
 
-open_private Bap.Target.LLVMLift Bap.Target.LLVMLift avxCode x86Code x86MemoStep
+open_private Bap.Target.LLVMLift Bap.Target.LLVMLift avxCode evexFamilyCode apxCode plainCode x86Code x86MemoStep
 
 variable {c c' : Context}
+
+theorem evexFamilyCode_anywhere (hc : Anywhere c c') {env : Environment} {opcode : EvexOpcode} {family : String} {operands : List SV}
+    {p : Bil.Program} (h : evexFamilyCode env c opcode family operands = .ok p) : evexFamilyCode env c' opcode family operands = .ok p := by
+  unfold evexFamilyCode at h ⊢
+  exact liftWithCode_anywhere hc h
+
+theorem liftWithCode_map_anywhere (hc : Anywhere c c') {env : Environment} {name : String} {operands : List SV}
+    {f : Bil.Program → Bil.Program} {p : Bil.Program}
+    (h : (Primus.Semantics.liftWithCode env c name operands).map f = .ok p) :
+    (Primus.Semantics.liftWithCode env c' name operands).map f = .ok p := by
+  cases hl : Primus.Semantics.liftWithCode env c name operands with
+  | error e =>
+    rw [hl] at h
+    cases h
+  | ok code =>
+    rw [hl] at h
+    rw [liftWithCode_anywhere hc hl]
+    exact h
+
+theorem apxCode_anywhere (hc : Anywhere c c') {env : Environment} {name undefined : String} {operands : List SV} {p : Bil.Program}
+    (h : apxCode env c name operands undefined = .ok p) : apxCode env c' name operands undefined = .ok p := by
+  unfold apxCode at h ⊢
+  split at h
+  · cases h
+  · simp only at h ⊢
+    split at h
+    · simp only [*, ↓reduceIte]
+      exact liftWithCode_map_anywhere hc h
+    · cases h
+
+theorem plainCode_anywhere (hc : Anywhere c c') {env : Environment} {name undefined : String} {operands : List SV} {p : Bil.Program}
+    (h : plainCode env c name operands undefined = .ok p) : plainCode env c' name operands undefined = .ok p := by
+  unfold plainCode at h ⊢
+  split at h
+  · exact apxCode_anywhere hc h
+  · simp only at h ⊢
+    split at h
+    · simp only [*, ↓reduceIte]
+      exact evexFamilyCode_anywhere hc h
+    · simp only [*, Bool.false_eq_true, ↓reduceIte] at h ⊢
+      split at h
+      · rename_i hy
+        rw [ite_eq_left hy]
+        exact evexFamilyCode_anywhere hc h
+      · rename_i hy
+        rw [ite_eq_right hy]
+        exact apxCode_anywhere hc h
 
 theorem avxCode_anywhere (hc : Anywhere c c') {env : Environment} {name : String} {operands : List SV} {p : Bil.Program}
     (h : avxCode env c name operands = .ok p) : avxCode env c' name operands = .ok p := by
@@ -41,13 +88,13 @@ theorem avxCode_anywhere (hc : Anywhere c c') {env : Environment} {name : String
     · simp only [h2, Bool.false_eq_true, ↓reduceIte] at h ⊢
       cases hop : evexOpcode? name with
       | none =>
-        simp only [hop] at h
-        cases h
+        simp only [hop] at h ⊢
+        exact plainCode_anywhere hc h
       | some opcode =>
         simp only [hop] at h ⊢
         by_cases h3 : env.operations.contains s!"evex:{opcode.family}" = true
         · simp only [h3, ↓reduceIte] at h ⊢
-          exact liftWithCode_anywhere hc h
+          exact evexFamilyCode_anywhere hc h
         · simp only [h3, Bool.false_eq_true, ↓reduceIte] at h ⊢
           split at h
           · rename_i h4

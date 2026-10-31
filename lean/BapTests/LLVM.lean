@@ -1852,8 +1852,8 @@ private def testX86EvexModel : IO Unit := do
   | .ok (.bits value) => assertEqual "andn from memory" ((evexRcx ^^^ 0xffffffff &&& 0xffffffff) &&& (evexM &&& 0xffffffff)) value.toNat
   | _ => throw <| IO.userError "andn: no RAX"
   -- what has no semantics stays an error
-  let quad ← (Target.LLVMLift.decodeX86With x86 0 0 (bytes [0x62, 0xf2, 0x7f, 0x48, 0x9a, 0x00])).toBaseIO
-  assertTrue "AVX-512 4FMAPS has no semantics" (quad matches .error _)
+  let privileged ← (Target.LLVMLift.decodeX86With x86 0 0 (bytes [0x0f, 0x09])).toBaseIO
+  assertTrue "WBINVD has no semantics" (privileged matches .error _)
 
 /-- What the same instruction was lifted to before is only used where it can't depend on the address. -/
 private def testX86Memo : IO Unit := do
@@ -1899,8 +1899,405 @@ private def testX86Memo : IO Unit := do
         pure (!Bil.Stmt.sameAll plain.bil insn.bil)
       assertEqual "real code is the same memoized" ([] : List String) (different.map (·.asm))
 
+/-! The values of `testHardware` are what the differential test of `tools/difftest` observed, on a Ryzen 9 5950X for x86 and under
+qemu-user for the others, each from a disagreement it found: they guard the fix with no machine. -/
+
+private def windowOf (bits base : Nat) (cells : List (Nat × Nat)) : Bil.Env := Id.run do
+  let mut memory : Memory bits := Memory.empty bits
+  for (offset, value) in cells do
+    memory := Memory.writeByte memory (BitVec.ofNat bits (base + offset)) (UInt8.ofNat value)
+  return [(⟨"mem", .mem bits 8, 0, false⟩, .memory memory)]
+
+private def wide (width : Nat) (name : String) (value : Nat) : Bap.Var × Value :=
+  (⟨name, .imm width, 0, false⟩, .bits (BitVec.ofNat width value))
+
+private def assertWide (width : Nat) (label name : String) (expected : Nat) (state : Bil.State) : IO Unit :=
+  match Bil.lookup state.env ⟨name, .imm width, 0, false⟩ with
+  | .ok (.bits value) => assertEqual label expected value.toNat
+  | .ok _ => throw <| IO.userError s!"{name} is not a bitvector"
+  | .error error => throw <| IO.userError error
+
+private def assertByte (bits : Nat) (label : String) (address expected : Nat) (state : Bil.State) : IO Unit :=
+  match Bil.lookup state.env ⟨"mem", .mem bits 8, 0, false⟩ with
+  | .ok (@Value.memory width memory) =>
+    assertEqual label expected (Memory.readByte memory (BitVec.ofNat width address)).toNat
+  | .ok _ => throw <| IO.userError "memory is not mapped"
+  | .error error => throw <| IO.userError error
+
+/-- What the machine does, of each instruction whose semantics were found to differ from it. -/
+private def testHardware : IO Unit := do
+  let x86 ← Target.LLVMLift.x86Environment
+  let decodeX86 (values : List Nat) := Target.LLVMLift.decodeX86With x86 0 0 (bytes values)
+  -- SHLD and SHRD of 16 bits: the count is masked to 5 bits, so 16 is all of the other operand, and not nothing
+  let shld ← execute (← decodeX86 [0x66, 0x44, 0x0f, 0xa5, 0xce])
+    [word "RSI" 0xfd2f2b40, word "R9" 0x6f6615fc, word "RCX" 16, bit "CF" 1, bit "OF" 0, bit "SF" 0, bit "ZF" 0, bit "PF" 0, bit "AF" 0]
+  assertReg "SHLD16 by 16, the machine" "RSI" 0xfd2f15fc shld
+  assertFlag "SHLD16 by 16, CF" "CF" 0 shld
+  assertFlag "SHLD16 by 16, PF" "PF" 1 shld
+  assertFlag "SHLD16 by 16, ZF" "ZF" 0 shld
+  let shrd ← execute (← decodeX86 [0x66, 0x44, 0x0f, 0xad, 0xce])
+    [word "RSI" 0x11, word "R9" 0x8000, word "RCX" 16, bit "CF" 0, bit "OF" 0, bit "SF" 0, bit "ZF" 0, bit "PF" 0, bit "AF" 0]
+  assertReg "SHRD16 by 16, the machine" "RSI" 0x8000 shrd
+  assertFlag "SHRD16 by 16, SF" "SF" 1 shrd
+  assertFlag "SHRD16 by 16, PF" "PF" 1 shrd
+  -- REP LODS goes on as long as the count, and does nothing with no count
+  let lodsMemory := windowOf 64 0x1000 [(0, 0xaa), (1, 0xbb), (2, 0xcc)]
+  let lods ← execute (← decodeX86 [0xf3, 0xac])
+    (lodsMemory ++ [word "RSI" 0x1000, word "RCX" 3, word "RAX" 0x1122334455667788, bit "DF" 0])
+  assertReg "REP LODSB, the last byte" "RAX" 0x11223344556677cc lods
+  assertReg "REP LODSB, the count" "RCX" 0 lods
+  assertReg "REP LODSB, the index" "RSI" 0x1003 lods
+  let lodsNone ← execute (← decodeX86 [0xf3, 0x66, 0xad])
+    (lodsMemory ++ [word "RSI" 0x1000, word "RCX" 0, word "RAX" 0x1122, bit "DF" 0])
+  assertReg "REP LODSW with no count, the value" "RAX" 0x1122 lodsNone
+  assertReg "REP LODSW with no count, the index" "RSI" 0x1000 lodsNone
+  -- ENTER with a nesting level copies the frame pointers
+  let enter ← execute (← decodeX86 [0xc8, 0x08, 0x00, 0x03])
+    (windowOf 64 0x1000 [(0xc0, 0x11), (0xb8, 0x22)] ++ [word "RBP" 0x10c8, word "RSP" 0x1100])
+  assertReg "ENTER 8, 3, the stack pointer" "RSP" 0x10d8 enter
+  assertReg "ENTER 8, 3, the frame pointer" "RBP" 0x10f8 enter
+  assertMemory "ENTER 8, 3, the old frame pointer" 0x10f8 0x10c8 enter
+  assertMemory "ENTER 8, 3, the first copy" 0x10f0 0x11 enter
+  assertMemory "ENTER 8, 3, the second copy" 0x10e8 0x22 enter
+  assertMemory "ENTER 8, 3, the new frame pointer" 0x10e0 0x10f8 enter
+  let x8632 ← Target.LLVMLift.x8632Environment
+  let decodeX8632 (values : List Nat) := Target.LLVMLift.decodeX8632With x8632 0 0 (bytes values)
+  -- the address-size prefix makes the sum wrap in 16 bits in the 32-bit mode
+  let lea ← execute (← decodeX8632 [0x67, 0x8d, 0x70, 0x10]) [word32 "EAX" 0xfff0, word32 "ESI" 0x10, word32 "EBX" 0xfff0]
+  assertReg32 "LEA of a 16-bit address, the machine" "ESI" 0x10 lea
+  -- an MMX register has 64 bits in the 32-bit mode too
+  let pand ← execute (← decodeX8632 [0x0f, 0xdb, 0xca])
+    [wide 64 "MM1" 0xff00ff00ff00ff00, wide 64 "MM2" 0x0ff00ff00ff00ff0]
+  assertWide 64 "PAND MM of the 32-bit mode" "MM1" 0x0f000f000f000f00 pand
+  -- the shifts by a register of NEON with a negative count: these aborted the process, as a shift of a wide lane by nearly 2^64
+  let a64 ← Target.LLVMLift.aarch64Environment
+  let decodeA64 (values : List Nat) := Target.LLVMLift.decodeAArch64With a64 0 0 (bytes values)
+  let sqshl ← execute (← decodeA64 [0x41, 0x4c, 0x63, 0x4e])
+    [wide 128 "Q2" 0x7fff8000000100400100ffff80007fff, wide 128 "Q3" 0x00f000f000ff000100010001000f0000]
+  assertWide 128 "SQSHL 8H" "Q1" 0xffff000000800200fffe80007fff sqshl
+  let srshl ← execute (← decodeA64 [0x41, 0x54, 0xe3, 0x4e])
+    [wide 128 "Q2" 0x0000000000000003fffffffffffffffd, wide 128 "Q3" 0x00000000000000ff00000000000000ff]
+  assertWide 128 "SRSHL 2D" "Q1" 0x2ffffffffffffffff srshl
+  let uqrshl ← execute (← decodeA64 [0x41, 0x5c, 0xa3, 0x7e]) [wide 128 "Q2" 0xffffffff, wide 128 "Q3" 0xff]
+  assertWide 128 "UQRSHL S" "Q1" 0x80000000 uqrshl
+  let urshl ← execute (← decodeA64 [0x41, 0x54, 0xe3, 0x7e]) [wide 128 "Q2" 0x8000000000000001, wide 128 "Q3" 0xc0]
+  assertWide 128 "URSHL D" "Q1" 0x1 urshl
+  -- the lists of registers of the loads and stores of structures and of TBL, none of which lifted
+  let block := windowOf 64 0x1000 ((List.range 32).map fun index => (index, index))
+  let ld1 ← execute (← decodeA64 [0xa1, 0xa0, 0x40, 0x4c]) (block ++ [word "X5" 0x1000])
+  assertWide 128 "LD1 of two, the first" "Q1" 0x0f0e0d0c0b0a09080706050403020100 ld1
+  assertWide 128 "LD1 of two, the second" "Q2" 0x1f1e1d1c1b1a19181716151413121110 ld1
+  let ld2 ← execute (← decodeA64 [0xa1, 0x88, 0xdf, 0x4c]) (block ++ [word "X5" 0x1000])
+  assertWide 128 "LD2 of 4S, the first" "Q1" 0x1b1a1918131211100b0a090803020100 ld2
+  assertWide 128 "LD2 of 4S, the second" "Q2" 0x1f1e1d1c171615140f0e0d0c07060504 ld2
+  assertReg "LD2 of 4S, the base" "X5" 0x1020 ld2
+  let st1 ← execute (← decodeA64 [0xa1, 0xac, 0x00, 0x4c])
+    (windowOf 64 0x1000 [] ++ [word "X5" 0x1000, wide 128 "Q1" 0x00112233445566778899aabbccddeeff, wide 128 "Q2" 0xf0e0d0c0b0a09080])
+  assertByte 64 "ST1 of two, the first" 0x1000 0xff st1
+  assertByte 64 "ST1 of two, the second" 0x1010 0x80 st1
+  let tbl ← execute (← decodeA64 [0x41, 0x20, 0x04, 0x4e])
+    [wide 128 "Q2" 0x0f0e0d0c0b0a09080706050403020100, wide 128 "Q3" 0x1f1e1d1c1b1a19181716151413121110, wide 128 "Q4" 0x401101]
+  assertWide 128 "TBL of two" "Q1" 0x1101 tbl
+  -- AltiVec registers have 128 bits, which didn't lift at all, and floating point ones have 64 bits on PowerPC 32
+  let powerpc ← Target.LLVMLift.powerpcEnvironment
+  let decodePPC (values : List Nat) := Target.LLVMLift.decodePowerPCWith powerpc 0 0 (bytes values)
+  let vadd ← execute (← decodePPC [0x00, 0x38, 0x64, 0x10])
+    [wide 128 "V4" 0x0102030405060708090a0b0c0d0e0fff, wide 128 "V7" 0x01010101010101010101010101010102]
+  assertWide 128 "VADDUBM" "V3" 0x02030405060708090a0b0c0d0e0f1001 vadd
+  -- the elements of AltiVec count from the other end in the little-endian mode
+  let lvebx ← execute (← decodePPC [0x0e, 0x30, 0x65, 0x7c])
+    (windowOf 64 0x1000 [(3, 0xab)] ++ [wide 128 "V3" 0x00112233445566778899aabbccddeeff, word "R5" 0x1000, word "R6" 3])
+  assertWide 128 "LVEBX, little-endian" "V3" 0x00112233445566778899aabbabddeeff lvebx
+  let stvebx ← execute (← decodePPC [0x0e, 0x31, 0x65, 0x7c])
+    (windowOf 64 0x1000 [] ++ [wide 128 "V3" 0x00112233445566778899aabbccddeeff, word "R5" 0x1000, word "R6" 3])
+  assertMemory "STVEBX, little-endian" 0x1003 0xcc stvebx
+  let powerpcBig ← Target.LLVMLift.powerpcEnvironmentOf { bits := 64, endian := .big }
+  let lvebxBig ← execute (← Target.LLVMLift.decodePowerPCOf { bits := 64, endian := .big } powerpcBig 0 0 (bytes [0x7c, 0x65, 0x30, 0x0e]))
+    (windowOf 64 0x1000 [(3, 0xab)] ++ [wide 128 "V3" 0x00112233445566778899aabbccddeeff, word "R5" 0x1000, word "R6" 3])
+  assertWide 128 "LVEBX, big-endian" "V3" 0x001122ab445566778899aabbccddeeff lvebxBig
+  let powerpc32 ← Target.LLVMLift.powerpc32Environment
+  let decodePPC32 (values : List Nat) := Target.LLVMLift.decodePowerPC32With powerpc32 0 0 (bytes values)
+  let fmr ← execute (← decodePPC32 [0xfc, 0x60, 0x20, 0x90]) [wide 64 "F4" 0x0123456789abcdef]
+  assertWide 64 "FMR of PowerPC 32" "F3" 0x0123456789abcdef fmr
+  let stfd ← execute (← decodePPC32 [0xd8, 0x65, 0x00, 0x08])
+    (windowOf 32 0x1000 [] ++ [wide 64 "F3" 0x0123456789abcdef, wide 32 "R5" 0x1000])
+  assertByte 32 "STFD of PowerPC 32" 0x1008 0x01 stfd
+  let lfd ← execute (← decodePPC32 [0xc8, 0x65, 0x00, 0x08])
+    (windowOf 32 0x1000 [(8, 0x01), (9, 0x23), (10, 0x45), (11, 0x67), (12, 0x89), (13, 0xab), (14, 0xcd), (15, 0xef)] ++ [wide 32 "R5" 0x1000])
+  assertWide 64 "LFD of PowerPC 32" "F3" 0x0123456789abcdef lfd
+  -- MOV of the pc of Thumb reads the address plus 4, and doesn't read a variable that nothing sets
+  let thumb ← Target.LLVMLift.thumbEnvironment
+  let mov ← execute (← Target.LLVMLift.decodeThumbWith thumb 0x10002000 0x10002000 (bytes [0x79, 0x46]))
+  assertReg32 "Thumb MOV r1, pc" "R1" 0x10002004 mov
+  -- the carry of a comparison with zero is set: it is of x + ~y + 1
+  let cmp ← execute (← Target.LLVMLift.decodeThumbWith thumb 0 0 (bytes [0x5d, 0x45]))
+    [word32 "R5" 5, word32 "R11" 0, bit "ZF" 1, bit "NF" 1, bit "CF" 0, bit "VF" 1]
+  assertFlag "Thumb CMP of a high register with zero, CF" "CF" 1 cmp
+  assertFlag "Thumb CMP of a high register with zero, ZF" "ZF" 0 cmp
+
+-- BEGIN tools/x86_model.py
+/-- The state of `x86RestCases`, from `tools/x86_model.py`. -/
+private def x86RestState : List (String × Nat × Nat) :=
+  [("ZMM0", 512, 0xceca0ca0c351e0a7c8b045b99d6fb2864f7580cd7b17a39ea402cba46b82bdddd1ea2fa4dd9af44c959ef8713231c2ca685bd8519d0023dbdaeb8ebd244a330c),
+    ("ZMM1", 512, 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c83868219521bb74476ee0b6e30f38987f53584df3c8),
+    ("ZMM2", 512, 0xa5869770cc27fdbaccd9e6665a0150635192725ac112b40f42381838bf9d61af0d50e066aa379226c764b0445800058a0e6c783bd0d3aac140254dfc5f952dda),
+    ("ZMM3", 512, 0xccd9e6665a0150635192725a6354374e1c89878831d2174b0d50e066aa379226c764b0449a0fcae9be90976fa0b88c6640254dfc5f952dda0ce9fcba3e066d3a),
+    ("ZMM4", 512, 0xd379bb36d3f73e92b2285aacd34440ff3be57c826f738d740ac1595ac5c3c0b61b447ae964c1c89aeaa54832abc0d0423ccbcd51ad9bec8bc3e6acee47500cf7),
+    ("ZMM5", 512, 0x7508bb12d38ae9a8930c5483d2e3d8184304b6980c59684902265866d923dd6bd73f0b44720f86bfdc931e17350c191881c189f6fa0b9fbc21bca2c338ec4530),
+    ("ZMM6", 512, 0x58159f4fdc1d8bd550024265fe7ebb2f3f80e82e94985dcdc37f8cba1bb658ff657db3a23fb1f544cd388e7c56f288bf91042da51a43f6a6483b9e4a3553d717),
+    ("ZMM7", 512, 0xe05a2af0326a51aa34849218aa1bc1d27afc1109efe0b1d84fbcf455e30e7d5cbd2f206f339b8ff70fec8fcd73f64b4d5aad8d0f2198d2c5a8ee121047b5ee36),
+    ("ZMM8", 512, 0xb000000070000000500000002000000030000000600000001000000000000000400000007000000030000000000000006000000020000000a00000001),
+    ("ZMM9", 512, 0x90000000000000009000000000000000800000000000000020000000000000002000000000000000a00000000000000070000000000000006),
+    ("K1", 64, 0x5a3c96f01e78d2b5),
+    ("K2", 64, 0x0),
+    ("K3", 64, 0xf0f0cc33aa5581c7),
+    ("K4", 64, 0xffff00ff),
+    ("K5", 64, 0x0),
+    ("RCX", 64, 0x10),
+    ("RDX", 64, 0xb8031a57a91ad512),
+    ("RBX", 64, 0x1008),
+    ("TMM0", 8192, 0x0),
+    ("TMM1", 8192, 0x7124649fbe312367b1000ea9c7a85b780000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008767cf6ab6313531a0947c07c10ace92000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ee637ff0d4efd9a3507ca6308e4061de),
+    ("TMM2", 8192, 0x457380482331d42ead7189bf012b76d3000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000bc360d67c05de8a2c16d341fe60b4c6c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000fbaa0b73a112fd3534078e9c4e5acd6d),
+    ("TMM3", 8192, 0xe1954ad3f7b43a0af63c5f3bc2b01d2e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005bdbce793a6a290b1aa9f06d4fc1c5e200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000049e92033d31198ce36aed547994cf6e6),
+    ("TMM4", 8192, 0x9a68f670370e7f6df8886c18000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a655dec4aa04515a4dfcafd000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000109b7cc98c3a0286aeefabd00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b8419daebadb13ee86a957a6),
+    ("TMM5", 8192, 0x22bd14bbcb2d45e20000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a9ce17cebba58544),
+    ("TMM6", 8192, 0x0),
+    ("TMM7", 8192, 0x0),
+    ("TILECFG", 512, 0x2040303030000000000000000000000000000000000000000000008000c001000100010000000000000000000000000000000000001),
+    ("MM0", 64, 0x4ea337d0fe4e6396),
+    ("MM1", 64, 0xa72a7dd42a1e2a52),
+    ("MM2", 64, 0xee95d0154c6ec863),
+    ("MM3", 64, 0xfcbdcf15d686fda6),
+    ("MM4", 64, 0xcdde808bb7332d60),
+    ("MM5", 64, 0x87b37ea789d4a476),
+    ("MM6", 64, 0x7b916dd970d9200f),
+    ("MM7", 64, 0x6c6eb263df472243),
+    ("FS_BASE", 64, 0x7000),
+    ("GS_BASE", 64, 0x9000),
+    ("RSP", 64, 0x2000),
+    ("FPU_TAG", 16, 0x0),
+    ("R17", 64, 0x10f743980c830116),
+    ("AF", 1, 0x1),
+    ("CF", 1, 0x1),
+    ("OF", 1, 0x0),
+    ("PF", 1, 0x0),
+    ("SF", 1, 0x1),
+    ("ZF", 1, 0x0)]
+
+private def x86RestMemory : Nat := 0x44830bd8f0a0f0702564cacc359a9af71a7e5607cb4060a632666cdf5fec35da3cbf878918da15e5a8f84ad0345be4aca38b7ca71b8b7497d8570898eeb3162c70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5343
+
+/-- The cases, from `tools/x86_model.py`: an independent model of what the manuals say, not from the semantics. -/
+private def x86RestCases : List (String × List Nat × List (String × Nat) × List (String × Nat) × Option Nat) := [
+  ("vp2intersectd z", [0x62, 0xf2, 0x6f, 0x48, 0x68, 0xe3], [("K4", 0x38e3), ("K5", 0xe38c)], [], none),
+  ("vp2intersectq z", [0x62, 0xf2, 0xef, 0x48, 0x68, 0xe3], [("K4", 0x49), ("K5", 0x92)], [], none),
+  ("vp2intersectd y", [0x62, 0xf2, 0x6f, 0x28, 0x68, 0xe3], [("K4", 0x23), ("K5", 0x8c)], [], none),
+  ("vp2intersectq x", [0x62, 0xf2, 0xef, 0x8, 0x68, 0xe3], [("K4", 0x1), ("K5", 0x2)], [], none),
+  ("vp2intersectd mem", [0x62, 0xf2, 0x6f, 0x48, 0x68, 0x10], [("K2", 0x0), ("K3", 0x0)], [], none),
+  ("vp2intersectq broadcast", [0x62, 0xf2, 0xef, 0x58, 0x68, 0x10], [("K2", 0x0), ("K3", 0x0)], [], none),
+  ("vbmacor y", [0x62, 0xf6, 0x6c, 0x28, 0x80, 0xcb], [("ZMM1", 0xfffffffffffffffffffffffffefdffefffffffffffffffffffffffffffffffff)], [], none),
+  ("vbmacor z", [0x62, 0xf6, 0x6c, 0x48, 0x80, 0xcb], [("ZMM1", 0xfffffffffffffffffffffffff7f7ffffffffffffffffffffffff7ffffffffffffffffffffffffffffffffffffefdffefffffffffffffffffffffffffffffffff)], [], none),
+  ("vbmacor mem", [0x62, 0xf6, 0x6c, 0x48, 0x80, 0x8], [("ZMM1", 0xfffffffffffffffffffffffff7ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeff7fffffffffffffffffffffffbffffffffffff)], [], none),
+  ("vbmacor broadcast", [0x62, 0xf6, 0x6c, 0x58, 0x80, 0x8], [("ZMM1", 0xf373f34bdfffdb47f75fdb4f7767f76b776b535f77ff77effb435357dbf3dbeff34bf7fbf3537b77d777db7b7b63d763fb77576ff3f7f34f7bdb7f535b4ff3cb)], [], none),
+  ("vbmacor merge", [0x62, 0xf6, 0x6c, 0x49, 0x80, 0xcb], [("ZMM1", 0xf330a10b9efefffffffffffff7f7b6286568ffffffffffffffff131499f29aadffffffffa211ffff9474c838fefd9521ffff476effffffff3898ffff584dffff)], [], none),
+  ("vbmacor zero", [0x62, 0xf6, 0x6c, 0xc9, 0x80, 0xcb], [("ZMM1", 0xfffffffffffff7f700000000ffffffffffffffff000000000000ffffffff0000ffff00000000fefd0000ffff0000ffffffff0000ffff0000ffff)], [], none),
+  ("vbmacxor y", [0x62, 0xf6, 0xec, 0x28, 0x80, 0xcb], [("ZMM1", 0x66b6c8013c9b4b28b636eefcac1cfce2d00934c62e40c0af46c9e54bdbbedeb2)], [], none),
+  ("vbmacxor z", [0x62, 0xf6, 0xec, 0x48, 0x80, 0xcb], [("ZMM1", 0x7624bae07e2c3028fc5705b562c38e6645d6eaabc533556857fa392c5c49e9f866b6c8013c9b4b28b636eefcac1cfce2d00934c62e40c0af46c9e54bdbbedeb2)], [], none),
+  ("vbmacxor mem", [0x62, 0xf6, 0xec, 0x48, 0x80, 0x8], [("ZMM1", 0x47226c1706cc4bad464d4e5cc7962002e9a4af810355a90e234dcf7f8eb964cf1572f97354fb08ca3ad0fe0c47356cef9e70a565225a10af5393f0efc06c188b)], [], none),
+  ("vbmacxor broadcast", [0x62, 0xf6, 0xec, 0x58, 0x80, 0x8], [("ZMM1", 0xa073a10b9efe9904b55fcb4d2765b6286568525f36fd34aeaa42405799f2c9eef04aa6b8f1527b3494749b7b3b62c662e837142de0b6b04c38987f53584da08b)], [], none),
+  ("vbmacxor merge", [0x62, 0xf6, 0xec, 0x49, 0x80, 0xcb], [("ZMM1", 0xf330a10b9efe3028fc5705b562c3b6286568eaabc533556857fa131499f29aad66b6c801a2114b289474c838ac1c9521d009476e2e40c0af3898e54b584ddeb2)], [], none),
+  ("vbmacxor zero", [0x62, 0xf6, 0xec, 0xc9, 0x80, 0xcb], [("ZMM1", 0x3028fc5705b562c300000000eaabc533556857fa00000000000066b6c80100004b2800000000ac1c0000d00900002e40c0af0000e54b0000deb2)], [], none),
+  ("vmpsadbw x 0x2d", [0x62, 0xf3, 0x6e, 0x8, 0x42, 0xcb, 0x2d], [("ZMM1", 0x1a8015f0081013301bb021702a201e9)], [], none),
+  ("vmpsadbw x 0x12", [0x62, 0xf3, 0x6e, 0x8, 0x42, 0xcb, 0x12], [("ZMM1", 0x1b7013f014c00d101cc00f001e80000)], [], none),
+  ("vmpsadbw y 0x2d", [0x62, 0xf3, 0x6e, 0x28, 0x42, 0xcb, 0x2d], [("ZMM1", 0x12a009700f500bb015200d10143007901a8015f0081013301bb021702a201e9)], [], none),
+  ("vmpsadbw y 0x12", [0x62, 0xf3, 0x6e, 0x28, 0x42, 0xcb, 0x12], [("ZMM1", 0x1ac00a701cb014101ee01a6024d017501b7013f014c00d101cc00f001e80000)], [], none),
+  ("vmpsadbw z 0x2d", [0x62, 0xf3, 0x6e, 0x48, 0x42, 0xcb, 0x2d], [("ZMM1", 0xae00f5014701d1014f01ad01960142018800e201da0175015e01b401060143012a009700f500bb015200d10143007901a8015f0081013301bb021702a201e9)], [], none),
+  ("vmpsadbw z 0x12", [0x62, 0xf3, 0x6e, 0x48, 0x42, 0xcb, 0x12], [("ZMM1", 0x202024e023701e30183015d00c70000004e0184010600bf015601ad00b6017101ac00a701cb014101ee01a6024d017501b7013f014c00d101cc00f001e80000)], [], none),
+  ("vmpsadbw mem", [0x62, 0xf3, 0x6e, 0x48, 0x42, 0x8, 0x2d], [("ZMM1", 0xa701be007601be018a012600f501a100f801ee00d801dd0164015201da01b10100015100f90173012800f901190127015201d7015900af013b0121017e01eb)], [], none),
+  ("vmpsadbw mem merge", [0x62, 0xf3, 0x6e, 0x4b, 0x42, 0x8, 0x2d], [("ZMM1", 0xa7a10b00769904018a980e00f5b628656801ee65be01ddf901015299f201b10100f5fba2117b349474c83868210127015201d7e0b6e30f38980121017e01eb)], [], none),
+  ("vmpsadbw mem zero", [0x62, 0xf3, 0x6e, 0xcb, 0x42, 0x8, 0x2d], [("ZMM1", 0xa7000000760000018a000000f50000000001ee000001dd00000152000001b101000000000000000000000000000127015201d70000000000000121017e01eb)], [], none),
+  ("vp4dpwssd", [0x62, 0xf2, 0x57, 0x48, 0x52, 0x8], [("ZMM1", 0xc8ac3ca904f18ad6bcb9483b7c44ae1159c2acc15771e1886e9c44b38ad984d7c620329e0dfa403ec36c37d77a8b18ae73cd56799c45680e0320d47a596ce10f)], [], none),
+  ("vp4dpwssd merge", [0x62, 0xf2, 0x5f, 0x49, 0x52, 0x8], [("ZMM1", 0xc8ac3ca904f18ad6e61c980e7c44ae116568525f65be34ae6e9c44b399f29aadc620329ea2117b34c36c37d77a8b18aebb74476e9c45680e38987f53596ce10f)], [], none),
+  ("vp4dpwssd zero", [0x62, 0xf2, 0x5f, 0xc9, 0x52, 0x8], [("ZMM1", 0xc8ac3ca904f18ad6000000007c44ae1100000000000000006e9c44b300000000c620329e00000000c36c37d77a8b18ae000000009c45680e00000000596ce10f)], [], none),
+  ("vp4dpwssds", [0x62, 0xf2, 0x57, 0x48, 0x53, 0x8], [("ZMM1", 0xc8ac3ca904f18ad6bcb9483b68583db54e6c1e695771e1886e9c44b3b735befcc620329e80000000c36c37d77a8b18ae800000009c45680e0320d47a596ce10f)], [], none),
+  ("vp4dpwssds merge", [0x62, 0xf2, 0x5f, 0x49, 0x53, 0x8], [("ZMM1", 0xc8ac3ca904f18ad6e61c980e68583db56568525f65be34ae6e9c44b399f29aadc620329ea2117b34c36c37d77a8b18aebb74476e9c45680e38987f53596ce10f)], [], none),
+  ("vp4dpwssds zero", [0x62, 0xf2, 0x5f, 0xc9, 0x53, 0x8], [("ZMM1", 0xc8ac3ca904f18ad60000000068583db500000000000000006e9c44b300000000c620329e00000000c36c37d77a8b18ae000000009c45680e00000000596ce10f)], [], none),
+  ("cmpccxadd32 4", [0xc4, 0xe2, 0x71, 0xe4, 0x10], [("RDX", 0xf50a5343)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 0), ("SF", 0), ("ZF", 0)], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5343),
+  ("cmpccxadd32 5", [0xc4, 0xe2, 0x71, 0xe5, 0x10], [("RDX", 0xf50a5343)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 0), ("SF", 0), ("ZF", 0)], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5353),
+  ("cmpccxadd32 2", [0xc4, 0xe2, 0x71, 0xe2, 0x10], [("RDX", 0xf50a5343)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 0), ("SF", 0), ("ZF", 0)], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5343),
+  ("cmpccxadd32 3", [0xc4, 0xe2, 0x71, 0xe3, 0x10], [("RDX", 0xf50a5343)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 0), ("SF", 0), ("ZF", 0)], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5353),
+  ("cmpccxadd32 12", [0xc4, 0xe2, 0x71, 0xec, 0x10], [("RDX", 0xf50a5343)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 0), ("SF", 0), ("ZF", 0)], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5343),
+  ("cmpccxadd32 15", [0xc4, 0xe2, 0x71, 0xef, 0x10], [("RDX", 0xf50a5343)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 0), ("SF", 0), ("ZF", 0)], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5353),
+  ("cmpccxadd64 4", [0xc4, 0xe2, 0xf1, 0xe4, 0x10], [("RDX", 0xf7f55da8f50a5343)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 0), ("SF", 0), ("ZF", 0)], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5343),
+  ("cmpccxadd64 5", [0xc4, 0xe2, 0xf1, 0xe5, 0x10], [("RDX", 0xf7f55da8f50a5343)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 0), ("SF", 0), ("ZF", 0)], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5353),
+  ("cmpccxadd64 2", [0xc4, 0xe2, 0xf1, 0xe2, 0x10], [("RDX", 0xf7f55da8f50a5343)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 0), ("SF", 0), ("ZF", 0)], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5343),
+  ("cmpccxadd64 3", [0xc4, 0xe2, 0xf1, 0xe3, 0x10], [("RDX", 0xf7f55da8f50a5343)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 0), ("SF", 0), ("ZF", 0)], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5353),
+  ("cmpccxadd64 12", [0xc4, 0xe2, 0xf1, 0xec, 0x10], [("RDX", 0xf7f55da8f50a5343)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 0), ("SF", 0), ("ZF", 0)], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5343),
+  ("cmpccxadd64 15", [0xc4, 0xe2, 0xf1, 0xef, 0x10], [("RDX", 0xf7f55da8f50a5343)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 0), ("SF", 0), ("ZF", 0)], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5353),
+  ("ldtilecfg", [0xc4, 0xe2, 0x78, 0x49, 0x0], [("TILECFG", 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5343), ("TMM1", 0x0), ("TMM7", 0x0)], [], none),
+  ("sttilecfg", [0xc4, 0xe2, 0x79, 0x49, 0x0], [("TILECFG", 0x2040303030000000000000000000000000000000000000000000008000c001000100010000000000000000000000000000000000001), ("TMM1", 0x7124649fbe312367b1000ea9c7a85b780000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008767cf6ab6313531a0947c07c10ace92000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ee637ff0d4efd9a3507ca6308e4061de)], [], some 0x2040303030000000000000000000000000000000000000000000008000c001000100010000000000000000000000000000000000001),
+  ("tilerelease", [0xc4, 0xe2, 0x78, 0x49, 0xc0], [("TILECFG", 0x0), ("TMM1", 0x0), ("TMM2", 0x0), ("TMM7", 0x0)], [], none),
+  ("tilezero", [0xc4, 0xe2, 0x7b, 0x49, 0xd0], [("TMM2", 0x0), ("TMM1", 0x7124649fbe312367b1000ea9c7a85b780000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008767cf6ab6313531a0947c07c10ace92000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ee637ff0d4efd9a3507ca6308e4061de)], [], none),
+  ("tileloadd", [0xc4, 0xe2, 0x7b, 0x4b, 0xc, 0x8], [("TMM1", 0x297d4a92f1b5ddd6e6c83895a9b2b59700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006fbe1c1a9bdaa566483f2a7f3d0ffec000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f67a6e8c8421b13ff7f55da8f50a5343)], [], none),
+  ("tileloaddt1", [0xc4, 0xe2, 0x79, 0x4b, 0x24, 0x8], [("TMM4", 0x866ab36da5ad1ae892a2e0fd00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f1b5ddd6e6c83895a9b2b59700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a9bdaa566483f2a7f3d0ffec000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008421b13ff7f55da8f50a5343)], [], none),
+  ("tileloaddrs", [0xc4, 0xe2, 0x7b, 0x4a, 0x2c, 0x8], [("TMM5", 0x6483f2a7f3d0ffec0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f7f55da8f50a5343)], [], none),
+  ("tilestored", [0xc4, 0xe2, 0x7a, 0x4b, 0x2c, 0x8], [], [], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa5622bd14bbcb2d45e2f67a6e8c8421b13fa9ce17cebba58544),
+  ("tdpbssd", [0xc4, 0xe2, 0x63, 0x5e, 0xca], [("TMM1", 0x712403fdbe30ed1eb0ffa21ec7a840e80000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008767aed7b6310c93a0945c71c10a6f4e000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ee638fb4d4efc8d8507cb3178e40a302)], [], none),
+  ("tdpbssd other sizes", [0xc4, 0xe2, 0x63, 0x5e, 0xec], [("TMM5", 0x22bd1b7acb2d089e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a9cdc963bba576ad)], [], none),
+  ("tdpbsud", [0xc4, 0xe2, 0x62, 0x5e, 0xca], [("TMM1", 0x7124aafdbe318b1eb100601ec7a897e8000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000876819d7b631c793a0951471c10bea4e000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ee6366b4d4f003d8507c10178e400f02)], [], none),
+  ("tdpbsud other sizes", [0xc4, 0xe2, 0x62, 0x5e, 0xec], [("TMM5", 0x22bc677acb2cbe9e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a9cd6f63bba4cead)], [], none),
+  ("tdpbusd", [0xc4, 0xe2, 0x61, 0x5e, 0xca], [("TMM1", 0x712522fdbe31631eb100bf1ec7a839e8000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000876850d7b6315493a0953c71c10a644e000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ee6421b4d4efc5d8507d3a178e401f02)], [], none),
+  ("tdpbusd other sizes", [0xc4, 0xe2, 0x61, 0x5e, 0xec], [("TMM5", 0x22bd327acb2d509e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a9ceb463bba540ad)], [], none),
+  ("tdpbuud", [0xc4, 0xe2, 0x60, 0x5e, 0xca], [("TMM1", 0x7126c9fdbe33011eb1027d1ec7ab90e8000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000876abbd7b6340f93a096f471c10ddf4e000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ee65f8b4d4f200d8507f97178e438b02)], [], none),
+  ("tdpbuud other sizes", [0xc4, 0xe2, 0x60, 0x5e, 0xec], [("TMM5", 0x22c07e7acb31069e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a9d15a63bba998ad)], [], none),
+  ("tilemovrow imm 1", [0x62, 0xf3, 0x7d, 0x48, 0x7, 0xcc, 0x1], [("ZMM1", 0x109b7cc98c3a0286aeefabd)], [], none),
+  ("tilemovrow imm 2", [0x62, 0xf3, 0x7d, 0x48, 0x7, 0xcc, 0x2], [("ZMM1", 0xa655dec4aa04515a4dfcafd)], [], none),
+  ("tilemovrow imm 3", [0x62, 0xf3, 0x7d, 0x48, 0x7, 0xcc, 0x3], [("ZMM1", 0x9a68f670370e7f6df8886c18)], [], none),
+  ("tilemovrow imm 17", [0x62, 0xf3, 0x7d, 0x48, 0x7, 0xcc, 0x11], [("ZMM1", 0x109b7cc98c3a0286aeefabd)], [], none),
+  ("tilemovrow imm 15", [0x62, 0xf3, 0x7d, 0x48, 0x7, 0xcc, 0xf], [("ZMM1", 0x0)], [], none),
+  ("tilemovrow reg", [0x62, 0xf2, 0x75, 0x48, 0x4a, 0xcd], [("ZMM1", 0xa9ce17cebba58544)], [], none),
+  ("sha1nexte", [0xf, 0x38, 0xc8, 0xca], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c83868219521bd498a16d0d3aac140254dfc5f952dda)], [], none),
+  ("sha1nexte mem", [0xf, 0x38, 0xc8, 0x8], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c83868219521a55780678421b13ff7f55da8f50a5343)], [], none),
+  ("sha1msg1", [0xf, 0x38, 0xc9, 0xca], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c8386821952183ec383db8fb10c736f40768889e5909)], [], none),
+  ("sha1msg1 mem", [0xf, 0x38, 0xc9, 0x8], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c8386821952183ec383db8fb10c7cee211dfdc6c42f7)], [], none),
+  ("sha1msg2", [0xf, 0x38, 0xca, 0xca], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c83868219521d74fdb5e41275de7ce1aa5121e04512d)], [], none),
+  ("sha1msg2 mem", [0xf, 0x38, 0xca, 0x8], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c838682195217eabeca22e877d4e9b2458214dcc3ed4)], [], none),
+  ("sha256msg1", [0xf, 0x38, 0xcc, 0xca], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c83868219521afaf5f73bc7ab1cdf3acc8dd1704e4fa)], [], none),
+  ("sha256msg1 mem", [0xf, 0x38, 0xcc, 0x8], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c83868219521c90feafabc7ab1cdf3acc8dd1704e4fa)], [], none),
+  ("sha256msg2", [0xf, 0x38, 0xcd, 0xca], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c838682195217c75cc3f16f9b89febb1fd38f85ada61)], [], none),
+  ("sha256msg2 mem", [0xf, 0x38, 0xcd, 0x8], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c83868219521dd9966e553607573b342fabc46e72ec0)], [], none),
+  ("sha1rnds4 0", [0xf, 0x3a, 0xcc, 0xca, 0x0], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c83868219521c19369828b15c79bd19eaf8d841454db)], [], none),
+  ("sha1rnds4 1", [0xf, 0x3a, 0xcc, 0xca, 0x1], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c838682195215675e8296500a40266854d05db0cb051)], [], none),
+  ("sha1rnds4 2", [0xf, 0x3a, 0xcc, 0xca, 0x2], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c838682195219076e6227c1ad606018f2876612b858e)], [], none),
+  ("sha1rnds4 3", [0xf, 0x3a, 0xcc, 0xca, 0x3], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c838682195218c6e5419ab85ec3559ae343d31eee5df)], [], none),
+  ("sha256rnds2", [0xf, 0x38, 0xcb, 0xca], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c83868219521ab4a570a9f7bc22cee8ffb27321ab97c)], [], none),
+  ("sha256rnds2 mem", [0xf, 0x38, 0xcb, 0x8], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c838682195212345c980bcc41ca44ff3604846c77cdc)], [], none),
+  ("pclmulqdq 0x0", [0x66, 0xf, 0x3a, 0x44, 0xca, 0x0], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c838682195210e21d90d411ff0d64b997fb6341dfb50)], [], none),
+  ("pclmulqdq 0x1", [0x66, 0xf, 0x3a, 0x44, 0xca, 0x1], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c838682195212ec800ceb2d6f611000b88d9022801d6)], [], none),
+  ("pclmulqdq 0x10", [0x66, 0xf, 0x3a, 0x44, 0xca, 0x10], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c83868219521015f8a361a591b3e2865f54a60f435c8)], [], none),
+  ("pclmulqdq 0x11", [0x66, 0xf, 0x3a, 0x44, 0xca, 0x11], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c83868219521067e2985c9ce0c632071125e00e6a14f)], [], none),
+  ("gf2p8mulb", [0x66, 0xf, 0x38, 0xcf, 0xca], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c8386821952118405a3ac0f21c238248bf39634982ce)], [], none),
+  ("gf2p8affineqb", [0x66, 0xf, 0x3a, 0xce, 0xca, 0x35], [("ZMM1", 0xf330a10b9efe9904e61c980e7426b6286568525f65be34aef901131499f29aada309f5fba2117b349474c8386821952139f241e83dddfcb81bf91ef6cc7c14dc)], [], none),
+  ("mmx packsswb", [0xf, 0x63, 0xca], [("MM1", 0x80807f80807f7f7f)], [], none),
+  ("mmx packuswb", [0xf, 0x67, 0xca], [("MM1", 0xff0000ffffff)], [], none),
+  ("mmx packssdw", [0xf, 0x6b, 0xca], [("MM1", 0x80007fff80007fff)], [], none),
+  ("mmx pmuludq", [0xf, 0xf4, 0xca], [("MM1", 0xc932e7e61f66db6)], [], none),
+  ("mmx pshufw", [0xf, 0x70, 0xca, 0x1b], [("MM1", 0xc8634c6ed015ee95)], [], none),
+  ("mmx pinsrw", [0xf, 0xc4, 0xca, 0x2], [("MM1", 0xa72ad5122a1e2a52)], [], none),
+  ("mmx pextrw", [0xf, 0xc5, 0xca, 0x3], [("RCX", 0xee95)], [], none),
+  ("mmx movq store", [0xf, 0x7f, 0x10], [], [], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13fee95d0154c6ec863),
+  ("emms", [0xf, 0x77], [("FPU_TAG", 0xffff)], [], none),
+  ("vpgatherdd", [0xc4, 0xa2, 0x69, 0x90, 0xc, 0x80], [("ZMM1", 0xbb74476e8421b13f38987f53584df3c8), ("ZMM2", 0x0)], [], none),
+  ("vpgatherdd y", [0xc4, 0xa2, 0x6d, 0x90, 0xc, 0x80], [("ZMM1", 0xa309f5fb06fbe1c1f67a6e8c68219521bb74476e8421b13f38987f53584df3c8), ("ZMM2", 0x0)], [], none),
+  ("vpgatherdq", [0xc4, 0xa2, 0xed, 0x90, 0xc, 0x80], [("ZMM1", 0xa309f5fba2117b34f67a6e8c8421b13fbb74476ee0b6e30f38987f53584df3c8), ("ZMM2", 0x0)], [], none),
+  ("vpgatherqd", [0xc4, 0xa2, 0x6d, 0x91, 0xc, 0x88], [("ZMM1", 0xbb74476ef1b5ddd638987f53584df3c8), ("ZMM2", 0x0)], [], none),
+  ("vpgatherqq", [0xc4, 0xa2, 0xed, 0x91, 0xc, 0x88], [("ZMM1", 0xa309f5fba2117b34297d4a92f1b5ddd6bb74476ee0b6e30f38987f53584df3c8), ("ZMM2", 0x0)], [], none),
+  ("xlat", [0xd7], [("RAX", 0x103f)], [], none),
+  ("rdfsbase", [0xf3, 0x48, 0xf, 0xae, 0xc1], [("RCX", 0x7000)], [], none),
+  ("rdgsbase", [0xf3, 0xf, 0xae, 0xc9], [("RCX", 0x9000)], [], none),
+  ("wrfsbase", [0xf3, 0x48, 0xf, 0xae, 0xd2], [("FS_BASE", 0xb8031a57a91ad512)], [], none),
+  ("wrgsbase", [0xf3, 0xf, 0xae, 0xda], [("GS_BASE", 0xa91ad512)], [], none),
+  ("aadd", [0x48, 0xf, 0x38, 0xfc, 0x10], [], [], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13faff878009e252855),
+  ("axor", [0xf3, 0x48, 0xf, 0x38, 0xfc, 0x10], [], [], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13f4ff647ff5c108651),
+  ("movdiri", [0x48, 0xf, 0x38, 0xf9, 0x10], [], [], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13fb8031a57a91ad512),
+  ("movdir64b", [0x66, 0xf, 0x38, 0xf8, 0x40, 0x10], [], [], some 0xa38b7ca71b8b7497d8570898eeb3162c70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffec),
+  ("adcx mem", [0x66, 0xf, 0x38, 0xf6, 0x8], [("RCX", 0xf50a5354)], [], none),
+  ("movrs", [0x48, 0xf, 0x38, 0x8b, 0x8], [("RCX", 0xf7f55da8f50a5343)], [], none),
+  ("push2", [0x62, 0xf4, 0x7c, 0x18, 0xff, 0xf2], [("RSP", 0x1ff0)], [], none),
+  ("add nd", [0x62, 0xf4, 0xf4, 0x18, 0x1, 0xda], [("RCX", 0xb8031a57a91ae51a), ("RDX", 0xb8031a57a91ad512), ("RBX", 0x1008)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 0), ("SF", 1), ("ZF", 0)], none),
+  ("add nf nd", [0x62, 0xf4, 0xf4, 0x1c, 0x1, 0xda], [("RCX", 0xb8031a57a91ae51a)], [("AF", 1), ("CF", 1), ("OF", 0), ("PF", 0), ("SF", 1), ("ZF", 0)], none),
+  ("add nf", [0x62, 0xf4, 0xfc, 0xc, 0x1, 0xda], [("RDX", 0xb8031a57a91ae51a)], [("AF", 1), ("CF", 1), ("OF", 0), ("PF", 0), ("SF", 1), ("ZF", 0)], none),
+  ("add16 nd clears", [0x62, 0xf4, 0x75, 0x18, 0x1, 0xda], [("RCX", 0xe51a)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 0), ("SF", 1), ("ZF", 0)], none),
+  ("add8 nd clears", [0x62, 0xf4, 0x74, 0x18, 0x0, 0xda], [("RCX", 0x1a)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 0), ("SF", 0), ("ZF", 0)], none),
+  ("adc32 nd", [0x62, 0xf4, 0x74, 0x18, 0x11, 0xda], [("RCX", 0xa91ae51b)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 1), ("SF", 1), ("ZF", 0)], none),
+  ("add mr nd", [0x62, 0xf4, 0xf4, 0x18, 0x1, 0x18], [("RCX", 0xf7f55da8f50a634b)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 1), ("SF", 1), ("ZF", 0)], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5343),
+  ("add16 mr nd", [0x62, 0xf4, 0x75, 0x18, 0x1, 0x18], [("RCX", 0x634b)], [("AF", 0), ("CF", 0), ("OF", 0), ("PF", 1), ("SF", 0), ("ZF", 0)], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5343),
+  ("add64 mi32 nd", [0x62, 0xf4, 0xf4, 0x18, 0x81, 0x0, 0xfb, 0xff, 0xff, 0xff], [("RCX", 0xf7f55da8f50a533e)], [("AF", 0), ("CF", 1), ("OF", 0), ("PF", 0), ("SF", 1), ("ZF", 0)], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5343),
+  ("add64 ri32 nd", [0x62, 0xf4, 0xf4, 0x18, 0x81, 0xc2, 0xfb, 0xff, 0xff, 0xff], [("RCX", 0xb8031a57a91ad50d)], [("AF", 0), ("CF", 1), ("OF", 0), ("PF", 0), ("SF", 1), ("ZF", 0)], none),
+  ("shl rcl nd", [0x62, 0xf4, 0xe4, 0x18, 0xd3, 0xe2], [("RBX", 0x1a57a91ad5120000)], [], none),
+  ("shl mcl nd", [0x62, 0xf4, 0xe4, 0x18, 0xd3, 0x20], [("RBX", 0x5da8f50a53430000)], [], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5343),
+  ("shl nf", [0x62, 0xf4, 0xfc, 0xc, 0xd3, 0xe2], [("RDX", 0x1a57a91ad5120000)], [("AF", 1), ("CF", 1), ("OF", 0), ("PF", 0), ("SF", 1), ("ZF", 0)], none),
+  ("neg m nd", [0x62, 0xf4, 0xf4, 0x18, 0xf7, 0x18], [("RCX", 0x80aa2570af5acbd)], [], some 0x70378245866ab36da5ad1ae892a2e0fd297d4a92f1b5ddd6e6c83895a9b2b59706fbe1c1a9bdaa566483f2a7f3d0ffecf67a6e8c8421b13ff7f55da8f50a5343),
+  ("ccmp holds", [0x62, 0xf4, 0xd4, 0x2, 0x39, 0xda], [], [("AF", 1), ("CF", 0), ("OF", 0), ("PF", 1), ("SF", 1), ("ZF", 0)], none),
+  ("ccmp not", [0x62, 0xf4, 0xd4, 0x3, 0x39, 0xda], [], [("AF", 0), ("CF", 0), ("OF", 1), ("PF", 0), ("SF", 0), ("ZF", 1)], none),
+  ("ccmpt", [0x62, 0xf4, 0xd4, 0xa, 0x39, 0xda], [], [("AF", 1), ("CF", 0), ("OF", 0), ("PF", 1), ("SF", 1), ("ZF", 0)], none),
+  ("ccmpf", [0x62, 0xf4, 0xd4, 0xb, 0x39, 0xda], [], [("AF", 0), ("CF", 0), ("OF", 1), ("PF", 0), ("SF", 0), ("ZF", 1)], none),
+  ("setzub", [0x62, 0xf4, 0x7f, 0x18, 0x42, 0xc1], [("RCX", 0x1)], [], none),
+  ("add r17 nd", [0x62, 0xf4, 0xf4, 0x10, 0x1, 0xda], [("R17", 0xb8031a57a91ae51a)], [], none),
+  ("add r17d nd", [0x62, 0xf4, 0x74, 0x10, 0x1, 0xda], [("R17", 0xa91ae51a)], [], none),
+  ("vpdpwssd vex", [0xc4, 0xe2, 0x69, 0x52, 0xcb], [("ZMM1", 0xe3b1761ebfd510383ad5561883067caa)], [], none),
+  ("vpdpwssd vex y", [0xc4, 0xe2, 0x6d, 0x52, 0xcb], [("ZMM1", 0xa9f01453db028b03c37eb1f444e0821de3b1761ebfd510383ad5561883067caa)], [], none),
+  ("vpmadd52luq vex", [0xc4, 0xe2, 0xe9, 0xb4, 0xcb], [("ZMM1", 0xbb81689feb4f386938a0e63163bc292c)], [], none),
+  ("vgf2p8mulb vex y", [0xc4, 0xe2, 0x6d, 0xcf, 0xcb], [("ZMM1", 0x9472e16b60263b64ebca21390c008a1aade84755f9b98f9e2d44ff5785538834)], [], none),
+  ("vpclmulqdq vex y", [0xc4, 0xe3, 0x6d, 0x44, 0xcb, 0x11], [("ZMM1", 0x5dc36385f6aaf29aa44c74ca6b92156039ae7860457721c5bad0597d065925a)], [], none)
+]
+-- END tools/x86_model.py
+
+/-- What can only be checked by the intrinsic it lifts to. -/
+private def x86RestIntrinsics : List (String × List Nat × String) := [
+  ("vcvt2ps2phx", [0x62, 0xf2, 0x75, 0x48, 0x67, 0xc2], "fconvert_rne_ieee754_binary_32_16"),
+  ("vcvt2ps2phx {rd-sae}", [0x62, 0xf2, 0x75, 0x38, 0x67, 0xc2], "fconvert_rdn_ieee754_binary_32_16"),
+  ("vcvtph2bf8", [0x62, 0xf2, 0x7e, 0x48, 0x74, 0xc1], "vcvtph2bf8_rne"),
+  ("vcvt2ph2bf8", [0x62, 0xf2, 0x77, 0x48, 0x74, 0xc2], "vcvt2ph2bf8_rne"),
+  ("vcvtbiasph2bf8", [0x62, 0xf2, 0x74, 0x48, 0x74, 0xc2], "vcvtbiasph2bf8_rne"),
+  ("vcvthf82ph", [0x62, 0xf5, 0x7f, 0x48, 0x1e, 0xc1], "vcvthf82ph"),
+  ("vminmaxsd", [0x62, 0xf3, 0xf5, 0x08, 0x53, 0xc2, 0x01], "fminmax_rne_ieee754_binary_64"),
+  ("vcvttsd2si", [0x62, 0xf5, 0x7f, 0x08, 0x6d, 0xc1], "cast_sint_sat_rtz_ieee754_binary_64_32"),
+  ("vcomxsd", [0x62, 0xf1, 0xff, 0x08, 0x2f, 0xc1], "forder_ieee754_binary_64"),
+  ("v4fmaddps", [0x62, 0xf2, 0x7f, 0x48, 0x9a, 0x00], "fmad"),
+  ("v4fnmaddss", [0x62, 0xf2, 0x7f, 0x08, 0xab, 0x00], "fmad"),
+  ("tdpbf16ps", [0xc4, 0xe2, 0x72, 0x5c, 0xc2], "tdpbf16ps"),
+  ("tcmmimfp16ps", [0xc4, 0xe2, 0x71, 0x6c, 0xc2], "tcmmimfp16ps"),
+  ("tcvtrowd2ps", [0x62, 0xf3, 0x7e, 0x48, 0x07, 0xc1, 0x03], "cast_sfloat_rne_ieee754_binary_32_32"),
+  ("tcvtrowps2phh", [0x62, 0xf3, 0x7c, 0x48, 0x07, 0xc1, 0x03], "fconvert_rne_ieee754_binary_32_16"),
+  ("rdrand", [0x48, 0x0f, 0xc7, 0xf0], "rdrand"),
+  ("rdseed", [0x48, 0x0f, 0xc7, 0xf8], "rdseed"),
+  ("aesenc", [0x66, 0x0f, 0x38, 0xdc, 0xc1], "aesenc"),
+  ("vaesenc", [0xc4, 0xe2, 0x71, 0xdc, 0xc2], "aesenc"),
+  ("rcpps", [0x0f, 0x53, 0xc1], "frcp_rne_ieee754_binary_32"),
+  ("fsin", [0xd9, 0xfe], "fsin_rne_ieee754_binary_80"),
+  ("fcom", [0xd8, 0xd1], "forder_ieee754_binary_80"),
+  ("xsave", [0x0f, 0xae, 0x20], "xsave")]
+
+/-- The instructions of `x86RestCases` from the state that the model has. -/
+private def testX86Rest : IO Unit := do
+  let x86 ← Target.LLVMLift.x86Environment
+  let cell : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let memory ← match Memory.write (Memory.empty 64) (BitVec.ofNat 64 0x1000) (BitVec.ofNat 1024 x86RestMemory) .little 128 with
+    | .ok memory => pure memory
+    | .error error => throw <| IO.userError error
+  let start : Bil.Env :=
+    (cell, .memory memory) :: (⟨"RAX", .imm 64, 0, false⟩, .bits (BitVec.ofNat 64 0x1000)) ::
+      x86RestState.map fun (name, width, value) => (⟨name, .imm width, 0, false⟩, .bits (BitVec.ofNat width value))
+  let widthOf (name : String) : Nat :=
+    (x86RestState.find? (·.1 == name)).elim 64 (·.2.1)
+  for (name, encoding, registers, flags, stored) in x86RestCases do
+    let insn ← Target.LLVMLift.decodeX86With x86 0 0 (bytes encoding)
+    assertEqual s!"{name} has its size" encoding.length insn.size
+    let state ← execute insn start
+    for (register, expected) in registers do
+      match Bil.lookup state.env ⟨register, .imm (widthOf register), 0, false⟩ with
+      | .ok (.bits value) => assertEqual s!"{name}: {register}" expected value.toNat
+      | _ => throw <| IO.userError s!"{name}: no {register}"
+    for (flag, expected) in flags do
+      match Bil.lookup state.env ⟨flag, .imm 1, 0, false⟩ with
+      | .ok (.bits value) => assertEqual s!"{name}: {flag}" expected value.toNat
+      | _ => throw <| IO.userError s!"{name}: no {flag}"
+    if let some expected := stored then
+      match Bil.lookup state.env cell with
+      | .ok (@Value.memory 64 memory) =>
+        assertEqual s!"{name}: memory" expected (Memory.read memory (BitVec.ofNat 64 0x1000) .little 64).toNat
+      | _ => throw <| IO.userError s!"{name}: no memory"
+  -- what has no value here, the lanes of floats and what asks the machine, is the intrinsic of its name
+  for (name, encoding, part) in x86RestIntrinsics do
+    let insn ← Target.LLVMLift.decodeX86With x86 0 0 (bytes encoding)
+    assertEqual s!"{name} has its size" encoding.length insn.size
+    assertTrue s!"{name} is {part}" (1 < ((Bil.Wire.renderProgram insn.bil).splitOn part).length)
+
 def run : IO Unit := do
+  testHardware
   testX86Memo
+  testX86Rest
   testX86EvexModel
   testStatusRegisters
   testArmMultipleAgree

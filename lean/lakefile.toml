@@ -16,3 +16,15 @@ name = "BapTests"
 name = "bap-tests"
 root = "BapTests.Main"
 moreLinkArgs = ["@native/static-link.rsp"]
+
+[[lean_exe]]
+name = "bap-difftest"
+srcDir = "tools/difftest"
+root = "DiffTest"
+moreLinkArgs = ["@native/static-link.rsp"]
+
+# The smoke test of what the lifters cover, see tools/smoke.py: `lake build bap-smoke`.
+[[lean_exe]]
+name = "bap-smoke"
+root = "tools.Smoke"
+moreLinkArgs = ["@native/static-link.rsp"]

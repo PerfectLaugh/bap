@@ -2287,3 +2287,205 @@
 (defun VSCATTERPF1DPSm (k b s i off seg) (empty))
 (defun VSCATTERPF1QPDm (k b s i off seg) (empty))
 (defun VSCATTERPF1QPSm (k b s i off seg) (empty))
+
+;;; WHAT THE NAMES OF THE OPCODES OF AVX10.2 AND KNIGHTS MILL SAY OTHERWISE
+;;
+;; The opcodes of these families have no `Z`, or the operands of a family
+;; have a register pair or a block, see `x86ExpandOperands`.
+
+;; the scalar forms of VMINMAX
+
+(defun evex:VMINMAXSS (o) (evex-scalar-imm2 'fminmax 32 o))
+(defun evex:VMINMAXSD (o) (evex-scalar-imm2 'fminmax 64 o))
+(defun evex:VMINMAXSH (o) (evex-scalar-imm2 'fminmax 16 o))
+
+;; the conversions that saturate, of a scalar to a general purpose register
+
+(defun evex:VCVTTSS2SIS (o) (evex-to-gpr 7 32 32 o))
+(defun evex:VCVTTSS2SI64S (o) (evex-to-gpr 7 32 64 o))
+(defun evex:VCVTTSS2USIS (o) (evex-to-gpr 8 32 32 o))
+(defun evex:VCVTTSS2USI64S (o) (evex-to-gpr 8 32 64 o))
+(defun evex:VCVTTSD2SIS (o) (evex-to-gpr 7 64 32 o))
+(defun evex:VCVTTSD2SI64S (o) (evex-to-gpr 7 64 64 o))
+(defun evex:VCVTTSD2USIS (o) (evex-to-gpr 8 64 32 o))
+(defun evex:VCVTTSD2USI64S (o) (evex-to-gpr 8 64 64 o))
+
+;; the comparisons of AVX10.2, which set the flags so that each condition
+;; of the integers means the same of the floats: ZF is only of equal values.
+;; See the AVX10.2 architecture specification, VCOMXSD.
+
+(defun compare-floats-x (rt x y)
+  (let ((nan (logor (sse-is-nan rt x) (sse-is-nan rt y)))
+        (less (sse-forder rt x y))
+        (more (sse-forder rt y x)))
+    (let ((same (not (logor nan (logor less more)))))
+      (set OF (logor same (logor less nan)))
+      (set SF (logor same nan))
+      (set ZF same)
+      (set PF nan)
+      (set CF (logor less nan))
+      (set AF 0:1))))
+
+(defun evex-compare-x-of (e o s)
+  (compare-floats-x e (car s) (if (= (evex-mem o) 1) (load-n e (evex-ea (cdr s))) (car (cdr s)))))
+(defun evex-compare-x (e o) (evex-compare-x-of e o (evex-ops o)))
+
+(defun evex:VCOMXSS (o) (evex-compare-x 32 o))
+(defun evex:VCOMXSD (o) (evex-compare-x 64 o))
+(defun evex:VCOMXSH (o) (evex-compare-x 16 o))
+(defun evex:VUCOMXSS (o) (evex-compare-x 32 o))
+(defun evex:VUCOMXSD (o) (evex-compare-x 64 o))
+(defun evex:VUCOMXSH (o) (evex-compare-x 16 o))
+
+;; the conversions of two vectors to one of half the elements: the low half
+;; of the result is of the last source
+
+(defun evex:VCVT2PS2PHX (o) (evex-ne2ps-of o (evex-sources o)))
+
+;; to and from the 8-bit formats BF8 and HF8, whose names say whether they saturate
+
+(defun evex-bf8-name (name) (symbol-concat name *sse-rmode* :sep '_))
+(defun evex-to-bf8 (name x) (intrinsic (evex-bf8-name name) (cast-low 16 x) :result 8))
+
+(defun evex-lane-ph2bf8 (name mode y _ _ _ _ i) (evex-to-bf8 name (evex-y mode 16 y i)))
+(defun evex-ph2bf8 (name o)
+  (evex-put-n o 8 (evex-count o 16) evex-lane-ph2bf8 name (evex-fp-mode o)
+              (evex-fp-value o 16 (evex-count o 16) (evex-k o) (evex-sources o)) 0 0 0 0))
+
+(defun evex-lane-2ph2bf8 (name w x mode y _ _ i)
+  (if (< i (/ w 16))
+      (evex-to-bf8 name (evex-y mode 16 y i))
+    (evex-to-bf8 name (evex-lane 16 x (- i (/ w 16))))))
+(defun evex-2ph2bf8-of (name o s)
+  (evex-put o 8 evex-lane-2ph2bf8 name (evex-w o) (car s) (evex-fp-mode o)
+            (evex-fp-value o 16 (evex-count o 16) (evex-k o) (cdr s)) 0 0))
+(defun evex-2ph2bf8 (name o) (evex-2ph2bf8-of name o (evex-sources o)))
+
+(defun evex-lane-biasph2bf8 (name x mode y _ _ _ i)
+  (intrinsic (evex-bf8-name name) (evex-lane 16 x i) (cast-low 16 (evex-y mode 16 y i)) :result 8))
+(defun evex-biasph2bf8-of (name o s)
+  (evex-put-n o 8 (evex-count o 16) evex-lane-biasph2bf8 name (car s) (evex-fp-mode o)
+              (evex-fp-value o 16 (evex-count o 16) (evex-k o) (cdr s)) 0 0 0))
+(defun evex-biasph2bf8 (name o) (evex-biasph2bf8-of name o (evex-sources o)))
+
+(defun evex-lane-hf82ph (mode y _ _ _ _ _ i)
+  (intrinsic 'vcvthf82ph (cast-low 8 (evex-y mode 8 y i)) :result 16))
+
+(defun evex:VCVTHF82PH (o)
+  (evex-put o 16 evex-lane-hf82ph (evex-fp-mode o)
+            (evex-fp-value o 8 (evex-count o 16) (evex-k o) (evex-sources o)) 0 0 0 0 0))
+
+(defun evex:VCVTPH2BF8 (o) (evex-ph2bf8 'vcvtph2bf8 o))
+(defun evex:VCVTPH2BF8S (o) (evex-ph2bf8 'vcvtph2bf8s o))
+(defun evex:VCVTPH2HF8 (o) (evex-ph2bf8 'vcvtph2hf8 o))
+(defun evex:VCVTPH2HF8S (o) (evex-ph2bf8 'vcvtph2hf8s o))
+(defun evex:VCVT2PH2BF8 (o) (evex-2ph2bf8 'vcvt2ph2bf8 o))
+(defun evex:VCVT2PH2BF8S (o) (evex-2ph2bf8 'vcvt2ph2bf8s o))
+(defun evex:VCVT2PH2HF8 (o) (evex-2ph2bf8 'vcvt2ph2hf8 o))
+(defun evex:VCVT2PH2HF8S (o) (evex-2ph2bf8 'vcvt2ph2hf8s o))
+(defun evex:VCVTBIASPH2BF8 (o) (evex-biasph2bf8 'vcvtbiasph2bf8 o))
+(defun evex:VCVTBIASPH2BF8S (o) (evex-biasph2bf8 'vcvtbiasph2bf8s o))
+(defun evex:VCVTBIASPH2HF8 (o) (evex-biasph2bf8 'vcvtbiasph2hf8 o))
+(defun evex:VCVTBIASPH2HF8S (o) (evex-biasph2bf8 'vcvtbiasph2hf8s o))
+
+;; VMPSADBW of each 128 bits, whose field of the immediate alternates
+
+(defun evex-mpsadbw-lane (x y imm g)
+  (mpsadbw (evex-lane 128 x g) (evex-lane 128 y g) (if (= (mod g 2) 0) imm (rshift imm 3))))
+
+(defun evex-mpsadbw-all (x y imm w)
+  (case w
+    128 (evex-mpsadbw-lane x y imm 0)
+    256 (concat (evex-mpsadbw-lane x y imm 1) (evex-mpsadbw-lane x y imm 0))
+    (concat (evex-mpsadbw-lane x y imm 3) (evex-mpsadbw-lane x y imm 2)
+            (evex-mpsadbw-lane x y imm 1) (evex-mpsadbw-lane x y imm 0))))
+
+(defun evex-mpsadbw-of (o s)
+  (evex-put o 16 evex-lane-move 16 0
+            (evex-freeze (evex-mpsadbw-all (car s) (evex-full o 16 (evex-k o) (cdr s)) (evex-imm o) (evex-w o))) 0 0 0 0))
+(defun evex:VMPSADBW (o) (evex-mpsadbw-of o (evex-sources o)))
+
+;; VP2INTERSECT: each bit of the two masks says whether the lane of its
+;; source is equal to any lane of the other one
+
+(defun evex-equal-any (e a y j n)
+  (if (= j n) 0:1
+    (logor (= a (evex-lane e y j)) (evex-equal-any e a y (+ j 1) n))))
+
+(defun evex-lane-intersect (e x y n _ _ _ i) (evex-equal-any e (evex-lane e x i) y 0 n))
+
+(defun evex-intersect-bits (e x y n)
+  (cast-unsigned 64 (evex-bits 0 0 evex-lane-intersect e x y n 0 0 0 0 n)))
+
+(defun evex-intersect-of (e o k0 k1 x y)
+  (set$ k0 (evex-intersect-bits e x y (evex-count o e)))
+  (set$ k1 (evex-intersect-bits e y x (evex-count o e))))
+
+(defun evex-intersect (e o s)
+  (evex-intersect-of e o (car s) (evex-nth 1 s) (evex-nth 2 s) (evex-freeze (evex-full o e 0 (evex-drop 3 s)))))
+
+(defun evex:VP2INTERSECTD (o) (evex-intersect 32 o (evex-ops o)))
+(defun evex:VP2INTERSECTQ (o) (evex-intersect 64 o (evex-ops o)))
+
+;; VBMACOR and VBMACXOR: the words of each 256 bits are the rows of a matrix
+;; of bits. The product of the second source and the third one is reduced by
+;; the operation, and accumulated with it into the destination, as AMD's
+;; 69192 says. It says that there is no masking, and LLVM decodes a mask
+;; over the words: that is what it gets here.
+
+(defun evex-bmac-or (x y) (logor x y))
+(defun evex-bmac-xor (x y) (logxor x y))
+
+(defun evex-bmac-row (f acc row block k)
+  (if (= k 16) acc
+    (evex-bmac-row f (f acc (logand (evex-spread-bit row k 16) (evex-lane 16 block k))) row block (+ k 1))))
+
+(defun evex-lane-bmac (f x a b _ _ _ i)
+  (evex-bmac-row f (evex-lane 16 x i) (evex-lane 16 a i) (evex-lane 256 b (/ i 16)) 0))
+
+(defun evex-bmac-of (f o s)
+  (evex-put-tied o 16 evex-lane-bmac f (evex-pass o) (car s) (evex-full o 16 (evex-k-tied o) (cdr s)) 0 0 0))
+(defun evex:VBMACOR (o) (evex-bmac-of evex-bmac-or o (evex-sources-tied o)))
+(defun evex:VBMACXOR (o) (evex-bmac-of evex-bmac-xor o (evex-sources-tied o)))
+
+;; The instructions of Knights Mill: a block of four registers, the operands
+;; R0 ... R3, and 16 bytes of memory that hold four elements. Each register
+;; is used in turn with its element, and each result is an input of the next.
+
+(defun evex-block-memory (o k m s)
+  "the 128 bits of memory at the head of S, which aren't loaded if the mask lets no lane through"
+  (evex-freeze (if (= m 0) (load-n 128 (evex-ea s))
+                 (if (non-zero (cast-low (evex-count o 32) k)) (load-n 128 (evex-ea s)) (zeros 128)))))
+
+(defun evex-v4-steps (f x r0 r1 r2 r3 mem i)
+  (f 32 (evex-lane 32 r3 i) (evex-lane 32 mem 3)
+     (f 32 (evex-lane 32 r2 i) (evex-lane 32 mem 2)
+        (f 32 (evex-lane 32 r1 i) (evex-lane 32 mem 1)
+           (f 32 (evex-lane 32 r0 i) (evex-lane 32 mem 0) x)))))
+
+(defun evex-lane-v4 (f x r0 r1 r2 r3 mem i) (evex-v4-steps f (evex-lane 32 x i) r0 r1 r2 r3 mem i))
+
+(defun evex-v4-packed-of (f o s)
+  (evex-put-tied o 32 evex-lane-v4 f (evex-pass o) (car s) (evex-nth 1 s) (evex-nth 2 s) (evex-nth 3 s)
+                 (evex-block-memory o (evex-k-tied o) (evex-m o) (evex-drop 4 s))))
+
+(defun evex-v4-scalar-of (f o s)
+  (set-vex (evex-rd o)
+           (concat (extract 127 32 (evex-pass o))
+                   (evex-mask (evex-m o) (evex-k-tied o) (evex-pass o) 32 0
+                              (evex-v4-steps f (evex-lane 32 (evex-pass o) 0) (car s) (evex-nth 1 s) (evex-nth 2 s) (evex-nth 3 s)
+                                             (evex-block-memory o (evex-k-tied o) (evex-m o) (evex-drop 4 s)) 0)))))
+
+(defun evex:V4FMADDPS (o) (evex-v4-packed-of fma-madd o (evex-sources-tied o)))
+(defun evex:V4FNMADDPS (o) (evex-v4-packed-of fma-nmadd o (evex-sources-tied o)))
+(defun evex:V4FMADDSS (o) (evex-v4-scalar-of fma-madd o (evex-sources-tied o)))
+(defun evex:V4FNMADDSS (o) (evex-v4-scalar-of fma-nmadd o (evex-sources-tied o)))
+
+(defun evex-4dp-add (_ y z x) (+ x (cast-low 32 (evex-dot16 true true y z))))
+(defun evex-4dp-sat (_ y z x) (evex-sat-signed x (evex-dot16 true true y z)))
+
+(defun evex-4dp-of (f o s)
+  (evex-put-tied o 32 evex-lane-v4 f (evex-pass o) (car s) (evex-nth 1 s) (evex-nth 2 s) (evex-nth 3 s)
+                 (evex-block-memory o (evex-k-tied o) (evex-m o) (evex-drop 4 s))))
+(defun evex:VP4DPWSSD (o) (evex-4dp-of evex-4dp-add o (evex-sources-tied o)))
+(defun evex:VP4DPWSSDS (o) (evex-4dp-of evex-4dp-sat o (evex-sources-tied o)))

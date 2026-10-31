@@ -170,12 +170,13 @@
 (defun SCASL (di) (scas EAX 32 di))
 (defun SCASQ (di) (declare (context (bits 64))) (scas RAX 64 di))
 
-;; LODS is not repeated, as only the last load would matter
+;; REP LODS loads as many times as the count says, so that nothing is
+;; loaded with a count of zero, and only the last load stays
 (defun lods (n si seg) (let ((x (load-n n (+ (segment-base seg) si)))) (string-step si n) x))
-(defun LODSB (si seg) (set-al (lods 8 si seg)))
-(defun LODSW (si seg) (set-ax (lods 16 si seg)))
-(defun LODSL (si seg) (set-eax (lods 32 si seg)))
-(defun LODSQ (si seg) (declare (context (bits 64))) (set-rax (lods 64 si seg)))
+(defun LODSB (si seg) (repeat (set-al (lods 8 si seg))))
+(defun LODSW (si seg) (repeat (set-ax (lods 16 si seg))))
+(defun LODSL (si seg) (repeat (set-eax (lods 32 si seg))))
+(defun LODSQ (si seg) (declare (context (bits 64))) (repeat (set-rax (lods 64 si seg))))
 
 ;;; THE FLAGS AND THE SYSTEM INSTRUCTIONS
 ;;

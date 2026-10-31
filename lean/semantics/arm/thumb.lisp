@@ -13,8 +13,11 @@
 (defun tCMPhir (rn rm cnd _)
   "cmp rn, rm"
   (when (condition-holds cnd)
-    (let ((r (- rn rm)))
-      (set-nzcv-from-registers r rn (- rm)))))
+    (let ((x (t2reg rn))
+          (y (t2reg rm))
+          (r (- x y)))
+      ;; the carry of x + ~y + 1, which of 0 is set
+      (set-nzcv-from-registers r x (lnot y)))))
 
 (defun tADR (rd lbl cnd _)
   "adr rd, lbl"
@@ -223,7 +226,7 @@
 
 (defun tMOVr (rt rn pre _)
   (when (condition-holds pre)
-    (t2set rt rn)))
+    (t2set rt (t2reg rn))))
 
 (defun t2pc () (+ (get-program-counter) 4))
 

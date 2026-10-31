@@ -199,15 +199,15 @@ private def sweeping : IO Unit := do
   let padded ← Disasm.Recursive.scanRegions one 17 0 [] { skip := fun address => if address < 4 then some 4 else none }
     [(0, 17)]
   assertEqual "a sweep doesn't decode padding" 4 ((padded.instructions.map (·.address)).head?.getD 0)
-  -- v4fmaddps (%rax),%zmm0,%zmm0, which has no semantics, and ret
-  let evex := bytesOf [0x62, 0xf2, 0x7f, 0x48, 0x9a, 0x00, 0xc3]
+  -- wbinvd, which is privileged and has no semantics, and ret
+  let evex := bytesOf [0x0f, 0x09, 0xc3]
   let lifted := Disasm.Disassembler.ofRegions x86 [({ addr := 0, data := evex }, x86)]
   match ← x86.decode 0 evex with
   | .error error => assertTrue s!"no semantics is an error: {error}" (error.endsWith "" && !error.isEmpty)
   | .ok insn => throw <| IO.userError s!"what has no semantics lifted to {insn.asm}"
-  assertEqual "what has no semantics has its size" (some 6) (← x86.sizeAt 0 evex)
-  let past ← Disasm.Recursive.scanRegions lifted 7 0 [0] (plan fun _ => false) [(0, 7)]
-  assertEqual "a sweep goes on past what it can't lift" [6] (past.instructions.map (·.address))
+  assertEqual "what has no semantics has its size" (some 2) (← x86.sizeAt 0 evex)
+  let past ← Disasm.Recursive.scanRegions lifted 3 0 [0] (plan fun _ => false) [(0, 3)]
+  assertEqual "a sweep goes on past what it can't lift" [2] (past.instructions.map (·.address))
   assertEqual "what it can't lift is an error of the scan" 1 past.errors.length
   -- `fxam` and `pcmpistri`, whose values are of conditional code, and x87 conversions by the rounding control at run time
   for (label, values) in [("fxam", [0xd9, 0xe5]), ("pcmpistri", [0x66, 0x0f, 0x3a, 0x63, 0xd9, 0x02]),

@@ -53,6 +53,18 @@ def srem (left right : Word width) : Word width :=
 def smod (left right : Word width) : Word width := BitVec.smod left right
 
 def shl (value amount : Word width) : Word width := value <<< amount.toNat
+
+/-- `shl` past the width is 0, without `Nat.shiftLeft` of an amount it can't represent, which aborts the process. -/
+def shlFast (value amount : Word width) : Word width :=
+  if width ≤ amount.toNat then 0#width else value <<< amount.toNat
+
+@[csimp] theorem shl_eq_fast : @shl = @shlFast := by
+  funext width value amount
+  unfold shl shlFast
+  split
+  · next h => exact BitVec.shiftLeft_eq_zero h
+  · rfl
+
 def lshr (value amount : Word width) : Word width := value >>> amount.toNat
 def ashr (value amount : Word width) : Word width := BitVec.sshiftRight value amount.toNat
 def eq (left right : Word width) : Word 1 := bool (left == right)

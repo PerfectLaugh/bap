@@ -818,7 +818,8 @@ theorem x86LowRegister_spec (name base : String) (width : Nat)
     (h : x86LowRegister name = some (base, width)) :
     (width = 8 ∨ width = 16 ∨ width = 32) ∧
       base ∈ ["RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP",
-        "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15"] := by
+        "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15", "R16", "R17", "R18", "R19", "R20", "R21", "R22", "R23",
+        "R24", "R25", "R26", "R27", "R28", "R29", "R30", "R31"] := by
   dsimp only [x86LowRegister] at h
   unfold_low at h
   split at h <;> first | (cases h; exact ⟨by decide, by decide⟩) | cases h
@@ -952,14 +953,14 @@ theorem arm32Register_shape (name : String) :
   all_goals exact ⟨_, _, rfl, by simp⟩
 
 theorem powerpcRegister_shape (name : String) :
-    ∃ n w, powerpcRegister name = register n w w ∧ (w = 1 ∨ w = 4 ∨ w = 64) := by
+    ∃ n w, powerpcRegister name = register n w w ∧ (w = 1 ∨ w = 4 ∨ w = 64 ∨ w = 128) := by
   lift_unfold powerpcRegister
   simp only []
   repeat' split
   all_goals exact ⟨_, _, rfl, by decide⟩
 
 theorem powerpc32Register_shape (name : String) :
-    ∃ n w, powerpc32Register name = register n w w ∧ (w = 1 ∨ w = 4 ∨ w = 32) := by
+    ∃ n w, powerpc32Register name = register n w w ∧ (w = 1 ∨ w = 4 ∨ w = 32 ∨ w = 64 ∨ w = 128) := by
   lift_unfold powerpc32Register
   simp only []
   repeat' split
@@ -1030,7 +1031,8 @@ theorem x86LowRegister_base (name base : String) (width : Nat)
   have hb := (x86LowRegister_spec name base width h).2
   simp only [List.mem_cons, List.not_mem_nil, or_false] at hb
   rcases hb with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl |
-    rfl | rfl <;> exact ⟨rfl, rfl⟩
+    rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl |
+    rfl <;> exact ⟨rfl, rfl⟩
 
 /-- The registers of the 32-bit mode are views of the 32-bit bases. -/
 theorem x8632_partial_views :

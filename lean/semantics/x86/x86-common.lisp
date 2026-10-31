@@ -59,11 +59,21 @@
 (defun operand-address (base scale index off)
   "(operand-address BASE SCALE INDEX OFF) is the address of a memory
    operand, BASE and INDEX may be absent, the base RIP is the address of
-   the next instruction"
-  (+ (if (= (symbol base) 'Nil) 0
-       (if (= (symbol base) 'RIP) (get-next-program-counter) base))
-     (if (= (symbol index) 'Nil) 0 (scaled-index scale index))
-     off))
+   the next instruction. The address-size prefix makes its sum wrap in
+   half of the size of an address."
+  (let ((a (+ (if (= (symbol base) 'Nil) 0
+                (if (= (symbol base) 'RIP) (get-next-program-counter) base))
+              (if (= (symbol index) 'Nil) 0 (scaled-index scale index))
+              off)))
+    (if (x86-prefix 0x67) (short-address a) a)))
+
+(defun short-address (a)
+  (declare (context (bits 64)))
+  (cast-unsigned 64 (cast-low 32 a)))
+
+(defun short-address (a)
+  (declare (context (bits 32)))
+  (cast-unsigned 32 (cast-low 16 a)))
 
 (defun scaled-index (scale index)
   "(scaled-index SCALE INDEX) is INDEX times SCALE, which is 1, 2, 4 or
