@@ -3,6 +3,7 @@
 
 #include <string>
 
+#ifdef __linux__
 #include <errno.h>
 #include <pthread.h>
 #include <time.h>
@@ -15,6 +16,7 @@ extern "C" int pthread_cond_clockwait(pthread_cond_t *condition,
     return EINVAL;
   return pthread_cond_timedwait(condition, mutex, timeout);
 }
+#endif
 
 namespace {
 

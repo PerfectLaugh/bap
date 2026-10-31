@@ -21,6 +21,10 @@ Z3_SOURCE = DEPS / "src" / f"z3-z3-{Z3_VERSION}"
 LLVM_BUILD = DEPS / f"llvm-{LLVM_VERSION}-pic-build"
 Z3_BUILD = DEPS / "z3-pic-build"
 Z3_INSTALL = DEPS / "z3-pic"
+LLVM_INSTALL = DEPS / f"llvm-{LLVM_VERSION}-pic"
+# Lean links with its own MinGW sysroot, which has only part of what LLVM imports.
+WINDOWS_IMPORT_LIBRARIES = ["psapi", "shell32", "ole32", "uuid", "advapi32", "ws2_32", "ntdll",
+                            "version"]
 
 
 def run(args, *, env=None):
@@ -36,13 +40,17 @@ def tool(name, fallback):
     return path
 
 
-def fetch_source(url, archive, source):
+def fetch_source(url, archive, source, directories=None):
     if source.is_dir():
         return
     if not archive.exists():
         urllib.request.urlretrieve(url, archive)
     with tarfile.open(archive) as contents:
-        contents.extractall(DEPS / "src")
+        members = contents.getmembers()
+        if directories is not None:
+            members = [member for member in members
+                       if member.name.partition("/")[2].partition("/")[0] in directories]
+        contents.extractall(DEPS / "src", members=members)
 
 
 def patch_z3():
@@ -86,6 +94,22 @@ def ensure_libcxx_headers(cmake, cxx_include):
     run([cmake, "--build", build, "--target", "install-cxx-headers"])
 
 
+def posix(path):
+    return Path(path).as_posix()
+
+
+def copy_import_libraries(cxx, lean_prefix):
+    for name in WINDOWS_IMPORT_LIBRARIES:
+        library = f"lib{name}.a"
+        if (lean_prefix / "lib" / library).exists():
+            continue
+        found = Path(subprocess.check_output(
+            [cxx, f"-print-file-name={library}"], text=True).strip())
+        if not found.is_absolute() or not found.exists():
+            raise RuntimeError(f"import library not found: {library}")
+        shutil.copy2(found, BUILD / library)
+
+
 def main():
     BUILD.mkdir(parents=True, exist_ok=True)
     (DEPS / "src").mkdir(parents=True, exist_ok=True)
@@ -103,7 +127,8 @@ def main():
 
     fetch_source(
         f"https://github.com/llvm/llvm-project/archive/refs/tags/llvmorg-{LLVM_VERSION}.tar.gz",
-        DEPS / f"llvmorg-{LLVM_VERSION}.tar.gz", LLVM_SOURCE)
+        DEPS / f"llvmorg-{LLVM_VERSION}.tar.gz", LLVM_SOURCE,
+        directories={"llvm", "cmake", "libc", "third-party"} if WINDOWS else None)
     fetch_source(
         f"https://github.com/Z3Prover/z3/archive/refs/tags/z3-{Z3_VERSION}.tar.gz",
         DEPS / f"z3-{Z3_VERSION}.tar.gz", Z3_SOURCE)
@@ -111,11 +136,11 @@ def main():
     ensure_libcxx_headers(cmake, cxx_include)
 
     cmake_env = os.environ.copy()
+    cmake_env.setdefault("CC", "clang")
+    cmake_env.setdefault("CXX", "clang++")
     cxx_flags = []
     exe_link_flags = []
     if not WINDOWS:
-        cmake_env.setdefault("CC", "clang")
-        cmake_env.setdefault("CXX", "clang++")
         cxx_flags = ["-nostdinc++", "-include", quote(NATIVE / "glibc-compat.h"),
                      f"-I{quote(cxx_include)}"]
         exe_link_flags = ["-stdlib=libc++", f"-L{quote(lean_prefix / 'lib')}",
@@ -123,7 +148,7 @@ def main():
 
     run([cmake, "-S", Z3_SOURCE, "-B", Z3_BUILD, "-G", "Ninja",
          "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
-         f"-DCMAKE_INSTALL_PREFIX={Z3_INSTALL}",
+         f"-DCMAKE_INSTALL_PREFIX={posix(Z3_INSTALL)}",
          f"-DCMAKE_CXX_FLAGS={' '.join(cxx_flags)}",
          f"-DCMAKE_EXE_LINKER_FLAGS={' '.join(exe_link_flags)}",
          "-DZ3_BUILD_LIBZ3_SHARED=OFF", "-DZ3_BUILD_EXECUTABLE=OFF",
@@ -138,20 +163,18 @@ def main():
         "-DLLVM_ENABLE_LIBCXX=OFF", "-DLLVM_ENABLE_ZLIB=OFF",
         "-DLLVM_ENABLE_ZSTD=OFF", "-DLLVM_ENABLE_LIBXML2=OFF",
         "-DLLVM_ENABLE_TERMINFO=OFF",
-        "-DCMAKE_REQUIRED_LIBRARIES=unwind",
     ]
     if not WINDOWS:
-        llvm_options += ["-DHAVE_MALLINFO2=OFF", "-DHAVE_MALLINFO=OFF",
+        llvm_options += ["-DCMAKE_REQUIRED_LIBRARIES=unwind", "-DHAVE_MALLINFO2=OFF", "-DHAVE_MALLINFO=OFF",
                          "-DHAVE_DECL_ARC4RANDOM=0"]
     run([cmake, "-S", LLVM_SOURCE / "llvm", "-B", LLVM_BUILD, "-G", "Ninja",
          "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
-         f"-DCMAKE_INSTALL_PREFIX={DEPS / f'llvm-{LLVM_VERSION}-pic'}",
+         f"-DCMAKE_INSTALL_PREFIX={posix(LLVM_INSTALL)}",
          f"-DCMAKE_CXX_FLAGS={' '.join(cxx_flags)}",
          f"-DCMAKE_EXE_LINKER_FLAGS={' '.join(exe_link_flags)}",
          *llvm_options], env=cmake_env)
     run([cmake, "--build", LLVM_BUILD, "-j", str(JOBS)])
 
-    object_ext = ".obj" if WINDOWS else ".o"
     native_flags = ["-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror"]
     if not WINDOWS:
         native_flags += ["-fPIC", "-nostdinc++", f"-I{cxx_include}"]
@@ -163,33 +186,33 @@ def main():
         ("bap_jit", llvm_includes),
         ("bap_z3", [f"-I{Z3_INSTALL / 'include'}"]),
     ]:
-        output = BUILD / f"{name}{object_ext}"
+        output = BUILD / f"{name}.o"
         run([cxx, *native_flags, *includes, "-c", NATIVE / f"{name}.cpp", "-o", output])
         objects[name] = output
 
-    archive_ext = ".lib" if WINDOWS else ".a"
-    llvm_archive = BUILD / f"{'bap_llvm' if WINDOWS else 'libbap_llvm'}{archive_ext}"
-    z3_archive = BUILD / f"{'bap_z3' if WINDOWS else 'libbap_z3'}{archive_ext}"
+    llvm_archive = BUILD / "libbap_llvm.a"
+    z3_archive = BUILD / "libbap_z3.a"
     run([ar, "rcs", llvm_archive, objects["bap_llvm"], objects["bap_jit"]])
     run([ar, "rcs", z3_archive, objects["bap_z3"]])
 
-    z3_candidates = [Z3_INSTALL / "lib64" / "libz3.a", Z3_INSTALL / "lib" / "libz3.a",
-                     Z3_INSTALL / "lib" / "z3.lib", Z3_INSTALL / "lib64" / "z3.lib"]
+    z3_candidates = [Z3_INSTALL / "lib64" / "libz3.a", Z3_INSTALL / "lib" / "libz3.a"]
     z3_library = next((path for path in z3_candidates if path.exists()), None)
     if z3_library is None:
         raise RuntimeError("installed static Z3 library not found")
-    llvm_libraries = sorted((LLVM_BUILD / "lib").glob("LLVM*.lib" if WINDOWS else "libLLVM*.a"))
+    llvm_libraries = sorted((LLVM_BUILD / "lib").glob("libLLVM*.a"))
     if not llvm_libraries:
         raise RuntimeError("static LLVM libraries not found")
 
+    link_args = [f"-L{quote(posix(path))}" for path in
+                 [BUILD, LLVM_BUILD / "lib", z3_library.parent]]
+    link_args += ["-lbap_llvm", "-lbap_z3", "-lz3", "-Wl,--start-group"]
+    link_args += [f"-l{path.stem.removeprefix('lib')}" for path in llvm_libraries]
+    link_args.append("-Wl,--end-group")
     if WINDOWS:
-        link_args = [quote(path) for path in
-                     [llvm_archive, z3_archive, z3_library, *llvm_libraries]]
+        copy_import_libraries(cxx, lean_prefix)
+        link_args += [f"-l{name}" for name in WINDOWS_IMPORT_LIBRARIES]
     else:
-        link_args = [f"-L{BUILD}", f"-L{LLVM_BUILD / 'lib'}", f"-L{z3_library.parent}",
-                     "-lbap_llvm", "-lbap_z3", "-lz3", "-Wl,--start-group"]
-        link_args += [f"-l{path.stem.removeprefix('lib')}" for path in llvm_libraries]
-        link_args += ["-Wl,--end-group", "-lm", "-ldl", "-lpthread", "-lrt"]
+        link_args += ["-lm", "-ldl", "-lpthread", "-lrt"]
     (NATIVE / "static-link.rsp").write_text("\n".join(link_args) + "\n")
 
     executable_suffix = ".exe" if WINDOWS else ""

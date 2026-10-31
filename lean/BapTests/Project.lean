@@ -67,7 +67,7 @@ private def componentsFastPath : IO Unit := do
     let callgraph : Analysis.Callgraph.Callgraph := { graph := graph }
     assertEqual "strongly connected components" (componentsBySpec callgraph) (Analysis.Callgraph.stronglyConnected callgraph)
 
-private def bin (name : String) : String := s!"/mnt/data/Dev/bap/testsuite/bin/{name}"
+private def bin (name : String) : String := s!"../testsuite/bin/{name}"
 
 private def bytesOf (values : List Nat) : ByteArray := ByteArray.mk (values.map UInt8.ofNat).toArray
 
@@ -267,7 +267,7 @@ private def binaryRegressions : IO Unit := do
   match Project.serialize { disasm := some { entry := 0, instructions := [⟨0, 1, "deep", .normal, none, [.jmp deep]⟩] } } with
   | .ok _ => throw <| IO.userError "code too deep to read was saved"
   | .error _ => IO.println "ok: code too deep to read is refused"
-  let real ← Project.load "/mnt/data/Dev/bap/testsuite/bin/x86_64-linux-gnu-crc-loop"
+  let real ← Project.load (bin "x86_64-linux-gnu-crc-loop")
   Project.save real "native/build/project-real.bin"
   let reloaded ← Project.loadSaved "native/build/project-real.bin"
   assertEqual "a real project reads back" (shape real) (shape reloaded)
@@ -310,14 +310,15 @@ def run : IO Unit := do
   | .error (.runtime "failing" "intentional failure") => IO.println "ok: pass runtime error propagated"
   | .error error => throw <| IO.userError s!"wrong runtime error: {repr error}"
   | .ok _ => throw <| IO.userError "pass runtime error ignored"
-  let project ← Project.load "/bin/echo"
-  assertTrue "project is disassembled" project.disassembled
-  match runPasses [report, summarize] project with
-  | .error error => throw <| IO.userError s!"analysis failed: {repr error}"
-  | .ok analyzed =>
-    assertTrue "the summary is of the whole of the code" (((analyzed.get "instructions").bind String.toNat?).getD 0 > 1000)
-    assertTrue "and of many blocks" (((analyzed.get "blocks").bind String.toNat?).getD 0 > 100)
-    assertEqual "default analysis status" (some "analyzed") (analyzed.get "status")
+  if ← System.FilePath.pathExists "/bin/echo" then
+    let project ← Project.load "/bin/echo"
+    assertTrue "project is disassembled" project.disassembled
+    match runPasses [report, summarize] project with
+    | .error error => throw <| IO.userError s!"analysis failed: {repr error}"
+    | .ok analyzed =>
+      assertTrue "the summary is of the whole of the code" (((analyzed.get "instructions").bind String.toNat?).getD 0 > 1000)
+      assertTrue "and of many blocks" (((analyzed.get "blocks").bind String.toNat?).getD 0 > 100)
+      assertEqual "default analysis status" (some "analyzed") (analyzed.get "status")
   let mem : Var := ⟨"mem", .mem 64 8, 0, false⟩
   let rax : Var := ⟨"RAX", .imm 64, 0, false⟩
   let target : Bil.Exp := .int (BitVec.ofNat 64 0x2000)
@@ -350,7 +351,7 @@ def run : IO Unit := do
       if !((Analysis.Xrefs.functionOf index address).map (·.name) == (functionOfBySpec functions address).map (·.name)) then
         throw <| IO.userError s!"functionOf differs from its specification, seed {seed} address {address}"
   IO.println "ok: binary search of functions agrees with the definition"
-  let binary ← Project.load "/mnt/data/Dev/bap/testsuite/bin/x86_64-linux-gnu-crc-loop"
+  let binary ← Project.load (bin "x86_64-linux-gnu-crc-loop")
   let binaryDisasm := binary.disasm.getD { entry := 0 }
   assertEqual "whole binary: instructions" 134 binaryDisasm.instructions.length
   assertEqual "whole binary: blocks" 32 binaryDisasm.blocks.length
@@ -361,7 +362,7 @@ def run : IO Unit := do
   assertEqual "whole binary: functions" 10 binaryIndex.functions.length
   assertEqual "whole binary: callgraph edges" 2 binaryGraph.graph.edges.length
   assertTrue "whole binary: main is a function" (binaryIndex.functions.any (·.name == "main"))
-  let stripped ← Project.load "/mnt/data/Dev/bap/testsuite/bin/x86_64-linux-gnu-loader-stdin-stripped"
+  let stripped ← Project.load (bin "x86_64-linux-gnu-loader-stdin-stripped")
   let strippedIndex := Analysis.Xrefs.discover stripped
   assertTrue "a stripped binary has its functions from the scan"
     (strippedIndex.functions.any fun symbol => symbol.name.startsWith "sub_")

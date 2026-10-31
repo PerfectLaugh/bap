@@ -317,14 +317,15 @@ def run : IO Unit := do
   let plain ← Recursive.scanRegions (Disassembler.ofRegions x86 [({ addr := 0, data := bytes [0xc3, 0x06, 0x06, 0x06, 0x90, 0xc3] }, x86)])
     6 0 [0] {} []
   assertEqual "without ranges there is no sweep" [0] (plain.instructions.map Insn.address)
-  let host ← Image.Elf.load "/bin/echo"
-  match host.memory.entries.find? fun entry => entry.1.contains host.entryPoint with
-  | none => throw <| IO.userError "host entry is unmapped"
-  | some (region, _) =>
-    let disasm ← Recursive.scan (← Target.X86.disassembler region.addr) region.data host.entryPoint
-    assertEqual "host disassembly has no errors" [] disasm.errors
-    assertEqual "host entry instruction count" 13 disasm.instructions.length
-    assertEqual "host entry basic blocks" 2 disasm.blocks.length
-    assertEqual "host entry ends with barrier" (some Flow.barrier) (disasm.instructions.getLast?.map Insn.flow)
+  if ← System.FilePath.pathExists "/bin/echo" then
+    let host ← Image.Elf.load "/bin/echo"
+    match host.memory.entries.find? fun entry => entry.1.contains host.entryPoint with
+    | none => throw <| IO.userError "host entry is unmapped"
+    | some (region, _) =>
+      let disasm ← Recursive.scan (← Target.X86.disassembler region.addr) region.data host.entryPoint
+      assertEqual "host disassembly has no errors" [] disasm.errors
+      assertEqual "host entry instruction count" 13 disasm.instructions.length
+      assertEqual "host entry basic blocks" 2 disasm.blocks.length
+      assertEqual "host entry ends with barrier" (some Flow.barrier) (disasm.instructions.getLast?.map Insn.flow)
 
 end Bap.Tests.Disasm

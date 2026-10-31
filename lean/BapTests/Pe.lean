@@ -144,7 +144,7 @@ def run : IO Unit := do
   | .ok image =>
     assertEqual "PE undefined symbol is not rebased onto section 1" (some 0) (image.symbols[0]?.map (·.addr))
     assertEqual "PE undefined symbol is not a function" (some false) (image.symbols[0]?.map (·.isFunction))
-  let path := "/tmp/bap-lean-fixture.exe"
+  let path := "native/build/bap-lean-fixture.exe"
   IO.FS.writeBinFile path fixture
   let loaded ← Image.load path
   let cli ← IO.Process.output { cmd := ".lake/build/bin/bap", args := #["image", path] }

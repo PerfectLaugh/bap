@@ -220,7 +220,7 @@ def run : IO Unit := do
     assertEqual "COFF virtual segment size" (some 16) (image.segments[0]?.map (·.size))
     assertEqual "COFF zero-filled byte" (some 0) (image.memory.readByte 15)
     assertEqual "COFF virtual memory end" none (image.memory.readByte 16)
-  let path := "/tmp/bap-lean-fixture.obj"
+  let path := "native/build/bap-lean-fixture.obj"
   IO.FS.writeBinFile path fixture
   let loaded ← Coff.load path
   IO.FS.removeFile path

@@ -98,7 +98,7 @@ def run : IO Unit := do
   | .error error => throw <| IO.userError error
   | .ok image =>
     assertEqual "Mach-O NO_SECT symbol is not in section 1" (some false) (image.symbols[0]?.map (·.isFunction))
-  let path := "/tmp/bap-lean-fixture.macho"
+  let path := "native/build/bap-lean-fixture.macho"
   IO.FS.writeBinFile path fixture
   let loaded ← Image.load path
   IO.FS.removeFile path
