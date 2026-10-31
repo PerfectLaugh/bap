@@ -150,6 +150,10 @@ private def lookupIn (names : String → Option Value) (name : String) (locals :
         if primitiveNames.contains primitiveName then .ok (.callable (.primitive primitiveName))
         else .error s!"unknown Primus symbol {name}"
 
+/-- The functions of a state, from its table: what `assignsLocal` asks about operators, for every operator of every
+`let` an interpreted function evaluates, and which a walk over all definitions would answer the same way. -/
+abbrev functionsOf (state : State) : String → Option Value := fun name => (state.operations.get? name).map .callable
+
 private def lookupState (name : String) (locals : Locals) (state : State) : Except String Value :=
   let primitiveName := if name.startsWith "core:" then (name.drop 5).toString else name
   match Assoc.get name locals with
@@ -1186,7 +1190,7 @@ mutual
           match binding with
           | .list [.atom name, value] =>
             let (value, state) ← eval fuel current.1 context current.2 value
-            if (bindings ++ body).any (assignsLocal (namesOf state.globals) name 64) then
+            if (bindings ++ body).any (assignsLocal (functionsOf state) name 64) then
               let (value, state) ← bindAssignable context state value
               .ok ((name, value) :: current.1, state)
             else

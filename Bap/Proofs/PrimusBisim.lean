@@ -426,9 +426,9 @@ theorem letStep_sim {context : Context} {all body : List Sexp} {fuel : Nat}
     refine Reach.bind (iEval hl hs h1) fun ⟨v', s1'⟩ hrel => ?_
     obtain ⟨hv, hst⟩ := hrel
     simp only at hv hst
-    have hany : (all ++ body).any (assignsLocal (namesOf s1.globals) name 64) = (all ++ body).any (assignsLocal (namesOf s1'.globals) name 64) := by
-      have e1 : assignsLocal (namesOf s1.globals) name 64 = assignsLocal (namesOf globals) name 64 := funext fun form => assignsLocal_compat hst.left name 64 form
-      have e2 : assignsLocal (namesOf s1'.globals) name 64 = assignsLocal (namesOf globals) name 64 := funext fun form => assignsLocal_compat hst.right name 64 form
+    have hany : (all ++ body).any (assignsLocal (functionsOf s1) name 64) = (all ++ body).any (assignsLocal (functionsOf s1') name 64) := by
+      have e1 : assignsLocal (functionsOf s1) name 64 = assignsLocal (namesOf globals) name 64 := funext fun form => assignsLocal_compat hst.left name 64 form
+      have e2 : assignsLocal (functionsOf s1') name 64 = assignsLocal (namesOf globals) name 64 := funext fun form => assignsLocal_compat hst.right name 64 form
       rw [e1, e2]
     simp only [hany] at h ⊢
     split at h

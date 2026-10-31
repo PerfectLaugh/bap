@@ -2444,7 +2444,7 @@ theorem eval_let_assignable (fuel : Nat) (locals : Locals) (context : Context) (
     {name : String} {form : Sexp} {body : List Sexp} {value : SV} {width : Nat} {exp : Bil.Exp}
     (hform : eval fuel locals context state form = .ok (value, after))
     (hvalue : expectBil context value = .ok (width, exp))
-    (hassigned : ([Sexp.list [.atom name, form]] ++ body).any (assignsLocal (namesOf after.globals) name 64) = true) :
+    (hassigned : ([Sexp.list [.atom name, form]] ++ body).any (assignsLocal (functionsOf after) name 64) = true) :
     eval (fuel + 1) locals context state (.list (.atom "let" :: .list [.list [.atom name, form]] :: body)) =
       evalSequence fuel ((name, .register s!"_primus_{after.nextTemp}" width width) :: locals) context
         { after with
@@ -4030,7 +4030,7 @@ private theorem macroExpansion_view (globals : Globals) (view : Bool) (callable 
 
 /-- Which names assign a local does not depend on how the functions were compiled. -/
 theorem assignsLocal_compat {globals : Globals} {state : State} (hs : Compat globals state) (name : String) (fuel : Nat)
-    (form : Sexp) : assignsLocal (namesOf state.globals) name fuel form = assignsLocal (namesOf globals) name fuel form := by
+    (form : Sexp) : assignsLocal (functionsOf state) name fuel form = assignsLocal (namesOf globals) name fuel form := by
   induction fuel generalizing form with
   | zero => simp [assignsLocal]
   | succ fuel ih =>
@@ -4045,7 +4045,7 @@ theorem assignsLocal_compat {globals : Globals} {state : State} (hs : Compat glo
         | atom operator =>
           have hn : namesOf globals operator = Assoc.get operator globals := rfl
           obtain ⟨view, hget⟩ := hs.definitions operator
-          simp only [assignsLocal, hget, ih, hn]
+          simp only [assignsLocal, functionsOf, hs.index, hget, ih, hn]
           cases Assoc.get operator globals with
           | none => simp only [Option.map_none]
           | some value =>
@@ -4401,7 +4401,7 @@ def letStep (fuel : Nat) (context : Context) (bindings body : List Sexp) (curren
   match binding with
   | .list [.atom name, value] =>
     let (value, state) ← eval fuel current.1 context current.2 value
-    if (bindings ++ body).any (assignsLocal (namesOf state.globals) name 64) then
+    if (bindings ++ body).any (assignsLocal (functionsOf state) name 64) then
       let (value, state) ← bindAssignable context state value
       .ok ((name, value) :: current.1, state)
     else
@@ -5286,8 +5286,8 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
             letStep f context all body (locals, s) (.list [.atom name, value]) =
               .ok ((name, (freeze context x.2 x.1).1) :: locals, (freeze context x.2 x.1).2) := by
           intro f x hx hev
-          have hanyx : (all ++ body).any (assignsLocal (namesOf x.2.globals) name 64) = false := by
-            have hf : assignsLocal (namesOf x.2.globals) name 64 = assignsLocal (namesOf globals) name 64 := by
+          have hanyx : (all ++ body).any (assignsLocal (functionsOf x.2) name 64) = false := by
+            have hf : assignsLocal (functionsOf x.2) name 64 = assignsLocal (namesOf globals) name 64 := by
               funext form
               exact assignsLocal_compat hx name 64 form
             rw [hf, hany]
