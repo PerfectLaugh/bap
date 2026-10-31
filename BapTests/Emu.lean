@@ -492,8 +492,12 @@ private def testProcesses : IO Unit := do
 joins. It is 3 s, most of it compiling hot code. -/
 private def testRealPthreads : IO Unit := do
   let binary := "native/build/pthreads-test"
-  let compiled ← IO.Process.output
-    { cmd := "gcc", args := #["-static", "-O1", "-pthread", "testsuite/src/libc-threads.c", "-o", binary] } |>.toBaseIO
+  -- What gcc makes elsewhere isn't a static x86-64 program for Linux.
+  let compiled ← if System.Platform.isWindows || !System.Platform.target.startsWith "x86_64" then
+      pure (.error (IO.userError "not here"))
+    else
+      (IO.Process.output
+        { cmd := "gcc", args := #["-static", "-O1", "-pthread", "testsuite/src/libc-threads.c", "-o", binary] }).toBaseIO
   match compiled with
   | .ok { exitCode := 0, .. } =>
     let written ← IO.mkRef ByteArray.empty

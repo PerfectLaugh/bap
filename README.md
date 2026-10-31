@@ -33,7 +33,7 @@ lake build
 ```
 
 `build-static.py` generates the libc++ headers it needs from the LLVM sources, unless
-`BAP_LIBCXX_INCLUDE` names a directory that has them. It also runs on Windows; CI runs on Linux.
+`BAP_LIBCXX_INCLUDE` names a directory that has them. CI builds and tests on Linux and Windows.
 
 ## Using it
 
@@ -60,7 +60,7 @@ Two more tools are in `tools/`, and neither is part of the default build:
 - `tools/difftest` runs each instruction on real execution, natively on x86-64 and i686 and under
   qemu-user for the other targets, and compares the registers, flags and memory with the lifted
   program. Linux only.
-- `tools/smoke.py` counts the opcodes of each target that decode and lift.
+- `tools/smoke.py` counts the opcodes of each target that decode and lift. Linux only.
 
 ## What is proved
 

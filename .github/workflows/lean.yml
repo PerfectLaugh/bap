@@ -19,3 +19,17 @@ jobs:
       - run: lake exe bap-tests
       - run: lake exe bap check BapTests/Fixtures/basic.bil
       - run: lake exe bap eval BapTests/Fixtures/basic.bil
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: choco install ninja -y
+      - uses: leanprover/lean-action@v1
+        with:
+          build: 'false'
+          test: 'false'
+      - run: python native/build-static.py
+      - run: lake exe bap-tests
+      - run: lake exe bap check BapTests/Fixtures/basic.bil
+      - run: lake exe bap eval BapTests/Fixtures/basic.bil
