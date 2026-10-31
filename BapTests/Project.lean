@@ -742,6 +742,9 @@ def run : IO Unit := do
   let projectPlan := Analysis.Slice.prepareProject xrefProject
   assertEqual "a planned slice has the same sites" memorySlice.sites (projectPlan.slice 0x1000 [.mem 0x3000 8]).sites
   assertEqual "a planned slice has the same live locations" memorySlice.live (projectPlan.slice 0x1000 [.mem 0x3000 8]).live
+  assertEqual "slices in tasks come in the order asked"
+    [memorySlice.sites, (projectPlan.slice 0x1000 []).sites]
+    ((projectPlan.sliceAll [(0x1000, [.mem 0x3000 8]), (0x1000, [])]).map (·.sites))
   assertEqual "a planned dynamic slice has the same sites" [0x1008]
     (Analysis.DynamicSlice.backwardPlanned projectPlan 0x1000 [0x1008] [] [.mem 0x3000 8]).sites
   let partialDynamic := Analysis.DynamicSlice.backward xrefProject 0x1000 [0x1008] [.mem 0x3000 8]

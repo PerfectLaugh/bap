@@ -1240,6 +1240,15 @@ flow of an instruction gives counts even if the disassembly left it out. -/
 def ProjectPlan.slice (plan : ProjectPlan) (entry : Nat) (criteria : List Location) : Result :=
   (plan.prepared entry).slice (some entry) criteria
 
+/-- Many slices, each in its own task, in the order asked. -/
+def ProjectPlan.sliceAll (plan : ProjectPlan) (queries : List (Nat × List Location)) : List Result :=
+  (queries.map fun query => Task.spawn fun _ => plan.slice query.1 query.2).map Task.get
+
+/-- The tasks change nothing: these are the slices one at a time. -/
+theorem ProjectPlan.sliceAll_eq (plan : ProjectPlan) (queries : List (Nat × List Location)) :
+    plan.sliceAll queries = queries.map fun query => plan.slice query.1 query.2 := by
+  simp [ProjectPlan.sliceAll, Task.spawn]
+
 /-- `ProjectPlan.slice` for one slice. -/
 def backwardProject (project : Project.Project) (entry : Nat) (criteria : List Location) : Result :=
   (prepareProject project).slice entry criteria
