@@ -1,4 +1,4 @@
-import Bap.Target.LLVMLift
+import Bap.Target.MIPS
 
 namespace Bap.Target.MIPS32
 
@@ -12,12 +12,8 @@ private def decodeWith (globals : Primus.Semantics.Environment) (base : Nat)
 def decodeAt (base address : Nat) (data : ByteArray) : IO (Except String Disasm.Insn) := do
   decodeWith (← LLVMLift.mips32Environment) base address data
 
-def disassembler (base : Nat := 0) : IO Disasm.Disassembler := do
-  let globals ← LLVMLift.mips32Environment
-  pure {
-    name := "mips-llvm-primus"
-    decode := decodeWith globals base
-    hasDelaySlot := LLVMLift.mipsHasDelaySlot
-    annulsSlot := LLVMLift.mipsAnnulsSlot }
+/-- The decoder of big-endian MIPS32. -/
+def disassembler (base : Nat := 0) : IO Disasm.Disassembler :=
+  MIPS.disassembler base { bits := 32 }
 
 end Bap.Target.MIPS32

@@ -79,8 +79,8 @@ def run : IO Unit := do
   let factState ← provideOrFail address 42 {}
   let factState ← provideOrFail bits wide factState
   let factProject : Project.Project := { knowledge := factState }
-  Project.save factProject "native/build/project-knowledge.sexp" persistent
-  let restoredProject ← Project.loadSaved "native/build/project-knowledge.sexp" persistent
+  Project.save factProject "native/build/project-knowledge.bin" persistent
+  let restoredProject ← Project.loadSaved "native/build/project-knowledge.bin" persistent
   match lookupFact address object restoredProject.knowledge.facts with
   | .ok value => assertEqual "project Knowledge natural round trip" (some 42) value
   | .error error => throw <| IO.userError s!"project Knowledge restore failed: {repr error}"
@@ -91,14 +91,14 @@ def run : IO Unit := do
   assertEqual "project Knowledge version restored" factState.version restoredProject.knowledge.version
   let unregisteredProject : Project.Project := { knowledge := state }
   let unregisteredFailed ← try
-    Project.save unregisteredProject "native/build/project-unregistered.sexp" persistent
+    Project.save unregisteredProject "native/build/project-unregistered.bin" persistent
     pure false
   catch _ => pure true
   assertTrue "project rejects unregistered Knowledge slots" unregisteredFailed
   let opinionState := suggest ⟨"test", 1⟩ address object 42 {}
   let opinionProject : Project.Project := { knowledge := opinionState }
-  Project.save opinionProject "native/build/project-opinions.sexp" persistent
-  let restoredOpinions ← Project.loadSaved "native/build/project-opinions.sexp" persistent
+  Project.save opinionProject "native/build/project-opinions.bin" persistent
+  let restoredOpinions ← Project.loadSaved "native/build/project-opinions.bin" persistent
   match restoredOpinions.knowledge.opinions with
   | [opinion] =>
     assertEqual "project opinion agent round trip" "test" opinion.agent.name
@@ -109,7 +109,7 @@ def run : IO Unit := do
   | .error error => throw <| IO.userError s!"project opinion resolution failed: {repr error}"
   let unregisteredOpinion := suggest ⟨"test", 1⟩ named object "bad" opinionState
   let unregisteredOpinionFailed ← try
-    Project.save { knowledge := unregisteredOpinion } "native/build/project-opinion-unregistered.sexp" persistent
+    Project.save { knowledge := unregisteredOpinion } "native/build/project-opinion-unregistered.bin" persistent
     pure false
   catch _ => pure true
   assertTrue "project rejects unregistered opinion slots" unregisteredOpinionFailed

@@ -105,7 +105,7 @@ private def parseSymbol (data : ByteArray) (header : Header) (sections : List Se
   let address := match sectionOfNumber sections sectionIndex with
     | some sec => sec.addr + value
     | none => value
-  .ok ⟨name, address, 0, sectionIndex != 0 && symbolType &&& 0x30 = 0x20, storageClass = 103⟩
+  .ok ⟨name, address, 0, sectionIndex != 0 && symbolType &&& 0x30 = 0x20, storageClass = 103, false⟩
 
 private def parseSymbols (data : ByteArray) (header : Header) (sections : List Section) :
     Nat → Nat → List (Nat × Symbol) → Except String (List (Nat × Symbol))

@@ -80,7 +80,7 @@ private def semanticsRegressions : IO Unit := do
     assertTrue "the assignment and the read use the let variable" (slot == assigned && assigned == read)
   | code => throw <| IO.userError s!"let assignment changed: {repr code}"
   match (← semanticsForms 64 "(let ((x 1)) (if (is-zero R) (set x 2) (set x 3)) (set R x))").code with
-  | [.move slot _, .ifElse _ [.move yes _] [.move no _], .move _ (.var read)] =>
+  | [.move slot _, .ifElse _ (.move yes _ :: _) (.move no _ :: _), .move _ (.var read)] =>
     assertTrue "both branches assign the let variable" (slot == yes && yes == no && no == read)
   | code => throw <| IO.userError s!"conditional let assignment changed: {repr code}"
   match (← semanticsForms 64 "(defmacro put (v e) (set v e)) (let ((x 1)) (put x 2) (set R x))").code with
@@ -369,7 +369,64 @@ private def protectRegressions : IO Unit := do
   assertEqual "a range before the region changes nothing" (some rw) ((memory.protect 0 0x1000 ro).protection 0x1000)
   assertEqual "a covering range protects it all" (some ro) ((memory.protect 0 0x2000 ro).protection 0x1003)
 
+/-- A conditional whose branches make code has the value of the branch that runs. -/
+private def conditionalValues : IO Unit := do
+  let source := "(defun f (x) (set R x) (+ x 1)) (set S (if (= R 1) (f 1) (f 2)))"
+  let forms ← match Sexp.parseMany source with
+    | .ok forms => pure forms
+    | .error error => throw <| IO.userError error
+  let globals := [("R", Primus.Semantics.register "R" 64 64), ("S", Primus.Semantics.register "S" 64 64)]
+  let program ← match Primus.Semantics.evalForms {} globals forms with
+    | .ok state => pure state.code
+    | .error error => throw <| IO.userError error
+  let finalS (r : Nat) : IO (Option Nat) := do
+    let state ← runProgram program { env := [(⟨"R", .imm 64, 0, false⟩, .bits (BitVec.ofNat 64 r))] }
+    match Bil.evalExp state.env (.var ⟨"S", .imm 64, 0, false⟩) with
+    | .ok (.bits value) => pure (some value.toNat)
+    | _ => pure none
+  assertEqual "the value of the branch with code that runs" (some 2) (← finalS 1)
+  assertEqual "and of the other" (some 3) (← finalS 0)
+  let compiled ← match Sexp.parseMany "(defun f (x) (set R x) (+ x 1)) (defun g () (set S (if (= R 1) (f 1) (f 2))))" with
+    | .ok forms =>
+      match Primus.Semantics.evalForms {} globals forms with
+      | .ok state => Primus.Semantics.lift state.globals {} "g" []
+      | .error error => throw <| IO.userError error
+    | .error error => throw <| IO.userError error
+  assertEqual "compiled, it makes the same code" (toString (Bil.Wire.printProgram program)) (toString (Bil.Wire.printProgram compiled))
+
+/-- Instructions of a thunked environment lift as they do written out, which `thunked_opcode_agrees` proves. -/
+private def thunkedRegressions : IO Unit := do
+  let forms ← match Sexp.parseMany "(defmacro twice (x) (+ x x)) (defun helper (x) (twice x)) (defun insn (r x) (set$ r (helper x)))" with
+    | .ok forms => pure forms
+    | .error error => throw <| IO.userError error
+  let state ← match Primus.Semantics.evalForms {} [("R", Primus.Semantics.register "R" 64 64)] forms with
+    | .ok state => pure state
+    | .error error => throw <| IO.userError error
+  let (lazy, eager) := state.globals.partition fun binding => binding.1 == "insn"
+  let lazy := lazy.filterMap fun binding =>
+    match binding.2 with
+    | .callable callable => some ((binding.1, callable), 7)
+    | _ => none
+  let environment := Primus.Semantics.Environment.thunked eager lazy
+  let operands : List Primus.Semantics.Value := [Primus.Semantics.register "R" 64 64, .bil 64 (.int 21#64)]
+  let thunked ← Primus.Semantics.liftMC environment {} 7 operands
+  let byName ← Primus.Semantics.liftWith environment {} "insn" operands
+  let written ← Primus.Semantics.liftWith { environment with instructions := {} } {} "insn" operands
+  assertEqual "a thunk lifts as the instruction written" (repr written).pretty (repr thunked).pretty
+  assertEqual "by name as well" (repr written).pretty (repr byName).pretty
+  let x86 ← Target.LLVMLift.x86Environment
+  let registers ← ["RAX", "RAX", "RBX"].mapM fun name =>
+    match Assoc.get name x86.globals with
+    | some register => pure register
+    | none => throw <| IO.userError s!"no register {name}"
+  for opcode in ["ADD64rr", "SUB64rr", "XOR64rr"] do
+    let forced ← Primus.Semantics.liftWith x86 {} opcode registers
+    let written ← Primus.Semantics.liftWith { x86 with instructions := {} } {} opcode registers
+    assertEqual s!"{opcode} lifts as written" (repr written).pretty (repr forced).pretty
+
 def run : IO Unit := do
+  conditionalValues
+  thunkedRegressions
   -- A binding that is no function shadows a function of the same name further on, in the index as in the definitions.
   let shadowed := Primus.Semantics.Environment.ofGlobals
     [("f", .int 1#64), ("f", .callable (.primitive "+")), ("g", .callable (.primitive "-"))]

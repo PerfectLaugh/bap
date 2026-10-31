@@ -154,7 +154,8 @@ private def parseSymbol (data : ByteArray) (header : Header) (strings : SectionH
     .ok none
   else
     let name ← IO.Reader.cstring data (strings.offset + nameOffset)
-    .ok (some ⟨name, codeAddress header.machine (info &&& 0xf) value, size, info &&& 0xf = 2, false⟩)
+    .ok (some ⟨name, codeAddress header.machine (info &&& 0xf) value, size, info &&& 0xf = 2, false,
+      header.machine = 40 && info &&& 0xf = 2 && value % 2 = 1⟩)
 
 private def parseSymbols (data : ByteArray) (header : Header) (sections : List SectionHeader) :
     Except String (List Symbol) := do
@@ -340,29 +341,6 @@ private def decodeRelocatable (data : ByteArray) (header : Header) (sections : L
     memory := regions.foldl (fun memory region => MemoryMap.add region () memory) {}
   }
 
-def decode (data : ByteArray) : Except String Image := do
-  let header ← parseHeader data
-  if header.fileType == 1 then
-    let sections ← parseSections data header
-    decodeRelocatable data header sections
-  else
-  let (segments, regions) ← parseSegments data header
-  let sectionHeaders ← parseSections data header
-  let sections ← resolveSectionNames data header sectionHeaders
-  let symbols ← parseSymbols data header sectionHeaders
-  let memory := regions.foldl (fun memory region => MemoryMap.add region () memory) {}
-  .ok {
-    arch := architecture header.machine
-    addrWidth := if header.is64 then 64 else 32
-    endian := header.endian
-    entryPoint := header.entryPoint
-    data := data
-    sections := sections
-    segments := segments
-    symbols := symbols
-    memory := memory
-  }
-
 structure DynamicSymbol where
   name : String
   value : Nat
@@ -453,6 +431,83 @@ def dynamicTags (data : ByteArray) (headers : List ProgramHeader) (is64 : Bool) 
 
 private def tagValue (tags : List (Nat × Nat)) (tag : Nat) : Option Nat :=
   (tags.find? fun entry => entry.1 = tag).map Prod.snd
+
+/-- The size of the table that `DT_HASH` or `DT_GNU_HASH` says the symbols of a file have. The first has it in a field. The
+second has the buckets of the highest symbol, whose chain ends at the last one, with bit 0 set. -/
+private def dynamicSymbolCount (data : ByteArray) (headers : List ProgramHeader) (tags : List (Nat × Nat)) (is64 : Bool)
+    (endian : Endian) : Except String Nat := do
+  let read (address : Nat) : Except String Nat :=
+    match offsetOf headers data.size address 4 with
+    | some offset => IO.Reader.u32 data endian offset
+    | none => .error "ELF hash table is outside the file"
+  match tagValue tags 4, tagValue tags 0x6ffffef5 with
+  | some hash, _ => read (hash + 4)
+  | none, some hash =>
+    let buckets ← read hash
+    let first ← read (hash + 4)
+    let bloom ← read (hash + 8)
+    let wordSize := if is64 then 8 else 4
+    let bucketsAt := hash + 16 + bloom * wordSize
+    let highest ← (List.range buckets).foldlM (init := 0) fun highest index => do
+      pure (max highest (← read (bucketsAt + index * 4)))
+    if highest < first then .ok first
+    else
+      let chainAt := bucketsAt + buckets * 4
+      let rec walk : Nat → Nat → Except String Nat
+        | 0, symbol => .ok symbol
+        | fuel + 1, symbol => do
+          if (← read (chainAt + (symbol - first) * 4)) % 2 = 1 then .ok (symbol + 1)
+          else walk fuel (symbol + 1)
+      walk (data.size / 4) highest
+  | none, none => .ok 0
+
+/-- The symbols that `PT_DYNAMIC` says a file has, for a file without section headers. -/
+private def dynamicSymbols (data : ByteArray) (header : Header) : Except String (List Symbol) := do
+  let headers ← programHeaders data
+  let tags ← dynamicTags data headers header.is64 header.endian
+  match tagValue tags 6, tagValue tags 5 with
+  | some table, some strings =>
+    let entrySize := (tagValue tags 11).getD (if header.is64 then 24 else 16)
+    match offsetOf headers data.size table 0, offsetOf headers data.size strings 0 with
+    | some tableOffset, some stringsOffset =>
+      let count ← dynamicSymbolCount data headers tags header.is64 header.endian
+      let strings : SectionHeader := ⟨0, 3, 0, strings, stringsOffset, 0, 0, 0, 0, 0⟩
+      let parsed ← (List.range count).mapM fun index =>
+        parseSymbol data header strings (tableOffset + index * entrySize)
+      .ok (parsed.filterMap id)
+    | _, _ => .ok []
+  | _, _ => .ok []
+
+/-- The symbols of a file that isn't relocatable: those of its symbol tables, or those of its dynamic linking if it has no
+section headers. What can't be read of the latter, which needn't be there, is not an error. -/
+private def loadedSymbols (data : ByteArray) (header : Header) (sections : List SectionHeader) :
+    Except String (List Symbol) :=
+  if sections.isEmpty then .ok ((dynamicSymbols data header).toOption.getD [])
+  else parseSymbols data header sections
+
+def decode (data : ByteArray) : Except String Image := do
+  let header ← parseHeader data
+  if header.fileType == 1 then
+    let sections ← parseSections data header
+    decodeRelocatable data header sections
+  else
+  let (segments, regions) ← parseSegments data header
+  let sectionHeaders ← parseSections data header
+  let sections ← resolveSectionNames data header sectionHeaders
+  let symbols ← loadedSymbols data header sectionHeaders
+  let memory := regions.foldl (fun memory region => MemoryMap.add region () memory) {}
+  .ok {
+    arch := architecture header.machine
+    addrWidth := if header.is64 then 64 else 32
+    endian := header.endian
+    entryPoint := header.entryPoint
+    data := data
+    sections := sections
+    segments := segments
+    symbols := symbols
+    memory := memory
+  }
+
 
 private def dynamicString (image : Image) (headers : List ProgramHeader) (strings size offset : Nat) : String :=
   if offset ≥ size then ""
@@ -847,6 +902,30 @@ def imports (image : Image) (spec : RelocationSpec) (endp : Nat) : Except String
 
 def importBytes (image : Image) (count : Nat) : Nat :=
   alignUp (count * (image.addrWidth / 8)) 0x1000
+
+/-- The tags of the dynamic linking of an image, none if it has none or they can't be read. -/
+def dynamicTagsOf (image : Image) : List (Nat × Nat) :=
+  ((do
+    let headers ← programHeaders image.data
+    dynamicTags image.data headers (image.addrWidth = 64) image.endian : Except String _).toOption).getD []
+
+/-- The value of a tag of the dynamic linking of an image. -/
+def tagOf (image : Image) (tag : Nat) : Option Nat := tagValue (dynamicTagsOf image) tag
+
+/-- The first program header of a type. -/
+def programHeaderOf (image : Image) (kind : Nat) : Option ProgramHeader :=
+  (((programHeaders image.data).toOption).getD []).find? (·.kind = kind)
+
+/-- `e_flags` of the ELF header of an image, at their offset of its class in its byte order, and 0 if it has none. -/
+def machineFlags (image : Image) : Nat :=
+  if (IO.Reader.read image.data .big 0 4).toOption == some 0x7f454c46 then
+    (IO.Reader.u32 image.data image.endian (if image.addrWidth = 64 then 48 else 36)).toOption.getD 0
+  else 0
+
+/-- Whether MIPS `e_flags` have `EF_MIPS_ARCH_32R6` or `EF_MIPS_ARCH_64R6` in their top four bits. -/
+def mipsRelease6 (flags : Nat) : Bool :=
+  let arch := flags / 0x10000000 % 16
+  arch == 9 || arch == 10
 
 def load (path : String) : IO Image := do
   let data ← IO.FS.readBinFile path

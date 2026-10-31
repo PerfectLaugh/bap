@@ -603,7 +603,7 @@ private def directEdges (block : Block) (chainFallthrough : Bool := false) : Lis
   match blockExit block with
   | .direct target => [target]
   | .branch _ yes no falls => if falls && !chainFallthrough then [yes] else [yes, no]
-  | .fall => if chainFallthrough && !block.program.isEmpty then [block.next] else []
+  | .fall => if chainFallthrough then [block.next] else []
   | .other => []
 
 private def reachable (edges : List (Nat × Nat)) (source target : Nat) : Bool :=

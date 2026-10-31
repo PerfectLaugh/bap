@@ -88,7 +88,7 @@
   "strd rt1, rt2, [rn, off]"
   (when (condition-holds pre)
     (store-word (+ rn imm) rt1)
-    (store-word (+ rn imm (sizeof word-width)) rt2)))
+    (store-word (+ rn imm 4) rt2)))
 
 (defun t2STRs (rt rn rm imm cnd _)
   "str.w rt [rn, rm, lsl imm]"

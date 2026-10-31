@@ -51,6 +51,9 @@ structure Disassembler where
   hasDelaySlot : Insn → Bool := fun _ => false
   /-- Of a delayed conditional branch: the slot only runs if the branch is taken, as in a MIPS `BEQL`. -/
   annulsSlot : Insn → Bool := fun _ => false
+  /-- The size of what decodes at an address, without lifting it, if it does. A linear sweep goes on past an instruction
+  that it can't lift by it. -/
+  sizeAt : Nat → ByteArray → IO (Option Nat) := fun _ _ => pure none
 
 structure Disasm where
   entry : Nat

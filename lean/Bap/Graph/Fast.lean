@@ -15,10 +15,12 @@ local macro "closureStep" : term =>
   return Lean.mkIdent (.num (`_private ++ `Bap.Graph.Basic) 0 ++ `Bap.Graph.closureStep)
 local macro "frontierWalk" : term =>
   return Lean.mkIdent (.num (`_private ++ `Bap.Graph.Basic) 0 ++ `Bap.Graph.frontierWalk)
-local macro "unfold_closureStep" : tactic =>
-  `(tactic| simp only [$(Lean.mkIdent (.num (`_private ++ `Bap.Graph.Basic) 0 ++ `Bap.Graph.closureStep)):ident])
-local macro "unfold_reachLoop_closure" : tactic =>
-  `(tactic| simp only [$(Lean.mkIdent `reachLoop):ident, $(Lean.mkIdent (.num (`_private ++ `Bap.Graph.Basic) 0 ++ `Bap.Graph.closure)):ident])
+local macro "unfold_closureStep" loc:(Lean.Parser.Tactic.location)? : tactic =>
+  `(tactic| simp only [$(Lean.mkIdent (.num (`_private ++ `Bap.Graph.Basic) 0 ++ `Bap.Graph.closureStep)):ident] $[$loc]?)
+local macro "unfold_closure" : tactic =>
+  `(tactic| simp only [$(Lean.mkIdent (.num (`_private ++ `Bap.Graph.Basic) 0 ++ `Bap.Graph.closure)):ident])
+local macro "unfold_reachRounds_closure" : tactic =>
+  `(tactic| simp only [$(Lean.mkIdent `reachRounds):ident, $(Lean.mkIdent (.num (`_private ++ `Bap.Graph.Basic) 0 ++ `Bap.Graph.closure)):ident])
 local macro "unfold_walk_frontierWalk" : tactic =>
   `(tactic| simp only [$(Lean.mkIdent `walk):ident, $(Lean.mkIdent (.num (`_private ++ `Bap.Graph.Basic) 0 ++ `Bap.Graph.frontierWalk)):ident, $(Lean.mkIdent `assocTable_get):ident])
 
@@ -113,27 +115,23 @@ theorem successors_eq (graph : Graph Nat) (node : Nat) :
 
 /-! ### Reachability -/
 
-/-- A step of `closure`: `hits` holds the successors of what is `seen`, and `waiting` what isn't seen yet. -/
-private def reachLoop (graph : Graph Nat) (table : HashMap Nat (List Nat)) :
-    Nat → List Nat → List Nat → HashSet Nat → List Nat
-  | 0, seen, _, _ => seen
-  | fuel + 1, seen, waiting, hits =>
-    match waiting.filter hits.contains with
-    | [] => seen
-    | discovered =>
-      let hits' := discovered.foldl (fun hits node => hits.insertMany (table.getD node [])) hits
-      reachLoop graph table fuel (seen ++ discovered) (waiting.filter fun node => !hits.contains node) hits'
+/-- Where each node is in the list of them, the first first. -/
+def positionTable (nodes : List Nat) : HashMap Nat (List Nat) := groupBy nodes.zipIdx
 
-private theorem mem_insertAll (table : HashMap Nat (List Nat)) (found : List Nat) (hits : HashSet Nat) (x : Nat) :
-    (found.foldl (fun hits node => hits.insertMany (table.getD node [])) hits).contains x = true ↔
-      hits.contains x = true ∨ ∃ node ∈ found, x ∈ table.getD node [] := by
-  induction found generalizing hits with
-  | nil => simp
-  | cons head tail ih =>
-    simp only [List.foldl_cons]
-    rw [ih, HashSet.contains_insertMany_list]
-    simp only [Bool.or_eq_true, List.contains_eq_mem, decide_eq_true_eq, List.mem_cons, exists_eq_or_imp]
-    grind
+/-- A round of `closure`: what `frontier` leads to, which isn't seen, in the order of the nodes. A round looks at no more than that,
+so that a long chain of blocks takes time for its length and not for its square. -/
+private def reachRound (nodes : Array Nat) (positions table : HashMap Nat (List Nat)) (seen : HashSet Nat) (frontier : List Nat) : List Nat :=
+  let hit := dedup ((frontier.flatMap fun node => table.getD node []).filter fun node => !seen.contains node)
+  (hit.flatMap fun node => positions.getD node []).mergeSort.map fun position => nodes[position]!
+
+private def reachRounds (nodes : Array Nat) (positions table : HashMap Nat (List Nat)) :
+    Nat → Array Nat → HashSet Nat → List Nat → List Nat
+  | 0, done, _, _ => done.toList
+  | fuel + 1, done, seen, frontier =>
+    match reachRound nodes positions table seen frontier with
+    | [] => done.toList
+    | discovered =>
+      reachRounds nodes positions table fuel (discovered.foldl Array.push done) (seen.insertMany discovered) discovered
 
 private theorem mem_successorTable (graph : Graph Nat) (a b : Nat) :
     b ∈ (successorTable graph).getD a [] ↔ (a, b) ∈ graph.edges := by
@@ -145,69 +143,158 @@ private theorem mem_successorTable (graph : Graph Nat) (a b : Nat) :
   · intro h
     exact ⟨(a, b), ⟨h, rfl⟩, rfl⟩
 
-private theorem reachLoop_eq (graph : Graph Nat) (fuel : Nat) (seen waiting : List Nat) (hits : HashSet Nat)
-    (hw : waiting = graph.nodes.filter fun node => node ∉ seen)
-    (hh : ∀ x, hits.contains x = true ↔ ∃ y ∈ seen, (y, x) ∈ graph.edges) :
-    reachLoop graph (successorTable graph) fuel seen waiting hits = closure graph fuel seen := by
-  induction fuel generalizing seen waiting hits with
+private theorem mem_positions (nodes : List Nat) (node position : Nat) :
+    position ∈ (positionTable nodes).getD node [] ↔ nodes[position]? = some node := by
+  rw [positionTable, groupBy_getD]
+  simp only [List.mem_map, List.mem_filter, decide_eq_true_eq]
+  constructor
+  · rintro ⟨⟨u, v⟩, ⟨he, rfl⟩, rfl⟩
+    exact List.mk_mem_zipIdx_iff_getElem?.1 he
+  · intro h
+    exact ⟨(node, position), ⟨List.mk_mem_zipIdx_iff_getElem?.2 h, rfl⟩, rfl⟩
+
+private theorem positions_nodup (nodes : List Nat) (node : Nat) : ((positionTable nodes).getD node []).Nodup := by
+  rw [positionTable, groupBy_getD]
+  have hz : (nodes.zipIdx.map Prod.snd).Nodup := by
+    rw [List.zipIdx_map_snd]
+    exact List.nodup_range'
+  exact (List.Sublist.map _ List.filter_sublist).nodup hz
+
+private theorem flatMap_positions_nodup (nodes : List Nat) {hit : List Nat} (h : hit.Nodup) :
+    (hit.flatMap fun node => (positionTable nodes).getD node []).Nodup := by
+  induction hit with
+  | nil => simp
+  | cons head rest ih =>
+    obtain ⟨hh, hr⟩ := List.nodup_cons.1 h
+    simp only [List.flatMap_cons]
+    refine List.nodup_append.2 ⟨positions_nodup nodes head, ih hr, ?_⟩
+    intro a ha b hb hab
+    subst hab
+    obtain ⟨other, hm, hb'⟩ := List.mem_flatMap.1 hb
+    have h1 := (mem_positions nodes head a).1 ha
+    have h2 := (mem_positions nodes other a).1 hb'
+    rw [h1] at h2
+    cases h2
+    exact hh hm
+
+/-- What a round finds is that part of the nodes, in their order. -/
+private theorem round_nodes (nodes : List Nat) {hit : List Nat} (h : hit.Nodup) :
+    ((hit.flatMap fun node => (positionTable nodes).getD node []).mergeSort.map fun position => nodes.toArray[position]!) =
+      nodes.filter fun node => node ∈ hit := by
+  have hrange : nodes = (List.range nodes.length).map fun position => nodes.toArray[position]! := by
+    apply List.ext_getElem (by simp)
+    intro i h1 h2
+    simp at h2
+    simp [h2]
+  have hsort : (hit.flatMap fun node => (positionTable nodes).getD node []).mergeSort =
+      (List.range nodes.length).filter fun position => nodes.toArray[position]! ∈ hit := by
+    apply List.Perm.eq_of_pairwise (le := fun a b => decide (a ≤ b) = true)
+    · intro a b _ _ h1 h2
+      simp only [decide_eq_true_eq] at h1 h2
+      omega
+    · exact List.pairwise_mergeSort (fun a b c h1 h2 => by simp only [decide_eq_true_eq] at *; omega)
+        (fun a b => by simp only [Bool.or_eq_true, decide_eq_true_eq]; omega) _
+    · refine ((List.pairwise_lt_range (n := nodes.length)).filter _).imp ?_
+      intro a b hab
+      simp only [decide_eq_true_eq]
+      omega
+    · refine (List.mergeSort_perm _ _).trans ?_
+      refine (List.perm_ext_iff_of_nodup (flatMap_positions_nodup nodes h) (List.nodup_range.filter _)).2 ?_
+      intro position
+      simp only [List.mem_flatMap, mem_positions, List.mem_filter, List.mem_range, decide_eq_true_eq]
+      constructor
+      · rintro ⟨node, hn, he⟩
+        obtain ⟨hl, hv⟩ := List.getElem?_eq_some_iff.1 he
+        refine ⟨hl, ?_⟩
+        simpa [hl, hv] using hn
+      · rintro ⟨hl, hm⟩
+        refine ⟨_, hm, ?_⟩
+        simp [hl]
+  have hf := List.filter_map (f := fun position => nodes.toArray[position]!) (p := fun node => decide (node ∈ hit)) (l := List.range nodes.length)
+  rw [← hrange] at hf
+  rw [hsort, hf]
+  rfl
+
+private theorem reachRounds_eq (graph : Graph Nat) (fuel : Nat) (done : Array Nat) (seen : HashSet Nat) (frontier : List Nat)
+    (hseen : ∀ x, seen.contains x = true ↔ x ∈ done.toList) (hfrontier : ∀ x ∈ frontier, x ∈ done.toList)
+    (hclosed : ∀ y ∈ done.toList, y ∉ frontier → ∀ x, (y, x) ∈ graph.edges → x ∈ graph.nodes → x ∈ done.toList) :
+    reachRounds graph.nodes.toArray (positionTable graph.nodes) (successorTable graph) fuel done seen frontier =
+      closure graph fuel done.toList := by
+  induction fuel generalizing done seen frontier with
   | zero => rfl
   | succ fuel ih =>
-    have hstep : closureStep graph seen = seen ++ waiting.filter hits.contains := by
-      unfold_closureStep
-      congr 1
-      rw [hw, List.filter_filter]
+    have hround : reachRound graph.nodes.toArray (positionTable graph.nodes) (successorTable graph) seen frontier =
+        graph.nodes.filter fun node => node ∉ done.toList ∧ (predecessors graph node).any fun pred => pred ∈ done.toList := by
+      simp only [reachRound, dedup_eq]
+      rw [round_nodes graph.nodes (Bap.Proofs.Graph.nodup_eraseDups _)]
       apply List.filter_congr
-      intro x _
-      have := hh x
+      intro x hx
       rw [Bool.eq_iff_iff]
-      simp only [decide_eq_true_eq, Bool.and_eq_true, List.any_eq_true, Bap.Proofs.Graph.mem_predecessors, and_comm (b := x ∉ seen)]
+      simp only [List.mem_eraseDups, List.mem_filter, List.mem_flatMap, mem_successorTable, Bool.not_eq_true', decide_eq_true_eq,
+        List.any_eq_true, Bap.Proofs.Graph.mem_predecessors]
+      have hs : seen.contains x = false ↔ x ∉ done.toList := by
+        rw [← hseen x]
+        simp
+      rw [hs]
       constructor
-      · rintro ⟨hx, y, he, hy⟩
-        exact ⟨hx, this.2 ⟨y, by simpa using hy, he⟩⟩
-      · rintro ⟨hx, hc⟩
-        obtain ⟨y, hy, he⟩ := this.1 hc
-        exact ⟨hx, y, he, by simpa using hy⟩
-    unfold_reachLoop_closure
+      · rintro ⟨⟨y, hy, he⟩, hn⟩
+        exact ⟨hn, y, he, hfrontier y hy⟩
+      · rintro ⟨hn, y, he, hy⟩
+        refine ⟨⟨y, ?_, he⟩, hn⟩
+        by_cases hf : y ∈ frontier
+        · exact hf
+        · exact (hn (hclosed y hy hf x he hx)).elim
+    have hstep : closureStep graph done.toList = done.toList ++ reachRound graph.nodes.toArray (positionTable graph.nodes) (successorTable graph) seen frontier := by
+      rw [hround]
+      unfold_closureStep
+    unfold_reachRounds_closure
     rw [hstep]
     split
     · rename_i hnil
       simp [hnil]
     · rename_i discovered hne
-      have hne' : ¬ (seen ++ waiting.filter hits.contains = seen) := by
+      have hne' : ¬ (done.toList ++ reachRound graph.nodes.toArray (positionTable graph.nodes) (successorTable graph) seen frontier = done.toList) := by
         intro he
         apply hne
         simpa using he
       simp only [hne', ite_false]
+      have hfold : ∀ (found : List Nat) (acc : Array Nat), (found.foldl Array.push acc).toList = acc.toList ++ found := by
+        intro found
+        induction found with
+        | nil => simp
+        | cons head tail _ => intro acc; simp [*]
+      rw [← hfold _ done]
       apply ih
-      · rw [hw, List.filter_filter]
-        apply List.filter_congr
-        intro x hx
-        by_cases hs : x ∈ seen
-        · simp [hs]
-        · have hmem : x ∈ waiting := by
-            rw [hw]
-            exact List.mem_filter.2 ⟨hx, by simpa using hs⟩
-          have hd : x ∈ waiting.filter hits.contains ↔ hits.contains x = true := by simp [List.mem_filter, hmem]
-          cases hc : hits.contains x <;> simp [hs, hc, hx]
       · intro x
-        rw [mem_insertAll, hh x]
-        simp only [mem_successorTable, List.mem_append]
-        constructor
-        · rintro (⟨y, hy, he⟩ | ⟨y, hy, he⟩)
-          · exact ⟨y, .inl hy, he⟩
-          · exact ⟨y, .inr hy, he⟩
-        · rintro ⟨y, hy | hy, he⟩
-          · exact .inl ⟨y, hy, he⟩
-          · exact .inr ⟨y, hy, he⟩
+        rw [HashSet.contains_insertMany_list, hfold, Bool.or_eq_true, hseen x]
+        simp
+      · intro x hx
+        rw [hfold]
+        exact List.mem_append_right _ hx
+      · intro y hy hn x he hx
+        rw [hfold] at hy ⊢
+        rcases List.mem_append.1 hy with hold | hnew
+        · by_cases hf : y ∈ frontier
+          · by_cases hd : x ∈ done.toList
+            · exact List.mem_append_left _ hd
+            · apply List.mem_append_right
+              rw [hround]
+              simp only [List.mem_filter, decide_eq_true_eq, List.any_eq_true, Bap.Proofs.Graph.mem_predecessors]
+              exact ⟨hx, hd, y, he, hold⟩
+          · exact List.mem_append_left _ (hclosed y hold hf x he hx)
+        · exact (hn hnew).elim
+
+private theorem start_closed (graph : Graph Nat) (start : List Nat) :
+    ∀ y ∈ start.toArray.toList, y ∉ start → ∀ x, (y, x) ∈ graph.edges → x ∈ graph.nodes → x ∈ start.toArray.toList := by
+  intro y hy hn
+  exact (hn (by simpa using hy)).elim
 
 /-- `reachableFrom`. -/
 def reachableFrom (graph : Graph Nat) (seeds : List Nat) : List Nat :=
   let nodes : HashSet Nat := HashSet.ofList graph.nodes
   let start := dedup (seeds.filter nodes.contains)
-  let table := successorTable graph
-  let started : HashSet Nat := HashSet.ofList start
-  let hits := start.foldl (fun hits node => hits.insertMany (table.getD node [])) ({} : HashSet Nat)
-  reachLoop graph table (graph.nodes.length + 1) start (graph.nodes.filter fun node => !started.contains node) hits
+  reachRounds graph.nodes.toArray (positionTable graph.nodes) (successorTable graph) (graph.nodes.length + 1) start.toArray
+    (HashSet.ofList start) start
 
 theorem reachableFrom_eq (graph : Graph Nat) (seeds : List Nat) :
     reachableFrom graph seeds = Bap.Graph.reachableFrom graph seeds := by
@@ -219,13 +306,10 @@ theorem reachableFrom_eq (graph : Graph Nat) (seeds : List Nat) :
     simp [HashSet.contains_ofList]
   simp only [reachableFrom, Bap.Graph.reachableFrom]
   rw [hstart]
-  apply reachLoop_eq
-  · apply List.filter_congr
-    intro x _
-    simp [HashSet.contains_ofList]
-  · intro x
-    rw [mem_insertAll]
-    simp [mem_successorTable]
+  have := reachRounds_eq graph (graph.nodes.length + 1) (seeds.filter fun node => node ∈ graph.nodes).eraseDups.toArray
+    (HashSet.ofList (seeds.filter fun node => node ∈ graph.nodes).eraseDups) (seeds.filter fun node => node ∈ graph.nodes).eraseDups
+    (fun x => by simp [HashSet.contains_ofList]) (fun x hx => by simpa using hx) (start_closed graph _)
+  simpa using this
 
 /-- `reachable`. -/
 def reachable (graph : Graph Nat) (start : Nat) : List Nat := reachableFrom graph [start]
@@ -233,16 +317,93 @@ def reachable (graph : Graph Nat) (start : Nat) : List Nat := reachableFrom grap
 theorem reachable_eq (graph : Graph Nat) (start : Nat) : reachable graph start = Bap.Graph.reachable graph start :=
   reachableFrom_eq graph [start]
 
-/-- `reachable`, for many starts in a graph, with what doesn't change between them already in tables. -/
-def reachableWith (graph : Graph Nat) (table : HashMap Nat (List Nat)) (nodes : HashSet Nat) (start : Nat) : List Nat :=
-  let begin := dedup ([start].filter nodes.contains)
-  let started : HashSet Nat := HashSet.ofList begin
-  let hits := begin.foldl (fun hits node => hits.insertMany (table.getD node [])) ({} : HashSet Nat)
-  reachLoop graph table (graph.nodes.length + 1) begin (graph.nodes.filter fun node => !started.contains node) hits
+/-- `closure` from one node. -/
+def reachableFuel (graph : Graph Nat) (fuel start : Nat) : List Nat :=
+  reachRounds graph.nodes.toArray (positionTable graph.nodes) (successorTable graph) fuel #[start] (HashSet.ofList [start]) [start]
 
-theorem reachableWith_eq (graph : Graph Nat) (start : Nat) :
-    reachableWith graph (successorTable graph) (HashSet.ofList graph.nodes) start = Bap.Graph.reachable graph start :=
-  reachable_eq graph start
+private theorem reachableFuel_eq (graph : Graph Nat) (fuel start : Nat) : reachableFuel graph fuel start = closure graph fuel [start] := by
+  have := reachRounds_eq graph fuel #[start] (HashSet.ofList [start]) [start]
+    (fun x => by simpa using eq_comm) (fun x hx => by simpa using hx) (start_closed graph [start])
+  simpa [reachableFuel] using this
+
+/-- What it gets to is reached. -/
+theorem mem_reachableFuel {graph : Graph Nat} {fuel start x : Nat} (hs : start ∈ graph.nodes) (h : x ∈ reachableFuel graph fuel start) :
+    Bap.Proofs.Graph.Reaches graph [start] x := by
+  rw [reachableFuel_eq] at h
+  refine Bap.Proofs.Graph.closure_sound graph [start] fuel [start] ?_ x h
+  intro y hy
+  rw [List.mem_singleton] at hy
+  subst hy
+  exact .seed List.mem_cons_self hs
+
+private def iterate (step : List Nat → List Nat) : Nat → List Nat → List Nat
+  | 0, value => value
+  | count + 1, value => iterate step count (step value)
+
+private theorem closure_iterate (graph : Graph Nat) (fuel : Nat) (seen : List Nat) :
+    closure graph fuel seen = iterate (closureStep graph) fuel seen := by
+  have hfixed : ∀ (fuel : Nat) (seen : List Nat), closureStep graph seen = seen → iterate (closureStep graph) fuel seen = seen := by
+    intro fuel seen h
+    induction fuel with
+    | zero => rfl
+    | succ fuel ih =>
+      simp only [iterate, h, ih]
+  induction fuel generalizing seen with
+  | zero => rfl
+  | succ fuel ih =>
+    simp only [iterate]
+    unfold_closure
+    split
+    · next h =>
+      rw [h, hfixed fuel seen h]
+    · exact ih _
+
+/-- **Going over a part of a graph gives the part of what going over the whole gives**, in the same order, if what is reached and leads into the part
+is in the part. A component of the graph is such a part, so it takes time for its own size. -/
+theorem reachable_restrict (graph sub : Graph Nat) (inner : Nat → Bool) (start : Nat) (hstart : start ∈ graph.nodes) (hinner : inner start = true)
+    (hnodes : sub.nodes = graph.nodes.filter inner)
+    (hedges : ∀ u v, (u, v) ∈ sub.edges ↔ (u, v) ∈ graph.edges ∧ inner u = true ∧ inner v = true)
+    (hconvex : ∀ y x, Bap.Proofs.Graph.Reaches graph [start] y → (y, x) ∈ graph.edges → x ∈ graph.nodes → inner x = true → inner y = true) :
+    reachableFuel sub (graph.nodes.length + 1) start = (Bap.Graph.reachable graph start).filter inner := by
+  have hspec : Bap.Graph.reachable graph start = closure graph (graph.nodes.length + 1) [start] := by
+    simp [Bap.Graph.reachable, Bap.Graph.reachableFrom, hstart, List.eraseDups_cons]
+  rw [hspec, reachableFuel_eq, closure_iterate, closure_iterate]
+  have hreach : ∀ (fuel : Nat) (seen : List Nat), (∀ x ∈ seen, Bap.Proofs.Graph.Reaches graph [start] x) →
+      iterate (closureStep sub) fuel (seen.filter inner) = (iterate (closureStep graph) fuel seen).filter inner := by
+    intro fuel
+    induction fuel with
+    | zero => intro _ _; rfl
+    | succ fuel ih =>
+      intro seen hs
+      have hstep : closureStep sub (seen.filter inner) = (closureStep graph seen).filter inner := by
+        unfold_closureStep
+        rw [List.filter_append, hnodes, List.filter_filter, List.filter_filter]
+        congr 1
+        apply List.filter_congr
+        intro x hx
+        rw [Bool.eq_iff_iff]
+        simp only [Bool.and_eq_true, decide_eq_true_eq, List.mem_filter, List.any_eq_true, Bap.Proofs.Graph.mem_predecessors, not_and]
+        constructor
+        · rintro ⟨⟨hn, y, he, hy, hiy⟩, hix⟩
+          exact ⟨hix, fun hm => hn hm hix, y, ((hedges y x).1 he).1, hy⟩
+        · rintro ⟨hix, hn, y, he, hy⟩
+          have hiy := hconvex y x (hs y hy) he hx hix
+          exact ⟨⟨fun hm _ => hn hm, y, (hedges y x).2 ⟨he, hiy, hix⟩, hy, hiy⟩, hix⟩
+      simp only [iterate, hstep]
+      apply ih
+      intro x hx
+      unfold_closureStep at hx
+      rcases List.mem_append.1 hx with h | h
+      · exact hs x h
+      · simp only [List.mem_filter, decide_eq_true_eq, List.any_eq_true, Bap.Proofs.Graph.mem_predecessors] at h
+        obtain ⟨hn, -, y, he, hy⟩ := h
+        exact .step (hs y hy) he hn
+  have := hreach (graph.nodes.length + 1) [start] (by
+    intro x hx
+    rw [List.mem_singleton] at hx
+    subst hx
+    exact .seed List.mem_cons_self hstart)
+  simpa [hinner] using this
 
 /-! ### Dominators -/
 

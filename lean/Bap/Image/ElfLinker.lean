@@ -1533,12 +1533,13 @@ def outputSymbols (tables : Tables) (memory : ByteArray) : List Symbol :=
         | none => none
       if isFunction then
         match descriptor with
-        | some code => some ⟨sym.name, code, 0, true, false⟩
+        | some code => some ⟨sym.name, code, 0, true, false, false⟩
         | none =>
-          let addr := if input.machine == emArm then value - value % 2 else value
-          some ⟨sym.name, addr, sym.size, true, false⟩
+          let arm := input.machine == emArm
+          let addr := if arm then value - value % 2 else value
+          some ⟨sym.name, addr, sym.size, true, false, arm && value % 2 == 1⟩
       else
-        some ⟨sym.name, value, sym.size, false, false⟩
+        some ⟨sym.name, value, sym.size, false, false, false⟩
 
 /-- The segment of the thread-local sections: from the first one to the end of the last one, as aligned as the most
 aligned one. -/

@@ -1,3 +1,4 @@
+import Bap.Graph.Fast
 import BapTests.Support
 
 namespace Bap.Tests.Graph
@@ -20,7 +21,30 @@ private def diamond : Sub :=
     ]
   }
 
+/-- `Graph.reachableFrom` as it reads: rounds, in the order of the nodes. -/
+private partial def roundsBySpec (graph : Graph.Graph Nat) (seen : List Nat) : List Nat :=
+  let next := seen ++ graph.nodes.filter fun node =>
+    !seen.contains node && graph.edges.any fun edge => edge.2 == node && seen.contains edge.1
+  if next == seen then seen else roundsBySpec graph next
+
+private def reachableBySpec (graph : Graph.Graph Nat) (seeds : List Nat) : List Nat :=
+  roundsBySpec graph (seeds.filter graph.nodes.contains).eraseDups
+
+/-- A round of the fast search looks at what the last one found, and gives what a round over all the nodes gives. -/
+private def roundsFastPath : IO Unit := do
+  let graphs : List (Graph.Graph Nat) := [
+    {},
+    { nodes := [1, 2, 3], edges := [(1, 2), (2, 1), (3, 3), (9, 1), (1, 9)] },
+    { nodes := (List.range 40).reverse, edges := (List.range 40).flatMap fun i => [(i, (i * 7 + 3) % 40), (i, (i * i + 1) % 40)] },
+    { nodes := [5, 5, 6, 7, 6, 5], edges := [(5, 6), (6, 5), (6, 7), (6, 7)] },
+    { nodes := (List.range 60).reverse, edges := (List.range 59).map fun i => (i, i + 1) },
+    { nodes := List.range 30, edges := (List.range 30).flatMap fun i => [(i, 2 * i % 31), (i, 3 * i % 31)] }]
+  for graph in graphs do
+    for seeds in [[], [0], [5, 1, 5], [100, 3], graph.nodes.take 2] do
+      assertEqual "a search over the graph" (reachableBySpec graph seeds) (Graph.Fast.reachableFrom graph seeds)
+
 def run : IO Unit := do
+  roundsFastPath
   let cfg := Cfg.fromSub diamond
   assertEqual "CFG entry" 1 cfg.start
   assertEqual "direct successors" [2, 3] (cfg.successors 1)

@@ -1,281 +1,228 @@
 import Bap.Project.Basic
-import Bap.Bil.Wire
+import Bap.Bil.Binary
 import Bap.Knowledge.Persist
+
+/-! A saved project is binary. Numbers are in base 128 and so have no width limit, code and instruction texts and the variables are
+stored once, and read back shared. `Bap.Proofs.Project` proves that what `serialize` writes, `deserialize` reads back. -/
 
 namespace Bap.Project
 
-private def nat (value : Nat) : Sexp := .atom (toString value)
-private def bool (value : Bool) : Sexp := .atom (toString value)
+open Binary
 
-private def boolValue (input : Sexp) : Except String Bool := do
-  match ← Sexp.asAtom input with
-  | "true" => .ok true
-  | "false" => .ok false
-  | _ => .error "invalid project boolean"
+private def archCode : Image.Arch → Nat
+  | .x86 => 0 | .x86_64 => 1 | .arm => 2 | .aarch64 => 3 | .mips => 4 | .powerpc => 5 | .riscv => 6 | .systemz => 7 | .unknown => 8
 
-private def encodeBytes (data : ByteArray) : Sexp :=
-  .list (data.toList.map fun byte => nat byte.toNat)
+private def archOf? : Nat → Option Image.Arch
+  | 0 => some .x86 | 1 => some .x86_64 | 2 => some .arm | 3 => some .aarch64 | 4 => some .mips | 5 => some .powerpc
+  | 6 => some .riscv | 7 => some .systemz | 8 => some .unknown | _ => none
 
-private def decodeBytes (input : Sexp) : Except String ByteArray := do
-  let bytes ← (← Sexp.asList input).mapM fun byte => Sexp.nat byte
-  if bytes.any fun byte => byte ≥ 256 then
-    .error "project byte is out of range"
-  else
-    .ok (ByteArray.mk (bytes.map UInt8.ofNat).toArray)
+private def putSection (out : ByteArray) (sec : Image.Section) : ByteArray :=
+  putNat (putNat (putNat (putNat (putNat (putText out sec.name) sec.addr) sec.offset) sec.size) sec.flags) sec.kind
 
-private def encodeArch : Image.Arch → Sexp
-  | .x86 => .atom "x86"
-  | .x86_64 => .atom "x86_64"
-  | .arm => .atom "arm"
-  | .aarch64 => .atom "aarch64"
-  | .mips => .atom "mips"
-  | .powerpc => .atom "powerpc"
-  | .riscv => .atom "riscv"
-  | .systemz => .atom "systemz"
-  | .unknown => .atom "unknown"
+private def getSection (data : ByteArray) (pos : Nat) : Option (Image.Section × Nat) := do
+  let (name, pos) ← getText data pos
+  let (addr, pos) ← getNat data pos
+  let (offset, pos) ← getNat data pos
+  let (size, pos) ← getNat data pos
+  let (flags, pos) ← getNat data pos
+  let (kind, pos) ← getNat data pos
+  some (⟨name, addr, offset, size, flags, kind⟩, pos)
 
-private def decodeArch (input : Sexp) : Except String Image.Arch := do
-  match ← Sexp.asAtom input with
-  | "x86" => .ok .x86
-  | "x86_64" => .ok .x86_64
-  | "arm" => .ok .arm
-  | "aarch64" => .ok .aarch64
-  | "mips" => .ok .mips
-  | "powerpc" => .ok .powerpc
-  | "riscv" => .ok .riscv
-  | "systemz" => .ok .systemz
-  | "unknown" => .ok .unknown
-  | _ => .error "invalid project architecture"
+private def putSegment (out : ByteArray) (segment : Image.Segment) : ByteArray :=
+  putBool (putBool (putBool (putNat (putNat (putText out segment.name) segment.addr) segment.size) segment.readable)
+    segment.writable) segment.executable
 
-private def encodeSection (sec : Image.Section) : Sexp :=
-  .tagged "section" [.atom sec.name, nat sec.addr, nat sec.offset,
-    nat sec.size, nat sec.flags, nat sec.kind]
+private def getSegment (data : ByteArray) (pos : Nat) : Option (Image.Segment × Nat) := do
+  let (name, pos) ← getText data pos
+  let (addr, pos) ← getNat data pos
+  let (size, pos) ← getNat data pos
+  let (readable, pos) ← getBool data pos
+  let (writable, pos) ← getBool data pos
+  let (executable, pos) ← getBool data pos
+  some (⟨name, addr, size, readable, writable, executable⟩, pos)
 
-private def decodeSection (input : Sexp) : Except String Image.Section := do
-  let args ← Sexp.expectTagged "section" 6 input
-  match args with
-  | [name, addr, offset, size, flags, kind] =>
-    .ok ⟨← Sexp.asAtom name, ← Sexp.nat addr, ← Sexp.nat offset,
-      ← Sexp.nat size, ← Sexp.nat flags, ← Sexp.nat kind⟩
-  | _ => .error "invalid project section"
+private def putSymbol (out : ByteArray) (symbol : Image.Symbol) : ByteArray :=
+  putBool (putBool (putBool (putNat (putNat (putText out symbol.name) symbol.addr) symbol.size) symbol.isFunction) symbol.isDebug)
+    symbol.thumb
 
-private def encodeSegment (segment : Image.Segment) : Sexp :=
-  .tagged "segment" [.atom segment.name, nat segment.addr, nat segment.size,
-    bool segment.readable, bool segment.writable, bool segment.executable]
+private def getSymbol (data : ByteArray) (pos : Nat) : Option (Image.Symbol × Nat) := do
+  let (name, pos) ← getText data pos
+  let (addr, pos) ← getNat data pos
+  let (size, pos) ← getNat data pos
+  let (isFunction, pos) ← getBool data pos
+  let (isDebug, pos) ← getBool data pos
+  let (thumb, pos) ← getBool data pos
+  some (⟨name, addr, size, isFunction, isDebug, thumb⟩, pos)
 
-private def decodeSegment (input : Sexp) : Except String Image.Segment := do
-  let args ← Sexp.expectTagged "segment" 6 input
-  match args with
-  | [name, addr, size, readable, writable, executable] =>
-    .ok ⟨← Sexp.asAtom name, ← Sexp.nat addr, ← Sexp.nat size,
-      ← boolValue readable, ← boolValue writable, ← boolValue executable⟩
-  | _ => .error "invalid project segment"
+private def putRegion (out : ByteArray) (region : Image.MemRegion) : ByteArray :=
+  putBool (putBool (putBool (putBytes (putNat out region.addr) region.data) region.readable) region.writable) region.executable
 
-private def encodeSymbol (symbol : Image.Symbol) : Sexp :=
-  .tagged "symbol" [.atom symbol.name, nat symbol.addr, nat symbol.size,
-    bool symbol.isFunction, bool symbol.isDebug]
+private def getRegion (data : ByteArray) (pos : Nat) : Option (Image.MemRegion × Nat) := do
+  let (addr, pos) ← getNat data pos
+  let (bytes, pos) ← getBytes data pos
+  let (readable, pos) ← getBool data pos
+  let (writable, pos) ← getBool data pos
+  let (executable, pos) ← getBool data pos
+  some (⟨addr, bytes, readable, writable, executable⟩, pos)
 
-private def decodeSymbol (input : Sexp) : Except String Image.Symbol := do
-  let args ← Sexp.expectTagged "symbol" 5 input
-  match args with
-  | [name, addr, size, isFunction, isDebug] =>
-    .ok ⟨← Sexp.asAtom name, ← Sexp.nat addr, ← Sexp.nat size,
-      ← boolValue isFunction, ← boolValue isDebug⟩
-  | _ => .error "invalid project symbol"
+private def putImage (out : ByteArray) (image : Image.Image) : ByteArray :=
+  let out := putNat out (archCode image.arch)
+  let out := putNat out image.addrWidth
+  let out := putEndian out image.endian
+  let out := putNat out image.entryPoint
+  let out := putBytes out image.data
+  let out := putList putSection out image.sections
+  let out := putList putSegment out image.segments
+  let out := putList putSymbol out image.symbols
+  putList putRegion out (image.memory.entries.map Prod.fst)
 
-private def encodeRegion (region : Image.MemRegion) : Sexp :=
-  .tagged "region" [nat region.addr, encodeBytes region.data,
-    bool region.readable, bool region.writable, bool region.executable]
+private def getImage (data : ByteArray) (pos : Nat) : Option (Image.Image × Nat) := do
+  let (arch, pos) ← getNat data pos
+  let arch ← archOf? arch
+  let (addrWidth, pos) ← getNat data pos
+  let (endian, pos) ← getEndian data pos
+  let (entryPoint, pos) ← getNat data pos
+  let (bytes, pos) ← getBytes data pos
+  let (sections, pos) ← getList (getSection data) data pos
+  let (segments, pos) ← getList (getSegment data) data pos
+  let (symbols, pos) ← getList (getSymbol data) data pos
+  let (regions, pos) ← getList (getRegion data) data pos
+  some ({ arch, addrWidth, endian, entryPoint, data := bytes, sections, segments, symbols, memory := ⟨regions.map (·, ())⟩ }, pos)
 
-private def decodeRegion (input : Sexp) : Except String Image.MemRegion := do
-  let args ← Sexp.expectTagged "region" 5 input
-  match args with
-  | [addr, data, readable, writable, executable] =>
-    .ok ⟨← Sexp.nat addr, ← decodeBytes data,
-      ← boolValue readable, ← boolValue writable, ← boolValue executable⟩
-  | _ => .error "invalid project memory region"
+private def flowCode : Disasm.Flow → Nat
+  | .normal => 0 | .jump => 1 | .conditionalJump => 2 | .indirectJump => 3 | .call => 4 | .ret => 5 | .barrier => 6
 
-private def encodeImage (image : Image.Image) : Sexp :=
-  .tagged "image" [
-    encodeArch image.arch,
-    nat image.addrWidth,
-    Bil.Wire.printEndian image.endian,
-    nat image.entryPoint,
-    encodeBytes image.data,
-    .list (image.sections.map encodeSection),
-    .list (image.segments.map encodeSegment),
-    .list (image.symbols.map encodeSymbol),
-    .list (image.memory.entries.map fun entry => encodeRegion entry.1)
-  ]
+private def flowOf? : Nat → Option Disasm.Flow
+  | 0 => some .normal | 1 => some .jump | 2 => some .conditionalJump | 3 => some .indirectJump | 4 => some .call
+  | 5 => some .ret | 6 => some .barrier | _ => none
 
-private def decodeImage (input : Sexp) : Except String Image.Image := do
-  let args ← Sexp.expectTagged "image" 9 input
-  match args with
-  | [arch, width, endian, entry, data, sections, segments, symbols, memory] =>
-    let arch ← decodeArch arch
-    let width ← Sexp.nat width
-    let endian ← Bil.Wire.parseEndian endian
-    let entry ← Sexp.nat entry
-    let data ← decodeBytes data
-    let sections ← (← Sexp.asList sections).mapM decodeSection
-    let segments ← (← Sexp.asList segments).mapM decodeSegment
-    let symbols ← (← Sexp.asList symbols).mapM decodeSymbol
-    let regions ← (← Sexp.asList memory).mapM decodeRegion
-    let memory : Image.MemoryMap Unit := ⟨regions.map (·, ())⟩
-    .ok {
-      arch
-      addrWidth := width
-      endian
-      entryPoint := entry
-      data
-      sections
-      segments
-      symbols
-      memory
-    }
-  | _ => .error "invalid project image"
+/-- The tables of a disassembly, of what its instructions have in common, and where each instruction has its parts. -/
+structure Tables where
+  vars : Table Bap.Var := {}
+  programs : Table Bil.Program := {}
+  texts : Table String := {}
+  programAt : Array Nat := #[]
+  textAt : Array Nat := #[]
 
-private def encodeFlow : Disasm.Flow → Sexp
-  | .normal => .atom "normal"
-  | .jump => .atom "jump"
-  | .conditionalJump => .atom "conditionalJump"
-  | .indirectJump => .atom "indirectJump"
-  | .call => .atom "call"
-  | .ret => .atom "ret"
-  | .barrier => .atom "barrier"
+private def addInsn (tables : Tables) (insn : Disasm.Insn) : Tables :=
+  match tables with
+  | ⟨vars, programs, texts, programAt, textAt⟩ =>
+    let (programs, programPosition) := programs.place insn.bil
+    let (texts, textPosition) := texts.place insn.asm
+    ⟨vars, programs, texts, programAt.push programPosition, textAt.push textPosition⟩
 
-private def decodeFlow (input : Sexp) : Except String Disasm.Flow := do
-  match ← Sexp.asAtom input with
-  | "normal" => .ok .normal
-  | "jump" => .ok .jump
-  | "conditionalJump" => .ok .conditionalJump
-  | "indirectJump" => .ok .indirectJump
-  | "call" => .ok .call
-  | "ret" => .ok .ret
-  | "barrier" => .ok .barrier
-  | _ => .error "invalid project control flow"
+private def tablesOf (instructions : List Disasm.Insn) : Tables :=
+  let tables := instructions.foldl addInsn {}
+  { tables with vars := tables.programs.items.foldl (init := {}) Binary.addProgramVars }
 
-private def encodeTarget : Option Nat → Sexp
-  | none => .atom "none"
-  | some target => nat target
+private def putInsn (tables : Tables) (number : Nat) (out : ByteArray) (insn : Disasm.Insn) : ByteArray :=
+  let out := putNat out insn.address
+  let out := putNat out insn.size
+  let out := putAt putText tables.texts.items (tables.textAt.getD number 0) out insn.asm
+  let out := putNat out (flowCode insn.flow)
+  let out := putOption putNat out insn.target
+  putAt (putProgram tables.vars) tables.programs.items (tables.programAt.getD number 0) out insn.bil
 
-private def decodeTarget (input : Sexp) : Except String (Option Nat) := do
-  match input with
-  | .atom "none" => .ok none
-  | _ => .ok (some (← Sexp.nat input))
+/-- The instructions from the one of that number on. -/
+private def putInsns (tables : Tables) (out : ByteArray) : List Disasm.Insn → Nat → ByteArray
+  | [], _ => out
+  | insn :: rest, number => putInsns tables (putInsn tables number out insn) rest (number + 1)
 
-private def encodeInsn (insn : Disasm.Insn) : Sexp :=
-  .tagged "insn" [nat insn.address, nat insn.size, .atom insn.asm,
-    encodeFlow insn.flow, encodeTarget insn.target, Bil.Wire.printProgram insn.bil]
+private def getInsn (vars : Array Bap.Var) (programs : Array Bil.Program) (texts : Array String) (data : ByteArray) (pos : Nat) :
+    Option (Disasm.Insn × Nat) := do
+  let (address, pos) ← getNat data pos
+  let (size, pos) ← getNat data pos
+  let (asm, pos) ← getRef (getText data) texts data pos
+  let (flow, pos) ← getNat data pos
+  let flow ← flowOf? flow
+  let (target, pos) ← getOption (getNat data) data pos
+  let (bil, pos) ← getRef (getProgram vars data) programs data pos
+  some (⟨address, size, asm, flow, target, bil⟩, pos)
 
-mutual
-  /-- Nesting depth of an S-expression: fuel enough for any statement parsed out of it. -/
-  private def depth : Sexp → Nat
-    | .atom _ => 0
-    | .list items => 1 + depthOfList items
+private def putEdge (out : ByteArray) (edge : Nat × Nat) : ByteArray :=
+  putNat (putNat out edge.1) edge.2
 
-  private def depthOfList : List Sexp → Nat
-    | [] => 0
-    | item :: rest => max (depth item) (depthOfList rest)
-end
+private def getEdge (data : ByteArray) (pos : Nat) : Option ((Nat × Nat) × Nat) := do
+  let (source, pos) ← getNat data pos
+  let (target, pos) ← getNat data pos
+  some ((source, target), pos)
 
-private def decodeInsn (input : Sexp) : Except String Disasm.Insn := do
-  let args ← Sexp.expectTagged "insn" 6 input
-  match args with
-  | [address, size, assembly, flow, target, bil] =>
-    .ok ⟨← Sexp.nat address, ← Sexp.nat size, ← Sexp.asAtom assembly,
-      ← decodeFlow flow, ← decodeTarget target, ← Bil.Wire.parseStmts (depth bil) bil⟩
-  | _ => .error "invalid project instruction"
+private def putDisasm (tables : Tables) (out : ByteArray) (disasm : Disasm.Disasm) : ByteArray :=
+  let out := putNat out disasm.entry
+  let out := putList putVar out tables.vars.items.toList
+  let out := putList (putProgram tables.vars) out tables.programs.items.toList
+  let out := putList putText out tables.texts.items.toList
+  let out := putInsns tables (putNat out disasm.instructions.length) disasm.instructions 0
+  let out := putList putEdge out disasm.edges
+  putList putText out disasm.errors
 
-private def encodeEdge (edge : Nat × Nat) : Sexp :=
-  .tagged "edge" [nat edge.1, nat edge.2]
+private def getDisasm (data : ByteArray) (pos : Nat) : Option (Disasm.Disasm × Nat) := do
+  let (entry, pos) ← getNat data pos
+  let (vars, pos) ← getArray (getVar data) data pos
+  let (programs, pos) ← getArray (getProgram vars data) data pos
+  let (texts, pos) ← getArray (getText data) data pos
+  let (instructions, pos) ← getList (getInsn vars programs texts data) data pos
+  let (edges, pos) ← getList (getEdge data) data pos
+  let (errors, pos) ← getList (getText data) data pos
+  some (⟨entry, instructions, edges, errors⟩, pos)
 
-private def decodeEdge (input : Sexp) : Except String (Nat × Nat) := do
-  let args ← Sexp.expectTagged "edge" 2 input
-  match args with
-  | [source, target] => .ok (← Sexp.nat source, ← Sexp.nat target)
-  | _ => .error "invalid project edge"
+/-- The code is no deeper than what the reader goes. -/
+private def disasmFits (tables : Tables) (disasm : Disasm.Disasm) : Bool :=
+  tables.programs.items.all (stmtsDepth · ≤ maxDepth) && disasm.instructions.all (stmtsDepth ·.bil ≤ maxDepth)
 
-private def encodeDisasm (disasm : Disasm.Disasm) : Sexp :=
-  .tagged "disasm" [nat disasm.entry, .list (disasm.instructions.map encodeInsn),
-    .list (disasm.edges.map encodeEdge), .list (disasm.errors.map Sexp.atom)]
+private def putBinding (out : ByteArray) (binding : String × String) : ByteArray :=
+  putText (putText out binding.1) binding.2
 
-private def decodeDisasm (input : Sexp) : Except String Disasm.Disasm := do
-  let args ← Sexp.expectTagged "disasm" 4 input
-  match args with
-  | [entry, instructions, edges, errors] =>
-    let entry ← Sexp.nat entry
-    let instructions ← (← Sexp.asList instructions).mapM decodeInsn
-    let edges ← (← Sexp.asList edges).mapM decodeEdge
-    let errors ← (← Sexp.asList errors).mapM Sexp.asAtom
-    .ok ⟨entry, instructions, edges, errors⟩
-  | _ => .error "invalid project disassembly"
+private def getBinding (data : ByteArray) (pos : Nat) : Option ((String × String) × Nat) := do
+  let (name, pos) ← getText data pos
+  let (value, pos) ← getText data pos
+  some ((name, value), pos)
 
-private def encodeBinding (binding : String × String) : Sexp :=
-  .tagged "binding" [.atom binding.1, .atom binding.2]
+private def magic : ByteArray := "BAPPROJECT2\n".toUTF8
 
-private def decodeBinding (input : Sexp) : Except String (String × String) := do
-  let args ← Sexp.expectTagged "binding" 2 input
-  match args with
-  | [name, value] => .ok (← Sexp.asAtom name, ← Sexp.asAtom value)
-  | _ => .error "invalid project storage binding"
+private def putProject (project : Project) (tables : Tables) (knowledge : String) : ByteArray :=
+  let out := magic
+  let out := putOption putImage out project.image
+  let out := putOption (putDisasm tables) out project.disasm
+  let out := putList putBinding out project.storage
+  let out := putList putText out project.passed
+  putText out knowledge
 
-def encode (project : Project) (persistent : List Knowledge.AnySlot := []) : Except String Sexp := do
+private def getProject (data : ByteArray) : Option (Project × String) := do
+  if data.extract 0 magic.size ≠ magic then none
+  let (image, pos) ← getOption (getImage data) data magic.size
+  let (disasm, pos) ← getOption (getDisasm data) data pos
+  let (storage, pos) ← getList (getBinding data) data pos
+  let (passed, pos) ← getList (getText data) data pos
+  let (knowledge, pos) ← getText data pos
+  if pos != data.size then none
+  some ({ image, disasm, storage, passed }, knowledge)
+
+def serialize (project : Project) (persistent : List Knowledge.AnySlot := []) : Except String ByteArray := do
   let names := persistent.map fun slot => slot.2.name
   let facts := project.knowledge.facts ++ project.knowledge.opinions.map fun opinion => opinion.fact
   match facts.find? fun fact => !names.contains fact.slot.2.name with
   | some fact => .error s!"unregistered project Knowledge slot {fact.slot.2.name}"
   | none =>
     let knowledge ← Knowledge.encodeState persistent project.knowledge
-    .ok (.tagged "project" [
-        match project.image with
-        | some image => .tagged "some" [encodeImage image]
-        | none => .atom "none",
-        match project.disasm with
-        | some disasm => .tagged "some" [encodeDisasm disasm]
-        | none => .atom "none",
-        .list (project.storage.map encodeBinding),
-        .list (project.passed.map Sexp.atom),
-        knowledge
-      ])
+    let tables := tablesOf ((project.disasm.map (·.instructions)).getD [])
+    if (project.disasm.map (disasmFits tables)).getD true then .ok (putProject project tables (toString knowledge))
+    else .error "project code is nested too deep"
 
-def decode (input : Sexp) (persistent : List Knowledge.AnySlot := []) : Except String Project := do
-  let args ← Sexp.expectTagged "project" 5 input
-  match args with
-  | [image, disasm, storage, passed, knowledge] =>
-    let image ← match image with
-      | .atom "none" => .ok none
-      | _ => do
-        let args ← Sexp.expectTagged "some" 1 image
-        match args with
-        | [image] => .ok (some (← decodeImage image))
-        | _ => .error "invalid optional project image"
-    let disasm ← match disasm with
-      | .atom "none" => .ok none
-      | _ => do
-        let args ← Sexp.expectTagged "some" 1 disasm
-        match args with
-        | [disasm] => .ok (some (← decodeDisasm disasm))
-        | _ => .error "invalid optional project disassembly"
-    let storage ← (← Sexp.asList storage).mapM decodeBinding
-    let passed ← (← Sexp.asList passed).mapM Sexp.asAtom
-    let knowledge ← Knowledge.decodeState persistent knowledge
-    .ok { image, disasm, knowledge, storage, passed }
-  | _ => .error "invalid project"
-
-def serialize (project : Project) (persistent : List Knowledge.AnySlot := []) : Except String String := do
-  .ok (toString (← encode project persistent))
-
-def deserialize (input : String) (persistent : List Knowledge.AnySlot := []) : Except String Project := do
-  decode (← Sexp.parse input) persistent
+def deserialize (data : ByteArray) (persistent : List Knowledge.AnySlot := []) : Except String Project := do
+  match getProject data with
+  | none => .error "not a well-formed project"
+  | some (project, knowledge) =>
+    let knowledge ← Knowledge.decodeState persistent (← Sexp.parse knowledge)
+    .ok { project with knowledge }
 
 def save (project : Project) (path : String) (persistent : List Knowledge.AnySlot := []) : IO Unit := do
   match serialize project persistent with
   | .error error => throw <| IO.userError error
-  | .ok text => IO.FS.writeFile path text
+  | .ok data => IO.FS.writeBinFile path data
 
 def loadSaved (path : String) (persistent : List Knowledge.AnySlot := []) : IO Project := do
-  match deserialize (← IO.FS.readFile path) persistent with
+  match deserialize (← IO.FS.readBinFile path) persistent with
   | .error error => throw <| IO.userError error
   | .ok project => pure project
 

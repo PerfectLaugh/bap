@@ -4278,6 +4278,29 @@ theorem decode_header {data : ByteArray} {image : Image} (h : Elf.decode data = 
   rcases h with ⟨header, h1, _⟩
   exact ⟨header, h1⟩
 
+/-- The word size and the byte order of a decoded ELF image are those of `EI_CLASS` and `EI_DATA` of its file. -/
+theorem decode_class_encoding {data : ByteArray} {image : Image} (h : Elf.decode data = .ok image) :
+    image.data = data ∧ image.addrWidth = (if byteAt data 4 = 2 then 64 else 32) ∧
+      image.endian = (if byteAt data 5 = 1 then .little else .big) := by
+  have ⟨header, hh⟩ := decode_header h
+  have ⟨_, _, _, _, hf⟩ := parseHeader_spec hh
+  have ⟨h1, h2, _⟩ := headerFields_ok hf
+  by_cases ht : header.fileType = 1
+  · have ⟨hd, hw, he, _⟩ := decode_relocatable h hh ht
+    exact ⟨hd, by rw [hw, h1]; simp, by rw [he, h2]⟩
+  · have ⟨hd, hw, he, _⟩ := decode_loaded h hh ht
+    exact ⟨hd, by rw [hw, h1]; simp, by rw [he, h2]⟩
+
+/-- The flags of a decoded ELF image are `e_flags` of its file, at their offset of its class. -/
+theorem decode_machineFlags {data : ByteArray} {image : Image} (h : Elf.decode data = .ok image) :
+    Elf.machineFlags image =
+      (IO.Reader.u32 data image.endian (if image.addrWidth = 64 then 48 else 36)).toOption.getD 0 := by
+  have ⟨hd, _, _⟩ := decode_class_encoding h
+  have ⟨_, hh⟩ := decode_header h
+  have ⟨hm, _⟩ := parseHeader_spec hh
+  simp only [Elf.machineFlags, hd, hm]
+  rfl
+
 theorem decode_rejects_short {data : ByteArray} (h : data.size < 52) : (Elf.decode data).isOk = false := by
   cases hd : Elf.decode data with
   | error e => rfl
@@ -4561,6 +4584,24 @@ theorem parseSymbol_layout {data : ByteArray} {header : Elf.Header} {strings : E
   rcases h with ⟨name, h5, h⟩
   cases h
   exact ⟨nameOffset, info, value, h1, h0, h2, h3, h4, rfl, rfl, h5⟩
+
+/-- A symbol keeps the Thumb state of an ARM function: bit 0 of its value, which its address doesn't have. -/
+theorem parseSymbol_thumb {data : ByteArray} {header : Elf.Header} {strings : Elf.SectionHeader} {offset : Nat}
+    {symbol : Symbol} (h : parseSymbol data header strings offset = .ok (some symbol)) :
+    ∃ info value,
+      IO.Reader.get8 data (offset + if header.is64 then 4 else 12) = .ok info ∧
+      word data header.endian header.is64 (offset + if header.is64 then 8 else 4) = .ok value ∧
+      (symbol.thumb = true ↔ header.machine = 40 ∧ info &&& 0xf = 2 ∧ value % 2 = 1) := by
+  simp only [parseSymbol, bind_ok_iff] at h
+  rcases h with ⟨nameOffset, h1, info, h2, size, h3, value, h4, h⟩
+  by_cases h0 : nameOffset = 0
+  · rw [ite_eq_left h0] at h; cases h
+  rw [ite_eq_right h0] at h
+  simp only [bind_ok_iff] at h
+  rcases h with ⟨name, h5, h⟩
+  cases h
+  refine ⟨info, value, h2, h4, ?_⟩
+  simp [and_assoc]
 
 /-- `r_info` splits exactly into symbol and type: at bit 8 for ELF32 and bit 32 for ELF64. -/
 theorem splitInfo_elf32 (info : Nat) :
@@ -5984,7 +6025,7 @@ set_option maxRecDepth 100000 in
 theorem rel32_call_next_instruction :
     let object := ObjectSection.mk ⟨".text", 0, 0, 5, 0, 0⟩ ⟨".text", 0, 5, true, false, true⟩
       ⟨0, ByteArray.mk #[0xe8, 0, 0, 0, 0], true, false, true⟩ 0 1
-    (applyRelocation rel32Input (Header.mk 0x8664 1 0 10 1 0) [] [(0, ⟨"f", 5, 0, true, false⟩)] object
+    (applyRelocation rel32Input (Header.mk 0x8664 1 0 10 1 0) [] [(0, ⟨"f", 5, 0, true, false, false⟩)] object
       (ObjectSection.region object) 0).toOption.map (fun region => (region.data.get! 1).toNat) = some 0 := by
   rfl
 
@@ -6374,7 +6415,7 @@ theorem decodeSegment_record (segment : Segment) :
 
 theorem decodeSymbol_record (symbol : Symbol) :
     decodeSymbol [.atom symbol.name, nat symbol.addr, nat symbol.size, bool symbol.isFunction,
-      bool symbol.isDebug] = .ok (.symbol symbol) := by
+      bool symbol.isDebug, bool symbol.thumb] = .ok (.symbol symbol) := by
   simp only [decodeSymbol, asAtom_atom, sexp_nat_nat, boolValue_bool, Reader.ok_bind]
 
 private theorem fact_section (args : List Sexp) : decodeFact (.tagged "section" args) = .ok [] := rfl
@@ -6400,7 +6441,7 @@ private theorem fact_segment_record (segment : Segment) :
 
 private theorem fact_symbol_record (symbol : Symbol) :
     decodeFact (.tagged "symbol-record" [.atom symbol.name, nat symbol.addr, nat symbol.size,
-      bool symbol.isFunction, bool symbol.isDebug]) = .ok [.symbol symbol] := by
+      bool symbol.isFunction, bool symbol.isDebug, bool symbol.thumb]) = .ok [.symbol symbol] := by
   show (decodeSymbol _ >>= fun f => Except.ok [f]) = _
   rw [decodeSymbol_record]
   rfl

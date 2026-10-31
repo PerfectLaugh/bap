@@ -394,8 +394,18 @@ private def mips32Register (name : String) : Primus.Semantics.Value :=
 private def mips32Globals : Primus.Semantics.Globals :=
   mipsRegisterNames.map fun name => (name, mips32Register name)
 
-private def mips32Operand : LLVM.Operand → Primus.Semantics.Value
-  | .reg name => mips32Register name
+/-- The floating point registers of release 6 have 64 bits also on MIPS32, see `fpr64` of the semantics. -/
+private def mips32r6Register (name : String) : Primus.Semantics.Value :=
+  match name.toList with
+  | 'F' :: digit :: digits =>
+    if (digit :: digits).all Char.isDigit then .register name 64 64 else mips32Register name
+  | _ => mips32Register name
+
+private def mips32r6Globals : Primus.Semantics.Globals :=
+  mipsRegisterNames.map fun name => (name, mips32r6Register name)
+
+private def mips32Operand (release6 : Bool) : LLVM.Operand → Primus.Semantics.Value
+  | .reg name => if release6 then mips32r6Register name else mips32Register name
   | .imm value => .bil 32 (.int (BitVec.ofInt 32 value))
 
 /-- The number that the digits are the decimal digits of. -/
@@ -477,17 +487,11 @@ private def compiledDefinitions (aliases : List (String × String)) (triple : St
     | _ => pure (binding, none)
   let (instructions, others) := numbered.partition fun entry => entry.2.isSome
   let registers := primitiveGlobals definitions ++ registers
-  let all := registers ++ others.map Prod.fst ++ instructions.map Prod.fst
   let lazy := instructions.filterMap fun entry =>
     match entry.1.2, entry.2 with
     | .callable callable, some opcode => some ((entry.1.1, callable), opcode)
     | _, _ => none
-  let (eager, thunks) := Primus.Semantics.compilePartly (registers ++ others.map Prod.fst) (lazy.map Prod.fst)
-    (Primus.Semantics.globalsTable all)
-  let opcodes := thunks.zip lazy |>.map fun entry => (entry.2.2, entry.1.2)
-  let environment := Primus.Semantics.Environment.ofMachine (eager ++ instructions.map Prod.fst) opcodes []
-  pure { environment with
-    instructions := thunks.reverse.foldl (init := {}) fun table binding => table.insert binding.1 binding.2 }
+  pure (Primus.Semantics.Environment.thunked (registers ++ others.map Prod.fst) lazy)
 
 /-- A target whose instructions are lifted by the names of their LLVM opcodes. -/
 private def makeEnvironment (triple : String) (registers definitions : Primus.Semantics.Globals) :
@@ -565,26 +569,88 @@ def riscvEnvironment : IO Primus.Semantics.Environment := cached riscvCache do
   let floats ← riscvFloatRegisters "riscv64"
   pure (environment.withRegisters (registers ++ floats))
 
-private initialize powerpcCache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
+/-- The semantics of a target of several variants, each loaded once. -/
+private def cachedVariant [BEq α] (cache : IO.Ref (List (α × Primus.Semantics.Environment))) (variant : α)
+    (build : IO Primus.Semantics.Environment) : IO Primus.Semantics.Environment := do
+  match (← cache.get).lookup variant with
+  | some environment => pure environment
+  | none =>
+    let environment ← build
+    cache.modify ((variant, environment) :: ·)
+    pure environment
 
-def powerpcEnvironment : IO Primus.Semantics.Environment := cached powerpcCache do
-  let context := semanticsContext 0 0
-  let definitions ← Primus.Semantics.loadMany (← pluginDirectories "powerpc") ["bits", "powerpc"] context
-  let environment ← compiledDefinitions [] "powerpc64le" powerpcGlobals definitions
-  let registers ← LLVM.registerNames "powerpc64le"
-  let registers := (0, powerpcRegister "Nil") ::
-    (registers.map fun binding => (binding.1, powerpcRegister binding.2))
-  pure (environment.withRegisters registers)
+/-- The PowerPC of a binary: its word size and its byte order, which are of its ELF header. -/
+structure PowerPCVariant where
+  bits : Nat := 64
+  endian : Endian := .little
+  deriving DecidableEq, Repr
 
-private initialize mipsCache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
+/-- The MIPS of a binary: its word size, its byte order, and whether it is of release 6, whose encodings reuse those of
+older instructions. All of these are of its ELF header. -/
+structure MipsVariant where
+  bits : Nat := 64
+  endian : Endian := .big
+  release6 : Bool := false
+  deriving DecidableEq, Repr
 
-def mipsEnvironment : IO Primus.Semantics.Environment := cached mipsCache do
-  let context := { semanticsContext 0 0 with endian := .big }
-  let definitions ← Primus.Semantics.loadMany (← pluginDirectories "mips") ["mips"] context
-  makeEnvironment "mips64" mipsGlobals definitions
+/-- The LLVM target of a PowerPC. -/
+def PowerPCVariant.triple (variant : PowerPCVariant) : String :=
+  match variant.bits == 64, variant.endian with
+  | true, .little => "powerpc64le"
+  | true, .big => "powerpc64"
+  | false, .little => "powerpcle"
+  | false, .big => "powerpc"
+
+/-- The LLVM target of a MIPS. Release 6 is the subarchitecture of the name, which picks the CPU of the decoder. -/
+def MipsVariant.triple (variant : MipsVariant) : String :=
+  match variant.bits == 64, variant.release6, variant.endian with
+  | true, false, .big => "mips64"
+  | true, false, .little => "mips64el"
+  | true, true, .big => "mipsisa64r6"
+  | true, true, .little => "mipsisa64r6el"
+  | false, false, .big => "mips"
+  | false, false, .little => "mipsel"
+  | false, true, .big => "mipsisa32r6"
+  | false, true, .little => "mipsisa32r6el"
 
 private def arm32Context (address nextPc : Nat) : Primus.Semantics.Context :=
   { bits := 32, pc := address, nextPc := nextPc, memory := ⟨"mem", .mem 32 8, 0, false⟩ }
+
+/-- The context of the semantics of a binary of a word size and a byte order. -/
+private def wordContext (bits : Nat) (endian : Endian) (address nextPc : Nat) : Primus.Semantics.Context :=
+  if bits == 64 then { semanticsContext address nextPc with endian := endian }
+  else { arm32Context address nextPc with endian := endian }
+
+private initialize powerpcCache : IO.Ref (List (PowerPCVariant × Primus.Semantics.Environment)) ← IO.mkRef []
+
+def powerpcEnvironmentOf (variant : PowerPCVariant) : IO Primus.Semantics.Environment :=
+  cachedVariant powerpcCache variant do
+    let definitions ← Primus.Semantics.loadMany (← pluginDirectories "powerpc") ["bits", "powerpc"]
+      (wordContext variant.bits variant.endian 0 0)
+    let globals := if variant.bits == 64 then powerpcGlobals else powerpc32Globals
+    let register := if variant.bits == 64 then powerpcRegister else powerpc32Register
+    let environment ← compiledDefinitions [] variant.triple globals definitions
+    let registers ← LLVM.registerNames variant.triple
+    pure (environment.withRegisters ((0, register "Nil") :: registers.map fun binding => (binding.1, register binding.2)))
+
+def powerpcEnvironment : IO Primus.Semantics.Environment := powerpcEnvironmentOf {}
+
+def powerpc32Environment : IO Primus.Semantics.Environment := powerpcEnvironmentOf { bits := 32, endian := .big }
+
+private initialize mipsCache : IO.Ref (List (MipsVariant × Primus.Semantics.Environment)) ← IO.mkRef []
+
+/-- `mips-r6` says that the variant is of release 6, for what the instructions of both do differently. -/
+def mipsEnvironmentOf (variant : MipsVariant) : IO Primus.Semantics.Environment :=
+  cachedVariant mipsCache variant do
+    let definitions ← Primus.Semantics.loadMany (← pluginDirectories "mips")
+      (if variant.release6 then ["mips", "mips-r6"] else ["mips"])
+      (wordContext variant.bits variant.endian 0 0)
+    makeEnvironment variant.triple
+      (if variant.bits == 64 then mipsGlobals else if variant.release6 then mips32r6Globals else mips32Globals) definitions
+
+def mipsEnvironment : IO Primus.Semantics.Environment := mipsEnvironmentOf {}
+
+def mips32Environment : IO Primus.Semantics.Environment := mipsEnvironmentOf { bits := 32 }
 
 private initialize x8632Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
@@ -612,24 +678,6 @@ def riscv32Environment : IO Primus.Semantics.Environment := cached riscv32Cache 
     pure (id, riscv32Register s!"X{n}")
   let floats ← riscvFloatRegisters "riscv32"
   pure (environment.withRegisters (registers ++ floats))
-
-private initialize mips32Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
-
-def mips32Environment : IO Primus.Semantics.Environment := cached mips32Cache do
-  let context := { arm32Context 0 0 with endian := .big }
-  let definitions ← Primus.Semantics.loadMany (← pluginDirectories "mips") ["mips"] context
-  makeEnvironment "mips" mips32Globals definitions
-
-private initialize powerpc32Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
-
-def powerpc32Environment : IO Primus.Semantics.Environment := cached powerpc32Cache do
-  let context := { arm32Context 0 0 with endian := .big }
-  let definitions ← Primus.Semantics.loadMany (← pluginDirectories "powerpc") ["bits", "powerpc"] context
-  let environment ← compiledDefinitions [] "powerpc" powerpc32Globals definitions
-  let registers ← LLVM.registerNames "powerpc"
-  let registers := (0, powerpc32Register "Nil") ::
-    (registers.map fun binding => (binding.1, powerpc32Register binding.2))
-  pure (environment.withRegisters registers)
 
 private initialize arm32Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
@@ -813,6 +861,16 @@ private def mipsTarget (bits address : Nat) (decoded : LLVM.Decoded) : Option Na
     else none
   | _ => none
 
+/-- The longest instruction of any target has 15 bytes, and decoding only needs that many. -/
+def instructionBytes (data : ByteArray) (offset : Nat) : ByteArray := data.extract offset (offset + 16)
+
+/-- The size of what decodes at an address in the code that starts at `base`, whether it can be lifted or not. -/
+def sizeAt (triple : String) (base address : Nat) (data : ByteArray) : IO (Option Nat) := do
+  try
+    pure (some (← LLVM.disassemble triple (instructionBytes data (address - base)) address).size)
+  catch _ =>
+    pure none
+
 /-- The MIPS jumps and conditional branches run their delay slot before the transfer. Calls reach the slot by falling
 through, which is where the callee returns past it. `ERET` has no delay slot. -/
 def mipsHasDelaySlot (insn : Disasm.Insn) : Bool :=
@@ -828,8 +886,6 @@ def mipsLikelyMnemonics : List String :=
 def mipsAnnulsSlot (insn : Disasm.Insn) : Bool :=
   mipsLikelyMnemonics.contains ((insn.asm.takeWhile fun c => c != ' ' && c != '\t').toString)
 
-/-- The longest instruction of any target has 15 bytes, and decoding only needs that many. -/
-def instructionBytes (data : ByteArray) (offset : Nat) : ByteArray := data.extract offset (offset + 16)
 
 /-- The instruction word at the start of `data`. -/
 private def instructionWord (endian : Endian) (data : ByteArray) : Nat :=
@@ -1118,12 +1174,13 @@ def decodeRISCV32With (globals : Primus.Semantics.Environment) (base address : N
 def decodeRISCV32 (base address : Nat) (data : ByteArray) : IO Disasm.Insn := do
   decodeRISCV32With (← riscv32Environment) base address data
 
-def decodePowerPCWith (globals : Primus.Semantics.Environment) (base address : Nat)
+/-- A PowerPC instruction of a variant, whose byte order is that of its encoding and of the accesses it makes. -/
+def decodePowerPCOf (variant : PowerPCVariant) (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : IO Disasm.Insn := do
   let bytes := instructionBytes data (address - base)
-  let decoded ← LLVM.disassembleMC "powerpc64le" bytes address
-  let word := instructionWord .little bytes
-  let context := semanticsContext address (address + decoded.size)
+  let decoded ← LLVM.disassembleMC variant.triple bytes address
+  let word := instructionWord variant.endian bytes
+  let context := wordContext variant.bits variant.endian address (address + decoded.size)
   let machineOperands ← LLVM.mcOperands decoded.instruction
   let operands ← machineOperands.mapM fun value =>
     match Primus.Semantics.machineOperand globals context value with
@@ -1135,69 +1192,47 @@ def decodePowerPCWith (globals : Primus.Semantics.Environment) (base address : N
     size := decoded.size
     asm := normalizeAssembly decoded.assembly
     flow := flow decoded.flags
-    target := powerpcMCTarget 64 address word machineOperands
+    target := powerpcMCTarget variant.bits address word machineOperands
     bil := resolveAliases powerpcAliases bil
   }
+
+def decodePowerPCWith : Primus.Semantics.Environment → Nat → Nat → ByteArray → IO Disasm.Insn :=
+  decodePowerPCOf {}
 
 def decodePowerPC (base address : Nat) (data : ByteArray) : IO Disasm.Insn := do
   decodePowerPCWith (← powerpcEnvironment) base address data
 
-def decodePowerPC32With (globals : Primus.Semantics.Environment) (base address : Nat)
-    (data : ByteArray) : IO Disasm.Insn := do
-  let bytes := instructionBytes data (address - base)
-  let decoded ← LLVM.disassembleMC "powerpc" bytes address
-  let word := instructionWord .big bytes
-  let context := { arm32Context address (address + decoded.size) with endian := .big }
-  let machineOperands ← LLVM.mcOperands decoded.instruction
-  let operands ← machineOperands.mapM fun value =>
-    match Primus.Semantics.machineOperand globals context value with
-    | .ok operand => pure operand
-    | .error error => throw <| IO.userError error
-  let bil ← Primus.Semantics.liftMC globals context (LLVM.mcOpcode decoded.instruction) operands
-  pure {
-    address := address
-    size := decoded.size
-    asm := normalizeAssembly decoded.assembly
-    flow := flow decoded.flags
-    target := powerpcMCTarget 32 address word machineOperands
-    bil := resolveAliases powerpcAliases bil
-  }
+def decodePowerPC32With : Primus.Semantics.Environment → Nat → Nat → ByteArray → IO Disasm.Insn :=
+  decodePowerPCOf { bits := 32, endian := .big }
 
 def decodePowerPC32 (base address : Nat) (data : ByteArray) : IO Disasm.Insn := do
   decodePowerPC32With (← powerpc32Environment) base address data
 
-def decodeMIPSWith (globals : Primus.Semantics.Environment) (base address : Nat)
+/-- A MIPS instruction of a variant, whose byte order is that of its encoding and of the accesses it makes. -/
+def decodeMIPSOf (variant : MipsVariant) (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : IO Disasm.Insn := do
-  let decoded ← LLVM.disassemble "mips64" (instructionBytes data (address - base)) address
-  let context := { semanticsContext address (address + decoded.size) with endian := .big }
-  let operands := decoded.operands.map (operand mipsRegister decoded.opcode)
+  let decoded ← LLVM.disassemble variant.triple (instructionBytes data (address - base)) address
+  let context := wordContext variant.bits variant.endian address (address + decoded.size)
+  let operands := decoded.operands.map
+    (if variant.bits == 64 then operand mipsRegister decoded.opcode else mips32Operand variant.release6)
   let bil ← Primus.Semantics.liftWith globals context decoded.opcode operands
   pure {
     address := address
     size := decoded.size
     asm := normalizeAssembly decoded.assembly
     flow := mipsFlow decoded
-    target := mipsTarget 64 address decoded
+    target := mipsTarget variant.bits address decoded
     bil := bil
   }
+
+def decodeMIPSWith : Primus.Semantics.Environment → Nat → Nat → ByteArray → IO Disasm.Insn :=
+  decodeMIPSOf {}
 
 def decodeMIPS (base address : Nat) (data : ByteArray) : IO Disasm.Insn := do
   decodeMIPSWith (← mipsEnvironment) base address data
 
-def decodeMIPS32With (globals : Primus.Semantics.Environment) (base address : Nat)
-    (data : ByteArray) : IO Disasm.Insn := do
-  let decoded ← LLVM.disassemble "mips" (instructionBytes data (address - base)) address
-  let context := { arm32Context address (address + decoded.size) with endian := .big }
-  let operands := decoded.operands.map mips32Operand
-  let bil ← Primus.Semantics.liftWith globals context decoded.opcode operands
-  pure {
-    address := address
-    size := decoded.size
-    asm := normalizeAssembly decoded.assembly
-    flow := mipsFlow decoded
-    target := mipsTarget 32 address decoded
-    bil := bil
-  }
+def decodeMIPS32With : Primus.Semantics.Environment → Nat → Nat → ByteArray → IO Disasm.Insn :=
+  decodeMIPSOf { bits := 32 }
 
 def decodeMIPS32 (base address : Nat) (data : ByteArray) : IO Disasm.Insn := do
   decodeMIPS32With (← mips32Environment) base address data

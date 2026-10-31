@@ -2,8 +2,10 @@ import Lean.Elab.Command
 import Bap.Project.Pass
 import Bap.Project.Persist
 import Bap.Proofs.Bil
+import Bap.Proofs.Binary
 import Bap.Proofs.Knowledge
 import Bap.Proofs.Disasm
+import Bap.Proofs.Image
 
 namespace Bap.Proofs.Project
 
@@ -1025,241 +1027,229 @@ theorem runPasses_six_pass_chain :
 
 end Chains
 
+
 section Persist
 
+open Bap.Binary Bap.Proofs.Binary
+
 open_private Bap.Project.Persist in Bap.Project :
-  nat bool boolValue encodeBytes decodeBytes encodeArch decodeArch encodeSection decodeSection
-  encodeSegment decodeSegment encodeSymbol decodeSymbol encodeRegion decodeRegion encodeImage
-  decodeImage encodeFlow decodeFlow encodeTarget decodeTarget encodeInsn decodeInsn encodeEdge
-  decodeEdge encodeDisasm decodeDisasm encodeBinding decodeBinding depth depthOfList
+  archCode archOf? putSection getSection putSegment getSegment putSymbol getSymbol putRegion getRegion putImage getImage
+  flowCode flowOf? tablesOf putInsn getInsn putInsns putEdge getEdge putDisasm getDisasm disasmFits putBinding getBinding
+  magic putProject getProject
 
-@[local simp] theorem nat_roundtrip (value : Nat) : Sexp.nat (nat value) = .ok value := by
-  simp [nat, Sexp.nat, Sexp.asAtom, bind, Except.bind]
+private theorem getSection_put (data : ByteArray) (value : Bap.Image.Section) : Reads (getSection data) putSection data value := by
+  intro out h
+  obtain ⟨name, addr, offset, size, flags, kind⟩ := value
+  simp only [putSection] at h ⊢
+  obtain ⟨h5, r5⟩ := getNat_putNat h
+  obtain ⟨h4, r4⟩ := getNat_putNat h5
+  obtain ⟨h3, r3⟩ := getNat_putNat h4
+  obtain ⟨h2, r2⟩ := getNat_putNat h3
+  obtain ⟨h1, r1⟩ := getNat_putNat h2
+  obtain ⟨hp, hr⟩ := getText_putText h1
+  exact ⟨hp, by simp only [getSection, hr, r1, r2, r3, r4, r5, bind, Option.bind]⟩
 
-@[local simp] theorem boolValue_roundtrip (value : Bool) : boolValue (bool value) = .ok value := by
-  cases value <;> rfl
+private theorem getSegment_put (data : ByteArray) (value : Bap.Image.Segment) : Reads (getSegment data) putSegment data value := by
+  intro out h
+  obtain ⟨name, addr, size, readable, writable, executable⟩ := value
+  simp only [putSegment] at h ⊢
+  obtain ⟨h5, r5⟩ := getBool_putBool h
+  obtain ⟨h4, r4⟩ := getBool_putBool h5
+  obtain ⟨h3, r3⟩ := getBool_putBool h4
+  obtain ⟨h2, r2⟩ := getNat_putNat h3
+  obtain ⟨h1, r1⟩ := getNat_putNat h2
+  obtain ⟨hp, hr⟩ := getText_putText h1
+  exact ⟨hp, by simp only [getSegment, hr, r1, r2, r3, r4, r5, bind, Option.bind]⟩
 
-private theorem mapM_roundtrip {α β ε} (f : α → β) (g : β → Except ε α) (xs : List α)
-    (h : ∀ x ∈ xs, g (f x) = .ok x) : (xs.map f).mapM g = .ok xs := by
-  induction xs with
+private theorem getSymbol_put (data : ByteArray) (value : Bap.Image.Symbol) : Reads (getSymbol data) putSymbol data value := by
+  intro out h
+  obtain ⟨name, addr, size, isFunction, isDebug, thumb⟩ := value
+  simp only [putSymbol] at h ⊢
+  obtain ⟨h5, r5⟩ := getBool_putBool h
+  obtain ⟨h4, r4⟩ := getBool_putBool h5
+  obtain ⟨h3, r3⟩ := getBool_putBool h4
+  obtain ⟨h2, r2⟩ := getNat_putNat h3
+  obtain ⟨h1, r1⟩ := getNat_putNat h2
+  obtain ⟨hp, hr⟩ := getText_putText h1
+  exact ⟨hp, by simp only [getSymbol, hr, r1, r2, r3, r4, r5, bind, Option.bind]⟩
+
+private theorem getRegion_put (data : ByteArray) (value : Bap.Image.MemRegion) : Reads (getRegion data) putRegion data value := by
+  intro out h
+  obtain ⟨addr, bytes, readable, writable, executable⟩ := value
+  simp only [putRegion] at h ⊢
+  obtain ⟨h4, r4⟩ := getBool_putBool h
+  obtain ⟨h3, r3⟩ := getBool_putBool h4
+  obtain ⟨h2, r2⟩ := getBool_putBool h3
+  obtain ⟨h1, r1⟩ := getBytes_putBytes h2
+  obtain ⟨hp, hr⟩ := getNat_putNat h1
+  exact ⟨hp, by simp only [getRegion, hr, r1, r2, r3, r4, bind, Option.bind]⟩
+
+private theorem archOf_code (arch : Bap.Image.Arch) : archOf? (archCode arch) = some arch := by cases arch <;> rfl
+private theorem flowOf_code (flow : Bap.Disasm.Flow) : flowOf? (flowCode flow) = some flow := by cases flow <;> rfl
+
+private theorem entries_regions (entries : List (Bap.Image.MemRegion × Unit)) :
+    (entries.map Prod.fst).map (·, ()) = entries := by
+  induction entries with
   | nil => rfl
-  | cons x xs ih =>
-    simp only [List.map_cons, List.mapM_cons, h x List.mem_cons_self,
-      ih fun y hy => h y (List.mem_cons_of_mem _ hy)]
-    rfl
+  | cons head rest ih =>
+    simpa only [List.map_cons, List.cons.injEq, true_and] using ih
 
-private theorem byteArray_toList_loop (bytes : ByteArray) (i : Nat) (acc : List UInt8) :
-    ByteArray.toList.loop bytes i acc = acc.reverse ++ bytes.data.toList.drop i := by
-  induction i, acc using ByteArray.toList.loop.induct bytes with
-  | case1 i acc hlt ih =>
-    rw [ByteArray.toList.loop, ite_eq_left hlt, ih]
-    have hlt' : i < bytes.data.toList.length := by simpa using hlt
-    have hget : bytes.get! i = bytes.data.toList[i] := by
-      simp [ByteArray.get!, hlt]
-    rw [List.drop_eq_getElem_cons hlt', hget]
-    simp
-  | case2 i acc hge =>
-    rw [ByteArray.toList.loop, ite_eq_right hge]
-    have : bytes.data.toList.length ≤ i := by simpa using hge
-    simp [List.drop_of_length_le this]
+private theorem getImage_put (data : ByteArray) (value : Bap.Image.Image) : Reads (getImage data) putImage data value := by
+  intro out h
+  obtain ⟨arch, addrWidth, endian, entryPoint, bytes, sections, segments, symbols, ⟨entries⟩⟩ := value
+  simp only [putImage] at h ⊢
+  obtain ⟨h8, r8⟩ := getList_putList (fun item _ => getRegion_put data item) h
+  obtain ⟨h7, r7⟩ := getList_putList (fun item _ => getSymbol_put data item) h8
+  obtain ⟨h6, r6⟩ := getList_putList (fun item _ => getSegment_put data item) h7
+  obtain ⟨h5, r5⟩ := getList_putList (fun item _ => getSection_put data item) h6
+  obtain ⟨h4, r4⟩ := getBytes_putBytes h5
+  obtain ⟨h3, r3⟩ := getNat_putNat h4
+  obtain ⟨h2, r2⟩ := getEndian_putEndian h3
+  obtain ⟨h1, r1⟩ := getNat_putNat h2
+  obtain ⟨hp, hr⟩ := getNat_putNat h1
+  exact ⟨hp, by simp only [getImage, hr, r1, r2, r3, r4, r5, r6, r7, r8, archOf_code, entries_regions, bind, Option.bind]⟩
 
-theorem byteArray_toList (bytes : ByteArray) : bytes.toList = bytes.data.toList := by
-  simpa [ByteArray.toList] using byteArray_toList_loop bytes 0 []
+private theorem beq_text (first second : String) (h : (first == second) = true) : first = second := by
+  simpa using h
 
-theorem decodeBytes_roundtrip (bytes : ByteArray) : decodeBytes (encodeBytes bytes) = .ok bytes := by
-  have hmap : (bytes.toList.map fun byte => nat byte.toNat).mapM Sexp.nat =
-      .ok (bytes.toList.map UInt8.toNat) := by
-    have := mapM_roundtrip nat Sexp.nat (bytes.toList.map UInt8.toNat) (fun x _ => nat_roundtrip x)
-    simpa [List.map_map, Function.comp_def] using this
-  have hany : ((bytes.toList.map UInt8.toNat).any fun byte => decide (byte ≥ 256)) = false := by
-    simp only [List.any_map, List.any_eq_false, Function.comp_apply, decide_eq_true_eq]
-    intro byte _
-    have := byte.toNat_lt
-    omega
-  simp only [decodeBytes, encodeBytes, Sexp.asList, bind, Except.bind, hmap, hany]
-  simp only [Bool.false_eq_true, ite_false, Except.ok.injEq]
-  rw [byteArray_toList]
-  obtain ⟨data⟩ := bytes
-  simp [List.map_map, Function.comp_def]
+private theorem beq_program (first second : Bap.Bil.Program) (h : (first == second) = true) : first = second :=
+  Bap.Bil.Stmt.sameAll_eq first second h
 
-/-- Soundness of the range check: any encoded value that does not fit a byte is rejected. -/
-theorem decodeBytes_rejects_out_of_range (values : List Nat) (h : ∃ v ∈ values, 256 ≤ v) :
-    decodeBytes (.list (values.map nat)) = .error "project byte is out of range" := by
-  have hmap : (values.map nat).mapM Sexp.nat = .ok values :=
-    mapM_roundtrip nat Sexp.nat values fun x _ => nat_roundtrip x
-  have hany : (values.any fun byte => decide (byte ≥ 256)) = true := by
-    simpa using h
-  simp [decodeBytes, Sexp.asList, bind, Except.bind, hmap, hany]
+private theorem getProgram_put (vars : Table Bap.Var) (data : ByteArray) {value : Bap.Bil.Program} (hd : stmtsDepth value ≤ maxDepth) :
+    Reads (getProgram vars.items data) (putProgram vars) data value := by
+  intro out h
+  simp only [putProgram, putStmts_list] at h ⊢
+  exact getStmts_putStmts vars data value hd h
 
-theorem decodeArch_roundtrip (arch : Bap.Image.Arch) : decodeArch (encodeArch arch) = .ok arch := by
-  cases arch <;> rfl
+private theorem getInsn_put (tables : Tables) (number : Nat) (data : ByteArray) {value : Bap.Disasm.Insn} (hd : stmtsDepth value.bil ≤ maxDepth) :
+    Reads (getInsn tables.vars.items tables.programs.items tables.texts.items data) (putInsn tables number) data value := by
+  intro out h
+  obtain ⟨address, size, asm, flow, target, bil⟩ := value
+  simp only [putInsn] at h ⊢
+  obtain ⟨h5, r5⟩ := getRef_putAt beq_program (getProgram_put tables.vars data hd) h
+  obtain ⟨h4, r4⟩ := getOption_putOption (fun item _ out h => getNat_putNat h) h5
+  obtain ⟨h3, r3⟩ := getNat_putNat h4
+  obtain ⟨h2, r2⟩ := getRef_putAt beq_text (fun _ h => getText_putText h) h3
+  obtain ⟨h1, r1⟩ := getNat_putNat h2
+  obtain ⟨hp, hr⟩ := getNat_putNat h1
+  exact ⟨hp, by simp only [getInsn, hr, r1, r2, r3, r4, r5, flowOf_code, bind, Option.bind]⟩
 
-theorem decodeFlow_roundtrip (flow : Bap.Disasm.Flow) : decodeFlow (encodeFlow flow) = .ok flow := by
-  cases flow <;> rfl
-
-theorem parseEndian_roundtrip (endian : Bap.Endian) :
-    Bap.Bil.Wire.parseEndian (Bap.Bil.Wire.printEndian endian) = .ok endian := by
-  cases endian <;> rfl
-
-private theorem toString_ne_none (value : Nat) : toString value ≠ "none" := by
-  intro h
-  have hlist : (toString value).toList = Nat.toDigits 10 value := Nat.toList_repr
-  have hmem : 'n' ∈ Nat.toDigits 10 value := by
-    rw [← hlist, h]
-    simp
-  have := Nat.isDigit_of_mem_toDigits (by decide) (by decide) hmem
-  revert this
-  decide
-
-theorem decodeTarget_roundtrip (target : Option Nat) :
-    decodeTarget (encodeTarget target) = .ok target := by
-  cases target with
-  | none => rfl
-  | some value =>
-    have hne := toString_ne_none value
-    simp only [decodeTarget, encodeTarget]
-    split
-    · rename_i heq
-      simp only [nat, Sexp.atom.injEq] at heq
-      exact absurd heq hne
-    · simp [bind, Except.bind]
-
-theorem decodeSection_roundtrip (sec : Bap.Image.Section) :
-    decodeSection (encodeSection sec) = .ok sec := by
-  simp [decodeSection, encodeSection, Sexp.expectTagged, Sexp.tagged, Sexp.asList, Sexp.asAtom,
-    bind, Except.bind]
-
-theorem decodeSegment_roundtrip (segment : Bap.Image.Segment) :
-    decodeSegment (encodeSegment segment) = .ok segment := by
-  simp [decodeSegment, encodeSegment, Sexp.expectTagged, Sexp.tagged, Sexp.asList, Sexp.asAtom,
-    bind, Except.bind]
-
-theorem decodeSymbol_roundtrip (symbol : Bap.Image.Symbol) :
-    decodeSymbol (encodeSymbol symbol) = .ok symbol := by
-  simp [decodeSymbol, encodeSymbol, Sexp.expectTagged, Sexp.tagged, Sexp.asList, Sexp.asAtom,
-    bind, Except.bind]
-
-theorem decodeRegion_roundtrip (region : Bap.Image.MemRegion) :
-    decodeRegion (encodeRegion region) = .ok region := by
-  simp [decodeRegion, encodeRegion, Sexp.expectTagged, Sexp.tagged, Sexp.asList,
-    decodeBytes_roundtrip, bind, Except.bind]
-
-theorem decodeEdge_roundtrip (edge : Nat × Nat) : decodeEdge (encodeEdge edge) = .ok edge := by
-  simp [decodeEdge, encodeEdge, Sexp.expectTagged, Sexp.tagged, Sexp.asList, bind, Except.bind]
-
-theorem decodeBinding_roundtrip (binding : String × String) :
-    decodeBinding (encodeBinding binding) = .ok binding := by
-  simp [decodeBinding, encodeBinding, Sexp.expectTagged, Sexp.tagged, Sexp.asList, Sexp.asAtom,
-    bind, Except.bind]
-
-private theorem le_depthOfList {item : Sexp} {items : List Sexp} (h : item ∈ items) :
-    depth item ≤ depthOfList items := by
+private theorem getItems_putInsns (tables : Tables) (data : ByteArray) {items : List Bap.Disasm.Insn}
+    (hd : ∀ insn ∈ items, stmtsDepth insn.bil ≤ maxDepth) :
+    ∀ (out : ByteArray) (number : Nat) (done : Array Bap.Disasm.Insn), Prefix (putInsns tables out items number) data →
+      Prefix out data ∧ getItems (getInsn tables.vars.items tables.programs.items tables.texts.items data) items.length out.size done =
+        some (done ++ items.toArray, (putInsns tables out items number).size) := by
   induction items with
-  | nil => simp at h
-  | cons head tail ih =>
-    rcases List.mem_cons.mp h with rfl | h
-    · simp only [depthOfList]
-      omega
-    · have := ih h
-      simp only [depthOfList]
-      omega
+  | nil =>
+    intro out number done h
+    exact ⟨h, by simp [putInsns, getItems]⟩
+  | cons item rest ih =>
+    intro out number done h
+    simp only [putInsns] at h ⊢
+    obtain ⟨hp, hr⟩ := ih (fun other hm => hd other (List.mem_cons_of_mem _ hm)) _ _ (done.push item) h
+    obtain ⟨hq, hg⟩ := getInsn_put tables number data (hd item List.mem_cons_self) _ hp
+    refine ⟨hq, ?_⟩
+    simp [getItems, hg, hr]
 
-mutual
-  private theorem stmtDepth_le : (stmt : Bap.Bil.Stmt) →
-      Bap.Proofs.Bil.WireLaws.stmtDepth stmt ≤ depth (Bap.Bil.Wire.printStmt stmt)
-    | .move _ _ | .jmp _ | .special _ | .cpuExn _ => by
-      simp [Bap.Proofs.Bil.WireLaws.stmtDepth, Bap.Bil.Wire.printStmt, Sexp.tagged, depth]
-    | .while condition body => by
-      have hb := programDepth_le body
-      simp only [Bap.Proofs.Bil.WireLaws.stmtDepth, Bap.Bil.Wire.printStmt, Sexp.tagged, depth, depthOfList]
-      omega
-    | .ifElse condition yes no => by
-      have hy := programDepth_le yes
-      have hn := programDepth_le no
-      simp only [Bap.Proofs.Bil.WireLaws.stmtDepth, Bap.Bil.Wire.printStmt, Sexp.tagged, depth, depthOfList]
-      omega
+private theorem getEdge_put (data : ByteArray) (value : Nat × Nat) : Reads (getEdge data) putEdge data value := by
+  intro out h
+  obtain ⟨source, target⟩ := value
+  simp only [putEdge] at h ⊢
+  obtain ⟨h1, r1⟩ := getNat_putNat h
+  obtain ⟨hp, hr⟩ := getNat_putNat h1
+  exact ⟨hp, by simp only [getEdge, hr, r1, bind, Option.bind]⟩
 
-  private theorem programDepth_le : (program : List Bap.Bil.Stmt) →
-      Bap.Proofs.Bil.WireLaws.programDepth program ≤ depthOfList (program.map Bap.Bil.Wire.printStmt)
-    | [] => by simp [Bap.Proofs.Bil.WireLaws.programDepth, depthOfList]
-    | stmt :: rest => by
-      have hs := stmtDepth_le stmt
-      have hr := programDepth_le rest
-      simp only [Bap.Proofs.Bil.WireLaws.programDepth, List.map_cons, depthOfList]
-      omega
-end
+private theorem getDisasm_put (tables : Tables) (data : ByteArray) {value : Bap.Disasm.Disasm} (hfit : disasmFits tables value = true) :
+    Reads (getDisasm data) (putDisasm tables) data value := by
+  intro out h
+  obtain ⟨entry, instructions, edges, errors⟩ := value
+  simp only [disasmFits, Bool.and_eq_true, Array.all_eq_true, List.all_eq_true, decide_eq_true_eq] at hfit
+  obtain ⟨hitems, hinsns⟩ := hfit
+  simp only [putDisasm] at h ⊢
+  obtain ⟨h6, r6⟩ := getList_putList (fun item _ out h => getText_putText h) h
+  obtain ⟨h5, r5⟩ := getList_putList (fun item _ => getEdge_put data item) h6
+  obtain ⟨h4', r4⟩ := getItems_putInsns tables data hinsns _ _ #[] h5
+  obtain ⟨h4, r4n⟩ := getNat_putNat h4'
+  have r4l : getList (getInsn tables.vars.items tables.programs.items tables.texts.items data) data
+      (putList putText (putList (putProgram tables.vars) (putList putVar (putNat out entry) tables.vars.items.toList) tables.programs.items.toList) tables.texts.items.toList).size =
+      some (instructions, (putInsns tables (putNat (putList putText (putList (putProgram tables.vars) (putList putVar (putNat out entry) tables.vars.items.toList) tables.programs.items.toList) tables.texts.items.toList) instructions.length) instructions 0).size) := by
+    simp [getList, getArray, r4n, r4]
+  obtain ⟨h3, r3⟩ := getArray_putList (fun item _ out h => getText_putText h) h4
+  obtain ⟨h2, r2⟩ := getArray_putList (fun item hm => getProgram_put tables.vars data (by
+    obtain ⟨i, hi, rfl⟩ := List.getElem_of_mem hm
+    simp only [Array.getElem_toList]
+    exact hitems i (by simpa using hi))) h3
+  obtain ⟨h1, r1⟩ := getArray_putList (fun item _ out h => getVar_putVar h) h2
+  obtain ⟨hp, hr⟩ := getNat_putNat h1
+  refine ⟨hp, ?_⟩
+  simp only [Array.toArray_toList] at r1 r2 r3
+  simp only [getDisasm, hr, r1, r2, r3, r4l, r5, r6, bind, Option.bind]
 
-/-- Parser fuel from the input's own depth always suffices, so no nesting limit remains. -/
-theorem parseStmts_depth (program : Bap.Bil.Program) :
-    Bap.Bil.Wire.parseStmts (depth (Bap.Bil.Wire.printProgram program)) (Bap.Bil.Wire.printProgram program) =
-      .ok program := by
-  have h : Bap.Proofs.Bil.WireLaws.programDepth program ≤ depth (Bap.Bil.Wire.printProgram program) := by
-    have := programDepth_le program
-    simp only [Bap.Bil.Wire.printProgram, depth]
-    omega
-  have hl := Bap.Proofs.Bil.WireLaws.parseStmtList_print program _ h
-  simp only [Bap.Bil.Wire.printProgram] at hl ⊢
-  simp [Bap.Bil.Wire.parseStmts, Sexp.asList, hl, bind, Except.bind]
+private theorem getBinding_put (data : ByteArray) (value : String × String) : Reads (getBinding data) putBinding data value := by
+  intro out h
+  obtain ⟨name, text⟩ := value
+  simp only [putBinding] at h ⊢
+  obtain ⟨h1, r1⟩ := getText_putText h
+  obtain ⟨hp, hr⟩ := getText_putText h1
+  exact ⟨hp, by simp only [getBinding, hr, r1, bind, Option.bind]⟩
 
-/-- An instruction roundtrips exactly, whatever its BIL and however deep. -/
-theorem decodeInsn_roundtrip (insn : Bap.Disasm.Insn) : decodeInsn (encodeInsn insn) = .ok insn := by
-  simp [decodeInsn, encodeInsn, Sexp.expectTagged, Sexp.tagged, Sexp.asList, Sexp.asAtom,
-    decodeFlow_roundtrip, decodeTarget_roundtrip, parseStmts_depth, bind, Except.bind]
+private theorem getProject_put {project : Project} {tables : Tables} {knowledge : String}
+    (hfit : (project.disasm.map (disasmFits tables)).getD true = true) :
+    getProject (putProject project tables knowledge) = some ({ project with knowledge := {} }, knowledge) := by
+  have h := Prefix.refl (putProject project tables knowledge)
+  have hsize : (putProject project tables knowledge).size = (putProject project tables knowledge).size := rfl
+  generalize hdata : putProject project tables knowledge = data at h
+  obtain ⟨image, disasm, kn, storage, passed⟩ := project
+  simp only [putProject] at hdata
+  subst hdata
+  simp only [Option.map] at hfit
+  obtain ⟨h4, r4⟩ := getText_putText h
+  obtain ⟨h3, r3⟩ := getList_putList (fun item _ out h => getText_putText h) h4
+  obtain ⟨h2, r2⟩ := getList_putList (fun item _ => getBinding_put _ item) h3
+  obtain ⟨h1, r1⟩ := getOption_putOption (fun item hi => getDisasm_put tables _ (by subst hi; simpa using hfit)) h2
+  obtain ⟨h0, r0⟩ := getOption_putOption (fun item _ => getImage_put _ item) h1
+  have hmagic : ∀ tail, (magic ++ tail).extract 0 magic.size = magic := fun tail => ByteArray.extract_append_eq_left rfl
+  obtain ⟨tail, htail⟩ := h0
+  have hm := hmagic tail
+  rw [← htail] at hm
+  simp [getProject, hm, r0, r1, r2, r3, r4, bind, Option.bind]
 
-private theorem mapM_atom_roundtrip (xs : List String) :
-    (xs.map Sexp.atom).mapM Sexp.asAtom = .ok xs :=
-  mapM_roundtrip _ _ _ fun _ _ => rfl
-
-theorem decodeDisasm_roundtrip (disasm : Bap.Disasm.Disasm) :
-    decodeDisasm (encodeDisasm disasm) = .ok disasm := by
-  have hi := mapM_roundtrip encodeInsn decodeInsn disasm.instructions
-    fun insn _ => decodeInsn_roundtrip insn
-  have he := mapM_roundtrip encodeEdge decodeEdge disasm.edges fun edge _ => decodeEdge_roundtrip edge
-  have hs := mapM_atom_roundtrip disasm.errors
-  simp only [decodeDisasm, encodeDisasm, Sexp.expectTagged, Sexp.tagged, Sexp.asList]
-  simp [bind, Except.bind, hi, he, hs]
-
-/-- An image roundtrips exactly, memory regions in order. The saved format is unchanged, so a file
-written by an earlier version loads as what it holds, the regions as they were when it was saved. -/
-theorem decodeImage_roundtrip (image : Bap.Image.Image) :
-    decodeImage (encodeImage image) = .ok image := by
-  have hsec := mapM_roundtrip encodeSection decodeSection image.sections
-    fun sec _ => decodeSection_roundtrip sec
-  have hseg := mapM_roundtrip encodeSegment decodeSegment image.segments
-    fun seg _ => decodeSegment_roundtrip seg
-  have hsym := mapM_roundtrip encodeSymbol decodeSymbol image.symbols
-    fun sym _ => decodeSymbol_roundtrip sym
-  have hreg := mapM_roundtrip encodeRegion decodeRegion (image.memory.entries.map Prod.fst)
-    fun region _ => decodeRegion_roundtrip region
-  rw [List.map_map] at hreg
-  have hmap : (encodeRegion ∘ Prod.fst) = fun entry : Bap.Image.MemRegion × Unit => encodeRegion entry.1 := rfl
-  rw [hmap] at hreg
-  have hid : (image.memory.entries.map Prod.fst).map (·, ()) = image.memory.entries := by
-    simp [List.map_map, Function.comp_def]
-  simp only [decodeImage, encodeImage, Sexp.expectTagged, Sexp.tagged, Sexp.asList]
-  simp [decodeArch_roundtrip, parseEndian_roundtrip, decodeBytes_roundtrip, hsec, hseg, hsym, hreg,
-    hid, bind, Except.bind]
-
-/-- Reads of overlapping memory, where the first matching region wins, survive a save and reload. -/
-theorem decodeImage_preserves_reads (image : Bap.Image.Image) (address : Nat) :
-    ((decodeImage (encodeImage image)).toOption.map fun image => image.memory.readByte address) =
-      some (image.memory.readByte address) := by
-  rw [decodeImage_roundtrip]
-  rfl
-
-/-- Saving a reloaded image writes the same document. -/
-theorem encodeImage_decodeImage (image : Bap.Image.Image) :
-    ((decodeImage (encodeImage image)).map encodeImage) = .ok (encodeImage image) := by
-  rw [decodeImage_roundtrip]
-  rfl
+/-- **A saved project is read back whole.** Facts and opinions must live in slots of `persistent`, uniquely named: `serialize` can only check a slot's
+name, and decoding a value needs the slot's own codec. -/
+theorem deserialize_serialize {project : Project} {persistent : List Bap.Knowledge.AnySlot} {data : ByteArray}
+    (h : serialize project persistent = .ok data)
+    (hnames : (persistent.map fun slot => slot.2.name).Nodup)
+    (hfacts : ∀ fact ∈ project.knowledge.facts, fact.slot ∈ persistent)
+    (hopinions : ∀ opinion ∈ project.knowledge.opinions, opinion.fact.slot ∈ persistent) :
+    deserialize data persistent = .ok project := by
+  simp only [serialize, bind, Except.bind] at h
+  split at h
+  · cases h
+  · split at h
+    · cases h
+    · rename_i knowledge hknowledge
+      by_cases hfit : (project.disasm.map (disasmFits (tablesOf ((project.disasm.map (·.instructions)).getD [])))).getD true = true
+      · simp only [hfit, ↓reduceIte, Except.ok.injEq] at h
+        subst h
+        have hkd : Bap.Knowledge.decodeState persistent knowledge = .ok project.knowledge := by
+          obtain ⟨decoded, hdec, hf, ho, hv⟩ :=
+            Bap.Proofs.Knowledge.decodeState_encodeState_total hnames hfacts hopinions hknowledge
+          rw [hdec]
+          cases decoded
+          cases hk : project.knowledge
+          simp_all
+        have hparse : Sexp.parse (toString knowledge) = .ok knowledge := Bap.Proofs.Core.SexpLaws.parse_render _
+        simp only [deserialize, getProject_put hfit, hparse, hkd, bind, Except.bind]
+      · simp only [hfit] at h
+        cases h
 
 /-- Encoding refuses a project holding a Knowledge fact whose slot is not registered. -/
-theorem encode_rejects_unregistered (project : Project) (persistent : List Bap.Knowledge.AnySlot)
+theorem serialize_rejects_unregistered (project : Project) (persistent : List Bap.Knowledge.AnySlot)
     (fact : Bap.Knowledge.Fact)
     (hm : fact ∈ project.knowledge.facts ++ project.knowledge.opinions.map fun opinion => opinion.fact)
     (hn : fact.slot.2.name ∉ persistent.map fun slot => slot.2.name) :
-    ∃ message, encode project persistent = .error message := by
-  simp only [encode]
+    ∃ message, serialize project persistent = .error message := by
+  simp only [serialize]
   have hsome : (((project.knowledge.facts ++ project.knowledge.opinions.map fun opinion => opinion.fact).find?
       fun fact => !(persistent.map fun slot => slot.2.name).contains fact.slot.2.name)).isSome := by
     rw [List.find?_isSome]
@@ -1269,139 +1259,60 @@ theorem encode_rejects_unregistered (project : Project) (persistent : List Bap.K
   rw [hfound]
   exact ⟨_, rfl⟩
 
-private theorem expectTagged_ok {tag : String} {arity : Nat} {input : Sexp} {args : List Sexp}
-    (h : Sexp.expectTagged tag arity input = .ok args) :
-    input = .tagged tag args ∧ args.length = arity := by
-  cases input with
-  | atom a => simp [Sexp.expectTagged, Sexp.asList, bind, Except.bind] at h
-  | list items =>
-    simp only [Sexp.expectTagged, Sexp.asList, bind, Except.bind] at h
-    split at h
-    · rename_i actual rest
-      split at h
-      · rename_i hc
-        cases h
-        simp [Sexp.tagged, hc.1, hc.2]
-      · cases h
-    · cases h
-
-theorem decode_shape {input : Sexp} {persistent : List Bap.Knowledge.AnySlot} {project : Project}
-    (h : decode input persistent = .ok project) :
-    ∃ image disasm storage passed knowledge,
-      input = .tagged "project" [image, disasm, storage, passed, knowledge] := by
-  simp only [decode, bind, Except.bind] at h
-  split at h
-  · cases h
-  · rename_i args hargs
-    have hinput := (expectTagged_ok hargs).1
-    split at h
-    · rename_i image disasm storage passed knowledge
-      exact ⟨image, disasm, storage, passed, knowledge, hinput⟩
-    · cases h
-
-/-- Exact roundtrip of a project. Facts and opinions must live in slots of `persistent`, uniquely
-named: `encode` can only check a slot's name, and decoding a value needs the slot's own codec. -/
-theorem decode_encode {project : Project} {persistent : List Bap.Knowledge.AnySlot} {encoded : Sexp}
-    (h : encode project persistent = .ok encoded)
-    (hnames : (persistent.map fun slot => slot.2.name).Nodup)
-    (hfacts : ∀ fact ∈ project.knowledge.facts, fact.slot ∈ persistent)
-    (hopinions : ∀ opinion ∈ project.knowledge.opinions, opinion.fact.slot ∈ persistent) :
-    decode encoded persistent = .ok project := by
-  simp only [encode, bind, Except.bind] at h
-  split at h
-  · cases h
-  · split at h
-    · cases h
-    · rename_i knowledge hknowledge
-      simp only [Except.ok.injEq] at h
-      subst h
-      have hkd : Bap.Knowledge.decodeState persistent knowledge = .ok project.knowledge := by
-        obtain ⟨decoded, hdec, hf, ho, hv⟩ :=
-          Bap.Proofs.Knowledge.decodeState_encodeState_total hnames hfacts hopinions hknowledge
-        rw [hdec]
-        cases decoded
-        cases hk : project.knowledge
-        simp_all
-      have hst := mapM_roundtrip encodeBinding decodeBinding project.storage
-        fun binding _ => decodeBinding_roundtrip binding
-      have hpa := mapM_atom_roundtrip project.passed
-      obtain ⟨image, disasm, kn, storage, passed⟩ := project
-      simp only at hkd hst hpa
-      cases image with
-      | none =>
-        cases disasm with
-        | none =>
-          simp [decode, Sexp.expectTagged, Sexp.tagged, Sexp.asList, bind, Except.bind, hst, hpa, hkd]
-        | some d =>
-          have hd := decodeDisasm_roundtrip d
-          simp [decode, Sexp.expectTagged, Sexp.tagged, Sexp.asList, bind, Except.bind, hst, hpa, hkd, hd]
-      | some i =>
-        have hi := decodeImage_roundtrip i
-        cases disasm with
-        | none =>
-          simp [decode, Sexp.expectTagged, Sexp.tagged, Sexp.asList, bind, Except.bind, hst, hpa, hkd, hi]
-        | some d =>
-          have hd := decodeDisasm_roundtrip d
-          simp [decode, Sexp.expectTagged, Sexp.tagged, Sexp.asList, bind, Except.bind, hst, hpa, hkd, hi, hd]
-
-/-- The roundtrip through text: parsing the rendered document and decoding it gives the project. -/
-theorem decode_parse_encode {project : Project} {persistent : List Bap.Knowledge.AnySlot} {encoded : Sexp}
-    (h : encode project persistent = .ok encoded)
-    (hnames : (persistent.map fun slot => slot.2.name).Nodup)
-    (hfacts : ∀ fact ∈ project.knowledge.facts, fact.slot ∈ persistent)
-    (hopinions : ∀ opinion ∈ project.knowledge.opinions, opinion.fact.slot ∈ persistent) :
-    (Sexp.parse (toString encoded)).bind (decode · persistent) = .ok project := by
-  rw [show Sexp.parse (toString encoded) = .ok encoded from Bap.Proofs.Core.SexpLaws.parse_render _]
-  exact decode_encode h hnames hfacts hopinions
-
-/-- What `save` writes, `deserialize` reads back: the whole file format, end to end. -/
-theorem deserialize_serialize {project : Project} {persistent : List Bap.Knowledge.AnySlot} {text : String}
-    (h : serialize project persistent = .ok text)
-    (hnames : (persistent.map fun slot => slot.2.name).Nodup)
-    (hfacts : ∀ fact ∈ project.knowledge.facts, fact.slot ∈ persistent)
-    (hopinions : ∀ opinion ∈ project.knowledge.opinions, opinion.fact.slot ∈ persistent) :
-    deserialize text persistent = .ok project := by
-  simp only [serialize, bind, Except.bind] at h
-  split at h
-  · cases h
-  · rename_i encoded hencoded
-    simp only [Except.ok.injEq] at h
-    subst h
-    exact decode_parse_encode hencoded hnames hfacts hopinions
+/-- A project is refused only for what can't be read back: without Knowledge, only for code nested deeper than the reader goes. -/
+theorem serialize_lossless_or_rejecting (project : Project) (hfacts : project.knowledge.facts = [])
+    (hopinions : project.knowledge.opinions = []) :
+    ((project.disasm.map (disasmFits (tablesOf ((project.disasm.map (·.instructions)).getD [])))).getD true = false ∧
+      ∃ error, serialize project [] = .error error) ∨
+      ∃ data, serialize project [] = .ok data ∧ deserialize data [] = .ok project := by
+  have hk : Bap.Knowledge.encodeState [] project.knowledge = .ok (.tagged "state" [.atom (toString project.knowledge.version), .list [], .list []]) := by
+    simp [Bap.Knowledge.encodeState, hfacts, hopinions, bind, Except.bind, pure, Except.pure]
+  have hrun : serialize project [] =
+      if (project.disasm.map (disasmFits (tablesOf ((project.disasm.map (·.instructions)).getD [])))).getD true = true then
+        .ok (putProject project (tablesOf ((project.disasm.map (·.instructions)).getD []))
+          (toString (Sexp.tagged "state" [.atom (toString project.knowledge.version), .list [], .list []])))
+      else .error "project code is nested too deep" := by
+    simp only [serialize, hfacts, hopinions, bind, Except.bind, hk]
+    simp
+  cases hfit : (project.disasm.map (disasmFits (tablesOf ((project.disasm.map (·.instructions)).getD [])))).getD true with
+  | false => exact Or.inl ⟨rfl, "project code is nested too deep", by simp [hrun, hfit]⟩
+  | true =>
+    have hs : serialize project [] = .ok (putProject project (tablesOf ((project.disasm.map (·.instructions)).getD []))
+        (toString (Sexp.tagged "state" [.atom (toString project.knowledge.version), .list [], .list []]))) := by
+      simp only [hrun, hfit, ↓reduceIte]
+    exact Or.inr ⟨_, hs, deserialize_serialize hs List.nodup_nil (by simp [hfacts]) (by simp [hopinions])⟩
 
 /-- `save` writes exactly what `serialize` produces, and fails only as it does. -/
 theorem save_eq (project : Project) (path : String) (persistent : List Bap.Knowledge.AnySlot) :
     save project path persistent = match serialize project persistent with
       | .error error => throw (IO.userError error)
-      | .ok text => IO.FS.writeFile path text := rfl
+      | .ok data => IO.FS.writeBinFile path data := rfl
 
 /-- `loadSaved` returns exactly what `deserialize` makes of the file. -/
 theorem loadSaved_eq (path : String) (persistent : List Bap.Knowledge.AnySlot) :
-    loadSaved path persistent = (IO.FS.readFile path >>= fun input =>
+    loadSaved path persistent = (IO.FS.readBinFile path >>= fun input =>
       match deserialize input persistent with
       | .error error => throw (IO.userError error)
       | .ok project => pure project) := rfl
-
-/-- Without Knowledge facts the file format needs no registry at all. -/
-theorem deserialize_serialize_no_knowledge {project : Project} {text : String}
-    (h : serialize project [] = .ok text) (hfacts : project.knowledge.facts = [])
-    (hopinions : project.knowledge.opinions = []) : deserialize text [] = .ok project :=
-  deserialize_serialize h List.nodup_nil (by simp [hfacts]) (by simp [hopinions])
 
 end Persist
 
 /-! ## The scan of an image -/
 
-/-- The roots of an image are the candidates that are in code. -/
-theorem mem_roots_iff (image : Bap.Image.Image) (address : Nat) :
-    address ∈ Bap.Project.Project.roots image ↔
-      address ∈ (Bap.Project.Project.entryOf image :: ((image.symbols.filter (·.isFunction)).map (·.addr) ++
-        Bap.Project.Project.initFunctions image)) ∧
+/-- The roots of a scan of an image are the candidates that are in code. -/
+theorem mem_scanRoots_iff (image : Bap.Image.Image) (address : Nat) :
+    address ∈ Bap.Project.Project.scanRoots image ↔
+      address ∈ (image.entryPoint :: ((image.symbols.filter (·.isFunction)).map Bap.Project.Project.symbolStart ++
+        Bap.Project.Project.initFunctions image ++
+        (if image.sections.isEmpty then Bap.Project.Project.pltEntries image else []) ++
+        (if image.sections.any (·.name == ".symtab") then [] else Bap.Project.Project.unwindFunctions image))) ∧
       ((Bap.Project.Project.codeRegions image).map Prod.snd).any (·.contains address) = true := by
-  simp only [Bap.Project.Project.roots]
+  simp only [Bap.Project.Project.scanRoots]
   generalize ((Bap.Project.Project.codeRegions image).map Prod.snd) = regions
-  generalize (Bap.Project.Project.entryOf image :: ((image.symbols.filter (·.isFunction)).map (·.addr) ++
-    Bap.Project.Project.initFunctions image)) = candidates
+  generalize (image.entryPoint :: ((image.symbols.filter (·.isFunction)).map Bap.Project.Project.symbolStart ++
+    Bap.Project.Project.initFunctions image ++
+    (if image.sections.isEmpty then Bap.Project.Project.pltEntries image else []) ++
+    (if image.sections.any (·.name == ".symtab") then [] else Bap.Project.Project.unwindFunctions image))) = candidates
   have key : ∀ (l : List Nat) (seen : Std.HashSet Nat) (found : List Nat),
       (∀ a, seen.contains a = true ↔ a ∈ found) →
       (∀ a, a ∈ (l.foldl (init := (seen, found)) fun state address =>
@@ -1450,11 +1361,13 @@ theorem mem_roots_iff (image : Bap.Image.Image) (address : Nat) :
   simp
 
 /-- The recursive scan of an image is sound for the decoder it goes with, and starts from all the roots of the image, and
-what its sweep added. -/
+what its sweep added. That of an ARM image goes over keys of addresses and states, whose instructions come out with addresses,
+see `Interwork.unkeyAll_spec`, and the theorems of a scan apply to the keys. -/
 theorem scanImage_sound (image : Bap.Image.Image) :
     Bap.Proofs.Disasm.Holds (Bap.Project.Project.scanImage image) fun result => ∀ disasm, result = some disasm →
-      disasm.entry = Bap.Project.Project.entryOf image ∧ ∃ d extra,
-        Bap.Proofs.Disasm.ScanOk d ByteArray.empty (extra ++ Bap.Project.Project.roots image) disasm.instructions disasm.edges := by
+      disasm.entry = Bap.Project.Project.entryOf image ∧ ∃ d extra keyed,
+        Bap.Proofs.Disasm.ScanOk d ByteArray.empty (extra ++ Bap.Project.Project.scanRoots image) keyed.instructions keyed.edges ∧
+        disasm = if image.arch = .arm then Bap.Disasm.Interwork.unkey keyed else keyed := by
   unfold Bap.Project.Project.scanImage
   refine Bap.Proofs.Disasm.Holds.bind (Bap.Proofs.Disasm.Holds.true _) fun base _ _ => ?_
   dsimp only
@@ -1466,6 +1379,104 @@ theorem scanImage_sound (image : Bap.Image.Image) :
     refine Bap.Proofs.Disasm.Holds.pure ?_
     intro _ h
     cases h
-    exact ⟨hd.1, _, hd.2⟩
+    obtain ⟨extra, hok⟩ := hd.2
+    refine ⟨?_, _, extra, disasm, hok, rfl⟩
+    split
+    · exact hd.1
+    · exact hd.1
+
+/-! ## The decoder of an image by the fields of its ELF header -/
+
+open Bap.Target.LLVMLift in
+/-- Each word size, byte order and release has its own LLVM target. -/
+theorem mips_triples :
+    MipsVariant.triple { bits := 32, endian := .big } = "mips" ∧
+    MipsVariant.triple { bits := 32, endian := .little } = "mipsel" ∧
+    MipsVariant.triple { bits := 64, endian := .big } = "mips64" ∧
+    MipsVariant.triple { bits := 64, endian := .little } = "mips64el" ∧
+    MipsVariant.triple { bits := 32, endian := .big, release6 := true } = "mipsisa32r6" ∧
+    MipsVariant.triple { bits := 32, endian := .little, release6 := true } = "mipsisa32r6el" ∧
+    MipsVariant.triple { bits := 64, endian := .big, release6 := true } = "mipsisa64r6" ∧
+    MipsVariant.triple { bits := 64, endian := .little, release6 := true } = "mipsisa64r6el" :=
+  ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+open Bap.Target.LLVMLift in
+theorem powerpc_triples :
+    PowerPCVariant.triple { bits := 32, endian := .big } = "powerpc" ∧
+    PowerPCVariant.triple { bits := 32, endian := .little } = "powerpcle" ∧
+    PowerPCVariant.triple { bits := 64, endian := .big } = "powerpc64" ∧
+    PowerPCVariant.triple { bits := 64, endian := .little } = "powerpc64le" :=
+  ⟨rfl, rfl, rfl, rfl⟩
+
+/-- The MIPS of a decoded ELF file is what its header says: `EI_CLASS`, `EI_DATA` and the architecture of `e_flags`. -/
+theorem mipsVariant_of_elf {data : ByteArray} {image : Bap.Image.Image} (h : Bap.Image.Elf.decode data = .ok image) :
+    (Project.mipsVariant image).bits = (if Bap.Proofs.Image.byteAt data 4 = 2 then 64 else 32) ∧
+    (Project.mipsVariant image).endian = (if Bap.Proofs.Image.byteAt data 5 = 1 then .little else .big) ∧
+    (Project.mipsVariant image).release6 = Bap.Image.Elf.mipsRelease6
+      ((IO.Reader.u32 data image.endian (if image.addrWidth = 64 then 48 else 36)).toOption.getD 0) := by
+  have ⟨_, hw, he⟩ := Bap.Proofs.Image.ElfParser.decode_class_encoding h
+  refine ⟨?_, he, ?_⟩
+  · simp only [Project.mipsVariant, hw]
+    split <;> simp_all
+  · simp only [Project.mipsVariant, Bap.Proofs.Image.ElfParser.decode_machineFlags h]
+
+/-- The PowerPC of a decoded ELF file is what its header says: `EI_CLASS` and `EI_DATA`. -/
+theorem powerpcVariant_of_elf {data : ByteArray} {image : Bap.Image.Image} (h : Bap.Image.Elf.decode data = .ok image) :
+    (Project.powerpcVariant image).bits = (if Bap.Proofs.Image.byteAt data 4 = 2 then 64 else 32) ∧
+    (Project.powerpcVariant image).endian = (if Bap.Proofs.Image.byteAt data 5 = 1 then .little else .big) := by
+  have ⟨_, hw, he⟩ := Bap.Proofs.Image.ElfParser.decode_class_encoding h
+  refine ⟨?_, he⟩
+  simp only [Project.powerpcVariant, hw]
+  split <;> simp_all
+
+/-- A MIPS image has the decoder of its variant, whatever its word size. -/
+theorem codeDisassembler_mips (image : Bap.Image.Image) (base : Nat) (h : image.arch = .mips) :
+    Bap.Proofs.Disasm.Holds (Project.codeDisassembler image base) fun result =>
+      ∀ d, result = some d → d.name = s!"{(Project.mipsVariant image).triple}-llvm-primus" := by
+  have hn : Bap.Proofs.Disasm.Holds (Bap.Target.MIPS.disassembler base (Project.mipsVariant image))
+      fun d => d.name = s!"{(Project.mipsVariant image).triple}-llvm-primus" := by
+    unfold Bap.Target.MIPS.disassembler
+    exact Bap.Proofs.Disasm.Holds.bind (Bap.Proofs.Disasm.Holds.true _) fun _ _ _ => Bap.Proofs.Disasm.Holds.pure rfl
+  unfold Project.codeDisassembler
+  simp only [h]
+  intro s r s' he d hd
+  subst hd
+  cases hm : Bap.Target.MIPS.disassembler base (Project.mipsVariant image) s with
+  | ok a s1 =>
+    have he' : (Bap.Target.MIPS.disassembler base (Project.mipsVariant image) >>= fun d => pure (some d)) s =
+        EST.Out.ok (some d) s' := he
+    rw [Bap.Proofs.Disasm.bind_ok hm] at he'
+    cases he'
+    exact hn s _ s' hm
+  | error e s1 =>
+    have he' : (Bap.Target.MIPS.disassembler base (Project.mipsVariant image) >>= fun d => pure (some d)) s =
+        EST.Out.ok (some d) s' := he
+    rw [Bap.Proofs.Disasm.bind_error hm] at he'
+    cases he'
+
+/-- A PowerPC image has the decoder of its variant, whatever its word size. -/
+theorem codeDisassembler_powerpc (image : Bap.Image.Image) (base : Nat) (h : image.arch = .powerpc) :
+    Bap.Proofs.Disasm.Holds (Project.codeDisassembler image base) fun result =>
+      ∀ d, result = some d → d.name = s!"{(Project.powerpcVariant image).triple}-llvm-primus" := by
+  have hn : Bap.Proofs.Disasm.Holds (Bap.Target.PowerPC.disassembler base (Project.powerpcVariant image))
+      fun d => d.name = s!"{(Project.powerpcVariant image).triple}-llvm-primus" := by
+    unfold Bap.Target.PowerPC.disassembler
+    exact Bap.Proofs.Disasm.Holds.bind (Bap.Proofs.Disasm.Holds.true _) fun _ _ _ => Bap.Proofs.Disasm.Holds.pure rfl
+  unfold Project.codeDisassembler
+  simp only [h]
+  intro s r s' he d hd
+  subst hd
+  cases hm : Bap.Target.PowerPC.disassembler base (Project.powerpcVariant image) s with
+  | ok a s1 =>
+    have he' : (Bap.Target.PowerPC.disassembler base (Project.powerpcVariant image) >>= fun d => pure (some d)) s =
+        EST.Out.ok (some d) s' := he
+    rw [Bap.Proofs.Disasm.bind_ok hm] at he'
+    cases he'
+    exact hn s _ s' hm
+  | error e s1 =>
+    have he' : (Bap.Target.PowerPC.disassembler base (Project.powerpcVariant image) >>= fun d => pure (some d)) s =
+        EST.Out.ok (some d) s' := he
+    rw [Bap.Proofs.Disasm.bind_error hm] at he'
+    cases he'
 
 end Bap.Proofs.Project

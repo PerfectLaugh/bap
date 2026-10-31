@@ -1,6 +1,7 @@
 import Lean.Elab.Tactic.Basic
 import Bap.Disasm.Linear
 import Bap.Disasm.Recursive
+import Bap.Disasm.Interwork
 import Std.Data.HashSet.Lemmas
 
 namespace Bap.Proofs.Disasm
@@ -25,7 +26,7 @@ private abbrev fastDecodeSlot : Disassembler → ByteArray → Nat → Recursive
 private abbrev fastScanAux : Disassembler → ByteArray → Nat → List Nat → Recursive.ScanState →
     IO Recursive.ScanState :=
   priv% Bap.Disasm.Recursive Bap.Disasm.Recursive.scanAux
-private abbrev fastSweepRange : Disassembler → ByteArray → Nat → Nat → Nat → Nat → Nat → Recursive.Walk → Recursive.ScanState →
+private abbrev fastSweepRange : Disassembler → ByteArray → Nat → Recursive.SweepPlan → Nat → Nat → Nat → Bool → Recursive.Walk → Recursive.ScanState →
     IO (Recursive.Walk × Recursive.ScanState) :=
   priv% Bap.Disasm.Recursive Bap.Disasm.Recursive.sweepRange
 private abbrev fastBuild : Std.HashSet Nat → List Insn → List Block → List Insn → List Block :=
@@ -159,7 +160,7 @@ private theorem Represents.add {s v is es errs} (h : Represents s v is es errs) 
     · intro a
       simp only [Std.HashSet.contains_insert, h.addresses_iff, List.any_append, List.any_cons, List.any_nil, Bool.or_false]
       rw [Bool.or_comm]
-    · simp [h.instructions]
+    · simp [h.instructions, Binary.share_eq]
 
 private theorem Represents.visit {s v is es errs} (h : Represents s v is es errs) (a : Nat) :
     Represents (s.visit a) (a :: v) is es errs := by
@@ -1956,6 +1957,193 @@ theorem scan_covers_delay_slots (d : Disassembler) (data : ByteArray) (entry bas
     have hnext := hall _ (Reach.step ha hv (next_mem_nextAddresses d insn (by simpa using hd) hft))
     exact ⟨fun i hi => ((hnext).1 i hi).1, hnext.2⟩
 
+/-! ### Keys of addresses and states -/
+
+namespace Interwork
+
+open Bap.Disasm.Interwork
+
+/-- A key says both the even address and the state it was made of. -/
+theorem key_inverse (address : Nat) (thumb : Bool) (h : address % 2 = 0) :
+    addressOf (key address thumb) = address ∧ isThumb (key address thumb) = thumb := by
+  cases thumb <;> simp [key, addressOf, isThumb, h] <;> omega
+
+/-- Different pairs of an even address and a state have different keys, so a scan over keys finds each once. -/
+theorem key_injective {a b : Nat} {s t : Bool} (ha : a % 2 = 0) (hb : b % 2 = 0) (h : key a s = key b t) : a = b ∧ s = t := by
+  have h1 := key_inverse a s ha
+  have h2 := key_inverse b t hb
+  rw [h] at h1
+  exact ⟨h1.1.symm.trans h2.1, h1.2.symm.trans h2.2⟩
+
+/-- Any number is the key of its address and its state. -/
+theorem key_surjective (code : Nat) : key (addressOf code) (isThumb code) = code := by
+  simp only [key, addressOf, isThumb]
+  by_cases h : code % 2 = 1 <;> simp [h] <;> omega
+
+/-- What follows an instruction of even size is in the state of the instruction. -/
+theorem next_keeps_state (thumb : Bool) (insn : Insn) (h : insn.address % 2 = 0) (hs : insn.size % 2 = 0) :
+    isThumb (rekey thumb insn).next = thumb := by
+  simp only [Insn.next, rekey, constantBx]
+  split <;> (cases thumb <;> simp [key, isThumb, h] <;> omega)
+
+/-- `BLX` of an immediate goes to the other state and every other direct branch stays in its state. -/
+theorem targetKey_state (thumb switches : Bool) (target : Nat) (h : target % 2 = 0) :
+    isThumb (targetKey thumb switches target) = (thumb != switches) ∧
+      addressOf (targetKey thumb switches target) = target :=
+  ⟨(key_inverse _ _ h).2, (key_inverse _ _ h).1⟩
+
+/-- What the decoder of keys says is of one of the decoders of the states, at the address of the key and in the state of the
+key, unless the mapping symbols say that no instruction of the state can be there. -/
+theorem decoder_gives (runs : Array Run) (arm thumb : Disassembler) (data : ByteArray) (code : Nat) (insn : Insn)
+    (h : Gives (decoder runs arm thumb) data code (.ok insn)) :
+    (isThumb code = true → ∃ raw, Gives thumb data (addressOf code) (.ok raw) ∧ insn = rekey true raw) ∧
+      (isThumb code = false → ∃ raw, Gives arm data (addressOf code) (.ok raw) ∧ insn = rekey false raw) := by
+  obtain ⟨st, st', he⟩ := h
+  have aux : ∀ (d : Disassembler) (t : Bool) (st st' : Void IO.RealWorld),
+      ((d.decode (addressOf code) data >>= fun result => pure (rekey t <$> result) : IO (Except String Insn)) st =
+        EST.Out.ok (.ok insn) st') →
+      ∃ raw, Gives d data (addressOf code) (.ok raw) ∧ insn = rekey t raw := by
+    intro d t st st' he
+    cases hd : d.decode (addressOf code) data st with
+    | error e s =>
+      rw [bind_error hd] at he
+      cases he
+    | ok r s =>
+      rw [bind_ok hd] at he
+      cases r with
+      | error e => cases he
+      | ok raw =>
+        cases he
+        exact ⟨raw, ⟨st, st', hd⟩, rfl⟩
+  simp only [decoder] at he
+  have arm_case : (runAt runs (addressOf code) ≠ some .data ∧ runAt runs (addressOf code) ≠ some .thumb) →
+      isThumb code = false → ∃ raw, Gives arm data (addressOf code) (.ok raw) ∧ insn = rekey false raw := by
+    intro ⟨h1, h2⟩ ht
+    cases hr : runAt runs (addressOf code) with
+    | none =>
+      simp only [hr, ht] at he
+      split at he
+      · cases he
+      · exact aux arm false _ _ he
+    | some k =>
+      cases k with
+      | data => exact absurd hr h1
+      | thumb => exact absurd hr h2
+      | arm =>
+        simp only [hr, ht] at he
+        split at he
+        · cases he
+        · exact aux arm false _ _ he
+  have thumb_case : (runAt runs (addressOf code) ≠ some .data ∧ runAt runs (addressOf code) ≠ some .arm) →
+      isThumb code = true → ∃ raw, Gives thumb data (addressOf code) (.ok raw) ∧ insn = rekey true raw := by
+    intro ⟨h1, h2⟩ ht
+    cases hr : runAt runs (addressOf code) with
+    | none =>
+      simp only [hr, ht] at he
+      exact aux thumb true _ _ he
+    | some k =>
+      cases k with
+      | data => exact absurd hr h1
+      | arm => exact absurd hr h2
+      | thumb =>
+        simp only [hr, ht] at he
+        exact aux thumb true _ _ he
+  have hdata : runAt runs (addressOf code) ≠ some .data := fun hr => by
+    simp only [hr] at he
+    cases he
+  refine ⟨fun ht => thumb_case ⟨hdata, fun hr => ?_⟩ ht, fun ht => arm_case ⟨hdata, fun hr => ?_⟩ ht⟩
+  · simp only [hr, ht] at he
+    cases he
+  · simp only [hr, ht] at he
+    cases he
+
+/-- The decoder of keys has no instruction in what the mapping symbols say is data. -/
+theorem decoder_data (runs : Array Run) (arm thumb : Disassembler) (data : ByteArray) (code : Nat) (insn : Insn)
+    (hrun : runAt runs (addressOf code) = some .data) : ¬ Gives (decoder runs arm thumb) data code (.ok insn) := by
+  rintro ⟨st, st', he⟩
+  simp only [decoder, hrun] at he
+  cases he
+
+/-- An instruction of the scan is an instruction of a state, whose lifted program is the one of its decoder: the key only
+changes where the rest of the scan goes. -/
+theorem unkey_rekey (thumb : Bool) (insn : Insn) (h : insn.address % 2 = 0)
+    (ht : ∀ target ∈ (constantBx thumb insn).target, target % 2 = 0) :
+    unkeyInsn (rekey thumb insn) = constantBx thumb insn := by
+  have hadd : (constantBx thumb insn).address = insn.address := by
+    simp only [constantBx]
+    split <;> rfl
+  have ha : addressOf (key insn.address thumb) = insn.address := (key_inverse _ _ h).1
+  simp only [unkeyInsn, rekey]
+  cases hc : constantBx thumb insn with
+  | mk address size asm flow target bil =>
+    rw [hc] at hadd ht
+    simp only at hadd
+    subst hadd
+    cases target with
+    | none => simp [ha]
+    | some t =>
+      have := ht t rfl
+      simp [targetKey, (key_inverse _ _ this).1, ha]
+
+/-- What a scan of keys finds has one instruction of each address, of those it found, and it keeps an instruction of each
+address that it found. -/
+theorem unkeyAll_spec (instructions : List Insn) :
+    ((unkeyAll instructions).map Insn.address).Nodup ∧
+      (∀ x ∈ unkeyAll instructions, ∃ k ∈ instructions, x = unkeyInsn k) ∧
+      ∀ k ∈ instructions, ∃ x ∈ unkeyAll instructions, x.address = addressOf k.address := by
+  have key : ∀ (l : List Insn) (seen : Std.HashSet Nat) (found : List Insn),
+      (∀ a, seen.contains a = true ↔ a ∈ found.map Insn.address) → (found.map Insn.address).Nodup →
+      let out := (l.foldl (init := (seen, found)) fun state insn =>
+        let insn := unkeyInsn insn
+        if state.1.contains insn.address then state else (state.1.insert insn.address, insn :: state.2)).2
+      (out.map Insn.address).Nodup ∧ (∀ x ∈ out, x ∈ found ∨ ∃ k ∈ l, x = unkeyInsn k) ∧
+        (∀ x ∈ found, x ∈ out) ∧ ∀ k ∈ l, ∃ x ∈ out, x.address = addressOf k.address := by
+    intro l
+    induction l with
+    | nil =>
+      intro seen found _ hn
+      exact ⟨hn, fun x hx => .inl hx, fun _ h => h, fun _ h => by cases h⟩
+    | cons head tail ih =>
+      intro seen found hs hn
+      simp only [List.foldl_cons]
+      split
+      · rename_i hc
+        have ⟨h1, h2, h3, h4⟩ := ih seen found hs hn
+        refine ⟨h1, fun x hx => ?_, h3, fun k hk => ?_⟩
+        · rcases h2 x hx with h | ⟨k, hk, he⟩
+          · exact .inl h
+          · exact .inr ⟨k, List.mem_cons_of_mem _ hk, he⟩
+        · rcases List.mem_cons.1 hk with rfl | hk
+          · obtain ⟨w, hw, he⟩ := List.mem_map.1 ((hs _).1 hc)
+            exact ⟨w, h3 w hw, he⟩
+          · exact h4 k hk
+      · rename_i hc
+        have hnew : (unkeyInsn head).address ∉ found.map Insn.address := fun hm => hc ((hs _).2 hm)
+        have ⟨h1, h2, h3, h4⟩ := ih (seen.insert (unkeyInsn head).address) (unkeyInsn head :: found) (fun a => by
+          rw [Std.HashSet.contains_insert, Bool.or_eq_true, hs]
+          simp only [beq_iff_eq, List.map_cons, List.mem_cons]
+          exact or_congr eq_comm Iff.rfl) (by simp only [List.map_cons]; exact List.nodup_cons.2 ⟨hnew, hn⟩)
+        refine ⟨h1, fun x hx => ?_, fun x hx => h3 x (List.mem_cons_of_mem _ hx), fun k hk => ?_⟩
+        · rcases h2 x hx with h | ⟨k, hk, he⟩
+          · rcases List.mem_cons.1 h with rfl | h
+            · exact .inr ⟨head, List.mem_cons_self, rfl⟩
+            · exact .inl h
+          · exact .inr ⟨k, List.mem_cons_of_mem _ hk, he⟩
+        · rcases List.mem_cons.1 hk with rfl | hk
+          · exact ⟨_, h3 _ List.mem_cons_self, rfl⟩
+          · exact h4 k hk
+  have ⟨h1, h2, _, h4⟩ := key instructions {} [] (by simp) (by simp)
+  simp only [unkeyAll]
+  refine ⟨?_, fun x hx => ?_, fun k hk => ?_⟩
+  · simpa [List.map_reverse, List.Nodup, List.pairwise_reverse, ne_comm] using h1
+  · rcases h2 x (List.mem_reverse.1 hx) with h | h
+    · cases h
+    · exact h
+  · obtain ⟨x, hx, he⟩ := h4 k hk
+    exact ⟨x, List.mem_reverse.2 hx, he⟩
+
+end Interwork
+
 /-! ### The scan with a linear sweep -/
 
 theorem Holds.and {α} {m : IO α} {P Q : α → Prop} (hp : Holds m P) (hq : Holds m Q) : Holds m fun a => P a ∧ Q a :=
@@ -2097,10 +2285,11 @@ private theorem fast_sweep_step (d : Disassembler) (data : ByteArray) (roots : L
   exact ⟨h1 st out st' he, ⟨a :: extra, h2 st out st' he⟩,
     fun x hx => (h3 st out st' he).1 x (hk x hx), fun x hx => (h3 st out st' he).2 x (hke x hx)⟩
 
-private theorem fast_sweep_range (d : Disassembler) (data : ByteArray) (roots : List Nat) (fuel alignment limit steps address : Nat)
+private theorem fast_sweep_range (d : Disassembler) (data : ByteArray) (roots : List Nat) (fuel : Nat)
+    (plan : Recursive.SweepPlan) (limit steps address : Nat) (lost : Bool)
     (walk : Recursive.Walk) (base s : Recursive.ScanState) (h : SweepInv d data roots base s) :
-    Holds (fastSweepRange d data fuel alignment limit steps address walk s) fun out => SweepInv d data roots base out.2 := by
-  induction steps generalizing address walk s with
+    Holds (fastSweepRange d data fuel plan limit steps address lost walk s) fun out => SweepInv d data roots base out.2 := by
+  induction steps generalizing address lost walk s with
   | zero =>
     dsimp only [fastSweepRange]
     prw Bap.Disasm.Recursive Bap.Disasm.Recursive.sweepRange
@@ -2113,21 +2302,28 @@ private theorem fast_sweep_range (d : Disassembler) (data : ByteArray) (roots : 
     split
     · exact Holds.pure h
     · split
-      · exact ih _ _ _ h
+      · exact ih _ _ _ _ h
       · split
-        · exact ih _ _ _ h
-        · exact Holds.bind (fast_sweep_step d data roots fuel address base s h) fun out ho _ => ih _ _ _ ho
+        · exact ih _ _ _ _ h
+        · split
+          · exact ih _ _ _ _ h
+          · split
+            · refine Holds.bind (Holds.true _) fun size _ _ => ?_
+              split
+              · exact ih _ _ _ _ h
+              · exact ih _ _ _ _ h
+            · exact Holds.bind (fast_sweep_step d data roots fuel address base s h) fun out ho _ => ih _ _ _ _ ho
 
-private theorem fast_sweep_ranges (d : Disassembler) (data : ByteArray) (roots : List Nat) (fuel alignment : Nat)
-    (ranges : List (Nat × Nat)) (walk : Recursive.Walk) (base s : Recursive.ScanState) (h : SweepInv d data roots base s) :
+private theorem fast_sweep_ranges (d : Disassembler) (data : ByteArray) (roots : List Nat) (fuel : Nat)
+    (plan : Recursive.SweepPlan) (ranges : List (Nat × Nat)) (walk : Recursive.Walk) (base s : Recursive.ScanState) (h : SweepInv d data roots base s) :
     Holds (ranges.foldlM (init := (walk, s)) fun (state : Recursive.Walk × Recursive.ScanState) range =>
-        fastSweepRange d data fuel alignment range.2 (2 * (range.2 - range.1) + 1) range.1 state.1 state.2)
+        fastSweepRange d data fuel plan range.2 (2 * (range.2 - range.1) + 1) range.1 false state.1 state.2)
       fun out => SweepInv d data roots base out.2 := by
   induction ranges generalizing walk s with
   | nil => exact Holds.pure h
   | cons range rest ih =>
     simp only [List.foldlM_cons]
-    exact Holds.bind (fast_sweep_range d data roots fuel alignment _ _ _ walk base s h) fun out ho _ => ih out.1 out.2 ho
+    exact Holds.bind (fast_sweep_range d data roots fuel plan _ _ _ _ walk base s h) fun out ho _ => ih out.1 out.2 ho
 
 private theorem scanRegions_stage (d : Disassembler) (bytes : Nat) (roots : List Nat) :
     Holds (fastScanAux d ByteArray.empty (4 * bytes + roots.length + 1) roots {})
@@ -2141,32 +2337,32 @@ private theorem scanRegions_stage (d : Disassembler) (bytes : Nat) (roots : List
   intro st out st' he
   exact ⟨h1 st out st' he, ⟨[], (h2 st out st' he).1⟩, fun _ h => h, fun _ h => h⟩
 
-private theorem scanRegions_unfold (d : Disassembler) (bytes entry : Nat) (roots : List Nat) (alignment : Nat)
+private theorem scanRegions_unfold (d : Disassembler) (bytes entry : Nat) (roots : List Nat) (plan : Recursive.SweepPlan)
     (ranges : List (Nat × Nat)) :
-    Recursive.scanRegions d bytes entry roots alignment ranges =
+    Recursive.scanRegions d bytes entry roots plan ranges =
       (fastScanAux d ByteArray.empty (4 * bytes + roots.length + 1) roots {} >>= fun first =>
         (ranges.foldlM (init := (({} : Recursive.Walk), first)) fun (state : Recursive.Walk × Recursive.ScanState) range =>
-          fastSweepRange d ByteArray.empty (4 * bytes + roots.length + 1) alignment range.2 (2 * (range.2 - range.1) + 1)
-            range.1 state.1 state.2) >>= fun out =>
+          fastSweepRange d ByteArray.empty (4 * bytes + roots.length + 1) plan range.2 (2 * (range.2 - range.1) + 1)
+            range.1 false state.1 state.2) >>= fun out =>
         pure { entry := entry, instructions := out.2.instructions.toList, edges := out.2.edges.toList,
                errors := first.errors.toList }) := rfl
 
 /-- Soundness of the scan with a linear sweep. What holds of a scan holds of it, from its roots and the addresses the
 sweep went on from, and it has no other errors than the ones of the scan from the roots. -/
-theorem scanRegions_sound (d : Disassembler) (bytes entry : Nat) (roots : List Nat) (alignment : Nat)
+theorem scanRegions_sound (d : Disassembler) (bytes entry : Nat) (roots : List Nat) (plan : Recursive.SweepPlan)
     (ranges : List (Nat × Nat)) :
-    Holds (Recursive.scanRegions d bytes entry roots alignment ranges) fun result =>
+    Holds (Recursive.scanRegions d bytes entry roots plan ranges) fun result =>
       result.entry = entry ∧ ∃ extra, ScanOk d ByteArray.empty (extra ++ roots) result.instructions result.edges := by
   rw [scanRegions_unfold]
   refine Holds.bind (scanRegions_stage d bytes roots) fun first hfirst _ => ?_
-  refine Holds.bind (fast_sweep_ranges d _ roots _ alignment ranges {} first first hfirst) fun out ho _ => ?_
+  refine Holds.bind (fast_sweep_ranges d _ roots _ plan ranges {} first first hfirst) fun out ho _ => ?_
   exact Holds.pure ⟨rfl, ho.ok⟩
 
 /-- Completeness of the scan with a linear sweep: the sweep adds to the scan from the roots and takes nothing back. -/
-theorem scanRegions_complete (d : Disassembler) (bytes entry : Nat) (roots R : List Nat) (alignment : Nat)
+theorem scanRegions_complete (d : Disassembler) (bytes entry : Nat) (roots R : List Nat) (plan : Recursive.SweepPlan)
     (ranges : List (Nat × Nat)) (f : Nat → Except String Insn) (hf : ∀ a r, Gives d ByteArray.empty a r → r = f a)
     (hR : R.length ≤ bytes) (hrange : ∀ a insn, Valid f a insn → a ∈ R) :
-    Holds (Recursive.scanRegions d bytes entry roots alignment ranges) fun result =>
+    Holds (Recursive.scanRegions d bytes entry roots plan ranges) fun result =>
       ∀ a, Reach d f roots a → Accounted d f result.instructions result.edges result.errors a := by
   rw [scanRegions_unfold]
   have ⟨S, h1, h2, h3⟩ := closed_of_range d roots R f hrange
@@ -2175,7 +2371,7 @@ theorem scanRegions_complete (d : Disassembler) (bytes entry : Nat) (roots R : L
   have hc := fast_holds hempty (scanAux_complete_of_closed d ByteArray.empty (4 * bytes + roots.length + 1) roots f hf S h1 h2
     (by omega))
   refine Holds.bind (Holds.and (scanRegions_stage d bytes roots) hc) fun first hfirst _ => ?_
-  refine Holds.bind (fast_sweep_ranges d _ roots _ alignment ranges {} first first hfirst.1) fun out ho _ => ?_
+  refine Holds.bind (fast_sweep_ranges d _ roots _ plan ranges {} first first hfirst.1) fun out ho _ => ?_
   exact Holds.pure fun a ha => Accounted.mono ho.keeps ho.keepsEdges (fun _ h => h) (hfirst.2 a ha)
 
 /-- The addresses the decoder of several regions has an instruction at are in the regions. -/
@@ -2217,13 +2413,13 @@ private theorem regions_addresses (regions : List (Bap.Image.MemRegion × Disass
 /-- The scan of several regions is complete, however the code branches: each address reached from the roots is
 accounted for, since their bytes give enough fuel. -/
 theorem scanRegions_complete_of_regions (base : Disassembler) (regions : List (Bap.Image.MemRegion × Disassembler))
-    (entry : Nat) (roots : List Nat) (alignment : Nat) (ranges : List (Nat × Nat)) (f : Nat → Except String Insn)
+    (entry : Nat) (roots : List Nat) (plan : Recursive.SweepPlan) (ranges : List (Nat × Nat)) (f : Nat → Except String Insn)
     (hf : ∀ a r, Gives (Disassembler.ofRegions base regions) ByteArray.empty a r → r = f a)
     (hrange : ∀ a insn, Valid f a insn → ∃ entry ∈ regions, entry.1.contains a = true) :
-    Holds (Recursive.scanRegions (Disassembler.ofRegions base regions) (regions.map (·.1.size)).sum entry roots alignment ranges)
+    Holds (Recursive.scanRegions (Disassembler.ofRegions base regions) (regions.map (·.1.size)).sum entry roots plan ranges)
       fun result => ∀ a, Reach (Disassembler.ofRegions base regions) f roots a →
         Accounted (Disassembler.ofRegions base regions) f result.instructions result.edges result.errors a := by
   have ⟨R, h1, h2⟩ := regions_addresses regions
-  exact scanRegions_complete _ _ entry roots R alignment ranges f hf (Nat.le_of_eq h1) fun a insn hv => h2 a (hrange a insn hv)
+  exact scanRegions_complete _ _ entry roots R plan ranges f hf (Nat.le_of_eq h1) fun a insn hv => h2 a (hrange a insn hv)
 
 end Bap.Proofs.Disasm

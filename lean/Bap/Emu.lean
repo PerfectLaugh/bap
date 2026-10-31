@@ -1201,6 +1201,8 @@ private def delayFor (emu : Emu) (address : Nat) : IO DelayKind := do
   | .none => pure .none
   | .mips release6 =>
     let code ← fetch emu address
+    -- `mipsWord` reads the most significant byte first
+    let code := if emu.config.endian == .little then ByteArray.mk (code.extract 0 4).toList.reverse.toArray else code
     match mipsWord code 0 with
     | none => pure .none
     | some word =>
@@ -1604,42 +1606,29 @@ def aarch64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config :=
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
   create (adjust config) [region] {} entry
 
-def mips64 (code : ByteArray) (base entry : Nat) (release6 : Bool := false) (adjust : Config → Config := id) : IO Emu := do
-  let environment ← Target.LLVMLift.mipsEnvironment
+private def mipsOf (variant : Target.LLVMLift.MipsVariant) (code : ByteArray) (base entry : Nat) (adjust : Config → Config) : IO Emu := do
+  let environment ← Target.LLVMLift.mipsEnvironmentOf variant
   let decoders (base : Nat) : IO Disasm.Disassembler := pure {
-    name := "mips64-llvm-primus"
-    decode := decodeAt (Target.LLVMLift.decodeMIPSWith environment) base
+    name := if variant.bits == 64 then "mips64-llvm-primus" else "mips-llvm-primus"
+    decode := decodeAt (Target.LLVMLift.decodeMIPSOf variant environment) base
     hasDelaySlot := Target.LLVMLift.mipsHasDelaySlot
     annulsSlot := Target.LLVMLift.mipsAnnulsSlot }
   let disassembler ← decoders base
   let config : Config := {
     disassembler
     disassemblerAt := some decoders
-    memory := ⟨"mem", .mem 64 8, 0, false⟩
-    endian := .big
+    memory := ⟨"mem", .mem variant.bits 8, 0, false⟩
+    endian := variant.endian
     syscallAbi := .mips
-    delayPolicy := .mips release6
+    delayPolicy := .mips variant.release6
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
   create (adjust config) [region] {} entry
 
-def mips32 (code : ByteArray) (base entry : Nat) (release6 : Bool := false) (adjust : Config → Config := id) : IO Emu := do
-  let environment ← Target.LLVMLift.mips32Environment
-  let decoders (base : Nat) : IO Disasm.Disassembler := pure {
-    name := "mips-llvm-primus"
-    decode := decodeAt (Target.LLVMLift.decodeMIPS32With environment) base
-    hasDelaySlot := Target.LLVMLift.mipsHasDelaySlot
-    annulsSlot := Target.LLVMLift.mipsAnnulsSlot }
-  let disassembler ← decoders base
-  let config : Config := {
-    disassembler
-    disassemblerAt := some decoders
-    memory := ⟨"mem", .mem 32 8, 0, false⟩
-    endian := .big
-    syscallAbi := .mips
-    delayPolicy := .mips release6
-  }
-  let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create (adjust config) [region] {} entry
+def mips64 (code : ByteArray) (base entry : Nat) (release6 : Bool := false) (endian : Endian := .big) (adjust : Config → Config := id) : IO Emu :=
+  mipsOf { bits := 64, endian, release6 } code base entry adjust
+
+def mips32 (code : ByteArray) (base entry : Nat) (release6 : Bool := false) (endian : Endian := .big) (adjust : Config → Config := id) : IO Emu :=
+  mipsOf { bits := 32, endian, release6 } code base entry adjust
 
 end Bap.Emu

@@ -102,7 +102,7 @@ def discoveredFunctions (project : Project.Project) (index : Index) : List Image
     (init := (named.foldl (fun set symbol => set.insert symbol.addr) ({} : Std.HashSet Nat), ([] : List Image.Symbol)))
     fun state address =>
       if state.1.contains address || !addresses.contains address then state
-      else (state.1.insert address, ⟨subroutineName address, address, 0, true, false⟩ :: state.2)
+      else (state.1.insert address, ⟨subroutineName address, address, 0, true, false, false⟩ :: state.2)
   named ++ state.2.reverse
 
 /-- The index of a project, with the functions it was found to have and not only the ones its symbols tell. -/

@@ -3443,9 +3443,10 @@ theorem eval_family_keeps (fuel : Nat) :
           simp only [Except.ok.injEq, Prod.mk.injEq] at h10
           obtain ⟨_, rfl⟩ := h10
           exact hk1
-        · simp only [Except.ok.injEq, Prod.mk.injEq] at h8
-          obtain ⟨_, rfl⟩ := h8
-          exact hk1
+        · split at h8 <;>
+            · simp only [Except.ok.injEq, Prod.mk.injEq] at h8
+              obtain ⟨_, rfl⟩ := h8
+              exact hk1
     · intro context state callable args value after h
       rw [apply.eq_def] at h
       simp only at h
@@ -3633,9 +3634,10 @@ theorem eval_family_keeps (fuel : Nat) :
           simp only [Except.ok.injEq, Prod.mk.injEq] at h10
           obtain ⟨_, rfl⟩ := h10
           exact hk1
-        · simp only [Except.ok.injEq, Prod.mk.injEq] at h8
-          obtain ⟨_, rfl⟩ := h8
-          exact hk1
+        · split at h8 <;>
+            · simp only [Except.ok.injEq, Prod.mk.injEq] at h8
+              obtain ⟨_, rfl⟩ := h8
+              exact hk1
     · intro locals context state form value after h
       rw [evalCompiled.eq_def] at h
       simp only at h
@@ -3769,10 +3771,24 @@ theorem evalCompiled_mono (locals : Locals) (state : State) (form : CExp) :
 
 end Families
 
-/-- The state that compiled code runs in: the definitions it was compiled against, compiled, and an index of the
-functions that agrees with them. -/
+/-- A definition as it is in a state that compiled code runs in: as written, or compiled. -/
+def viewValue (names : String → Option SV) : Bool → SV → SV
+  | false, value => value
+  | true, value => compileValue names value
+
+/-- The same of a function. -/
+def viewCallable (names : String → Option SV) : Bool → Callable → Callable
+  | false, callable => callable
+  | true, callable => compileCallable names callable
+
+theorem viewValue_callable (names : String → Option SV) (view : Bool) (callable : Callable) :
+    viewValue names view (.callable callable) = .callable (viewCallable names view callable) := by
+  cases view <;> rfl
+
+/-- The state that compiled code runs in: each name finds its definition, compiled or not, and an index of the
+functions agrees with them. A thunked environment has its instructions as written and the others compiled. -/
 structure Compat (globals : Globals) (state : State) : Prop where
-  definitions : state.globals = compileGlobals globals
+  definitions : ∀ name, ∃ view, Assoc.get name state.globals = (Assoc.get name globals).map (viewValue (namesOf globals) view)
   index : ∀ name, state.operations.get? name =
     match Assoc.get name state.globals with
     | some (.callable callable) => some callable
@@ -3780,7 +3796,9 @@ structure Compat (globals : Globals) (state : State) : Prop where
 
 theorem Compat.keep {globals : Globals} {first second : State} (h : Compat globals first) (hk : Keeps first second) :
     Compat globals second where
-  definitions := hk.1.trans h.definitions
+  definitions := by
+    rw [hk.1]
+    exact h.definitions
   index := by
     intro name
     rw [hk.2.1, hk.1]
@@ -3828,7 +3846,7 @@ theorem compileGlobals_spec (globals : Globals) :
     funext (globalsTable_get globals)
   simp only [compileGlobals, key]
 
-private theorem get_compileGlobals' (globals : Globals) (name : String) :
+theorem get_compileGlobals' (globals : Globals) (name : String) :
     Assoc.get name (compileGlobals globals) = (Assoc.get name globals).map (compileValue (namesOf globals)) := by
   rw [compileGlobals_spec]
   exact get_compileGlobals globals globals name
@@ -3872,14 +3890,22 @@ private theorem macroExpansion_compile (globals : Globals) (callable : Callable)
     macroExpansion (compileCallable (namesOf globals) callable) operands = macroExpansion callable operands := by
   simp only [macroExpansion, macroCandidates_compile]
 
+private theorem macroCandidates_view (globals : Globals) (view : Bool) (callable : Callable) :
+    macroCandidates (viewCallable (namesOf globals) view callable) = macroCandidates callable := by
+  cases view
+  · rfl
+  · exact macroCandidates_compile globals callable
+
+private theorem macroExpansion_view (globals : Globals) (view : Bool) (callable : Callable) (operands : List Sexp) :
+    macroExpansion (viewCallable (namesOf globals) view callable) operands = macroExpansion callable operands := by
+  simp only [macroExpansion, macroCandidates_view]
+
 /-- Which names assign a local does not depend on how the functions were compiled. -/
-theorem assignsLocal_compile (globals : Globals) (name : String) (fuel : Nat) (form : Sexp) :
-    assignsLocal (namesOf (compileGlobals globals)) name fuel form = assignsLocal (namesOf globals) name fuel form := by
+theorem assignsLocal_compat {globals : Globals} {state : State} (hs : Compat globals state) (name : String) (fuel : Nat)
+    (form : Sexp) : assignsLocal (namesOf state.globals) name fuel form = assignsLocal (namesOf globals) name fuel form := by
   induction fuel generalizing form with
   | zero => simp [assignsLocal]
   | succ fuel ih =>
-    have hget : ∀ operator, Assoc.get operator (compileGlobals globals) =
-        (Assoc.get operator globals).map (compileValue (namesOf globals)) := get_compileGlobals' globals
     cases form with
     | atom a => simp [assignsLocal]
     | list items =>
@@ -3890,11 +3916,14 @@ theorem assignsLocal_compile (globals : Globals) (name : String) (fuel : Nat) (f
         | list inner => simp only [assignsLocal, ih]
         | atom operator =>
           have hn : namesOf globals operator = Assoc.get operator globals := rfl
+          obtain ⟨view, hget⟩ := hs.definitions operator
           simp only [assignsLocal, hget, ih, hn]
           cases Assoc.get operator globals with
           | none => simp only [Option.map_none]
           | some value =>
-            cases value <;> simp only [Option.map, compileValue, macroCandidates_compile]
+            cases value
+            case callable callable => simp only [Option.map, viewValue_callable, macroCandidates_view]
+            all_goals cases view <;> simp only [Option.map, viewValue, compileValue]
 
 private theorem lookupState_compat {globals : Globals} {state : State} (h : Compat globals state) (name : String)
     (locals : Locals) : lookupState name locals state = lookup name locals state.globals := by
@@ -4000,7 +4029,14 @@ def conditionalBody (context : Context) (test : Nat → Except String (SV × Sta
       let width := max yesWidth noWidth
       .ok (.bil width (.ite condition (extend width yes) (extend width no)), state)
     else
-      .ok (.unit, emit state [.ifElse condition yesState.code noState.code])
+      match expectBil context yesValue, expectBil context noValue with
+      | .ok (yesWidth, yes), .ok (noWidth, no) =>
+        let width := max yesWidth noWidth
+        let result : Bap.Var := ⟨s!"_primus_{state.nextTemp}", .imm width, 0, false⟩
+        .ok (.bil width (.var result), emit { state with nextTemp := state.nextTemp + 1 }
+          [.ifElse condition (yesState.code ++ [.move result (extend width yes)])
+            (noState.code ++ [.move result (extend width no)])])
+      | _, _ => .ok (.unit, emit state [.ifElse condition yesState.code noState.code])
 
 theorem conditional_transfer {context : Context} {P : State → Prop}
     {test test' : Nat → Except String (SV × State)} {yes yes' no no' : Nat → State → Except String (SV × State)}
@@ -4283,17 +4319,17 @@ private theorem lookup_visible_some {name : String} {names : List String} {local
       exact ih hl
     · simp only
 
-/-- A name resolves to the compiled form of what it resolves to in the definitions compiled from. -/
-private theorem lookup_compile (globals : Globals) (name : String) (locals : Locals)
+/-- A name resolves to what it resolves to in the definitions compiled from, compiled or not. -/
+private theorem lookup_view {globals : Globals} {state : State} (hs : Compat globals state) (name : String) (locals : Locals)
     (hl : Assoc.get name locals = none) (visible : Locals) (hv : Assoc.get name visible = none) :
-    lookup name locals (compileGlobals globals) = (lookup name visible globals).map (compileValue (namesOf globals)) := by
-  have hget : Assoc.get name (compileGlobals globals) = (Assoc.get name globals).map (compileValue (namesOf globals)) :=
-    get_compileGlobals' globals name
+    ∃ view, lookup name locals state.globals = (lookup name visible globals).map (viewValue (namesOf globals) view) := by
+  obtain ⟨view, hget⟩ := hs.definitions name
+  refine ⟨view, ?_⟩
   simp only [lookup, hl, hv, hget]
   generalize (if name.startsWith "core:" = true then (name.drop 5).toString else name) = primitive
   by_cases hr : primitive = "replicate"
   · simp only [hr, ↓reduceIte]
-    rfl
+    cases view <;> rfl
   · simp only [hr, ↓reduceIte]
     cases Assoc.get name globals with
     | some value => rfl
@@ -4301,7 +4337,7 @@ private theorem lookup_compile (globals : Globals) (name : String) (locals : Loc
       simp only [Option.map]
       by_cases hp : primitiveNames.contains primitive = true
       · simp only [hp, ↓reduceIte]
-        rfl
+        cases view <;> rfl
       · simp only [hp]
         rfl
 
@@ -4611,11 +4647,9 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
               · simp only [hrep, ↓reduceIte] at h
                 simp at h
               · simp only [hrep, ↓reduceIte] at h
-                have hget' : Assoc.get atom s.globals = (Assoc.get atom globals).map (compileValue (namesOf globals)) := by
-                  rw [hs.definitions]
-                  exact get_compileGlobals' globals atom
+                obtain ⟨view, hget'⟩ := hs.definitions atom
                 have hlook : ∀ {v : SV}, Assoc.get atom globals = some v →
-                    lookupState atom locals s = .ok (compileValue (namesOf globals) v) := by
+                    lookupState atom locals s = .ok (viewValue (namesOf globals) view v) := by
                   intro v hv
                   rw [lookupState_compat hs]
                   simp only [lookup, local_none ha hnone, hrep, ↓reduceIte, hget', hv, Option.map_some]
@@ -4627,20 +4661,20 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
                   case callable callable =>
                     simp only [Option.some.injEq] at h
                     subst h
-                    have hindex : s.operations.get? atom = some (compileCallable (namesOf globals) callable) := by
+                    have hindex : s.operations.get? atom = some (viewCallable (namesOf globals) view callable) := by
                       rw [hs.index atom, hget', hg]
-                      rfl
+                      simp only [Option.map, viewValue_callable]
                     have hC : ∀ f, evalCompiled (f + 1) clocals context s (.global atom) =
-                        .ok (.callable (compileCallable (namesOf globals) callable), s) := by
+                        .ok (.callable (viewCallable (namesOf globals) view callable), s) := by
                       intro f
                       rw [evalCompiled.eq_def]
                       simp only [hindex]
-                    simp only [hC, hlook hg, compileValue]
+                    simp only [hC, hlook hg, viewValue_callable]
                   all_goals
                     simp only [Option.some.injEq] at h
                     subst h
                     rw [← hvalue]
-                    simp only [hlook hg, compileValue]
+                    cases view <;> simp only [hlook hg, viewValue, compileValue]
       · simp only [Option.some.injEq] at h
         subst h
         have hC : ∀ f, evalCompiled (f + 1) clocals context s (.value (.list [])) = .ok (.list [], s) := by
@@ -4918,11 +4952,11 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
               lookup operator (names.map fun name => (name, Value.unit)) globals = .ok .unit := by
             intro v hv
             simp only [lookup, lookup_visible_some ha hv]
-          have hstate : Assoc.get operator locals = none → lookupState operator locals s =
-              (lookup operator (names.map fun name => (name, Value.unit)) globals).map (compileValue (namesOf globals)) := by
+          have hstate : Assoc.get operator locals = none → ∃ view, lookupState operator locals s =
+              (lookup operator (names.map fun name => (name, Value.unit)) globals).map (viewValue (namesOf globals) view) := by
             intro hl
-            rw [lookupState_compat hs, hs.definitions]
-            exact lookup_compile globals operator locals hl _ (lookup_visible ha hl)
+            rw [lookupState_compat hs]
+            exact lookup_view hs operator locals hl _ (lookup_visible ha hl)
           simp only [lookupIn_namesOf] at h
           generalize hrv : lookup operator (names.map fun name => (name, Value.unit)) globals = rv at h hvisible hstate
           have hnotlocal : ∀ {w : Callable}, rv = .ok (.callable w) → Assoc.get operator locals = none := by
@@ -4938,8 +4972,9 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
             rename_i name
             have hl := hnotlocal rfl
             have hL : lookupState operator locals s = .ok (.callable (.primitive name)) := by
-              rw [hstate hl]
-              rfl
+              obtain ⟨view, hview⟩ := hstate hl
+              rw [hview]
+              cases view <;> rfl
             obtain ⟨operation, hindex, h⟩ := oget h
             have hcomp : compilablePrimitive operation = true := by
               cases hc : compilablePrimitive operation
@@ -4996,11 +5031,12 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
           · -- a definition
             rename_i callable hnotprim
             have hl := hnotlocal rfl
-            have hL : lookupState operator locals s = .ok (.callable (compileCallable (namesOf globals) callable)) := by
-              rw [hstate hl]
-              rfl
-            have hexp : macroExpansion (compileCallable (namesOf globals) callable) operands = macroExpansion callable operands :=
-              macroExpansion_compile globals callable operands
+            obtain ⟨view, hview⟩ := hstate hl
+            have hL : lookupState operator locals s = .ok (.callable (viewCallable (namesOf globals) view callable)) := by
+              rw [hview]
+              simp only [Except.map, viewValue_callable]
+            have hexp : macroExpansion (viewCallable (namesOf globals) view callable) operands = macroExpansion callable operands :=
+              macroExpansion_view globals view callable operands
             split at h
             · next expanded hmac =>
               obtain ⟨cb, hb, h⟩ := omap h
@@ -5041,7 +5077,7 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
                 | rfl
                 | (simp only [hsome, ↓reduceIte])
             | none =>
-              have hs' := hstate hl
+              obtain ⟨view, hs'⟩ := hstate hl
               cases rv with
               | error e =>
                 exfalso
@@ -5069,10 +5105,10 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
                       simp only [hgg] at hrv
                       cases hrv
               | ok v =>
-                have hL : lookupState operator locals s = .ok (compileValue (namesOf globals) v) := hs'
+                have hL : lookupState operator locals s = .ok (viewValue (namesOf globals) view v) := hs'
                 cases v
                 case callable c => exact (hother _ rfl).elim
-                all_goals simp only [hL, compileValue]
+                all_goals cases view <;> simp only [hL, viewValue, compileValue]
       · -- a call of a value
         rename_i operator operands _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
         obtain ⟨ca, hca, h⟩ := oget h
@@ -5124,9 +5160,8 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
           intro f x hx hev
           have hanyx : (all ++ body).any (assignsLocal (namesOf x.2.globals) name 64) = false := by
             have hf : assignsLocal (namesOf x.2.globals) name 64 = assignsLocal (namesOf globals) name 64 := by
-              rw [hx.definitions]
               funext form
-              exact assignsLocal_compile globals name 64 form
+              exact assignsLocal_compat hx name 64 form
             rw [hf, hany]
           simp only [letStep, hev, bind, Except.bind, hanyx, Bool.false_eq_true, ↓reduceIte]
         have hrestAgree : ∀ x : SV × State, Compat globals x.2 → SameResults
@@ -5205,12 +5240,112 @@ theorem evalCompiled_agrees_eval {globals : Globals} {context : Context} {names 
     (∃ f, evalCompiled f clocals context state compiled = .ok result) ↔ ∃ f, eval f locals context state form = .ok result :=
   (compile_agrees globals context fuel).1 ha h state hs result
 
+private theorem resolveFunction_compile (globals : Globals) (count : Nat) (candidates : List Callable) :
+    resolveFunction count (candidates.map (compileFunction (namesOf globals))) =
+      (resolveFunction count candidates).map (compileFunction (namesOf globals)) := by
+  induction candidates with
+  | nil => rfl
+  | cons head rest ih =>
+    cases head with
+    | function p b e =>
+      rcases compileFunction_cases globals p b e with hc | ⟨body, hc⟩ <;>
+        · simp only [List.map_cons, hc, resolveFunction]
+          split
+          · simp only [Option.map, hc]
+          · exact ih
+    | compiled p b e =>
+      simp only [List.map_cons, compileFunction, resolveFunction]
+      split
+      · simp only [Option.map, compileFunction]
+      · exact ih
+    | «macro» p b => simpa only [List.map_cons, compileFunction, resolveFunction] using ih
+    | primitive n => simpa only [List.map_cons, compileFunction, resolveFunction] using ih
+    | overloads c => simpa only [List.map_cons, compileFunction, resolveFunction] using ih
+
+/-- A function compiled, in a state that compiled code runs in, has the same successes as the function as written. -/
+theorem apply_compileFunction {globals : Globals} {context : Context} {state : State} (hs : Compat globals state)
+    (callable : Callable) (args : List SV) :
+    SameResults (fun f => apply f context state (.callable (compileFunction (namesOf globals) callable)) args)
+      (fun f => apply f context state (.callable callable) args) := by
+  cases callable with
+  | function params body env =>
+    simp only [compileFunction]
+    split
+    · next compiled hb =>
+      intro r
+      rw [succeeds_succ (apply_mono context state _ args), succeeds_succ (apply_mono context state _ args)]
+      have hC : ∀ f, apply (f + 1) context state (.callable (.compiled params compiled env)) args =
+          if params.length != args.length then .error "Primus function arity mismatch"
+          else evalCompiledSequence f (params.zip args ++ env) context state compiled := by
+        intro f
+        rw [apply]
+      have hE : ∀ f, apply (f + 1) context state (.callable (.function params body env)) args =
+          if params.length != args.length then .error "Primus function arity mismatch"
+          else evalSequence f (params.zip args ++ env) context state body := by
+        intro f
+        rw [apply]
+      simp only [hC, hE]
+      by_cases hlen : params.length = args.length
+      · have ha : Aligned (params ++ env.map Prod.fst) (params.zip args ++ env) (params.zip args ++ env) := by
+          refine ⟨?_, rfl⟩
+          simp only [List.map_append, List.map_fst_zip (Nat.le_of_eq hlen)]
+        have hkeep : ∀ {s f form v after}, Compat globals s →
+            eval f (params.zip args ++ env) context s form = .ok (v, after) → Compat globals after :=
+          fun hs he => compat_eval hs he
+        simp only [hlen, bne_self_eq_false, Bool.false_eq_true, ↓reduceIte]
+        exact sequence_agrees hkeep
+          (mapM_related (fun form c hc => (compile_agrees globals context 1000).1 ha hc) hb) state hs r
+      · have hne : (params.length != args.length) = true := by simpa using hlen
+        simp [hne, Succeeds]
+    · exact fun _ => Iff.rfl
+  | compiled p b e => exact fun _ => Iff.rfl
+  | «macro» p b => exact fun _ => Iff.rfl
+  | primitive n => exact fun _ => Iff.rfl
+  | overloads c => exact fun _ => Iff.rfl
+
+/-- So does a definition compiled, and whichever of several definitions a call selects. -/
+theorem apply_compileCallable {globals : Globals} {context : Context} {state : State} (hs : Compat globals state)
+    (callable : Callable) (args : List SV) :
+    SameResults (fun f => apply f context state (.callable (compileCallable (namesOf globals) callable)) args)
+      (fun f => apply f context state (.callable callable) args) := by
+  cases callable with
+  | overloads candidates =>
+    intro r
+    simp only [compileCallable]
+    rw [succeeds_succ (apply_mono context state _ args), succeeds_succ (apply_mono context state _ args)]
+    cases hr : resolveFunction args.length candidates with
+    | none =>
+      have hr' : resolveFunction args.length (candidates.map (compileFunction (namesOf globals))) = none := by
+        rw [resolveFunction_compile, hr]
+        rfl
+      constructor <;> rintro ⟨f, hf⟩
+      · obtain ⟨e, he⟩ := apply_overloads_none (fuel := f + 1) (context := context) (state := state) hr'
+        simp only at hf
+        rw [he] at hf
+        cases hf
+      · obtain ⟨e, he⟩ := apply_overloads_none (fuel := f + 1) (context := context) (state := state) hr
+        simp only at hf
+        rw [he] at hf
+        cases hf
+    | some candidate =>
+      have hr' : resolveFunction args.length (candidates.map (compileFunction (namesOf globals))) =
+          some (compileFunction (namesOf globals) candidate) := by
+        rw [resolveFunction_compile, hr]
+        rfl
+      simp only [apply_overloads hr', apply_overloads hr]
+      exact apply_compileFunction hs candidate args r
+  | function p b e => simpa only [compileCallable] using apply_compileFunction hs (.function p b e) args
+  | compiled p b e => simpa only [compileCallable] using apply_compileFunction hs (.compiled p b e) args
+  | «macro» p b => simpa only [compileCallable] using apply_compileFunction hs (.macro p b) args
+  | primitive n => simpa only [compileCallable] using apply_compileFunction hs (.primitive n) args
+
 /-- The state a function is lifted in, when its definitions are compiled with `compileGlobals`. -/
 theorem compat_of_index {globals : Globals} {state : State} (hg : state.globals = compileGlobals globals)
     (hi : ∀ name, state.operations.get? name =
       match Assoc.get name state.globals with
       | some (.callable callable) => some callable
-      | _ => none) : Compat globals state := ⟨hg, hi⟩
+      | _ => none) : Compat globals state :=
+  ⟨fun name => ⟨true, by rw [hg]; exact get_compileGlobals' globals name⟩, hi⟩
 
 /-- The index of `Environment.ofGlobals` agrees with the definitions: a name has the function that the first of its
 bindings defines, if that does define one. -/
@@ -5242,7 +5377,7 @@ def liftState (globals : Globals) : State :=
     operations := (Environment.ofGlobals (compileGlobals globals)).operations }
 
 theorem compat_ofGlobals (globals : Globals) : Compat globals (liftState globals) where
-  definitions := rfl
+  definitions name := ⟨true, get_compileGlobals' globals name⟩
   index := ofGlobals_operations (compileGlobals globals)
 
 /-- Compiled code agrees with the interpreter on what `lift` runs it on, without a hypothesis about the state. -/

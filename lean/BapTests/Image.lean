@@ -29,7 +29,7 @@ def run : IO Unit := do
   assertEqual "raw Ogre fields generated" true (!(Ogre.ofImage image).fields.isEmpty)
   let rich : Image := { image with
     sections := [⟨"text", 0x400000, 0, 4, 5, 1⟩]
-    symbols := [⟨"main", 0x400000, 4, true, false⟩]
+    symbols := [⟨"main", 0x400000, 4, true, false, false⟩]
   }
   let doc := Ogre.ofImage rich
   let rendered := Ogre.render doc

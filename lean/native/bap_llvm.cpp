@@ -80,6 +80,10 @@ std::string targetFeatures(const Triple &triple, bool assembling) {
   if (triple.getArch() == Triple::aarch64)
     return "+v8.1a,+v8.2a,+v8.3a,+fullfp16,+aes,+sha2,+sha3,+sm4,+crc,+lse,+rdm,+dotprod,+fp16fml,"
            "+flagm,+rand,+pauth,+jsconv,+complxnum,+rcpc,+rcpc-immo,+fptoint,+sb,+predres,+ccdp,+sve";
+  // Release 2 adds to the base CPU of the triple: SEB, SEH, ROTR, WSBH. Release 6 is the subarchitecture
+  // of the triple and removes what these add to.
+  if (triple.isMIPS() && triple.getSubArch() != Triple::MipsSubArch_r6)
+    return triple.isMIPS64() ? "+mips64r2" : "+mips32r2";
   return "";
 }
 

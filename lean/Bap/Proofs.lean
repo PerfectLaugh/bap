@@ -23,6 +23,7 @@ import Bap.Proofs.ABI
 import Bap.Proofs.API
 import Bap.Proofs.Analysis
 import Bap.Proofs.Bil
+import Bap.Proofs.Binary
 import Bap.Proofs.Checkpoint
 import Bap.Proofs.Core
 import Bap.Proofs.Crypto

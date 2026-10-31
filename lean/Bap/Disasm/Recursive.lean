@@ -1,4 +1,5 @@
 import Bap.Disasm.Basic
+import Bap.Bil.Binary
 import Std.Data.HashSet
 import Std.Data.HashMap
 
@@ -64,7 +65,11 @@ def _root_.Bap.Disasm.Disassembler.ofRegions (base : Disassembler) (regions : Li
     decode := fun address _ =>
       match regions.find? (·.1.contains address) with
       | some (region, disassembler) => disassembler.decode address region.data
-      | none => pure (.error s!"{address} is not in code") }
+      | none => pure (.error s!"{address} is not in code")
+    sizeAt := fun address _ =>
+      match regions.find? (·.1.contains address) with
+      | some (region, disassembler) => disassembler.sizeAt address region.data
+      | none => pure none }
 
 /-- What a scan has found so far, with the addresses of the instructions as a set. -/
 structure ScanState where
@@ -73,13 +78,17 @@ structure ScanState where
   instructions : Array Insn := #[]
   edges : Array (Nat × Nat) := #[]
   errors : Array String := #[]
+  /-- The code of the instructions, which many of them have in common. -/
+  programs : Binary.Table Bil.Program := {}
 
 namespace ScanState
 
 /-- `addInsn` on the array. -/
 def add (state : ScanState) (insn : Insn) : ScanState :=
   if state.addresses.contains insn.address then state
-  else { state with addresses := state.addresses.insert insn.address, instructions := state.instructions.push insn }
+  else
+    let (programs, bil) := Binary.share state.programs insn.bil
+    { state with addresses := state.addresses.insert insn.address, instructions := state.instructions.push { insn with bil }, programs }
 
 def error (state : ScanState) (message : String) : ScanState := { state with errors := state.errors.push message }
 
@@ -150,38 +159,56 @@ def sync (walk : Walk) (state : ScanState) : Walk :=
 
 end Walk
 
-/-- The next multiple of `alignment` after `address`. -/
-def nextAligned (alignment address : Nat) : Nat :=
-  (address / alignment + 1) * alignment
+/-- How a linear sweep goes through code. -/
+structure SweepPlan where
+  /-- The distance of the addresses it tries one by one after one that fails. -/
+  stride : Nat := 1
+  /-- Where what's at an address ends if it is padding, which no instruction starts in. -/
+  skip : Nat → Option Nat := fun _ => none
+  /-- Whether it may start at an address after something failed. Where instructions have different sizes, most of them
+  are in the middle of one. It always may at what the scan found. -/
+  resume : Nat → Bool := fun _ => true
 
 /-- Goes linearly through the addresses from `address` up to `limit`. What the scan already found it steps over, and it
-scans from what it hasn't. Where that fails, it tries again at the next multiple of `alignment`. -/
-private def sweepRange (disassembler : Disassembler) (data : ByteArray) (fuel alignment limit : Nat) :
-    Nat → Nat → Walk → ScanState → IO (Walk × ScanState)
-  | 0, _, walk, state => pure (walk, state)
-  | steps + 1, address, walk, state =>
+scans from what it hasn't. An instruction that can't be lifted it steps over too, and it stays an error of the scan if the
+scan got to it. Past what doesn't decode, which isn't an error since it needn't be code, it is `lost`: it doesn't scan
+until the `plan` says that it may. -/
+private def sweepRange (disassembler : Disassembler) (data : ByteArray) (fuel : Nat) (plan : SweepPlan) (limit : Nat) :
+    Nat → Nat → Bool → Walk → ScanState → IO (Walk × ScanState)
+  | 0, _, _, walk, state => pure (walk, state)
+  | steps + 1, address, lost, walk, state =>
     if limit ≤ address then pure (walk, state)
     else
       let walk := walk.sync state
       match walk.sizes[address]? with
-      | some size => sweepRange disassembler data fuel alignment limit steps (address + size) walk state
+      | some size => sweepRange disassembler data fuel plan limit steps (address + size) false walk state
       | none =>
-        if state.visited.contains address then
-          sweepRange disassembler data fuel alignment limit steps (nextAligned alignment address) walk state
-        else do
-          let state ← scanAux disassembler data fuel [address] state
-          sweepRange disassembler data fuel alignment limit steps address walk state
+        if lost && !plan.resume address then
+          sweepRange disassembler data fuel plan limit steps (address + plan.stride) true walk state
+        else
+          match plan.skip address with
+          | some next => sweepRange disassembler data fuel plan limit steps next true walk state
+          | none =>
+            if state.visited.contains address then do
+              match ← disassembler.sizeAt address data with
+              | some size =>
+                sweepRange disassembler data fuel plan limit steps (address + size) false walk state
+              | none =>
+                sweepRange disassembler data fuel plan limit steps (address + plan.stride) true walk state
+            else do
+              let state ← scanAux disassembler data fuel [address] state
+              sweepRange disassembler data fuel plan limit steps address lost walk state
 
 /-- Scans from all the `roots`, and then sweeps the `ranges` linearly. What a sweep can't decode isn't an error, since
 it needn't be code. -/
-def scanRegions (disassembler : Disassembler) (bytes entry : Nat) (roots : List Nat) (alignment : Nat)
+def scanRegions (disassembler : Disassembler) (bytes entry : Nat) (roots : List Nat) (plan : SweepPlan)
     (ranges : List (Nat × Nat)) : IO Disasm := do
   let data := ByteArray.empty
   let fuel := 4 * bytes + roots.length + 1
   let state ← scanAux disassembler data fuel roots {}
   let errors := state.errors
   let (_, state) ← ranges.foldlM (init := (({} : Walk), state)) fun (walk, state) range =>
-    sweepRange disassembler data fuel alignment range.2 (2 * (range.2 - range.1) + 1) range.1 walk state
+    sweepRange disassembler data fuel plan range.2 (2 * (range.2 - range.1) + 1) range.1 false walk state
   pure { entry := entry, instructions := state.instructions.toList, edges := state.edges.toList, errors := errors.toList }
 
 end Bap.Disasm.Recursive

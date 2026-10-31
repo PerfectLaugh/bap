@@ -77,7 +77,7 @@ private def encodeField : Field → List Sexp
       .tagged "named-symbol" [nat symbol.addr, .atom symbol.name],
       .tagged "symbol-chunk" [nat symbol.addr, nat symbol.size, nat symbol.addr],
       .tagged "symbol-record" [.atom symbol.name, nat symbol.addr, nat symbol.size,
-        bool symbol.isFunction, bool symbol.isDebug]
+        bool symbol.isFunction, bool symbol.isDebug, bool symbol.thumb]
     ]
   | .codeRegion address size offset => [.tagged "code-region" [nat address, nat size, nat offset]]
 
@@ -97,9 +97,9 @@ private def decodeSegment (args : List Sexp) : Except String Field := do
 
 private def decodeSymbol (args : List Sexp) : Except String Field := do
   match args with
-  | [name, addr, size, isFunction, isDebug] =>
+  | [name, addr, size, isFunction, isDebug, thumb] =>
     .ok (.symbol ⟨← Sexp.asAtom name, ← Sexp.nat addr, ← Sexp.nat size,
-      ← boolValue isFunction, ← boolValue isDebug⟩)
+      ← boolValue isFunction, ← boolValue isDebug, ← boolValue thumb⟩)
   | _ => .error "invalid Ogre symbol record"
 
 private def decodeFact (fact : Sexp) : Except String (List Field) := do

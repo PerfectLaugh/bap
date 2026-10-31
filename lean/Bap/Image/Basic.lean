@@ -38,6 +38,8 @@ structure Symbol where
   size : Nat
   isFunction : Bool
   isDebug : Bool
+  /-- An ARM function that runs in Thumb state: bit 0 of the value of its symbol, which `addr` doesn't have. -/
+  thumb : Bool := false
   deriving DecidableEq, Repr
 
 /-- The least multiple of `alignment` at or above `value`; an alignment of 0 or 1 asks for nothing. -/

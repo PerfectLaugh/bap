@@ -78,15 +78,17 @@ inductive Op where
 
 opaque Program : Type
 
+/-! The native functions read their arguments and don't release them, so that they all borrow: an owned argument would never be freed. -/
+
 @[extern "bap_jit_compile"]
-opaque compile (ops : List Op) : IO Program
+opaque compile (ops : @& List Op) : IO Program
 
 abbrev MemoryObserver := Bool → Nat → Nat → Nat → IO Unit
 abbrev CodeObserver := Nat → IO Bool
 
 @[extern "bap_jit_run_memory_code"]
-opaque runWithMemoryObservedCode (program : Program) (state addresses : Array UInt64) (values : Array UInt8)
-    (observer : Option MemoryObserver) (codeObserver : Option CodeObserver) :
+opaque runWithMemoryObservedCode (program : @& Program) (state addresses : @& Array UInt64) (values : @& Array UInt8)
+    (observer : @& Option MemoryObserver) (codeObserver : @& Option CodeObserver) :
     IO (Nat × Array UInt64 × Array UInt64 × Array UInt8)
 
 def runWithMemoryObserved (program : Program) (state addresses : Array UInt64) (values : Array UInt8)
@@ -104,14 +106,14 @@ def run (program : Program) (state : Array UInt64) : IO (Nat × Array UInt64) :=
 opaque Memory : Type
 
 @[extern "bap_jit_memory_create"]
-opaque createMemory (addresses : Array UInt64) (values : Array UInt8) : IO Memory
+opaque createMemory (addresses : @& Array UInt64) (values : @& Array UInt8) : IO Memory
 
 @[extern "bap_jit_memory_write"]
-opaque writeMemory (memory : Memory) (addresses : Array UInt64) (values : Array UInt8) : IO Unit
+opaque writeMemory (memory : @& Memory) (addresses : @& Array UInt64) (values : @& Array UInt8) : IO Unit
 
 @[extern "bap_jit_run_memory_object_code"]
-opaque runWithPersistentMemoryObservedCode (program : Program) (state : Array UInt64) (memory : Memory)
-    (observer : Option MemoryObserver) (codeObserver : Option CodeObserver) :
+opaque runWithPersistentMemoryObservedCode (program : @& Program) (state : @& Array UInt64) (memory : @& Memory)
+    (observer : @& Option MemoryObserver) (codeObserver : @& Option CodeObserver) :
     IO (Nat × Array UInt64 × Array UInt64 × Array UInt8)
 
 def runWithPersistentMemory (program : Program) (state : Array UInt64) (memory : Memory)
@@ -119,15 +121,15 @@ def runWithPersistentMemory (program : Program) (state : Array UInt64) (memory :
   runWithPersistentMemoryObservedCode program state memory observer none
 
 @[extern "bap_jit_memory_dump"]
-opaque dumpMemory (memory : Memory) : IO (Array UInt64 × Array UInt8)
+opaque dumpMemory (memory : @& Memory) : IO (Array UInt64 × Array UInt8)
 
 @[extern "bap_jit_memory_clone"]
-opaque cloneMemory (memory : Memory) : IO Memory
+opaque cloneMemory (memory : @& Memory) : IO Memory
 
 @[extern "bap_jit_memory_read"]
-opaque readMemory (memory : Memory) (address : UInt64) : IO UInt8
+opaque readMemory (memory : @& Memory) (address : UInt64) : IO UInt8
 
 @[extern "bap_jit_memory_size"]
-opaque memorySize (memory : Memory) : IO Nat
+opaque memorySize (memory : @& Memory) : IO Nat
 
 end Bap.Jit

@@ -15,12 +15,9 @@
 (in-package mips)
 
 ;; the release 6 targets, whose instructions are defined at the end of
-;; the file, and whose FPU is of IEEE 754-2008, see below
+;; the file, and whose FPU is of IEEE 754-2008, see below. They also
+;; load `mips-r6`, which says so.
 (defun release6 () false)
-(defun release6 () (declare (context (target mipsr6))) true)
-(defun release6 () (declare (context (target mipsr6el))) true)
-(defun release6 () (declare (context (target mips64r6))) true)
-(defun release6 () (declare (context (target mips64r6el))) true)
 
 ;;; MIPS32 AND MIPS64 RELEASE 2 INTEGER INSTRUCTIONS
 ;;

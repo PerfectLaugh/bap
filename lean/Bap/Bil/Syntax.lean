@@ -55,7 +55,7 @@ inductive Exp where
   | extract (high low : Nat) (value : Exp)
   | concat (left right : Exp)
   | unknown (message : String) (typ : Typ)
-  deriving Repr
+  deriving DecidableEq, Repr
 
 inductive Stmt where
   | move (var : Bap.Var) (value : Exp)

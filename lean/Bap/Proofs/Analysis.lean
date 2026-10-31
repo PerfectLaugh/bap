@@ -177,7 +177,7 @@ theorem discover_functions_at_instructions {project : Bap.Project.Project} {symb
         (∀ s ∈ acc, (instructionAddresses project).contains s.addr = true) →
         ∀ s ∈ (l.foldl (init := (seen, acc)) fun state address =>
           if state.1.contains address || !(instructionAddresses project).contains address then state
-          else (state.1.insert address, (⟨subroutineName address, address, 0, true, false⟩ : Bap.Image.Symbol) :: state.2)).2,
+          else (state.1.insert address, (⟨subroutineName address, address, 0, true, false, false⟩ : Bap.Image.Symbol) :: state.2)).2,
         (instructionAddresses project).contains s.addr = true := by
       intro l
       induction l with

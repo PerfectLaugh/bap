@@ -96,11 +96,10 @@
 ;; the index of the least or the most significant bit of IntRes2, or the
 ;; number of the elements if there is none
 (defun pstr-index (n r)
-  (cast-unsigned 32
-    (if (is-zero r) (pstr-elements n)
-      (if (pstr-msb n)
-          (- 15:8 (resize 8 (clz r)))
-        (resize 8 (clz (reverse-bits r)))))))
+  (let ((found (if (pstr-msb n)
+                   (- 15:8 (resize 8 (clz r)))
+                 (resize 8 (clz (reverse-bits r))))))
+    (cast-unsigned 32 (if (is-zero r) (pstr-elements n) found))))
 
 (defun pstr-mask (n r)
   (if (pstr-msb n)

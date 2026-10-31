@@ -2003,6 +2003,18 @@ theorem decodeMIPSWith_lifted (globals : Primus.Semantics.Environment) (base add
   unfold decodeMIPSWith
   lifted_decoder
 
+/-- A PowerPC instruction of any variant says how it goes on as its LLVM flags do. -/
+theorem decodePowerPCOf_lifted (variant : PowerPCVariant) (globals : Primus.Semantics.Environment) (base address : Nat)
+    (data : ByteArray) : Holds (decodePowerPCOf variant globals base address data) (Lifted (flow) address) := by
+  unfold decodePowerPCOf
+  lifted_decoder
+
+/-- A MIPS instruction of any variant, also of release 6 and little-endian, is at its address, with the flow of `mipsFlow`. -/
+theorem decodeMIPSOf_lifted (variant : MipsVariant) (globals : Primus.Semantics.Environment) (base address : Nat)
+    (data : ByteArray) : Holds (decodeMIPSOf variant globals base address data) (Lifted mipsFlow address) := by
+  unfold decodeMIPSOf
+  lifted_decoder
+
 /-- The flow of an A32 instruction is what `arm32Flow` says of it, corrected by what its program does to the pc. -/
 theorem decodeARM32With_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : Holds (decodeARM32With globals base address data)
@@ -2913,8 +2925,9 @@ structure RegisteredAs (name : String) (d : Disassembler) : Prop where
 private theorem registeredAs_mk (name : String) (decode : Nat → ByteArray → IO (Except String Insn))
     (inner : Nat → ByteArray → IO Insn) (hd : ∀ a d, decode a d = wrap (inner a d))
     {α} (classify : α → Flow) (hi : ∀ a d, Holds (inner a d) (Lifted classify a))
-    (delay : Insn → Bool) (annul : Insn → Bool := fun _ => false) :
-    RegisteredAs name { name := name, decode := decode, hasDelaySlot := delay, annulsSlot := annul } where
+    (delay : Insn → Bool) (annul : Insn → Bool := fun _ => false)
+    (sizes : Nat → ByteArray → IO (Option Nat) := fun _ _ => pure none) :
+    RegisteredAs name { name := name, decode := decode, hasDelaySlot := delay, annulsSlot := annul, sizeAt := sizes } where
   name := rfl
   total a d := by
     show NoThrow (decode a d)
@@ -2944,7 +2957,7 @@ theorem x86_disassembler (base : Nat) :
     Holds (X86.disassembler base) (RegisteredAs "x86-llvm-primus") := by
   unfold X86.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeX86With globals base) (fun _ _ => rfl) _ (decodeX86With_lifted globals base) _
+  exact registeredAs_mk _ _ (decodeX86With globals base) (fun _ _ => rfl) _ (decodeX86With_lifted globals base) _ _ _
 
 theorem x86_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (X86.decodeAt base address data) fun result =>
@@ -2980,7 +2993,7 @@ theorem riscv_disassembler (base : Nat) :
     Holds (RISCV.disassembler base) (RegisteredAs "riscv64-llvm-primus") := by
   unfold RISCV.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeRISCVWith globals base) (fun _ _ => rfl) _ (decodeRISCVWith_lifted globals base) _
+  exact registeredAs_mk _ _ (decodeRISCVWith globals base) (fun _ _ => rfl) _ (decodeRISCVWith_lifted globals base) _ _ _
 
 theorem riscv_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (RISCV.decodeAt base address data) fun result =>
@@ -3052,7 +3065,7 @@ theorem thumb_disassembler (base : Nat) :
     Holds (Thumb.disassembler base) (RegisteredAs "thumbv7-llvm-primus") := by
   unfold Thumb.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeThumbWith globals base) (fun _ _ => rfl) _ (decodeThumbWith_lifted globals base) _
+  exact registeredAs_mk _ _ (decodeThumbWith globals base) (fun _ _ => rfl) _ (decodeThumbWith_lifted globals base) _ _ _
 
 theorem thumb_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (Thumb.decodeAt base address data) fun result =>
@@ -3070,7 +3083,7 @@ theorem x8632_disassembler (base : Nat) :
     Holds (X8632.disassembler base) (RegisteredAs "i386-llvm-primus") := by
   unfold X8632.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeX8632With globals base) (fun _ _ => rfl) _ (decodeX8632With_lifted globals base) _
+  exact registeredAs_mk _ _ (decodeX8632With globals base) (fun _ _ => rfl) _ (decodeX8632With_lifted globals base) _ _ _
 
 theorem x8632_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (X8632.decodeAt base address data) fun result =>
@@ -3088,7 +3101,7 @@ theorem riscv32_disassembler (base : Nat) :
     Holds (RISCV32.disassembler base) (RegisteredAs "riscv32-llvm-primus") := by
   unfold RISCV32.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeRISCV32With globals base) (fun _ _ => rfl) _ (decodeRISCV32With_lifted globals base) _
+  exact registeredAs_mk _ _ (decodeRISCV32With globals base) (fun _ _ => rfl) _ (decodeRISCV32With_lifted globals base) _ _ _
 
 theorem riscv32_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (RISCV32.decodeAt base address data) fun result =>

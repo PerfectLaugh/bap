@@ -67,11 +67,11 @@ private def testDiff : IO Unit := do
     (← LLVM.assemble "riscv64" "addi a0, a0, 1")
   let emu ← Tuned.riscv64 code 0 0
   let saved ← Bap.Emu.snapshot emu
-  Bap.Emu.save emu "native/build/emu-diff.sexp"
+  Bap.Emu.save emu "native/build/emu-diff.bin"
   Bap.Emu.write emu 0 (ByteArray.mk #[0, 0])
   Bap.Emu.write emu 4 (ByteArray.mk #[0])
   assertEqual "Emu snapshot diff coalesces changes" [(0, 2), (4, 1)] (← Bap.Emu.diff emu saved)
-  assertEqual "Emu checkpoint diff matches snapshot" [(0, 2), (4, 1)] (← Bap.Emu.changedSince emu "native/build/emu-diff.sexp")
+  assertEqual "Emu checkpoint diff matches snapshot" [(0, 2), (4, 1)] (← Bap.Emu.changedSince emu "native/build/emu-diff.bin")
   Bap.Emu.restore emu saved
   assertEqual "Emu restored snapshot has no diff" [] (← Bap.Emu.diff emu saved)
   let memory := Bap.Memory.writeRegion (Bap.Memory.empty 64) 0xfe (ByteArray.mk #[1, 2, 3, 4])
@@ -117,8 +117,8 @@ private def testLiveProject : IO Unit := do
   | .ok analyzed =>
     assertEqual "Emu live project analysis instruction count" (some "2") (analyzed.get "instructions")
     assertEqual "Emu live project analysis status" (some "analyzed") (analyzed.get "status")
-    Bap.Project.save analyzed "native/build/emu-live-project.sexp"
-    let restored ← Bap.Project.loadSaved "native/build/emu-live-project.sexp"
+    Bap.Project.save analyzed "native/build/emu-live-project.bin"
+    let restored ← Bap.Project.loadSaved "native/build/emu-live-project.bin"
     assertEqual "Emu persisted project keeps analysis" (some "analyzed") (restored.get "status")
     assertEqual "Emu persisted project keeps pass history" analyzed.passed restored.passed
     match restored.image, restored.disasm with
@@ -203,7 +203,7 @@ private def testDelaySlots : IO Unit := do
   Bap.Emu.setReg emu r5 (.bits (BitVec.ofNat 64 0))
   let _ ← Bap.Emu.run emu 1
   assertEqual "Emu MIPS branch stops at delay slot" 4 (← Bap.Emu.pc emu)
-  Bap.Emu.save emu "native/build/emu-delay-checkpoint.sexp"
+  Bap.Emu.save emu "native/build/emu-delay-checkpoint.bin"
   let pending ← Bap.Emu.snapshot emu
   let second ← Bap.Emu.spawnThread emu 16 7
   Bap.Emu.switchThread emu second
@@ -220,7 +220,7 @@ private def testDelaySlots : IO Unit := do
   let _ ← Bap.Emu.run emu 2
   assertBits "Emu snapshot restores pending branch" (BitVec.ofNat 64 1) (.ok (← Bap.Emu.reg emu r5))
   Bap.Emu.restore emu pending
-  Bap.Emu.load emu "native/build/emu-delay-checkpoint.sexp"
+  Bap.Emu.load emu "native/build/emu-delay-checkpoint.bin"
   let _ ← Bap.Emu.run emu 2
   assertBits "Emu checkpoint restores pending branch" (BitVec.ofNat 64 1) (.ok (← Bap.Emu.reg emu r5))
 
@@ -275,7 +275,7 @@ private def testThreads : IO Unit := do
   Bap.Emu.resumeThread emu 1
 
   let saved ← Bap.Emu.snapshot emu
-  Bap.Emu.save emu "native/build/emu-threads-checkpoint.sexp"
+  Bap.Emu.save emu "native/build/emu-threads-checkpoint.bin"
   Bap.Emu.setThreadReg emu 1 output (.bits (BitVec.ofNat 64 99))
   Bap.Emu.setThreadReg emu second output (.bits (BitVec.ofNat 64 99))
   Bap.Emu.write emu 0x1000 (ByteArray.mk #[99, 99, 99, 99])
@@ -286,7 +286,7 @@ private def testThreads : IO Unit := do
     (.ok (← Bap.Emu.threadReg emu second output))
   Bap.Emu.setThreadReg emu 1 output (.bits (BitVec.ofNat 64 99))
   Bap.Emu.setThreadReg emu second output (.bits (BitVec.ofNat 64 99))
-  Bap.Emu.load emu "native/build/emu-threads-checkpoint.sexp"
+  Bap.Emu.load emu "native/build/emu-threads-checkpoint.bin"
   assertBits "Emu checkpoint restores first thread" (BitVec.ofNat 64 2)
     (.ok (← Bap.Emu.threadReg emu 1 output))
   assertBits "Emu checkpoint restores second thread" (BitVec.ofNat 64 12)
@@ -370,8 +370,8 @@ private def testThreads : IO Unit := do
     | throw <| IO.userError "missing child memory"
   let childNative ← Jit.readMemory childNativeMemory 0x1004
   assertEqual "Emu fork memory preserves child bytes" 12 childNative.toNat
-  Bap.Emu.save parallelMemoryEmu "native/build/emu-cow-checkpoint.sexp"
-  Bap.Emu.load parallelMemoryEmu "native/build/emu-cow-checkpoint.sexp"
+  Bap.Emu.save parallelMemoryEmu "native/build/emu-cow-checkpoint.bin"
+  Bap.Emu.load parallelMemoryEmu "native/build/emu-cow-checkpoint.bin"
   Bap.Emu.switchThread parallelMemoryEmu 1
   Bap.Emu.setPc parallelMemoryEmu 0
   Bap.Emu.switchThread parallelMemoryEmu parallelMemorySecond
@@ -696,8 +696,8 @@ private def coreRegressions : IO Unit := do
   let _ ← Bap.Emu.step afterSwitch
   assertEqual "Emu thread switches cause no re-fire" 1 (← hits.get)
   let afterSave ← fresh
-  Bap.Emu.save afterSave "native/build/emu-refire-checkpoint.sexp"
-  Bap.Emu.load afterSave "native/build/emu-refire-checkpoint.sexp"
+  Bap.Emu.save afterSave "native/build/emu-refire-checkpoint.bin"
+  Bap.Emu.load afterSave "native/build/emu-refire-checkpoint.bin"
   Bap.Emu.resume afterSave
   let _ ← Bap.Emu.step afterSave
   assertEqual "Emu checkpoints cause no re-fire" 1 (← hits.get)
@@ -805,9 +805,9 @@ private def coreRegressions : IO Unit := do
   Bap.Emu.setPc failing 8
   expectThrow "Emu fork faults" (Bap.Emu.step failing)
   assertEqual "Emu fork keeps its memory across a fault" 101 (← Bap.Emu.read failing 0x1000 1)[0]!.toNat
-  Bap.Emu.save failing "native/build/emu-fork-checkpoint.sexp"
+  Bap.Emu.save failing "native/build/emu-fork-checkpoint.bin"
   Bap.Emu.write failing 0x1000 (ByteArray.mk #[7])
-  Bap.Emu.load failing "native/build/emu-fork-checkpoint.sexp"
+  Bap.Emu.load failing "native/build/emu-fork-checkpoint.bin"
   assertEqual "Emu checkpoint keeps a fork's memory" 101 (← Bap.Emu.read failing 0x1000 1)[0]!.toNat
   Bap.Emu.switchThread failing 1
   assertEqual "Emu checkpoint keeps the parent's memory" 0 (← Bap.Emu.read failing 0x1000 1)[0]!.toNat
@@ -928,12 +928,12 @@ private def runEmulator : IO Unit := do
   Bap.Emu.setPc emu 8
   let beforeCheckpoint ← Bap.Emu.reg emu output
   assertBits "Emu checkpoint input register" (BitVec.ofNat 64 4) (.ok beforeCheckpoint)
-  Bap.Emu.save emu "native/build/emu-checkpoint.sexp"
+  Bap.Emu.save emu "native/build/emu-checkpoint.bin"
   Bap.Emu.setPc emu 0
   Bap.Emu.setReg emu output (.bits (BitVec.ofNat 64 99))
   let checkpointOverwrite ← LLVM.assemble "riscv64" "addi a0, a1, 9"
   Bap.Emu.write emu 0 checkpointOverwrite
-  Bap.Emu.load emu "native/build/emu-checkpoint.sexp"
+  Bap.Emu.load emu "native/build/emu-checkpoint.bin"
   assertEqual "Emu checkpoint restores PC" 8 (← Bap.Emu.pc emu)
   let checkpointResult ← Bap.Emu.reg emu output
   assertBits "Emu checkpoint restores registers" (BitVec.ofNat 64 4) (.ok checkpointResult)
@@ -1202,7 +1202,7 @@ private def runEmulator : IO Unit := do
   let shellEmu ← Tuned.riscv64 shellCode 0 0
   let (shellInput, shellOutput, shellText) ← shellStreams [
     "help", "pc", "set X10 40", "reg X10", "snap", "step", "restore", "reg X10",
-    "write 0 " ++ patchText, "x 0 4", "save native/build/emu-shell-checkpoint.sexp",
+    "write 0 " ++ patchText, "x 0 4", "save native/build/emu-shell-checkpoint.bin",
     "break 4", "breaks", "continue", "delete 4", "continue 8", "q"
   ]
   Bap.Emu.shell shellEmu shellInput shellOutput
@@ -1614,9 +1614,41 @@ private def allEmulatorTests : IO Unit := do
   coreRegressions
   runEmulator
 
+/-- A little-endian MIPS and its delay slots: the word of a branch is read in its byte order. -/
+private def mipsLittle : IO Unit := do
+  for (triple, bits, make) in [("mips64el", 64, Bap.Emu.mips64 (endian := .little)), ("mipsel", 32, Bap.Emu.mips32 (endian := .little))] do
+    let code := (← LLVM.assemble triple "addiu $4, $4, 1") ++ ByteArray.mk #[0x02, 0, 0, 0x10] ++
+      (← LLVM.assemble triple "addiu $4, $4, 10") ++ (← LLVM.assemble triple "addiu $4, $4, 100") ++
+      (← LLVM.assemble triple "addiu $5, $5, 1")
+    let a0 : Bap.Var := ⟨"R4", .imm bits, 0, false⟩
+    let a1 : Bap.Var := ⟨"R5", .imm bits, 0, false⟩
+    let emu ← make code 0 0
+    Bap.Emu.setReg emu a0 (.bits (BitVec.ofNat bits 0))
+    Bap.Emu.setReg emu a1 (.bits (BitVec.ofNat bits 0))
+    let _ ← Bap.Emu.run emu 4
+    match ← Bap.Emu.reg emu a0, ← Bap.Emu.reg emu a1 with
+    | .bits first, .bits second =>
+      assertEqual s!"{triple} runs its delay slot and skips what the branch skips" 11 first.toNat
+      assertEqual s!"{triple} goes on at the target" 1 second.toNat
+    | _, _ => throw <| IO.userError "no registers"
+
+/-- A range runs on over an instruction that does nothing, and doesn't leave and come back at each pass of a loop. -/
+private def nopInLoop : IO Unit := do
+  let code ← LLVM.assemble "x86_64" "movl $0, %eax\nmovl $1000, %ecx\n1:\nnopw 0(%rax,%rax,1)\nsubl $1, %ecx\njne 1b\nhlt"
+  let emu ← Bap.Emu.x86_64 code 0x1000 0x1000
+  let steps ← Bap.Emu.run emu 3002
+  assertEqual "a loop with a nop runs all of its instructions" 3002 steps
+  match ← Bap.Emu.reg emu ⟨"RCX", .imm 64, 0, false⟩ with
+  | .bits value => assertEqual "and counts down" 0 value.toNat
+  | _ => throw <| IO.userError "no RCX"
+  let statistics ← emu.engine.statistics.get
+  assertTrue s!"and stays in a compiled range: {statistics.nativeRuns} runs" (statistics.nativeRuns < 100)
+
 /-- The tests of the emulator, on the machine as it comes, on one that compiles everything at once, and on one that does not
 chain, so that they say the same of native code, ranges and the interpreter. -/
 def run : IO Unit := do
+  nopInLoop
+  mipsLittle
   allEmulatorTests
   tuningRef.set (some (1, 4096, 16))
   allEmulatorTests

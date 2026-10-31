@@ -1074,7 +1074,15 @@ mutual
           let width := max yesWidth noWidth
           .ok (.bil width (.ite condition (extend width yes) (extend width no)), state)
         else
-          .ok (.unit, emit state [.ifElse condition yesState.code noState.code])
+          -- a branch with code can have a value too: it is what the branch leaves in a variable of its own
+          match expectBil context yesValue, expectBil context noValue with
+          | .ok (yesWidth, yes), .ok (noWidth, no) =>
+            let width := max yesWidth noWidth
+            let result : Bap.Var := ⟨s!"_primus_{state.nextTemp}", .imm width, 0, false⟩
+            .ok (.bil width (.var result), emit { state with nextTemp := state.nextTemp + 1 }
+              [.ifElse condition (yesState.code ++ [.move result (extend width yes)])
+                (noState.code ++ [.move result (extend width no)])])
+          | _, _ => .ok (.unit, emit state [.ifElse condition yesState.code noState.code])
 
   private def apply (fuel : Nat) (context : Context) (state : State)
       (value : Value) (args : List Value) : Except String (Value × State) := do
@@ -1245,7 +1253,15 @@ mutual
           let width := max yesWidth noWidth
           .ok (.bil width (.ite condition (extend width yes) (extend width no)), state)
         else
-          .ok (.unit, emit state [.ifElse condition yesState.code noState.code])
+          -- a branch with code can have a value too: it is what the branch leaves in a variable of its own
+          match expectBil context yesValue, expectBil context noValue with
+          | .ok (yesWidth, yes), .ok (noWidth, no) =>
+            let width := max yesWidth noWidth
+            let result : Bap.Var := ⟨s!"_primus_{state.nextTemp}", .imm width, 0, false⟩
+            .ok (.bil width (.var result), emit { state with nextTemp := state.nextTemp + 1 }
+              [.ifElse condition (yesState.code ++ [.move result (extend width yes)])
+                (noState.code ++ [.move result (extend width no)])])
+          | _, _ => .ok (.unit, emit state [.ifElse condition yesState.code noState.code])
 
   private def evalCompiled (fuel : Nat) (locals : Locals) (context : Context)
       (state : State) (form : CExp) : Except String (Value × State) := do
@@ -1440,6 +1456,15 @@ def compilePartly (eager : Globals) (lazy : List (String × Callable)) (table : 
 def compileGlobals (globals : Globals) : Globals :=
   let table := globalsTable globals
   globals.map fun binding => (binding.1, compileValue (fun name => table.get? name) binding.2)
+
+/-- The environment of a target: all of `eager` compiled, and each instruction of `lazy`, which has the number of its opcode,
+as written in the definitions and compiled when it is first lifted. All compile against all of the definitions. -/
+def Environment.thunked (eager : Globals) (lazy : List ((String × Callable) × Nat)) : Environment :=
+  let raw : Globals := lazy.map fun entry => (entry.1.1, .callable entry.1.2)
+  let (compiled, thunks) := compilePartly eager (lazy.map Prod.fst) (globalsTable (eager ++ raw))
+  let environment := Environment.ofMachine (compiled ++ raw) ((thunks.zip lazy).map fun entry => (entry.2.2, entry.1.2)) []
+  { environment with
+    instructions := thunks.reverse.foldl (init := {}) fun table binding => table.insert binding.1 binding.2 }
 
 /-- `Assoc.put`, without the walk over all definitions when the name has no binding. -/
 private def putDefinition (state : State) (name : String) (value : Value) : Globals :=

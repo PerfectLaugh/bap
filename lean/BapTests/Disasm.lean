@@ -311,11 +311,11 @@ def run : IO Unit := do
   let x86 ← Target.X86.disassembler 0
   -- 0x06 doesn't decode in 64-bit mode; the sweep goes on at the next multiple of 4
   let swept ← Recursive.scanRegions (Disassembler.ofRegions x86 [({ addr := 0, data := bytes [0xc3, 0x06, 0x06, 0x06, 0x90, 0xc3] }, x86)])
-    6 0 [0] 4 [(0, 6)]
+    6 0 [0] { resume := (· % 4 == 0) } [(0, 6)]
   assertEqual "a sweep finds what the scan doesn't and steps over what doesn't decode" [0, 4, 5] (swept.instructions.map Insn.address)
   assertEqual "a sweep has no errors of its own" [] swept.errors
   let plain ← Recursive.scanRegions (Disassembler.ofRegions x86 [({ addr := 0, data := bytes [0xc3, 0x06, 0x06, 0x06, 0x90, 0xc3] }, x86)])
-    6 0 [0] 4 []
+    6 0 [0] {} []
   assertEqual "without ranges there is no sweep" [0] (plain.instructions.map Insn.address)
   let host ← Image.Elf.load "/bin/echo"
   match host.memory.entries.find? fun entry => entry.1.contains host.entryPoint with

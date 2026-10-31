@@ -11,7 +11,9 @@
 (defun HLT ()
   (intrinsic 'hlt))
 
-;; LLVM decodes the prefix on its own: an effect on other threads only, so nothing here
+;; LLVM decodes the prefix as an instruction of its own. Its effect, that the access of the next instruction is
+;; atomic, is on other threads only, so the BIL of a single thread has nothing to do: this ignores atomicity, as
+;; the programs of this semantics, which run one thread at a time, can't tell.
 (defun LOCK_PREFIX ()
   (empty))
 

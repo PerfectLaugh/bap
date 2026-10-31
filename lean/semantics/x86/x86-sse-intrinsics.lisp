@@ -366,11 +366,14 @@
   "(x87-rounded OP RT X) is (OP RM RT X) with the rounding mode RM of
    the rounding control, OP is a statement, as the conversions in the
    branches are"
-  (case (x87-rc)
-    0 (op 'rne rt x)
-    1 (op 'rtn rt x)
-    2 (op 'rtp rt x)
-    (op 'rtz rt x)))
+  (let ((rc (x87-rc)))
+    (if (= rc 0b00)
+        (op 'rne rt x)
+      (if (= rc 0b01)
+          (op 'rtn rt x)
+        (if (= rc 0b10)
+            (op 'rtp rt x)
+          (op 'rtz rt x))))))
 
 (defun x87-round-st0 (rm _ x) (set ST0 (x87-unary 'fround rm x)))
 
@@ -406,12 +409,15 @@
 (defun ILD_F64m (b s i off seg) (x87-push (x87-from-int 64 (load-n 64 (ea b s i off seg)))))
 
 (defmacro x87-store-as (convert rt base scale index off seg)
-  (let ((addr (ea base scale index off seg)))
-    (case (x87-rc)
-      0 (store-n rt addr (convert 'rne rt ST0))
-      1 (store-n rt addr (convert 'rtn rt ST0))
-      2 (store-n rt addr (convert 'rtp rt ST0))
-      (store-n rt addr (convert 'rtz rt ST0)))))
+  (let ((addr (ea base scale index off seg))
+        (rc (x87-rc)))
+    (if (= rc 0b00)
+        (store-n rt addr (convert 'rne rt ST0))
+      (if (= rc 0b01)
+          (store-n rt addr (convert 'rtn rt ST0))
+        (if (= rc 0b10)
+            (store-n rt addr (convert 'rtp rt ST0))
+          (store-n rt addr (convert 'rtz rt ST0)))))))
 
 (defun x87-store-float (rt base scale index off seg)
   (x87-store-as x87-to-float rt base scale index off seg))
@@ -558,12 +564,19 @@
   (let ((e (extract 78 64 x))
         (j (extract 63 63 x)))
     (if (= (extract 78 0 x) 0) 0b01:2
-      (if (or (= e 0x7fff) (= e 0) (not j)) 0b10:2 0b00:2))))
+      (if (logor (= e 0x7fff) (= e 0) (not j)) 0b10:2 0b00:2))))
 
-;; the register ST of the physical register I
+;; the register ST of the physical register I, whichever the top of the
+;; stack is when it runs
 (defun x87-physical (i)
-  (case (- i (x87-top))
-    0 ST0 1 ST1 2 ST2 3 ST3 4 ST4 5 ST5 6 ST6 ST7))
+  (let ((d (- i (x87-top))))
+    (if (= d 0:3) ST0
+      (if (= d 1:3) ST1
+        (if (= d 2:3) ST2
+          (if (= d 3:3) ST3
+            (if (= d 4:3) ST4
+              (if (= d 5:3) ST5
+                (if (= d 6:3) ST6 ST7)))))))))
 
 ;; the tag word, whose empty registers have the tag 11, and the others
 ;; the tags of their values
@@ -573,8 +586,9 @@
    (x87-tag-of 3:3) (x87-tag-of 2:3) (x87-tag-of 1:3) (x87-tag-of 0:3)))
 
 (defun x87-tag-of (i)
-  (let ((empty (= (extract 1 0 (rshift FPU_TAG (* 2 (cast-unsigned 16 i)))) 3)))
-    (if empty 0b11:2 (x87-classify (x87-physical i)))))
+  (let ((empty (= (extract 1 0 (rshift FPU_TAG (* 2 (cast-unsigned 16 i)))) 3))
+        (tag (x87-classify (x87-physical i))))
+    (if empty 0b11:2 tag)))
 
 ;; the environment, of the 32-bit and the 64-bit modes, of 28 bytes: the
 ;; control, the status, and the tag words, and the pointers of the last
@@ -605,10 +619,11 @@
         (e (extract 78 64 x))
         (j (extract 63 63 x))
         (f (extract 62 0 x))
+        (zero (= f 0))
         (c (if (= e 0x7fff)
-               (if (and j (= f 0)) 0b011 (if j 0b001 0b000))
+               (if (logand j zero) 0b011 (if j 0b001 0b000))
              (if (= e 0)
-                 (if (and (not j) (= f 0)) 0b100 0b110)
+                 (if (logand (not j) zero) 0b100 0b110)
                (if j 0b010 0b000)))))
     (set FPU_STATUS
          (logor (logand FPU_STATUS 0xb8ff:16)
