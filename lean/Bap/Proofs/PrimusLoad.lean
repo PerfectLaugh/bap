@@ -1,5 +1,5 @@
 import Lean
-import Bap.Proofs.Primus
+import Bap.Proofs.PrimusBisim
 
 open Lean Elab Command in
 /-- Bring private declarations of module `mod`, namespace `ns`, into scope by short name. -/
@@ -60,7 +60,8 @@ theorem evalForms_define_spec {context : Context} {globals : Globals} {forms : L
 
 `compilePartly` puts off the compilation of `lazy`. `Compat` is about what a name finds up to compilation, so that it holds of the state of the
 thunked environment that `compiledDefinitions` builds as it does of the one with all compiled (`thunked_compat`). So each instruction that environment
-lifts, which is a thunk that compiles it, has the same successes as the instruction as it was written (`thunked_opcode_agrees`, `thunked_instruction_agrees`). -/
+lifts, which is a thunk that compiles it, has the same successes as the instruction as it was written in the same state (`thunked_opcode_agrees`, `thunked_instruction_agrees`), and the same outcomes as
+the instruction in the state with nothing compiled (`thunked_opcode_means_source`, `thunked_instruction_means_source`). -/
 
 /-- All of the definitions of a target, as `compiledDefinitions` puts them. -/
 def allOf (eager : Globals) (lazy : List (String × Callable)) : Globals :=
@@ -254,10 +255,9 @@ theorem thunked_instruction_agrees (eager : Globals) (lazy : List ((String × Ca
 
 /-! ### The state with no compiled definitions
 
-What is proved of it: a thunk has the same successes as its instruction as written in this state too, as in the one of the environment.
-What is not: that the instruction as written has the same successes in the two states. A helper it calls is compiled in the one and written in the other, so
-results differ in the callables they hold, and a run of the compiled helper turns into a run of the written one at a fuel with no bound in the first (`apply_compileCallable`),
-so that a simulation can't go by induction on the fuel in that direction. -/
+The state of an environment has its helpers compiled, and this one has nothing compiled, so that a run in it is what the definitions say. Compiling makes no
+difference: a run in the one and a run in the other have the same outcomes (`apply_same_outcomes`), which gives `thunked_instruction_means_source` and
+`thunked_opcode_means_source`. -/
 
 /-- All of the definitions as they were written. -/
 def writtenState (eager : Globals) (lazy : List ((String × Callable) × Nat)) : State :=
@@ -276,5 +276,38 @@ theorem written_instruction_agrees (eager : Globals) (lazy : List ((String × Ca
     SameResults (fun fuel => apply fuel context (writtenState eager lazy) (.callable (compileCallable (namesOf (thunkedAll eager lazy)) callable)) args)
       (fun fuel => apply fuel context (writtenState eager lazy) (.callable callable) args) :=
   apply_compileCallable (written_compat eager lazy) _ args
+
+private theorem thunked_written_rel (eager : Globals) (lazy : List ((String × Callable) × Nat)) :
+    StateRel (thunkedAll eager lazy) (Environment.state (Environment.thunked eager lazy)) (writtenState eager lazy) :=
+  ⟨thunked_compat eager lazy, written_compat eager lazy, rfl, rfl⟩
+
+/-- **An instruction lifted through the environment of a target by name means exactly what its Lisp source says.** `liftWith` runs what the environment holds for
+`name`: compiled, against the definitions of the target, in a state with the helpers compiled. That is an instruction of `lazy` of that name, and its run
+has the same outcomes as evaluating the definitions as they were written, in the state with nothing compiled: each success of the one is a success of the other, with
+the same code, the same temporaries, and the same value, up to which functions in it are compiled.
+
+Nothing is assumed of the definitions, the context or the arguments. -/
+theorem thunked_instruction_means_source (eager : Globals) (lazy : List ((String × Callable) × Nat)) {name : String} {thunk : Thunk Callable}
+    (h : (Environment.thunked eager lazy).instructions.get? name = some thunk) :
+    ∃ entry ∈ lazy, entry.1.1 = name ∧ ∀ (context : Context) (args : List Bap.Primus.Semantics.Value),
+      SameOutcomes (SameOutcome (thunkedAll eager lazy))
+        (fun fuel => apply fuel context (Environment.state (Environment.thunked eager lazy)) (.callable thunk.get) args)
+        (fun fuel => apply fuel context (writtenState eager lazy) (.callable entry.1.2) args) := by
+  obtain ⟨entry, hentry, hname, hget, _⟩ := thunked_instruction_agrees eager lazy h
+  refine ⟨entry, hentry, hname, fun context args => ?_⟩
+  rw [hget]
+  exact apply_same_outcomes (thunked_written_rel eager lazy) context (.callable (compileCallable_rel _).symm) (ListRel.refl _)
+
+/-- **So does one lifted by the number of its opcode**, which is what `liftMC` runs. -/
+theorem thunked_opcode_means_source (eager : Globals) (lazy : List ((String × Callable) × Nat)) {opcode : Nat} {thunk : Thunk Callable}
+    (h : (Environment.thunked eager lazy).opcodes.get? opcode = some thunk) :
+    ∃ entry ∈ lazy, entry.2 = opcode ∧ ∀ (context : Context) (args : List Bap.Primus.Semantics.Value),
+      SameOutcomes (SameOutcome (thunkedAll eager lazy))
+        (fun fuel => apply fuel context (Environment.state (Environment.thunked eager lazy)) (.callable thunk.get) args)
+        (fun fuel => apply fuel context (writtenState eager lazy) (.callable entry.1.2) args) := by
+  obtain ⟨entry, hentry, hopcode, hget, _⟩ := thunked_opcode_agrees eager lazy h
+  refine ⟨entry, hentry, hopcode, fun context args => ?_⟩
+  rw [hget]
+  exact apply_same_outcomes (thunked_written_rel eager lazy) context (.callable (compileCallable_rel _).symm) (ListRel.refl _)
 
 end Bap.Proofs.Primus

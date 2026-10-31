@@ -43,6 +43,8 @@ import Bap.Proofs.Jit
 import Bap.Proofs.Knowledge
 import Bap.Proofs.LLVM
 import Bap.Proofs.Primus
+import Bap.Proofs.PrimusRelated
+import Bap.Proofs.PrimusBisim
 import Bap.Proofs.PrimusLoad
 import Bap.Proofs.Project
 import Bap.Proofs.Symbolic

@@ -1328,9 +1328,6 @@ private def testX86Evex : IO Unit := do
   match Bil.lookup movedGs.env segment with
   | .ok (.bits value) => assertEqual "x86-32 mov to a segment" 0x5678 value.toNat
   | _ => throw <| IO.userError "x86-32: no GS"
-  -- what has no semantics stays an error: a static rounding mode is not modeled in a lane
-  let rounded ← (Target.LLVMLift.decodeX86With x86 0 0 (bytes [0x62, 0xf1, 0x6c, 0x18, 0x58, 0xd9])).toBaseIO
-  assertTrue "a static rounding mode is an error" (rounded matches .error _)
 
 /-- A memory of an address width with bytes at an address. -/
 private def bytesAt {width : Nat} (start : Nat) (values : List Nat) (memory : Memory width := Memory.empty width) :
@@ -1728,7 +1725,161 @@ private def testThumbMultipleAgree : IO Unit := do
       | .error error => throw <| IO.userError error
     assertEqual s!"{decoded.opcode} does the same in both" (← observe first) (← observe second)
 
+private def evexModelCases : List (String × List Nat × List (String × Nat) × List (String × Nat) × Option Nat) := [
+  ("vpgatherdd", [0x62, 0xe2, 0x7d, 0x41, 0x90, 0x4, 0xa0], [("ZMM16", 0x6c9d91a5a0ac7bd5f6f343e80a86b476bea39fd950c2ea80a9c98a191dfe28bcbdec0c1b531f2da275238f32affcaa534108734028f52bd5e2b160820213f007), ("K1", 0x0)], [], none),
+  ("vpgatherdq", [0x62, 0xe2, 0xfd, 0x41, 0x90, 0x4, 0xf0], [("ZMM16", 0x28f52bd5bdec0c1bf6f343e8e81a7666a0ac7bd5e54e1ca80a86b476b2695b741cb7dfcb531f2da20164ed93da9c27b7410873405d0c3044affcaa53a9c98a19), ("K1", 0x0)], [], none),
+  ("vpgatherqd", [0x62, 0xe2, 0x7d, 0x41, 0x91, 0x4, 0xe8], [("ZMM16", 0xbdec0c1b531f2da2a3669cfdda9c27b741087340b2695b74e2b1608275238f32), ("K1", 0x0)], [], none),
+  ("vpscatterdd", [0x62, 0xf2, 0x7d, 0x41, 0xa0, 0xc, 0xa0], [("K1", 0x0)], [], some 0xc77dfd03e54e1ca80164ed93da9c27b7f99dd2eca7b5615e8a9c41fcb2695b7480b5ae31a3669cfdb0dd16191c9cf0b97aa37783a0ffe2d5776d462e0aec2476),
+  ("vpscatterqq", [0x62, 0xf2, 0xfd, 0x41, 0xa1, 0xc, 0xe8], [("K1", 0x0)], [], some 0xa0ac7bd5e54e1ca80aec2476b28c1f78a0ffe2d5c77dfd031c9cf0b9776d462ecd092b886c15951b08fc3786b0dd16197aa377836c9d91a5affcaa53a9c98a19),
+  ("vpcompressd store", [0x62, 0xf2, 0x7d, 0x49, 0x8b, 0x8], [], [], some 0xa0ac7bd5e54e1ca80164ed93da9c27b728f52bd5bdec0c1b0a86b476a0ffe2d5c77dfd038a9c41fc0aec2476a7b5615e1c9cf0b9776d462ef99dd2ecb0dd1619),
+  ("vpcompressb merge", [0x62, 0xb2, 0x7d, 0x49, 0x63, 0xc8], [("ZMM16", 0x27ed33963dbc17d4f6f343e8e81a7666bea39fd950c2ea80b97745e81dfe28ffd5c7fdcb6a8a9ccd8815950aec24765edb1d9c9cf0b9777a5a83d2083786dd19)], [], none),
+  ("vpcompressb zero", [0x62, 0xb2, 0x7d, 0xc9, 0x63, 0xc8], [("ZMM16", 0xffd5c7fdcb6a8a9ccd8815950aec24765edb1d9c9cf0b9777a5a83d2083786dd19)], [], none),
+  ("vpexpandb reg", [0x62, 0xe2, 0x7d, 0x49, 0x62, 0xc1], [("ZMM16", 0x277833a7b5bc61d4f6f35edb1d9c766627a39f1c509cf080b9776d461dfe28bc1cb7df2e7a5a30a2a283f99dd24dc306ec0873fc5d0c374486b1b0dd96164319)], [], none),
+  ("vpexpandd mem", [0x62, 0xe2, 0x7d, 0xc9, 0x89, 0x0], [("ZMM16", 0xb2695b7480b5ae3100000000a3669cfd00000000000000000213f0070000000075238f32000000007aa377836c9d91a500000000affcaa5300000000a9c98a19)], [], none),
+  ("vpexpandq mem", [0x62, 0xe2, 0xfd, 0x49, 0x89, 0x0], [("ZMM16", 0xa86b476b2695b74f6f343e8e81a766680b5ae31a3669cfd0213f00775238f321cb7dfcb531f2da27aa377836c9d91a5410873405d0c3044affcaa53a9c98a19)], [], none),
+  ("vgf2p8mulb", [0x62, 0xe2, 0x75, 0x48, 0xcf, 0xc2], [("ZMM16", 0xf6df2f3b248d170543d7f0d5ded1aa16fa1c294b970a905e447897c8e9ca4e9c9cfc8afc6f4ad17938bc4602c996bf3898b9539f07d02e0d0f16a9ffed7b0f5a)], [], none),
+  ("vgf2p8mulb masked", [0x62, 0xe2, 0x75, 0x49, 0xcf, 0xc2], [("ZMM16", 0x27df333b24bc17d4f6f3f0d5ded17666faa39f4b500a9080447897c81dfe28bc1cb7dffc6f4ad1a2a2bc4602c94dc30698b9739f5d0c2e440fb1a9ff967b435a)], [], none),
+  ("vgf2p8affineqb", [0x62, 0xe3, 0xf5, 0x48, 0xce, 0xc2, 0x63], [("ZMM16", 0x5f3bb7ae56f4af0bf085f88f7365e82532188bbc811d5776d9ce919e4eda2b4a729c470f0431dc252d29b15facc13454aa3d81e821c776cec457097ab9e9b797)], [], none),
+  ("vgf2p8affineqb mem masked", [0x62, 0xe3, 0xf5, 0xc9, 0xce, 0x0, 0x63], [("ZMM16", 0xbb00ee86009f000000e85f33b50000620000ac001d270059ce513e000000000000001fb4115c0000a9113f9c000000ba2d00680000f6009400095a00f900a7)], [], none),
+  ("vpclmulqdq 0", [0x62, 0xe3, 0x75, 0x48, 0x44, 0xc2, 0x0], [("ZMM16", 0x5ae6848de136f4b4fd260c100155500047f5bc2c4e24867f7fc050015515400038deb82f243b13307501e510140454051b387eca45532c9625517c01140141)], [], none),
+  ("vpclmulqdq 1", [0x62, 0xe3, 0x75, 0x48, 0x44, 0xc2, 0x1], [("ZMM16", 0x9e37397ec81b2c239af5880ee06e040796014d87db4b3460452d59ac0435c801449df25b58b19a9d1784cb6ef03f0a30fa56d79b1f0355a5cf3c9a9092c34c)], [], none),
+  ("vpclmulqdq 16", [0x62, 0xe3, 0x75, 0x48, 0x44, 0xc2, 0x10], [("ZMM16", 0x29f42af8f5a0c5ae6b2ce7830ee06e04010cfbbea9fffd84976dad81ac0435c80e420feacca884fb26b1efcb6ef03f0a03fc2ab29ea90eda6676b5069092c34c)], [], none),
+  ("vpclmulqdq 17", [0x62, 0xe3, 0x75, 0x48, 0x44, 0xc2, 0x11], [("ZMM16", 0x4423db84e4e4740274a4be51555100051f8a3cac936c0120fea77fce4111014553959f5b4ee217972c0234bc41500415156cf34fc26d03070b0ac55151045450)], [], none),
+  ("vpdpbssd", [0x62, 0xe2, 0x77, 0x48, 0x50, 0xc2], [("ZMM16", 0x27ed50b93dbc61a0f6f34208e81ae46bbea3b2df50c3495bb9777b881dfeb1111cb81530531f6345a200f7b5f94e44284108e00b5d0c6092e2b1240296e36619)], [], none),
+  ("vpdpbssds", [0x62, 0xe2, 0x77, 0x48, 0x51, 0xc2], [("ZMM16", 0x27ed50b93dbc61a0f6f34208e81ae46bbea3b2df50c3495bb9777b881dfeb1111cb81530531f6345a200f7b5f94e44284108e00b5d0c6092e2b1240296e36619)], [], none),
+  ("vpdpbsud", [0x62, 0xe2, 0x76, 0x48, 0x50, 0xc2], [("ZMM16", 0x27ecc4b93dbc25a0f6f37708e81a066bbea343df50c2de5bb9778b881dfdef111cb7d230531eda45a200e7b5f94e44284108bd0b5d0bb492e2b15f0296e2f319)], [], none),
+  ("vpdpbsuds", [0x62, 0xe2, 0x76, 0x48, 0x51, 0xc2], [("ZMM16", 0x27ecc4b93dbc25a0f6f37708e81a066bbea343df50c2de5bb9778b881dfdef111cb7d230531eda45a200e7b5f94e44284108bd0b5d0bb492e2b15f0296e2f319)], [], none),
+  ("vpdpbuud", [0x62, 0xe2, 0x74, 0x48, 0x50, 0xc2], [("ZMM16", 0x27ef60b93dbde9a0f6f46408e81c286bbea440df50c3735bb97811881dff2d111cb9073053205145a201f1b5f94e44284109400b5d0f0892e2b2ae0296e48019)], [], none),
+  ("vpdpbuuds", [0x62, 0xe2, 0x74, 0x48, 0x51, 0xc2], [("ZMM16", 0x27ef60b93dbde9a0f6f46408e81c286bbea440df50c3735bb97811881dff2d111cb9073053205145a201f1b5f94e44284109400b5d0f0892e2b2ae0296e48019)], [], none),
+  ("vpdpwsud", [0x62, 0xe2, 0x76, 0x48, 0xd2, 0xc2], [("ZMM16", 0xde30d1230ebe98e6c683ead6b98cf586bdf0519e40221512d39dfbd4ebd76d8c329479c2f6a55cdc93e95c7d444177b3924af69731ae041d0dcf7904621f3135)], [], none),
+  ("vpdpwsuds", [0x62, 0xe2, 0x76, 0x48, 0xd3, 0xc2], [("ZMM16", 0xde30d1230ebe98e6c683ead6b98cf586bdf0519e40221512d39dfbd4ebd76d8c329479c2f6a55cdc93e95c7d444177b37fffffff31ae041d0dcf790480000000)], [], none),
+  ("vpdpwusd", [0x62, 0xe2, 0x75, 0x48, 0xd2, 0xc2], [("ZMM16", 0x59b2d1230ebe98e6e8acead6b98cf586e6e5519e40221512af27fbd4ebd76d8caa3679c2f6a55cdc93375c7d444177b3924af69731ae041dcd4d7904621f3135)], [], none),
+  ("vpdpwusds", [0x62, 0xe2, 0x75, 0x48, 0xd3, 0xc2], [("ZMM16", 0x59b2d1230ebe98e6e8acead6b98cf586e6e5519e40221512af27fbd4ebd76d8caa3679c2f6a55cdc93375c7d444177b37fffffff31ae041dcd4d790480000000)], [], none),
+  ("vpdpwuud", [0x62, 0xe2, 0x74, 0x48, 0xd2, 0xc2], [("ZMM16", 0xfab1d123d33e98e6b416ead64428f586e6e5519ed53d1512d39dfbd49e636d8cb34979c26de95cdc83f05c7d444177b3924af697fe37041d0dcf790412fc3135)], [], none),
+  ("vpdpwuuds", [0x62, 0xe2, 0x74, 0x48, 0xd3, 0xc2], [("ZMM16", 0xfab1d123ffffffffffffffffffffffffe6e5519ed53d1512d39dfbd49e636d8cb34979c2ffffffffffffffffffffffff924af697ffffffffffffffffffffffff)], [], none),
+  ("vdbpsadbw", [0x62, 0xe3, 0x75, 0x48, 0x42, 0xc2, 0x1b], [("ZMM16", 0x1b001b40234017f01d10188017700870122014000bf014d00b901df021e015c01380192021a015701030169015200bc00ea019d015e016a0180013a018a013b)], [], none),
+  ("vpshldvd mem masked", [0x62, 0xe2, 0x75, 0x49, 0x71, 0x0], [("ZMM16", 0x72d41ffcbc17d4c7f6f343e833454e20bea39fd950c2ea807a02bb091dfe28bcbf974f6a531f2da2007fed0e0c19ddb541087340a186089fe2b16082f761ba2c)], [], none),
+  ("vpmulhrsw mem masked", [0x62, 0xe2, 0x75, 0x49, 0xb, 0x0], [("ZMM16", 0x27ed33963dbcff5500bb0792224b7666bea30ee8c834f5e400e645e81dfe28bc57cec1c5531f4d3ca200ffda6d4ac306753a7340fa9526dde2b1dad696e3eba5)], [], none)]
+
+/-- The families from their real encodings, with the values of an independent model of them, and what can't be looked at in values. -/
+private def testX86EvexModel : IO Unit := do
+  let x86 ← Target.LLVMLift.x86Environment
+  let cell : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let memory ← match Memory.write (Memory.empty 64) (BitVec.ofNat 64 0x1000) (BitVec.ofNat 512 evexM) .little 64 with
+    | .ok memory => pure memory
+    | .error error => throw <| IO.userError error
+  let zmm (number value : Nat) : Bap.Var × Bap.Value :=
+    (⟨s!"ZMM{number}", .imm 512, 0, false⟩, .bits (BitVec.ofNat 512 value))
+  let word (name : String) (value : Nat) : Bap.Var × Bap.Value :=
+    (⟨name, .imm 64, 0, false⟩, .bits (BitVec.ofNat 64 value))
+  let start : Bil.Env :=
+    [(cell, .memory memory), word "RAX" 0x1000, word "RCX" evexRcx, word "K1" evexK1, word "K3" evexK3, word "K2" 0,
+      zmm 1 evexA, zmm 2 evexB, zmm 3 evexC, zmm 16 evexZ16, zmm 20 0x20000000f0000000c000000090000000600000003000000000000000d0000000a0000000700000004000000010000000e0000000b0000000800000005, zmm 21 0x50000000000000000000000000000000300000000000000060000000000000001000000000000000400000000000000070000000000000002, zmm 22 0x500000002000000070000000400000001000000060000000300000000]
+  for (name, encoding, registers, _, stored) in evexModelCases do
+    let insn ← Target.LLVMLift.decodeX86With x86 0 0 (bytes encoding)
+    assertEqual s!"{name} has its size" encoding.length insn.size
+    let state ← execute insn start
+    for (register, expected) in registers do
+      let width := if register.startsWith "ZMM" then 512 else 64
+      match Bil.lookup state.env ⟨register, .imm width, 0, false⟩ with
+      | .ok (.bits value) => assertEqual s!"{name}: {register}" expected value.toNat
+      | _ => throw <| IO.userError s!"{name}: no {register}"
+    if let some expected := stored then
+      match Bil.lookup state.env cell with
+      | .ok (@Value.memory 64 memory) =>
+        assertEqual s!"{name}: memory" expected (Memory.read memory (BitVec.ofNat 64 0x1000) .little 64).toNat
+      | _ => throw <| IO.userError s!"{name}: no memory"
+  -- a load of a masked source is in the branch of its bit, also of what goes to an intrinsic
+  let rec loose : Bil.Exp → Nat
+    | .load m a _ _ => 1 + loose m + loose a
+    | .ite c _ _ => loose c
+    | .bin _ l r | .concat l r => loose l + loose r
+    | .un _ v | .cast _ _ v | .extract _ _ v => loose v
+    | .letIn _ v b => loose v + loose b
+    | .store m a v _ _ => loose m + loose a + loose v
+    | _ => 0
+  let hasGuarded (e : List Nat) : IO Bool := do
+    let insn ← Target.LLVMLift.decodeX86With x86 0 0 (bytes e)
+    pure (insn.bil.all fun stmt => match stmt with
+      | .move _ value => loose value == 0
+      | _ => true)
+  for (name, encoding) in [
+      ("vpshldvd", [0x62, 0xf2, 0x75, 0x49, 0x71, 0x00]), ("vpmulhrsw", [0x62, 0xf2, 0x75, 0x49, 0x0b, 0x00]),
+      ("vaddps", [0x62, 0xf1, 0x74, 0x49, 0x58, 0x00]), ("vfmadd132ps", [0x62, 0xf2, 0x75, 0x49, 0x98, 0x00]),
+      ("vsqrtpd", [0x62, 0xf1, 0xfd, 0x49, 0x51, 0x00]), ("vaddss", [0x62, 0xf1, 0x76, 0x09, 0x58, 0x00]),
+      ("vcvtps2udq", [0x62, 0xf1, 0x7c, 0x49, 0x79, 0x00])] do
+    assertTrue s!"masked {name} only loads under its mask" (← hasGuarded encoding)
+  -- the rounding of the form is the name of the intrinsic, and the format of BF16 is its own
+  let intrinsicIn (e : List Nat) (part : String) : IO Bool := do
+    let insn ← Target.LLVMLift.decodeX86With x86 0 0 (bytes e)
+    pure (1 < ((Bil.Wire.renderProgram insn.bil).splitOn part).length)
+  for (name, encoding, part) in [
+      ("vaddps {rn-sae}", [0x62, 0xf1, 0x74, 0x18, 0x58, 0xd2], "fadd_rne"), ("vaddps {rd-sae}", [0x62, 0xf1, 0x74, 0x38, 0x58, 0xd2], "fadd_rdn"),
+      ("vaddps {ru-sae}", [0x62, 0xf1, 0x74, 0x58, 0x58, 0xd2], "fadd_rup"), ("vaddps {rz-sae}", [0x62, 0xf1, 0x74, 0x78, 0x58, 0xd2], "fadd_rtz"),
+      ("vaddph", [0x62, 0xf5, 0x74, 0x48, 0x58, 0xd2], "fadd_rne_ieee754_binary_16"),
+      ("vcvtps2udq {rd-sae}", [0x62, 0xf1, 0x7c, 0x38, 0x79, 0xd2], "cast_uint_rdn"), ("vcvttps2udq", [0x62, 0xf1, 0x7c, 0x48, 0x78, 0xd2], "cast_uint_rtz"),
+      ("vcvtudq2ps", [0x62, 0xf1, 0x7f, 0x48, 0x7a, 0xd2], "cast_ufloat_rne"),
+      ("vcvtdq2ps {rd-sae}", [0x62, 0xf1, 0x7c, 0x38, 0x5b, 0xd2], "cast_sfloat_rdn"), ("vcvtps2dq {ru-sae}", [0x62, 0xf1, 0x7d, 0x58, 0x5b, 0xd2], "cast_sint_rup"),
+      ("vcvtpd2ps {rz-sae}", [0x62, 0xf1, 0xfd, 0x78, 0x5a, 0xd2], "fconvert_rtz"), ("vcvtqq2pd {rd-sae}", [0x62, 0xf1, 0xfe, 0x38, 0xe6, 0xd2], "cast_sfloat_rdn"),
+      ("vsqrtps {ru-sae}", [0x62, 0xf1, 0x7c, 0x58, 0x51, 0xd2], "fsqrt_rup"), ("vfmadd132ps {rd-sae}", [0x62, 0xf2, 0x75, 0x38, 0x98, 0xd2], "_rdn_"),
+      ("vaddss {rz-sae}", [0x62, 0xf1, 0x76, 0x78, 0x58, 0xd2], "fadd_rtz")] do
+    assertTrue s!"{name} is {part}" (← intrinsicIn encoding part)
+  -- a memory form of BMI: andn (%rax),%ecx,%eax
+  let andn ← execute (← Target.LLVMLift.decodeX86With x86 0 0 (bytes [0xc4, 0xe2, 0x70, 0xf2, 0x00])) start
+  match Bil.lookup andn.env ⟨"RAX", .imm 64, 0, false⟩ with
+  | .ok (.bits value) => assertEqual "andn from memory" ((evexRcx ^^^ 0xffffffff &&& 0xffffffff) &&& (evexM &&& 0xffffffff)) value.toNat
+  | _ => throw <| IO.userError "andn: no RAX"
+  -- what has no semantics stays an error
+  let quad ← (Target.LLVMLift.decodeX86With x86 0 0 (bytes [0x62, 0xf2, 0x7f, 0x48, 0x9a, 0x00])).toBaseIO
+  assertTrue "AVX-512 4FMAPS has no semantics" (quad matches .error _)
+
+/-- What the same instruction was lifted to before is only used where it can't depend on the address. -/
+private def testX86Memo : IO Unit := do
+  let x86 ← Target.LLVMLift.x86Environment
+  let x8632 ← Target.LLVMLift.x8632Environment
+  let memo ← IO.mkRef ({} : Target.LLVMLift.LiftMemo)
+  let memo32 ← IO.mkRef ({} : Target.LLVMLift.LiftMemo)
+  let encodings : List (List Nat) := [
+    [0x48, 0x8d, 0x05, 0x10, 0, 0, 0], -- lea rax, [rip + 16]
+    [0x48, 0x8b, 0x1d, 0x10, 0, 0, 0], -- mov rbx, [rip + 16]
+    [0xe9, 0x10, 0, 0, 0], [0xeb, 0x05], [0xe8, 0x10, 0, 0, 0], [0x74, 0x05], [0xe2, 0x05], [0xe3, 0x05], -- jumps, a call, loops
+    [0xff, 0xd0], [0xc3], -- what has no address in its operands and pushes or pops one
+    [0x48, 0x01, 0xd8], [0x50], [0x48, 0x8b, 0x43, 0x08], [0x48, 0x01, 0x18], [0xf0, 0x48, 0x01, 0x18], [0xf3, 0xa4], [0xa4],
+    [0x62, 0xf1, 0x6d, 0x49, 0xfe, 0xd9]]
+  for encoding in encodings do
+    let pad := List.replicate 32 0x90
+    let data := bytes (encoding ++ pad ++ encoding ++ pad ++ encoding ++ pad)
+    let second := encoding.length + 32
+    let third := 2 * second
+    for at0 in [0, second, third, second] do
+      let plain ← Target.LLVMLift.decodeX86With x86 0 at0 data
+      let memoized ← Target.LLVMLift.decodeX86Memo memo x86 0 at0 data
+      assertEqual s!"the memoized code of {encoding} at {at0}" (Bil.Wire.renderProgram plain.bil) (Bil.Wire.renderProgram memoized.bil)
+      let plain32 ← (Target.LLVMLift.decodeX8632With x8632 0 at0 data).toBaseIO
+      let memoized32 ← (Target.LLVMLift.decodeX8632Memo memo32 x8632 0 at0 data).toBaseIO
+      match plain32, memoized32 with
+      | .ok left, .ok right =>
+        assertEqual s!"the memoized 32-bit code of {encoding} at {at0}" (Bil.Wire.renderProgram left.bil) (Bil.Wire.renderProgram right.bil)
+      | .error _, .error _ => pure ()
+      | _, _ => throw <| IO.userError s!"only one 32-bit decoder failed on {encoding}"
+  assertTrue "the memo has what has no address in it" ((← memo.get).size > 0)
+  -- real code, if there is any to read
+  let path := "/bin/ls"
+  if ← System.FilePath.pathExists path then
+    let image ← Image.load path
+    match image.sections.find? (·.name == ".text") with
+    | none => pure ()
+    | some text =>
+      let data := image.data.extract text.offset (text.offset + min text.size 60000)
+      let disasm ← Disasm.Linear.sweep (← Target.X86.disassembler text.addr) data text.addr
+      let different ← disasm.instructions.filterM fun insn => do
+        let plain ← Target.LLVMLift.decodeX86With x86 text.addr insn.address data
+        pure (!Bil.Stmt.sameAll plain.bil insn.bil)
+      assertEqual "real code is the same memoized" ([] : List String) (different.map (·.asm))
+
 def run : IO Unit := do
+  testX86Memo
+  testX86EvexModel
   testStatusRegisters
   testArmMultipleAgree
   testThumbMultipleAgree

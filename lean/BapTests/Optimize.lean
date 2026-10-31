@@ -199,19 +199,26 @@ local macro "isSolved" : term =>
 local macro "propagateBlock" : term =>
   return Lean.mkIdent (.num (`_private ++ `Bap.IR.Optimize) 0 ++ `Bap.IR.propagateBlock)
 
+local macro "constReads" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.IR.Optimize) 0 ++ `Bap.IR.constReads)
+
 /-- `propagateConstants` as it reads: its lists, and a block rewritten for what it says of its constants. -/
-private def constantsBySpec (cfg : Cfg) : Cfg :=
+private def constantsBySpec (cfg : Cfg) (keepAll : Bool := false) : Cfg :=
   let cfg := cfg.prune
-  let exits := propagateAux cfg (propagateFuel cfg) [] [cfg.start]
-  let solved := isSolved cfg exits
+  let all : List Var := (cfg.blocks.flatMap fun blk => blk.definedVars ++ blk.freeVars).eraseDups
+  let reads := if keepAll then cfg.blocks.map (fun blk => (blk.tid, all)) else constReads cfg
+  let exits := propagateAux cfg reads (propagateFuel cfg) [] [cfg.start]
+  let solved := isSolved cfg reads exits
   { cfg with blocks := cfg.blocks.map fun blk =>
     (propagateBlock blk (if solved then entryEnv cfg exits blk.tid else [])).1
   }
 
-private def sameConstants (name : String) (sub : Sub) : IO Unit :=
+/-- The rewrite is the one from all constants at the end of each block, not only those that can be read. -/
+private def sameConstants (name : String) (sub : Sub) : IO Unit := do
   let cfg := Cfg.fromSub sub
-  assertEqual s!"constants of {name}" (toString (Wire.printSub ((constantsBySpec cfg).intoSub sub)))
-    (toString (Wire.printSub ((propagateConstants cfg).intoSub sub)))
+  let fast := toString (Wire.printSub ((propagateConstants cfg).intoSub sub))
+  assertEqual s!"constants of {name}" (toString (Wire.printSub ((constantsBySpec cfg).intoSub sub))) fast
+  assertEqual s!"all constants of {name}" (toString (Wire.printSub ((constantsBySpec cfg true).intoSub sub))) fast
 
 /-- From a real instruction sequence: a block per basic block and its moves, jumps by flow. -/
 private def stmtDefs : Nat → Bil.Program → List Def
@@ -312,6 +319,18 @@ private def deadCodeFastPath : IO Unit := do
       toString (Wire.printSub ((eliminateDeadCode cfg protectedVars).intoSub sub))
   assertEqual "dead code: 1000 random CFGs" ([] : List Nat)
     ((List.range 1000).filter fun seed => !agrees [] (randomSub seed) || !agrees [reg "r1"] (randomSub seed) || !agrees [] (toSsa (randomSub seed)))
+  let agreesConstants (sub : Sub) : Bool :=
+    let cfg := Cfg.fromSub sub
+    let fast := toString (Wire.printSub ((propagateConstants cfg).intoSub sub))
+    toString (Wire.printSub ((constantsBySpec cfg).intoSub sub)) == fast && toString (Wire.printSub ((constantsBySpec cfg true).intoSub sub)) == fast
+  assertEqual "constants: 1000 random CFGs" ([] : List Nat)
+    ((List.range 1000).filter fun seed => !agreesConstants (randomSub seed) || !agreesConstants (toSsa (randomSub seed)))
+  -- a chain of phis that read what is assigned later: nothing about it is quadratic any more
+  let chainStarted ← IO.monoMsNow
+  for sub in [chainSub 7000, toSsa (chainSub 7000)] do
+    assertTrue "a chain of 7000 blocks stays" ((optimize sub).blks.length == 7000)
+  let chainElapsed := (← IO.monoMsNow) - chainStarted
+  assertTrue s!"a chain of 7000 blocks is optimized in under a second, not {chainElapsed} ms" (chainElapsed < 1000)
   -- a pass costs what it removes: these take a pass a block, and many blocks mention the one variable
   let started ← IO.monoMsNow
   for sub in [selfChain 7000, hubChain false 7000, hubChain true 7000] do

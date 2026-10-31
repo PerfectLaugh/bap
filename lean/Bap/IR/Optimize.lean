@@ -200,24 +200,36 @@ private def entryEnv (cfg : Cfg) (exits : ExitEnvs) (tid : Tid) : ConstEnv :=
     | [] => []
     | first :: rest => rest.foldl joinEnv first
 
+/-- For each block, what can read a constant after it: the liveness of the blocks without their phis, as a phi's inputs
+aren't rewritten and what a phi assigns is forgotten anyway. Constants of anything else are only carried along, and cost a
+list of every constant so far at the end of every block. Dropping any constant is sound, which is all that the correctness of
+the rewrite needs of this table. -/
+private def constReads (cfg : Cfg) : List (Tid × List Bap.Var) :=
+  ({ cfg with blocks := cfg.blocks.map fun blk => { blk with phis := [] } } : Cfg).liveness.2
+
+/-- The constants at the end of a block that can still be read. -/
+private def keepReads (reads : List (Tid × List Bap.Var)) (tid : Tid) (env : ConstEnv) : ConstEnv :=
+  let row := (Assoc.get tid reads).getD []
+  env.filter fun entry => decide (entry.1 ∈ row)
+
 /-- Optimistic forward analysis from the start. It never edits the CFG. -/
-private def propagateAux (cfg : Cfg) : Nat → ExitEnvs → List Tid → ExitEnvs
+private def propagateAux (cfg : Cfg) (reads : List (Tid × List Bap.Var)) : Nat → ExitEnvs → List Tid → ExitEnvs
   | 0, exits, _ => exits
   | _fuel + 1, exits, [] => exits
   | fuel + 1, exits, tid :: work =>
     match cfg.block tid with
-    | none => propagateAux cfg fuel exits work
+    | none => propagateAux cfg reads fuel exits work
     | some blk =>
-      let env := (propagateBlock blk (entryEnv cfg exits tid)).2
+      let env := keepReads reads tid (propagateBlock blk (entryEnv cfg exits tid)).2
       if Assoc.get tid exits = some env then
-        propagateAux cfg fuel exits work
+        propagateAux cfg reads fuel exits work
       else
-        propagateAux cfg fuel (Assoc.put tid env exits) (work ++ cfg.successors tid)
+        propagateAux cfg reads fuel (Assoc.put tid env exits) (work ++ cfg.successors tid)
 
 /-- The analysis result is a fixpoint of the transfer functions on every block. -/
-private def isSolved (cfg : Cfg) (exits : ExitEnvs) : Bool :=
+private def isSolved (cfg : Cfg) (reads : List (Tid × List Bap.Var)) (exits : ExitEnvs) : Bool :=
   cfg.blocks.all fun blk =>
-    Assoc.get blk.tid exits = some (propagateBlock blk (entryEnv cfg exits blk.tid)).2
+    Assoc.get blk.tid exits = some (keepReads reads blk.tid (propagateBlock blk (entryEnv cfg exits blk.tid)).2)
 
 /-- Rounds of the analysis: a block goes back on the list when its constants change, and they only go. -/
 private def propagateFuel (cfg : Cfg) : Nat :=
@@ -236,8 +248,9 @@ private def propagateFuelFast (cfg : Cfg) : Nat :=
 to each block are used. -/
 def propagateConstants (cfg : Cfg) : Cfg :=
   let cfg := cfg.prune
-  let exits := propagateAux cfg (propagateFuel cfg) [] [cfg.start]
-  let solved := isSolved cfg exits
+  let reads := constReads cfg
+  let exits := propagateAux cfg reads (propagateFuel cfg) [] [cfg.start]
+  let solved := isSolved cfg reads exits
   { cfg with blocks := cfg.blocks.map fun blk =>
     (propagateBlock blk (if solved then entryEnv cfg exits blk.tid else [])).1
   }
@@ -274,11 +287,47 @@ private structure PropTables where
   blocks : Std.HashMap Tid Blk
   preds : Std.HashMap Tid (List Tid)
   succs : Std.HashMap Tid (List Tid)
+  reads : Std.HashMap Tid (Std.HashSet Bap.Var)
 
-private def propTablesOf (cfg : Cfg) : PropTables where
+private def propTablesOf (cfg : Cfg) (reads : List (Tid × List Bap.Var)) : PropTables where
   blocks := assocTable (cfg.blocks.map fun blk => (blk.tid, blk))
   preds := predecessorTable cfg.graph
   succs := successorTable cfg.graph
+  reads := assocTable (reads.map fun row => (row.1, Std.HashSet.ofList row.2))
+
+/-- `keepReads`, with the row in a set. -/
+@[inline] private def keepReadsT (tables : PropTables) (tid : Tid) (env : ConstEnv) : ConstEnv :=
+  match env with
+  | [] => []
+  | _ =>
+    match tables.reads.get? tid with
+    | none => []
+    | some row => env.filter fun entry => row.contains entry.1
+
+private theorem keepReadsT_eq (cfg : Cfg) (reads : List (Tid × List Bap.Var)) (tid : Tid) (env : ConstEnv) :
+    keepReadsT (propTablesOf cfg reads) tid env = keepReads reads tid env := by
+  have hget : (propTablesOf cfg reads).reads.get? tid = (Assoc.get tid reads).map Std.HashSet.ofList := by
+    simp only [propTablesOf, assocTable_get]
+    induction reads with
+    | nil => rfl
+    | cons head tail ih =>
+      obtain ⟨k, v⟩ := head
+      simp only [List.map_cons, Assoc.get, List.lookup_cons] at ih ⊢
+      cases tid == k with
+      | true => rfl
+      | false => exact ih
+  have hnil : ∀ env : ConstEnv, env.filter (fun entry => decide (entry.1 ∈ ([] : List Bap.Var))) = [] := by simp
+  simp only [keepReadsT, keepReads, hget]
+  split
+  · rfl
+  · cases Assoc.get tid reads with
+    | none => simp only [Option.map, Option.getD, hnil]
+    | some row =>
+      simp only [Option.map, Option.getD]
+      apply List.filter_congr
+      intro entry _
+      rw [Bool.eq_iff_iff]
+      simp [Std.HashSet.contains_ofList]
 
 private def entryEnvT (cfg : Cfg) (tables : PropTables) (exits : Std.HashMap Tid ConstEnv) (tid : Tid) : ConstEnv :=
   if tid = cfg.start then
@@ -296,7 +345,7 @@ private def propagateAuxT (cfg : Cfg) (tables : PropTables) :
     match tables.blocks.get? tid with
     | none => propagateAuxT cfg tables fuel exits work
     | some blk =>
-      let env := propagateExit blk (entryEnvT cfg tables exits tid)
+      let env := keepReadsT tables tid (propagateExit blk (entryEnvT cfg tables exits tid))
       if exits.get? tid = some env then
         propagateAuxT cfg tables fuel exits work
       else
@@ -304,10 +353,10 @@ private def propagateAuxT (cfg : Cfg) (tables : PropTables) :
 
 private def propagateConstantsFast (cfg : Cfg) : Cfg :=
   let cfg := cfg.prune
-  let tables := propTablesOf cfg
+  let tables := propTablesOf cfg (constReads cfg)
   let exits := propagateAuxT cfg tables (propagateFuel cfg) {} [cfg.start]
   let solved := cfg.blocks.all fun blk =>
-    exits.get? blk.tid = some (propagateExit blk (entryEnvT cfg tables exits blk.tid))
+    exits.get? blk.tid = some (keepReadsT tables blk.tid (propagateExit blk (entryEnvT cfg tables exits blk.tid)))
   { cfg with blocks := cfg.blocks.map fun blk =>
     (propagateBlock blk (if solved then entryEnvT cfg tables exits blk.tid else [])).1
   }
@@ -315,7 +364,7 @@ private def propagateConstantsFast (cfg : Cfg) : Cfg :=
 private abbrev SameExits (list : ExitEnvs) (table : Std.HashMap Tid ConstEnv) : Prop :=
   ∀ tid, Assoc.get tid list = table.get? tid
 
-private theorem prop_block (cfg : Cfg) (tid : Tid) : (propTablesOf cfg).blocks.get? tid = cfg.block tid := by
+private theorem prop_block (cfg : Cfg) (reads : List (Tid × List Bap.Var)) (tid : Tid) : (propTablesOf cfg reads).blocks.get? tid = cfg.block tid := by
   simp only [propTablesOf, assocTable_get, Cfg.block]
   have key : ∀ l : List Blk, Assoc.get tid (l.map fun blk => (blk.tid, blk)) = l.find? (fun blk => decide (blk.tid = tid)) := by
     intro l
@@ -331,12 +380,12 @@ private theorem prop_block (cfg : Cfg) (tid : Tid) : (propTablesOf cfg).blocks.g
         exact ih
   exact key cfg.blocks
 
-private theorem entryEnv_eq (cfg : Cfg) {exits : ExitEnvs} {table : Std.HashMap Tid ConstEnv} (h : SameExits exits table) (tid : Tid) :
-    entryEnv cfg exits tid = entryEnvT cfg (propTablesOf cfg) table tid := by
+private theorem entryEnv_eq (cfg : Cfg) (reads : List (Tid × List Bap.Var)) {exits : ExitEnvs} {table : Std.HashMap Tid ConstEnv} (h : SameExits exits table) (tid : Tid) :
+    entryEnv cfg exits tid = entryEnvT cfg (propTablesOf cfg reads) table tid := by
   simp only [entryEnv, entryEnvT]
   split
   · rfl
-  · have hp : dedup ((propTablesOf cfg).preds.getD tid []) = cfg.predecessors tid := predecessors_eq cfg.graph tid
+  · have hp : dedup ((propTablesOf cfg reads).preds.getD tid []) = cfg.predecessors tid := predecessors_eq cfg.graph tid
     rw [hp]
     have hf : (fun pred => Assoc.get pred exits) = table.get? := funext h
     rw [hf]
@@ -371,23 +420,23 @@ private theorem SameExits.put {exits : ExitEnvs} {table : Std.HashMap Tid ConstE
   · have hb : (tid == key) = false := by simpa using fun e : tid = key => hk e.symm
     simp [hk, hb]
 
-private theorem propagateAux_same (cfg : Cfg) (fuel : Nat) (work : List Tid) {exits : ExitEnvs} {table : Std.HashMap Tid ConstEnv}
-    (h : SameExits exits table) : SameExits (propagateAux cfg fuel exits work) (propagateAuxT cfg (propTablesOf cfg) fuel table work) := by
+private theorem propagateAux_same (cfg : Cfg) (reads : List (Tid × List Bap.Var)) (fuel : Nat) (work : List Tid) {exits : ExitEnvs} {table : Std.HashMap Tid ConstEnv}
+    (h : SameExits exits table) : SameExits (propagateAux cfg reads fuel exits work) (propagateAuxT cfg (propTablesOf cfg reads) fuel table work) := by
   induction fuel generalizing exits table work with
   | zero => exact h
   | succ fuel ih =>
     cases work with
     | nil => exact h
     | cons tid rest =>
-      simp only [propagateAux, propagateAuxT, prop_block, propagateExit_eq]
+      simp only [propagateAux, propagateAuxT, prop_block, propagateExit_eq, keepReadsT_eq]
       cases hb : cfg.block tid with
       | none => exact ih _ h
       | some blk =>
         simp only
-        rw [entryEnv_eq cfg h, h tid]
+        rw [entryEnv_eq cfg reads h, h tid]
         split
         · exact ih _ h
-        · have hs : dedup ((propTablesOf cfg).succs.getD tid []) = cfg.successors tid := successors_eq cfg.graph tid
+        · have hs : dedup ((propTablesOf cfg reads).succs.getD tid []) = cfg.successors tid := successors_eq cfg.graph tid
           rw [hs]
           exact ih _ (h.put _ _)
 
@@ -396,9 +445,9 @@ private theorem propagateAux_same (cfg : Cfg) (fuel : Nat) (work : List Tid) {ex
   have hempty : SameExits [] ({} : Std.HashMap Tid ConstEnv) := by
     intro tid
     simp [Assoc.get]
-  have hsame := propagateAux_same cfg.prune (propagateFuel cfg.prune) [cfg.prune.start] hempty
-  have hentry := entryEnv_eq cfg.prune hsame
-  simp only [propagateConstants, propagateConstantsFast, isSolved, hentry, hsame _, propagateExit_eq]
+  have hsame := propagateAux_same cfg.prune (constReads cfg.prune) (propagateFuel cfg.prune) [cfg.prune.start] hempty
+  have hentry := entryEnv_eq cfg.prune (constReads cfg.prune) hsame
+  simp only [propagateConstants, propagateConstantsFast, isSolved, hentry, hsame _, propagateExit_eq, keepReadsT_eq]
 
 end FastPropagation
 
@@ -1309,7 +1358,7 @@ private theorem readsD_spec {ids : Ids} {blocks : Array DBlk} (tid : Tid) (succs
 /-- A scan of a block, whatever the marks were. -/
 private theorem scanD_spec {ids : Ids} {blocks : Array DBlk} {cfg : Cfg} {g : Graphs} {ps : List Bap.Var} {n : Nat} {rows : Array DenseDce.Row}
     (hm : Mirror hasSideEffect ids blocks cfg) (hg : GraphsOK g ids cfg ps n)
-    (hrows : ∀ x, ids.contains x = true → RowsOK ids cfg rows x) {i : Nat} {blk : Blk} (hi : At cfg i blk) {reads live : Marks}
+    (hrows : ∀ x, ids.contains x = true → RowsOK g ids cfg rows x) {i : Nat} {blk : Blk} (hi : At cfg i blk) {reads live : Marks}
     (hr : reads.WF ids.size) (hl : live.WF ids.size) :
     let result := scanD g blocks rows i (denseBlk hasSideEffect ids blk) reads live
     result.1 = denseBlk hasSideEffect ids (scanWith (endSet ps cfg blk) blk).1 ∧
@@ -1369,13 +1418,17 @@ private theorem scanD_spec {ids : Ids} {blocks : Array DBlk} {cfg : Cfg} {g : Gr
           · obtain ⟨c, hc⟩ := hat (hsin s hs)
             exact ⟨c.tid, (hg.succs i blk s c hi hc).1 (hsi ▸ hs), c, hg.block s c hc, Or.inr ((hedge s c hc hs).1 hread)⟩
           · obtain ⟨c, hc⟩ := hat (hsin s hs)
-            exact ⟨c.tid, (hg.succs i blk s c hi hc).1 (hsi ▸ hs), c, hg.block s c hc, Or.inl ⟨(hrows x hx s c hc).1 hrow, (hphiOf s c hc).1 hp⟩⟩
+            exact ⟨c.tid, (hg.succs i blk s c hi hc).1 (hsi ▸ hs), c, hg.block s c hc, Or.inl ⟨((hrows x hx s c hc).1 hrow).2, (hphiOf s c hc).1 hp⟩⟩
         · rintro ⟨τ, hτ, c, hbs, hneed⟩
           obtain ⟨s, hc, hct⟩ := hg.index τ c hbs
           subst hct
           have hs : s ∈ succs := hsi ▸ (hg.succs i blk s c hi hc).2 hτ
           rcases hneed with ⟨hl', hp⟩ | hread
-          · exact Or.inr ⟨s, hs, (hrows x hx s c hc).2 hl', (hphiOf s c hc).2 hp⟩
+          · refine Or.inr ⟨s, hs, (hrows x hx s c hc).2 ⟨?_, hl'⟩, (hphiOf s c hc).2 hp⟩
+            have hip : i ∈ g.preds.getD s [] := (hg.preds s c i blk hc hi).2 ⟨hreach, hτ⟩
+            refine hg.above_mono hip ?_
+            simp only [aboveD, decide_eq_true_eq]
+            exact hg.floor_le _ i (hg.definers i blk hi x hxa)
           · exact Or.inl ⟨s, hs, (hedge s c hc hs).2 hread⟩
       rw [or_assoc, main]
     · have hrb : ¬ g.reach.getD i false = true := fun h => hreach ((hg.reach i blk hi).1 h)
@@ -1453,7 +1506,7 @@ private theorem scan_sizes (S : Std.HashSet Bap.Var) (blk : Blk) :
 /-- The blocks of `scanAll`, and what they have removed. -/
 private theorem scanAll_spec {ids : Ids} {blocks : Array DBlk} {cfg : Cfg} {g : Graphs} {ps : List Bap.Var} {n : Nat} {rows : Array DenseDce.Row}
     (hm : Mirror hasSideEffect ids blocks cfg) (hg : GraphsOK g ids cfg ps n)
-    (hrows : ∀ x, ids.contains x = true → RowsOK ids cfg rows x) (dirty : List Nat) (hdirty : ∀ i ∈ dirty, i < n) (hsize : blocks.size = n) (j y k : Nat)
+    (hrows : ∀ x, ids.contains x = true → RowsOK g ids cfg rows x) (dirty : List Nat) (hdirty : ∀ i ∈ dirty, i < n) (hsize : blocks.size = n) (j y k : Nat)
     (reads live : Marks) (hr : reads.WF ids.size) (hl : live.WF ids.size) :
     let result := scanAll g blocks rows dirty reads live
     result.1.size = n ∧ result.2.2.1.WF ids.size ∧ result.2.2.2.WF ids.size ∧
@@ -1632,7 +1685,7 @@ private theorem graphs_next {g : Graphs} {ids : Ids} {cfg : Cfg} {ps : List Bap.
     obtain ⟨d, hd, rfl⟩ := hat hb'
     rw [htid, htid] at he
     exact hg.unique i j c d hc hd he
-  refine ⟨?_, ?_, ?_, hunique, by simpa using hg.count, hg.preds_in, ?_, hg.succs_in, ?_, ?_, ?_, hg.sites_in, ?_, hg.definers_in, hg.protect⟩
+  refine ⟨?_, ?_, ?_, hunique, by simpa using hg.count, hg.preds_in, ?_, hg.succs_in, ?_, ?_, ?_, hg.sites_in, ?_, hg.definers_in, hg.protect, hg.rank_mono, hg.floor_le⟩
   · intro i b h
     obtain ⟨c, hc, rfl⟩ := hat h
     rw [htid]
@@ -1828,7 +1881,7 @@ private structure DenseInv (ps : List Bap.Var) (base : Cfg) (g : Graphs) (ids : 
   seen2 : seen2.WF M
   reads : reads.WF ids.size
   live : live.WF ids.size
-  rows : ∀ x, ids.contains x = true → RowsOK ids cfg rows x
+  rows : ∀ x, ids.contains x = true → RowsOK g ids cfg rows x
   dirty_in : ∀ i ∈ dirty, i < n
   stable : ∀ i b, At cfg i b → i ∉ dirty → dceBlock (liveAtEnd ps cfg b) b = b
   groupsSize : groups.size = ids.size
@@ -2032,9 +2085,9 @@ private theorem loopD_eq {ps : List Bap.Var} {base : Cfg} {g : Graphs} {ids : Id
       have hstate : ∀ x, ids.contains x = true → (VarDone g res.1 ids cfg { cfg with blocks := cfg.blocks.map step } rows [] x (orig (idOf ids x)) ∧
             (addGroups res.2.1 groups).getD (idOf ids x) [] = []) ∨
           ((addGroups res.2.1 groups).getD (idOf ids x) [] = orig (idOf ids x) ∧ orig (idOf ids x) ≠ [] ∧
-            (∀ i b, At { cfg with blocks := cfg.blocks.map step } i b → ((rows.getD (idOf ids x) (.short [])).contains i = true ↔ x ∈ liveIn cfg b.tid))) := by
+            (∀ i b, At { cfg with blocks := cfg.blocks.map step } i b → ((rows.getD (idOf ids x) (.short [])).contains i = true ↔ aboveD g (idOf ids x) i = true ∧ x ∈ liveIn cfg b.tid))) := by
         intro x hx
-        have hrowOld : ∀ i b, At { cfg with blocks := cfg.blocks.map step } i b → ((rows.getD (idOf ids x) (.short [])).contains i = true ↔ x ∈ liveIn cfg b.tid) := by
+        have hrowOld : ∀ i b, At { cfg with blocks := cfg.blocks.map step } i b → ((rows.getD (idOf ids x) (.short [])).contains i = true ↔ aboveD g (idOf ids x) i = true ∧ x ∈ liveIn cfg b.tid) := by
           intro i b hb
           obtain ⟨c, hc, rfl⟩ := hatN' hb
           rw [htid]

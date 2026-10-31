@@ -17,6 +17,11 @@
 
 (defparameter *sse-format* 'ieee754_binary)
 
+(defun sse-rmode-now ()
+  "the rounding mode of this instruction: a symbol that is made has what
+   it is bound to now, where a compiled definition has what it was"
+  (symbol-concat *sse-rmode*))
+
 (defun symbol-of-size (sz)
   (case sz
     16  '16
@@ -787,13 +792,13 @@
 
 ;; the conversions of the lanes
 
-(defun fp-sint-to-float (rt x) (sse-convert 'cast_sfloat *sse-rmode* rt rt x))
-(defun fp-float-to-sint (rt x) (sse-to-int *sse-rmode* rt rt x))
+(defun fp-sint-to-float (rt x) (sse-convert 'cast_sfloat (sse-rmode-now) rt rt x))
+(defun fp-float-to-sint (rt x) (sse-to-int (sse-rmode-now) rt rt x))
 (defun fp-float-to-sint-rtz (rt x) (sse-to-int 'rtz rt rt x))
-(defun fp-int32-to-double (x) (sse-convert 'cast_sfloat *sse-rmode* 32 64 x))
-(defun fp-float-to-double (x) (sse-convert 'fconvert *sse-rmode* 32 64 x))
-(defun fp-double-to-float (x) (sse-convert 'fconvert *sse-rmode* 64 32 x))
-(defun fp-double-to-int32 (x) (sse-to-int *sse-rmode* 64 32 x))
+(defun fp-int32-to-double (x) (sse-convert 'cast_sfloat (sse-rmode-now) 32 64 x))
+(defun fp-float-to-double (x) (sse-convert 'fconvert (sse-rmode-now) 32 64 x))
+(defun fp-double-to-float (x) (sse-convert 'fconvert (sse-rmode-now) 64 32 x))
+(defun fp-double-to-int32 (x) (sse-to-int (sse-rmode-now) 64 32 x))
 (defun fp-double-to-int32-rtz (x) (sse-to-int 'rtz 64 32 x))
 
 (defmacro fp-widen2 (f x)

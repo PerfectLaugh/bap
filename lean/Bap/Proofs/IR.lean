@@ -62,6 +62,10 @@ local macro "propagateBlock" : term =>
   return Lean.mkIdent (.num (`_private ++ `Bap.IR.Optimize) 0 ++ `Bap.IR.propagateBlock)
 local macro "propagateAux" : term =>
   return Lean.mkIdent (.num (`_private ++ `Bap.IR.Optimize) 0 ++ `Bap.IR.propagateAux)
+local macro "keepReads" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.IR.Optimize) 0 ++ `Bap.IR.keepReads)
+local macro "constReads" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.IR.Optimize) 0 ++ `Bap.IR.constReads)
 local macro "hasSideEffect" : term =>
   return Lean.mkIdent (.num (`_private ++ `Bap.IR.Optimize) 0 ++ `Bap.IR.hasSideEffect)
 local macro "dcePass" : term =>
@@ -1872,14 +1876,14 @@ private theorem entryEnv_mem {cfg : Cfg} {exits : ExitEnvs} {t pred : Tid} {E : 
       · exact h₁
       · exact h₂ _ hm
 
-private theorem isSolved_spec {cfg : Cfg} {exits : ExitEnvs} (h : isSolved cfg exits = true) {blk : Blk}
+private theorem isSolved_spec {cfg : Cfg} {reads : List (Tid × List Var)} {exits : ExitEnvs} (h : isSolved cfg reads exits = true) {blk : Blk}
     (hb : blk ∈ cfg.blocks) :
-    Assoc.get blk.tid exits = some (propagateBlock blk (entryEnv cfg exits blk.tid)).2 := by
+    Assoc.get blk.tid exits = some (keepReads reads blk.tid (propagateBlock blk (entryEnv cfg exits blk.tid)).2) := by
   have := List.all_eq_true.1 h blk hb
   simpa using this
 
 /-- At a fixpoint, the constants the analysis assigns to a block entry hold on every run. -/
-theorem fixpoint_constants_hold {cfg : Cfg} {exits : ExitEnvs} (hsolved : isSolved cfg exits = true)
+theorem fixpoint_constants_hold {cfg : Cfg} {reads : List (Tid × List Var)} {exits : ExitEnvs} (hsolved : isSolved cfg reads exits = true)
     {t : Tid} {env : Env} (hrun : PropRun cfg t env) {blk : Blk} (hb : cfg.block t = some blk) :
     ConstHold env (propEntry blk (entryEnv cfg exits t)) := by
   induction hrun generalizing blk with
@@ -1908,15 +1912,15 @@ theorem fixpoint_constants_hold {cfg : Cfg} {exits : ExitEnvs} (hsolved : isSolv
     have hpred : t ∈ cfg.predecessors t' := by
       have := (Bap.Graph.successors_mem cfg.graph t t').1 hsucc
       exact (mem_predecessors' _ _ _).2 this
-    exact hout k c (entryEnv_mem hentry hpred hget)
+    exact hout k c (List.mem_filter.1 (entryEnv_mem hentry hpred hget)).1
 
 private abbrev solution (cfg : Cfg) : ExitEnvs :=
-  propagateAux cfg.prune
+  propagateAux cfg.prune (constReads cfg.prune)
     (((cfg.prune.blocks.flatMap fun blk => blk.definedVars ++ blk.freeVars).eraseDups.length + 2) *
       (cfg.prune.blocks.length + 2) * (cfg.prune.graph.edges.length + 2)) [] [cfg.prune.start]
 
 private abbrev constAt (cfg : Cfg) (t : Tid) : ConstEnv :=
-  if isSolved cfg.prune (solution cfg) then entryEnv cfg.prune (solution cfg) t else []
+  if isSolved cfg.prune (constReads cfg.prune) (solution cfg) then entryEnv cfg.prune (solution cfg) t else []
 
 private theorem propagateConstants_eq (cfg : Cfg) :
     propagateConstants cfg =
@@ -1934,7 +1938,7 @@ theorem propagateConstants_correct (cfg : Cfg) {t : Tid} {env : Env} (hrun : Pro
         ∀ e v, evalExp r.1 e = .ok v → evalExp r.1 (g e) = .ok v := by
   obtain ⟨hmem, htid⟩ := block_some hb
   have hc : ConstHold env (propEntry blk (constAt cfg blk.tid)) := by
-    by_cases hsolved : isSolved cfg.prune (solution cfg) = true
+    by_cases hsolved : isSolved cfg.prune (constReads cfg.prune) (solution cfg) = true
     · simp only [constAt, hsolved, ↓reduceIte, htid]
       exact fixpoint_constants_hold hsolved hrun hb
     · simp only [constAt, hsolved]
@@ -2052,7 +2056,7 @@ theorem optimize_straight_line (tid : Tid) (name : String) (args : List Arg) (bl
   obtain ⟨hprune, hstart⟩ := prune_single tid name args blk
   have hconst : ConstHold env (propEntry blk (constAt (Cfg.fromSub sub) blk.tid)) := by
     have hnil : constAt (Cfg.fromSub sub) blk.tid = [] := by
-      by_cases hsolved : isSolved (Cfg.fromSub sub).prune (solution (Cfg.fromSub sub)) = true
+      by_cases hsolved : isSolved (Cfg.fromSub sub).prune (constReads (Cfg.fromSub sub).prune) (solution (Cfg.fromSub sub)) = true
       · simp only [constAt, hsolved, ↓reduceIte]
         show (if blk.tid = (Cfg.fromSub sub).prune.start then [] else _) = []
         rw [hstart]
@@ -2823,7 +2827,7 @@ private theorem propagateConstants_run (cfg : Cfg) {pred t : Tid} {env final : E
       ConstHold e (propEntry b (constAt cfg b.tid)) := by
     intro z e b hz hb
     have htid := (block_some hb).2
-    by_cases hsolved : isSolved cfg.prune (solution cfg) = true
+    by_cases hsolved : isSolved cfg.prune (constReads cfg.prune) (solution cfg) = true
     · simp only [constAt, hsolved, ↓reduceIte, htid]
       exact fixpoint_constants_hold hsolved hz hb
     · simp only [constAt, hsolved]

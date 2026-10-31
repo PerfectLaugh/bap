@@ -1978,6 +1978,16 @@ theorem decodeX86With_lifted (globals : Primus.Semantics.Environment) (base addr
   unfold decodeX86With
   lifted_decoder
 
+theorem decodeX86Memo_lifted (memo : IO.Ref LiftMemo) (globals : Primus.Semantics.Environment) (base address : Nat)
+    (data : ByteArray) : Holds (decodeX86Memo memo globals base address data) (Lifted (flow) address) := by
+  unfold decodeX86Memo
+  lifted_decoder
+
+theorem decodeX8632Memo_lifted (memo : IO.Ref LiftMemo) (globals : Primus.Semantics.Environment) (base address : Nat)
+    (data : ByteArray) : Holds (decodeX8632Memo memo globals base address data) (Lifted (flow) address) := by
+  unfold decodeX8632Memo
+  lifted_decoder
+
 theorem decodeAArch64With_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : Holds (decodeAArch64With globals base address data) (Lifted (flow) address) := by
   unfold decodeAArch64With
@@ -3041,14 +3051,14 @@ theorem mips_delay_slots (base : Nat) :
   · unfold MIPS32.disassembler
     exact Holds.bind fun _ => Holds.pure ⟨rfl, rfl⟩
   · unfold X86.disassembler
-    exact Holds.bind fun _ => Holds.pure fun _ => rfl
+    exact Holds.bind fun _ => Holds.bind fun _ => Holds.pure fun _ => rfl
 
 /-- Registration data of the 11 target modules. -/
 theorem x86_disassembler (base : Nat) :
     Holds (X86.disassembler base) (RegisteredAs "x86-llvm-primus") := by
   unfold X86.disassembler
-  refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeX86With globals base) (fun _ _ => rfl) _ (decodeX86With_lifted globals base) _ _ _
+  refine Holds.bind fun globals => Holds.bind fun memo => Holds.pure ?_
+  exact registeredAs_mk _ _ (decodeX86Memo memo globals base) (fun _ _ => rfl) _ (decodeX86Memo_lifted memo globals base) _ _ _
 
 theorem x86_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (X86.decodeAt base address data) fun result =>
@@ -3173,8 +3183,8 @@ theorem thumb_decodeAt (base address : Nat) (data : ByteArray) :
 theorem x8632_disassembler (base : Nat) :
     Holds (X8632.disassembler base) (RegisteredAs "i386-llvm-primus") := by
   unfold X8632.disassembler
-  refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeX8632With globals base) (fun _ _ => rfl) _ (decodeX8632With_lifted globals base) _ _ _
+  refine Holds.bind fun globals => Holds.bind fun memo => Holds.pure ?_
+  exact registeredAs_mk _ _ (decodeX8632Memo memo globals base) (fun _ _ => rfl) _ (decodeX8632Memo_lifted memo globals base) _ _ _
 
 theorem x8632_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (X8632.decodeAt base address data) fun result =>

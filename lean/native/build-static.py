@@ -60,14 +60,30 @@ def patch_z3():
         original = path.read_text()
         text = original
         for old, new in edits:
-            if new not in text:
-                text = text.replace(old, new)
+            text = text.replace(old, new)
         if text != original:
             path.write_text(text)
 
 
 def quote(value):
     return f'"{value}"'
+
+
+def ensure_libcxx_headers(cmake, cxx_include):
+    """Generates the libc++ headers from the LLVM sources, if nothing provides them."""
+    if WINDOWS or (cxx_include / "cstddef").exists():
+        return
+    if "BAP_LIBCXX_INCLUDE" in os.environ:
+        raise RuntimeError(f"no libc++ headers in BAP_LIBCXX_INCLUDE={cxx_include}")
+    build = DEPS / "libcxx-headers-build"
+    env = os.environ.copy()
+    env.setdefault("CC", "clang")
+    env.setdefault("CXX", "clang++")
+    run([cmake, "-S", LLVM_SOURCE / "runtimes", "-B", build, "-G", "Ninja",
+         "-DLLVM_ENABLE_RUNTIMES=libcxx", "-DLIBCXX_CXX_ABI=none",
+         "-DLIBCXX_INCLUDE_TESTS=OFF", "-DLIBCXX_INCLUDE_BENCHMARKS=OFF",
+         "-DLLVM_INCLUDE_TESTS=OFF", f"-DCMAKE_INSTALL_PREFIX={DEPS / 'sysroot' / 'usr'}"], env=env)
+    run([cmake, "--build", build, "--target", "install-cxx-headers"])
 
 
 def main():
@@ -92,6 +108,7 @@ def main():
         f"https://github.com/Z3Prover/z3/archive/refs/tags/z3-{Z3_VERSION}.tar.gz",
         DEPS / f"z3-{Z3_VERSION}.tar.gz", Z3_SOURCE)
     patch_z3()
+    ensure_libcxx_headers(cmake, cxx_include)
 
     cmake_env = os.environ.copy()
     cxx_flags = []

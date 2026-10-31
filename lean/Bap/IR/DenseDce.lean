@@ -82,6 +82,12 @@ structure Graphs where
   sites : Array (List Nat)
   definers : Array (List Nat)
   protect : Array Bool
+  rank : Array Nat
+  floor : Array Nat
+
+/-- Whether what assigns a variable can come before a block at all: a row only has the blocks that it can. What is live anywhere else is
+never asked about, and it is a long way back to the start of a subroutine from a read of what is assigned later or never. -/
+@[inline] def aboveD (g : Graphs) (y t : Nat) : Bool := decide (g.floor.getD y 0 ≤ g.rank.getD t 0)
 
 @[inline] def killedD (d : DBlk) (x : Nat) : Bool := d.phis.any (·.var == x) || d.defs.any (·.var == x)
 @[inline] def hasPhiD (d : DBlk) (x : Nat) : Bool := d.phis.any (·.var == x)
@@ -137,16 +143,16 @@ def nodup (seen : Marks) (l : List Nat) : List Nat × Marks :=
   l.foldl (init := ([], seen.clear)) fun state x => if state.2.contains x then state else (x :: state.1, state.2.add x)
 
 /-- The rows of `xs`, from what starts them. -/
-def refreshRows (blocks : Array DBlk) (preds : Array (List Nat)) (seeds : Array (List Nat)) :
+def refreshRows (blocks : Array DBlk) (preds : Array (List Nat)) (seeds : Array (List Nat)) (above : Nat → Nat → Bool) :
     Array Row → Marks → List Nat → Option (Array Row × Marks)
   | rows, seen, [] => some (rows, seen)
   | rows, seen, x :: rest =>
-    match seeds.getD x [] with
-    | [] => refreshRows blocks preds seeds (rows.setIfInBounds x (.short [])) seen rest
+    match (seeds.getD x []).filter (above x) with
+    | [] => refreshRows blocks preds seeds above (rows.setIfInBounds x (.short [])) seen rest
     | start =>
-      match floodD blocks preds x (fun p => killedD (blkAt blocks p) x) (start.length + blocks.size + 1) (start.foldl Marks.add seen.clear) start start with
+      match floodD blocks preds x (fun p => killedD (blkAt blocks p) x || !above x p) (start.length + blocks.size + 1) (start.foldl Marks.add seen.clear) start start with
       | none => none
-      | some (row, seen) => refreshRows blocks preds seeds (rows.setIfInBounds x (Row.ofList row)) seen rest
+      | some (row, seen) => refreshRows blocks preds seeds above (rows.setIfInBounds x (Row.ofList row)) seen rest
 
 def affectedMarks (size : Nat) (affected : List Nat) : Array Bool :=
   affected.foldl (fun mark x => mark.setIfInBounds x true) (Array.replicate size false)
@@ -155,7 +161,7 @@ def refreshD (g : Graphs) (blocks : Array DBlk) (rows : Array Row) (affected : L
     Option (Array Row × Marks × Marks) :=
   let sites := nodup seen (affected.flatMap fun x => g.sites.getD x [])
   let seeds := seedsD g blocks (affectedMarks rows.size affected) kills sites.1 (Array.replicate rows.size [])
-  match refreshRows blocks g.preds seeds.1 rows sites.2 affected with
+  match refreshRows blocks g.preds seeds.1 (aboveD g) rows sites.2 affected with
   | none => none
   | some (rows, seen) => some (rows, seeds.2, seen)
 
@@ -320,18 +326,58 @@ def reachTable (index : Std.HashMap Tid Nat) (reachable : List Tid) (reach : Arr
 def succsIn (successors : Std.HashMap Tid (List Tid)) (index : Std.HashMap Tid Nat) (t : Tid) : List Nat :=
   (Bap.Graph.Fast.dedup (successors.getD t [])).filterMap index.get?
 
+/-- The blocks from `start`, each before what only comes after it, depth first. -/
+def postOrder (succs : Array (List Nat)) : Nat → List (Nat × List Nat) → Array Bool → List Nat → List Nat
+  | 0, _, _, order => order
+  | _ + 1, [], _, order => order
+  | fuel + 1, (t, []) :: stack, seen, order => postOrder succs fuel stack seen (t :: order)
+  | fuel + 1, (t, s :: more) :: stack, seen, order =>
+    if seen.getD s true then postOrder succs fuel ((t, more) :: stack) seen order
+    else postOrder succs fuel ((s, succs.getD s []) :: (t, more) :: stack) (seen.setIfInBounds s true) order
+
+/-- A number for each block that doesn't go down along an edge: blocks in order, with one number for what a jump back goes over. -/
+def ranksFrom (preds : Array (List Nat)) (order : List Nat) (n : Nat) : Array Nat :=
+  let position := (order.foldl (fun state t => (state.1 + 1, state.2.setIfInBounds t state.1)) (0, Array.replicate n 0)).2
+  let back := (order.foldl (init := (0, Array.replicate n 0)) fun state t =>
+    let furthest := (preds.getD t []).foldl (fun furthest p => max furthest (position.getD p 0)) 0
+    (state.1 + 1, state.2.setIfInBounds state.1 furthest)).2
+  let result := order.foldl (init := (0, 0, 0, Array.replicate n 0)) fun state t =>
+    let (i, rank, extent, ranks) := state
+    let rank := if i > extent then rank + 1 else rank
+    (i + 1, rank, max (max extent i) (back.getD i 0), ranks.setIfInBounds t rank)
+  result.2.2.2
+
+/-- `ranksFrom`, if it does what it is for. With nothing to check against, all blocks have the same number. -/
+def ranksOf (preds succs : Array (List Nat)) (start : Option Nat) (n : Nat) : Array Nat :=
+  let order := match start with
+    | none => []
+    | some s => postOrder succs (2 * (n + preds.foldl (fun count l => count + l.length) 0) + 2) [(s, succs.getD s [])]
+        ((Array.replicate n false).setIfInBounds s true) []
+  let ranks := ranksFrom preds order n
+  if (List.range preds.size).all fun t => (preds.getD t []).all fun p => decide (ranks.getD p 0 ≤ ranks.getD t 0) then ranks else #[]
+
+/-- The least number of the blocks that assign each variable. What nothing assigns has `top`. -/
+def floorsOf (definers : Array (List Nat)) (rank : Array Nat) (top : Nat) : Array Nat :=
+  definers.map fun sites => sites.foldl (fun least s => min least (rank.getD s 0)) top
+
 def graphsOf (ids : Ids) (protectedVars : List Bap.Var) (cfg : Cfg) (index : Std.HashMap Tid Nat) : Graphs :=
   let n := cfg.blocks.length
   let nVars := ids.size
   let reachable := cfg.reachable
   let successors := Bap.Graph.Fast.successorTable cfg.graph
+  let preds := predsTable index (succsIn successors index) reachable (Array.replicate n [])
+  let succs := (cfg.blocks.map fun blk => succsIn successors index blk.tid).toArray
+  let definers := positionTable ids assigned 0 cfg.blocks (Array.replicate nVars [])
+  let rank := ranksOf preds succs (index.get? cfg.start) n
   { tids := (cfg.blocks.map Blk.tid).toArray
-    preds := predsTable index (succsIn successors index) reachable (Array.replicate n [])
-    succs := (cfg.blocks.map fun blk => succsIn successors index blk.tid).toArray
+    preds := preds
+    succs := succs
     reach := reachTable index reachable (Array.replicate n false)
     sites := positionTable ids vocabulary 0 cfg.blocks (Array.replicate nVars [])
-    definers := positionTable ids assigned 0 cfg.blocks (Array.replicate nVars [])
-    protect := protectedVars.foldl (fun protect x => protect.setIfInBounds (idOf ids x) true) (Array.replicate nVars false) }
+    definers := definers
+    protect := protectedVars.foldl (fun protect x => protect.setIfInBounds (idOf ids x) true) (Array.replicate nVars false)
+    rank := rank
+    floor := floorsOf definers rank (n + 1) }
 
 /-- `fallback` is for two blocks with the same tid, and for what runs out of fuel. -/
 def run (effect : Bil.Exp → Bool) (protectedVars : List Bap.Var) (cfg : Cfg) (fuel : Nat) (fallback : Cfg → Nat → Cfg) : Cfg :=
@@ -962,6 +1008,13 @@ structure GraphsOK (g : Graphs) (ids : Ids) (cfg : Cfg) (protectedVars : List Ba
   definers : ∀ i b, At cfg i b → ∀ y ∈ assigned b, i ∈ g.definers.getD (idOf ids y) []
   definers_in : ∀ y, ∀ s ∈ g.definers.getD y [], s < n
   protect : ∀ x, ids.contains x = true → (g.protect.getD (idOf ids x) false = true ↔ x ∈ protectedVars)
+  rank_mono : ∀ t, ∀ p ∈ g.preds.getD t [], g.rank.getD p 0 ≤ g.rank.getD t 0
+  floor_le : ∀ y, ∀ s ∈ g.definers.getD y [], g.floor.getD y 0 ≤ g.rank.getD s 0
+
+theorem GraphsOK.above_mono {g : Graphs} {ids : Ids} {cfg : Cfg} {ps : List Bap.Var} {n : Nat} (hg : GraphsOK g ids cfg ps n) {y t p : Nat}
+    (hp : p ∈ g.preds.getD t []) (ha : aboveD g y p = true) : aboveD g y t = true := by
+  simp only [aboveD, decide_eq_true_eq] at ha ⊢
+  exact Nat.le_trans ha (hg.rank_mono t p hp)
 
 /-- The dense blocks are those of a CFG. -/
 structure Mirror (effect : Bil.Exp → Bool) (ids : Ids) (blocks : Array DBlk) (cfg : Cfg) : Prop where
@@ -1168,13 +1221,13 @@ theorem size_affectedMarks (size : Nat) (affected : List Nat) : (affectedMarks s
   simp
 
 /-- The rows for numbers `xs`, as far as `floodD` goes. `L y i` says what the row of `y` has to be. -/
-theorem refreshRows_spec {preds : Array (List Nat)} {seeds : Array (List Nat)} {n : Nat} (L : Nat → Nat → Prop)
-    (xs : List Nat) (hflood : ∀ y ∈ xs, FloodSpec blocks preds y (fun p => killedD (Bap.IR.DenseDce.blkAt blocks p) y) (L y)) (hsound : ∀ y ∈ xs, ∀ i, i ∈ seeds.getD y [] → L y i)
-    (hleast : ∀ y ∈ xs, ∀ (Row : Nat → Prop), (∀ t ∈ seeds.getD y [], Row t) →
-      (∀ t, Row t → hasPhiD (Bap.IR.DenseDce.blkAt blocks t) y = false → ∀ p ∈ preds.getD t [], killedD (Bap.IR.DenseDce.blkAt blocks p) y = false → Row p) →
+theorem refreshRows_spec {preds : Array (List Nat)} {seeds : Array (List Nat)} {above : Nat → Nat → Bool} {n : Nat} (L : Nat → Nat → Prop)
+    (xs : List Nat) (hflood : ∀ y ∈ xs, FloodSpec blocks preds y (fun p => killedD (Bap.IR.DenseDce.blkAt blocks p) y || !above y p) (L y)) (hsound : ∀ y ∈ xs, ∀ i, i ∈ (seeds.getD y []).filter (above y) → L y i)
+    (hleast : ∀ y ∈ xs, ∀ (Row : Nat → Prop), (∀ t ∈ (seeds.getD y []).filter (above y), Row t) →
+      (∀ t, Row t → hasPhiD (Bap.IR.DenseDce.blkAt blocks t) y = false → ∀ p ∈ preds.getD t [], (killedD (Bap.IR.DenseDce.blkAt blocks p) y || !above y p) = false → Row p) →
       ∀ t, L y t → Row t)
-    (rows result : Array Row) (seen seen' : Marks) (hxs : ∀ y ∈ xs, y < rows.size) (hw : seen.WF n) (hb : ∀ y ∈ xs, ∀ t ∈ seeds.getD y [], t < n)
-    (hr : refreshRows blocks preds seeds rows seen xs = some (result, seen')) :
+    (rows result : Array Row) (seen seen' : Marks) (hxs : ∀ y ∈ xs, y < rows.size) (hw : seen.WF n) (hb : ∀ y ∈ xs, ∀ t ∈ (seeds.getD y []).filter (above y), t < n)
+    (hr : refreshRows blocks preds seeds above rows seen xs = some (result, seen')) :
     seen'.WF n ∧ result.size = rows.size ∧ (∀ y, y ∉ xs → result.getD y (.short []) = rows.getD y (.short [])) ∧
       ∀ y ∈ xs, ∀ i, (result.getD y (.short [])).contains i = true ↔ L y i := by
   induction xs generalizing rows seen with
@@ -1196,7 +1249,7 @@ theorem refreshRows_spec {preds : Array (List Nat)} {seeds : Array (List Nat)} {
     have hrest : ∀ (r : Row), ∀ y ∈ rest, y < (rows.setIfInBounds x r).size := fun r y hy => by
       simpa using hxs y (List.mem_cons_of_mem _ hy)
     have hfinish : ∀ (r : Row) (s : Marks), s.WF n → (∀ i, r.contains i = true ↔ L x i) →
-        refreshRows blocks preds seeds (rows.setIfInBounds x r) s rest = some (result, seen') →
+        refreshRows blocks preds seeds above (rows.setIfInBounds x r) s rest = some (result, seen') →
         seen'.WF n ∧ result.size = rows.size ∧ (∀ y, y ∉ x :: rest → result.getD y (.short []) = rows.getD y (.short [])) ∧
           ∀ y ∈ x :: rest, ∀ i, (result.getD y (.short [])).contains i = true ↔ L y i := by
       intro r s hsw hcorrect hnext
@@ -1213,7 +1266,7 @@ theorem refreshRows_spec {preds : Array (List Nat)} {seeds : Array (List Nat)} {
           rw [a3 y hyr, hgetRows _ _ _ hx]
           simpa using hcorrect i
     simp only [refreshRows] at hr
-    cases hs : seeds.getD x [] with
+    cases hs : (seeds.getD x []).filter (above x) with
     | nil =>
       rw [hs] at hr
       dsimp only at hr
@@ -1221,12 +1274,12 @@ theorem refreshRows_spec {preds : Array (List Nat)} {seeds : Array (List Nat)} {
       intro i
       simp only [Row.contains, List.contains_nil, Bool.false_eq_true, false_iff]
       intro hl
-      exact (hleast x List.mem_cons_self (fun _ => False) (by simp [hs]) (fun _ h => h.elim) i hl)
+      exact (hleast x List.mem_cons_self (fun _ => False) (by rw [hs]; simp) (fun _ h => h.elim) i hl)
     | cons first more =>
       rw [hs] at hr
       dsimp only at hr
       rw [← hs] at hr
-      cases hf : floodD blocks preds x (fun p => killedD (Bap.IR.DenseDce.blkAt blocks p) x) ((seeds.getD x []).length + blocks.size + 1) ((seeds.getD x []).foldl Marks.add seen.clear) (seeds.getD x []) (seeds.getD x []) with
+      cases hf : floodD blocks preds x (fun p => killedD (Bap.IR.DenseDce.blkAt blocks p) x || !above x p) (((seeds.getD x []).filter (above x)).length + blocks.size + 1) (((seeds.getD x []).filter (above x)).foldl Marks.add seen.clear) ((seeds.getD x []).filter (above x)) ((seeds.getD x []).filter (above x)) with
       | none =>
         rw [hf] at hr
         cases hr
@@ -1234,9 +1287,9 @@ theorem refreshRows_spec {preds : Array (List Nat)} {seeds : Array (List Nat)} {
         rw [hf] at hr
         obtain ⟨row, s⟩ := pair
         dsimp only at hr
-        have hwc : (((seeds.getD x []).foldl Marks.add seen.clear)).WF n := hw.clear.foldl_add _
-        have hin : ∀ t ∈ seeds.getD x [], t < n := hb x List.mem_cons_self
-        have hmarked : ∀ t, ((seeds.getD x []).foldl Marks.add seen.clear).contains t = true → t ∈ seeds.getD x [] := by
+        have hwc : ((((seeds.getD x []).filter (above x)).foldl Marks.add seen.clear)).WF n := hw.clear.foldl_add _
+        have hin : ∀ t ∈ (seeds.getD x []).filter (above x), t < n := hb x List.mem_cons_self
+        have hmarked : ∀ t, (((seeds.getD x []).filter (above x)).foldl Marks.add seen.clear).contains t = true → t ∈ (seeds.getD x []).filter (above x) := by
           intro t ht
           rw [Marks.contains_foldl_add hw.clear hin, Marks.contains_clear hw] at ht
           simpa using ht
@@ -1244,16 +1297,16 @@ theorem refreshRows_spec {preds : Array (List Nat)} {seeds : Array (List Nat)} {
         exact hfinish _ _ f1 (fun i => by rw [Row.contains_ofList, f2]) hr
 
 /-- What a row of the rows has in it, for a variable. -/
-def RowsOK (ids : Ids) (cfg : Cfg) (rows : Array Row) (x : Bap.Var) : Prop :=
-  ∀ i b, At cfg i b → ((rows.getD (idOf ids x) (.short [])).contains i = true ↔ x ∈ liveIn cfg b.tid)
+def RowsOK (g : Graphs) (ids : Ids) (cfg : Cfg) (rows : Array Row) (x : Bap.Var) : Prop :=
+  ∀ i b, At cfg i b → ((rows.getD (idOf ids x) (.short [])).contains i = true ↔ aboveD g (idOf ids x) i = true ∧ x ∈ liveIn cfg b.tid)
 
 theorem refreshD_spec {g : Graphs} {ps : List Bap.Var} {n M : Nat} (hm : Mirror effect ids blocks cfg) (hg : GraphsOK g ids cfg ps n) (hnM : n ≤ M)
     {rows rows' : Array Row} (hsize : ids.size = rows.size) {affected : List Nat} {kills seen kills' seen' : Marks}
     (hk : kills.WF rows.size) (hs : seen.WF M)
-    (hold : ∀ x, ids.contains x = true → idOf ids x ∉ affected → RowsOK ids cfg rows x)
+    (hold : ∀ x, ids.contains x = true → idOf ids x ∉ affected → RowsOK g ids cfg rows x)
     (hnames : ∀ y ∈ affected, ∃ x, ids.contains x = true ∧ idOf ids x = y)
     (hr : refreshD g blocks rows affected kills seen = some (rows', kills', seen')) :
-    rows'.size = rows.size ∧ kills'.WF rows.size ∧ seen'.WF M ∧ ∀ x, ids.contains x = true → RowsOK ids cfg rows' x := by
+    rows'.size = rows.size ∧ kills'.WF rows.size ∧ seen'.WF M ∧ ∀ x, ids.contains x = true → RowsOK g ids cfg rows' x := by
   have hids := hm.wf
   have hat : ∀ {i}, i < n → ∃ b, At cfg i b := by
     intro i hi
@@ -1302,7 +1355,7 @@ theorem refreshD_spec {g : Graphs} {ps : List Bap.Var} {n M : Nat} (hm : Mirror 
   generalize hseeds : seedsD g blocks mark kills sites.1 (Array.replicate rows.size []) = seeds at hspec
   have hseeds2 : seedsD g blocks (affectedMarks rows.size affected) kills sites.1 (Array.replicate rows.size []) = seeds := hseeds
   rw [hseeds2] at hr
-  cases hrr : refreshRows blocks g.preds seeds.1 rows sites.2 affected with
+  cases hrr : refreshRows blocks g.preds seeds.1 (aboveD g) rows sites.2 affected with
   | none =>
     rw [hrr] at hr
     cases hr
@@ -1314,13 +1367,15 @@ theorem refreshD_spec {g : Graphs} {ps : List Bap.Var} {n M : Nat} (hm : Mirror 
     have hmarkOf : ∀ x, ids.contains x = true → idOf ids x ∈ affected → mark.getD (idOf ids x) false = true := by
       intro x hx ha
       exact (mem_affectedMarks _ _ _).2 ⟨ha, hsize ▸ hids.lt x hx⟩
-    let L : Nat → Nat → Prop := fun y i => ∃ x b, ids.contains x = true ∧ idOf ids x = y ∧ At cfg i b ∧ x ∈ liveIn cfg b.tid
-    have hstep : ∀ y ∈ affected, FloodSpec blocks g.preds y (fun p => killedD (Bap.IR.DenseDce.blkAt blocks p) y) (L y) := by
+    let L : Nat → Nat → Prop := fun y i => aboveD g y i = true ∧ ∃ x b, ids.contains x = true ∧ idOf ids x = y ∧ At cfg i b ∧ x ∈ liveIn cfg b.tid
+    have hstep : ∀ y ∈ affected, FloodSpec blocks g.preds y (fun p => killedD (Bap.IR.DenseDce.blkAt blocks p) y || !aboveD g y p) (L y) := by
       intro y _
       refine ⟨?_⟩
-      rintro t ⟨x, b, hx, rfl, hb, hl⟩ hp p hps hk'
+      rintro t ⟨_, x, b, hx, rfl, hb, hl⟩ hp p hps hk''
+      have hk' : killedD (Bap.IR.DenseDce.blkAt blocks p) (idOf ids x) = false ∧ aboveD g (idOf ids x) p = true := by simpa using hk''
+      obtain ⟨hk', habove⟩ := hk'
       obtain ⟨c, hc⟩ := hat (hg.preds_in t p hps)
-      refine ⟨x, c, hx, rfl, hc, ?_⟩
+      refine ⟨habove, x, c, hx, rfl, hc, ?_⟩
       rw [hm.blkAt hb, hasPhiD_dense hids (hnamed hb) hx, hasPhi_false_iff] at hp
       rw [hm.blkAt hc, killedD_dense hids (hnamed hc) hx] at hk'
       obtain ⟨h1, h2⟩ := (hg.preds t b p c hb hc).1 hps
@@ -1328,12 +1383,14 @@ theorem refreshD_spec {g : Graphs} {ps : List Bap.Var} {n M : Nat} (hm : Mirror 
       have := (killed_iff c x).2 hkk
       rw [hk'] at this
       cases this
-    have hsoundAll : ∀ y ∈ affected, ∀ i, i ∈ seeds.1.getD y [] → L y i := by
-      intro y hy i hi
+    have hsoundAll : ∀ y ∈ affected, ∀ i, i ∈ (seeds.1.getD y []).filter (aboveD g y) → L y i := by
+      intro y hy i hi'
+      obtain ⟨hi, habove⟩ := List.mem_filter.1 hi'
       obtain ⟨x, hx, rfl⟩ := hnames y hy
       rcases ((hspec x hx i).2.2).1 hi with hz | ⟨_, s, hss, hc⟩
       · exact (hrepl _ _ hz).elim
-      · rcases hc with ⟨rfl, hre, b, hb, hg'⟩ | ⟨hip, hread, hk'⟩
+      · refine ⟨habove, ?_⟩
+        rcases hc with ⟨rfl, hre, b, hb, hg'⟩ | ⟨hip, hread, hk'⟩
         · exact ⟨x, b, hx, rfl, hb, live_of_gen ((hg.reach i b hb).1 hre) (hg.block i b hb) hg'⟩
         · obtain ⟨c, hc⟩ := hat (hg.preds_in s i hip)
           obtain ⟨a, _, hsa⟩ := List.mem_flatMap.1 ((hsitesMem s).1 hss)
@@ -1346,26 +1403,27 @@ theorem refreshD_spec {g : Graphs} {ps : List Bap.Var} {n M : Nat} (hm : Mirror 
           have := (killed_iff c x).2 hkk
           rw [hk'] at this
           cases this
-    have hleastAll : ∀ y ∈ affected, ∀ (Row : Nat → Prop), (∀ t ∈ seeds.1.getD y [], Row t) →
-        (∀ t, Row t → hasPhiD (Bap.IR.DenseDce.blkAt blocks t) y = false → ∀ p ∈ g.preds.getD t [], killedD (Bap.IR.DenseDce.blkAt blocks p) y = false → Row p) →
+    have hleastAll : ∀ y ∈ affected, ∀ (Row : Nat → Prop), (∀ t ∈ (seeds.1.getD y []).filter (aboveD g y), Row t) →
+        (∀ t, Row t → hasPhiD (Bap.IR.DenseDce.blkAt blocks t) y = false → ∀ p ∈ g.preds.getD t [], (killedD (Bap.IR.DenseDce.blkAt blocks p) y || !aboveD g y p) = false → Row p) →
         ∀ t, L y t → Row t := by
       intro y hy Row hstart hclosed t
       obtain ⟨x, hx, rfl⟩ := hnames y hy
-      rintro ⟨x', b, hx', he, hb, hl⟩
+      rintro ⟨hab, x', b, hx', he, hb, hl⟩
       have hxx : x' = x := hids.inj _ _ hx' hx he
       subst hxx
       have hsiteOf : ∀ i c, At cfg i c → x' ∈ vocabulary c → i ∈ sites.1 := by
         intro i c hc hv
         rw [hsitesMem, List.mem_flatMap]
         exact ⟨_, hy, hg.sites i c hc x' hv⟩
-      have hRow := live_least cfg x' (fun τ => ∃ j c, At cfg j c ∧ c.tid = τ ∧ Row j) ?_ ?_ hl
+      have hRow := live_least cfg x' (fun τ => ∃ j c, At cfg j c ∧ c.tid = τ ∧ (aboveD g (idOf ids x') j = true → Row j)) ?_ ?_ hl
       · obtain ⟨j, c, hc, htid, hj⟩ := hRow
         have := hg.unique j t c b hc hb htid
-        exact this ▸ hj
+        subst this
+        exact hj hab
       · intro τ hτ blk hblk hgen
         obtain ⟨i, hi, htid⟩ := hg.index τ blk hblk
         subst htid
-        refine ⟨i, blk, hi, rfl, hstart i ?_⟩
+        refine ⟨i, blk, hi, rfl, fun ha => hstart i (List.mem_filter.2 ⟨?_, ha⟩)⟩
         refine ((hspec x' hx i).2.2).2 (Or.inr ⟨hmarkOf x' hx hy, i, hsiteOf i blk hi (vocabulary_of_gen hgen), Or.inl ⟨rfl, (hg.reach i blk hi).2 hτ, blk, hi, hgen⟩⟩)
       · intro τ hτ blk hblk hkk σ hσ hneed
         obtain ⟨i, hi, htid⟩ := hg.index τ blk hblk
@@ -1377,19 +1435,20 @@ theorem refreshD_spec {g : Graphs} {ps : List Bap.Var} {n M : Nat} (hm : Mirror 
           rw [hm.blkAt hi, killedD_dense hids (hnamed hi) hx, Bool.eq_false_iff]
           exact fun h => hkk ((killed_iff blk x').1 h)
         have hip : i ∈ g.preds.getD is [] := (hg.preds is bs i blk his hi).2 ⟨hτ, hσ⟩
-        refine ⟨i, blk, hi, rfl, ?_⟩
+        refine ⟨i, blk, hi, rfl, fun ha => ?_⟩
         rcases hc with ⟨⟨j, c, hcj, htid, hj⟩, hnp⟩ | hread
         · have hje := hg.unique j is c bs hcj his htid
           subst hje
-          refine hclosed j hj ?_ i hip hkf
+          refine hclosed j (hj (hg.above_mono hip ha)) ?_ i hip (by simp [hkf, ha])
           rw [hm.blkAt his, hasPhiD_dense hids (hnamed his) hx, hasPhi_false_iff]
           exact hnp
-        · refine hstart i ?_
+        · refine hstart i (List.mem_filter.2 ⟨?_, ha⟩)
           refine ((hspec x' hx i).2.2).2 (Or.inr ⟨hmarkOf x' hx hy, is, hsiteOf is bs his (vocabulary_of_read hread), Or.inr ⟨hip, ?_, hkf⟩⟩)
           rw [hm.blkAt his, hg.tids i blk hi, phiReadsD_dense hids (hnamed his) _ hx]
           exact hread
-    have hbAll : ∀ y ∈ affected, ∀ t ∈ seeds.1.getD y [], t < n := by
-      intro y hy t ht
+    have hbAll : ∀ y ∈ affected, ∀ t ∈ (seeds.1.getD y []).filter (aboveD g y), t < n := by
+      intro y hy t ht'
+      have ht := (List.mem_filter.1 ht').1
       obtain ⟨x, hx, rfl⟩ := hnames y hy
       rcases ((hspec x hx t).2.2).1 ht with hz | ⟨_, s, hss, hc⟩
       · exact (hrepl _ _ hz).elim
@@ -1410,11 +1469,11 @@ theorem refreshD_spec {g : Graphs} {ps : List Bap.Var} {n M : Nat} (hm : Mirror 
       by_cases ha : idOf ids x ∈ affected
       · rw [r4 _ ha]
         constructor
-        · rintro ⟨x', c, hx', he, hc, hl⟩
+        · rintro ⟨hab, x', c, hx', he, hc, hl⟩
           rw [hids.inj _ _ hx' hx he] at hl
           rw [hsame hb hc]
-          exact hl
-        · exact fun hl => ⟨x, b, hx, rfl, hb, hl⟩
+          exact ⟨hab, hl⟩
+        · exact fun hl => ⟨hl.1, x, b, hx, rfl, hb, hl.2⟩
       · rw [r3 _ ha]
         exact hold x hx ha i b hb
 
@@ -1590,6 +1649,49 @@ private theorem getD_replicate_nil (n y : Nat) : (Array.replicate n ([] : List N
   simp only [Array.getD_eq_getD_getElem?, Array.getElem?_replicate]
   split <;> rfl
 
+theorem ranksOf_mono (preds succs : Array (List Nat)) (start : Option Nat) (n : Nat) (t p : Nat) (hp : p ∈ preds.getD t []) :
+    (ranksOf preds succs start n).getD p 0 ≤ (ranksOf preds succs start n).getD t 0 := by
+  simp only [ranksOf]
+  generalize ranksFrom preds _ n = ranks
+  split
+  · rename_i hall
+    have ht : t < preds.size := by
+      refine Classical.byContradiction fun hn => ?_
+      have hnone : preds[t]? = none := Array.getElem?_eq_none_iff.2 (Nat.le_of_not_gt hn)
+      simp [Array.getD_eq_getD_getElem?, hnone] at hp
+    have := (List.all_eq_true.1 hall) t (List.mem_range.2 ht)
+    simpa using (List.all_eq_true.1 this) p hp
+  · simp
+
+theorem floorsOf_le (definers : Array (List Nat)) (rank : Array Nat) (top : Nat) (y s : Nat) (hs : s ∈ definers.getD y []) :
+    (floorsOf definers rank top).getD y 0 ≤ rank.getD s 0 := by
+  have key : ∀ (l : List Nat) (least : Nat), s ∈ l → l.foldl (fun least s => min least (rank.getD s 0)) least ≤ rank.getD s 0 := by
+    intro l
+    induction l with
+    | nil => intro _ h; cases h
+    | cons a as ih =>
+      intro least h
+      simp only [List.foldl_cons]
+      by_cases hm : s ∈ as
+      · exact ih _ hm
+      · have hsa : s = a := by simpa [hm] using h
+        subst hsa
+        have hle : ∀ (l : List Nat) (m : Nat), l.foldl (fun least s => min least (rank.getD s 0)) m ≤ m := by
+          intro l
+          induction l with
+          | nil => intro _; exact Nat.le_refl _
+          | cons _ _ ih2 =>
+            intro m
+            simp only [List.foldl_cons]
+            exact Nat.le_trans (ih2 _) (Nat.min_le_left _ _)
+        exact Nat.le_trans (hle _ _) (Nat.min_le_right _ _)
+  simp only [floorsOf, Array.getD_eq_getD_getElem?, Array.getElem?_map] at hs ⊢
+  cases h : definers[y]? with
+  | none => simp [h] at hs
+  | some l =>
+    simp only [h, Option.getD_some, Option.map_some] at hs ⊢
+    simpa [Array.getD_eq_getD_getElem?] using key l top hs
+
 theorem graphsOf_ok {ids : Ids} {cfg : Cfg} {ps : List Bap.Var} (hids : IdsWF ids)
     (hnamed : ∀ blk ∈ cfg.blocks, ∀ y ∈ vocabulary blk, ids.contains y = true) (hps : ∀ x ∈ ps, ids.contains x = true)
     (hcheck : indexChecks (indexOf 0 cfg.blocks {}) 0 cfg.blocks = true) :
@@ -1739,7 +1841,7 @@ theorem graphsOf_ok {ids : Ids} {cfg : Cfg} {ps : List Bap.Var} (hids : IdsWF id
       exact hτ
     · intro hm
       exact ⟨c.tid, hm, hin s c hc⟩
-  refine ⟨?_, ?_, ?_, hunique, rfl, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, hunique, rfl, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ranksOf_mono _ _ _ _, floorsOf_le _ _ _⟩
   · intro i b hb
     have hbi : cfg.blocks[i]? = some b := hb
     simp [graphsOf, Array.getD_eq_getD_getElem?, hbi]
@@ -2099,19 +2201,19 @@ structure Removal (old cfg : Cfg) (x : Bap.Var) (sites : List Nat) : Prop where
 
 /-- Where a variable was live and may not be any more is what goes back from what lost it. -/
 private theorem removal_cover {g : Graphs} {ps : List Bap.Var} {n : Nat} {x : Bap.Var} {sites : List Nat} (hg : GraphsOK g ids cfg ps n)
-    (hrm : Removal old cfg x sites) (C : Nat → Prop) (R : Nat → Prop) (hrow : ∀ i b, At cfg i b → (R i ↔ x ∈ liveIn old b.tid))
+    (hrm : Removal old cfg x sites) (C A : Nat → Prop) (R : Nat → Prop) (hA : ∀ t, ∀ p ∈ g.preds.getD t [], A p → A t) (hrow : ∀ i b, At cfg i b → (R i ↔ A i ∧ x ∈ liveIn old b.tid))
     (hseed : ∀ i b, At cfg i b → R i → x ∉ blockIn b [] → i ∈ sites → C i)
     (hpred : ∀ s ∈ sites, ∀ p ∈ g.preds.getD s [], ∀ b, At cfg p b → R p → x ∉ blockIn b [] → C p)
     (hclosed : ∀ t b, At cfg t b → C t → (∀ phi ∈ b.phis, phi.var ≠ x) → ∀ p ∈ g.preds.getD t [], ∀ c, At cfg p c → R p → ¬ Killed c x → x ∉ blockIn c [] → C p)
-    {i : Nat} {b : Blk} (hb : At cfg i b) (hl : x ∈ liveIn old b.tid) : C i ∨ x ∈ liveIn cfg b.tid := by
-  have hkey := live_least old x (fun τ => x ∈ liveIn old τ ∧ ∀ i b, At cfg i b → b.tid = τ → C i ∨ x ∈ liveIn cfg τ) ?_ ?_ hl
-  · exact hkey.2 i b hb rfl
+    {i : Nat} {b : Blk} (hb : At cfg i b) (hai : A i) (hl : x ∈ liveIn old b.tid) : C i ∨ x ∈ liveIn cfg b.tid := by
+  have hkey := live_least old x (fun τ => x ∈ liveIn old τ ∧ ∀ i b, At cfg i b → b.tid = τ → A i → C i ∨ x ∈ liveIn cfg τ) ?_ ?_ hl
+  · exact hkey.2 i b hb rfl hai
   · intro τ hτ before hbefore hgen
     have hlo : x ∈ liveIn old τ := live_of_gen hτ hbefore hgen
     refine ⟨hlo, ?_⟩
     obtain ⟨j, after, hj, htid, _, hag⟩ := hrm.block τ before hbefore
     subst htid
-    intro k c hc hct
+    intro k c hc hct hak
     have hkj := hg.unique k j c after hc hj hct
     subst hkj
     have hsame : c = after := by
@@ -2123,7 +2225,7 @@ private theorem removal_cover {g : Graphs} {ps : List Bap.Var} {n : Nat} {x : Ba
     by_cases hgn : x ∈ blockIn c []
     · exact Or.inr (live_of_gen hreachNew (hg.block k c hc) hgn)
     · by_cases hs : k ∈ sites
-      · exact Or.inl (hseed k c hc ((hrow k c hc).2 hlo) hgn hs)
+      · exact Or.inl (hseed k c hc ((hrow k c hc).2 ⟨hak, hlo⟩) hgn hs)
       · exact (hgn ((hag hs).gen.1 hgen)).elim
   · intro τ hτ before hbefore hk σ hσ he
     obtain ⟨obs, hobs, hcase⟩ := he
@@ -2136,7 +2238,7 @@ private theorem removal_cover {g : Graphs} {ps : List Bap.Var} {n : Nat} {x : Ba
     subst htid
     obtain ⟨js, bs, hjs, hst, hshs, hags⟩ := hrm.block σ obs hobs
     subst hst
-    intro k c hc hct
+    intro k c hc hct hak
     have hkj := hg.unique k j c after hc hj hct
     subst hkj
     have hsame : c = after := by
@@ -2153,35 +2255,36 @@ private theorem removal_cover {g : Graphs} {ps : List Bap.Var} {n : Nat} {x : Ba
     have hbsb := hg.block js bs hjs
     rcases hcase with ⟨hr, hp⟩ | hr
     · have hpn := hshs.phi hp
-      rcases hr.2 js bs hjs rfl with hC | hnew
-      · exact Or.inl (hclosed js bs hjs hC hpn k hip c hc ((hrow k c hc).2 hlo) hkn hgn)
+      rcases hr.2 js bs hjs rfl (hA js k hip hak) with hC | hnew
+      · exact Or.inl (hclosed js bs hjs hC hpn k hip c hc ((hrow k c hc).2 ⟨hak, hlo⟩) hkn hgn)
       · exact Or.inr (live_of_edge hreachNew (hg.block k c hc) hkn hsucc ⟨bs, hbsb, Or.inl ⟨hnew, hpn⟩⟩)
     · by_cases hs : js ∈ sites
-      · exact Or.inl (hpred js hs k hip c hc ((hrow k c hc).2 hlo) hgn)
+      · exact Or.inl (hpred js hs k hip c hc ((hrow k c hc).2 ⟨hak, hlo⟩) hgn)
       · exact Or.inr (live_of_edge hreachNew (hg.block k c hc) hkn hsucc ⟨bs, hbsb, Or.inr (((hags hs).reads c.tid).1 hr)⟩)
 
 /-- The row of a variable after a removal, from the one before it, what can lose it and what doesn't. -/
 private theorem removal_exact {g : Graphs} {ps : List Bap.Var} {n : Nat} {x : Bap.Var} {sites : List Nat} (hg : GraphsOK g ids cfg ps n)
-    (hrm : Removal old cfg x sites) (C K R : Nat → Prop) (hrow : ∀ i b, At cfg i b → (R i ↔ x ∈ liveIn old b.tid))
-    (hcover : ∀ i b, At cfg i b → x ∈ liveIn old b.tid → C i ∨ x ∈ liveIn cfg b.tid)
+    (hrm : Removal old cfg x sites) (C K A R : Nat → Prop) (hA : ∀ t, ∀ p ∈ g.preds.getD t [], A p → A t) (hrow : ∀ i b, At cfg i b → (R i ↔ A i ∧ x ∈ liveIn old b.tid))
+    (hcover : ∀ i b, At cfg i b → A i → x ∈ liveIn old b.tid → C i ∨ x ∈ liveIn cfg b.tid)
     (hgen : ∀ i b, At cfg i b → C i → x ∉ blockIn b [])
     (hKsound : ∀ i b, At cfg i b → K i → x ∈ liveIn cfg b.tid)
     (hsurvive : ∀ i b, At cfg i b → C i → ¬ Killed b x → ∀ is bs, At cfg is bs → bs.tid ∈ cfg.successors b.tid →
       ((R is ∧ ¬ C is ∧ ∀ phi ∈ bs.phis, phi.var ≠ x) ∨ x ∈ phiReads b.tid bs) → K i)
     (hKclosed : ∀ t b, At cfg t b → K t → (∀ phi ∈ b.phis, phi.var ≠ x) → ∀ p c, At cfg p c → c.tid ∈ cfg.reachable → b.tid ∈ cfg.successors c.tid → C p → ¬ Killed c x → K p)
-    {i : Nat} {b : Blk} (hb : At cfg i b) : (R i ∧ (¬ C i ∨ K i)) ↔ x ∈ liveIn cfg b.tid := by
+    {i : Nat} {b : Blk} (hb : At cfg i b) : (R i ∧ (¬ C i ∨ K i)) ↔ A i ∧ x ∈ liveIn cfg b.tid := by
   constructor
   · rintro ⟨hr, hc | hc⟩
-    · rcases hcover i b hb ((hrow i b hb).1 hr) with h | h
+    · obtain ⟨ha, hlo⟩ := (hrow i b hb).1 hr
+      rcases hcover i b hb ha hlo with h | h
       · exact (hc h).elim
-      · exact h
-    · exact hKsound i b hb hc
-  · intro hl
-    have hkey := live_least cfg x (fun τ => x ∈ liveIn cfg τ ∧ ∀ i b, At cfg i b → b.tid = τ → ¬ C i ∨ K i) ?_ ?_ hl
-    · exact ⟨(hrow i b hb).2 (hrm.sub _ hl), hkey.2 i b hb rfl⟩
+      · exact ⟨ha, h⟩
+    · exact ⟨((hrow i b hb).1 hr).1, hKsound i b hb hc⟩
+  · rintro ⟨ha, hl⟩
+    have hkey := live_least cfg x (fun τ => x ∈ liveIn cfg τ ∧ ∀ i b, At cfg i b → b.tid = τ → A i → ¬ C i ∨ K i) ?_ ?_ hl
+    · exact ⟨(hrow i b hb).2 ⟨ha, hrm.sub _ hl⟩, hkey.2 i b hb rfl ha⟩
     · intro τ hτ blk hblk hgn
       refine ⟨live_of_gen hτ hblk hgn, ?_⟩
-      intro k c hc hct
+      intro k c hc hct _
       obtain rfl : blk = c := Option.some.inj (by rw [← hblk, ← hct]; exact hg.block k c hc)
       exact Or.inl fun hC => hgen k blk hc hC hgn
     · intro τ hτ blk hblk hk σ hσ he
@@ -2192,7 +2295,7 @@ private theorem removal_exact {g : Graphs} {ps : List Bap.Var} {n : Nat} {x : Ba
         · exact Or.inl ⟨h1.1, h2⟩
         · exact Or.inr h1)
       refine ⟨hlv, ?_⟩
-      intro k c hc hct
+      intro k c hc hct hak
       obtain rfl : blk = c := Option.some.inj (by rw [← hblk, ← hct]; exact hg.block k c hc)
       by_cases hC : C k
       · refine Or.inr ?_
@@ -2200,9 +2303,10 @@ private theorem removal_exact {g : Graphs} {ps : List Bap.Var} {n : Nat} {x : Ba
         obtain ⟨is, his, hst⟩ := hg.index σ bs hbs
         subst hst
         subst hct
+        have hais : A is := hA is k ((hg.preds is bs k blk his hc).2 ⟨hτ, hσ⟩) hak
         rcases hcase with ⟨h1, h2⟩ | h1
-        · rcases h1.2 is bs his rfl with hn | hK
-          · exact hsurvive k blk hc hC hk is bs his hσ (Or.inl ⟨(hrow is bs his).2 (hrm.sub _ h1.1), hn, h2⟩)
+        · rcases h1.2 is bs his rfl hais with hn | hK
+          · exact hsurvive k blk hc hC hk is bs his hσ (Or.inl ⟨(hrow is bs his).2 ⟨hais, hrm.sub _ h1.1⟩, hn, h2⟩)
           · exact hKclosed is bs his hK h2 k blk hc hτ hσ hC hk
         · exact hsurvive k blk hc hC hk is bs his hσ (Or.inr h1)
       · exact Or.inl hC
@@ -2218,14 +2322,20 @@ private theorem getD_modify_row (a : Array Row) (y j : Nat) (f : Row → Row) (d
   · have : j ≠ y := fun e => h e.symm
     simp [h, this]
 
+private theorem killed_assigned {b : Blk} {x : Bap.Var} (h : Killed b x) : x ∈ assigned b := by
+  simp only [assigned, List.mem_append, List.mem_map]
+  rcases h with ⟨p, hp, he⟩ | ⟨d, hd, he⟩
+  · exact Or.inr ⟨p, hp, he⟩
+  · exact Or.inl ⟨d, hd, he⟩
+
 /-- What `updateVar` leaves. -/
 theorem updateVar_spec {g : Graphs} {ps : List Bap.Var} {n M : Nat} {x : Bap.Var} {sites : List Nat} {rows rows' : Array Row} {dirty dirty' : List Nat}
     {seen seen2 s1 s2 : Marks} (hm : Mirror effect ids blocks cfg) (hg : GraphsOK g ids cfg ps n) (hnM : n ≤ M) (hx : ids.contains x = true) (hxs : idOf ids x < rows.size)
-    (hrm : Removal old cfg x sites) (hsites : ∀ s ∈ sites, s < n) (hrow : ∀ i b, At cfg i b → ((rows.getD (idOf ids x) (.short [])).contains i = true ↔ x ∈ liveIn old b.tid))
+    (hrm : Removal old cfg x sites) (hsites : ∀ s ∈ sites, s < n) (hrow : ∀ i b, At cfg i b → ((rows.getD (idOf ids x) (.short [])).contains i = true ↔ aboveD g (idOf ids x) i = true ∧ x ∈ liveIn old b.tid))
     (hs1 : seen.WF M) (hs2 : seen2.WF M)
     (hr : updateVar g blocks (idOf ids x) sites rows dirty seen seen2 = some (rows', dirty', s1, s2)) :
     s1.WF M ∧ s2.WF M ∧ rows'.size = rows.size ∧ (∀ y, y ≠ idOf ids x → rows'.getD y (.short []) = rows.getD y (.short [])) ∧
-      (∀ i b, At cfg i b → ((rows'.getD (idOf ids x) (.short [])).contains i = true ↔ x ∈ liveIn cfg b.tid)) ∧
+      (∀ i b, At cfg i b → ((rows'.getD (idOf ids x) (.short [])).contains i = true ↔ aboveD g (idOf ids x) i = true ∧ x ∈ liveIn cfg b.tid)) ∧
       (∀ d ∈ dirty, d ∈ dirty') ∧ (∀ d ∈ dirty', d ∈ dirty ∨ d < n) ∧
       ∀ t b, At cfg t b → (t ∈ sites ∨ (x ∈ liveIn old b.tid ∧ x ∉ liveIn cfg b.tid)) →
         ∀ p ∈ g.preds.getD t [], killedD (Bap.IR.DenseDce.blkAt blocks p) (idOf ids x) = true → p ∈ dirty' := by
@@ -2257,9 +2367,10 @@ theorem updateVar_spec {g : Graphs} {ps : List Bap.Var} {n M : Nat} {x : Bap.Var
     have hexpF : ∀ {i b}, At cfg i b → (exposesD (Bap.IR.DenseDce.blkAt blocks i) (idOf ids x) = false ↔ x ∉ blockIn b []) := by
       intro i b hb
       rw [hm.blkAt hb, ← exposesD_dense (effect := effect) hids (hnamed hb) hx, Bool.not_eq_true]
-    have hcover : ∀ i b, At cfg i b → x ∈ liveIn old b.tid → i ∈ lost ∨ x ∈ liveIn cfg b.tid := by
-      intro i b hb hlv
-      refine removal_cover (R := fun i => row.contains i = true) hg hrm (fun t => t ∈ lost) hrow ?_ ?_ ?_ hb hlv
+    have hmono : ∀ t, ∀ p ∈ g.preds.getD t [], aboveD g (idOf ids x) p = true → aboveD g (idOf ids x) t = true := fun _ _ hp ha => hg.above_mono hp ha
+    have hcover : ∀ i b, At cfg i b → aboveD g (idOf ids x) i = true → x ∈ liveIn old b.tid → i ∈ lost ∨ x ∈ liveIn cfg b.tid := by
+      intro i b hb hai hlv
+      refine removal_cover (R := fun i => row.contains i = true) hg hrm (fun t => t ∈ lost) (fun t => aboveD g (idOf ids x) t = true) hmono hrow ?_ ?_ ?_ hb hai hlv
       · intro i b hb hr hn hs
         exact l4 i (List.mem_append_left _ hs) hr ((hexpF hb).2 hn)
       · intro s hs p hp b hb hr hn
@@ -2282,12 +2393,12 @@ theorem updateVar_spec {g : Graphs} {ps : List Bap.Var} {n M : Nat} {x : Bap.Var
           simp only [survivesD, Bool.and_eq_true, Bool.not_eq_true', List.any_eq_true, Bool.or_eq_true] at hsv
           obtain ⟨hkf, s, hs, hcase⟩ := hsv
           obtain ⟨c, hc⟩ := hat (hg.succs_in t s hs)
-          have hreach : b.tid ∈ cfg.reachable := hrm.reach ▸ reachable_of_live ((hrow t b hb).1 (l3 t ht).2.1)
+          have hreach : b.tid ∈ cfg.reachable := hrm.reach ▸ reachable_of_live ((hrow t b hb).1 (l3 t ht).2.1).2
           have hsucc := (hg.succs t b s c hb hc).1 hs
           refine live_of_edge hreach (hg.block t b hb) ((hkillF hb).1 hkf) hsucc ⟨c, hg.block s c hc, ?_⟩
           rcases hcase with ⟨⟨h1, h2⟩, h3⟩ | h1
           · refine Or.inl ⟨?_, (hphiIff hc).1 h3⟩
-            rcases hcover s c hc ((hrow s c hc).1 h1) with hC | hn
+            rcases hcover s c hc ((hrow s c hc).1 h1).1 ((hrow s c hc).1 h1).2 with hC | hn
             · have : lostM.contains s = true := (l2 s).2 hC
               rw [h2] at this
               cases this
@@ -2299,9 +2410,9 @@ theorem updateVar_spec {g : Graphs} {ps : List Bap.Var} {n M : Nat} {x : Bap.Var
           obtain ⟨c, hc⟩ := hat (hg.preds_in t p hp)
           obtain ⟨h1, h2⟩ := (hg.preds t b p c hb hc).1 hp
           exact ⟨c, hc, live_of_edge h1 (hg.block p c hc) ((hkillF hc).1 hkf) h2 ⟨b, hg.block t b hb, Or.inl ⟨hlv, (hphiIff hb).1 hph⟩⟩⟩) hk
-      have hexact : ∀ {i b}, At cfg i b → ((row.contains i = true ∧ (i ∉ lost ∨ i ∈ kept)) ↔ x ∈ liveIn cfg b.tid) := by
+      have hexact : ∀ {i b}, At cfg i b → ((row.contains i = true ∧ (i ∉ lost ∨ i ∈ kept)) ↔ aboveD g (idOf ids x) i = true ∧ x ∈ liveIn cfg b.tid) := by
         intro i b hb
-        refine removal_exact (R := fun i => row.contains i = true) (C := fun t => t ∈ lost) (K := fun t => t ∈ kept) hg hrm hrow hcover ?_ ?_ ?_ ?_ hb
+        refine removal_exact (R := fun i => row.contains i = true) (C := fun t => t ∈ lost) (K := fun t => t ∈ kept) (A := fun t => aboveD g (idOf ids x) t = true) hg hrm hmono hrow hcover ?_ ?_ ?_ ?_ hb
         · intro i b hb hC
           exact (hexpF hb).1 (l3 i hC).2.2
         · intro i b hb hK
@@ -2346,17 +2457,23 @@ theorem updateVar_spec {g : Graphs} {ps : List Bap.Var} {n M : Nat} {x : Bap.Var
         rcases hcase with hs | ⟨h1, h2⟩
         · exact List.mem_append_right _ hs
         · refine List.mem_append_left _ (List.mem_filter.2 ?_)
-          rcases hcover t b hb h1 with hC | hn
+          have hat' : aboveD g (idOf ids x) t = true := by
+            obtain ⟨c, hc⟩ := hat (hg.preds_in t p hp)
+            refine hg.above_mono hp ?_
+            have hdef := hg.definers p c hc x (killed_assigned ((hkillIff hc).1 hkp))
+            simp only [aboveD, decide_eq_true_eq]
+            exact hg.floor_le _ p hdef
+          rcases hcover t b hb hat' h1 with hC | hn
           · refine ⟨hC, ?_⟩
             simp only [Bool.not_eq_eq_eq_not, Bool.not_true]
             rw [Bool.eq_false_iff]
             intro hkm
-            exact h2 ((hexact hb).1 ⟨(hrow t b hb).2 h1, Or.inr ((k2 t).1 hkm)⟩)
+            exact h2 ((hexact hb).1 ⟨(hrow t b hb).2 ⟨hat', h1⟩, Or.inr ((k2 t).1 hkm)⟩).2
           · exact (h2 hn).elim
 
 /-- A variable that has its row, and the blocks to look at again for it. -/
 structure VarDone (g : Graphs) (blocks : Array DBlk) (ids : Ids) (old cfg : Cfg) (rows : Array Row) (dirty : List Nat) (x : Bap.Var) (sites : List Nat) : Prop where
-  row : ∀ i b, At cfg i b → ((rows.getD (idOf ids x) (.short [])).contains i = true ↔ x ∈ liveIn cfg b.tid)
+  row : ∀ i b, At cfg i b → ((rows.getD (idOf ids x) (.short [])).contains i = true ↔ aboveD g (idOf ids x) i = true ∧ x ∈ liveIn cfg b.tid)
   dirty : ∀ t b, At cfg t b → (t ∈ sites ∨ (x ∈ liveIn old b.tid ∧ x ∉ liveIn cfg b.tid)) →
     ∀ p ∈ g.preds.getD t [], killedD (Bap.IR.DenseDce.blkAt blocks p) (idOf ids x) = true → p ∈ dirty
 
@@ -2377,7 +2494,7 @@ theorem updateAll_spec {g : Graphs} {ps : List Bap.Var} {n M : Nat} (orig : Nat 
     (hsize : rows.size = ids.size) (hgsize : groups.size = ids.size) (hs1 : seen.WF M) (hs2 : seen2.WF M)
     (hnames : ∀ p ∈ pairs, ∃ x, ids.contains x = true ∧ idOf ids x = p.1)
     (hstate : ∀ x, ids.contains x = true → (VarDone g blocks ids old cfg rows dirty x (orig (idOf ids x)) ∧ groups.getD (idOf ids x) [] = []) ∨
-      (groups.getD (idOf ids x) [] = orig (idOf ids x) ∧ orig (idOf ids x) ≠ [] ∧ (∀ i b, At cfg i b → ((rows.getD (idOf ids x) (.short [])).contains i = true ↔ x ∈ liveIn old b.tid))))
+      (groups.getD (idOf ids x) [] = orig (idOf ids x) ∧ orig (idOf ids x) ≠ [] ∧ (∀ i b, At cfg i b → ((rows.getD (idOf ids x) (.short [])).contains i = true ↔ aboveD g (idOf ids x) i = true ∧ x ∈ liveIn old b.tid))))
     (hleft : ∀ y, groups.getD y [] ≠ [] → ∃ p ∈ pairs, p.1 = y)
     {rows' : Array Row} {groups' : Array (List Nat)} {dirty' : List Nat} {s1 s2 : Marks}
     (hr : updateAll g blocks pairs rows groups dirty seen seen2 = some (rows', groups', dirty', s1, s2)) :
@@ -2424,7 +2541,7 @@ theorem updateAll_spec {g : Graphs} {ps : List Bap.Var} {n M : Nat} (orig : Nat 
         dsimp only at hr
         have hltx : idOf ids x0 < ids.size := hids.lt x0 hx0
         have hold : groups.getD (idOf ids x0) [] = orig (idOf ids x0) ∧
-            ∀ i b, At cfg i b → ((rows.getD (idOf ids x0) (.short [])).contains i = true ↔ x0 ∈ liveIn old b.tid) := by
+            ∀ i b, At cfg i b → ((rows.getD (idOf ids x0) (.short [])).contains i = true ↔ aboveD g (idOf ids x0) i = true ∧ x0 ∈ liveIn old b.tid) := by
           rcases hstate x0 hx0 with h | ⟨h1, _, h3⟩
           · rw [h.2] at hg0
             cases hg0

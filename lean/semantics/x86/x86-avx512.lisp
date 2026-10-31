@@ -153,7 +153,12 @@
 
 ;; the sources
 
-(defun evex-rounding () (error "evex: a static rounding mode"))
+(defun evex-rc-mode (c) (case (logand c 3) 0 'rne 1 'rdn 2 'rup 'rtz))
+
+;; `Bap.Target.LLVMLift` binds *sse-rmode* to a static rounding mode, the last
+;; operand of a form that has one. The same form with {sae} of what doesn't
+;; round has no such operand, and exceptions aren't modeled, so it is what
+;; the register form is. It binds *sse-format* for the families of BF16.
 
 (defun evex-ea (s)
   (evex-freeze (ea (car s) (evex-nth 1 s) (evex-nth 2 s) (evex-nth 3 s) (evex-nth 4 s))))
@@ -163,7 +168,7 @@
     0 0
     1 (if (= (evex-m o) 0) 0 1)
     2 (if (= (evex-m o) 0) 2 3)
-    (evex-rounding)))
+    0))
 
 (defun evex-value (o e total s)
   "the value of the source at the head of S, of TOTAL bits, whose mode
@@ -171,12 +176,38 @@
    only if its bit is set"
   (case (evex-mem o)
     0 (car s)
+    4 (car s)
     1 (if (= (evex-m o) 0) (evex-freeze (load-n total (evex-ea s))) (evex-ea s))
     (if (= (evex-m o) 0) (evex-freeze (load-n e (evex-ea s))) (evex-ea s))))
 
 (defun evex-src (o e s) (evex-value o e (evex-w o) s))
 
 (defun evex-replicate (v n) (replicate v n))
+
+;; An intrinsic has its inputs read before it, wherever it is, so the lanes
+;; of what is one have their source in a variable, of which a lane masked
+;; out is zero and was not loaded
+
+(defun evex-fp-mode (o) (if (= (evex-m o) 0) (evex-mode o) 0))
+
+(defun evex-fp-value (o e n k s)
+  "the source of N E-bit lanes at the head of S for (evex-fp-mode O), under the mask K"
+  (case (evex-mem o)
+    0 (car s)
+    4 (car s)
+    (if (= (evex-m o) 0)
+        (evex-value o e (* n e) s)
+      (evex-freeze
+       (evex-lanes 2 k 0 e evex-lane-move e (evex-mode o) (evex-ea s) 0 0 0 0 0 n)))))
+
+(defun evex-fp-scalar-source (o e k s)
+  "the source of a scalar at the head of S, under the mask K"
+  (case (evex-mem o)
+    0 (cast-low e (car s))
+    4 (cast-low e (car s))
+    (if (= (evex-m o) 0)
+        (load-n e (evex-ea s))
+      (if (select 0 k) (load-n e (evex-ea s)) (zeros e)))))
 
 (defun evex-full (o e s)
   "(evex-full O E S) is the whole of the source at the head of S, as for
@@ -185,7 +216,7 @@
     0 (car s)
     1 (evex-freeze (load-n (evex-w o) (evex-ea s)))
     2 (evex-replicate (evex-freeze (load-n e (evex-ea s))) (evex-count o e))
-    (evex-rounding)))
+    (car s)))
 
 ;; the shapes of the instructions
 
@@ -390,7 +421,10 @@
 (defun evex:VPMULLQ (o) (evex-binary mul-low 64 o))
 (defun evex:VPMULHW (o) (evex-binary mul-high-signed 16 o))
 (defun evex:VPMULHUW (o) (evex-binary mul-high-unsigned 16 o))
-(defun evex:VPMULHRSW (o) (evex-binary mul-high-round 16 o))
+(defun lane-mulhrs (x y)
+  (cast-low 16
+            (rshift (+ (rshift (* (cast-signed 32 x) (cast-signed 32 y)) 14:32) 1:32) 1:32)))
+(defun evex:VPMULHRSW (o) (evex-binary lane-mulhrs 16 o))
 (defun evex:VPAVGB (o) (evex-binary lane-avg 8 o))
 (defun evex:VPAVGW (o) (evex-binary lane-avg 16 o))
 (defun evex:VPMINUB (o) (evex-binary lane-minu 8 o))
@@ -462,14 +496,13 @@
 ;; in the low quadword of a source, and by an immediate, of a source
 ;; that can be memory
 
+(defun lane-rotate-count (w c) (logand c (- (cast-unsigned w (resize 8 w)) 1:1)))
 (defun lane-rol (x c)
-  (let ((w (word-width x))
-        (n (logand c (- (cast-unsigned w (resize 8 w)) 1:1))))
-    (logor (lshift x n) (rshift x (- (cast-unsigned w (resize 8 w)) n)))))
+  (logor (lshift x (lane-rotate-count (word-width x) c))
+         (rshift x (- (cast-unsigned (word-width x) (resize 8 (word-width x))) (lane-rotate-count (word-width x) c)))))
 (defun lane-ror (x c)
-  (let ((w (word-width x))
-        (n (logand c (- (cast-unsigned w (resize 8 w)) 1:1))))
-    (logor (rshift x n) (lshift x (- (cast-unsigned w (resize 8 w)) n)))))
+  (logor (rshift x (lane-rotate-count (word-width x) c))
+         (lshift x (- (cast-unsigned (word-width x) (resize 8 (word-width x))) (lane-rotate-count (word-width x) c)))))
 
 (defun evex:VPSLLVW (o) (evex-binary lane-sll 16 o))
 (defun evex:VPSLLVD (o) (evex-binary lane-sll 32 o))
@@ -531,13 +564,13 @@
 ;; the concatenated shifts
 
 (defun lane-shld (x y c)
-  (let ((w (word-width x))
-        (n (logand (cast-unsigned w c) (- (cast-unsigned w (resize 8 w)) 1:1))))
-    (cast-high w (lshift (concat x y) (cast-unsigned (* 2 w) n)))))
+  (cast-high (word-width x)
+             (lshift (concat x y)
+                     (cast-unsigned (* 2 (word-width x)) (lane-rotate-count (word-width x) (cast-unsigned (word-width x) c))))))
 (defun lane-shrd (x y c)
-  (let ((w (word-width x))
-        (n (logand (cast-unsigned w c) (- (cast-unsigned w (resize 8 w)) 1:1))))
-    (cast-low w (rshift (concat y x) (cast-unsigned (* 2 w) n)))))
+  (cast-low (word-width x)
+            (rshift (concat y x)
+                    (cast-unsigned (* 2 (word-width x)) (lane-rotate-count (word-width x) (cast-unsigned (word-width x) c))))))
 
 (defun evex-concat-imm-of (f e o s)
   (evex-put o e evex-lane-binary-imm f e (car s) (evex-mode o) (evex-src o e (cdr s))
@@ -563,16 +596,14 @@
 (defun evex-spread (w bit) (cast-signed w bit))
 
 (defun lane-ternlog (x y z imm)
-  (let ((t (cast-low 8 imm))
-        (w (word-width x)))
-    (logor (logand (evex-spread w (select 7 t)) x y z)
-           (logand (evex-spread w (select 6 t)) x y (lnot z))
-           (logand (evex-spread w (select 5 t)) x (lnot y) z)
-           (logand (evex-spread w (select 4 t)) x (lnot y) (lnot z))
-           (logand (evex-spread w (select 3 t)) (lnot x) y z)
-           (logand (evex-spread w (select 2 t)) (lnot x) y (lnot z))
-           (logand (evex-spread w (select 1 t)) (lnot x) (lnot y) z)
-           (logand (evex-spread w (select 0 t)) (lnot x) (lnot y) (lnot z)))))
+  (logor (logand (evex-spread (word-width x) (select 7 imm)) x y z)
+         (logand (evex-spread (word-width x) (select 6 imm)) x y (lnot z))
+         (logand (evex-spread (word-width x) (select 5 imm)) x (lnot y) z)
+         (logand (evex-spread (word-width x) (select 4 imm)) x (lnot y) (lnot z))
+         (logand (evex-spread (word-width x) (select 3 imm)) (lnot x) y z)
+         (logand (evex-spread (word-width x) (select 2 imm)) (lnot x) y (lnot z))
+         (logand (evex-spread (word-width x) (select 1 imm)) (lnot x) (lnot y) z)
+         (logand (evex-spread (word-width x) (select 0 imm)) (lnot x) (lnot y) (lnot z))))
 
 (defun evex:VPTERNLOGD (o) (evex-ternary-imm lane-ternlog 32 o))
 (defun evex:VPTERNLOGQ (o) (evex-ternary-imm lane-ternlog 64 o))
@@ -812,17 +843,21 @@
 (defun evex:VPERMILPS (o) (if (evex-imm-form o) (evex-shuffle-imm 32 2 o) (evex-permil-ps-control o)))
 (defun evex:VPERMILPD (o) (if (evex-imm-form o) (evex-permil-pd-imm o) (evex-permil-pd-control o)))
 
+(defun evex-shufps-at (x mode y i j)
+  (if (< (mod i 4) 2) (evex-lane 32 x j) (evex-y mode 32 y j)))
+
 (defun evex-lane-shufps (x mode y imm _ _ _ i)
-  (let ((j (+ (evex-group-start 4 i) (evex-select-imm 2 4 imm i))))
-    (if (< (mod i 4) 2) (evex-lane 32 x j) (evex-y mode 32 y j))))
+  (evex-shufps-at x mode y i (+ (evex-group-start 4 i) (evex-select-imm 2 4 imm i))))
 
 (defun evex-shufps-of (o s)
   (evex-put o 32 evex-lane-shufps (car s) (evex-mode o) (evex-src o 32 (cdr s)) (evex-imm o) 0 0 0))
 (defun evex-shufps (o) (evex-shufps-of o (evex-sources o)))
 
+(defun evex-shufpd-at (x mode y i j)
+  (if (= (mod i 2) 0) (evex-lane 64 x j) (evex-y mode 64 y j)))
+
 (defun evex-lane-shufpd (x mode y imm _ _ _ i)
-  (let ((j (+ (evex-group-start 2 i) (logand (rshift imm i) 1))))
-    (if (= (mod i 2) 0) (evex-lane 64 x j) (evex-y mode 64 y j))))
+  (evex-shufpd-at x mode y i (+ (evex-group-start 2 i) (logand (rshift imm i) 1))))
 
 (defun evex-shufpd-of (o s)
   (evex-put o 64 evex-lane-shufpd (car s) (evex-mode o) (evex-src o 64 (cdr s)) (evex-imm o) 0 0 0))
@@ -831,9 +866,11 @@
 (defun evex:VSHUFPS (o) (evex-shufps o))
 (defun evex:VSHUFPD (o) (evex-shufpd o))
 
+(defun evex-unpack-at (e x mode y i j)
+  (if (= (mod i 2) 0) (evex-lane e x j) (evex-y mode e y j)))
+
 (defun evex-lane-unpack (high e n x mode y _ i)
-  (let ((j (+ (evex-group-start n i) (/ (mod i n) 2) (if high (/ n 2) 0))))
-    (if (= (mod i 2) 0) (evex-lane e x j) (evex-y mode e y j))))
+  (evex-unpack-at e x mode y i (+ (evex-group-start n i) (/ (mod i n) 2) (if high (/ n 2) 0))))
 
 (defun evex-unpack-of (high e o s)
   (evex-put o e evex-lane-unpack high e (/ 128 e) (car s) (evex-mode o) (evex-src o e (cdr s)) 0))
@@ -854,11 +891,14 @@
 (defun evex:VUNPCKHPS (o) (evex-unpack true 32 o))
 (defun evex:VUNPCKHPD (o) (evex-unpack true 64 o))
 
+(defun evex-pack-at (kind es ed x mode y i n half)
+  (cast-saturate kind ed
+                 (if (< (mod i n) half)
+                     (evex-lane es x (+ (* half (/ i n)) (mod (mod i n) half)))
+                   (evex-y mode es y (+ (* half (/ i n)) (mod (mod i n) half))))))
+
 (defun evex-lane-pack (kind es ed x mode y _ i)
-  (let ((n (/ 128 ed))
-        (half (/ n 2))
-        (j (+ (* half (/ i n)) (mod (mod i n) half))))
-    (cast-saturate kind ed (if (< (mod i n) half) (evex-lane es x j) (evex-y mode es y j)))))
+  (evex-pack-at kind es ed x mode y i (/ 128 ed) (/ (/ 128 ed) 2)))
 
 (defun evex-pack-of (kind es ed o s)
   (evex-put o ed evex-lane-pack kind es ed (car s) (evex-mode o) (evex-src o es (cdr s)) 0))
@@ -965,14 +1005,15 @@
 
 ;; the groups as a whole
 
+(defun evex-shuf-group-at (e x mode y g groups j)
+  (if (< g (/ groups 2)) (evex-lane e x j) (evex-y mode e y j)))
+
+(defun evex-shuf-group-field (e x mode y imm i n groups g bits)
+  (evex-shuf-group-at e x mode y g groups
+                      (+ (* n (logand (rshift imm (* bits g)) (- (lshift 1 bits) 1))) (mod i n))))
+
 (defun evex-lane-shuf-group (e t w x mode y imm i)
-  (let ((n (/ t e))
-        (groups (/ w t))
-        (bits (if (= groups 4) 2 1))
-        (g (/ i n))
-        (j (+ (* n (logand (rshift imm (* bits g)) (- (lshift 1 bits) 1)))
-              (mod i n))))
-    (if (< g (/ groups 2)) (evex-lane e x j) (evex-y mode e y j))))
+  (evex-shuf-group-field e x mode y imm i (/ t e) (/ w t) (/ i (/ t e)) (if (= (/ w t) 4) 2 1)))
 
 (defun evex-shuf-group-of (e t o s)
   (evex-put o e evex-lane-shuf-group e t (evex-w o) (car s) (evex-mode o) (evex-src o e (cdr s)) (evex-imm o)))
@@ -1030,48 +1071,73 @@
 (defun evex:VINSERTF64X4 (o) (evex-insert 64 256 o))
 
 ;; compressing and expanding by a mask, which have an unknown position
-;; for each lane
+;; for each lane. All of them go over the lanes in turn with what they
+;; have so far in a variable, which keeps them linear in the lanes
 
-(defun evex-count-below (k i)
-  "(evex-count-below K I) is the number of the set bits of K below I"
-  (if (= i 0) 0:8
-    (+ (evex-count-below k (- i 1)) (cast-unsigned 8 (select (- i 1) k)))))
+(defun evex-compress-from (e w y k i acc)
+  "the lanes of Y from I down whose bits are set on the top of ACC, at the bottom"
+  (if (= i 0) acc
+    (evex-compress-from e w y k (- i 1)
+                        (evex-freeze
+                         (if (select (- i 1) k)
+                             (logor (lshift acc (cast-unsigned w (resize 16 e)))
+                                    (cast-unsigned w (evex-lane e y (- i 1))))
+                           acc)))))
 
-(defun evex-select-nth-set (e x k n j i)
-  "the lane of X of the first set bit from I, with J set bits below it"
-  (if (= i n) (zeros e)
-    (if (logand (select i k) (= j (evex-count-below k i)))
-        (evex-lane e x i)
-      (evex-select-nth-set e x k n j (+ i 1)))))
+(defun evex-set-bits-from (w k i n count)
+  (if (= i n) count
+    (evex-set-bits-from w k (+ i 1) n
+                        (evex-freeze (+ count (cast-unsigned w (select i k)))))))
 
-(defun evex-unsupported () (error "evex: a compressing store"))
+(defun evex-store-compressed (e a x k i n at)
+  "stores the lanes of X from I up whose bits are set, one after the other from AT"
+  (if (= i n) (empty)
+    (prog
+       (when (select i k) (store-n e at (evex-lane e x i)))
+       (evex-store-compressed e a x k (+ i 1) n
+                              (evex-freeze (if (select i k) (+ at (/ e 8)) at))))))
 
-(defun evex-lane-compress (e n m k pass y _ i)
-  (if (< (resize 8 i) (evex-count-below k n))
-      (evex-select-nth-set e y k n (resize 8 i) 0)
-    (if (= m 1) (evex-lane e pass i) (zeros e))))
+(defun evex-compress-kept (e w m pass kept count)
+  "above the COUNT lanes KEPT, the lanes of PASS if merging, or else nothing"
+  (if (= m 1)
+      (logor kept
+             (logand pass
+                     (lnot (- (lshift (cast-unsigned w 1:1) (* (cast-unsigned w (resize 16 e)) count))
+                              (cast-unsigned w 1:1)))))
+    kept))
+
+(defun evex-compress-store (e o ops)
+  (evex-store-compressed e 0 (evex-nth 6 ops) (evex-nth 5 ops) 0 (evex-count o e) (evex-ea ops)))
 
 (defun evex-compress (e o)
   "(RD K Y): the lanes of Y whose bits are set, at the bottom"
   (if (= (evex-m o) 0) (evex-move e o)
-    (if (= (evex-mem o) 3) (evex-unsupported)
+    (if (= (evex-mem o) 3) (evex-compress-store e o (evex-ops o))
       (set-vex (evex-rd o)
-               (evex-lanes 0 0 0 e evex-lane-compress e (evex-count o e) (evex-m o) (evex-k o)
-                           (evex-merged o) (car (evex-sources o)) 0 0 (evex-count o e))))))
+               (evex-compress-kept e (evex-w o) (evex-m o) (cast-unsigned (evex-w o) (evex-merged o))
+                                   (evex-compress-from e (evex-w o) (car (evex-sources o)) (evex-k o) (evex-count o e) (zeros (evex-w o)))
+                                   (evex-set-bits-from (evex-w o) (evex-k o) 0 (evex-count o e) (zeros (evex-w o))))))))
 
-(defun evex-lane-expand (e m k pass mem y a i)
+(defun evex-expand-lane (e m k pass mem y a i count)
   (if (select i k)
       (if (= mem 0)
-          (evex-dyn e y (cast-unsigned e (evex-count-below k i)))
-        (load-n e (+ a (* (/ e 8) (cast-unsigned (word-width a) (evex-count-below k i))))))
+          (cast-low e (rshift y (* (cast-unsigned (word-width y) (resize 16 e)) (cast-unsigned (word-width y) count))))
+        (load-n e (+ a (* (/ e 8) (cast-unsigned (word-width a) count)))))
     (if (= m 1) (evex-lane e pass i) (zeros e))))
+
+(defun evex-expand-from (e w m k pass mem y a i n count acc)
+  (if (= i n) acc
+    (evex-expand-from e w m k pass mem y a (+ i 1) n
+                      (evex-freeze (+ count (cast-unsigned 16 (select i k))))
+                      (evex-freeze (logor acc (lshift (cast-unsigned w (evex-expand-lane e m k pass mem y a i count))
+                                                      (cast-unsigned w (resize 16 (* e i)))))))))
 
 (defun evex-expand-of (e o s)
   (set-vex (evex-rd o)
-           (evex-lanes 0 0 0 e evex-lane-expand e (evex-m o) (evex-k o) (evex-merged o) (evex-mem o)
-                       (if (= (evex-mem o) 0) (car s) 0)
-                       (if (= (evex-mem o) 0) 0 (evex-ea s))
-                       0 (evex-count o e))))
+           (evex-expand-from e (evex-w o) (evex-m o) (evex-k o) (evex-merged o) (evex-mem o)
+                             (if (= (evex-mem o) 0) (car s) 0)
+                             (if (= (evex-mem o) 0) 0 (evex-ea s))
+                             0 (evex-count o e) (zeros 16) (zeros (evex-w o)))))
 
 (defun evex-expand (e o)
   "(RD K Y): the lanes of Y at the bottom go to the lanes whose bits are
@@ -1099,14 +1165,14 @@
   (fp-predicate e (evex-lane e x i) (evex-y mode e y i) imm))
 
 (defun evex-fp-binary-of (f e o s)
-  (evex-put o e evex-lane-fp2 f e (car s) (evex-mode o) (evex-src o e (cdr s)) 0 0))
+  (evex-put o e evex-lane-fp2 f e (car s) (evex-fp-mode o) (evex-fp-value o e (evex-count o e) (evex-k o) (cdr s)) 0 0))
 (defun evex-fp-binary (f e o) (evex-fp-binary-of f e o (evex-sources o)))
 
 (defun evex-fp-unary (f e o)
-  (evex-put o e evex-lane-fp1 f e (evex-mode o) (evex-src o e (evex-sources o)) 0 0 0))
+  (evex-put o e evex-lane-fp1 f e (evex-fp-mode o) (evex-fp-value o e (evex-count o e) (evex-k o) (evex-sources o)) 0 0 0))
 
 (defun evex-fp-compare-of (e o s)
-  (evex-put-mask o e evex-lane-fp-compare e (car s) (evex-mode o) (evex-src o e (cdr s)) (evex-imm o) 0 0))
+  (evex-put-mask o e evex-lane-fp-compare e (car s) (evex-fp-mode o) (evex-fp-value o e (evex-count o e) (evex-k-once o) (cdr s)) (evex-imm o) 0 0))
 (defun evex-fp-compare (e o) (evex-fp-compare-of e o (evex-sources-once o)))
 
 (defun evex:VADDPS (o) (evex-fp-binary fp-add 32 o))
@@ -1142,7 +1208,7 @@
   (evex-fma-of f order e (evex-lane e x i) (evex-lane e y i) (evex-y mode e z i)))
 
 (defun evex-fma-packed-of (f order e o s)
-  (evex-put-tied o e evex-lane-fma f order e (evex-pass o) (car s) (evex-mode o) (evex-src o e (cdr s))))
+  (evex-put-tied o e evex-lane-fma f order e (evex-pass o) (car s) (evex-fp-mode o) (evex-fp-value o e (evex-count o e) (evex-k-tied o) (cdr s))))
 (defun evex-fma (f order e o) (evex-fma-packed-of f order e o (evex-sources-tied o)))
 
 (defun evex-lane-fma-alternate (sub-even order e x y mode z i)
@@ -1150,7 +1216,7 @@
                order e (evex-lane e x i) (evex-lane e y i) (evex-y mode e z i)))
 
 (defun evex-fmaddsub-of (even order e o s)
-  (evex-put-tied o e evex-lane-fma-alternate even order e (evex-pass o) (car s) (evex-mode o) (evex-src o e (cdr s))))
+  (evex-put-tied o e evex-lane-fma-alternate even order e (evex-pass o) (car s) (evex-fp-mode o) (evex-fp-value o e (evex-count o e) (evex-k-tied o) (cdr s))))
 (defun evex-fmaddsub (even order e o) (evex-fmaddsub-of even order e o (evex-sources-tied o)))
 
 (defun evex-fma-scalar-of (f order e o s)
@@ -1158,7 +1224,7 @@
            (concat (extract 127 e (evex-pass o))
                    (evex-mask (evex-m o) (evex-k-tied o) (evex-pass o) e 0
                               (evex-fma-of f order e (evex-lane e (evex-pass o) 0) (evex-lane e (car s) 0)
-                                           (evex-y (evex-mode o) e (evex-value o e e (cdr s)) 0))))))
+                                           (evex-fp-scalar-source o e (evex-k-tied o) (cdr s)))))))
 (defun evex-fma-scalar (f order e o) (evex-fma-scalar-of f order e o (evex-sources-tied o)))
 
 (defun evex:VFMADD132PS (o) (evex-fma fma-madd 132 32 o))
@@ -1227,20 +1293,20 @@
 (defun evex-lane-convert (f es mode y _ _ _ i) (f (evex-y mode es y i)))
 
 (defun evex-convert-n (f es ed n o)
-  (evex-put-n o ed n evex-lane-convert f es (evex-mode o)
-              (evex-value o es (* n es) (evex-sources o)) 0 0 0))
+  (evex-put-n o ed n evex-lane-convert f es (evex-fp-mode o)
+              (evex-fp-value o es n (evex-k o) (evex-sources o)) 0 0 0))
 (defun evex-widen (f es ed o) (evex-convert-n f es ed (evex-count o ed) o))
 (defun evex-shorten (f es ed o) (evex-convert-n f es ed (evex-count o es) o))
 
-(defun fp-sint32-to-double (x) (sse-convert 'cast_sfloat *sse-rmode* 32 64 x))
-(defun fp-sint64-to-double (x) (sse-convert 'cast_sfloat *sse-rmode* 64 64 x))
-(defun fp-sint64-to-float (x) (sse-convert 'cast_sfloat *sse-rmode* 64 32 x))
-(defun fp-uint32-to-float (x) (sse-convert 'cast_ufloat *sse-rmode* 32 32 x))
-(defun fp-uint32-to-double (x) (sse-convert 'cast_ufloat *sse-rmode* 32 64 x))
-(defun fp-uint64-to-double (x) (sse-convert 'cast_ufloat *sse-rmode* 64 64 x))
-(defun fp-uint64-to-float (x) (sse-convert 'cast_ufloat *sse-rmode* 64 32 x))
-(defun fp-float-to-int64 (x) (sse-to-int *sse-rmode* 32 64 x))
-(defun fp-double-to-int64 (x) (sse-to-int *sse-rmode* 64 64 x))
+(defun fp-sint32-to-double (x) (sse-convert 'cast_sfloat (sse-rmode-now) 32 64 x))
+(defun fp-sint64-to-double (x) (sse-convert 'cast_sfloat (sse-rmode-now) 64 64 x))
+(defun fp-sint64-to-float (x) (sse-convert 'cast_sfloat (sse-rmode-now) 64 32 x))
+(defun fp-uint32-to-float (x) (sse-convert 'cast_ufloat (sse-rmode-now) 32 32 x))
+(defun fp-uint32-to-double (x) (sse-convert 'cast_ufloat (sse-rmode-now) 32 64 x))
+(defun fp-uint64-to-double (x) (sse-convert 'cast_ufloat (sse-rmode-now) 64 64 x))
+(defun fp-uint64-to-float (x) (sse-convert 'cast_ufloat (sse-rmode-now) 64 32 x))
+(defun fp-float-to-int64 (x) (sse-to-int (sse-rmode-now) 32 64 x))
+(defun fp-double-to-int64 (x) (sse-to-int (sse-rmode-now) 64 64 x))
 (defun fp-float-to-int64-rtz (x) (sse-to-int 'rtz 32 64 x))
 (defun fp-double-to-int64-rtz (x) (sse-to-int 'rtz 64 64 x))
 
@@ -1283,12 +1349,12 @@
 (defun evex-lane-fp-class (e mode y imm _ _ _ i) (cast-low 1 (fp-with-imm 'fpclass e (evex-y mode e y i) imm)))
 
 (defun evex-fp-imm (name e o)
-  (evex-put o e evex-lane-fp-imm name e (evex-mode o) (evex-src o e (evex-sources o)) (evex-imm o) 0 0))
+  (evex-put o e evex-lane-fp-imm name e (evex-fp-mode o) (evex-fp-value o e (evex-count o e) (evex-k o) (evex-sources o)) (evex-imm o) 0 0))
 (defun evex-fp2-imm-of (name e o s)
-  (evex-put o e evex-lane-fp2-imm name e (car s) (evex-mode o) (evex-src o e (cdr s)) (evex-imm o) 0))
+  (evex-put o e evex-lane-fp2-imm name e (car s) (evex-fp-mode o) (evex-fp-value o e (evex-count o e) (evex-k o) (cdr s)) (evex-imm o) 0))
 (defun evex-fp2-imm (name e o) (evex-fp2-imm-of name e o (evex-sources o)))
 (defun evex-fp-class (e o)
-  (evex-put-mask o e evex-lane-fp-class e (evex-mode o) (evex-src o e (evex-sources-once o)) (evex-imm o) 0 0 0))
+  (evex-put-mask o e evex-lane-fp-class e (evex-fp-mode o) (evex-fp-value o e (evex-count o e) (evex-k-once o) (evex-sources-once o)) (evex-imm o) 0 0 0))
 
 (defun evex:VGETEXPPS (o) (evex-fp-unary fp-getexp 32 o))
 (defun evex:VGETEXPPD (o) (evex-fp-unary fp-getexp 64 o))
@@ -1397,9 +1463,8 @@
 ;; of the control
 
 (defun evex-lane-multishift (c mode y _ _ _ _ i)
-  (let ((q (evex-y mode 64 y (/ i 8))))
-    (cast-low 8 (rshift (concat q q)
-                        (cast-unsigned 128 (logand (evex-lane 8 c i) 63:8))))))
+  (cast-low 8 (rshift (concat (evex-y mode 64 y (/ i 8)) (evex-y mode 64 y (/ i 8)))
+                      (cast-unsigned 128 (logand (evex-lane 8 c i) 63:8)))))
 
 (defun evex-multishift-of (o s)
   (evex-put o 8 evex-lane-multishift (car s) 0 (evex-full o 64 (cdr s)) 0 0 0 0))
@@ -1412,10 +1477,10 @@
         (cast-unsigned 64
           (if (= (evex-m o) 0)
               (fp-predicate e (evex-lane e (car s) 0)
-                            (evex-y (evex-mode o) e (evex-value o e e (cdr s)) 0) (evex-imm o))
+                            (evex-fp-scalar-source o e 0 (cdr s)) (evex-imm o))
             (if (select 0 (evex-k-once o))
                 (fp-predicate e (evex-lane e (car s) 0)
-                              (evex-y (evex-mode o) e (evex-value o e e (cdr s)) 0) (evex-imm o))
+                              (evex-fp-scalar-source o e (evex-k-once o) (cdr s)) (evex-imm o))
               0:1)))))
 (defun evex:VCMPSS (o) (evex-scalar-compare-of 32 o (evex-sources-once o)))
 (defun evex:VCMPSD (o) (evex-scalar-compare-of 64 o (evex-sources-once o)))
@@ -1427,12 +1492,11 @@
 ;; the scalar lanes
 
 (defun evex-fp-scalar-of (f e o s)
-  (evex-scalar-set o e (car s) (f e (evex-lane e (car s) 0)
-                                  (evex-y (evex-mode o) e (evex-value o e e (cdr s)) 0))))
+  (evex-scalar-set o e (car s) (f e (evex-lane e (car s) 0) (evex-fp-scalar-source o e (evex-k o) (cdr s)))))
 (defun evex-fp-scalar (f e o) (evex-fp-scalar-of f e o (evex-sources o)))
 
 (defun evex-fp-scalar1-of (f e o s)
-  (evex-scalar-set o e (car s) (f e (evex-y (evex-mode o) e (evex-value o e e (cdr s)) 0))))
+  (evex-scalar-set o e (car s) (f e (evex-fp-scalar-source o e (evex-k o) (cdr s)))))
 (defun evex-fp-scalar1 (f e o) (evex-fp-scalar1-of f e o (evex-sources o)))
 
 (defun evex:VADDSS (o) (evex-fp-scalar fp-add 32 o))
@@ -1582,3 +1646,630 @@
 (defun KTESTWkk (x y) (ptest (cast-low 16 x) (cast-low 16 y)))
 (defun KTESTDkk (x y) (ptest (cast-low 32 x) (cast-low 32 y)))
 (defun KTESTQkk (x y) (ptest (cast-low 64 x) (cast-low 64 y)))
+
+;;; THE REST OF AVX-512: FP16, BF16, THE CONVERSIONS, GATHERS AND SCATTERS
+
+;; the lanes of a format that isn't that of SSE
+(defun evex-named1 (name e x) (intrinsic (symbol-concat name *sse-rmode* *sse-format* (symbol-of-size e) :sep '_) (cast-low e x) :result e))
+(defun evex-named2 (name e x y)
+  (intrinsic (symbol-concat name *sse-rmode* *sse-format* (symbol-of-size e) :sep '_) (cast-low e x) (cast-low e y) :result e))
+(defun evex-named3 (name e x y z)
+  (intrinsic (symbol-concat name *sse-rmode* *sse-format* (symbol-of-size e) :sep '_) (cast-low e x) (cast-low e y) (cast-low e z) :result e))
+
+(defun evex-lane-named1 (name e mode y _ _ _ i) (evex-named1 name e (evex-y mode e y i)))
+(defun evex-lane-named2 (name e x mode y _ _ i) (evex-named2 name e (evex-lane e x i) (evex-y mode e y i)))
+(defun evex-lane-named3 (name e x y mode z _ i) (evex-named3 name e (evex-lane e x i) (evex-lane e y i) (evex-y mode e z i)))
+
+(defun evex-named-unary (name e o)
+  (evex-put o e evex-lane-named1 name e (evex-fp-mode o) (evex-fp-value o e (evex-count o e) (evex-k o) (evex-sources o)) 0 0 0))
+(defun evex-named-binary-of (name e o s)
+  (evex-put o e evex-lane-named2 name e (car s) (evex-fp-mode o) (evex-fp-value o e (evex-count o e) (evex-k o) (cdr s)) 0 0))
+(defun evex-named-binary (name e o) (evex-named-binary-of name e o (evex-sources o)))
+(defun evex-named-ternary-of (name e o s)
+  (evex-put-tied o e evex-lane-named3 name e (evex-pass o) (car s) (evex-fp-mode o) (evex-fp-value o e (evex-count o e) (evex-k-tied o) (cdr s)) 0))
+(defun evex-named-ternary (name e o) (evex-named-ternary-of name e o (evex-sources-tied o)))
+
+;; the scalar forms, whose upper bits are of the first source
+
+(defun evex-scalar-src (o e s) (evex-fp-scalar-source o e (evex-k o) s))
+
+(defun evex-scalar-imm1-of (name e o s)
+  (evex-scalar-set o e (car s) (fp-with-imm name e (evex-scalar-src o e (cdr s)) (evex-imm o))))
+(defun evex-scalar-imm1 (name e o) (evex-scalar-imm1-of name e o (evex-sources o)))
+(defun evex-scalar-imm2-of (name e o s)
+  (evex-scalar-set o e (car s) (fp2-with-imm name e (evex-lane e (car s) 0) (evex-scalar-src o e (cdr s)) (evex-imm o))))
+(defun evex-scalar-imm2 (name e o) (evex-scalar-imm2-of name e o (evex-sources o)))
+
+(defun evex-scalar-class-of (e o s)
+  (set$ (evex-rd o)
+        (cast-unsigned 64
+          (if (= (evex-m o) 0)
+              (cast-low 1 (fp-with-imm 'fpclass e (evex-fp-scalar-source o e 0 s) (evex-imm o)))
+            (if (select 0 (evex-k-once o))
+                (cast-low 1 (fp-with-imm 'fpclass e (evex-fp-scalar-source o e (evex-k-once o) s) (evex-imm o)))
+              0:1)))))
+(defun evex-scalar-class (e o) (evex-scalar-class-of e o (evex-sources-once o)))
+
+(defun evex-lane-fixup (name e x y mode z imm i)
+  (fp3-with-imm name e (evex-lane e x i) (evex-lane e y i) (evex-y mode e z i) imm))
+(defun fp3-with-imm (name rt x y z imm)
+  (intrinsic (symbol-concat name *sse-rmode* *sse-format* (symbol-of-size rt) :sep '_)
+             (cast-low rt x) (cast-low rt y) (cast-low rt z) (cast-low 8 imm) :result rt))
+(defun evex-fixup-of (e o s)
+  (evex-put-tied o e evex-lane-fixup 'ffixupimm e (evex-pass o) (car s) (evex-fp-mode o) (evex-fp-value o e (evex-count o e) (evex-k-tied o) (cdr s)) (evex-imm o)))
+(defun evex-fixup (e o) (evex-fixup-of e o (evex-sources-tied o)))
+(defun evex-fixup-scalar-of (e o s)
+  (set-vex (evex-rd o)
+           (concat (extract 127 e (evex-pass o))
+                   (evex-mask (evex-m o) (evex-k-tied o) (evex-pass o) e 0
+                              (fp3-with-imm 'ffixupimm e (evex-lane e (evex-pass o) 0) (evex-lane e (car s) 0)
+                                            (evex-fp-scalar-source o e (evex-k-tied o) (cdr s)) (evex-imm o))))))
+(defun evex-fixup-scalar (e o) (evex-fixup-scalar-of e o (evex-sources-tied o)))
+
+(defun evex-named-scalar-of (name e o s)
+  (evex-scalar-set o e (car s) (evex-named2 name e (evex-lane e (car s) 0) (evex-scalar-src o e (cdr s)))))
+(defun evex-named-scalar (name e o) (evex-named-scalar-of name e o (evex-sources o)))
+(defun evex-named-scalar3-of (name e o s)
+  (set-vex (evex-rd o)
+           (concat (extract 127 e (evex-pass o))
+                   (evex-mask (evex-m o) (evex-k-tied o) (evex-pass o) e 0
+                              (evex-named3 name e (evex-lane e (evex-pass o) 0) (evex-lane e (car s) 0) (evex-fp-scalar-source o e (evex-k-tied o) (cdr s)))))))
+(defun evex-named-scalar3 (name e o) (evex-named-scalar3-of name e o (evex-sources-tied o)))
+
+(defun evex-compare-flags-of (e o s)
+  (compare-floats e (car s) (if (= (evex-mem o) 1) (load-n e (evex-ea (cdr s))) (car (cdr s)))))
+(defun evex-compare-flags (e o) (evex-compare-flags-of e o (evex-ops o)))
+
+;; to and from the integers: an integer that doesn't fit is the indefinite
+;; value, the sign bit of the signed ones and all ones of the unsigned
+
+(defun evex-exponent (rs x)
+  (case rs
+    16 (cast-unsigned 64 (extract 14 10 x))
+    32 (cast-unsigned 64 (extract 30 23 x))
+    (cast-unsigned 64 (extract 62 52 x))))
+(defun evex-bias (rs) (case rs 16 15 32 127 1023))
+
+(defun evex-to-sint (rmode rs rt x)
+  (if (>= (evex-exponent rs (cast-low rs x)) (cast-unsigned 64 (- (+ (evex-bias rs) rt) 1)))
+      (lshift (cast-unsigned rt 1) (- rt 1))
+    (sse-convert 'cast_sint rmode rs rt x)))
+(defun evex-to-uint (rmode rs rt x)
+  (if (logor (>= (evex-exponent rs (cast-low rs x)) (cast-unsigned 64 (+ (evex-bias rs) rt)))
+             (logand (msb (cast-low rs x)) (>= (evex-exponent rs (cast-low rs x)) (cast-unsigned 64 (evex-bias rs)))))
+      (ones rt)
+    (sse-convert 'cast_uint rmode rs rt x)))
+
+(defun evex-cvt (kind es ed x)
+  (case kind
+    0 (sse-convert 'fconvert (sse-rmode-now) es ed x)
+    1 (sse-convert 'cast_sfloat (sse-rmode-now) es ed x)
+    2 (sse-convert 'cast_ufloat (sse-rmode-now) es ed x)
+    3 (evex-to-sint (sse-rmode-now) es ed x)
+    4 (evex-to-uint (sse-rmode-now) es ed x)
+    5 (evex-to-sint 'rtz es ed x)
+    6 (evex-to-uint 'rtz es ed x)
+    7 (sse-convert 'cast_sint_sat 'rtz es ed x)
+    8 (sse-convert 'cast_uint_sat 'rtz es ed x)
+    9 (sse-convert 'cast_ibs (sse-rmode-now) es ed x)
+    10 (sse-convert 'cast_iubs (sse-rmode-now) es ed x)
+    11 (sse-convert 'cast_ibs 'rtz es ed x)
+    (sse-convert 'cast_iubs 'rtz es ed x)))
+
+(defun evex-lane-cvt (kind es ed mode y _ _ i) (evex-cvt kind es ed (evex-y mode es y i)))
+
+(defun evex-conversion (kind es ed o)
+  "the N lanes that the longer of ES and ED bits have in the vector"
+  (evex-put-n o ed (/ (evex-w o) (evex-longer es ed)) evex-lane-cvt kind es ed (evex-fp-mode o)
+              (evex-fp-value o es (/ (evex-w o) (evex-longer es ed)) (evex-k o) (evex-sources o)) 0 0))
+
+(defun evex-scalar-cvt-of (kind es ed o s)
+  (evex-scalar-set o ed (car s) (evex-cvt kind es ed (evex-scalar-src o es (cdr s)))))
+(defun evex-scalar-cvt (kind es ed o) (evex-scalar-cvt-of kind es ed o (evex-sources o)))
+
+(defun evex-to-gpr-of (kind es ed o s)
+  (set-gpr (evex-rd o) (evex-cvt kind es ed (if (= (evex-mem o) 1) (load-n es (evex-ea s)) (cast-low es (car s))))))
+(defun evex-to-gpr (kind es ed o) (evex-to-gpr-of kind es ed o (cdr (evex-ops o))))
+
+(defun evex-from-gpr-of (kind es ed o s)
+  (evex-scalar-set o ed (car s) (evex-cvt kind es ed (if (= (evex-mem o) 1) (load-n es (evex-ea (cdr s))) (cast-low es (car (cdr s)))))))
+(defun evex-from-gpr (kind es ed o) (evex-from-gpr-of kind es ed o (cdr (evex-ops o))))
+
+(defun evex-ps2ph-rounding (imm)
+  (if (is-zero (logand imm 4:64)) (evex-rc-mode imm) (sse-rmode-now)))
+
+(defun evex-ps2ph-lane (imm mode y _ _ _ _ i)
+  (sse-convert 'fconvert (evex-ps2ph-rounding imm) 32 16 (evex-y mode 32 y i)))
+
+(defun evex-ps2ph-store-lane (a k m x imm _ _ i)
+  (when (if (= m 0) 1:1 (select i k))
+    (store-n 16 (evex-address 16 a i) (sse-convert 'fconvert (evex-ps2ph-rounding imm) 32 16 (evex-lane 32 x i)))))
+
+(defun evex-ps2ph-store (o ops)
+  (evex-each evex-ps2ph-store-lane (evex-ea ops) (if (= (evex-m o) 0) 0 (evex-nth 5 ops)) (evex-m o)
+             (evex-nth (if (= (evex-m o) 0) 5 6) ops) (evex-imm o) 0 0 0 (evex-count o 32)))
+
+(defun evex:VCVTPS2PH (o)
+  (if (= (evex-mem o) 3)
+      (evex-ps2ph-store o (evex-ops o))
+    (evex-put-n o 16 (evex-count o 32) evex-ps2ph-lane (evex-imm o) 0 (car (evex-sources o)) 0 0 0 0)))
+
+(defun evex-lane-ne2ps (w x mode y _ _ _ i)
+  (if (< i (/ w 32))
+      (sse-convert 'fconvert (sse-rmode-now) 32 16 (evex-y mode 32 y i))
+    (sse-convert 'fconvert (sse-rmode-now) 32 16 (evex-lane 32 x (- i (/ w 32))))))
+(defun evex-ne2ps-of (o s)
+  (evex-put o 16 evex-lane-ne2ps (evex-w o) (car s) (evex-fp-mode o) (evex-fp-value o 32 (evex-count o 32) (evex-k o) (cdr s)) 0 0 0))
+
+;; the gathers and the scatters: an address for each lane. A gather clears
+;; the mask, and only loads what its bits say. A scatter goes from the
+;; lowest lane up, as the last of those that overlap stays
+
+(defun evex-element-address (a scale ie idx i)
+  (+ a (* scale (cast-signed (word-width a) (evex-lane ie idx i)))))
+
+(defun evex-lane-gather (e ie a scale idx pass k i)
+  (if (select i k)
+      (load-n e (evex-element-address a scale ie idx i))
+    (evex-lane e pass i)))
+
+(defun evex-gather-of (e ie o ops)
+  "(RD KWB PASS K BASE SCALE IDX OFF SEG)"
+  (set-vex (car ops)
+           (evex-lanes 0 0 0 e evex-lane-gather e ie
+                       (evex-freeze (ea (evex-nth 4 ops) 0 'Nil (evex-nth 7 ops) (evex-nth 8 ops)))
+                       (evex-nth 5 ops) (evex-nth 6 ops) (evex-nth 2 ops) (evex-nth 3 ops)
+                       0 (/ (evex-w o) (evex-longer e ie))))
+  (k-set (evex-nth 1 ops) 0:64))
+(defun evex-gather (e ie o) (evex-gather-of e ie o (evex-ops o)))
+
+(defun evex-scatter-from (e ie a scale idx x k i n)
+  (if (= i n) (empty)
+    (prog
+       (when (select i k)
+         (store-n e (evex-element-address a scale ie idx i) (evex-lane e x i)))
+       (evex-scatter-from e ie a scale idx x k (+ i 1) n))))
+
+(defun evex-scatter-of (e ie o ops)
+  "(KWB BASE SCALE IDX OFF SEG K X)"
+  (evex-scatter-from e ie
+                     (evex-freeze (ea (evex-nth 1 ops) 0 'Nil (evex-nth 4 ops) (evex-nth 5 ops)))
+                     (evex-nth 2 ops) (evex-nth 3 ops) (evex-nth 7 ops) (evex-nth 6 ops)
+                     0 (/ (evex-w o) (evex-longer e ie)))
+  (k-set (car ops) 0:64))
+(defun evex-scatter (e ie o) (evex-scatter-of e ie o (evex-ops o)))
+
+;; VAES and SM4, as they are in no theory here
+
+(defun lane-aesenc (x y) (intrinsic 'aesenc x y :result 128))
+(defun lane-aesenclast (x y) (intrinsic 'aesenclast x y :result 128))
+(defun lane-aesdec (x y) (intrinsic 'aesdec x y :result 128))
+(defun lane-aesdeclast (x y) (intrinsic 'aesdeclast x y :result 128))
+(defun lane-sm4key4 (x y) (intrinsic 'sm4key4 x y :result 128))
+(defun lane-sm4rnds4 (x y) (intrinsic 'sm4rnds4 x y :result 128))
+
+;; GF(2^8) with the polynomial x^8 + x^4 + x^3 + x + 1
+
+(defun evex-spread-bit (x n w) (cast-signed w (select n x)))
+
+(defun evex-clmul8 (x y)
+  (logxor (logand (evex-spread-bit y 0 16) (cast-unsigned 16 x))
+          (logand (evex-spread-bit y 1 16) (lshift (cast-unsigned 16 x) 1))
+          (logand (evex-spread-bit y 2 16) (lshift (cast-unsigned 16 x) 2))
+          (logand (evex-spread-bit y 3 16) (lshift (cast-unsigned 16 x) 3))
+          (logand (evex-spread-bit y 4 16) (lshift (cast-unsigned 16 x) 4))
+          (logand (evex-spread-bit y 5 16) (lshift (cast-unsigned 16 x) 5))
+          (logand (evex-spread-bit y 6 16) (lshift (cast-unsigned 16 x) 6))
+          (logand (evex-spread-bit y 7 16) (lshift (cast-unsigned 16 x) 7))))
+
+(defun evex-reduce-term (p bit part) (logand (evex-spread-bit p bit 8) part))
+
+(defun lane-gf-mul (x y)
+  (logxor (cast-low 8 (evex-clmul8 x y))
+          (evex-reduce-term (evex-clmul8 x y) 8 0x1b:8)
+          (evex-reduce-term (evex-clmul8 x y) 9 0x36:8)
+          (evex-reduce-term (evex-clmul8 x y) 10 0x6c:8)
+          (evex-reduce-term (evex-clmul8 x y) 11 0xd8:8)
+          (evex-reduce-term (evex-clmul8 x y) 12 0xab:8)
+          (evex-reduce-term (evex-clmul8 x y) 13 0x4d:8)
+          (evex-reduce-term (evex-clmul8 x y) 14 0x9a:8)))
+
+(defun evex-parity8 (x)
+  (logxor (select 0 x) (select 1 x) (select 2 x) (select 3 x) (select 4 x) (select 5 x) (select 6 x) (select 7 x)))
+
+(defun evex-affine-bit (x a imm b)
+  "the bit B of the affine image of X by the matrix A: the row of the bit is byte 7 - B of A"
+  (logxor (evex-parity8 (logand (evex-lane 8 a (- 7 b)) x)) (select b imm)))
+
+(defun evex-affine-byte (x a imm)
+  (concat (evex-affine-bit x a imm 7) (evex-affine-bit x a imm 6) (evex-affine-bit x a imm 5) (evex-affine-bit x a imm 4)
+          (evex-affine-bit x a imm 3) (evex-affine-bit x a imm 2) (evex-affine-bit x a imm 1) (evex-affine-bit x a imm 0)))
+
+(defun evex-longer (a b) (if (> a b) a b))
+
+(defun evex-lane-affine (x mode a imm _ _ _ i)
+  (evex-affine-byte (evex-lane 8 x i) (evex-y mode 64 a (/ i 8)) imm))
+(defun evex-lane-affine-inv (x mode a imm m k _ i)
+  (intrinsic 'gf2p8affineinvqb (evex-lane 8 x i)
+             (if (= m 0) (evex-y mode 64 a (/ i 8)) (if (select i k) (evex-y mode 64 a (/ i 8)) (zeros 64)))
+             imm :result 8))
+
+(defun evex-affine-of (f o s)
+  (evex-put o 8 f (car s) (evex-mode o) (evex-src o 64 (cdr s)) (cast-low 8 (evex-imm o)) (evex-m o) (evex-k o) 0))
+(defun evex:VGF2P8AFFINEQB (o) (evex-affine-of evex-lane-affine o (evex-sources o)))
+(defun evex:VGF2P8AFFINEINVQB (o) (evex-affine-of evex-lane-affine-inv o (evex-sources o)))
+(defun evex:VGF2P8MULB (o) (evex-binary lane-gf-mul 8 o))
+
+;; VPCLMULQDQ
+
+(defun evex-clmul-from (x y i)
+  (if (= i 63)
+      (logand (evex-spread-bit y 63 128) (lshift x 63))
+    (logxor (logand (evex-spread-bit y i 128) (lshift x i)) (evex-clmul-from x y (+ i 1)))))
+
+(defun evex-qword-of (v bit) (if (= bit 0) (cast-low 64 v) (cast-high 64 v)))
+
+(defun lane-clmul (x y imm)
+  (evex-clmul-from (cast-unsigned 128 (evex-qword-of x (logand imm 1))) (evex-qword-of y (logand imm 16)) 0))
+
+(defun evex-clmul-of (o s)
+  (evex-put o 128 evex-lane-binary-imm lane-clmul 128 (car s) (evex-mode o) (evex-src o 128 (cdr s)) (evex-imm o) 0))
+(defun evex:VPCLMULQDQ (o) (evex-clmul-of o (evex-sources o)))
+
+;; the dot products of the other kinds, of the lanes of the two last
+;; sources with the signs that their names say
+
+(defun evex-dot-part (sign n x i)
+  (if sign (cast-signed 64 (evex-lane n x i)) (cast-unsigned 64 (evex-lane n x i))))
+(defun evex-dot-term (sy sz n y z i) (* (evex-dot-part sy n y i) (evex-dot-part sz n z i)))
+(defun evex-dot8 (sy sz y z)
+  (+ (evex-dot-term sy sz 8 y z 0) (evex-dot-term sy sz 8 y z 1) (evex-dot-term sy sz 8 y z 2) (evex-dot-term sy sz 8 y z 3)))
+(defun evex-dot16 (sy sz y z) (+ (evex-dot-term sy sz 16 y z 0) (evex-dot-term sy sz 16 y z 1)))
+(defun evex-sat-signed (x sum) (cast-saturate :signed 32 (+ (cast-signed 64 x) sum)))
+(defun evex-sat-unsigned (x sum)
+  (cast-low 32 (if (non-zero (rshift (+ (cast-unsigned 64 x) sum) 32:64)) (ones 64) (+ (cast-unsigned 64 x) sum))))
+
+(defun lane-dpbss (x y z) (+ x (cast-low 32 (evex-dot8 true true y z))))
+(defun lane-dpbsss (x y z) (evex-sat-signed x (evex-dot8 true true y z)))
+(defun evex:VPDPBSSD (o) (evex-ternary lane-dpbss 32 o))
+(defun evex:VPDPBSSDS (o) (evex-ternary lane-dpbsss 32 o))
+(defun lane-dpbsu (x y z) (+ x (cast-low 32 (evex-dot8 true false y z))))
+(defun lane-dpbsus (x y z) (evex-sat-signed x (evex-dot8 true false y z)))
+(defun evex:VPDPBSUD (o) (evex-ternary lane-dpbsu 32 o))
+(defun evex:VPDPBSUDS (o) (evex-ternary lane-dpbsus 32 o))
+(defun lane-dpbuu (x y z) (+ x (cast-low 32 (evex-dot8 false false y z))))
+(defun lane-dpbuus (x y z) (evex-sat-unsigned x (evex-dot8 false false y z)))
+(defun evex:VPDPBUUD (o) (evex-ternary lane-dpbuu 32 o))
+(defun evex:VPDPBUUDS (o) (evex-ternary lane-dpbuus 32 o))
+(defun lane-dpwsu (x y z) (+ x (cast-low 32 (evex-dot16 true false y z))))
+(defun lane-dpwsus (x y z) (evex-sat-signed x (evex-dot16 true false y z)))
+(defun evex:VPDPWSUD (o) (evex-ternary lane-dpwsu 32 o))
+(defun evex:VPDPWSUDS (o) (evex-ternary lane-dpwsus 32 o))
+(defun lane-dpwus (x y z) (+ x (cast-low 32 (evex-dot16 false true y z))))
+(defun lane-dpwuss (x y z) (evex-sat-signed x (evex-dot16 false true y z)))
+(defun evex:VPDPWUSD (o) (evex-ternary lane-dpwus 32 o))
+(defun evex:VPDPWUSDS (o) (evex-ternary lane-dpwuss 32 o))
+(defun lane-dpwuu (x y z) (+ x (cast-low 32 (evex-dot16 false false y z))))
+(defun lane-dpwuus (x y z) (evex-sat-unsigned x (evex-dot16 false false y z)))
+(defun evex:VPDPWUUD (o) (evex-ternary lane-dpwuu 32 o))
+(defun evex:VPDPWUUDS (o) (evex-ternary lane-dpwuus 32 o))
+
+(defun lane-bitrev8 (x)
+  (concat (select 0 x) (select 1 x) (select 2 x) (select 3 x) (select 4 x) (select 5 x) (select 6 x) (select 7 x)))
+(defun evex:VPBITREVB (o) (evex-unary lane-bitrev8 8 o))
+
+;; VDBPSADBW: the sums of the differences of the bytes of X and of the
+;; dwords of Y that the immediate selects in each group
+
+(defun evex-dbp-dword (y imm g j)
+  (evex-lane 32 (evex-lane 128 y g) (logand (rshift imm (* 2 j)) 3)))
+(defun evex-dbp-byte (y imm g k)
+  (evex-lane 8 (evex-dbp-dword y imm g (/ k 4)) (mod k 4)))
+(defun evex-absdiff (a b)
+  (if (>= a b) (cast-unsigned 16 (- a b)) (cast-unsigned 16 (- b a))))
+(defun evex-dbp-sum (x y imm g xs ys)
+  (+ (evex-absdiff (evex-lane 8 x (+ xs 0)) (evex-dbp-byte y imm g (+ ys 0)))
+     (evex-absdiff (evex-lane 8 x (+ xs 1)) (evex-dbp-byte y imm g (+ ys 1)))
+     (evex-absdiff (evex-lane 8 x (+ xs 2)) (evex-dbp-byte y imm g (+ ys 2)))
+     (evex-absdiff (evex-lane 8 x (+ xs 3)) (evex-dbp-byte y imm g (+ ys 3)))))
+(defun evex-lane-dbp (x y imm _ _ _ _ i)
+  (evex-dbp-sum x y imm (/ i 8) (+ (* 16 (/ i 8)) (* 8 (/ (mod i 8) 4)) (* 4 (/ (mod (mod i 8) 4) 2)))
+                (+ (* 8 (/ (mod i 8) 4)) (mod (mod i 8) 4))))
+(defun evex-dbp-of (o s)
+  (evex-put o 16 evex-lane-dbp (car s) (evex-full o 16 (cdr s)) (cast-low 8 (evex-imm o)) 0 0 0 0))
+(defun evex:VDBPSADBW (o) (evex-dbp-of o (evex-sources o)))
+
+;; what has no family
+
+(defun VPEXTRWrri_REV (rd x imm) (set-gpr rd (cast-unsigned 32 (evex-lane 16 x (logand imm 7)))))
+(defun VMOV64toPQIrm (rd b s i off seg) (set-vex rd (cast-unsigned 128 (load-n 64 (ea b s i off seg)))))
+(defun VMOVW2SHrr (rd x) (set-vex rd (cast-unsigned 128 (cast-low 16 x))))
+(defun VMOVW64toSHrr (rd x) (set-vex rd (cast-unsigned 128 (cast-low 16 x))))
+(defun VMOVSH2Wrr (rd x) (set-gpr rd (cast-unsigned 32 (cast-low 16 x))))
+(defun VMOVSHtoW64rr (rd x) (set-gpr rd (cast-unsigned 64 (cast-low 16 x))))
+(defun VMOVWrm (rd b s i off seg) (set-vex rd (cast-unsigned 128 (load-n 16 (ea b s i off seg)))))
+(defun VMOVWmr (b s i off seg x) (store-n 16 (ea b s i off seg) (cast-low 16 x)))
+
+(defun evex-low-move-of (e o ops)
+  (if (= (evex-mem o) 3)
+      (store-n e (evex-ea ops) (cast-low e (evex-nth 5 ops)))
+    (set-vex (car ops) (cast-unsigned 128 (if (= (evex-mem o) 1) (load-n e (evex-ea (cdr ops))) (cast-low e (car (cdr ops))))))))
+(defun evex:VMOVZPWILo2PWI (o) (evex-low-move-of 16 o (evex-ops o)))
+(defun evex:VMOVZPDILo2PDI (o) (evex-low-move-of 32 o (evex-ops o)))
+
+(defun evex:VADDPH (o) (evex-fp-binary fp-add 16 o))
+(defun evex:VSUBPH (o) (evex-fp-binary fp-sub 16 o))
+(defun evex:VMULPH (o) (evex-fp-binary fp-mul 16 o))
+(defun evex:VDIVPH (o) (evex-fp-binary fp-div 16 o))
+(defun evex:VMINPH (o) (evex-fp-binary fp-min 16 o))
+(defun evex:VMAXPH (o) (evex-fp-binary fp-max 16 o))
+(defun evex:VSCALEFPH (o) (evex-fp-binary fp-scalef 16 o))
+(defun evex:VSQRTPH (o) (evex-fp-unary fp-sqrt 16 o))
+(defun evex:VGETEXPPH (o) (evex-fp-unary fp-getexp 16 o))
+(defun evex:VRCPPH (o) (evex-named-unary 'frcp 16 o))
+(defun evex:VRSQRTPH (o) (evex-named-unary 'frsqrt 16 o))
+(defun evex:VGETMANTPH (o) (evex-fp-imm 'fgetmant 16 o))
+(defun evex:VREDUCEPH (o) (evex-fp-imm 'freduce 16 o))
+(defun evex:VRNDSCALEPH (o) (evex-fp-imm 'frndscale 16 o))
+(defun evex:VMINMAXPH (o) (evex-fp2-imm 'fminmax 16 o))
+(defun evex:VFPCLASSPH (o) (evex-fp-class 16 o))
+(defun evex:VCMPPH (o) (evex-fp-compare 16 o))
+(defun evex:VFMADD132PH (o) (evex-fma fma-madd 132 16 o))
+(defun evex:VFMADD213PH (o) (evex-fma fma-madd 213 16 o))
+(defun evex:VFMADD231PH (o) (evex-fma fma-madd 231 16 o))
+(defun evex:VFMSUB132PH (o) (evex-fma fma-msub 132 16 o))
+(defun evex:VFMSUB213PH (o) (evex-fma fma-msub 213 16 o))
+(defun evex:VFMSUB231PH (o) (evex-fma fma-msub 231 16 o))
+(defun evex:VFNMADD132PH (o) (evex-fma fma-nmadd 132 16 o))
+(defun evex:VFNMADD213PH (o) (evex-fma fma-nmadd 213 16 o))
+(defun evex:VFNMADD231PH (o) (evex-fma fma-nmadd 231 16 o))
+(defun evex:VFNMSUB132PH (o) (evex-fma fma-nmsub 132 16 o))
+(defun evex:VFNMSUB213PH (o) (evex-fma fma-nmsub 213 16 o))
+(defun evex:VFNMSUB231PH (o) (evex-fma fma-nmsub 231 16 o))
+(defun evex:VADDBF16 (o) (evex-fp-binary fp-add 16 o))
+(defun evex:VSUBBF16 (o) (evex-fp-binary fp-sub 16 o))
+(defun evex:VMULBF16 (o) (evex-fp-binary fp-mul 16 o))
+(defun evex:VDIVBF16 (o) (evex-fp-binary fp-div 16 o))
+(defun evex:VMINBF16 (o) (evex-fp-binary fp-min 16 o))
+(defun evex:VMAXBF16 (o) (evex-fp-binary fp-max 16 o))
+(defun evex:VSCALEFBF16 (o) (evex-fp-binary fp-scalef 16 o))
+(defun evex:VSQRTBF16 (o) (evex-fp-unary fp-sqrt 16 o))
+(defun evex:VGETEXPBF16 (o) (evex-fp-unary fp-getexp 16 o))
+(defun evex:VRCPBF16 (o) (evex-named-unary 'frcp 16 o))
+(defun evex:VRSQRTBF16 (o) (evex-named-unary 'frsqrt 16 o))
+(defun evex:VGETMANTBF16 (o) (evex-fp-imm 'fgetmant 16 o))
+(defun evex:VREDUCEBF16 (o) (evex-fp-imm 'freduce 16 o))
+(defun evex:VRNDSCALEBF16 (o) (evex-fp-imm 'frndscale 16 o))
+(defun evex:VMINMAXBF16 (o) (evex-fp2-imm 'fminmax 16 o))
+(defun evex:VFPCLASSBF16 (o) (evex-fp-class 16 o))
+(defun evex:VCMPBF16 (o) (evex-fp-compare 16 o))
+(defun evex:VFMADD132BF16 (o) (evex-fma fma-madd 132 16 o))
+(defun evex:VFMADD213BF16 (o) (evex-fma fma-madd 213 16 o))
+(defun evex:VFMADD231BF16 (o) (evex-fma fma-madd 231 16 o))
+(defun evex:VFMSUB132BF16 (o) (evex-fma fma-msub 132 16 o))
+(defun evex:VFMSUB213BF16 (o) (evex-fma fma-msub 213 16 o))
+(defun evex:VFMSUB231BF16 (o) (evex-fma fma-msub 231 16 o))
+(defun evex:VFNMADD132BF16 (o) (evex-fma fma-nmadd 132 16 o))
+(defun evex:VFNMADD213BF16 (o) (evex-fma fma-nmadd 213 16 o))
+(defun evex:VFNMADD231BF16 (o) (evex-fma fma-nmadd 231 16 o))
+(defun evex:VFNMSUB132BF16 (o) (evex-fma fma-nmsub 132 16 o))
+(defun evex:VFNMSUB213BF16 (o) (evex-fma fma-nmsub 213 16 o))
+(defun evex:VFNMSUB231BF16 (o) (evex-fma fma-nmsub 231 16 o))
+(defun evex:VMINMAXPS (o) (evex-fp2-imm 'fminmax 32 o))
+(defun evex:VMINMAXPD (o) (evex-fp2-imm 'fminmax 64 o))
+(defun evex:VFMADDSUB132PH (o) (evex-fmaddsub true 132 16 o))
+(defun evex:VFMADDSUB213PH (o) (evex-fmaddsub true 213 16 o))
+(defun evex:VFMADDSUB231PH (o) (evex-fmaddsub true 231 16 o))
+(defun evex:VFMSUBADD132PH (o) (evex-fmaddsub false 132 16 o))
+(defun evex:VFMSUBADD213PH (o) (evex-fmaddsub false 213 16 o))
+(defun evex:VFMSUBADD231PH (o) (evex-fmaddsub false 231 16 o))
+(defun evex:VFMADD132SH (o) (evex-fma-scalar fma-madd 132 16 o))
+(defun evex:VFMADD213SH (o) (evex-fma-scalar fma-madd 213 16 o))
+(defun evex:VFMADD231SH (o) (evex-fma-scalar fma-madd 231 16 o))
+(defun evex:VFMSUB132SH (o) (evex-fma-scalar fma-msub 132 16 o))
+(defun evex:VFMSUB213SH (o) (evex-fma-scalar fma-msub 213 16 o))
+(defun evex:VFMSUB231SH (o) (evex-fma-scalar fma-msub 231 16 o))
+(defun evex:VFNMADD132SH (o) (evex-fma-scalar fma-nmadd 132 16 o))
+(defun evex:VFNMADD213SH (o) (evex-fma-scalar fma-nmadd 213 16 o))
+(defun evex:VFNMADD231SH (o) (evex-fma-scalar fma-nmadd 231 16 o))
+(defun evex:VFNMSUB132SH (o) (evex-fma-scalar fma-nmsub 132 16 o))
+(defun evex:VFNMSUB213SH (o) (evex-fma-scalar fma-nmsub 213 16 o))
+(defun evex:VFNMSUB231SH (o) (evex-fma-scalar fma-nmsub 231 16 o))
+(defun evex:VADDSH (o) (evex-fp-scalar fp-add 16 o))
+(defun evex:VSUBSH (o) (evex-fp-scalar fp-sub 16 o))
+(defun evex:VMULSH (o) (evex-fp-scalar fp-mul 16 o))
+(defun evex:VDIVSH (o) (evex-fp-scalar fp-div 16 o))
+(defun evex:VMINSH (o) (evex-fp-scalar fp-min 16 o))
+(defun evex:VMAXSH (o) (evex-fp-scalar fp-max 16 o))
+(defun evex:VSCALEFSH (o) (evex-fp-scalar fp-scalef 16 o))
+(defun evex:VSCALEFSS (o) (evex-fp-scalar fp-scalef 32 o))
+(defun evex:VSCALEFSD (o) (evex-fp-scalar fp-scalef 64 o))
+(defun evex:VSQRTSH (o) (evex-fp-scalar1 fp-sqrt 16 o))
+(defun evex:VGETEXPSS (o) (evex-fp-scalar1 fp-getexp 32 o))
+(defun evex:VGETMANTSS (o) (evex-scalar-imm1 'fgetmant 32 o))
+(defun evex:VREDUCESS (o) (evex-scalar-imm1 'freduce 32 o))
+(defun evex:VRNDSCALESS (o) (evex-scalar-imm1 'frndscale 32 o))
+(defun evex:VFPCLASSSS (o) (evex-scalar-class 32 o))
+(defun evex:VGETEXPSD (o) (evex-fp-scalar1 fp-getexp 64 o))
+(defun evex:VGETMANTSD (o) (evex-scalar-imm1 'fgetmant 64 o))
+(defun evex:VREDUCESD (o) (evex-scalar-imm1 'freduce 64 o))
+(defun evex:VRNDSCALESD (o) (evex-scalar-imm1 'frndscale 64 o))
+(defun evex:VFPCLASSSD (o) (evex-scalar-class 64 o))
+(defun evex:VGETEXPSH (o) (evex-fp-scalar1 fp-getexp 16 o))
+(defun evex:VGETMANTSH (o) (evex-scalar-imm1 'fgetmant 16 o))
+(defun evex:VREDUCESH (o) (evex-scalar-imm1 'freduce 16 o))
+(defun evex:VRNDSCALESH (o) (evex-scalar-imm1 'frndscale 16 o))
+(defun evex:VFPCLASSSH (o) (evex-scalar-class 16 o))
+(defun evex:VRANGESS (o) (evex-scalar-imm2 'frange 32 o))
+(defun evex:VFIXUPIMMSS (o) (evex-fixup-scalar 32 o))
+(defun evex:VFIXUPIMMPS (o) (evex-fixup 32 o))
+(defun evex:VRCP14SS (o) (evex-fp-scalar1 fp-rcp14 32 o))
+(defun evex:VRSQRT14SS (o) (evex-fp-scalar1 fp-rsqrt14 32 o))
+(defun evex:VRCP28SS (o) (evex-fp-scalar1 fp-rcp28 32 o))
+(defun evex:VRSQRT28SS (o) (evex-fp-scalar1 fp-rsqrt28 32 o))
+(defun evex:VCOMISS (o) (evex-compare-flags 32 o))
+(defun evex:VUCOMISS (o) (evex-compare-flags 32 o))
+(defun evex:VRANGESD (o) (evex-scalar-imm2 'frange 64 o))
+(defun evex:VFIXUPIMMSD (o) (evex-fixup-scalar 64 o))
+(defun evex:VFIXUPIMMPD (o) (evex-fixup 64 o))
+(defun evex:VRCP14SD (o) (evex-fp-scalar1 fp-rcp14 64 o))
+(defun evex:VRSQRT14SD (o) (evex-fp-scalar1 fp-rsqrt14 64 o))
+(defun evex:VRCP28SD (o) (evex-fp-scalar1 fp-rcp28 64 o))
+(defun evex:VRSQRT28SD (o) (evex-fp-scalar1 fp-rsqrt28 64 o))
+(defun evex:VCOMISD (o) (evex-compare-flags 64 o))
+(defun evex:VUCOMISD (o) (evex-compare-flags 64 o))
+(defun evex:VCOMISH (o) (evex-compare-flags 16 o))
+(defun evex:VUCOMISH (o) (evex-compare-flags 16 o))
+(defun evex:VCOMISBF16 (o) (evex-compare-flags 16 o))
+(defun evex:VCMPSH (o) (evex-scalar-compare-of 16 o (evex-sources-once o)))
+(defun evex:VMOVSH (o) (evex-scalar-move 16 o))
+(defun evex:VRCPSH (o) (evex-named-scalar 'frcp 16 o))
+(defun evex:VRSQRTSH (o) (evex-named-scalar 'frsqrt 16 o))
+(defun evex:VMOVRSB (o) (evex-move 8 o))
+(defun evex:VMOVRSW (o) (evex-move 16 o))
+(defun evex:VMOVRSD (o) (evex-move 32 o))
+(defun evex:VMOVRSQ (o) (evex-move 64 o))
+(defun evex:VAESENC (o) (evex-binary lane-aesenc 128 o))
+(defun evex:VAESENCLAST (o) (evex-binary lane-aesenclast 128 o))
+(defun evex:VAESDEC (o) (evex-binary lane-aesdec 128 o))
+(defun evex:VAESDECLAST (o) (evex-binary lane-aesdeclast 128 o))
+(defun evex:VSM4KEY4 (o) (evex-binary lane-sm4key4 128 o))
+(defun evex:VSM4RNDS4 (o) (evex-binary lane-sm4rnds4 128 o))
+(defun evex:VFMULCPH (o) (evex-named-binary 'fmulc 32 o))
+(defun evex:VFMULCSH (o) (evex-named-scalar 'fmulc 32 o))
+(defun evex:VFCMULCPH (o) (evex-named-binary 'fcmulc 32 o))
+(defun evex:VFCMULCSH (o) (evex-named-scalar 'fcmulc 32 o))
+(defun evex:VFMADDCPH (o) (evex-named-ternary 'fmaddc 32 o))
+(defun evex:VFMADDCSH (o) (evex-named-scalar3 'fmaddc 32 o))
+(defun evex:VFCMADDCPH (o) (evex-named-ternary 'fcmaddc 32 o))
+(defun evex:VFCMADDCSH (o) (evex-named-scalar3 'fcmaddc 32 o))
+(defun evex:VDPBF16PS (o) (evex-named-ternary 'dpbf16 32 o))
+(defun evex:VDPPHPS (o) (evex-named-ternary 'dpph 32 o))
+(defun evex:VCVTNE2PS2BF16 (o) (evex-ne2ps-of o (evex-sources o)))
+(defun evex:VCVTNEPS2BF16 (o) (evex-conversion 0 32 16 o))
+(defun evex:VCVTPS2UDQ (o) (evex-conversion 4 32 32 o))
+(defun evex:VCVTPD2UDQ (o) (evex-conversion 4 64 32 o))
+(defun evex:VCVTPS2UQQ (o) (evex-conversion 4 32 64 o))
+(defun evex:VCVTPD2UQQ (o) (evex-conversion 4 64 64 o))
+(defun evex:VCVTPH2DQ (o) (evex-conversion 3 16 32 o))
+(defun evex:VCVTPH2QQ (o) (evex-conversion 3 16 64 o))
+(defun evex:VCVTPH2UDQ (o) (evex-conversion 4 16 32 o))
+(defun evex:VCVTPH2UQQ (o) (evex-conversion 4 16 64 o))
+(defun evex:VCVTPH2UW (o) (evex-conversion 4 16 16 o))
+(defun evex:VCVTPH2W (o) (evex-conversion 3 16 16 o))
+(defun evex:VCVTPS2PHX (o) (evex-conversion 0 32 16 o))
+(defun evex:VCVTPD2PH (o) (evex-conversion 0 64 16 o))
+(defun evex:VCVTDQ2PH (o) (evex-conversion 1 32 16 o))
+(defun evex:VCVTQQ2PH (o) (evex-conversion 1 64 16 o))
+(defun evex:VCVTUDQ2PH (o) (evex-conversion 2 32 16 o))
+(defun evex:VCVTUQQ2PH (o) (evex-conversion 2 64 16 o))
+(defun evex:VCVTUW2PH (o) (evex-conversion 2 16 16 o))
+(defun evex:VCVTW2PH (o) (evex-conversion 1 16 16 o))
+(defun evex:VCVTPH2IBS (o) (evex-conversion 9 16 16 o))
+(defun evex:VCVTPH2IUBS (o) (evex-conversion 10 16 16 o))
+(defun evex:VCVTPS2IBS (o) (evex-conversion 9 32 32 o))
+(defun evex:VCVTPS2IUBS (o) (evex-conversion 10 32 32 o))
+(defun evex:VCVTTPS2UDQ (o) (evex-conversion 6 32 32 o))
+(defun evex:VCVTTPD2UDQ (o) (evex-conversion 6 64 32 o))
+(defun evex:VCVTTPS2UQQ (o) (evex-conversion 6 32 64 o))
+(defun evex:VCVTTPD2UQQ (o) (evex-conversion 6 64 64 o))
+(defun evex:VCVTTPH2DQ (o) (evex-conversion 5 16 32 o))
+(defun evex:VCVTTPH2QQ (o) (evex-conversion 5 16 64 o))
+(defun evex:VCVTTPH2UDQ (o) (evex-conversion 6 16 32 o))
+(defun evex:VCVTTPH2UQQ (o) (evex-conversion 6 16 64 o))
+(defun evex:VCVTTPH2UW (o) (evex-conversion 6 16 16 o))
+(defun evex:VCVTTPH2W (o) (evex-conversion 5 16 16 o))
+(defun evex:VCVTPH2PD (o) (evex-conversion 0 16 64 o))
+(defun evex:VCVTPH2PSX (o) (evex-conversion 0 16 32 o))
+(defun evex:VCVTPH2PS (o) (evex-conversion 0 16 32 o))
+(defun evex:VCVTTPS2DQS (o) (evex-conversion 7 32 32 o))
+(defun evex:VCVTTPD2DQS (o) (evex-conversion 7 64 32 o))
+(defun evex:VCVTTPS2QQS (o) (evex-conversion 7 32 64 o))
+(defun evex:VCVTTPD2QQS (o) (evex-conversion 7 64 64 o))
+(defun evex:VCVTTPS2UDQS (o) (evex-conversion 8 32 32 o))
+(defun evex:VCVTTPD2UDQS (o) (evex-conversion 8 64 32 o))
+(defun evex:VCVTTPS2UQQS (o) (evex-conversion 8 32 64 o))
+(defun evex:VCVTTPD2UQQS (o) (evex-conversion 8 64 64 o))
+(defun evex:VCVTTPH2IBS (o) (evex-conversion 11 16 16 o))
+(defun evex:VCVTTPH2IUBS (o) (evex-conversion 12 16 16 o))
+(defun evex:VCVTTPS2IBS (o) (evex-conversion 11 32 32 o))
+(defun evex:VCVTTPS2IUBS (o) (evex-conversion 12 32 32 o))
+(defun evex:VCVTBF162IBS (o) (evex-conversion 9 16 16 o))
+(defun evex:VCVTBF162IUBS (o) (evex-conversion 10 16 16 o))
+(defun evex:VCVTTBF162IBS (o) (evex-conversion 11 16 16 o))
+(defun evex:VCVTTBF162IUBS (o) (evex-conversion 12 16 16 o))
+(defun evex:VCVTSD2SS (o) (evex-scalar-cvt 0 64 32 o))
+(defun evex:VCVTSS2SD (o) (evex-scalar-cvt 0 32 64 o))
+(defun evex:VCVTSD2SH (o) (evex-scalar-cvt 0 64 16 o))
+(defun evex:VCVTSH2SD (o) (evex-scalar-cvt 0 16 64 o))
+(defun evex:VCVTSH2SS (o) (evex-scalar-cvt 0 16 32 o))
+(defun evex:VCVTSS2SH (o) (evex-scalar-cvt 0 32 16 o))
+(defun evex:VCVTSS2SI (o) (evex-to-gpr 3 32 32 o))
+(defun evex:VCVTSS2USI (o) (evex-to-gpr 4 32 32 o))
+(defun evex:VCVTSS2SI64 (o) (evex-to-gpr 3 32 64 o))
+(defun evex:VCVTSS2USI64 (o) (evex-to-gpr 4 32 64 o))
+(defun evex:VCVTTSS2SI (o) (evex-to-gpr 5 32 32 o))
+(defun evex:VCVTTSS2USI (o) (evex-to-gpr 6 32 32 o))
+(defun evex:VCVTTSS2SI64 (o) (evex-to-gpr 5 32 64 o))
+(defun evex:VCVTTSS2USI64 (o) (evex-to-gpr 6 32 64 o))
+(defun evex:VCVTSI2SS (o) (evex-from-gpr 1 32 32 o))
+(defun evex:VCVTUSI2SS (o) (evex-from-gpr 2 32 32 o))
+(defun evex:VCVTSI642SS (o) (evex-from-gpr 1 64 32 o))
+(defun evex:VCVTUSI642SS (o) (evex-from-gpr 2 64 32 o))
+(defun evex:VCVTSD2SI (o) (evex-to-gpr 3 64 32 o))
+(defun evex:VCVTSD2USI (o) (evex-to-gpr 4 64 32 o))
+(defun evex:VCVTSD2SI64 (o) (evex-to-gpr 3 64 64 o))
+(defun evex:VCVTSD2USI64 (o) (evex-to-gpr 4 64 64 o))
+(defun evex:VCVTTSD2SI (o) (evex-to-gpr 5 64 32 o))
+(defun evex:VCVTTSD2USI (o) (evex-to-gpr 6 64 32 o))
+(defun evex:VCVTTSD2SI64 (o) (evex-to-gpr 5 64 64 o))
+(defun evex:VCVTTSD2USI64 (o) (evex-to-gpr 6 64 64 o))
+(defun evex:VCVTSI2SD (o) (evex-from-gpr 1 32 64 o))
+(defun evex:VCVTUSI2SD (o) (evex-from-gpr 2 32 64 o))
+(defun evex:VCVTSI642SD (o) (evex-from-gpr 1 64 64 o))
+(defun evex:VCVTUSI642SD (o) (evex-from-gpr 2 64 64 o))
+(defun evex:VCVTSH2SI (o) (evex-to-gpr 3 16 32 o))
+(defun evex:VCVTSH2USI (o) (evex-to-gpr 4 16 32 o))
+(defun evex:VCVTSH2SI64 (o) (evex-to-gpr 3 16 64 o))
+(defun evex:VCVTSH2USI64 (o) (evex-to-gpr 4 16 64 o))
+(defun evex:VCVTTSH2SI (o) (evex-to-gpr 5 16 32 o))
+(defun evex:VCVTTSH2USI (o) (evex-to-gpr 6 16 32 o))
+(defun evex:VCVTTSH2SI64 (o) (evex-to-gpr 5 16 64 o))
+(defun evex:VCVTTSH2USI64 (o) (evex-to-gpr 6 16 64 o))
+(defun evex:VCVTSI2SH (o) (evex-from-gpr 1 32 16 o))
+(defun evex:VCVTUSI2SH (o) (evex-from-gpr 2 32 16 o))
+(defun evex:VCVTSI642SH (o) (evex-from-gpr 1 64 16 o))
+(defun evex:VCVTUSI642SH (o) (evex-from-gpr 2 64 16 o))
+(defun evex:VPGATHERDD (o) (evex-gather 32 32 o))
+(defun evex:VPGATHERDQ (o) (evex-gather 64 32 o))
+(defun evex:VPGATHERQD (o) (evex-gather 32 64 o))
+(defun evex:VPGATHERQQ (o) (evex-gather 64 64 o))
+(defun evex:VGATHERDPS (o) (evex-gather 32 32 o))
+(defun evex:VGATHERDPD (o) (evex-gather 64 32 o))
+(defun evex:VGATHERQPS (o) (evex-gather 32 64 o))
+(defun evex:VGATHERQPD (o) (evex-gather 64 64 o))
+(defun evex:VPSCATTERDD (o) (evex-scatter 32 32 o))
+(defun evex:VPSCATTERDQ (o) (evex-scatter 64 32 o))
+(defun evex:VPSCATTERQD (o) (evex-scatter 32 64 o))
+(defun evex:VPSCATTERQQ (o) (evex-scatter 64 64 o))
+(defun evex:VSCATTERDPS (o) (evex-scatter 32 32 o))
+(defun evex:VSCATTERDPD (o) (evex-scatter 64 32 o))
+(defun evex:VSCATTERQPS (o) (evex-scatter 32 64 o))
+(defun evex:VSCATTERQPD (o) (evex-scatter 64 64 o))
+;; the prefetches of the gathers and the scatters only hint at what comes
+(defun VGATHERPF0DPDm (k b s i off seg) (empty))
+(defun VGATHERPF0DPSm (k b s i off seg) (empty))
+(defun VGATHERPF0QPDm (k b s i off seg) (empty))
+(defun VGATHERPF0QPSm (k b s i off seg) (empty))
+(defun VGATHERPF1DPDm (k b s i off seg) (empty))
+(defun VGATHERPF1DPSm (k b s i off seg) (empty))
+(defun VGATHERPF1QPDm (k b s i off seg) (empty))
+(defun VGATHERPF1QPSm (k b s i off seg) (empty))
+(defun VSCATTERPF0DPDm (k b s i off seg) (empty))
+(defun VSCATTERPF0DPSm (k b s i off seg) (empty))
+(defun VSCATTERPF0QPDm (k b s i off seg) (empty))
+(defun VSCATTERPF0QPSm (k b s i off seg) (empty))
+(defun VSCATTERPF1DPDm (k b s i off seg) (empty))
+(defun VSCATTERPF1DPSm (k b s i off seg) (empty))
+(defun VSCATTERPF1QPDm (k b s i off seg) (empty))
+(defun VSCATTERPF1QPSm (k b s i off seg) (empty))
