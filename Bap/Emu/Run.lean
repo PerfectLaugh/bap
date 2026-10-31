@@ -113,8 +113,7 @@ private def serveLibcCalls (emu : Emu) (output : ByteArray → IO Unit) : IO Hoo
     | 318 =>
       write guest (arg 0) (ByteArray.mk (Array.replicate (arg 1) 7))
       pure (.returnValue (arg 1))
-    | 267 => pure (.returnValue (2 ^ 64 - 38))
-    | _ => pure .default
+    | _ => pure (.returnValue (2 ^ 64 - 38))
 
 /-- Runs a static x86-64 Linux executable to its end, with what it writes going to `output`. -/
 def runExecutable (path : String) (output : ByteArray → IO Unit) (quantum : Nat := 100000) (fuel : Nat := 100000000) :
