@@ -275,8 +275,8 @@ private def binaryRegressions : IO Unit := do
   assertEqual "with its symbols" (real.image.map (·.symbols)) (reloaded.image.map (·.symbols))
   assertTrue "with its bytes" ((real.image.map (·.data)) == (reloaded.image.map (·.data)))
 
-/-! The solver of `Slice.backwardCfg` against passes over plain lists, which it says it computes. `limit` bounds the work
-of the passes, which is quadratic in what is live; `none` is that it ran out. -/
+/-! The solver of `Slice.backwardCfg` against passes over plain lists, which it says it computes unless it widened.
+`limit` bounds the work of the passes, which is quadratic in what is live; `none` is that it ran out or the slice widened. -/
 namespace SliceSpec
 
 open Analysis.Slice
@@ -349,7 +349,7 @@ private def solve (code : List Disasm.Insn) (successors : Std.HashMap Nat (List 
         table.insert address { table.getD address {} with site := true }) table
       solve code successors criteria passes limit fuel table
 
-/-- Whether `Slice.backwardCfg` answers as the passes do, to the last list: `none` if they ran out. -/
+/-- Whether `Slice.backwardCfg` answers as the passes do: `none` if they ran out or the slice widened. -/
 private def agrees (instructions : List Disasm.Insn) (edges : List (Nat × Nat)) (criteria : List Location)
     (limit : Nat := 200000) : Option Bool := do
   let expanded := expandCriteria instructions criteria
@@ -358,10 +358,13 @@ private def agrees (instructions : List Disasm.Insn) (edges : List (Nat × Nat))
     (instructions.length + 1) {}
   let lookup (address : Nat) : Entry := table.getD address {}
   let result := backwardCfg instructions edges none criteria
+  if result.widened then none else
+  let sameSet (left right : List Location) : Bool := left.length == right.length && left.all right.contains
   let sameEntry (address : Nat) : Bool :=
     let left := lookup address
     let right := result.entry address
-    left.site == right.site && left.before == right.before && left.after == right.after && left.next == right.next
+    left.site == right.site && sameSet left.before right.before && sameSet left.after right.after &&
+      left.next == right.next
   let sites := (instructions.filter fun insn => (lookup insn.address).site).map (·.address)
   let calls := (instructions.filter fun insn =>
     insn.flow = .call && !(lookup insn.address).after.isEmpty).map (·.address)
@@ -369,10 +372,9 @@ private def agrees (instructions : List Disasm.Insn) (edges : List (Nat × Nat))
     | some insn => (lookup insn.address).before
     | none => expanded
   let determined := Equations.determined instructions edges expanded lookup
-  return result.table.size == table.size && instructions.all (fun insn => sameEntry insn.address) &&
-    result.sites == sites && result.calls == calls && result.live == live && result.determined == determined &&
-    result.complete == (determined && calls.isEmpty) &&
-    result.table.toList.map (·.1) == table.toList.map (·.1)
+  return instructions.all (fun insn => sameEntry insn.address) &&
+    result.sites == sites && result.calls == calls && sameSet result.live live && result.determined == determined &&
+    result.complete == (determined && calls.isEmpty)
 
 /-- The variables a listing assigns, at most `count` of them. -/
 private def assigned (instructions : List Disasm.Insn) (count : Nat) : List Bap.Var :=
@@ -416,15 +418,27 @@ def run : IO Unit := do
   let at' (address : Nat) (bil : Bil.Program) : Disasm.Insn := ⟨address, 1, "", .normal, none, bil⟩
   let readAt (var : Bap.Var) : Bil.Stmt := .move var (.load (.var mem) (.var rsp) .little 8)
   let bump : Bil.Stmt := .move rsp (.bin .add (.var rsp) (word 8))
-  -- A pointer walks: what is live keeps moving, past what the passes may take.
+  -- A pointer walks: what is live keeps moving, until it is all of the memory and the pointer.
   let walk : List Disasm.Insn := [
     at' 0 [bump, readAt x],
     ⟨1, 1, "", .conditionalJump, some 0, [.ifElse (.var c) [.jmp (word 0)] []]⟩,
     at' 2 [.move y (.var x)]]
   let walked := backward walk [.rel mem rsp 0 8]
-  assertTrue "a walking pointer runs out of passes" !walked.determined
-  assertEqual "the solver runs out as the passes do" (some true) (agrees walk (flowEdges walk) [.rel mem rsp 0 8] 20000000)
-  assertEqual "a walking pointer, from a register" (some true) (agrees walk (flowEdges walk) [.reg y] 20000000)
+  assertTrue "a walking pointer widens" walked.widened
+  assertTrue "and what it finds checks out" walked.determined
+  assertEqual "the tables are a solution of the equations" walked.determined
+    (Equations.determined walk (flowEdges walk) [.rel mem rsp 0 8] walked.entry)
+  assertTrue "a walking pointer holds all of the memory" ((walked.entry 0).before.contains (.whole mem))
+  assertTrue "and the pointer" ((walked.entry 0).before.contains (.reg rsp))
+  assertEqual "a walking pointer is one site and its branch" [0, 1] walked.sites
+  assertEqual "the solver widens only when there are too many offsets" none (agrees walk (flowEdges walk) [.rel mem rsp 0 8] 20000000)
+  -- The arms of a run of `if`s: the list of what must agree does not double with each.
+  let masked : List Disasm.Insn := [at' 0 ((List.range 64).map fun index =>
+    .ifElse (.var c) [.move mem (.store (.var mem) (.bin .add (.var rsp) (word index)) (word 1) .little 1)] []),
+    at' 1 [.move y (.load (.var mem) (.var rsp) .little 8)]]
+  let runOfIfs := backward masked [.reg y]
+  assertEqual "a run of ifs is a site" [0, 1] runOfIfs.sites
+  assertTrue "a run of ifs checks out" runOfIfs.determined
   -- An address twice, whose elements see the same entry.
   let twice : List Disasm.Insn := [at' 0 [.move x (word 1)], at' 0 [.move y (.var x)], at' 1 [.move x (.var y)]]
   assertEqual "an address listed twice" (some true) (agrees twice (flowEdges twice) [.reg x])
@@ -441,6 +455,14 @@ def run : IO Unit := do
   for criterion in ([[.reg x], [.reg y], [.reg rsp], [.whole mem], [.mem 0x3000 8], [.rel mem rsp 0 8], [.memOf mem 0x3000 8]] :
       List (List Location)) do
     assertEqual "branches, loops, ends and stores" (some true) (agrees choice (flowEdges choice) criterion)
+  -- What is prepared gives what a slice from scratch does.
+  let prepared := prepare choice (flowEdges choice)
+  for criterion in ([[.reg x], [.whole mem], [.mem 0x3000 8]] : List (List Location)) do
+    let once := backward choice criterion
+    let again := prepared.slice none criterion
+    assertEqual "a prepared slice has the same sites" once.sites again.sites
+    assertEqual "a prepared slice has the same live locations" once.live again.live
+    assertEqual "a prepared slice is as complete" once.complete again.complete
   assertEqual "nothing to slice" (some true) (agrees [] [] [.reg x])
   let binaries := ["x86_64-linux-gnu-echo", "aarch64-linux-gnu-echo", "arm-linux-gnueabi-echo"]
   let compared ← binaries.mapM fun name => overBinary s!"../testsuite/bin/{name}"
@@ -717,6 +739,11 @@ def run : IO Unit := do
   let indexedSlice := Analysis.Slice.backward indexed [.reg rax]
   assertEqual "a read at an address that is not known needs every store" [0, 1] indexedSlice.sites
   assertTrue "and is no reason to give up" indexedSlice.complete
+  let projectPlan := Analysis.Slice.prepareProject xrefProject
+  assertEqual "a planned slice has the same sites" memorySlice.sites (projectPlan.slice 0x1000 [.mem 0x3000 8]).sites
+  assertEqual "a planned slice has the same live locations" memorySlice.live (projectPlan.slice 0x1000 [.mem 0x3000 8]).live
+  assertEqual "a planned dynamic slice has the same sites" [0x1008]
+    (Analysis.DynamicSlice.backwardPlanned projectPlan 0x1000 [0x1008] [] [.mem 0x3000 8]).sites
   let partialDynamic := Analysis.DynamicSlice.backward xrefProject 0x1000 [0x1008] [.mem 0x3000 8]
   assertEqual "dynamic slice keeps traced site" [0x1008] partialDynamic.sites
   assertEqual "dynamic slice reports missing producer" [0x1004] partialDynamic.gaps

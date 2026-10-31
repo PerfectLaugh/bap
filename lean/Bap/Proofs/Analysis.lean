@@ -1011,7 +1011,10 @@ open_private Bap.Analysis.Slice in Bap.Analysis.Slice :
   Info Info.mk Info.writes Info.wholesale Info.uses Info.dynamic Info.always
   constantRange closedBits affine offsetLimit accessAt bound oversized throughMove usesExp merge chainRoot memoryWrites isStore stmtInfo blockInfo relevant moveBefore stmtBefore
   codeBefore insnBefore Exits Exits.falls Exits.targets Exits.unknown constantTarget stmtExits codeExits mayEnd
-  successorTable checkInsn checkEdges checkFlow expMemories stmtMemories
+  successorTable checkInsn checkEdges checkFlow expMemories stmtMemories expandWith holds allBelow allIn stmtAssigned isPlain movedOf
+  varBit Location.mark Step Step.image Step.through stepOf stepsOf imageOf Visit Visit.insn Visit.slot Visit.next Visit.info Visit.ends
+  Visit.moved Visit.plain Visit.fixed Visit.fixedBits Visit.fixedNumbers Visit.steps visitOf imageAt Numbered.says Numbered.holdsIn
+  Numbered.untouched Numbered.quiet Numbered.through Numbered.check Numbering baseNumbering slotTable resultOf groupBy
 
 theorem slice_covers_overlaps {outer inner : Location} (h : outer.covers inner = true) :
     outer.overlaps inner = true := by
@@ -2523,7 +2526,7 @@ private theorem slice_exec_agree {Ms : List Bap.Var} (hM : slice_Memories Ms) (e
           obtain ⟨hdc, hdy, hdn⟩ := hd
           obtain ⟨cv, he, hp⟩ := slice_exec_if_ok h
           have hvb := slice_eval_agree hM condition hv hdc
-            (fun l hl => List.mem_append_left _ (List.mem_append_left _ hl)) hab _ he
+            (fun l hl => List.mem_append_left _ hl) hab _ he
           rw [slice_exec_if_eq hvb]
           by_cases hc : cv = 1
           · simp only [hc, ite_true] at hp ⊢
@@ -2532,14 +2535,14 @@ private theorem slice_exec_agree {Ms : List Bap.Var} (hM : slice_Memories Ms) (e
                 cases hds : Info.dynamic (stmtInfo s) with
                 | false => rfl
                 | true => rw [(slice_block_dynamic yes).mpr ⟨s, hs, hds⟩] at hdy; cases hdy)
-              (slice_Agree_mono (fun l hl => List.mem_append_left _ (List.mem_append_right _ hl)) hab) hp
+              (slice_Agree_mono (fun l hl => List.mem_append_right _ (List.mem_eraseDups.2 (List.mem_append_left _ hl))) hab) hp
           · simp only [hc, ite_false] at hp ⊢
             exact ihp no a a' b e after hn
               (fun s hs => by
                 cases hds : Info.dynamic (stmtInfo s) with
                 | false => rfl
                 | true => rw [(slice_block_dynamic no).mpr ⟨s, hs, hds⟩] at hdn; cases hdn)
-              (slice_Agree_mono (fun l hl => List.mem_append_right _ hl) hab) hp
+              (slice_Agree_mono (fun l hl => List.mem_append_right _ (List.mem_eraseDups.2 (List.mem_append_right _ hl))) hab) hp
     · intro code a a' b e after hwf hd hab h
       cases code with
       | nil =>
@@ -2933,6 +2936,40 @@ inductive slice_SiteRun (fuel : Nat) (instructions : List Bap.Disasm.Insn) (edge
       slice_SiteRun fuel instructions edges result (result.nextSite other.address) a' final →
       slice_SiteRun fuel instructions edges result (some insn.address) a final
 
+/-- States that agree on `.whole m` and `.reg b` agree on what goes by `b` in `m`. -/
+private theorem slice_Agree_holds {Ms : List Bap.Var} {P : Location → Prop} {live : List Location} {a b : Bap.Bil.Env}
+    (h : ∀ l, P l → holds live l = true) (hab : slice_Agree Ms (· ∈ live) a b) : slice_Agree Ms P a b := by
+  have hsplit : ∀ l, P l → l ∈ live ∨ ∃ memory base offset size, l = .rel memory base offset size ∧
+      Location.whole memory ∈ live ∧ Location.reg base ∈ live := by
+    intro l hl
+    have := h l hl
+    simp only [holds, Bool.or_eq_true, List.contains_eq_mem, decide_eq_true_eq] at this
+    rcases this with h1 | h1
+    · exact .inl h1
+    · right
+      cases l with
+      | rel memory base offset size =>
+        simp only [Bool.and_eq_true, decide_eq_true_eq] at h1
+        exact ⟨memory, base, offset, size, rfl, h1.1, h1.2⟩
+      | _ => simp at h1
+  obtain ⟨hregs, hmems⟩ := hab
+  refine ⟨fun x ht hp => ?_, fun m hm => ?_⟩
+  · rcases hsplit _ hp with h1 | ⟨_, _, _, _, h1, _⟩
+    · exact hregs x ht h1
+    · cases h1
+  · obtain ⟨w, vw, Ma, Mb, h1, h2, h3, h4, h5, h6, h7, h8⟩ := hmems m hm
+    refine ⟨w, vw, Ma, Mb, h1, h2, h3, h4, h5, fun address n hp => ?_, fun base offset n ht hp => ?_, fun hp => ?_⟩
+    · rcases hsplit _ hp with h9 | ⟨_, _, _, _, h9, _⟩
+      · exact h6 address n h9
+      · cases h9
+    · rcases hsplit _ hp with h9 | ⟨_, _, _, _, h9, h10, h11⟩
+      · exact h7 base offset n ht h9
+      · cases h9
+        exact ⟨hregs base ht h11, fun wb c _ k _ => h8 h10 _⟩
+    · rcases hsplit _ hp with h9 | ⟨_, _, _, _, h9, _⟩
+      · exact h8 h9
+      · cases h9
+
 /-- The equations `complete` tests, one instruction at a time. -/
 private structure slice_Solved (instructions : List Bap.Disasm.Insn) (edges : List (Nat × Nat)) (result : Result)
     (criteria : List Location) (insn : Bap.Disasm.Insn) : Prop where
@@ -2942,7 +2979,7 @@ private structure slice_Solved (instructions : List Bap.Disasm.Insn) (edges : Li
     ∀ l ∈ criteria, l ∈ (result.entry insn.address).after
   relevantSite : relevant (result.entry insn.address).after (blockInfo insn.bil) = true → (result.entry insn.address).site = true
   site : (result.entry insn.address).site = true →
-    (∀ l ∈ insnBefore insn.bil (result.entry insn.address).after, l ∈ (result.entry insn.address).before) ∧
+    (∀ l ∈ insnBefore insn.bil (result.entry insn.address).after, holds (result.entry insn.address).before l = true) ∧
     (result.entry insn.address).next = .site insn.address ∧ Info.dynamic (blockInfo insn.bil) = false
   skip : (result.entry insn.address).site = false →
     (∀ l ∈ (result.entry insn.address).after, l ∈ (result.entry insn.address).before) ∧
@@ -3002,18 +3039,834 @@ private theorem slice_mem_successorTable (instructions : List Bap.Disasm.Insn) (
 
 private theorem slice_mem_expand_reg {instructions : List Bap.Disasm.Insn} {criteria : List Location} {r : Bap.Var}
     (h : Location.reg r ∈ criteria) : Location.reg r ∈ expandCriteria instructions criteria := by
-  simp only [expandCriteria, List.mem_eraseDups, List.mem_flatMap]
+  simp only [expandCriteria, expandWith, List.mem_eraseDups, List.mem_flatMap]
   exact ⟨_, h, by simp⟩
 
 private theorem slice_mem_expand_memOf {instructions : List Bap.Disasm.Insn} {criteria : List Location} {m : Bap.Var}
     {address n : Nat} (h : Location.memOf m address n ∈ criteria ∨ (Location.mem address n ∈ criteria ∧ m ∈ memories instructions)) :
     Location.memOf m address n ∈ expandCriteria instructions criteria := by
-  simp only [expandCriteria, List.mem_eraseDups, List.mem_flatMap]
+  simp only [expandCriteria, expandWith, List.mem_eraseDups, List.mem_flatMap]
   rcases h with h | ⟨h, hm⟩
   · exact ⟨_, h, by simp⟩
   · refine ⟨_, h, ?_⟩
     have hne : memories instructions ≠ [] := List.ne_nil_of_mem hm
     simp [hne, hm]
+
+/-! #### The check on the numbers
+
+`Numbered.check` implies `checkInsn` whatever the tables are, so `backwardCfg` may look there first. -/
+
+private theorem slice_allBelow {p : Nat → Bool} : ∀ {count n : Nat}, allBelow p count = true → n < count → p n = true := by
+  intro count
+  induction count with
+  | zero => intro n _ h; omega
+  | succ count ih =>
+    intro n h hn
+    simp only [allBelow, Bool.and_eq_true] at h
+    by_cases hc : n = count
+    · exact hc ▸ h.1
+    · exact ih h.2 (by omega)
+
+private theorem slice_has_zero {set : ByteArray} {number : Nat} (h : has set number = true) :
+    set.get! (number / 8) ≠ 0 := by
+  intro hz
+  simp [has, hz] at h
+
+private theorem slice_has_size {set : ByteArray} {number : Nat} (h : has set number = true) : number / 8 < set.size := by
+  apply Classical.byContradiction
+  intro hn
+  apply slice_has_zero h
+  cases set with
+  | mk data =>
+    have hn' : ¬ number / 8 < data.size := hn
+    simp [ByteArray.get!, hn']
+    rfl
+
+private theorem slice_allIn {p : Nat → Bool} {set : ByteArray} {number : Nat} (h : allIn p set = true)
+    (hn : has set number = true) : p number = true := by
+  have hb := slice_allBelow h (slice_has_size hn)
+  simp only [Bool.or_eq_true, beq_iff_eq] at hb
+  rcases hb with hb | hb
+  · exact absurd hb (slice_has_zero hn)
+  · have hk := slice_allBelow hb (Nat.mod_lt number (by decide : 8 > 0))
+    simp only [Bool.or_eq_true, beq_iff_eq] at hk
+    rcases hk with hk | hk
+    · simp [has, hk] at hn
+    · rwa [Nat.div_add_mod] at hk
+
+private theorem slice_mem_setOf {tables : Numbered} {set : ByteArray} {l : Location} :
+    l ∈ tables.setOf set ↔ ∃ n, has set n = true ∧ tables.locations[n]? = some l := by
+  simp only [Numbered.setOf, List.mem_filterMap, List.mem_range]
+  constructor
+  · rintro ⟨n, _, h⟩
+    split at h
+    · exact ⟨n, by assumption, h⟩
+    · cases h
+  · rintro ⟨n, hn, h⟩
+    refine ⟨n, ?_, by simp [hn, h]⟩
+    exact (Array.getElem?_eq_some_iff.1 h).1
+
+private theorem slice_says {tables : Numbered} {set : ByteArray} {l : Location} (h : Numbered.says tables set l = true) :
+    l ∈ tables.setOf set := by
+  simp only [Numbered.says] at h
+  split at h
+  · rename_i number _
+    simp only [Bool.and_eq_true, beq_iff_eq] at h
+    exact slice_mem_setOf.2 ⟨number, h.1, h.2⟩
+  · cases h
+
+private theorem slice_holdsIn {tables : Numbered} {set : ByteArray} {l : Location}
+    (h : Numbered.holdsIn tables set l = true) : holds (tables.setOf set) l = true := by
+  simp only [Numbered.holdsIn, Bool.or_eq_true] at h
+  simp only [holds, Bool.or_eq_true, List.contains_eq_mem, decide_eq_true_eq]
+  rcases h with h | h
+  · exact .inl (slice_says h)
+  · right
+    split at h
+    · simp only [Bool.and_eq_true, decide_eq_true_eq] at h ⊢
+      exact ⟨slice_says h.1, slice_says h.2⟩
+    · cases h
+
+private theorem slice_within {tables : Numbered} {set other : ByteArray} (h : allIn (has other) set = true) {l : Location}
+    (hl : l ∈ tables.setOf set) : l ∈ tables.setOf other := by
+  obtain ⟨n, hn, hg⟩ := slice_mem_setOf.1 hl
+  exact slice_mem_setOf.2 ⟨n, slice_allIn h hn, hg⟩
+
+private theorem slice_stepThrough (dst : Bap.Var) (value : Bap.Bil.Exp) (memory : Bap.Var) (offset : Int) (size : Nat) :
+    Step.through (stepOf dst value) memory offset size = throughMove memory value offset size := rfl
+
+/-- `moveBefore` takes what is live one location at a time. -/
+private theorem slice_mem_moveBefore (dst : Bap.Var) (value : Bap.Bil.Exp) (live : List Location) (l : Location) :
+    l ∈ moveBefore dst value live ↔ ∃ s ∈ live, l ∈ Step.image (stepOf dst value) s := by
+  have hsome : ∀ x : Location, (some x = some l ↔ l ∈ [x]) := by
+    intro x
+    constructor
+    · intro h
+      rw [Option.some.inj h]
+      exact List.mem_singleton.2 rfl
+    · intro h
+      rw [List.mem_singleton.1 h]
+  have hnone : ((none : Option Location) = some l ↔ l ∈ ([] : List Location)) := by simp
+  unfold moveBefore Step.image
+  cases ht : dst.typ with
+  | mem aw vw =>
+    simp only [stepOf, ht, ↓reduceIte, List.mem_filterMap]
+    apply exists_congr
+    intro s
+    apply and_congr_right
+    intro _
+    cases s with
+    | reg var => exact hsome _
+    | mem address size => exact hsome _
+    | memOf memory address size =>
+      dsimp only
+      by_cases h1 : (memory != dst) = true
+      · simp only [h1]
+        exact hsome _
+      · simp only [h1]
+        by_cases h2 : ((memoryWrites dst value).1.any fun x => Location.covers x (Location.memOf memory address size)) = true
+        · simp only [h2]
+          exact hnone
+        · simp only [h2]
+          cases chainRoot value <;> exact hsome _
+    | rel memory base offset size =>
+      dsimp only
+      by_cases h1 : (memory != dst) = true
+      · simp only [h1]
+        exact hsome _
+      · simp only [h1]
+        by_cases h2 : ((memoryWrites dst value).1.any fun x => Location.covers x (Location.rel memory base offset size)) = true
+        · simp only [h2]
+          exact hnone
+        · simp only [h2]
+          cases chainRoot value <;> exact hsome _
+    | whole memory =>
+      dsimp only
+      by_cases h1 : (memory != dst) = true
+      · simp only [h1]
+        exact hsome _
+      · simp only [h1]
+        cases chainRoot value <;> exact hsome _
+  | imm _ | unknown | unit =>
+    simp only [stepOf, ht, Bool.false_eq_true, ↓reduceIte, List.mem_map, List.mem_filter, bne_iff_ne, ne_eq]
+    constructor
+    · rintro ⟨s, ⟨hs, hne⟩, hl⟩
+      refine ⟨s, hs, ?_⟩
+      have hb : (s == Location.reg dst) = false := by simpa using hne
+      simp only [hb, Bool.false_eq_true, ↓reduceIte]
+      rw [← hl]
+      cases s with
+      | rel memory base offset size =>
+        simp only [List.mem_singleton]
+        rfl
+      | _ => simp
+    · rintro ⟨s, hs, hl⟩
+      by_cases hb : s = Location.reg dst
+      · simp [hb] at hl
+      · have hb' : (s == Location.reg dst) = false := by simpa using hb
+        simp only [hb', Bool.false_eq_true, ↓reduceIte] at hl
+        refine ⟨s, ⟨hs, hb⟩, ?_⟩
+        cases s with
+        | rel memory base offset size =>
+          simp only [List.mem_singleton] at hl
+          rw [hl]
+          rfl
+        | _ =>
+          simp only [List.mem_singleton] at hl
+          rw [hl]
+
+/-- More after and at the exit is more before. -/
+private theorem slice_before_mono (stmt : Bap.Bil.Stmt) :
+    ∀ {exit exit' after after' : List Location}, (∀ l ∈ exit, l ∈ exit') → (∀ l ∈ after, l ∈ after') →
+      ∀ l ∈ stmtBefore exit stmt after, l ∈ stmtBefore exit' stmt after' := by
+  have code : ∀ (body : Bap.Bil.Program), (∀ s ∈ body, ∀ {exit exit' after after' : List Location}, (∀ l ∈ exit, l ∈ exit') →
+      (∀ l ∈ after, l ∈ after') → ∀ l ∈ stmtBefore exit s after, l ∈ stmtBefore exit' s after') →
+      ∀ {exit exit' after after' : List Location}, (∀ l ∈ exit, l ∈ exit') → (∀ l ∈ after, l ∈ after') →
+        ∀ l ∈ codeBefore exit body after, l ∈ codeBefore exit' body after' := by
+    intro body
+    induction body with
+    | nil => intro _ _ _ _ _ _ ha l hl; simpa [codeBefore] using ha l (by simpa [codeBefore] using hl)
+    | cons head tail ih =>
+      intro hs _ _ _ _ he ha l hl
+      simp only [codeBefore] at hl ⊢
+      exact hs head (by simp) he (ih (fun s hm => hs s (by simp [hm])) he ha) l hl
+  induction stmt using stmtInduction with
+  | move var value =>
+    intro _ _ _ _ _ ha l hl
+    simp only [stmtBefore, List.mem_append, slice_mem_moveBefore] at hl ⊢
+    rcases hl with hl | ⟨s, hs, hl⟩
+    · exact .inl hl
+    · exact .inr ⟨s, ha s hs, hl⟩
+  | jmp target =>
+    intro _ _ _ _ he _ l hl
+    simp only [stmtBefore, List.mem_append] at hl ⊢
+    exact hl.imp id (he l)
+  | special message =>
+    intro _ _ _ _ he ha l hl
+    simp only [stmtBefore, List.mem_append] at hl ⊢
+    exact hl.imp (he l) (ha l)
+  | cpuExn number =>
+    intro _ _ _ _ he ha l hl
+    simp only [stmtBefore, List.mem_append] at hl ⊢
+    exact hl.imp (he l) (ha l)
+  | while_ condition body ih =>
+    intro _ _ _ _ he ha l hl
+    simp only [stmtBefore, List.mem_append, List.mem_eraseDups] at hl ⊢
+    rcases hl with (hl | hl) | hl | hl
+    · exact .inl (.inl hl)
+    · exact .inl (.inr (he l hl))
+    · exact .inr (.inl (ha l hl))
+    · exact .inr (.inr (code body ih he ha l hl))
+  | ifElse condition yes no ihy ihn =>
+    intro _ _ _ _ he ha l hl
+    simp only [stmtBefore, List.mem_append, List.mem_eraseDups] at hl ⊢
+    rcases hl with hl | hl | hl
+    · exact .inl hl
+    · exact .inr (.inl (code yes ihy he ha l hl))
+    · exact .inr (.inr (code no ihn he ha l hl))
+
+private theorem slice_code_mono {body : Bap.Bil.Program} :
+    ∀ {exit exit' after after' : List Location}, (∀ l ∈ exit, l ∈ exit') → (∀ l ∈ after, l ∈ after') →
+      ∀ l ∈ codeBefore exit body after, l ∈ codeBefore exit' body after' := by
+  induction body with
+  | nil => intro _ _ _ _ _ ha l hl; simpa [codeBefore] using ha l (by simpa [codeBefore] using hl)
+  | cons head tail ih =>
+    intro _ _ _ _ he ha l hl
+    simp only [codeBefore] at hl ⊢
+    exact slice_before_mono head he (ih he ha) l hl
+
+/-- What `D` says of `stmtBefore`, for `codeBefore`, as what is live goes through a statement at a time. -/
+private theorem slice_code_of_stmts {body : Bap.Bil.Program}
+    (hs : ∀ s ∈ body, ∀ (exit after : List Location) (l : Location), l ∈ stmtBefore exit s after →
+      l ∈ stmtBefore [] s [] ∨ (∃ x ∈ exit, l ∈ stmtBefore [x] s []) ∨ ∃ x ∈ after, l ∈ stmtBefore [] s [x]) :
+    ∀ (exit after : List Location) (l : Location), l ∈ codeBefore exit body after →
+      l ∈ codeBefore [] body [] ∨ (∃ x ∈ exit, l ∈ codeBefore [x] body []) ∨ ∃ x ∈ after, l ∈ codeBefore [] body [x] := by
+  induction body with
+  | nil =>
+    intro exit after l hl
+    simp only [codeBefore] at hl
+    exact .inr (.inr ⟨l, hl, by simp [codeBefore]⟩)
+  | cons head tail ih =>
+    intro exit after l hl
+    simp only [codeBefore] at hl ⊢
+    have hh := hs head (by simp)
+    have nil_sub : ∀ {A B : List Location}, ([] : List Location) = A → ∀ l ∈ A, l ∈ B := by
+      intro _ _ h l hl; subst h; cases hl
+    rcases hh _ _ l hl with h | ⟨x, hx, h⟩ | ⟨y, hy, h⟩
+    · exact .inl (slice_before_mono head (by simp) (by simp) l h)
+    · refine .inr (.inl ⟨x, hx, slice_before_mono head (by simp) (by simp) l h⟩)
+    · rcases ih (fun s hm => hs s (by simp [hm])) _ _ y hy with hy | ⟨x, hx, hy⟩ | ⟨x, hx, hy⟩
+      · exact .inl (slice_before_mono head (by simp) (by simpa using hy) l h)
+      · exact .inr (.inl ⟨x, hx, slice_before_mono head (by simp) (by simpa using hy) l h⟩)
+      · exact .inr (.inr ⟨x, hx, slice_before_mono head (by simp) (by simpa using hy) l h⟩)
+
+/-- What must agree before a statement is what it reads whatever is live, and an image of each location live. -/
+private theorem slice_stmt_each (stmt : Bap.Bil.Stmt) :
+    ∀ (exit after : List Location) (l : Location), l ∈ stmtBefore exit stmt after →
+      l ∈ stmtBefore [] stmt [] ∨ (∃ x ∈ exit, l ∈ stmtBefore [x] stmt []) ∨ ∃ x ∈ after, l ∈ stmtBefore [] stmt [x] := by
+  induction stmt using stmtInduction with
+  | move var value =>
+    intro exit after l hl
+    simp only [stmtBefore, List.mem_append, slice_mem_moveBefore] at hl ⊢
+    rcases hl with hl | ⟨s, hs, hl⟩
+    · exact .inl (.inl hl)
+    · exact .inr (.inr ⟨s, hs, .inr ⟨s, by simp, hl⟩⟩)
+  | jmp target =>
+    intro exit after l hl
+    simp only [stmtBefore, List.mem_append] at hl ⊢
+    rcases hl with hl | hl
+    · exact .inl (.inl hl)
+    · exact .inr (.inl ⟨l, hl, .inr (by simp)⟩)
+  | special message =>
+    intro exit after l hl
+    simp only [stmtBefore, List.mem_append] at hl ⊢
+    rcases hl with hl | hl
+    · exact .inr (.inl ⟨l, hl, .inl (by simp)⟩)
+    · exact .inr (.inr ⟨l, hl, .inr (by simp)⟩)
+  | cpuExn number =>
+    intro exit after l hl
+    simp only [stmtBefore, List.mem_append] at hl ⊢
+    rcases hl with hl | hl
+    · exact .inr (.inl ⟨l, hl, .inl (by simp)⟩)
+    · exact .inr (.inr ⟨l, hl, .inr (by simp)⟩)
+  | while_ condition body ih =>
+    intro exit after l hl
+    have hb := slice_code_of_stmts ih
+    simp only [stmtBefore, List.mem_append, List.mem_eraseDups] at hl ⊢
+    rcases hl with (hl | hl) | hl | hl
+    · exact .inl (.inl (.inl hl))
+    · exact .inr (.inl ⟨l, hl, .inl (.inr (by simp))⟩)
+    · exact .inr (.inr ⟨l, hl, .inr (.inl (by simp))⟩)
+    · rcases hb _ _ l hl with h | ⟨x, hx, h⟩ | ⟨x, hx, h⟩
+      · exact .inl (.inr (.inr h))
+      · exact .inr (.inl ⟨x, hx, .inr (.inr h)⟩)
+      · exact .inr (.inr ⟨x, hx, .inr (.inr h)⟩)
+  | ifElse condition yes no ihy ihn =>
+    intro exit after l hl
+    have hy := slice_code_of_stmts ihy
+    have hn := slice_code_of_stmts ihn
+    simp only [stmtBefore, List.mem_append, List.mem_eraseDups] at hl ⊢
+    rcases hl with hl | hl | hl
+    · exact .inl (.inl hl)
+    · rcases hy _ _ l hl with h | ⟨x, hx, h⟩ | ⟨x, hx, h⟩
+      · exact .inl (.inr (.inl h))
+      · exact .inr (.inl ⟨x, hx, .inr (.inl h)⟩)
+      · exact .inr (.inr ⟨x, hx, .inr (.inl h)⟩)
+    · rcases hn _ _ l hl with h | ⟨x, hx, h⟩ | ⟨x, hx, h⟩
+      · exact .inl (.inr (.inr h))
+      · exact .inr (.inl ⟨x, hx, .inr (.inr h)⟩)
+      · exact .inr (.inr ⟨x, hx, .inr (.inr h)⟩)
+
+/-- `insnBefore` takes what is live one location at a time. -/
+private theorem slice_insn_each {code : Bap.Bil.Program} {live : List Location} {l : Location}
+    (hl : l ∈ insnBefore code live) : l ∈ insnBefore code [] ∨ ∃ x ∈ live, l ∈ insnBefore code [x] := by
+  rcases slice_code_of_stmts (fun s _ => slice_stmt_each s) live live l hl with h | ⟨x, hx, h⟩ | ⟨x, hx, h⟩
+  · exact .inl h
+  · exact .inr ⟨x, hx, slice_code_mono (by simp) (by simp) l h⟩
+  · exact .inr ⟨x, hx, slice_code_mono (by simp) (by simp) l h⟩
+
+/-- A location that no assignment touches only stays. -/
+private theorem slice_stmt_stays {x : Location} (stmt : Bap.Bil.Stmt)
+    (hq : ∀ d ∈ stmtAssigned stmt, ∀ value, Step.image (stepOf d value) x = [x]) :
+    ∀ (exit after : List Location), (∀ y ∈ exit, y = x) → (∀ y ∈ after, y = x) →
+      ∀ l ∈ stmtBefore exit stmt after, l = x ∨ l ∈ stmtBefore [] stmt [] := by
+  have code : ∀ (body : Bap.Bil.Program),
+      (∀ s ∈ body, (∀ d ∈ stmtAssigned s, ∀ value, Step.image (stepOf d value) x = [x]) →
+        ∀ (exit after : List Location), (∀ y ∈ exit, y = x) → (∀ y ∈ after, y = x) →
+          ∀ l ∈ stmtBefore exit s after, l = x ∨ l ∈ stmtBefore [] s []) →
+      (∀ s ∈ body, ∀ d ∈ stmtAssigned s, ∀ value, Step.image (stepOf d value) x = [x]) →
+      ∀ (exit after : List Location), (∀ y ∈ exit, y = x) → (∀ y ∈ after, y = x) →
+        ∀ l ∈ codeBefore exit body after, l = x ∨ l ∈ codeBefore [] body [] := by
+    intro body
+    induction body with
+    | nil =>
+      intro _ _ _ _ _ ha l hl
+      exact .inl (ha l (by simpa [codeBefore] using hl))
+    | cons head tail ih =>
+      intro hs hq exit after he ha l hl
+      simp only [codeBefore] at hl ⊢
+      have hh := hs head (by simp) (hq head (by simp))
+      have hrest := ih (fun s hm => hs s (by simp [hm])) (fun s hm => hq s (by simp [hm])) exit after he ha
+      rcases slice_stmt_each head _ _ l hl with h | ⟨y, hy, h⟩ | ⟨y, hy, h⟩
+      · exact .inr (slice_before_mono head (by simp) (by simp) l h)
+      · rcases hh [y] [] (by simpa using he y hy) (by simp) l h with h | h
+        · exact .inl h
+        · exact .inr (slice_before_mono head (by simp) (by simp) l h)
+      · rcases hrest y hy with hy | hy
+        · rcases hh [] [y] (by simp) (by simpa using hy) l h with h | h
+          · exact .inl h
+          · exact .inr (slice_before_mono head (by simp) (by simp) l h)
+        · exact .inr (slice_before_mono head (by simp) (by simpa using hy) l h)
+  induction stmt using stmtInduction with
+  | move var value =>
+    intro exit after _ ha l hl
+    simp only [stmtBefore, List.mem_append, slice_mem_moveBefore] at hl ⊢
+    rcases hl with hl | ⟨s, hs, hl⟩
+    · exact .inr (.inl hl)
+    · rw [ha s hs, hq var (by simp [stmtAssigned]) value] at hl
+      exact .inl (by simpa using hl)
+  | jmp target =>
+    intro exit after he _ l hl
+    simp only [stmtBefore, List.mem_append] at hl ⊢
+    rcases hl with hl | hl
+    · exact .inr (.inl hl)
+    · exact .inl (he l hl)
+  | special message =>
+    intro exit after he ha l hl
+    simp only [stmtBefore, List.mem_append] at hl
+    rcases hl with hl | hl
+    · exact .inl (he l hl)
+    · exact .inl (ha l hl)
+  | cpuExn number =>
+    intro exit after he ha l hl
+    simp only [stmtBefore, List.mem_append] at hl
+    rcases hl with hl | hl
+    · exact .inl (he l hl)
+    · exact .inl (ha l hl)
+  | while_ condition body ih =>
+    intro exit after he ha l hl
+    have hb := code body ih (fun s hm d hd => hq d (by simp only [stmtAssigned, List.mem_flatMap]; exact ⟨s, hm, hd⟩)) exit after he ha
+    simp only [stmtBefore, List.mem_append, List.mem_eraseDups] at hl ⊢
+    rcases hl with (hl | hl) | hl | hl
+    · exact .inr (.inl (.inl hl))
+    · exact .inl (he l hl)
+    · exact .inl (ha l hl)
+    · rcases hb l hl with h | h
+      · exact .inl h
+      · exact .inr (.inr (.inr h))
+  | ifElse condition yes no ihy ihn =>
+    intro exit after he ha l hl
+    have hy := code yes ihy (fun s hm d hd => hq d (by
+      simp only [stmtAssigned, List.mem_append, List.mem_flatMap]; exact .inl ⟨s, hm, hd⟩)) exit after he ha
+    have hn := code no ihn (fun s hm d hd => hq d (by
+      simp only [stmtAssigned, List.mem_append, List.mem_flatMap]; exact .inr ⟨s, hm, hd⟩)) exit after he ha
+    simp only [stmtBefore, List.mem_append, List.mem_eraseDups] at hl ⊢
+    rcases hl with hl | hl | hl
+    · exact .inr (.inl hl)
+    · rcases hy l hl with h | h
+      · exact .inl h
+      · exact .inr (.inr (.inl h))
+    · rcases hn l hl with h | h
+      · exact .inl h
+      · exact .inr (.inr (.inr h))
+
+private theorem slice_insn_stays {x : Location} (code : Bap.Bil.Program)
+    (hq : ∀ d ∈ code.flatMap stmtAssigned, ∀ value, Step.image (stepOf d value) x = [x]) {l : Location}
+    (hl : l ∈ insnBefore code [x]) : l = x ∨ l ∈ insnBefore code [] := by
+  have key : ∀ (body : Bap.Bil.Program), (∀ d ∈ body.flatMap stmtAssigned, ∀ value, Step.image (stepOf d value) x = [x]) →
+      ∀ l ∈ codeBefore [x] body [x], l = x ∨ l ∈ codeBefore [] body [] := by
+    intro body
+    induction body with
+    | nil => intro _ l hl; exact .inl (by simpa [codeBefore] using hl)
+    | cons head tail ih =>
+      intro hq l hl
+      simp only [codeBefore] at hl ⊢
+      have hh : ∀ d ∈ stmtAssigned head, ∀ value, Step.image (stepOf d value) x = [x] := fun d hd =>
+        hq d (List.mem_flatMap.2 ⟨head, by simp, hd⟩)
+      have hrest := ih (fun d hd => hq d (by simp only [List.flatMap_cons, List.mem_append]; exact .inr hd))
+      rcases slice_stmt_each head _ _ l hl with h | ⟨y, hy, h⟩ | ⟨y, hy, h⟩
+      · exact .inr (slice_before_mono head (by simp) (by simp) l h)
+      · simp only [List.mem_singleton] at hy
+        subst hy
+        rcases slice_stmt_stays head hh [y] [] (by simp) (by simp) l h with h | h
+        · exact .inl h
+        · exact .inr (slice_before_mono head (by simp) (by simp) l h)
+      · rcases hrest y hy with hy | hy
+        · rcases slice_stmt_stays head hh [] [y] (by simp) (by simpa using hy) l h with h | h
+          · exact .inl h
+          · exact .inr (slice_before_mono head (by simp) (by simp) l h)
+        · exact .inr (slice_before_mono head (by simp) (by simpa using hy) l h)
+  exact key code hq l hl
+
+/-- In code that only assigns and jumps, the steps have what becomes of a location. -/
+private theorem slice_plain_image {x : Location} : ∀ (code : Bap.Bil.Program), code.all isPlain = true →
+    ∀ l ∈ codeBefore [x] code [x], l ∈ codeBefore [] code [] ∨ l ∈ imageOf (stepsOf code) x := by
+  intro code
+  induction code with
+  | nil =>
+    intro _ l hl
+    exact .inr (by simpa [imageOf, stepsOf, codeBefore] using hl)
+  | cons head tail ih =>
+    intro hp l hl
+    simp only [List.all_cons, Bool.and_eq_true] at hp
+    cases head with
+    | move var value =>
+      simp only [codeBefore, stmtBefore, List.mem_append, slice_mem_moveBefore] at hl ⊢
+      rcases hl with hl | ⟨s, hs, hl⟩
+      · exact .inl (.inl hl)
+      · rcases ih hp.2 s hs with h | h
+        · exact .inl (.inr ⟨s, h, hl⟩)
+        · refine .inr ?_
+          simp only [stepsOf, imageOf, List.foldr_cons, List.mem_flatMap]
+          exact ⟨s, h, hl⟩
+    | jmp target =>
+      simp only [codeBefore, stmtBefore, List.mem_append] at hl ⊢
+      rcases hl with hl | hl
+      · exact .inl (.inl hl)
+      · exact .inr (by simpa [imageOf, stepsOf] using hl)
+    | special _ => simp [isPlain] at hp
+    | cpuExn _ => simp [isPlain] at hp
+    | «while» _ _ => simp [isPlain] at hp
+    | ifElse _ _ _ => simp [isPlain] at hp
+
+private theorem slice_imageAt {code : Bap.Bil.Program} {x l : Location}
+    {visit : Visit} (hplain : Visit.plain visit = code.all isPlain) (hsteps : Visit.steps visit = stepsOf code)
+    (hcode : (Visit.insn visit).bil = code) (hl : l ∈ insnBefore code [x]) :
+    l ∈ insnBefore code [] ∨ l ∈ imageAt visit x := by
+  unfold imageAt
+  rw [hplain]
+  split
+  · rename_i hp
+    rw [hsteps]
+    exact slice_plain_image code hp l hl
+  · rw [hcode]
+    exact .inr hl
+
+/-! The marks. -/
+
+private theorem slice_varBit_ne (var : Bap.Var) : varBit var ≠ 0 := by
+  intro h
+  have h2 := congrArg (fun word : UInt64 => (word.toBitVec.getLsbD ((hash var).toBitVec.toNat % 64))) h
+  simp [varBit, UInt64.toBitVec_shiftLeft] at h2
+  omega
+
+private theorem slice_word_or_left {a w b : UInt64} (h : a &&& w = a) : a &&& (w ||| b) = a := by
+  have h' : a.toBitVec &&& w.toBitVec = a.toBitVec := by simpa using congrArg UInt64.toBitVec h
+  apply UInt64.toBitVec_inj.1
+  simp only [UInt64.toBitVec_and, UInt64.toBitVec_or]
+  rw [BitVec.and_or_distrib_left, h']
+  ext i hi
+  simp only [BitVec.getElem_or, BitVec.getElem_and]
+  grind
+
+private theorem slice_word_or_right {a w b : UInt64} (h : a &&& b = a) : a &&& (w ||| b) = a := by
+  have h' : a.toBitVec &&& b.toBitVec = a.toBitVec := by simpa using congrArg UInt64.toBitVec h
+  apply UInt64.toBitVec_inj.1
+  simp only [UInt64.toBitVec_and, UInt64.toBitVec_or]
+  rw [BitVec.and_or_distrib_left, h']
+  ext i hi
+  simp only [BitVec.getElem_or, BitVec.getElem_and]
+  grind
+
+/-- A variable is its bit in a word that says it. -/
+private theorem slice_bit_movedOf {list : List Bap.Var} {d : Bap.Var} (hd : d ∈ list) (init : UInt64) :
+    varBit d &&& list.foldl (fun bits var => bits ||| varBit var) init = varBit d := by
+  have keep : ∀ (rest : List Bap.Var) (word : UInt64), varBit d &&& word = varBit d →
+      varBit d &&& rest.foldl (fun bits var => bits ||| varBit var) word = varBit d := by
+    intro rest
+    induction rest with
+    | nil => intro _ h; exact h
+    | cons head tail ih =>
+      intro word h
+      exact ih _ (slice_word_or_left h)
+  induction list generalizing init with
+  | nil => cases hd
+  | cons head tail ih =>
+    rcases List.mem_cons.1 hd with rfl | hd
+    · simp only [List.foldl_cons]
+      exact keep tail _ (slice_word_or_right UInt64.and_self)
+    · exact ih hd _
+
+/-- Two words with no bit in common have no variable in common. -/
+private theorem slice_bit_apart {word moved : UInt64} {d : Bap.Var} (hw : varBit d &&& word = varBit d)
+    (hm : varBit d &&& moved = varBit d) (h : word &&& moved = 0) : False := by
+  apply slice_varBit_ne d
+  calc varBit d = varBit d &&& moved := hm.symm
+    _ = (varBit d &&& word) &&& moved := by rw [hw]
+    _ = varBit d &&& (word &&& moved) := by rw [UInt64.and_assoc]
+    _ = 0 := by rw [h]; simp
+
+/-- `var` is none of the variables of a location. -/
+private def slice_Apart (var : Bap.Var) : Location → Prop
+  | .reg other | .whole other | .memOf other _ _ => other ≠ var
+  | .rel memory base _ _ => memory ≠ var ∧ base ≠ var
+  | .mem _ _ => False
+
+private theorem slice_apart_of_mark {location : Location} {code : Bap.Bil.Program} {d : Bap.Var}
+    (h : Location.mark location &&& movedOf code = 0) (hd : d ∈ code.flatMap stmtAssigned) : slice_Apart d location := by
+  have hm := slice_bit_movedOf hd 0
+  cases location with
+  | reg other | whole other | memOf other _ _ =>
+    simp only [slice_Apart]
+    rintro rfl
+    exact slice_bit_apart (word := Location.mark _) (by simp [Location.mark]) hm h
+  | rel memory base _ _ =>
+    simp only [slice_Apart]
+    refine ⟨?_, ?_⟩
+    · rintro rfl
+      refine slice_bit_apart (word := Location.mark _) ?_ hm h
+      simp only [Location.mark]
+      exact slice_word_or_left UInt64.and_self
+    · rintro rfl
+      refine slice_bit_apart (word := Location.mark _) ?_ hm h
+      simp only [Location.mark]
+      exact slice_word_or_right UInt64.and_self
+  | mem _ _ =>
+    simp only [slice_Apart]
+    refine slice_bit_apart (word := Location.mark _) ?_ hm h
+    simp only [Location.mark]
+    apply UInt64.toBitVec_inj.1
+    have : (UInt64.ofNat (2 ^ 64 - 1)).toBitVec = BitVec.allOnes 64 := by decide
+    rw [UInt64.toBitVec_and, this, BitVec.and_allOnes]
+
+private theorem slice_image_apart {d : Bap.Var} {location : Location} (h : slice_Apart d location) (value : Bap.Bil.Exp) :
+    Step.image (stepOf d value) location = [location] := by
+  unfold Step.image
+  cases ht : d.typ with
+  | mem aw vw =>
+    simp only [stepOf, ht, ↓reduceIte]
+    cases location with
+    | reg _ | mem _ _ => rfl
+    | memOf memory _ _ =>
+      have : (memory != d) = true := by simpa [slice_Apart] using h
+      simp [this]
+    | rel memory _ _ _ =>
+      have : (memory != d) = true := by simpa [slice_Apart] using h.1
+      simp [this]
+    | whole memory =>
+      have : (memory != d) = true := by simpa [slice_Apart] using h
+      simp [this]
+  | imm _ | unknown | unit =>
+    simp only [stepOf, ht, Bool.false_eq_true, ↓reduceIte]
+    cases location with
+    | reg other =>
+      have hne : other ≠ d := h
+      simp [hne]
+    | rel _ base _ _ =>
+      have : base ≠ d := h.2
+      simp [this]
+    | mem _ _ | memOf _ _ _ | whole _ => simp
+
+/-- A write of plain code is to a variable it assigns. -/
+private theorem slice_plain_write {code : Bap.Bil.Program} (hp : code.all isPlain = true) {d : Location}
+    (hd : d ∈ Info.writes (blockInfo code)) :
+    ∃ var ∈ code.flatMap stmtAssigned, d = .reg var ∨ (∃ n s, d = .memOf var n s) ∨ ∃ b off s, d = .rel var b off s := by
+  obtain ⟨s, hs, hd⟩ := (slice_block_writes_iff _ _).1 hd
+  have hps : isPlain s = true := List.all_eq_true.1 hp s hs
+  cases s with
+  | move var value =>
+    refine ⟨var, List.mem_flatMap.2 ⟨_, hs, by simp [stmtAssigned]⟩, ?_⟩
+    simp only [stmtInfo] at hd
+    cases ht : var.typ with
+    | mem aw vw =>
+      simp only [ht, ↓reduceIte] at hd
+      exact .inr (slice_memoryWrites_mem ht value hd)
+    | imm _ | unknown | unit =>
+      simp only [ht, Bool.false_eq_true, ↓reduceIte, List.mem_singleton] at hd
+      exact .inl hd
+  | jmp target =>
+    simp only [stmtInfo] at hd
+    rw [(slice_usesExp_pure target).1] at hd
+    cases hd
+  | _ => simp [isPlain] at hps
+
+/-- What plain code assigns wholesale it assigns. -/
+private theorem slice_plain_wholesale {code : Bap.Bil.Program} (hp : code.all isPlain = true) {m : Bap.Var}
+    (hd : m ∈ Info.wholesale (blockInfo code)) : m ∈ code.flatMap stmtAssigned := by
+  obtain ⟨s, hs, hd⟩ := (slice_block_wholesale_iff _ _).1 hd
+  have hps : isPlain s = true := List.all_eq_true.1 hp s hs
+  cases s with
+  | move var value =>
+    simp only [stmtInfo] at hd
+    refine List.mem_flatMap.2 ⟨_, hs, ?_⟩
+    cases ht : var.typ with
+    | mem aw vw =>
+      simp only [ht, ↓reduceIte] at hd
+      split at hd
+      · simpa [stmtAssigned] using hd
+      · cases hd
+    | imm _ | unknown | unit =>
+      simp only [ht, Bool.false_eq_true, ↓reduceIte] at hd
+      cases hd
+  | jmp target =>
+    simp only [stmtInfo] at hd
+    rw [(slice_usesExp_pure target).2] at hd
+    cases hd
+  | _ => simp [isPlain] at hps
+
+/-- A plain instruction that assigns none of the variables of a location is not relevant to it. -/
+private theorem slice_plain_quiet {code : Bap.Bil.Program} {location : Location} (hp : code.all isPlain = true)
+    (hnever : Info.always (blockInfo code) = false)
+    (h : Location.mark location &&& movedOf code = 0) : relevant [location] (blockInfo code) = false := by
+  cases hr : relevant [location] (blockInfo code) with
+  | false => rfl
+  | true =>
+    exfalso
+    rcases (slice_relevant_iff _ _).1 hr with ha | ⟨m, hm, l, hl, hi⟩ | ⟨d, hd, l, hl, ha⟩
+    · rw [hnever] at ha
+      cases ha
+    · rw [List.mem_singleton.1 hl] at hi
+      have hapart := slice_apart_of_mark h (slice_plain_wholesale hp hm)
+      cases location <;> simp_all [Location.inMemory, slice_Apart]
+    · rw [List.mem_singleton.1 hl] at ha
+      obtain ⟨var, hv, hshape⟩ := slice_plain_write hp hd
+      have hapart := slice_apart_of_mark h hv
+      rcases hshape with rfl | ⟨n, s, rfl⟩ | ⟨b, off, s, rfl⟩ <;> cases location <;>
+        simp_all [Location.affects, Location.overlaps, slice_Apart]
+
+private theorem slice_quiet {tables : Numbered} {code : Bap.Bil.Program} {visit : Visit} {set : ByteArray}
+    (hplain : Visit.plain visit = code.all isPlain) (hmoved : Visit.moved visit = movedOf code)
+    (hinfo : Visit.info visit = blockInfo code) (h : Numbered.quiet tables visit set = true) :
+    relevant (tables.setOf set) (blockInfo code) = false := by
+  simp only [Numbered.quiet, Bool.and_eq_true, Bool.not_eq_true', hinfo] at h
+  obtain ⟨hnever, hall⟩ := h
+  have each : ∀ l ∈ tables.setOf set, relevant [l] (blockInfo code) = false := by
+    intro l hl
+    obtain ⟨n, hn, hg⟩ := slice_mem_setOf.1 hl
+    have hp := slice_allIn hall hn
+    simp only [Bool.or_eq_true, hg, Bool.not_eq_true'] at hp
+    rcases hp with hp | hp
+    · simp only [Numbered.untouched, Bool.and_eq_true, beq_iff_eq, hplain, hmoved] at hp
+      have hmark : tables.marks.getD n 0 = Location.mark l := by
+        rw [tables.marked]
+        simp [Array.getD_eq_getD_getElem?, hg]
+      rw [hmark] at hp
+      exact slice_plain_quiet hp.1 hnever hp.2
+    · exact hp
+  cases hr : relevant (tables.setOf set) (blockInfo code) with
+  | false => rfl
+  | true =>
+    rcases (slice_relevant_iff _ _).1 hr with ha | ⟨m, hm, l, hl, hi⟩ | ⟨d, hd, l, hl, ha⟩
+    · rw [hnever] at ha
+      cases ha
+    · have := (slice_relevant_iff [l] code).2 (.inr (.inl ⟨m, hm, l, by simp, hi⟩))
+      rw [each l hl] at this
+      cases this
+    · have := (slice_relevant_iff [l] code).2 (.inr (.inr ⟨d, hd, l, by simp, ha⟩))
+      rw [each l hl] at this
+      cases this
+
+/-- A list with its images paired up. -/
+private theorem slice_mem_zip_map {α β : Type} (f : α → β) {list : List α} {x : α} (h : x ∈ list) :
+    (x, f x) ∈ list.zip (list.map f) := by
+  induction list with
+  | nil => cases h
+  | cons head tail ih =>
+    rcases List.mem_cons.1 h with rfl | h
+    · simp
+    · simpa using .inr (ih h)
+
+private theorem slice_through {tables : Numbered} {code : Bap.Bil.Program} {visit : Visit} {after before : ByteArray}
+    (hplain : Visit.plain visit = code.all isPlain) (hsteps : Visit.steps visit = stepsOf code)
+    (hcode : (Visit.insn visit).bil = code) (hmoved : Visit.moved visit = movedOf code)
+    (hfixed : Visit.fixed visit = insnBefore code [])
+    (hnumbers : ∃ f : Location → Nat, Visit.fixedNumbers visit = (insnBefore code []).map f)
+    (h : Numbered.through tables visit after before = true) {l : Location} (hl : l ∈ insnBefore code (tables.setOf after)) :
+    holds (tables.setOf before) l = true := by
+  simp only [Numbered.through, Bool.and_eq_true, List.all_eq_true] at h
+  obtain ⟨hfix, hall⟩ := h
+  have fixedOk : ∀ l ∈ insnBefore code [], holds (tables.setOf before) l = true := by
+    intro l hl
+    obtain ⟨f, hf⟩ := hnumbers
+    have := hfix (l, f l) (by rw [hfixed, hf]; exact slice_mem_zip_map f hl)
+    simp only [Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq] at this
+    rcases this with ⟨h1, h2⟩ | h1
+    · simp only [holds, Bool.or_eq_true, List.contains_eq_mem, decide_eq_true_eq]
+      exact .inl (slice_mem_setOf.2 ⟨_, h1, h2⟩)
+    · exact slice_holdsIn h1
+  rcases slice_insn_each hl with h1 | ⟨x, hx, h1⟩
+  · exact fixedOk l h1
+  · obtain ⟨n, hn, hg⟩ := slice_mem_setOf.1 hx
+    have hp := slice_allIn hall hn
+    have hmark : tables.marks.getD n 0 = Location.mark x := by
+      rw [tables.marked]
+      simp [Array.getD_eq_getD_getElem?, hg]
+    rw [hmark, hmoved] at hp
+    split at hp
+    · rename_i hz
+      have hbz : Location.mark x &&& movedOf code = 0 := by simpa using hz
+      rcases slice_insn_stays code (fun d hd value => slice_image_apart (slice_apart_of_mark hbz hd) value) h1 with rfl | h2
+      · simp only [holds, Bool.or_eq_true, List.contains_eq_mem, decide_eq_true_eq]
+        exact .inl (slice_mem_setOf.2 ⟨n, hp, hg⟩)
+      · exact fixedOk l h2
+    · simp only [hg, List.all_eq_true] at hp
+      rcases slice_imageAt hplain hsteps hcode h1 with h2 | h2
+      · exact fixedOk l h2
+      · exact slice_holdsIn (hp l h2)
+
+/-- `Numbered.check` implies `checkInsn`, whatever the tables are. -/
+private theorem slice_check {slots : Std.HashMap Nat Nat} {successors : Std.HashMap Nat (List Nat)} {numbering : Numbering}
+    {tables : Numbered} {criteria : List Location} {insn : Bap.Disasm.Insn}
+    (h : Numbered.check tables criteria (visitOf slots successors numbering insn) = true) :
+    checkInsn tables.entry (successors.getD insn.address []) criteria insn = true := by
+  have h' : ((successors.getD insn.address []).all (fun target => allIn (has (tables.cell insn.address).after) (tables.cell target).before) &&
+      (!mayEnd insn (successors.getD insn.address []) || criteria.all (Numbered.says tables (tables.cell insn.address).after)) &&
+      ((tables.cell insn.address).site || Numbered.quiet tables (visitOf slots successors numbering insn) (tables.cell insn.address).after) &&
+      (if (tables.cell insn.address).site then
+        Numbered.through tables (visitOf slots successors numbering insn) (tables.cell insn.address).after (tables.cell insn.address).before &&
+          (tables.cell insn.address).next == .site insn.address
+      else
+        allIn (has (tables.cell insn.address).before) (tables.cell insn.address).after &&
+        (!mayEnd insn (successors.getD insn.address []) || (tables.cell insn.address).next == .exit) &&
+        (successors.getD insn.address []).all fun target =>
+          (tables.cell target).next == (tables.cell insn.address).next || (tables.cell target).next == .never)) = true := h
+  simp only [Bool.and_eq_true, Bool.or_eq_true, Bool.not_eq_true', List.all_eq_true] at h'
+  obtain ⟨⟨⟨hflow, hends⟩, hquiet⟩, hsplit⟩ := h'
+  simp only [checkInsn, Numbered.entry, Bool.and_eq_true, Bool.or_eq_true, Bool.not_eq_true', List.all_eq_true,
+    List.contains_eq_mem, decide_eq_true_eq]
+  refine ⟨⟨⟨fun target ht l hl => slice_within (hflow target ht) hl, ?_⟩, ?_⟩, ?_⟩
+  · rcases hends with he | he
+    · exact .inl he
+    · exact .inr fun l hl => slice_says (he l hl)
+  · rcases hquiet with hq | hq
+    · exact .inr hq
+    · exact .inl (slice_quiet rfl rfl rfl hq)
+  · by_cases hs : (tables.cell insn.address).site = true
+    · simp only [hs, ↓reduceIte, Bool.and_eq_true, beq_iff_eq] at hsplit
+      simp only [hs, ↓reduceIte, Bool.and_eq_true, beq_iff_eq, List.all_eq_true]
+      exact ⟨fun l hl => slice_through rfl rfl rfl rfl rfl ⟨_, rfl⟩ hsplit.1 hl, hsplit.2⟩
+    · have hf : (tables.cell insn.address).site = false := by simpa using hs
+      simp only [hf, Bool.false_eq_true, ↓reduceIte, Bool.and_eq_true, Bool.or_eq_true, Bool.not_eq_true', beq_iff_eq,
+        List.all_eq_true] at hsplit
+      simp only [hf, Bool.false_eq_true, ↓reduceIte, Bool.and_eq_true, Bool.or_eq_true, Bool.not_eq_true', beq_iff_eq,
+        List.all_eq_true, List.contains_eq_mem, decide_eq_true_eq]
+      obtain ⟨⟨h1, h2⟩, h3⟩ := hsplit
+      exact ⟨⟨fun l hl => slice_within h1 hl, h2⟩, h3⟩
+
+/-- Looking at the numbers first is `checkInsn`: it says no more than that, and if it fails, `checkInsn` decides. -/
+private theorem slice_check_or {slots : Std.HashMap Nat Nat} {successors : Std.HashMap Nat (List Nat)} {numbering : Numbering}
+    {tables : Numbered} {criteria : List Location} {insn : Bap.Disasm.Insn} :
+    (Numbered.check tables criteria (visitOf slots successors numbering insn) ||
+      checkInsn tables.entry (successors.getD insn.address []) criteria insn) =
+    checkInsn tables.entry (successors.getD insn.address []) criteria insn := by
+  cases hc : Numbered.check tables criteria (visitOf slots successors numbering insn) with
+  | false => rfl
+  | true => rw [slice_check hc]; rfl
+
+/-- A slice is what its tables say, whatever found them. -/
+private theorem slice_cfg_tables (instructions : List Bap.Disasm.Insn) (edges : List (Nat × Nat)) (entry : Option Nat)
+    (criteria : List Location) : ∃ tables widened, backwardCfg instructions edges entry criteria =
+      resultOf (prepare instructions edges) entry (expandCriteria instructions criteria) tables widened :=
+  ⟨_, _, rfl⟩
+
+/-- What `complete` is made of. -/
+private theorem slice_complete_parts {instructions : List Bap.Disasm.Insn} {edges : List (Nat × Nat)}
+    {entry : Option Nat} {criteria : List Location}
+    (h : (backwardCfg instructions edges entry criteria).complete = true) :
+    let tables := (backwardCfg instructions edges entry criteria).tables
+    let visits := instructions.map (visitOf (slotTable instructions).1 (successorTable instructions edges) (baseNumbering instructions))
+    (instructions.all fun insn =>
+      checkEdges (fun t => (instructions.foldl (fun (table : Std.HashMap Nat Unit) insn => table.insert insn.address ()) {}).contains t)
+        ((successorTable instructions edges).getD insn.address []) insn && checkFlow insn) = true ∧
+    visits.all (fun visit => !(tables.cell (Visit.insn visit).address).site || !Info.dynamic (Visit.info visit)) = true ∧
+    visits.all (fun visit => Numbered.check tables (expandCriteria instructions criteria) visit ||
+      checkInsn tables.entry (Visit.next visit) (expandCriteria instructions criteria) (Visit.insn visit)) = true ∧
+    (instructions.filter fun insn => decide (insn.flow = .call) &&
+      !((backwardCfg instructions edges entry criteria).entry insn.address).after.isEmpty).map (·.address) = [] := by
+  obtain ⟨tables, widened, hr⟩ := slice_cfg_tables instructions edges entry criteria
+  simp only [hr] at h ⊢
+  have h' : ((((instructions.all fun insn =>
+      checkEdges (fun t => (instructions.foldl (fun (table : Std.HashMap Nat Unit) insn => table.insert insn.address ()) {}).contains t)
+        ((successorTable instructions edges).getD insn.address []) insn && checkFlow insn) &&
+      (instructions.map (visitOf (slotTable instructions).1 (successorTable instructions edges) (baseNumbering instructions))).all
+        (fun visit => !(tables.cell (Visit.insn visit).address).site || !Info.dynamic (Visit.info visit))) &&
+      (instructions.map (visitOf (slotTable instructions).1 (successorTable instructions edges) (baseNumbering instructions))).all
+        (fun visit => Numbered.check tables (expandCriteria instructions criteria) visit ||
+        checkInsn tables.entry (Visit.next visit) (expandCriteria instructions criteria) (Visit.insn visit))) &&
+      ((instructions.filter fun insn => decide (insn.flow = .call) &&
+        !(tables.setOf (tables.cell insn.address).after).isEmpty).map (·.address)).isEmpty) = true := h
+  simp only [Bool.and_eq_true, List.isEmpty_iff] at h'
+  exact ⟨h'.1.1.1, h'.1.1.2, h'.1.2, h'.2⟩
 
 /-- What `complete` says of the tables. -/
 private theorem slice_complete_tables {instructions : List Bap.Disasm.Insn} {edges : List (Nat × Nat)}
@@ -3023,12 +3876,17 @@ private theorem slice_complete_tables {instructions : List Bap.Disasm.Insn} {edg
     ∀ x ∈ instructions, checkInsn r.entry ((successorTable instructions edges).getD x.address [])
       (expandCriteria instructions criteria) x = true := by
   subst hr
-  have h' : (((instructions.filter fun i => ((backwardCfg instructions edges entry criteria).entry i.address).site).all
-      (fun i => !Info.dynamic (blockInfo i.bil))) &&
-    (instructions.all fun i => checkInsn (backwardCfg instructions edges entry criteria).entry ((successorTable instructions edges).getD i.address [])
-      (expandCriteria instructions criteria) i && _ && _) && _) = true := h
-  simp only [Bool.and_eq_true, List.all_eq_true, List.mem_filter, Bool.not_eq_true'] at h'
-  exact ⟨fun x hx hs => h'.1.1 x ⟨hx, hs⟩, fun x hx => (h'.1.2 x hx).1.1⟩
+  obtain ⟨_, hdyn, hcheck, _⟩ := slice_complete_parts h
+  simp only [List.all_map, List.all_eq_true, Function.comp_apply] at hdyn hcheck
+  refine ⟨fun x hx hs => ?_, fun x hx => ?_⟩
+  · have := hdyn x hx
+    simp only [Bool.or_eq_true, Bool.not_eq_true'] at this
+    rcases this with h1 | h1
+    · have h1' : ((backwardCfg instructions edges entry criteria).entry x.address).site = false := h1
+      rw [hs] at h1'
+      cases h1'
+    · exact h1
+  · exact slice_check_or ▸ hcheck x hx
 
 /-- What `complete` says of the result. -/
 private theorem slice_complete_solved {instructions : List Bap.Disasm.Insn} {edges : List (Nat × Nat)}
@@ -3055,7 +3913,7 @@ private theorem slice_complete_solved {instructions : List Bap.Disasm.Insn} {edg
       cases hrel
     · exact hrel
   · intro hs
-    simp only [hs, ↓reduceIte, Bool.and_eq_true, List.all_eq_true, List.contains_eq_mem, decide_eq_true_eq, beq_iff_eq] at hsplit
+    simp only [hs, ↓reduceIte, Bool.and_eq_true, List.all_eq_true, beq_iff_eq] at hsplit
     exact ⟨hsplit.1, hsplit.2, hd hs⟩
   · intro hs
     simp only [hs, Bool.false_eq_true, ↓reduceIte, Bool.and_eq_true, Bool.or_eq_true, Bool.not_eq_true', List.all_eq_true,
@@ -3066,6 +3924,11 @@ private theorem slice_complete_solved {instructions : List Bap.Disasm.Insn} {edg
     · rw [hm] at h2
       cases h2
     · exact h2
+
+private theorem slice_nextSite_eq (result : Result) (address : Nat) :
+    result.nextSite address = match (result.entry address).next with
+      | .site site => some site
+      | _ => none := rfl
 
 /-- A run that ends went through no code that `never` ends. -/
 private theorem slice_next_good {fuel : Nat} {instructions : List Bap.Disasm.Insn} {edges : List (Nat × Nat)}
@@ -3113,7 +3976,7 @@ private theorem slice_simulation {Ms : List Bap.Var} (hM : slice_Memories Ms) {f
         cases hds : Info.dynamic (stmtInfo s) with
         | false => rfl
         | true => rw [(slice_block_dynamic _).mpr ⟨s, hs', hds⟩] at hdyn; cases hdyn)
-      (slice_Agree_mono hbefore hab) hrun
+      (slice_Agree_holds hbefore hab) hrun
     exact ⟨b', h1, by simpa using h2⟩
   have hframe : ∀ {i : Bap.Disasm.Insn} {a a' b : Bap.Bil.State} {e : Effect}, i ∈ instructions →
       (result.entry i.address).site = false → slice_Agree Ms (· ∈ (result.entry i.address).before) a.env b.env →
@@ -3161,12 +4024,12 @@ private theorem slice_simulation {Ms : List Bap.Var} (hM : slice_Memories Ms) {f
       obtain ⟨b', h1, h2⟩ := hsiteRun hx hsite hab hrun
       refine ⟨b', ?_, slice_Agree_mono ((hs insn hx).ends hend) h2⟩
       have hn : result.nextSite insn.address = some insn.address := by
-        simp [Result.nextSite, ((hs insn hx).site hsite).2.1]
+        simp [slice_nextSite_eq, ((hs insn hx).site hsite).2.1]
       rw [hn]
       exact .stop hx hsite h1 hstop
     | false =>
       have hn : result.nextSite insn.address = none := by
-        simp [Result.nextSite, ((hs insn hx).skip hsite).2.1 hend]
+        simp [slice_nextSite_eq, ((hs insn hx).skip hsite).2.1 hend]
       rw [hn]
       exact ⟨b, .done, slice_Agree_mono ((hs insn hx).ends hend) (hframe hx hsite hab hrun)⟩
   | @step insn other a a' e final hrun hnext he ho hrest ih =>
@@ -3177,7 +4040,7 @@ private theorem slice_simulation {Ms : List Bap.Var} (hM : slice_Memories Ms) {f
       obtain ⟨bf, hbf, hag⟩ := ih ho b' (slice_Agree_mono ((hs insn hx).flow other ho he) h2)
       refine ⟨bf, ?_, hag⟩
       have hn : result.nextSite insn.address = some insn.address := by
-        simp [Result.nextSite, ((hs insn hx).site hsite).2.1]
+        simp [slice_nextSite_eq, ((hs insn hx).site hsite).2.1]
       rw [hn]
       exact .step hx hsite h1 hnext he ho hbf
     | false =>
@@ -3186,7 +4049,7 @@ private theorem slice_simulation {Ms : List Bap.Var} (hM : slice_Memories Ms) {f
       have hgood := slice_next_good hs hrest ho
       have hn : result.nextSite insn.address = result.nextSite other.address := by
         rcases ((hs insn hx).skip hsite).2.2 other ho he with h3 | h3
-        · simp [Result.nextSite, h3]
+        · simp [slice_nextSite_eq, h3]
         · exact absurd h3 hgood.1
       rw [hn]
       exact hbf
@@ -3245,6 +4108,110 @@ theorem slice_site_is_instruction {instructions : List Bap.Disasm.Insn} {edges :
   obtain ⟨insn, hi, rfl⟩ := List.mem_map.1 h'
   exact ⟨insn, (List.mem_filter.1 hi).1, rfl⟩
 
+/-- What is prepared gives the same slice. -/
+theorem slice_prepared (instructions : List Bap.Disasm.Insn) (edges : List (Nat × Nat)) (entry : Option Nat)
+    (criteria : List Location) :
+    (prepare instructions edges).slice entry criteria = backwardCfg instructions edges entry criteria := rfl
+
+/-- `determined` is the equations on the entries: looking at the numbers first decides nothing `checkInsn` would not. -/
+theorem slice_determined_equations (instructions : List Bap.Disasm.Insn) (edges : List (Nat × Nat)) (entry : Option Nat)
+    (criteria : List Location) :
+    (backwardCfg instructions edges entry criteria).determined =
+      Equations.determined instructions edges (expandCriteria instructions criteria)
+        (backwardCfg instructions edges entry criteria).entry := by
+  obtain ⟨tables, widened, hr⟩ := slice_cfg_tables instructions edges entry criteria
+  simp only [hr]
+  have hleft : (resultOf (prepare instructions edges) entry (expandCriteria instructions criteria) tables widened).determined =
+      ((((instructions.all fun insn =>
+        checkEdges (fun t => (instructions.foldl (fun (table : Std.HashMap Nat Unit) insn => table.insert insn.address ()) {}).contains t)
+          ((successorTable instructions edges).getD insn.address []) insn && checkFlow insn) &&
+        (instructions.map (visitOf (slotTable instructions).1 (successorTable instructions edges) (baseNumbering instructions))).all
+          (fun visit => !(tables.cell (Visit.insn visit).address).site || !Info.dynamic (Visit.info visit))) &&
+        (instructions.map (visitOf (slotTable instructions).1 (successorTable instructions edges) (baseNumbering instructions))).all
+          (fun visit => Numbered.check tables (expandCriteria instructions criteria) visit ||
+          checkInsn tables.entry (Visit.next visit) (expandCriteria instructions criteria) (Visit.insn visit)))) := rfl
+  have hright : (resultOf (prepare instructions edges) entry (expandCriteria instructions criteria) tables widened).entry = tables.entry := rfl
+  rw [hleft, hright, Bool.eq_iff_iff]
+  have hcell : ∀ a, (tables.entry a).site = (tables.cell a).site := fun _ => rfl
+  have hcheck : ∀ x, (Numbered.check tables (expandCriteria instructions criteria)
+      (visitOf (slotTable instructions).1 (successorTable instructions edges) (baseNumbering instructions) x) = true ∨
+      checkInsn tables.entry (Visit.next (visitOf (slotTable instructions).1 (successorTable instructions edges) (baseNumbering instructions) x))
+        (expandCriteria instructions criteria) x = true) ↔
+      checkInsn tables.entry ((successorTable instructions edges).getD x.address []) (expandCriteria instructions criteria) x = true := by
+    intro x
+    rw [← Bool.or_eq_true]
+    exact iff_of_eq (congrArg (· = true) slice_check_or)
+  have hdyn : ∀ x, Info.dynamic (Visit.info (visitOf (slotTable instructions).1 (successorTable instructions edges) (baseNumbering instructions) x)) =
+      Info.dynamic (blockInfo x.bil) := fun _ => rfl
+  have haddr : ∀ x, Visit.insn (visitOf (slotTable instructions).1 (successorTable instructions edges) (baseNumbering instructions) x) = x := fun _ => rfl
+  simp only [List.all_map, Function.comp_def, hdyn, haddr, Equations.determined, hcell, Bool.and_eq_true,
+    List.all_eq_true, Bool.or_eq_true, Bool.not_eq_true', List.mem_filter, and_imp]
+  constructor
+  · rintro ⟨⟨h1, h2⟩, h3⟩
+    refine ⟨fun x hx hs => ?_, fun x hx => ⟨⟨(hcheck x).1 (h3 x hx), (h1 x hx).1⟩, (h1 x hx).2⟩⟩
+    rcases h2 x hx with h4 | h4
+    · rw [hs] at h4
+      cases h4
+    · exact h4
+  · rintro ⟨h1, h2⟩
+    refine ⟨⟨fun x hx => ⟨(h2 x hx).1.2, (h2 x hx).2⟩, fun x hx => ?_⟩, fun x hx => (hcheck x).2 (h2 x hx).1.1⟩
+    cases hs : (tables.cell x.address).site with
+    | true => exact .inr (h1 x hx hs)
+    | false => exact .inl rfl
+
+private theorem slice_groupBy {α : Type} (key : α → Option Nat) (list : List α) (found : Nat) :
+    (groupBy key list).getD found [] = list.filter (key · == some found) := by
+  induction list with
+  | nil => simp [groupBy]
+  | cons head tail ih =>
+    simp only [groupBy, List.foldr_cons, List.filter_cons] at ih ⊢
+    split
+    · rename_i k hk
+      rw [Std.HashMap.getD_insert]
+      by_cases he : k = found
+      · subst he
+        simp [hk, ih]
+      · have h1 : (k == found) = false := by simpa using he
+        have h2 : (key head == some found) = false := by simpa [hk] using he
+        simp [h1, h2, ih]
+    · rename_i hk
+      rw [ih]
+      simp [hk]
+
+/-- A slice over what is prepared for a project is of the instructions of the function of `entry`, or of all if it has
+none, over the edges from them and what their flow says. -/
+theorem slice_backwardProject (project : Bap.Project.Project) (entry : Nat) (criteria : List Location) :
+    backwardProject project entry criteria =
+      let index := Bap.Analysis.Xrefs.create project
+      let instructions := (project.disasm.map (·.instructions)).getD []
+      let cfg := (project.disasm.map (·.edges)).getD []
+      match ownerOf index entry with
+      | some owner =>
+        let listed := instructions.filter (ownerOf index ·.address == some owner)
+        backwardCfg listed (cfg.filter (ownerOf index ·.1 == some owner) ++ flowEdges listed) (some entry) criteria
+      | none => backwardCfg instructions (cfg ++ flowEdges instructions) (some entry) criteria := by
+  simp only [backwardProject, ProjectPlan.slice, ProjectPlan.prepared, prepareProject]
+  cases ho : ownerOf (Bap.Analysis.Xrefs.create project) entry with
+  | none => rfl
+  | some owner =>
+    simp only [Std.HashMap.getElem?_map]
+    have hedges := slice_groupBy (fun edge => ownerOf (Bap.Analysis.Xrefs.create project) edge.1)
+      ((project.disasm.map (·.edges)).getD []) owner
+    have hinsns := slice_groupBy (fun insn => ownerOf (Bap.Analysis.Xrefs.create project) insn.address)
+      ((project.disasm.map (·.instructions)).getD []) owner
+    cases hg : (groupBy (fun insn => ownerOf (Bap.Analysis.Xrefs.create project) insn.address)
+        ((project.disasm.map (·.instructions)).getD []))[owner]? with
+    | none =>
+      rw [Std.HashMap.getD_eq_getD_getElem?, hg] at hinsns
+      simp only [Option.getD_none] at hinsns
+      simp only [← hinsns, hedges]
+      rfl
+    | some listed =>
+      rw [Std.HashMap.getD_eq_getD_getElem?, hg] at hinsns
+      simp only [Option.getD_some] at hinsns
+      simp only [Option.map_some, hinsns, hedges]
+      rfl
+
 /-- `complete` is the determination of the sites, and no live call. -/
 theorem slice_complete_iff (instructions : List Bap.Disasm.Insn) (edges : List (Nat × Nat)) (entry : Option Nat)
     (criteria : List Location) :
@@ -3278,30 +4245,29 @@ theorem slice_complete_no_live_call {instructions : List Bap.Disasm.Insn} {edges
     {criteria : List Location} (h : (backwardCfg instructions edges entry criteria).complete = true)
     {insn : Bap.Disasm.Insn} (hi : insn ∈ instructions) (hflow : insn.flow = .call) :
     ((backwardCfg instructions edges entry criteria).entry insn.address).after = [] := by
-  have h' : (_ && ((instructions.filter fun i => decide (i.flow = .call) &&
-      !((backwardCfg instructions edges entry criteria).entry i.address).after.isEmpty).map (·.address)).isEmpty) = true := h
-  simp only [Bool.and_eq_true, List.isEmpty_iff, List.map_eq_nil_iff] at h'
-  have hmem := List.filter_eq_nil_iff.1 h'.2 insn hi
+  have hcalls : ((instructions.filter fun i => decide (i.flow = .call) &&
+      !((backwardCfg instructions edges entry criteria).entry i.address).after.isEmpty).map (·.address)) = [] :=
+    (slice_complete_parts h).2.2.2
+  rw [List.map_eq_nil_iff] at hcalls
+  have hmem := List.filter_eq_nil_iff.1 hcalls insn hi
   simpa [hflow] using hmem
 
 /-- `complete` promises that no listed instruction is an indirect jump, which the CFG has no edges for. -/
 theorem slice_complete_no_indirect {instructions : List Bap.Disasm.Insn} {edges : List (Nat × Nat)} {entry : Option Nat}
     {criteria : List Location} (h : (backwardCfg instructions edges entry criteria).complete = true)
     {insn : Bap.Disasm.Insn} (hi : insn ∈ instructions) : insn.flow ≠ .indirectJump := by
-  have h' : (_ && (instructions.all fun i => (_ && _ && checkFlow i)) && _) = true := h
+  have h' := (slice_complete_parts h).1
   simp only [Bool.and_eq_true, List.all_eq_true] at h'
-  simpa [checkFlow] using (h'.1.2 insn hi).2
+  simpa [checkFlow] using (h' insn hi).2
 
 /-- `complete` promises that the CFG has an edge for every constant jump into the listing. -/
 theorem slice_complete_edges {instructions : List Bap.Disasm.Insn} {edges : List (Nat × Nat)} {entry : Option Nat}
     {criteria : List Location} (h : (backwardCfg instructions edges entry criteria).complete = true)
     {insn other : Bap.Disasm.Insn} (hi : insn ∈ instructions) (ho : other ∈ instructions) (hf : insn.flow ≠ .call)
     (ht : other.address ∈ Exits.targets (codeExits insn.bil)) : (insn.address, other.address) ∈ edges := by
-  have h' : (_ && (instructions.all fun i => (_ && checkEdges (fun t =>
-      (instructions.foldl (fun (table : Std.HashMap Nat Unit) insn => table.insert insn.address ()) {}).contains t)
-      ((successorTable instructions edges).getD i.address []) i && _)) && _) = true := h
+  have h' := (slice_complete_parts h).1
   simp only [Bool.and_eq_true, List.all_eq_true] at h'
-  have hc := (h'.1.2 insn hi).1.2
+  have hc := (h' insn hi).1
   simp only [checkEdges, Bool.or_eq_true, beq_iff_eq, hf, false_or, List.all_eq_true, List.contains_eq_mem,
     decide_eq_true_eq, Bool.not_eq_true'] at hc
   rcases hc _ ht with hm | hm
@@ -3430,7 +4396,13 @@ end Slice
 
 section DynamicSlice
 open Bap.Analysis.DynamicSlice
-open_private Bap.Analysis.DynamicSlice in Bap.Analysis.DynamicSlice : writesCriterion
+open_private Bap.Analysis.DynamicSlice in Bap.Analysis.DynamicSlice : writesCriterion ofStatic
+
+/-- What is prepared for a project gives the same dynamic slice. -/
+theorem dynslice_backwardPlanned (project : Bap.Project.Project) (entry : Nat) (pcs : List Nat)
+    (accesses : List Bap.Emu.TraceAccess) (criteria : List Bap.Analysis.Slice.Location) :
+    backwardPlanned (Bap.Analysis.Slice.prepareProject project) entry pcs accesses criteria =
+      backwardWithAccesses project entry pcs accesses criteria := rfl
 
 theorem dynslice_writesCriterion_iff (access : Bap.Emu.TraceAccess) (criteria : List Bap.Analysis.Slice.Location) :
     writesCriterion access criteria = true ↔
@@ -3444,7 +4416,7 @@ theorem dynslice_mem_sites_iff (project : Bap.Project.Project) (entry : Nat) (pc
     (accesses : List Bap.Emu.TraceAccess) (criteria : List Bap.Analysis.Slice.Location) (site : Nat) :
     site ∈ (backwardWithAccesses project entry pcs accesses criteria).sites ↔
       site ∈ (Bap.Analysis.Slice.backwardProject project entry criteria).sites ∧ site ∈ pcs := by
-  simp [backwardWithAccesses]
+  simp [backwardWithAccesses, ofStatic]
 
 theorem dynslice_sites_sublist_static (project : Bap.Project.Project) (entry : Nat) (pcs : List Nat)
     (accesses : List Bap.Emu.TraceAccess) (criteria : List Bap.Analysis.Slice.Location) :
@@ -3460,7 +4432,7 @@ theorem dynslice_mem_gaps_iff (project : Bap.Project.Project) (entry : Nat) (pcs
       (gap ∈ (Bap.Analysis.Slice.backwardProject project entry criteria).sites ∧ gap ∉ pcs) ∨
       ∃ access ∈ accesses, access.pc = gap ∧ writesCriterion access criteria = true ∧
         gap ∉ (Bap.Analysis.Slice.backwardProject project entry criteria).sites := by
-  simp only [backwardWithAccesses, List.mem_eraseDups, List.mem_append, List.mem_filter, List.mem_filterMap]
+  simp only [backwardWithAccesses, ofStatic, List.mem_eraseDups, List.mem_append, List.mem_filter, List.mem_filterMap]
   apply or_congr
   · simp
   · constructor
@@ -3486,7 +4458,7 @@ theorem dynslice_complete_iff (project : Bap.Project.Project) (entry : Nat) (pcs
       (Bap.Analysis.Slice.backwardProject project entry criteria).determined = true ∧
         (∀ call ∈ (Bap.Analysis.Slice.backwardProject project entry criteria).calls, call ∉ pcs) ∧
         (backwardWithAccesses project entry pcs accesses criteria).gaps = [] := by
-  simp [backwardWithAccesses, Bool.and_eq_true]
+  simp [backwardWithAccesses, ofStatic, Bool.and_eq_true]
   grind
 
 /-- A call with something live after it that the trace executed leaves the dynamic slice incomplete:
@@ -3535,12 +4507,12 @@ theorem dynslice_full_coverage (project : Bap.Project.Project) (entry : Nat) (pc
     · exact hp (hcover gap hs)
     · exact hs (hinside access ha hw)
   refine ⟨?_, hgaps, rfl, ?_⟩
-  · simp only [backwardWithAccesses]
+  · simp only [backwardWithAccesses, ofStatic]
     apply List.filter_eq_self.mpr
     intro site hs
     simpa using hcover site hs
   · have hg := hgaps
-    simp only [backwardWithAccesses] at hg ⊢
+    simp only [backwardWithAccesses, ofStatic] at hg ⊢
     rw [hg]
     simp
 
