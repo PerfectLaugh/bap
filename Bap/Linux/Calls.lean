@@ -56,7 +56,9 @@ inductive Call where
   | access | faccessat | dup | dup2 | dup3 | fcntl | ioctl | getdents | getcwd | chdir | fchdir | mkdir | mkdirat | rmdir
   | unlink | unlinkat | rename | renameat | symlink | symlinkat | readlink | readlinkat | chmod | fchmodat | truncate
   | ftruncate | umask | mmap | mremap | brk | gettimeofday | time | clockGettime | clockGetres | uname | getrlimit | prlimit
-  | getrandom | sigaltstack | schedGetaffinity
+  | getrandom | sigaltstack | schedGetaffinity | statfs | fstatfs | sysinfo
+  /-- `statfs` and `fstatfs` with the size of the structure in the middle, as 32-bit systems and PowerPC have them. -/
+  | statfs64 | fstatfs64
   /-- What 32-bit systems have for numbers that don't fit a word: the offsets of `mmap2` are in pages and `truncate64`,
   `ftruncate64` and `_llseek` have them in two words. -/
   | mmap2 | truncate64 | ftruncate64 | llseek | clockGettime64 | clockGetres64
@@ -67,7 +69,8 @@ inductive Call where
 
 /-- The numbers of x86-64. -/
 def x86_64Calls : List (Nat × Call) :=
-  [(0, .read), (1, .write), (2, .open_), (257, .openat), (3, .close), (4, .stat), (6, .lstat), (5, .fstat), (262, .fstatat),
+  [(137, .statfs), (138, .fstatfs), (99, .sysinfo),
+   (0, .read), (1, .write), (2, .open_), (257, .openat), (3, .close), (4, .stat), (6, .lstat), (5, .fstat), (262, .fstatat),
    (332, .statx), (8, .lseek), (17, .pread), (18, .pwrite), (19, .readv), (20, .writev), (21, .access), (269, .faccessat),
    (439, .faccessat), (32, .dup), (33, .dup2), (292, .dup3), (72, .fcntl), (16, .ioctl), (217, .getdents), (79, .getcwd),
    (80, .chdir), (81, .fchdir), (83, .mkdir), (258, .mkdirat), (84, .rmdir), (87, .unlink), (263, .unlinkat), (82, .rename),
@@ -80,7 +83,8 @@ def x86_64Calls : List (Nat × Call) :=
 
 /-- The numbers of the architectures that came after the old calls went: `asm-generic/unistd.h`. -/
 def genericCalls : List (Nat × Call) :=
-  [(63, .read), (64, .write), (56, .openat), (57, .close), (80, .fstat), (79, .fstatat), (291, .statx), (62, .lseek),
+  [(43, .statfs), (44, .fstatfs), (179, .sysinfo),
+   (63, .read), (64, .write), (56, .openat), (57, .close), (80, .fstat), (79, .fstatat), (291, .statx), (62, .lseek),
    (67, .pread), (68, .pwrite), (65, .readv), (66, .writev), (48, .faccessat), (439, .faccessat), (23, .dup), (24, .dup3),
    (25, .fcntl), (29, .ioctl), (61, .getdents), (17, .getcwd), (49, .chdir), (50, .fchdir), (34, .mkdirat), (35, .unlinkat),
    (38, .renameat), (276, .renameat), (36, .symlinkat), (78, .readlinkat), (53, .fchmodat), (45, .truncate), (46, .ftruncate),
@@ -91,7 +95,8 @@ def genericCalls : List (Nat × Call) :=
 
 /-- The numbers of `asm-generic` on 32 bits, where whatever has a time or an offset in a word has gone. -/
 def generic32Calls : List (Nat × Call) :=
-  [(63, .read), (64, .write), (56, .openat), (57, .close), (291, .statx), (62, .llseek),
+  [(43, .statfs64), (44, .fstatfs64), (179, .sysinfo),
+   (63, .read), (64, .write), (56, .openat), (57, .close), (291, .statx), (62, .llseek),
    (67, .pread), (68, .pwrite), (65, .readv), (66, .writev), (48, .faccessat), (439, .faccessat), (23, .dup), (24, .dup3),
    (25, .fcntl), (29, .ioctl), (61, .getdents), (17, .getcwd), (49, .chdir), (50, .fchdir), (34, .mkdirat), (35, .unlinkat),
    (38, .renameat), (276, .renameat), (36, .symlinkat), (78, .readlinkat), (53, .fchmodat), (45, .truncate64), (46, .ftruncate64),
@@ -102,7 +107,8 @@ def generic32Calls : List (Nat × Call) :=
 
 /-- The numbers of the o32 ABI of MIPS, without their 4000. -/
 def o32Calls : List (Nat × Call) :=
-  [(3, .read), (4, .write), (5, .open_), (288, .openat), (6, .close), (366, .statx), (19, .lseek), (140, .llseek),
+  [(213, .stat), (214, .lstat), (215, .fstat), (293, .fstatat), (255, .statfs64), (256, .fstatfs64), (116, .sysinfo),
+   (3, .read), (4, .write), (5, .open_), (288, .openat), (6, .close), (366, .statx), (19, .lseek), (140, .llseek),
    (200, .pread), (201, .pwrite), (145, .readv), (146, .writev), (33, .access), (300, .faccessat), (439, .faccessat),
    (41, .dup), (63, .dup2), (327, .dup3), (55, .fcntl), (220, .fcntl), (54, .ioctl), (219, .getdents), (203, .getcwd),
    (12, .chdir), (133, .fchdir), (39, .mkdir), (289, .mkdirat), (40, .rmdir), (10, .unlink), (294, .unlinkat), (38, .rename),
@@ -116,7 +122,8 @@ def o32Calls : List (Nat × Call) :=
 
 /-- The numbers of the n64 ABI of MIPS, without their 5000. -/
 def n64Calls : List (Nat × Call) :=
-  [(0, .read), (1, .write), (2, .open_), (247, .openat), (3, .close), (4, .stat), (6, .lstat), (5, .fstat), (252, .fstatat),
+  [(134, .statfs), (135, .fstatfs), (97, .sysinfo),
+   (0, .read), (1, .write), (2, .open_), (247, .openat), (3, .close), (4, .stat), (6, .lstat), (5, .fstat), (252, .fstatat),
    (326, .statx), (8, .lseek), (16, .pread), (17, .pwrite), (18, .readv), (19, .writev), (20, .access), (259, .faccessat),
    (439, .faccessat), (31, .dup), (32, .dup2), (286, .dup3), (70, .fcntl), (15, .ioctl), (308, .getdents), (77, .getcwd),
    (78, .chdir), (79, .fchdir), (81, .mkdir), (248, .mkdirat), (82, .rmdir), (85, .unlink), (253, .unlinkat), (80, .rename),
@@ -129,7 +136,8 @@ def n64Calls : List (Nat × Call) :=
 
 /-- The numbers of 32-bit ARM, with EABI, and two of its own: `set_tls` and `cacheflush`. -/
 def armCalls : List (Nat × Call) :=
-  [(3, .read), (4, .write), (5, .open_), (322, .openat), (6, .close), (397, .statx), (19, .lseek), (140, .llseek),
+  [(195, .stat), (196, .lstat), (197, .fstat), (327, .fstatat), (266, .statfs64), (267, .fstatfs64), (116, .sysinfo),
+   (3, .read), (4, .write), (5, .open_), (322, .openat), (6, .close), (397, .statx), (19, .lseek), (140, .llseek),
    (180, .pread), (181, .pwrite), (145, .readv), (146, .writev), (33, .access), (334, .faccessat), (439, .faccessat), (41, .dup),
    (63, .dup2), (358, .dup3), (55, .fcntl), (221, .fcntl), (54, .ioctl), (217, .getdents), (183, .getcwd), (12, .chdir),
    (133, .fchdir), (39, .mkdir), (323, .mkdirat), (40, .rmdir), (10, .unlink), (328, .unlinkat), (38, .rename), (329, .renameat),
@@ -143,7 +151,8 @@ def armCalls : List (Nat × Call) :=
 
 /-- The numbers of i686. -/
 def i686Calls : List (Nat × Call) :=
-  [(3, .read), (4, .write), (5, .open_), (295, .openat), (6, .close), (383, .statx), (19, .lseek), (140, .llseek),
+  [(195, .stat), (196, .lstat), (197, .fstat), (300, .fstatat), (268, .statfs64), (269, .fstatfs64), (116, .sysinfo),
+   (3, .read), (4, .write), (5, .open_), (295, .openat), (6, .close), (383, .statx), (19, .lseek), (140, .llseek),
    (180, .pread), (181, .pwrite), (145, .readv), (146, .writev), (33, .access), (307, .faccessat), (439, .faccessat), (41, .dup),
    (63, .dup2), (330, .dup3), (55, .fcntl), (221, .fcntl), (54, .ioctl), (220, .getdents), (183, .getcwd), (12, .chdir),
    (133, .fchdir), (39, .mkdir), (296, .mkdirat), (40, .rmdir), (10, .unlink), (301, .unlinkat), (38, .rename), (302, .renameat),
@@ -157,7 +166,8 @@ def i686Calls : List (Nat × Call) :=
 
 /-- The numbers of PowerPC, where those of each width that the other doesn't have are left to it not asking for them. -/
 def powerpcCalls : List (Nat × Call) :=
-  [(3, .read), (4, .write), (5, .open_), (286, .openat), (6, .close), (106, .stat), (107, .lstat), (108, .fstat), (291, .fstatat),
+  [(116, .sysinfo),
+   (3, .read), (4, .write), (5, .open_), (286, .openat), (6, .close), (106, .stat), (107, .lstat), (108, .fstat), (291, .fstatat),
    (383, .statx), (19, .lseek), (140, .llseek), (179, .pread), (180, .pwrite), (145, .readv), (146, .writev), (33, .access),
    (298, .faccessat), (439, .faccessat), (41, .dup), (63, .dup2), (316, .dup3), (55, .fcntl), (204, .fcntl), (54, .ioctl),
    (202, .getdents), (182, .getcwd), (12, .chdir), (133, .fchdir), (39, .mkdir), (287, .mkdirat), (40, .rmdir), (10, .unlink),
@@ -177,7 +187,11 @@ def Architecture.calls : Architecture → List (Nat × Call)
   | .riscv32 => generic32Calls
   | .mips 32 _ _ => o32Calls.map fun entry => (entry.1 + 4000, entry.2)
   | .mips _ _ _ => n64Calls.map fun entry => (entry.1 + 5000, entry.2)
-  | .powerpc _ _ => powerpcCalls
+  -- The same numbers have the wide `struct stat` on 64-bit systems and `stat64` on the others.
+  | .powerpc 32 _ =>
+    [(195, .stat), (196, .lstat), (197, .fstat), (252, .statfs64), (253, .fstatfs64)] ++
+      powerpcCalls.filter fun entry => ![106, 107, 108].contains entry.1
+  | .powerpc _ _ => [(99, .statfs), (100, .fstatfs), (252, .statfs64), (253, .fstatfs64)] ++ powerpcCalls
 
 /-- The call of a number, if the kernel serves it. -/
 def Architecture.call (architecture : Architecture) (number : Nat) : Option Call :=
@@ -214,11 +228,15 @@ def Architecture.guestFlags : Architecture → Nat → Nat
   | .powerpc _ _, flags => moveBits (powerpcOpenBits.map fun move => (move.2, move.1)) flags
   | architecture, flags => architecture.openFlags flags
 
-/-- `struct stat`. 32-bit systems ask for `statx`, whose times are wide enough. -/
+/-- `struct stat`, and of 32-bit systems `struct stat64`, whose times 2038 ends: what asks for them asks for `statx` first. -/
 def Architecture.stat : Architecture → Kernel.Stat → ByteArray
-  | .x86_64, value | .i686, value => Abi.stat value
-  | .aarch64, value | .riscv64, value | .riscv32, value | .arm, value => Abi.genericStat value
+  | .x86_64, value => Abi.stat value
+  | .i686, value => Abi.stat64 value
+  | .arm, value => Abi.armStat64 value
+  | .aarch64, value | .riscv64, value | .riscv32, value => Abi.genericStat value
+  | .mips 32 big _, value => Abi.mipsStat64 value big
   | .mips _ big _, value => Abi.mips64Stat value big
+  | .powerpc 32 big, value => Abi.powerpcStat64 value big
   | .powerpc _ big, value => Abi.stat value big
 
 /-- The number of an error of a guest, which on MIPS isn't that of Linux elsewhere for those above 34. -/

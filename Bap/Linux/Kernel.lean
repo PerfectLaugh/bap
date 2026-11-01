@@ -735,6 +735,57 @@ def mips64Stat (value : Kernel.Stat) (big : Bool) : ByteArray :=
     bytesOf 12 0 ++ get 8 value.size ++ time ++ time ++ time ++ get 4 4096 ++ bytesOf 4 0 ++ get 8 ((value.size + 511) / 512) ++
     bytesOf 56 0
 
+/-- `struct stat64` of i686, which is packed. -/
+def stat64 (value : Kernel.Stat) : ByteArray :=
+  let time := bytesOf 4 (value.time / 1000000000) ++ bytesOf 4 (value.time % 1000000000)
+  bytesOf 8 1 ++ bytesOf 4 0 ++ bytesOf 4 (value.inode % 2 ^ 32) ++ bytesOf 4 value.mode ++ bytesOf 4 value.links ++ bytesOf 8 0 ++
+    bytesOf 8 0 ++ bytesOf 4 0 ++ bytesOf 8 value.size ++ bytesOf 4 4096 ++ bytesOf 8 ((value.size + 511) / 512) ++
+    time ++ time ++ time ++ bytesOf 8 value.inode
+
+/-- `struct stat64` of ARM, whose wide fields are aligned. -/
+def armStat64 (value : Kernel.Stat) : ByteArray :=
+  let time := bytesOf 4 (value.time / 1000000000) ++ bytesOf 4 (value.time % 1000000000)
+  bytesOf 8 1 ++ bytesOf 4 0 ++ bytesOf 4 (value.inode % 2 ^ 32) ++ bytesOf 4 value.mode ++ bytesOf 4 value.links ++ bytesOf 8 0 ++
+    bytesOf 8 0 ++ bytesOf 8 0 ++ bytesOf 8 value.size ++ bytesOf 4 4096 ++ bytesOf 4 0 ++ bytesOf 8 ((value.size + 511) / 512) ++
+    time ++ time ++ time ++ bytesOf 8 value.inode
+
+/-- `struct stat64` of 32-bit PowerPC. -/
+def powerpcStat64 (value : Kernel.Stat) (big : Bool) : ByteArray :=
+  let get := field big
+  let time := get 4 (value.time / 1000000000) ++ get 4 (value.time % 1000000000)
+  get 8 1 ++ get 8 value.inode ++ get 4 value.mode ++ get 4 value.links ++ bytesOf 8 0 ++ bytesOf 8 0 ++ bytesOf 8 0 ++
+    get 8 value.size ++ get 4 4096 ++ bytesOf 4 0 ++ get 8 ((value.size + 511) / 512) ++ time ++ time ++ time ++ bytesOf 8 0
+
+/-- `struct stat64` of the o32 ABI of MIPS. -/
+def mipsStat64 (value : Kernel.Stat) (big : Bool) : ByteArray :=
+  let get := field big
+  let time := get 4 (value.time / 1000000000) ++ get 4 (value.time % 1000000000)
+  get 4 1 ++ bytesOf 12 0 ++ get 8 value.inode ++ get 4 value.mode ++ get 4 value.links ++ bytesOf 8 0 ++ bytesOf 4 0 ++
+    bytesOf 12 0 ++ get 8 value.size ++ time ++ time ++ time ++ get 4 4096 ++ bytesOf 4 0 ++ get 8 ((value.size + 511) / 512)
+
+/-- What `statfs` says of the file system that all files are on, a tmpfs of 4 GiB with all of it free. Its type, block size and the three at the end of it are of the word, so that `statfs` and `statfs64` of a 64-bit system
+are the same. MIPS has its fields in another order. -/
+def statfs (wide big mips : Bool) : ByteArray :=
+  let get := field big
+  let word := if wide then get 8 else get 4
+  let tmpfs := 0x01021994
+  let blocks := 1048576
+  if mips then
+    word tmpfs ++ word 4096 ++ word 4096 ++ (if wide then bytesOf 0 0 else bytesOf 4 0) ++ get 8 blocks ++ get 8 blocks ++
+      get 8 blocks ++ get 8 blocks ++ get 8 blocks ++ bytesOf 8 0 ++ word 255 ++ word 0 ++ bytesOf (if wide then 40 else 20) 0
+  else
+    word tmpfs ++ word 4096 ++ get 8 blocks ++ get 8 blocks ++ get 8 blocks ++ get 8 blocks ++ get 8 blocks ++ bytesOf 8 0 ++
+      word 255 ++ word 4096 ++ word 0 ++ bytesOf (if wide then 32 else 16) 0
+
+/-- `struct sysinfo`: 2 GiB of memory, all free, in units of a byte. -/
+def sysinfo (wide big : Bool) (uptime processes : Nat) : ByteArray :=
+  let get := field big
+  let word := if wide then get 8 else get 4
+  let memory := 0x7fffffff
+  word uptime ++ word 0 ++ word 0 ++ word 0 ++ word memory ++ word memory ++ word 0 ++ word 0 ++ word 0 ++ word 0 ++
+    get 2 processes ++ bytesOf (if wide then 6 else 2) 0 ++ word 0 ++ word 0 ++ get 4 1 ++
+    bytesOf (if wide then 4 else 8) 0
+
 /-- `struct statx`. -/
 def statx (value : Kernel.Stat) (big : Bool := false) : ByteArray :=
   let get := field big

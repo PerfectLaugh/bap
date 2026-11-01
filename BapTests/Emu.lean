@@ -745,6 +745,33 @@ private def testKernel : IO Unit := do
   | .error _ => IO.println "ok: Kernel what isn't ELF doesn't start"
   | .ok _ => throw <| IO.userError "Kernel started what isn't ELF"
 
+/-- Where the fields are, as qemu-user has them from the structures of Linux. -/
+def testLinuxLayouts : IO Unit := do
+  let word (bytes : ByteArray) (at_ : Nat) (big : Bool) : Nat :=
+    let part := (List.range 4).map fun index => bytes[at_ + (if big then 3 - index else index)]!.toNat <<< (8 * index)
+    part.foldl (· + ·) 0
+  let value : Bap.Linux.Kernel.Stat := { inode := 7, mode := 0o100644, size := 0x12345, links := 2, time := 0 }
+  let cases : List (String × Bap.Linux.Architecture × Bool × Nat × Nat × Nat × Nat) :=
+    [("i686", .i686, false, 96, 44, 16, 20), ("arm", .arm, false, 104, 48, 16, 20),
+     ("mips", .mips 32 true false, true, 104, 60, 24, 28), ("powerpc", .powerpc 32 true, true, 104, 52, 16, 20)]
+  for (name, architecture, big, size, sizeAt, modeAt, linksAt) in cases do
+    let bytes := architecture.stat value
+    assertEqual s!"stat64 of {name} is its size" size bytes.size
+    assertEqual s!"stat64 of {name} has the size of the file" 0x12345 (word bytes sizeAt big)
+    assertEqual s!"stat64 of {name} has the mode" 0o100644 (word bytes modeAt big)
+    assertEqual s!"stat64 of {name} has the links" 2 (word bytes linksAt big)
+  let filesystems : List (String × Bool × Bool × Bool × Nat × Nat) :=
+    [("i686", false, false, false, 0, 56), ("mips", false, true, true, 0, 64), ("powerpc", false, true, false, 0, 56),
+     ("x86-64", true, false, false, 0, 64), ("mips64", true, true, true, 4, 76), ("powerpc64", true, true, false, 4, 68)]
+  for (name, wide, big, mips, typeAt, nameAt) in filesystems do
+    let bytes := Bap.Linux.Abi.statfs wide big mips
+    assertEqual s!"statfs of {name} has the type" 0x01021994 (word bytes typeAt big)
+    assertEqual s!"statfs of {name} has the longest name" 255 (word bytes nameAt big)
+  assertEqual "sysinfo of 32 bits has the unit" 1 (word (Bap.Linux.Abi.sysinfo false false 5 1) 52 false)
+  assertEqual "sysinfo of 64 bits has the unit" 1 (word (Bap.Linux.Abi.sysinfo true false 5 1) 104 false)
+  assertEqual "sysinfo of 32 bits is its size" 64 (Bap.Linux.Abi.sysinfo false false 5 1).size
+  assertEqual "sysinfo of 64 bits is its size" 112 (Bap.Linux.Abi.sysinfo true false 5 1).size
+
 /-- Programs of libc under the virtual kernel, dynamic, if there is a compiler to make them. The program does all of
 what it does to files in the kernel's, and says what it found. -/
 def testLinuxPrograms : IO Unit := do

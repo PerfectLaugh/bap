@@ -179,6 +179,7 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     let architecture := machine.architecture
     let wide := architecture.bits
     let big := architecture.big
+    let mips := match architecture with | .mips .. => true | _ => false
     let wordSize := wide / 8
     let cell := Abi.field big
     -- A number that doesn't fit a word on 32 bits, from two arguments in the order of the guest.
@@ -279,6 +280,20 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
           | .ok value => returning emu (arg 2) (architecture.stat value)
         else pure (errorOf Errno.enoent)
       | _ => statAt (arg 0) (arg 1) (arg 2) (arg 3 &&& 0x100 == 0)
+    | .statfs | .statfs64 =>
+      at_ here (arg 0) fun from_ path =>
+        match kernel.statPath from_ path with
+        | .error errno => pure (errorOf errno)
+        | .ok _ =>
+          let bytes := Abi.statfs (architecture.bits == 64) big mips
+          if call == .statfs then returning emu (arg 1) bytes else returning emu (arg 2) (bytes.extract 0 (arg 1))
+    | .fstatfs | .fstatfs64 =>
+      match kernel.statDescriptor group (arg 0) with
+      | .error errno => pure (errorOf errno)
+      | .ok _ =>
+        let bytes := Abi.statfs (architecture.bits == 64) big mips
+        if call == .fstatfs then returning emu (arg 1) bytes else returning emu (arg 2) (bytes.extract 0 (arg 1))
+    | .sysinfo => returning emu (arg 0) (Abi.sysinfo (architecture.bits == 64) big (kernel.clock / 1000000000 - 1700000000) 1)
     | .statx =>
       let path ← (readString emu (arg 1)).toBaseIO
       let finish (result : Result Kernel.Stat) : IO SyscallAction :=
@@ -446,7 +461,7 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
 
 /-- The argument of a call that is a path, if it has one, and whether it is relative to a descriptor. -/
 private def pathArgument : Call → Option Nat
-  | .open_ | .stat | .lstat | .access | .readlink | .chdir | .truncate | .truncate64 => some 0
+  | .open_ | .stat | .lstat | .access | .readlink | .chdir | .truncate | .truncate64 | .statfs | .statfs64 => some 0
   | .openat | .fstatat | .statx | .faccessat | .readlinkat => some 1
   | _ => none
 
