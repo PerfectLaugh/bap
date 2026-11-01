@@ -586,6 +586,19 @@ def testThumbIt : IO Unit := do
   assertEqual "Thumb IT blocks are what qemu does" (String.fromUTF8! (← IO.FS.readBinFile "testsuite/data/thumb-it.out"))
     (String.fromUTF8! (← written.get))
 
+/-- A program that runs another, a script among them, in a child that had its memory before. -/
+def testLinuxExec (triple : String) : IO Unit := do
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-exec"
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" program).addFile "/script" "#!/test child\n".toUTF8
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual s!"Linux {triple} a program that runs others ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual s!"Linux {triple} programs run others"
+    ("missing 2\ndescriptors 3 4\nchild: a bc env=NAME=value kept=1 closed=0\nstatus 7\n" ++
+      "child: /script x env=none kept=1 closed=0\nscript 7\n")
+    (String.fromUTF8! (← written.get))
+
 /-- What a program finds in `/proc`, of itself and its child, and a file that a function makes, across a checkpoint. -/
 def testLinuxProc (triple : String) : IO Unit := do
   let path := s!"testsuite/bin/{triple}-linux-musl-libc-proc"

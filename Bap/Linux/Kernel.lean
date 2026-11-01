@@ -16,6 +16,7 @@ namespace Errno
 def eperm : Nat := 1
 def eacces : Nat := 13
 def enoent : Nat := 2
+def enoexec : Nat := 8
 def eio : Nat := 5
 def ebadf : Nat := 9
 def enomem : Nat := 12

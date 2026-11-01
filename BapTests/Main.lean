@@ -63,6 +63,11 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxPrograms,
     Bap.Tests.Emu.testLinuxLayouts,
     Bap.Tests.Emu.testThumbIt,
+    Bap.Tests.Emu.testLinuxExec "aarch64",
+    Bap.Tests.Emu.testLinuxExec "i686",
+    Bap.Tests.Emu.testLinuxExec "thumb",
+    Bap.Tests.Emu.testLinuxExec "mips",
+    Bap.Tests.Emu.testLinuxExec "powerpc64",
     Bap.Tests.GraphScale.run,
     -- Floating point is much the longest of each, so only one of each family runs it here: of AArch64, Thumb, x87, RISC-V, MIPS and PowerPC.
     -- The others were compared with qemu by hand.

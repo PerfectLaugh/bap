@@ -293,6 +293,7 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       | .ok _ =>
         let bytes := Abi.statfs (architecture.bits == 64) big mips
         if call == .fstatfs then returning emu (arg 1) bytes else returning emu (arg 2) (bytes.extract 0 (arg 1))
+    | .execve => pure (errorOf Errno.enosys)
     | .sysinfo => returning emu (arg 0) (Abi.sysinfo (architecture.bits == 64) big (kernel.clock / 1000000000 - 1700000000) 1)
     | .statx =>
       let path ← (readString emu (arg 1)).toBaseIO
@@ -716,6 +717,118 @@ private def mapStack (emu : Emu) (architecture : Architecture) (arguments enviro
     write emu (pointer + wordSize * index) (Abi.field architecture.big wordSize cell)
   setReg emu ⟨(threadRegisters emu.config.syscallAbi).1, .imm architecture.bits, 0, false⟩ (bits architecture.bits pointer)
 
+/-- A parsed program and what interprets it in an emulator that has nothing mapped: its registers, its memory, its stack and
+where it starts. It gives where its heap starts. -/
+private def loadProgram (emu : Emu) (architecture : Architecture) (path : String) (data : ByteArray) (program : Elf.Program)
+    (interpreter : Option (ByteArray × Elf.Program)) (arguments environment : List String) : IO Nat := do
+  let base := if program.relocatable then programBase architecture else 0
+  resetRegisters emu architecture
+  let top ← mapProgram emu data program base
+  let lowest := program.segments.foldl (fun lowest segment => min lowest segment.address) (2 ^ 63)
+  let entry ← match interpreter with
+    | some (bytes, loaded) =>
+      let _ ← mapProgram emu bytes loaded (interpreterBase architecture)
+      pure (interpreterBase architecture + loaded.entry)
+    | none => pure (base + program.entry)
+  -- What the processor has: on AArch64, FP and ASIMD, and not CPUID, so that libc doesn't choose routines by the implementer, and
+  -- on RISC-V, a bit for each of the letters of IMAFDC.
+  let capabilities := match architecture with
+    | .x86_64 | .i686 => 0x07888f9f
+    | .aarch64 => 3
+    -- HALF, THUMB, FAST_MULT, VFP, EDSP, NEON, VFPv3 and TLS
+    | .arm => 0xb0d6
+    | .riscv64 | .riscv32 => 0x112d
+    | .mips _ _ _ => 0
+    -- A 32-bit or a 64-bit machine, with floating point, AltiVec and VSX.
+    | .powerpc wide _ => (if wide == 64 then 0xc0000000 else 0x80000000) + 0x18000080
+  -- AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_FLAGS, AT_ENTRY, the ids of root, AT_HWCAP, AT_CLKTCK, AT_SECURE
+  let auxiliary := [(3, base + lowest + program.headerOffset), (4, program.headerSize), (5, program.headerCount), (6, 4096),
+    (7, if interpreter.isSome then interpreterBase architecture else 0), (8, 0), (9, base + program.entry), (11, 0), (12, 0), (13, 0), (14, 0),
+    (16, capabilities), (17, 100), (23, 0)]
+  mapStack emu architecture (if arguments.isEmpty then [path] else arguments) environment auxiliary
+  -- On ARM, the low bit of where a program starts says that it is in Thumb.
+  let entry ← if architecture == .arm then do
+      setReg emu ⟨"ISET", .imm 1, 0, false⟩ (bits 1 (entry % 2))
+      mapHelpers emu
+      pure (entry / 2 * 2)
+    else pure entry
+  setPc emu entry
+  -- ELFv2: a function that is called from elsewhere finds its table of contents from where it is, and a program is called so.
+  if let .powerpc 64 _ := architecture then setReg emu (word "R12") (bits 64 entry)
+  pure top
+
+/-- A program of a path of the kernel, as far as it can be told that it will run, and what its arguments come to: a script
+is run by what its first line names, with the script after that, to a depth that Linux has too. -/
+private def programOf (kernel : Kernel) (architecture : Architecture) : Nat → String → List String →
+    Result (String × ByteArray × Elf.Program × Option (ByteArray × Elf.Program) × List String)
+  | 0, _, _ => .error Errno.enoexec
+  | depth + 1, path, arguments => do
+    let data ← fileOf kernel path
+    if data.size ≥ 2 && data.get! 0 == 35 && data.get! 1 == 33 then
+      let first := (String.fromUTF8? (data.extract 2 (min data.size 256))).getD ""
+      let line := ((first.splitOn "\n").headD "").trimAscii.toString
+      -- All of the line after the name is one argument.
+      match line.splitOn " " with
+      | [""] => .error Errno.enoexec
+      | name :: rest =>
+        let given := (" ".intercalate rest).trimAscii.toString
+        programOf kernel architecture depth name (name :: (if given.isEmpty then [] else [given]) ++ [path] ++ arguments.drop 1)
+      | [] => .error Errno.enoexec
+    else
+      let some program := (Elf.parse data).toOption | .error Errno.enoexec
+      if Architecture.ofElf program.machine program.bits program.big program.flags != some architecture then .error Errno.enoexec
+      let interpreter ← match program.interpreter with
+        | none => .ok none
+        | some name => do
+          let bytes ← fileOf kernel name
+          let some loaded := (Elf.parse bytes).toOption | .error Errno.enoexec
+          .ok (some (bytes, loaded))
+      .ok (path, data, program, interpreter, arguments)
+
+/-- The strings of a list of pointers that a null ends, as `execve` is given them. -/
+private def readStrings (emu : Emu) (architecture : Architecture) (address : Nat) : IO (List String) := do
+  if address == 0 then return []
+  let size := architecture.bits / 8
+  let rec go : Nat → Nat → List String → IO (List String)
+    | 0, _, found => pure found.reverse
+    | fuel + 1, at_, found => do
+      let bytes ← read emu at_ size
+      let bytes := if architecture.big then bytes.toList else bytes.toList.reverse
+      let pointer := bytes.foldl (fun value byte => value * 256 + byte.toNat) 0
+      if pointer == 0 then pure found.reverse
+      else go fuel (at_ + size) ((← readString emu pointer) :: found)
+  go 65536 address []
+
+/-- `execve`: nothing of the process changes until the program is known to run, and then all its memory and its threads other
+than this one are gone, and its descriptors but for those that stay open over it. -/
+private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO SyscallAction := do
+  let architecture := machine.architecture
+  let kernel ← machine.kernel.get
+  let group := (← currentTask emu).group
+  match ← (do pure (← readString emu (args.getD 0 0), ← readStrings emu architecture (args.getD 1 0),
+      ← readStrings emu architecture (args.getD 2 0)) : IO _).toBaseIO with
+  | .error _ => pure (errorOf Errno.efault)
+  | .ok (path, arguments, environment) =>
+    let absolute := if path.startsWith "/" then path else (kernel.process group).cwd ++ "/" ++ path
+    match programOf kernel architecture 4 absolute (if arguments.isEmpty then [path] else arguments) with
+    | .error errno => pure (errorOf errno)
+    | .ok (name, data, program, interpreter, arguments) =>
+      let table ← emu.taskTable.get
+      let current ← thread emu
+      for task in table.tasks do
+        if task.group == group && task.tid != current && task.status.isNone then
+          emu.taskTable.modify (·.exitTask task.tid 0 group)
+          emu.threadsRef.modify (setThreadStopped · task.tid true)
+      for region in ← emu.regions.get do
+        unmap emu region.address region.data.size
+      let top ← loadProgram emu architecture name data program interpreter arguments environment
+      emu.redirect.set (some (← pc emu))
+      let process := kernel.process group
+      machine.kernel.set (kernel.setProcess group { process with
+        descriptors := process.descriptors.filter fun _ entry => !entry.closeOnExec
+        breakStart := top, breakEnd := top, command := arguments, environment, program := name })
+      pure (.returnValue 0)
+
 /-- An emulator of an architecture, as a Linux machine needs it, with nothing mapped. -/
 private def emulatorOf (architecture : Architecture) : IO Emu := do
   -- A real program runs more code than the working set of a few thousand blocks that the default is for, and past it, each one
@@ -759,6 +872,9 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
       pure .default
   if let some handler := handler then
     let _ ← onSyscall emu handler
+  let _ ← onSyscall emu fun emu number args => do
+    if machine.architecture.call number == some .execve then handOver machine emu (← execute { machine with emu } emu args)
+    else pure .default
   let _ ← serveKernelCalls machine
   let _ ← serveTaskCalls emu
   let _ ← serveRest machine
@@ -775,7 +891,6 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   let program ← IO.ofExcept (Elf.parse data)
   let some architecture := Architecture.ofElf program.machine program.bits program.big program.flags
     | throw <| IO.userError s!"{path}: no Linux machine for ELF machine {program.machine} of {program.bits} bits"
-  let base := if program.relocatable then programBase architecture else 0
   let interpreter ← match program.interpreter with
     | none => pure none
     | some name =>
@@ -785,39 +900,7 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   -- would be lifted each time it runs. Most of its code runs at its start, a few times, and compiling that takes longer than
   -- running it: with this threshold, `ls` takes a third of the time, and a long loop no longer.
   let emu ← emulatorOf architecture
-  resetRegisters emu architecture
-  let top ← mapProgram emu data program base
-  let lowest := program.segments.foldl (fun lowest segment => min lowest segment.address) (2 ^ 63)
-  let entry ← match interpreter with
-    | some (bytes, loaded) =>
-      let _ ← mapProgram emu bytes loaded (interpreterBase architecture)
-      pure (interpreterBase architecture + loaded.entry)
-    | none => pure (base + program.entry)
-  -- What the processor has: on AArch64, FP and ASIMD, and not CPUID, so that libc doesn't choose routines by the implementer, and
-  -- on RISC-V, a bit for each of the letters of IMAFDC.
-  let capabilities := match architecture with
-    | .x86_64 | .i686 => 0x07888f9f
-    | .aarch64 => 3
-    -- HALF, THUMB, FAST_MULT, VFP, EDSP, NEON, VFPv3 and TLS
-    | .arm => 0xb0d6
-    | .riscv64 | .riscv32 => 0x112d
-    | .mips _ _ _ => 0
-    -- A 32-bit or a 64-bit machine, with floating point, AltiVec and VSX.
-    | .powerpc wide _ => (if wide == 64 then 0xc0000000 else 0x80000000) + 0x18000080
-  -- AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_FLAGS, AT_ENTRY, the ids of root, AT_HWCAP, AT_CLKTCK, AT_SECURE
-  let auxiliary := [(3, base + lowest + program.headerOffset), (4, program.headerSize), (5, program.headerCount), (6, 4096),
-    (7, if interpreter.isSome then interpreterBase architecture else 0), (8, 0), (9, base + program.entry), (11, 0), (12, 0), (13, 0), (14, 0),
-    (16, capabilities), (17, 100), (23, 0)]
-  mapStack emu architecture (if arguments.isEmpty then [path] else arguments) environment auxiliary
-  -- On ARM, the low bit of where a program starts says that it is in Thumb.
-  let entry ← if architecture == .arm then do
-      setReg emu ⟨"ISET", .imm 1, 0, false⟩ (bits 1 (entry % 2))
-      mapHelpers emu
-      pure (entry / 2 * 2)
-    else pure entry
-  setPc emu entry
-  -- ELFv2: a function that is called from elsewhere finds its table of contents from where it is, and a program is called so.
-  if let .powerpc 64 _ := architecture then setReg emu (word "R12") (bits 64 entry)
+  let top ← loadProgram emu architecture path data program interpreter arguments environment
   let first := (← currentTask emu).group
   let kernel := kernel.withConsole first input
   let kernel := kernel.setProcess first { kernel.process first with

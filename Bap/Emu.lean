@@ -170,6 +170,8 @@ structure Emu where
   processHooks : IO.Ref (List (Nat → Nat → IO Unit))
   /-- Where the instruction that runs goes next, for a system call to know where a new thread starts. -/
   nextPc : IO.Ref Nat
+  /-- Where the instruction that runs goes after all, for a program that a system call has replaced. -/
+  redirect : IO.Ref (Option Nat)
 
 /-- Compiled ranges chain blocks along their branches, which leaves delay slots out. -/
 private def rangeLimitOf (config : Config) : Nat :=
@@ -254,6 +256,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     servedPrograms := ← IO.mkRef {}
     processHooks := ← IO.mkRef []
     nextPc := ← IO.mkRef 0
+    redirect := ← IO.mkRef none
   }
 
 /-- The address space of a thread. -/
@@ -1577,8 +1580,14 @@ private def executeBlock (emu : Emu) (address : Nat) : IO (Nat × Bil.Effect) :=
   setSkip := emu.skipCode.set
   pending := emu.pendingRef.get
   setControl := fun pc pending => do
-    emu.pc.set pc
-    emu.pendingRef.set pending
+    match ← emu.redirect.get with
+    | some target =>
+      emu.redirect.set none
+      emu.pc.set target
+      emu.pendingRef.set none
+    | none =>
+      emu.pc.set pc
+      emu.pendingRef.set pending
 
 /-- The references of the emulator as the environment of `stepM`. -/
 @[inline] private def stepOps (emu : Emu) : StepOps IO (Snapshot × Option TraceState) :=
