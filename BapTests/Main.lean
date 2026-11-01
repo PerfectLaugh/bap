@@ -125,6 +125,12 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRuntimeModels "aarch64" 17,
     Bap.Tests.Emu.testLinuxRuntimeModels "mips" 4203,
     Bap.Tests.Emu.testLinuxServedCheckpoint "aarch64" 17,
+    Bap.Tests.Lifted.testNativeMemory,
+    Bap.Tests.Lifted.testNativeMemoryModel,
+    Bap.Tests.Emu.testParallelAtomics,
+    Bap.Tests.Emu.testParallelTearing,
+    Bap.Tests.Emu.testParallelFences,
+    Bap.Tests.Emu.testParallelUnaligned,
     Bap.Tests.Jni.run,
     Bap.Tests.Jni.testState
   ]

@@ -1033,6 +1033,127 @@ def testLinuxServedCheckpoint (triple : String) (getcwd : Nat) : IO Unit := do
   let (outcome, after) ← runOn second
   assertEqual s!"Linux {triple} a call that stopped goes on as it would have" (wholeOutcome, wholeText) (outcome, before ++ after)
 
+/-- What is atomic on a machine is atomic in a parallel round, against each other and against plain stores: each thread adds 1 many
+times to one counter, and nothing is lost. -/
+def testParallelAtomics : IO Unit := do
+  let trial (label : String) (make : IO Bap.Emu.Emu) (register : Nat → Bap.Var) (last threads count : Nat) : IO Unit := do
+    let emu ← make
+    Bap.Emu.map emu ⟨0x10000, ByteArray.mk (Array.replicate 16 0), ⟨true, true, false⟩⟩
+    let word (value : Nat) : Bap.Value := .bits (BitVec.ofNat 64 value)
+    let setup (write : Bap.Var → Bap.Value → IO Unit) : IO Unit := do
+      write (register 0) (word 0x10000)
+      write (register 1) (word count)
+      write (register 2) (word 1)
+    setup (Bap.Emu.setReg emu)
+    for _ in [1:threads] do
+      let id ← Bap.Emu.spawnThread emu 0 0
+      setup (Bap.Emu.setThreadReg emu id)
+    let mut finished := false
+    for _ in [0:100000] do
+      let _ ← Bap.Emu.runPreemptiveParallel emu 500
+      if ← (← Bap.Emu.threads emu).allM (fun thread => pure (thread.pc == last)) then
+        finished := true
+        break
+    assertTrue s!"{label} ends" finished
+    let bytes ← Bap.Emu.read emu 0x10000 4
+    let value := (List.range 4).foldl (init := 0) fun value index => value + bytes[index]!.toNat * 256 ^ index
+    assertEqual s!"{label} loses nothing" (threads * count) value
+  let riscv (source : String) : IO Bap.Emu.Emu := do Bap.Emu.riscv64 (← LLVM.assemble "riscv64" source) 0 0
+  -- a0 is where, a2 how many, a3 by how much.
+  let riscvRegister (index : Nat) : Bap.Var := ⟨s!"X{[10, 12, 13][index]!}", .imm 64, 0, false⟩
+  trial "Parallel lr and sc" (riscv "lr.w t1, (a0)\naddi t1, t1, 1\nsc.w t2, t1, (a0)\nbnez t2, -12\naddi a2, a2, -1\nbnez a2, -20\nj 0")
+    riscvRegister 24 4 1000
+  trial "Parallel amoadd" (riscv "amoadd.w zero, a3, (a0)\naddi a2, a2, -1\nbnez a2, -8\nj 0") riscvRegister 12 4 1000
+  -- A lock that is taken by a swap and let go by a plain store, around what isn't atomic: a store that a swap went over would never end.
+  trial "Parallel lock of a swap and a store"
+    (riscv "addi t4, a0, 8\namoswap.w t3, a3, (t4)\nbnez t3, -4\nlw t1, (a0)\naddi t1, t1, 1\nsw t1, (a0)\nsw zero, (t4)\naddi a2, a2, -1\nbnez a2, -28\nj 0")
+    riscvRegister 36 4 300
+  let aarch64 (source : String) : IO Bap.Emu.Emu := do Bap.Emu.aarch64 (← LLVM.assemble "aarch64" source) 0 0
+  let armRegister (index : Nat) : Bap.Var := ⟨s!"X{[0, 3, 4][index]!}", .imm 64, 0, false⟩
+  trial "Parallel ldxr and stxr"
+    (aarch64 "ldxr w1, [x0]\nadd w1, w1, #1\nstxr w2, w1, [x0]\ncbnz w2, #-12\nsub x3, x3, #1\ncbnz x3, #-20\nb #0") armRegister 24 4 1000
+  trial "Parallel ldadd" (aarch64 "ldadd w4, wzr, [x0]\nsub x3, x3, #1\ncbnz x3, #-8\nb #0") armRegister 12 4 1000
+  -- A round is turns of its own: what a run left of a turn isn't there after one, whether it had one thread to run or more.
+  let turns ← riscv "nop\nj -4"
+  let _ ← Bap.Emu.spawnThread turns 0 0
+  let _ ← Bap.Emu.runPreemptive turns 10 3
+  assertEqual "A run that fuel ended holds what was left of its turn" 3 (← turns.turnUsed.get)
+  let _ ← Bap.Emu.runPreemptiveParallel turns 10
+  assertEqual "A round goes on from no turn" 0 (← turns.turnUsed.get)
+  let alone ← riscv "nop\nj -4"
+  let _ ← Bap.Emu.runPreemptiveParallel alone 10
+  assertEqual "A round of one thread leaves no turn" 0 (← alone.turnUsed.get)
+
+/-- An aligned load sees a whole store, as on a machine, and never a part of one: one thread writes all ones and all zeros by turns,
+and another reads what it may, and stops if it is anything else. -/
+def testParallelTearing : IO Unit := do
+  let trial (label loadStore : String) : IO Unit := do
+    -- 0: the one that writes. 20: the one that reads, which is at `torn` if it saw a part. a0 is where.
+    let code ← LLVM.assemble "riscv64" (s!"li t1, -1\n{loadStore} t1, (a0)\n{loadStore} zero, (a0)\nj -8\nnop\n" ++
+      s!"{(if loadStore == "sd" then "ld" else "lw")} t2, (a0)\nbeqz t2, -4\naddi t3, t2, 1\nbeqz t3, -12\nj 0")
+    let torn := code.size - 4
+    -- Compiled, and never compiled, which is another way to memory.
+    for (way, adjust) in [("compiled", id), ("interpreted", fun config => { config with hotThreshold := 1000000000 })] do
+      let emu ← Bap.Emu.riscv64 code 0 0 (adjust := adjust)
+      Bap.Emu.map emu ⟨0x10000, ByteArray.mk (Array.replicate 64 0), ⟨true, true, false⟩⟩
+      let where_ : Bap.Var := ⟨"X10", .imm 64, 0, false⟩
+      let address : Bap.Value := .bits (BitVec.ofNat 64 0x10000)
+      Bap.Emu.setReg emu where_ address
+      let reader ← Bap.Emu.spawnThread emu 20 0
+      Bap.Emu.setThreadReg emu reader where_ address
+      for _ in [0:(if way == "compiled" then 40 else 400)] do
+        let _ ← Bap.Emu.runPreemptiveParallel emu (if way == "compiled" then 20000 else 500)
+      let readerAt := ((← Bap.Emu.threads emu).find? (·.id == reader)).map (·.pc)
+      assertTrue s!"{label} {way} is not seen in parts" (readerAt != some torn)
+  trial "Parallel store of 4 bytes" "sw"
+  trial "Parallel store of 8 bytes" "sd"
+
+/-- A fence holds a worker until all the others have stopped, as that is what orders what they did: of each target, by how little a
+round gets through. A `nop` is no reason to stop. -/
+def testParallelFences : IO Unit := do
+  let trial (label : String) (make : IO Bap.Emu.Emu) (stops : Bool) : IO Unit := do
+    let emu ← make
+    let _ ← Bap.Emu.spawnThread emu 0 0
+    let steps ← Bap.Emu.runPreemptiveParallel emu 2000
+    if stops then assertTrue s!"{label} ends a round early: {steps}" (steps ≤ 16)
+    else assertEqual s!"{label} doesn't end a round" 4000 steps
+  let riscv (source : String) : IO Bap.Emu.Emu := do Bap.Emu.riscv64 (← LLVM.assemble "riscv64" source) 0 0
+  let arm (source : String) : IO Bap.Emu.Emu := do Bap.Emu.aarch64 (← LLVM.assemble "aarch64" source) 0 0
+  let x86 (code : List UInt8) : IO Bap.Emu.Emu := Bap.Emu.x86_64 (ByteArray.mk code.toArray) 0 0
+  trial "RISC-V fence" (riscv "fence rw, rw\nj -4") true
+  trial "RISC-V fence.tso" (riscv "fence.tso\nj -4") true
+  trial "RISC-V nop" (riscv "nop\nj -4") false
+  trial "AArch64 dmb" (arm "dmb ish\nb #-4") true
+  trial "AArch64 dsb" (arm "dsb sy\nb #-4") true
+  trial "AArch64 nop" (arm "nop\nb #-4") false
+  -- A jump back to the start after each.
+  trial "x86 mfence" (x86 [0x0F, 0xAE, 0xF0, 0xEB, 0xFB]) true
+  trial "x86 sfence" (x86 [0x0F, 0xAE, 0xF8, 0xEB, 0xFB]) true
+  trial "x86 nop" (x86 [0x90, 0xEB, 0xFD]) false
+  -- Each stops where it starts, so that nothing comes after it: these hold what their disassemblers call a fence.
+  trial "MIPS sync" (do Bap.Emu.mips32 (← LLVM.assemble "mips" "sync") 0 0) true
+  trial "PowerPC sync" (do Bap.Emu.powerpc (← LLVM.assemble "powerpc64le" "sync") 0 0 {}) true
+  trial "PowerPC lwsync" (do Bap.Emu.powerpc (← LLVM.assemble "powerpc64le" "lwsync") 0 0 {}) true
+  trial "ARM dmb" (do Bap.Emu.arm32 (← LLVM.assemble "armv7" "dmb ish") 0 0) true
+
+/-- A store across a word is a store to each, but what lies within one word is seen whole, at any alignment and of any size that the
+lifter makes: a store of 4 bytes at 2 off a multiple of 8. -/
+def testParallelUnaligned : IO Unit := do
+  let code ← LLVM.assemble "riscv64" ("li t1, -1\nsw t1, 2(a0)\nsw zero, 2(a0)\nj -8\nnop\n" ++
+    "lw t2, 2(a0)\nbeqz t2, -4\naddi t3, t2, 1\nbeqz t3, -12\nj 0")
+  let torn := code.size - 4
+  let emu ← Bap.Emu.riscv64 code 0 0
+  Bap.Emu.map emu ⟨0x10000, ByteArray.mk (Array.replicate 64 0), ⟨true, true, false⟩⟩
+  let where_ : Bap.Var := ⟨"X10", .imm 64, 0, false⟩
+  let address : Bap.Value := .bits (BitVec.ofNat 64 0x10000)
+  Bap.Emu.setReg emu where_ address
+  let reader ← Bap.Emu.spawnThread emu 20 0
+  Bap.Emu.setThreadReg emu reader where_ address
+  for _ in [0:40] do
+    let _ ← Bap.Emu.runPreemptiveParallel emu 20000
+  let readerAt := ((← Bap.Emu.threads emu).find? (·.id == reader)).map (·.pc)
+  assertTrue "Parallel store within a word off its alignment is not seen in parts" (readerAt != some torn)
+
 /-- The kernel itself: a program isn't needed to say what it does. -/
 private def testKernel : IO Unit := do
   let unwrap {α} (result : Bap.Linux.Result α) : IO α := match result with

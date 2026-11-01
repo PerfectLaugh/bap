@@ -4,10 +4,12 @@
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/Error.h>
+#include <llvm/Support/SwapByteOrder.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
 
@@ -17,12 +19,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <malloc.h>
 #include <memory>
+#include <new>
 #include <mutex>
 #include <string>
 #include <vector>
+
+#include "paged_memory.h"
 
 class CellMap {
   struct Slot {
@@ -100,17 +106,42 @@ struct BapCell {
   uint8_t value;
 };
 
+// A store that a run made, to say at its end what it changed. Keeping these and not a table of bytes is what lets a store be one
+// instruction and one call.
+struct StoreRecord {
+  uint64_t address;
+  uint64_t value;
+  uint8_t size;
+  uint8_t bigEndian;
+};
+
+// Where a run last found the pages. A tag is one more than the number of a page, so that 0 is an entry that holds nothing. A run has
+// its own, so that this needs no synchronization, and the code that a program is compiled to reads it.
+struct BapPageEntry {
+  uint64_t tag;
+  uint8_t *page;
+};
+constexpr size_t pageEntryCount = 64;
+static_assert(sizeof(BapPageEntry) == 16, "compiled code goes through these by index");
+
 struct BapCells {
   BapCell *items;
   size_t size;
   size_t capacity;
   lean_object *observer;
   lean_object *error;
-  std::array<CellMap, 64> *tables;
-  CellMap *changes;
+  PagedMemory *pages;
+  std::vector<StoreRecord> *changes;
   lean_object *codeObserver;
-  std::array<std::mutex, 64> *memoryMutexes;
+  BapPageEntry pageEntries[pageEntryCount] = {};
 };
+
+// Once there is an error nothing takes effect, and with nothing here compiled code goes to `bap_jit_memory_page`, which says so.
+static void failCells(BapCells *cells, lean_object *error) {
+  cells->error = error;
+  lean_inc_ref(error);
+  std::memset(cells->pageEntries, 0, sizeof(cells->pageEntries));
+}
 
 extern "C" void bap_jit_memory_notify(BapCells *cells, uint8_t write,
                                       uint64_t address, uint64_t size,
@@ -123,10 +154,8 @@ extern "C" void bap_jit_memory_notify(BapCells *cells, uint8_t write,
   action = lean_apply_1(action, lean_uint64_to_nat(size));
   action = lean_apply_1(action, lean_uint64_to_nat(value));
   lean_object *result = lean_apply_1(action, lean_io_mk_world());
-  if (lean_io_result_is_error(result)) {
-    cells->error = lean_io_result_get_error(result);
-    lean_inc_ref(cells->error);
-  }
+  if (lean_io_result_is_error(result))
+    failCells(cells, lean_io_result_get_error(result));
   lean_dec_ref(result);
 }
 
@@ -138,8 +167,7 @@ extern "C" uint64_t bap_jit_code_notify(BapCells *cells, uint64_t pc) {
   lean_object *result = lean_apply_1(action, lean_io_mk_world());
   uint64_t stop = 0;
   if (lean_io_result_is_error(result)) {
-    cells->error = lean_io_result_get_error(result);
-    lean_inc_ref(cells->error);
+    failCells(cells, lean_io_result_get_error(result));
     stop = 1;
   } else {
     stop = lean_unbox(lean_io_result_get_value(result));
@@ -148,40 +176,71 @@ extern "C" uint64_t bap_jit_code_notify(BapCells *cells, uint64_t pc) {
   return stop;
 }
 
-extern "C" uint8_t bap_jit_memory_load(BapCells *cells, uint64_t address) {
-  if (cells->error != nullptr)
-    return 0;
-  if (cells->tables != nullptr) {
-    size_t shard = (address >> 8) & 63;
-    std::lock_guard<std::mutex> lock((*cells->memoryMutexes)[shard]);
-    return (*cells->tables)[shard].get(address);
-  }
+static uint8_t loadByte(BapCells *cells, uint64_t address) {
   for (size_t index = 0; index != cells->size; ++index)
     if (cells->items[index].address == address)
       return cells->items[index].value;
   return 0;
 }
 
-extern "C" void bap_jit_memory_store(BapCells *cells, uint64_t address,
-                                     uint8_t value) {
-  if (cells->error != nullptr)
-    return;
-  if (cells->tables != nullptr) {
-    size_t shard = (address >> 8) & 63;
-    std::lock_guard<std::mutex> lock((*cells->memoryMutexes)[shard]);
-    (*cells->tables)[shard].set(address, value);
-    if (cells->changes != nullptr)
-      cells->changes->set(address, value);
-    return;
-  }
+static void storeByte(BapCells *cells, uint64_t address, uint8_t value) {
   for (size_t index = 0; index != cells->size; ++index) {
     if (cells->items[index].address == address) {
       cells->items[index].value = value;
       return;
     }
   }
-  if (cells->size != cells->capacity)
+  if (cells->size < cells->capacity)
     cells->items[cells->size++] = BapCell{address, value};
+}
+
+// The way of what no instruction does: an access that isn't aligned or that has a size no instruction has, or one on a page that
+// isn't there, or a run without pages.
+extern "C" uint64_t bap_jit_memory_load_bytes(BapCells *cells, uint64_t address, uint64_t size, uint8_t bigEndian) {
+  if (cells->error != nullptr)
+    return 0;
+  uint8_t bytes[8];
+  if (cells->pages != nullptr)
+    cells->pages->load(address, static_cast<size_t>(size), bytes);
+  else
+    for (uint64_t index = 0; index != size; ++index)
+      bytes[index] = loadByte(cells, address + index);
+  uint64_t result = 0;
+  for (uint64_t index = 0; index != size; ++index)
+    result |= static_cast<uint64_t>(bytes[index]) << ((bigEndian != 0 ? size - 1 - index : index) * 8);
+  return result;
+}
+
+extern "C" void bap_jit_memory_note(BapCells *cells, uint64_t address, uint64_t size, uint8_t bigEndian, uint64_t value) {
+  if (cells->changes != nullptr)
+    cells->changes->push_back(StoreRecord{address, value, static_cast<uint8_t>(size), bigEndian});
+}
+
+extern "C" void bap_jit_memory_store_bytes(BapCells *cells, uint64_t address, uint64_t size, uint8_t bigEndian, uint64_t value) {
+  if (cells->error != nullptr)
+    return;
+  uint8_t bytes[8];
+  for (uint64_t index = 0; index != size; ++index)
+    bytes[index] = static_cast<uint8_t>(value >> ((bigEndian != 0 ? size - 1 - index : index) * 8));
+  if (cells->pages != nullptr)
+    cells->pages->store(address, static_cast<size_t>(size), bytes);
+  else
+    for (uint64_t index = 0; index != size; ++index)
+      storeByte(cells, address + index, bytes[index]);
+  bap_jit_memory_note(cells, address, size, bigEndian, value);
+}
+
+// The page of an address for the code of a run, which remembers it, or nothing if it has to go the other way. Only a store makes a
+// page: reading what was never written doesn't need one, and a program that reads a lot of nothing shouldn't come to hold a lot of it.
+extern "C" uint8_t *bap_jit_memory_page(BapCells *cells, uint64_t address, uint8_t write) {
+  if (cells->pages == nullptr || cells->error != nullptr)
+    return nullptr;
+  uint8_t *page = write != 0 ? cells->pages->ensure(address) : cells->pages->find(address);
+  if (page == nullptr)
+    return nullptr;
+  uint64_t number = address >> PagedMemory::pageBits;
+  cells->pageEntries[number & (pageEntryCount - 1)] = BapPageEntry{number + 1, page};
+  return page;
 }
 
 namespace {
@@ -229,10 +288,14 @@ std::shared_ptr<SharedJit> sharedJit(bool optimized) {
     throw std::runtime_error("LLVM ORC JIT creation failed: " +
                              llvm::toString(jit.takeError()));
   llvm::orc::SymbolMap runtimeSymbols;
-  runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_memory_load")] =
-      llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_memory_load);
-  runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_memory_store")] =
-      llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_memory_store);
+  runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_memory_load_bytes")] =
+      llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_memory_load_bytes);
+  runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_memory_store_bytes")] =
+      llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_memory_store_bytes);
+  runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_memory_note")] =
+      llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_memory_note);
+  runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_memory_page")] =
+      llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_memory_page);
   runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_memory_notify")] =
       llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_memory_notify);
   runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_code_notify")] =
@@ -321,12 +384,15 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
     llvm::Value *memory = function->getArg(1);
     llvm::Value *zero = llvm::ConstantInt::get(word, 0);
     llvm::Type *byte = llvm::Type::getInt8Ty(*context);
-    llvm::FunctionCallee loadMemory = module->getOrInsertFunction(
-        "bap_jit_memory_load", llvm::FunctionType::get(byte, {pointer, word}, false));
-    llvm::FunctionCallee storeMemory = module->getOrInsertFunction(
-        "bap_jit_memory_store",
-        llvm::FunctionType::get(llvm::Type::getVoidTy(*context),
-                                {pointer, word, byte}, false));
+    llvm::Type *voidType = llvm::Type::getVoidTy(*context);
+    llvm::FunctionCallee loadBytes = module->getOrInsertFunction(
+        "bap_jit_memory_load_bytes", llvm::FunctionType::get(word, {pointer, word, word, byte}, false));
+    llvm::FunctionCallee storeBytes = module->getOrInsertFunction(
+        "bap_jit_memory_store_bytes", llvm::FunctionType::get(voidType, {pointer, word, word, byte, word}, false));
+    llvm::FunctionCallee noteStore = module->getOrInsertFunction(
+        "bap_jit_memory_note", llvm::FunctionType::get(voidType, {pointer, word, word, byte, word}, false));
+    llvm::FunctionCallee pageOf = module->getOrInsertFunction(
+        "bap_jit_memory_page", llvm::FunctionType::get(pointer, {pointer, word, byte}, false));
     llvm::FunctionCallee notifyMemory = module->getOrInsertFunction(
         "bap_jit_memory_notify",
         llvm::FunctionType::get(llvm::Type::getVoidTy(*context),
@@ -337,6 +403,44 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
 
     auto pointerTo = [&](size_t slot) {
       return builder.CreateConstGEP1_64(word, state, slot);
+    };
+    // Whether a size is that of an instruction of the host, which is atomic at an address that is a multiple of it.
+    auto hasInstruction = [](size_t size) { return size == 1 || size == 2 || size == 4 || size == 8; };
+    // The page of an access that an instruction can do, if the page can be had: ends with the insertion point where the access
+    // is, with the page in hand, and `slow` where it isn't.
+    auto pageForAccess = [&](llvm::Value *base, size_t size, bool write, llvm::BasicBlock *slow) -> llvm::Value * {
+      llvm::Value *aligned = builder.CreateICmpEQ(
+          builder.CreateAnd(base, llvm::ConstantInt::get(word, size - 1)), zero);
+      llvm::Value *number = builder.CreateLShr(base, PagedMemory::pageBits);
+      llvm::Value *index = builder.CreateAnd(number, llvm::ConstantInt::get(word, pageEntryCount - 1));
+      llvm::Value *entryAddress = builder.CreateGEP(byte, memory, builder.CreateAdd(
+          llvm::ConstantInt::get(word, offsetof(BapCells, pageEntries)),
+          builder.CreateMul(index, llvm::ConstantInt::get(word, sizeof(BapPageEntry)))));
+      llvm::Value *tag = builder.CreateLoad(word, entryAddress);
+      llvm::Value *known = builder.CreateICmpEQ(tag, builder.CreateAdd(number, llvm::ConstantInt::get(word, 1)));
+      llvm::BasicBlock *hit = llvm::BasicBlock::Create(*context, "page_known", function);
+      llvm::BasicBlock *check = llvm::BasicBlock::Create(*context, "page_check", function);
+      llvm::BasicBlock *miss = llvm::BasicBlock::Create(*context, "page_miss", function);
+      llvm::BasicBlock *access = llvm::BasicBlock::Create(*context, "page_access", function);
+      builder.CreateCondBr(builder.CreateAnd(aligned, known), hit, check);
+      builder.SetInsertPoint(check);
+      builder.CreateCondBr(aligned, miss, slow);
+      builder.SetInsertPoint(hit);
+      llvm::Value *knownPage = builder.CreateLoad(pointer, builder.CreateConstGEP1_64(byte, entryAddress, offsetof(BapPageEntry, page)));
+      builder.CreateBr(access);
+      builder.SetInsertPoint(miss);
+      llvm::Value *foundPage = builder.CreateCall(pageOf, {memory, base, llvm::ConstantInt::get(byte, write ? 1 : 0)});
+      builder.CreateCondBr(builder.CreateIsNull(foundPage), slow, access);
+      builder.SetInsertPoint(access);
+      llvm::PHINode *page = builder.CreatePHI(pointer, 2);
+      page->addIncoming(knownPage, hit);
+      page->addIncoming(foundPage, miss);
+      return builder.CreateGEP(byte, page, builder.CreateAnd(base, llvm::ConstantInt::get(word, PagedMemory::pageSize - 1)));
+    };
+    auto swapped = [&](llvm::Value *value, size_t size, bool bigEndian) -> llvm::Value * {
+      if (size == 1 || bigEndian == llvm::sys::IsBigEndianHost)
+        return value;
+      return builder.CreateUnaryIntrinsic(llvm::Intrinsic::bswap, value);
     };
     auto load = [&](size_t slot) {
       return builder.CreateLoad(word, pointerTo(slot));
@@ -624,14 +728,28 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
         builder.CreateCall(notifyMemory,
             {memory, llvm::ConstantInt::get(byte, 0), base,
              llvm::ConstantInt::get(word, size), zero});
-        llvm::Value *result = zero;
-        for (size_t index = 0; index != size; ++index) {
-          llvm::Value *current = builder.CreateAdd(
-              base, llvm::ConstantInt::get(word, index));
-          llvm::Value *value = builder.CreateCall(loadMemory, {memory, current});
-          size_t shift = (bigEndian ? size - 1 - index : index) * 8;
-          result = builder.CreateOr(
-              result, builder.CreateShl(builder.CreateZExt(value, word), shift));
+        llvm::Value *endianness = llvm::ConstantInt::get(byte, bigEndian ? 1 : 0);
+        llvm::Value *result;
+        if (hasInstruction(size)) {
+          llvm::BasicBlock *slow = llvm::BasicBlock::Create(*context, "load_slow", function);
+          llvm::BasicBlock *done = llvm::BasicBlock::Create(*context, "load_done", function);
+          llvm::Value *cell = pageForAccess(base, size, false, slow);
+          llvm::IntegerType *width = llvm::IntegerType::get(*context, size * 8);
+          llvm::LoadInst *loaded = builder.CreateAlignedLoad(width, cell, llvm::Align(size));
+          loaded->setAtomic(llvm::AtomicOrdering::Acquire);
+          llvm::Value *fast = builder.CreateZExt(swapped(loaded, size, bigEndian), word);
+          llvm::BasicBlock *fastEnd = builder.GetInsertBlock();
+          builder.CreateBr(done);
+          builder.SetInsertPoint(slow);
+          llvm::Value *bytes = builder.CreateCall(loadBytes, {memory, base, llvm::ConstantInt::get(word, size), endianness});
+          builder.CreateBr(done);
+          builder.SetInsertPoint(done);
+          llvm::PHINode *merged = builder.CreatePHI(word, 2);
+          merged->addIncoming(fast, fastEnd);
+          merged->addIncoming(bytes, slow);
+          result = merged;
+        } else {
+          result = builder.CreateCall(loadBytes, {memory, base, llvm::ConstantInt::get(word, size), endianness});
         }
         store(dst, result);
         noteSlot(dst);
@@ -650,13 +768,24 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
         builder.CreateCall(notifyMemory,
             {memory, llvm::ConstantInt::get(byte, 1), base,
              llvm::ConstantInt::get(word, size), stored});
-        for (size_t index = 0; index != size; ++index) {
-          llvm::Value *current = builder.CreateAdd(
-              base, llvm::ConstantInt::get(word, index));
-          size_t shift = (bigEndian ? size - 1 - index : index) * 8;
-          llvm::Value *byteValue = builder.CreateTrunc(
-              builder.CreateLShr(stored, shift), byte);
-          builder.CreateCall(storeMemory, {memory, current, byteValue});
+        llvm::Value *endianness = llvm::ConstantInt::get(byte, bigEndian ? 1 : 0);
+        llvm::Value *sizeValue = llvm::ConstantInt::get(word, size);
+        if (hasInstruction(size)) {
+          llvm::BasicBlock *slow = llvm::BasicBlock::Create(*context, "store_slow", function);
+          llvm::BasicBlock *done = llvm::BasicBlock::Create(*context, "store_done", function);
+          llvm::Value *cell = pageForAccess(base, size, true, slow);
+          llvm::IntegerType *width = llvm::IntegerType::get(*context, size * 8);
+          llvm::StoreInst *written = builder.CreateAlignedStore(
+              swapped(builder.CreateTrunc(stored, width), size, bigEndian), cell, llvm::Align(size));
+          written->setAtomic(llvm::AtomicOrdering::Release);
+          builder.CreateCall(noteStore, {memory, base, sizeValue, endianness, stored});
+          builder.CreateBr(done);
+          builder.SetInsertPoint(slow);
+          builder.CreateCall(storeBytes, {memory, base, sizeValue, endianness, stored});
+          builder.CreateBr(done);
+          builder.SetInsertPoint(done);
+        } else {
+          builder.CreateCall(storeBytes, {memory, base, sizeValue, endianness, stored});
         }
         memoryStores += size;
         noteSlot(address);
@@ -765,7 +894,7 @@ extern "C" lean_obj_res bap_jit_run(lean_obj_arg programObject,
     std::vector<uint64_t> state(size);
     for (size_t index = 0; index != size; ++index)
       state[index] = lean_unbox_uint64(lean_array_get_core(stateObject, index));
-    BapCells memory{nullptr, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    BapCells memory{nullptr, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr};
     uint64_t next = program->function(state.data(), &memory);
     lean_obj_res resultState = lean_alloc_array(size, size);
     for (size_t index = 0; index != size; ++index)
@@ -809,7 +938,7 @@ extern "C" lean_obj_res bap_jit_run_memory_code(lean_obj_arg programObject,
         ? nullptr : lean_ctor_get(observerObject, 0);
     lean_object *codeObserver = lean_is_scalar(codeObserverObject)
         ? nullptr : lean_ctor_get(codeObserverObject, 0);
-    BapCells memory{cells.data(), addressCount, cells.capacity(), observer, nullptr, nullptr, nullptr, codeObserver, nullptr};
+    BapCells memory{cells.data(), addressCount, cells.capacity(), observer, nullptr, nullptr, nullptr, codeObserver};
     uint64_t next = program->function(state.data(), &memory);
     if (memory.error != nullptr)
       return lean_io_result_mk_error(memory.error);
@@ -851,32 +980,7 @@ extern "C" lean_obj_res bap_jit_run_memory(lean_obj_arg programObject,
 }
 
 namespace {
-struct PersistentMemory {
-  std::array<CellMap, 64> cells;
-  std::array<std::mutex, 64> mutexes;
-
-  size_t size() const {
-    size_t total = 0;
-    for (const auto &cell : cells)
-      total += cell.size();
-    return total;
-  }
-
-  template <typename F> void forEach(F &&action) const {
-    for (const auto &cell : cells)
-      cell.forEach(action);
-  }
-
-  std::vector<std::unique_lock<std::mutex>> lockAll() {
-    std::vector<std::unique_lock<std::mutex>> locks;
-    locks.reserve(mutexes.size());
-    for (auto &mutex : mutexes)
-      locks.emplace_back(mutex);
-    return locks;
-  }
-};
-
-void finalizeMemory(void *data) { delete static_cast<PersistentMemory *>(data); }
+void finalizeMemory(void *data) { delete static_cast<PagedMemory *>(data); }
 void foreachMemory(void *, b_lean_obj_arg) {}
 
 lean_external_class *memoryClass() {
@@ -894,14 +998,14 @@ extern "C" lean_obj_res bap_jit_memory_create(lean_obj_arg addressesObject,
     const size_t valueCount = lean_array_size(valuesObject);
     if (addressCount != valueCount)
       return ioError("JIT memory addresses and values have different lengths");
-    auto *memory = new PersistentMemory;
-    for (auto &cell : memory->cells)
-      cell.reserve(addressCount / memory->cells.size() + 1);
+    auto *memory = new PagedMemory;
+    std::vector<uint64_t> addresses(addressCount);
+    std::vector<uint8_t> values(addressCount);
     for (size_t index = 0; index != addressCount; ++index) {
-      uint64_t address = lean_unbox_uint64(lean_array_get_core(addressesObject, index));
-      memory->cells[(address >> 8) & 63].set(
-          address, static_cast<uint8_t>(lean_unbox(lean_array_get_core(valuesObject, index))));
+      addresses[index] = lean_unbox_uint64(lean_array_get_core(addressesObject, index));
+      values[index] = static_cast<uint8_t>(lean_unbox(lean_array_get_core(valuesObject, index)));
     }
+    memory->writeAll(addresses.data(), values.data(), addressCount);
     return lean_io_result_mk_ok(lean_alloc_external(memoryClass(), memory));
   } catch (const std::exception &error) {
     return ioError(std::string("JIT memory creation failed: ") + error.what());
@@ -912,28 +1016,28 @@ extern "C" lean_obj_res bap_jit_memory_write(lean_obj_arg memoryObject,
                                                lean_obj_arg addressesObject,
                                                lean_obj_arg valuesObject, lean_obj_arg) {
   try {
-    auto *persistent = static_cast<PersistentMemory *>(lean_get_external_data(memoryObject));
+    auto *persistent = static_cast<PagedMemory *>(lean_get_external_data(memoryObject));
     const size_t addressCount = lean_array_size(addressesObject);
     const size_t valueCount = lean_array_size(valuesObject);
     if (addressCount != valueCount)
       return ioError("JIT memory addresses and values have different lengths");
-    auto locks = persistent->lockAll();
+    std::vector<uint64_t> addresses(addressCount);
+    std::vector<uint8_t> values(addressCount);
     for (size_t index = 0; index != addressCount; ++index) {
-      uint64_t address = lean_unbox_uint64(lean_array_get_core(addressesObject, index));
-      persistent->cells[(address >> 8) & 63].set(
-          address, static_cast<uint8_t>(lean_unbox(lean_array_get_core(valuesObject, index))));
+      addresses[index] = lean_unbox_uint64(lean_array_get_core(addressesObject, index));
+      values[index] = static_cast<uint8_t>(lean_unbox(lean_array_get_core(valuesObject, index)));
     }
-    return lean_io_result_mk_ok(lean_box(0));
+    persistent->writeAll(addresses.data(), values.data(), addressCount);
+return lean_io_result_mk_ok(lean_box(0));
   } catch (const std::exception &error) {
     return ioError(std::string("JIT persistent memory write failed: ") + error.what());
   }
 }
 
 extern "C" lean_obj_res bap_jit_memory_clone(lean_obj_arg memoryObject, lean_obj_arg) {
-  auto *persistent = static_cast<PersistentMemory *>(lean_get_external_data(memoryObject));
-  auto locks = persistent->lockAll();
-  auto *copy = new PersistentMemory;
-  copy->cells = persistent->cells;
+  auto *persistent = static_cast<PagedMemory *>(lean_get_external_data(memoryObject));
+  auto *copy = new PagedMemory;
+  copy->copyFrom(*persistent);
   return lean_io_result_mk_ok(lean_alloc_external(memoryClass(), copy));
 }
 
@@ -943,7 +1047,7 @@ extern "C" lean_obj_res bap_jit_run_memory_object_code(
     lean_obj_arg codeObserverObject, lean_obj_arg) {
   try {
     auto *program = static_cast<Program *>(lean_get_external_data(programObject));
-    auto *persistent = static_cast<PersistentMemory *>(lean_get_external_data(memoryObject));
+    auto *persistent = static_cast<PagedMemory *>(lean_get_external_data(memoryObject));
     const size_t stateSize = lean_array_size(stateObject);
     if (stateSize < program->maxSlot)
       return ioError("JIT state has fewer slots than its program requires");
@@ -954,11 +1058,19 @@ extern "C" lean_obj_res bap_jit_run_memory_object_code(
         ? nullptr : lean_ctor_get(observerObject, 0);
     lean_object *codeObserver = lean_is_scalar(codeObserverObject)
         ? nullptr : lean_ctor_get(codeObserverObject, 0);
-    CellMap changes;
-    BapCells memory{nullptr, 0, 0, observer, nullptr, &persistent->cells, &changes, codeObserver, &persistent->mutexes};
+    std::vector<StoreRecord> records;
+    BapCells memory{nullptr, 0, 0, observer, nullptr, persistent, &records, codeObserver};
     uint64_t next = program->function(state.data(), &memory);
     if (memory.error != nullptr)
       return lean_io_result_mk_error(memory.error);
+    // What the stores came to, each byte once, the last that was written to it.
+    CellMap changes;
+    changes.reserve(records.size());
+    for (const StoreRecord &record : records)
+      for (uint64_t index = 0; index != record.size; ++index) {
+        uint64_t shift = (record.bigEndian != 0 ? record.size - 1 - index : index) * 8;
+        changes.set(record.address + index, static_cast<uint8_t>(record.value >> shift));
+      }
     lean_obj_res resultState = lean_alloc_array(stateSize, stateSize);
     for (size_t index = 0; index != stateSize; ++index)
       lean_array_set_core(resultState, index, lean_box_uint64(state[index]));
@@ -993,14 +1105,21 @@ extern "C" lean_obj_res bap_jit_run_memory_object(
 }
 
 extern "C" lean_obj_res bap_jit_memory_dump(lean_obj_arg memoryObject, lean_obj_arg) {
-  auto *memory = static_cast<PersistentMemory *>(lean_get_external_data(memoryObject));
-  auto locks = memory->lockAll();
+  auto *memory = static_cast<PagedMemory *>(lean_get_external_data(memoryObject));
   std::vector<std::pair<uint64_t, uint8_t>> cells;
-  cells.reserve(memory->size());
-  memory->forEach([&](uint64_t address, uint8_t value) {
-    cells.emplace_back(address, value);
+  memory->forEachPage([&](uint64_t address, const uint8_t *page) {
+    // By the word, so that a word that a thread is storing to is one that it stored.
+    for (size_t offset = 0; offset != PagedMemory::pageSize; offset += sizeof(uint64_t)) {
+      uint64_t word = __atomic_load_n(reinterpret_cast<const uint64_t *>(page + offset), __ATOMIC_ACQUIRE);
+      if (word == 0)
+        continue;
+      uint8_t bytes[sizeof(uint64_t)];
+      std::memcpy(bytes, &word, sizeof(uint64_t));
+      for (size_t index = 0; index != sizeof(uint64_t); ++index)
+        if (bytes[index] != 0)
+          cells.emplace_back(address + offset + index, bytes[index]);
+    }
   });
-  std::sort(cells.begin(), cells.end());
   lean_obj_res addresses = lean_alloc_array(cells.size(), cells.size());
   lean_obj_res values = lean_alloc_array(cells.size(), cells.size());
   size_t index = 0;
@@ -1016,14 +1135,32 @@ extern "C" lean_obj_res bap_jit_memory_dump(lean_obj_arg memoryObject, lean_obj_
 }
 
 extern "C" lean_obj_res bap_jit_memory_read(lean_obj_arg memoryObject, uint64_t address, lean_obj_arg) {
-  auto *memory = static_cast<PersistentMemory *>(lean_get_external_data(memoryObject));
-  std::lock_guard<std::mutex> lock(memory->mutexes[(address >> 8) & 63]);
-  uint8_t value = memory->cells[(address >> 8) & 63].get(address);
-  return lean_io_result_mk_ok(lean_uint64_to_nat(value));
+  auto *memory = static_cast<PagedMemory *>(lean_get_external_data(memoryObject));
+  return lean_io_result_mk_ok(lean_uint64_to_nat(memory->read(address)));
+}
+
+extern "C" lean_obj_res bap_jit_memory_read_range(lean_obj_arg memoryObject, uint64_t address, lean_obj_arg sizeObject, lean_obj_arg) {
+  if (!lean_is_scalar(sizeObject))
+    return ioError("JIT memory read too large");
+  auto *memory = static_cast<PagedMemory *>(lean_get_external_data(memoryObject));
+  size_t size = lean_unbox(sizeObject);
+  lean_obj_res result = lean_alloc_sarray(1, size, size);
+  memory->readRange(address, size, lean_sarray_cptr(result));
+  return lean_io_result_mk_ok(result);
+}
+
+extern "C" lean_obj_res bap_jit_memory_trim(lean_obj_arg memoryObject, uint64_t first, uint64_t last, lean_obj_arg) {
+  static_cast<PagedMemory *>(lean_get_external_data(memoryObject))->trim(first, last);
+  return lean_io_result_mk_ok(lean_box(0));
 }
 
 extern "C" lean_obj_res bap_jit_memory_size(lean_obj_arg memoryObject, lean_obj_arg) {
-  auto *memory = static_cast<PersistentMemory *>(lean_get_external_data(memoryObject));
-  auto locks = memory->lockAll();
-  return lean_io_result_mk_ok(lean_uint64_to_nat(memory->size()));
+  auto *memory = static_cast<PagedMemory *>(lean_get_external_data(memoryObject));
+  size_t total = 0;
+  memory->forEachPage([&](uint64_t, const uint8_t *page) {
+    for (size_t offset = 0; offset != PagedMemory::pageSize; ++offset)
+      if (__atomic_load_n(page + offset, __ATOMIC_RELAXED) != 0)
+        ++total;
+  });
+  return lean_io_result_mk_ok(lean_uint64_to_nat(total));
 }

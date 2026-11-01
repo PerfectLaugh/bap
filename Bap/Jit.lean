@@ -10,7 +10,7 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
    the `jump` that ended it. `lowerStatements_run` and `lowerExp_correct` are proved against that model.
 2. `memLoad` and `memStore` first call the memory observer, once, with the base address, the size, and, for a
    store, the whole value, and then access `size` consecutive bytes (at most 8) in the order of `bigEndian`, at
-   the base plus 0 and so on in 64 bits. They do not wrap at the end of a narrower address space. Lowering does not
+   the base plus 0 and so on in 64 bits, as one instruction of the host where obligation 10 says. They do not wrap at the end of a narrower address space. Lowering does not
    let them get there: such a multi-byte access is either the interpreter's (`Lifted.wrapSafe`), or the observer
    rejects it first (`accessFault_past_end`). Any other access is the same on the model whose `view` wraps
    (`denoteLoad_view`, `denoteStore_view`, `wrap_in_range`).
@@ -26,14 +26,22 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
 6. `runWithMemoryObservedCode` returns the final cells of the memory image, and
    `runWithPersistentMemoryObservedCode` the cells its stores changed, each once.
 
-**Persistent memory** (`Memory`, `createMemory`, `writeMemory`, `readMemory`, `dumpMemory`, `cloneMemory`)
+**Persistent memory** (`Memory`, `createMemory`, `writeMemory`, `readMemory`, `readMemoryRange`, `dumpMemory`, `cloneMemory`, `trimMemory`)
 7. A `Memory` is a total map from `UInt64` to `UInt8`, 0 where nothing was written. `readMemory` reads it,
    `writeMemory` and `createMemory` write pairs in array order, and `createMemory` starts from nothing.
-8. `dumpMemory` returns a cell for each address written, by ascending address, with no address twice
-   (`persistentRegionData_bytes` depends on it), and its bytes are those `readMemory` reads.
+8. `dumpMemory` returns a cell for each address that doesn't hold 0, by ascending address, with no address twice
+   (`persistentRegionData_bytes` depends on it), and its bytes are those `readMemory` reads. Where it has no cell,
+   `readMemory` reads 0, whether anything was written there or not.
 9. `cloneMemory` returns a new map with the same contents, and no later operation on one affects the other.
-10. Accesses of one byte from several threads are atomic: a parallel round has no other synchronization on
-    memory. Multi-byte accesses are not atomic across threads, like on hardware.
+10. An access that lies within one word of 8 bytes at a multiple of 8 is atomic across threads, whatever its size and
+    alignment, with acquire for a load and release for a store. That goes for `memLoad`, `memStore`, `readMemoryRange` and
+    `writeMemory`, for each word of what they access: one that crosses words is atomic in each word and not as a whole.
+    This takes a host whose accesses of those sizes are atomic, as x86-64 and AArch64 are. Between a store and a later
+    load of another address there is no order: a fence of a guest is what gives that, by `Bap.Emu`'s stopping every
+    worker of a parallel round at one, which `IO.wait` then orders.
+11. `readMemoryRange memory address size` is `size` bytes of what `readMemory` reads, from `address` on.
+12. `trimMemory` changes nothing that any operation here can tell. It may let the host have the memory of pages that
+    hold only zeros, of those wholly between its bounds, when nothing stores there meanwhile.
 
 Everything else in `Bap.Emu`, from what the code hooks see to what a rollback restores, is proved against
 these. No theorem assumes anything of LLVM beyond them, and nothing depends on `memorySize`, which has no obligation.
@@ -137,6 +145,12 @@ opaque cloneMemory (memory : @& Memory) : IO Memory
 
 @[extern "bap_jit_memory_read"]
 opaque readMemory (memory : @& Memory) (address : UInt64) : IO UInt8
+
+@[extern "bap_jit_memory_read_range"]
+opaque readMemoryRange (memory : @& Memory) (address : UInt64) (size : @& Nat) : IO ByteArray
+
+@[extern "bap_jit_memory_trim"]
+opaque trimMemory (memory : @& Memory) (first last : UInt64) : IO Unit
 
 @[extern "bap_jit_memory_size"]
 opaque memorySize (memory : @& Memory) : IO Nat

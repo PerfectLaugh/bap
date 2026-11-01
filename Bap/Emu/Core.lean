@@ -33,7 +33,8 @@ are about the flows on the model, and Lean sees no more of `IO`, `Task` and `@[e
    (`deferred`), and leaves faults to the rollback of its round. The model has no delay slots, as `rangeLimitOf` has no ranges with them.
 4. **The parallel round.** `roundM` is proved on the model. `IO.asTask` runs the workers, `IO.wait` waits for them all,
    and the mutex of `serialize` gives hooks one at a time. Between the workers only the native memory is shared, by
-   obligation 10 of `Bap.Jit`.
+   obligation 10 of `Bap.Jit`. What has to be atomic, by `Primus.Lifted.atomicProgram`, stops a worker, and runs when all of them have
+   stopped (`runAtomic`), which is only tested: that nothing is lost by it, and that what it recognizes is all that is atomic.
 5. **Native code**, on the terms of `Bap.Jit`: the C++ and LLVM are not verified.
 6. **Lifting.** The blocks a range is made of are what the lifter makes of the bytes, and it makes the same of the same bytes.
    `sameBytes_eq` and the versions of ranges go by that. That the memo of x86 code doesn't change what it makes is proved

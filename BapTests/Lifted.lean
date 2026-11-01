@@ -45,6 +45,164 @@ def invalidationScales : IO Unit := do
   let stats ← Primus.Lifted.stats engine
   assertEqual "an invalidation drops what starts there and only that" (blocks + 1) stats.lifts
 
+/-- What native code does to memory, for every size in both orders, where an instruction of the host can do it and where it can't: at
+a multiple of the size, off one, across a page, at the very top of the address space, and without pages at all. -/
+def testNativeMemory : IO Unit := do
+  let value : UInt64 := 0x8877665544332211
+  let expected (size : Nat) (big : Bool) : List UInt8 :=
+    (List.range size).map fun index =>
+      let shift := (if big then size - 1 - index else index) * 8
+      ((value >>> shift.toUInt64) &&& 0xFF).toUInt8
+  let truncated (size : Nat) : UInt64 := if size == 8 then value else value &&& ((1 <<< (size * 8).toUInt64) - 1)
+  let places : List UInt64 := [0x1000, 0x1001, 0x1FFD, 0x2FFF, 0x7FFFFFFFFFFF0, 0xFFFFFFFFFFFFF000, 0xFFFFFFFFFFFFFFF8]
+  for address in places do
+    for size in [1, 2, 3, 4, 5, 6, 7, 8] do
+      -- The top of the address space has only so much room, and an access doesn't wrap.
+      if address.toNat + size ≤ 2 ^ 64 then
+      for big in [false, true] do
+        let label := s!"native {size} bytes at {address} big {big}"
+        let store ← Jit.compile [.set 0 address, .set 1 value, .memStore 0 1 size big, .jump 0]
+        let load ← Jit.compile [.set 0 address, .memLoad 1 0 size big, .jump 0]
+        let memory ← Jit.createMemory #[] #[]
+        let (_, _, changed, changedValues) ← Jit.runWithPersistentMemory store #[0, 0] memory none
+        let bytes ← (List.range size).mapM fun index => Jit.readMemory memory (address + index.toUInt64)
+        assertEqual s!"{label} stores its bytes" (expected size big) bytes
+        assertEqual s!"{label} touches nothing before it" 0 (← Jit.readMemory memory (address - 1)).toNat
+        if address.toNat + size < 2 ^ 64 then
+          assertEqual s!"{label} touches nothing after it" 0 (← Jit.readMemory memory (address + size.toUInt64)).toNat
+        assertEqual s!"{label} says what it changed" size changed.size
+        let changes := (changed.toList.zip changedValues.toList).mergeSort fun left right => left.1 ≤ right.1
+        assertEqual s!"{label} says the bytes it changed" (expected size big) (changes.map (·.2))
+        let (_, loaded, _, _) ← Jit.runWithPersistentMemory load #[0, 0] memory none
+        assertEqual s!"{label} loads what it stored" (truncated size).toNat loaded[1]!.toNat
+        let (dumped, _) ← Jit.dumpMemory memory
+        assertEqual s!"{label} is in the dump" size dumped.size
+        -- A run without pages does the same, a byte at a time.
+        let (_, _, cellAddresses, cellValues) ← Jit.runWithMemoryObservedCode store #[0, 0] #[] #[] none none
+        let cells := (cellAddresses.toList.zip cellValues.toList).mergeSort fun left right => left.1 ≤ right.1
+        assertEqual s!"{label} stores its bytes in cells" (expected size big) (cells.map (·.2))
+        let (_, loadedCells, _, _) ← Jit.runWithMemoryObservedCode load #[0, 0] cellAddresses cellValues none none
+        assertEqual s!"{label} loads from cells" (truncated size).toNat loadedCells[1]!.toNat
+  -- More pages than a run remembers, each found again, to one that has the same place among those it remembers.
+  let many ← Jit.compile (([0, 1, 2, 3, 64, 65, 128, 4096, 0].flatMap fun page =>
+    [.set 0 (0x100000 + UInt64.ofNat page * 4096), .set 1 (UInt64.ofNat page + 1), .memStore 0 1 8 false]) ++ [.jump 0])
+  let paged ← Jit.createMemory #[] #[]
+  let _ ← Jit.runWithPersistentMemory many #[0, 0] paged none
+  for page in [1, 2, 3, 64, 65, 128, 4096] do
+    assertEqual s!"native page {page} isn't another with its place" ((page + 1) % 256)
+      (← Jit.readMemory paged (0x100000 + UInt64.ofNat page * 4096)).toNat
+  -- Once an observer has thrown nothing takes effect, on either way of an access.
+  let aligned ← Jit.compile [.set 0 0x3000, .set 1 7, .memStore 0 1 4 false, .memStore 0 1 8 false, .jump 0]
+  let across ← Jit.compile [.set 0 0x3FFE, .set 1 0xFFFFFFFF, .memStore 0 1 4 false, .jump 0]
+  let refusing : Jit.MemoryObserver := fun _ _ _ _ => throw (IO.userError "refused")
+  for (label, program) in [("aligned", aligned), ("across", across)] do
+    let guarded ← Jit.createMemory #[0x3000, 0x3FFE] #[9, 9]
+    match ← (Jit.runWithPersistentMemory program #[0, 0] guarded (some refusing)).toBaseIO with
+    | .ok _ => throw <| IO.userError s!"native {label} an observer that throws has to stop a run"
+    | .error _ => pure ()
+    assertEqual s!"native {label} store after a throw takes no effect" (9, 9)
+      ((← Jit.readMemory guarded 0x3000).toNat, (← Jit.readMemory guarded 0x3FFE).toNat)
+  -- A zero that is written is a change, and reads as what was never written, which a dump leaves out.
+  let zeroing ← Jit.compile [.set 0 0x4000, .set 1 0, .memStore 0 1 1 false, .jump 0]
+  let zeroed ← Jit.createMemory #[0x4000, 0x4001] #[5, 6]
+  let (_, _, zeroAddresses, zeroValues) ← Jit.runWithPersistentMemory zeroing #[0, 0] zeroed none
+  assertEqual "native a store of zero is a change" (#[0x4000], #[0]) (zeroAddresses, zeroValues)
+  assertEqual "native a dump has what isn't zero, in order" (#[0x4001], #[6]) (← Jit.dumpMemory zeroed)
+  assertEqual "native size counts what isn't zero" 1 (← Jit.memorySize zeroed)
+  Jit.writeMemory zeroed #[0x9000, 0x5000] #[1, 2]
+  assertEqual "native a dump is by ascending address" (#[0x4001, 0x5000, 0x9000], #[6, 2, 1]) (← Jit.dumpMemory zeroed)
+  -- A clone is its own, both ways, with the pages that it had and those that come after.
+  let clone ← Jit.cloneMemory zeroed
+  Jit.writeMemory clone #[0x4001, 0xA000] #[7, 8]
+  Jit.writeMemory zeroed #[0x5000] #[3]
+  assertEqual "native a clone doesn't change what it came from" (#[0x4001, 0x5000, 0x9000], #[6, 3, 1]) (← Jit.dumpMemory zeroed)
+  assertEqual "native what a clone came from doesn't change it" (#[0x4001, 0x5000, 0x9000, 0xA000], #[7, 2, 1, 8]) (← Jit.dumpMemory clone)
+
+/-- A `Memory` against a table of bytes, on a long run of what could be done to it: what it reads, and what it dumps, are what the
+obligations of `Bap.Jit` say. -/
+def testNativeMemoryModel : IO Unit := do
+  let random ← IO.mkRef (0x2545F4914F6CDD1D : UInt64)
+  let next : IO Nat := do
+    let value ← random.get
+    let value := value ^^^ (value <<< 13)
+    let value := value ^^^ (value >>> 7)
+    let value := value ^^^ (value <<< 17)
+    random.set value
+    pure value.toNat
+  -- Few enough places for them to meet, and across words and pages, and at the top of the address space.
+  let place : IO UInt64 := do
+    let base := [0x1000, 0x1FF0, 0x2000, 0xFFFF000, 0xFFFFFFFFFFFFF000][(← next) % 5]!
+    pure (UInt64.ofNat (base + (← next) % 64))
+  let mut memory ← Jit.createMemory #[] #[]
+  let mut model : Std.HashMap UInt64 UInt8 := {}
+  let same (label : String) (memory : Jit.Memory) (model : Std.HashMap UInt64 UInt8) : IO Unit := do
+    let cells := (model.toList.filter (·.2 != 0)).mergeSort fun left right => left.1 ≤ right.1
+    let (addresses, values) ← Jit.dumpMemory memory
+    assertTrue s!"{label} dumps what isn't zero, in order"
+      (addresses.toList == cells.map (·.1) && values.toList == cells.map (·.2))
+    assertTrue s!"{label} has the size that it has" ((← Jit.memorySize memory) == cells.length)
+    for (address, value) in model.toList do
+      unless (← Jit.readMemory memory address) == value do
+        throw <| IO.userError s!"{label} reads {address} as it was written"
+  for round in [0:4000] do
+    match (← next) % 8 with
+    | 0 | 1 | 2 =>
+      -- Pairs in order, the last of an address being what stays.
+      let count := (← next) % 20 + 1
+      let start ← place
+      let mut addresses : Array UInt64 := #[]
+      let mut values : Array UInt8 := #[]
+      for index in [0:count] do
+        let elsewhere ← place
+        let address := if (← next) % 8 == 0 then elsewhere else start + index.toUInt64
+        addresses := addresses.push address
+        values := values.push (UInt8.ofNat ((← next) % 3 * ((← next) % 256)))
+      Jit.writeMemory memory addresses values
+      for (address, value) in addresses.toList.zip values.toList do
+        model := model.insert address value
+    | 3 | 4 =>
+      -- A program that stores, of any size and order.
+      let address ← place
+      let size := (← next) % 8 + 1
+      let big := (← next) % 2 == 0
+      let value := UInt64.ofNat (← next)
+      if address.toNat + size ≤ 2 ^ 64 then
+        let program ← Jit.compile [.set 0 address, .set 1 value, .memStore 0 1 size big, .jump 0]
+        let _ ← Jit.runWithPersistentMemory program #[0, 0] memory none
+        for index in [0:size] do
+          let shift := (if big then size - 1 - index else index) * 8
+          model := model.insert (address + index.toUInt64) ((value >>> shift.toUInt64) &&& 0xFF).toUInt8
+    | 5 =>
+      -- What a program loads, and what a range reads.
+      let address ← place
+      let size := (← next) % 8 + 1
+      let big := (← next) % 2 == 0
+      if address.toNat + size ≤ 2 ^ 64 then
+        let program ← Jit.compile [.set 0 address, .memLoad 1 0 size big, .jump 0]
+        let (_, slots, _, _) ← Jit.runWithPersistentMemory program #[0, 0] memory none
+        let expected := (List.range size).foldl (init := 0) fun total index =>
+          let byte := (model.getD (address + index.toUInt64) 0).toNat
+          total + byte * 256 ^ (if big then size - 1 - index else index)
+        unless slots[1]!.toNat == expected do
+          throw <| IO.userError s!"native model load of {size} at {address} big {big} in round {round}"
+        let range ← Jit.readMemoryRange memory address size
+        unless range.toList == (List.range size).map fun index => model.getD (address + index.toUInt64) 0 do
+          throw <| IO.userError s!"native model range of {size} at {address} in round {round}"
+    | 6 =>
+      let first ← place
+      Jit.trimMemory memory first (first + UInt64.ofNat ((← next) % 8192))
+    | _ =>
+      -- A clone goes on, and what it came from is left as it was, which it must still be.
+      if (← next) % 16 == 0 then
+        let clone ← Jit.cloneMemory memory
+        Jit.writeMemory memory #[0x1000] #[77]
+        same s!"native model clone in round {round}" clone model
+        model := model.insert 0x1000 77
+    if round % 500 == 0 then same s!"native model in round {round}" memory model
+  same "native model at its end" memory model
+  memory ← Jit.cloneMemory memory
+  same "native model of a clone at its end" memory model
+
 set_option maxRecDepth 4000 in
 def run : IO Unit := do
   let program ← Jit.compile [.set 0 40, .add 1 0 2, .jumpSlot 1]

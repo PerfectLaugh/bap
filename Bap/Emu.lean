@@ -187,6 +187,12 @@ structure Emu where
   turnUsed : IO.Ref Nat
   /-- Whether a system call is being served, in the middle of its instruction. -/
   serving : IO.Ref Bool
+  /-- Whether this is a worker of a parallel round that stops before what has to be atomic. -/
+  atomicGated : IO.Ref Bool
+  /-- Whether it has stopped there, and hasn't run it. -/
+  atomicReached : IO.Ref Bool
+  /-- Whether the instruction that was these bytes at an address has to be atomic, as finding out takes lifting it. -/
+  atomicSites : IO.Ref (Std.HashMap Nat (ByteArray × Bool))
 
 /-- Compiled ranges chain blocks along their branches, which leaves delay slots out. -/
 private def rangeLimitOf (config : Config) : Nat :=
@@ -280,6 +286,9 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     redirect := ← IO.mkRef none
     turnUsed := ← IO.mkRef 0
     serving := ← IO.mkRef false
+    atomicGated := ← IO.mkRef false
+    atomicReached := ← IO.mkRef false
+    atomicSites := ← IO.mkRef {}
   }
 
 /-- The address space of a thread. -/
@@ -937,7 +946,10 @@ def read (emu : Emu) (address size : Nat) : IO ByteArray := do
   if !coversRange (← emu.regions.get) address (address + size) then
     throw <| IO.userError s!"unmapped Emu address in {size} bytes at {address}"
   let bytes ← (List.range size).mapM fun offset => readByte emu (address + offset)
-  pure (ByteArray.mk bytes.toArray)
+  match ← emu.engine.persistentMemory.get with
+  -- Once more all at once, now that it may be read: what a worker of a parallel round stores is seen whole.
+  | some memory => Jit.readMemoryRange memory (UInt64.ofNat address) size
+  | none => pure (ByteArray.mk bytes.toArray)
 
 private def synchronizeWrite (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
   let persistent ← emu.engine.persistentMemory.get
@@ -1120,6 +1132,8 @@ def unmap (emu : Emu) (address size : Nat) : IO Unit := do
       let written := (addresses.zip values).filter fun cell =>
         cell.2 != 0 && address ≤ cell.1.toNat && cell.1.toNat < upper
       Jit.writeMemory native (written.map (·.1)) (written.map fun _ => 0)
+      -- What isn't mapped any more needn't take memory of the host, as a program may map and unmap as long as it likes.
+      if upper > address then Jit.trimMemory native (UInt64.ofNat address) (UInt64.ofNat (upper - 1))
 
 def regions (emu : Emu) : IO (List (Nat × Nat × Primus.Protection)) := do
   let mapped ← emu.regions.get
@@ -1397,14 +1411,17 @@ private def isThumb (state : Bil.State) : Bool :=
   | .ok (.bits bits) => bits.toNat == 1
   | _ => false
 
+private def disassemblerFor (emu : Emu) (thumb : Bool) (address : Nat) :=
+  match emu.config.thumbAt, emu.config.disassemblerAt with
+  | some create, _ => if thumb then create address else
+    match emu.config.disassemblerAt with
+    | some arm => arm address
+    | none => pure emu.config.disassembler
+  | none, some create => create address
+  | none, none => pure emu.config.disassembler
+
 private def lift (emu : Emu) (thumb : Bool) (address : Nat) (code : ByteArray) : IO Primus.Lifted.Block := do
-  let disassembler ← match emu.config.thumbAt, emu.config.disassemblerAt with
-    | some create, _ => if thumb then create address else
-      match emu.config.disassemblerAt with
-      | some arm => arm address
-      | none => pure emu.config.disassembler
-    | none, some create => create address
-    | none, none => pure emu.config.disassembler
+  let disassembler ← disassemblerFor emu thumb address
   let decoded ← disassembler.decode address code
   match decoded with
   | .error error => throw <| IO.userError s!"Emu instruction at {address}: {error}"
@@ -1638,9 +1655,37 @@ private def executeBlock (emu : Emu) (address : Nat) : IO (Nat × Bil.Effect) :=
       emu.pc.set pc
       emu.pendingRef.set pending
 
+/-- A worker of a parallel round stops at an instruction that has to be atomic or that is a fence, as at a breakpoint: `stepM` doesn't run it, and doesn't
+fire the hooks of the pc again. What it can't fetch or lift isn't that, and the step says what is wrong with it. -/
+private def gateAtomic (emu : Emu) (address : Nat) : IO Unit := do
+  if !(← emu.atomicGated.get) then return
+  if (← emu.pc.get) != address || (← emu.stopped.get) then return
+  try
+    let code ← fetch emu address
+    let thumb := isThumb (← emu.state.get)
+    let classify : IO Bool := do
+      let block ← lift emu thumb address code
+      let atomic ← if Primus.Lifted.atomicProgram block.program then pure true
+        else if !block.program.isEmpty then pure false
+        else
+          match ← (← disassemblerFor emu thumb address).decode address code with
+          | .ok insn => pure (Primus.Lifted.fenceText insn.asm)
+          | .error _ => pure false
+      emu.atomicSites.modify (·.insert address (code, atomic))
+      pure atomic
+    let atomic ← match (← emu.atomicSites.get)[address]? with
+      | some (bytes, atomic) => if bytes == code then pure atomic else classify
+      | none => classify
+    if atomic then
+      emu.atomicReached.set true
+      emu.stopped.set true
+  catch _ =>
+    emu.lastFault.set none
+
 /-- The references of the emulator as the environment of `stepM`. -/
 @[inline] private def stepOps (emu : Emu) : StepOps IO (Snapshot × Option TraceState) :=
-  stepOpsOf (controlCells emu) (notifyCode emu) (do pure (← snapshotBlock emu, ← emu.trace.get)) (delayFor emu)
+  stepOpsOf (controlCells emu) (fun address => do notifyCode emu address; gateAtomic emu address)
+    (do pure (← snapshotBlock emu, ← emu.trace.get)) (delayFor emu)
     (recordTrace emu)
     (fun address => do
       let result ← executeBlock emu address
@@ -1721,11 +1766,15 @@ private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared :
   let space := table.spaceOf context.id
   let regions ← if space == table.spaceOf (← emu.currentThreadRef.get) then pure emu.regions
     else IO.mkRef ((← emu.parkedRegions.get).getD space (← emu.regions.get))
+  -- What it remembers of a map is of that map.
+  let fetchPages ← if space == table.spaceOf (← emu.currentThreadRef.get) then pure emu.fetchPages else IO.mkRef {}
   pure {
     emu with
     engine
     regions
-    state := ← IO.mkRef context.state
+    fetchPages
+    -- What it loaded exclusively before the round may change in it, as when a thread is switched to.
+    state := ← IO.mkRef { env := clearMonitor emu.config context.state.env }
     pc := ← IO.mkRef context.pc
     stopped := ← IO.mkRef context.stopped
     currentThreadRef := ← IO.mkRef context.id
@@ -1739,7 +1788,39 @@ private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared :
     budget := ← IO.mkRef 0
     restarting := ← IO.mkRef false
     rangeStart := ← IO.mkRef none
+    nextPc := ← IO.mkRef context.pc
+    redirect := ← IO.mkRef none
+    atomicGated := ← IO.mkRef true
+    atomicReached := ← IO.mkRef false
   }
+
+/-- How many instructions a thread may run alone from an exclusive load to its store. Past that its store fails, which a guest goes
+back from, as it may on a machine. -/
+private def exclusiveLimit : Nat := 64
+
+/-- Runs what a worker stopped at, with every other worker stopped: then nothing can come between its load and its store, and what it
+loaded exclusively stays so up to its exclusive store. -/
+private def runAtomic (worker : Emu) : IO Nat := do
+  worker.atomicReached.set false
+  worker.stopped.set false
+  worker.atomicGated.set false
+  let held : IO Bool := do
+    match memoryWidth worker.config with
+    | .error _ => pure false
+    | .ok width =>
+      match Bil.lookup (← worker.state.get).env (exclusiveMonitor width) with
+      | .ok (.bits value) => pure (value.toNat != 0)
+      | _ => pure false
+  let rec go : Nat → Nat → IO Nat
+    | 0, total => pure total
+    | fuel + 1, total => do
+      if !(← step worker) then pure total
+      else if ← held then go fuel (total + 1)
+      else pure (total + 1)
+  let total ← go exclusiveLimit 0
+  if ← held then worker.state.modify fun state => { env := clearMonitor worker.config state.env }
+  worker.atomicGated.set true
+  pure total
 
 /-- `memory` with the bytes of `native` at the written ranges. -/
 private def applyJournal {width : Nat} (memory : Bap.Memory width) (native : Jit.Memory)
@@ -1780,6 +1861,8 @@ private def synchronizeRound (emu : Emu) (merged : List ThreadContext)
 def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
   if quantum = 0 then
     throw <| IO.userError "Emu thread quantum must be positive"
+  -- A round is turns of its own, and goes on from no other.
+  emu.turnUsed.set 0
   if (← emu.parallelLock.get).isNone then
     emu.parallelLock.set (some (← Std.BaseMutex.new))
   let contexts ← captureThreads emu
@@ -1789,7 +1872,9 @@ def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
     match active with
     | [only] => if only.id != (← thread emu) then switchThread emu only.id
     | _ => pure ()
-    runPreemptive emu quantum quantum
+    let total ← runPreemptive emu quantum quantum
+    emu.turnUsed.set 0
+    pure total
   else
     emu.threadControl.set {}
     roundM (ε := IO.Error) (snapshot emu) (restore emu)
@@ -1817,7 +1902,18 @@ def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
         let first ← (workers.head?.elim (pure 0) fun worker => run worker.2 quantum).toBaseIO
         -- Every worker finishes before the round is judged, so none outlives a rollback.
         let results ← tasks.mapM fun task => IO.wait task
-        pure (first :: results))
+        let results := first :: results
+        -- With every worker stopped, what they stopped at runs, one at a time. A round that failed is undone anyway.
+        if results.any (fun result => match result with | .error _ => true | .ok _ => false) then
+          pure results
+        else
+          (workers.zip results).mapM fun (worker, result) => do
+            if !(← worker.2.atomicReached.get) then pure result
+            else
+              match ← (runAtomic worker.2).toBaseIO, result with
+              | .ok more, .ok steps => pure (.ok (steps + more))
+              | .error error, _ => pure (.error error)
+              | _, other => pure other)
       (fun (_, _, workers) => do
         -- The fault of the first failing worker, whose state the rollback discards.
         let faults ← workers.filterMapM fun worker => worker.2.lastFault.get

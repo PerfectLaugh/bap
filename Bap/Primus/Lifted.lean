@@ -122,6 +122,55 @@ private structure CachedBlock where
   entered : Nat := 0
   enteredNeeds : List Bap.Var := []
 
+/-- The name of the variable of the exclusive monitor of the targets that have one. -/
+def monitorName : String := "EXCLUSIVE_MONITOR"
+
+private def expAny (found : Bil.Exp → Bool) : Bil.Exp → Bool
+  | .int value => found (.int value)
+  | .var var => found (.var var)
+  | .load memory address endian size =>
+    found (.load memory address endian size) || expAny found memory || expAny found address
+  | .store memory address value endian size =>
+    found (.store memory address value endian size) || expAny found memory || expAny found address || expAny found value
+  | .bin _ left right => expAny found left || expAny found right
+  | .un _ value => expAny found value
+  | .cast _ _ value => expAny found value
+  | .letIn _ value body => expAny found value || expAny found body
+  | .ite condition yes no => expAny found condition || expAny found yes || expAny found no
+  | .extract _ _ value => expAny found value
+  | .concat left right => expAny found left || expAny found right
+  | .unknown .. => false
+
+private def programAny (found : Bil.Exp → Bool) (moved : Bap.Var → Bool) : Nat → List Bil.Stmt → Bool
+  | 0, _ => false
+  | fuel + 1, program => program.any fun stmt =>
+    match stmt with
+    | .move var value => moved var || expAny found value
+    | .jmp target => expAny found target
+    | .special _ | .cpuExn _ => false
+    | .while condition body => expAny found condition || programAny found moved fuel body
+    | .ifElse condition yes no =>
+      expAny found condition || programAny found moved fuel yes || programAny found moved fuel no
+
+/-- Whether an instruction is a fence of memory, by what it says it is, as its program is empty like that of any instruction that does
+nothing: `sync` of MIPS and PowerPC, and what x86, ARM and RISC-V call theirs. What only waits for the pipeline or for instructions
+isn't one, and nothing here needs it. -/
+def fenceText (text : String) : Bool :=
+  match (text.trimAscii.toString.split (fun char => char == ' ' || char == '\t')).toList.map (·.toString) with
+  | mnemonic :: _ =>
+    ["mfence", "lfence", "sfence", "dmb", "dsb", "fence", "fence.tso", "sync", "lwsync", "hwsync", "msync", "ptesync", "eieio", "mbar"].contains
+      (mnemonic.toLower)
+  | [] => false
+
+/-- Whether an instruction has to run with nothing else running to be what it says: it uses the exclusive monitor, or both reads and
+writes memory. That is all that is atomic on a machine, and also what isn't, such as `add` to memory on x86, which is only slower
+for it. -/
+def atomicProgram (program : Bil.Program) : Bool :=
+  let depth := 64
+  let loads := programAny (fun | .load .. => true | _ => false) (fun _ => false) depth program
+  let stores := programAny (fun | .store .. => true | _ => false) (fun _ => false) depth program
+  programAny (fun | .var var => var.name == monitorName | _ => false) (·.name == monitorName) depth program || (loads && stores)
+
 structure Engine where
   cache : IO.Ref (Std.HashMap Nat CachedBlock)
   ranges : IO.Ref (Std.HashMap Nat CachedBlock)
@@ -1371,7 +1420,11 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
           | .native _ _ fallback => fallback
           | .interpreted program => program
         let seed : Block := ⟨first.address, first.next, firstProgram⟩
-        let lowerable (block : Block) : Bool := (lowerGraph [block] [] engine.wrapFaults).isSome
+        -- A worker of a parallel round stops at what has to be atomic, and at a fence, which is an instruction that does nothing, so
+        -- that no range of its goes past one.
+        let lowerable (block : Block) : Bool :=
+          (lowerGraph [block] [] engine.wrapFaults).isSome &&
+            !(engine.deferMemorySync && (atomicProgram block.program || block.program.isEmpty))
         let (blocks, edges, sources) ←
           if lowerable seed then gatherGraph engine fetch lift engine.rangeLimit seed first.code lowerable
           else pure ([seed], [], [])
@@ -1670,7 +1723,17 @@ private def readThrough (memory : Jit.Memory) (var : Bap.Var) (program : Bil.Pro
         if write then pure () else collected.modify ((address, size) :: ·)
       let _ ← Bil.runObserved (some observer) program { env := Bil.bind state.env var (.memory cells) }
       collected.get
-    let native (address : Nat) : IO UInt8 := Jit.readMemory memory (UInt64.ofNat address)
+    -- By the word, as a worker of the round may be storing to it, and each once: what an instruction sees of a word is of one moment.
+    let words ← IO.mkRef ({} : Std.HashMap Nat ByteArray)
+    let native (address : Nat) : IO UInt8 := do
+      let start := address - address % 8
+      let word ← match (← words.get)[start]? with
+        | some word => pure word
+        | none =>
+          let word ← Jit.readMemoryRange memory (UInt64.ofNat start) 8
+          words.modify (·.insert start word)
+          pure word
+      pure word[address - start]!
     match ← Bap.Emu.readThroughM reads native 16 cells with
     | some cells => pure { env := Bil.bind state.env var (.memory cells) }
     | none =>
