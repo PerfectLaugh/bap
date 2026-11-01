@@ -1,5 +1,5 @@
 import Bap.Emu.Tasks
-import Bap.Linux.Kernel
+import Bap.Linux.Calls
 import Bap.Linux.Elf
 import Bap.Float
 
@@ -7,7 +7,7 @@ import Bap.Float
 
 The virtual kernel of `Bap.Linux.Kernel` behind the system calls of the emulator, and what the kernel does to start a program:
 its segments, and those of the interpreter that it asks for, in pages, and the stack that it starts on. No request ever
-reaches the machine that this runs on: a program has what was put in its kernel. x86-64 only. -/
+reaches the machine that this runs on: a program has what was put in its kernel. For x86-64 and AArch64. -/
 
 namespace Bap.Linux
 
@@ -18,6 +18,7 @@ private def word (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
 private def bits (width value : Nat) : Bap.Value := .bits (BitVec.ofNat width value)
 
 structure Machine where
+  architecture : Architecture
   emu : Emu
   kernel : IO.Ref Kernel
 
@@ -110,7 +111,12 @@ private def base (machine : Machine) (group directory : Nat) : IO (Result String
 
 /-- The system calls of files, memory that files are mapped into, time and what a process asks of itself. -/
 private def kernelCall (machine : Machine) (emu : Emu) (number : Nat) (args : List Nat) : IO SyscallAction := do
+  match machine.architecture.call number with
+  -- What serveTaskCalls serves.
+  | none => pure .default
+  | some call =>
     let machine : Machine := { machine with emu }
+    let architecture := machine.architecture
     let arg (index : Nat) : Nat := args.getD index 0
     let group := (← currentTask emu).group
     let kernel ← machine.kernel.get
@@ -125,7 +131,7 @@ private def kernelCall (machine : Machine) (emu : Emu) (number : Nat) (args : Li
         | .ok path => action from_ path
     let here := 2 ^ 64 - 100
     let openAt (directory address flags mode : Nat) : IO SyscallAction :=
-      at_ directory address fun from_ path => applyNat machine (·.openPath group from_ path flags mode)
+      at_ directory address fun from_ path => applyNat machine (·.openPath group from_ path (architecture.openFlags flags) mode)
     let accessAt (directory address : Nat) : IO SyscallAction :=
       at_ directory address fun from_ path =>
         pure (match kernel.statPath from_ path with
@@ -145,7 +151,7 @@ private def kernelCall (machine : Machine) (emu : Emu) (number : Nat) (args : Li
       at_ directory address fun from_ path =>
         match kernel.statPath from_ path follow with
         | .error errno => pure (errorOf errno)
-        | .ok value => returning emu out (Abi.stat value)
+        | .ok value => returning emu out (architecture.stat value)
     let clock (out scale : Nat) : IO SyscallAction := do
       let (next, now) := (← machine.kernel.get).tick
       machine.kernel.set next
@@ -163,19 +169,22 @@ private def kernelCall (machine : Machine) (emu : Emu) (number : Nat) (args : Li
           if value < field 8 then return .returnValue total
         | other => return other
       pure (.returnValue total)
-    match number with
-    | 0 => readInto (arg 0) (arg 1) (arg 2)
-    | 1 => writeOut (arg 0) (arg 1) (arg 2)
-    | 2 => openAt here (arg 0) (arg 1) (arg 2)
-    | 257 => openAt (arg 0) (arg 1) (arg 2) (arg 3)
-    | 3 => apply machine (·.close group (arg 0))
-    | 4 => statAt here (arg 0) (arg 1) true
-    | 6 => statAt here (arg 0) (arg 1) false
-    | 5 =>
+    -- A path in the directory of the second, from another call of `at_`.
+    let inDirectory (directory address : Nat) (action : String → IO SyscallAction) : IO SyscallAction :=
+      at_ directory address fun from_ path => action (if path.startsWith "/" then path else from_ ++ "/" ++ path)
+    match call with
+    | .read => readInto (arg 0) (arg 1) (arg 2)
+    | .write => writeOut (arg 0) (arg 1) (arg 2)
+    | .open_ => openAt here (arg 0) (arg 1) (arg 2)
+    | .openat => openAt (arg 0) (arg 1) (arg 2) (arg 3)
+    | .close => apply machine (·.close group (arg 0))
+    | .stat => statAt here (arg 0) (arg 1) true
+    | .lstat => statAt here (arg 0) (arg 1) false
+    | .fstat =>
       match kernel.statDescriptor group (arg 0) with
       | .error errno => pure (errorOf errno)
-      | .ok value => returning emu (arg 1) (Abi.stat value)
-    | 262 =>
+      | .ok value => returning emu (arg 1) (architecture.stat value)
+    | .fstatat =>
       -- AT_EMPTY_PATH says that the descriptor is what it is about.
       let path ← (readString emu (arg 1)).toBaseIO
       match path with
@@ -183,10 +192,10 @@ private def kernelCall (machine : Machine) (emu : Emu) (number : Nat) (args : Li
         if arg 3 &&& 0x1000 != 0 then
           match kernel.statDescriptor group (arg 0) with
           | .error errno => pure (errorOf errno)
-          | .ok value => returning emu (arg 2) (Abi.stat value)
+          | .ok value => returning emu (arg 2) (architecture.stat value)
         else pure (errorOf Errno.enoent)
       | _ => statAt (arg 0) (arg 1) (arg 2) (arg 3 &&& 0x100 == 0)
-    | 332 =>
+    | .statx =>
       let path ← (readString emu (arg 1)).toBaseIO
       let finish (result : Result Kernel.Stat) : IO SyscallAction :=
         match result with
@@ -198,27 +207,27 @@ private def kernelCall (machine : Machine) (emu : Emu) (number : Nat) (args : Li
         else pure (errorOf Errno.enoent)
       | _ =>
         at_ (arg 0) (arg 1) fun from_ text => finish (kernel.statPath from_ text (arg 2 &&& 0x100 == 0))
-    | 8 =>
+    | .lseek =>
       let (negative, distance) := signed (arg 1)
       applyNat machine (·.seek group (arg 0) negative distance (arg 2))
-    | 17 =>
+    | .pread =>
       match kernel.readFrom group (arg 0) (arg 2) (arg 3) with
       | .error errno => pure (errorOf errno)
       | .ok bytes => returning emu (arg 1) bytes bytes.size
-    | 18 =>
+    | .pwrite =>
       match ← (read emu (arg 1) (arg 2)).toBaseIO with
       | .error _ => pure (errorOf Errno.efault)
       | .ok bytes => applyNat machine (·.writeTo group (arg 0) bytes (arg 3))
-    | 19 => vectors (arg 0) (arg 1) (arg 2) readInto
-    | 20 => vectors (arg 0) (arg 1) (arg 2) writeOut
-    | 21 => accessAt here (arg 0)
-    | 269 | 439 => accessAt (arg 0) (arg 1)
-    | 32 => applyNat machine (·.dup group (arg 0))
-    | 33 => applyNat machine (·.dupTo group (arg 0) (arg 1))
-    | 292 =>
+    | .readv => vectors (arg 0) (arg 1) (arg 2) readInto
+    | .writev => vectors (arg 0) (arg 1) (arg 2) writeOut
+    | .access => accessAt here (arg 0)
+    | .faccessat => accessAt (arg 0) (arg 1)
+    | .dup => applyNat machine (·.dup group (arg 0))
+    | .dup2 => applyNat machine (·.dupTo group (arg 0) (arg 1))
+    | .dup3 =>
       if arg 0 == arg 1 then pure (errorOf Errno.einval)
       else applyNat machine (·.dupTo group (arg 0) (arg 1) (arg 2 &&& Kernel.oCloexec != 0))
-    | 72 =>
+    | .fcntl =>
       match arg 1 with
       | 0 => applyNat machine (·.dup group (arg 0) (arg 2))
       | 1030 => applyNat machine (·.dup group (arg 0) (arg 2) true)
@@ -230,13 +239,13 @@ private def kernelCall (machine : Machine) (emu : Emu) (number : Nat) (args : Li
       | 3 =>
         pure (match kernel.getFlags group (arg 0) with
           | .error errno => errorOf errno
-          | .ok value => .returnValue value)
-      | 4 => apply machine (·.setFlags group (arg 0) (arg 2))
+          | .ok value => .returnValue (architecture.openFlags value))
+      | 4 => apply machine (·.setFlags group (arg 0) (architecture.openFlags (arg 2)))
       | _ => pure (errorOf Errno.einval)
-    | 16 =>
+    | .ioctl =>
       -- No descriptor is a terminal.
       pure (errorOf (match kernel.statDescriptor group (arg 0) with | .ok _ => Errno.enotty | .error errno => errno))
-    | 217 =>
+    | .getdents =>
       match kernel.directoryEntries group (arg 0) with
       | .error errno => pure (errorOf errno)
       | .ok (id, first, entries) =>
@@ -246,33 +255,35 @@ private def kernelCall (machine : Machine) (emu : Emu) (number : Nat) (args : Li
         else
           machine.kernel.set (kernel.advance id count)
           returning emu (arg 1) bytes bytes.size
-    | 79 =>
+    | .getcwd =>
       let text := (cwd ++ "\x00").toUTF8
       if text.size > arg 1 then pure (errorOf Errno.erange)
       else returning emu (arg 0) text text.size
-    | 80 => at_ here (arg 0) fun _ path => apply machine (·.chdir group path)
-    | 81 =>
+    | .chdir => at_ here (arg 0) fun _ path => apply machine (·.chdir group path)
+    | .fchdir =>
       match kernel.directoryEntries group (arg 0), kernel.baseOf group (arg 0) false with
       | _, .ok path => apply machine (·.chdir group path)
       | .error errno, _ => pure (errorOf errno)
       | _, .error errno => pure (errorOf errno)
-    | 83 => at_ here (arg 0) fun from_ path => apply machine (·.mkdir group from_ path (arg 1))
-    | 258 => at_ (arg 0) (arg 1) fun from_ path => apply machine (·.mkdir group from_ path (arg 2))
-    | 84 => at_ here (arg 0) fun from_ path => apply machine (·.remove from_ path true)
-    | 87 => at_ here (arg 0) fun from_ path => apply machine (·.remove from_ path false)
-    | 263 => at_ (arg 0) (arg 1) fun from_ path => apply machine (·.remove from_ path (arg 2 &&& 0x200 != 0))
-    | 82 =>
-      at_ here (arg 0) fun from_ source => do
-        match ← (readString emu (arg 1)).toBaseIO with
-        | .error _ => pure (errorOf Errno.efault)
-        | .ok target => apply machine (·.rename from_ source target)
-    | 88 =>
-      at_ here (arg 1) fun from_ path => do
+    | .mkdir => at_ here (arg 0) fun from_ path => apply machine (·.mkdir group from_ path (arg 1))
+    | .mkdirat => at_ (arg 0) (arg 1) fun from_ path => apply machine (·.mkdir group from_ path (arg 2))
+    | .rmdir => at_ here (arg 0) fun from_ path => apply machine (·.remove from_ path true)
+    | .unlink => at_ here (arg 0) fun from_ path => apply machine (·.remove from_ path false)
+    | .unlinkat => at_ (arg 0) (arg 1) fun from_ path => apply machine (·.remove from_ path (arg 2 &&& 0x200 != 0))
+    | .rename =>
+      inDirectory here (arg 0) fun source => inDirectory here (arg 1) fun target =>
+        apply machine (·.rename "/" source target)
+    | .renameat =>
+      inDirectory (arg 0) (arg 1) fun source => inDirectory (arg 2) (arg 3) fun target =>
+        apply machine (·.rename "/" source target)
+    | .symlink | .symlinkat =>
+      let (directory, address) := if call == .symlink then (here, arg 1) else (arg 1, arg 2)
+      at_ directory address fun from_ path => do
         match ← (readString emu (arg 0)).toBaseIO with
         | .error _ => pure (errorOf Errno.efault)
         | .ok target => apply machine (·.symlink from_ target path)
-    | 89 | 267 =>
-      let (directory, address, out, room) := if number == 89 then (here, arg 0, arg 1, arg 2) else (arg 0, arg 1, arg 2, arg 3)
+    | .readlink | .readlinkat =>
+      let (directory, address, out, room) := if call == .readlink then (here, arg 0, arg 1, arg 2) else (arg 0, arg 1, arg 2, arg 3)
       at_ directory address fun from_ path =>
         match kernel.readlink from_ path with
         | .error errno => pure (errorOf errno)
@@ -280,45 +291,40 @@ private def kernelCall (machine : Machine) (emu : Emu) (number : Nat) (args : Li
           let bytes := target.toUTF8
           let bytes := bytes.extract 0 room
           returning emu out bytes bytes.size
-    | 90 => at_ here (arg 0) fun from_ path => apply machine (·.chmod from_ path (arg 1))
-    | 268 => at_ (arg 0) (arg 1) fun from_ path => apply machine (·.chmod from_ path (arg 2))
-    | 76 => at_ here (arg 0) fun from_ path => apply machine (·.truncatePath from_ path (arg 1))
-    | 77 => apply machine (·.truncateDescriptor group (arg 0) (arg 1))
-    | 74 | 75 => pure (.returnValue 0)
-    | 91 | 92 | 93 | 94 | 260 | 280 => pure (.returnValue 0)
-    | 95 =>
+    | .chmod => at_ here (arg 0) fun from_ path => apply machine (·.chmod from_ path (arg 1))
+    | .fchmodat => at_ (arg 0) (arg 1) fun from_ path => apply machine (·.chmod from_ path (arg 2))
+    | .truncate => at_ here (arg 0) fun from_ path => apply machine (·.truncatePath from_ path (arg 1))
+    | .ftruncate => apply machine (·.truncateDescriptor group (arg 0) (arg 1))
+    | .umask =>
       let process := kernel.process group
       machine.kernel.set (kernel.setProcess group { process with umask := arg 0 &&& 0o777 })
       pure (.returnValue process.umask)
-    | 9 =>
+    | .mmap =>
       if arg 3 &&& 0x20 != 0 then pure .default
       else serveFileMap machine group (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) (arg 5)
-    | 25 => pure (errorOf Errno.enomem)
-    | 12 => serveBreak machine group (arg 0)
-    | 96 => clock (arg 0) 1000
-    | 201 =>
+    | .mremap => pure (errorOf Errno.enomem)
+    | .brk => serveBreak machine group (arg 0)
+    | .gettimeofday => clock (arg 0) 1000
+    | .time =>
       let (next, now) := (← machine.kernel.get).tick
       machine.kernel.set next
       returning emu (arg 0) (Abi.bytesOf 8 (now / 1000000000)) (now / 1000000000)
-    | 228 => clock (arg 1) 1
-    | 229 => returning emu (arg 1) (Abi.time 1 1)
-    | 35 | 230 => pure (.returnValue 0)
-    | 63 => returning emu (arg 0) (Abi.utsname "bap")
-    | 102 | 104 | 107 | 108 => pure (.returnValue 0)
-    | 97 =>
+    | .clockGettime => clock (arg 1) 1
+    | .clockGetres => returning emu (arg 1) (Abi.time 1 1)
+    | .uname => returning emu (arg 0) (Abi.utsname "bap" architecture.name)
+    | .getrlimit =>
       let stack := if arg 0 == 3 then 8 * 1024 * 1024 else 2 ^ 64 - 1
       returning emu (arg 1) (Abi.bytesOf 8 stack ++ Abi.bytesOf 8 (2 ^ 64 - 1))
-    | 302 =>
+    | .prlimit =>
       let stack := if arg 1 == 3 then 8 * 1024 * 1024 else 2 ^ 64 - 1
       returning emu (arg 3) (Abi.bytesOf 8 stack ++ Abi.bytesOf 8 (2 ^ 64 - 1))
-    | 318 =>
+    | .getrandom =>
       -- A fixed sequence, as a run is the same each time.
       let bytes := ByteArray.mk ((List.range (arg 1)).map fun index => (index * 167 + 13).toUInt8).toArray
       returning emu (arg 0) bytes (arg 1)
-    | 131 => returning emu (arg 1) (ByteArray.mk (Array.replicate 24 0))
-    | 204 => returning emu (arg 2) (ByteArray.mk #[1, 0, 0, 0, 0, 0, 0, 0]) 8
-    -- What serveTaskCalls serves.
-    | _ => pure .default
+    | .sigaltstack => returning emu (arg 1) (ByteArray.mk (Array.replicate 24 0))
+    | .schedGetaffinity => returning emu (arg 2) (ByteArray.mk #[1, 0, 0, 0, 0, 0, 0, 0]) 8
+    | .succeeds => pure (.returnValue 0)
 
 private def serveKernelCalls (machine : Machine) : IO HookId :=
   onSyscall machine.emu (kernelCall machine)
@@ -404,7 +410,19 @@ private def serveCpu (emu : Emu) : IO Unit := do
   pure ()
 
 /-- Registers hold zeros at the start, as the kernel leaves them, but for the state of the floating point units. -/
-private def resetRegisters (emu : Emu) : IO Unit := do
+private def resetRegisters (emu : Emu) : Architecture → IO Unit
+  | .aarch64 => do
+    for index in List.range 31 do
+      setReg emu (word s!"X{index}") (bits 64 0)
+    for name in ["SP", "TPIDR_EL0", "TPIDRRO_EL0", "CNTVCT_EL0"] do
+      setReg emu (word name) (bits 64 0)
+    for name in ["NF", "ZF", "CF", "VF"] do
+      setReg emu ⟨name, .imm 1, 0, false⟩ (bits 1 0)
+    for index in List.range 32 do
+      setReg emu ⟨s!"Q{index}", .imm 128, 0, false⟩ (bits 128 0)
+    for name in ["FPCR", "FPSR"] do
+      setReg emu ⟨name, .imm 32, 0, false⟩ (bits 32 0)
+  | .x86_64 => do
   for name in ["RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15",
       "FS_BASE", "GS_BASE"] do
     setReg emu (word name) (bits 64 0)
@@ -451,14 +469,14 @@ private def fileOf (kernel : Kernel) (path : String) : Result ByteArray := do
   | _ => .error Errno.einval
 
 /-- The stack that the kernel hands over: where the arguments, the environment and the auxiliary vector are. -/
-private def mapStack (emu : Emu) (arguments environment : List String) (auxiliary : List (Nat × Nat)) : IO Unit := do
+private def mapStack (emu : Emu) (architecture : Architecture) (arguments environment : List String) (auxiliary : List (Nat × Nat)) : IO Unit := do
   map emu ⟨stackTop - stackSize, ByteArray.mk (Array.replicate stackSize 0), ⟨true, true, false⟩⟩
   let mut cursor := stackTop - 16
   let place (cursor : Nat) (text : ByteArray) : IO Nat := do
     let at_ := cursor - text.size
     write emu at_ text
     pure at_
-  cursor ← place cursor "x86_64\x00".toUTF8
+  cursor ← place cursor (architecture.name ++ "\x00").toUTF8
   let platform := cursor
   cursor ← place cursor (ByteArray.mk ((List.range 16).map fun index => (index * 37 + 11).toUInt8).toArray)
   let random := cursor
@@ -478,7 +496,7 @@ private def mapStack (emu : Emu) (arguments environment : List String) (auxiliar
   let pointer := (cursor - 8 * cells.length) / 16 * 16
   for (cell, index) in cells.zipIdx do
     write emu (pointer + 8 * index) (Abi.bytesOf 8 cell)
-  setReg emu (word "RSP") (bits 64 pointer)
+  setReg emu (word (threadRegisters emu.config.syscallAbi).1) (bits 64 pointer)
 
 /-- A machine at the start of `path`, which is in `kernel`. Its first process has the standard descriptors, on a console, with
 `input` to read. `watch` sees each system call before it is served. -/
@@ -486,6 +504,8 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
     (input : ByteArray := ByteArray.empty) (watch : Option (Nat → List Nat → IO Unit) := none) : IO Machine := do
   let data ← IO.ofExcept ((fileOf kernel path).mapError fun errno => s!"{path}: error {errno}")
   let program ← IO.ofExcept (Elf.parse data)
+  let some architecture := Architecture.ofElf program.machine
+    | throw <| IO.userError s!"{path}: no Linux machine for ELF machine {program.machine}"
   let base := if program.relocatable then programBase else 0
   let interpreter ← match program.interpreter with
     | none => pure none
@@ -495,11 +515,17 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   -- A real program runs more code than the working set of a few thousand blocks that the default is for, and past it, each one
   -- would be lifted each time it runs. Most of its code runs at its start, a few times, and compiling that takes longer than
   -- running it: with this threshold, `ls` takes a third of the time, and a long loop no longer.
-  let emu ← x86_64 (ByteArray.mk (Array.replicate 16 0x90)) 0x1000 0 fun config =>
-    { config with cacheLimit := 1048576, hotThreshold := 1024 }
+  let tuned (config : Config) : Config := { config with cacheLimit := 1048576, hotThreshold := 1024 }
+  -- Nothing is in its one page, which goes at once.
+  let page := ByteArray.mk (Array.replicate 16 0)
+  let emu ← match architecture with
+    | .x86_64 => x86_64 page 0x1000 0 tuned
+    | .aarch64 => aarch64 page 0x1000 0 tuned
   unmap emu 0x1000 16
-  emu.intrinsicServer.set (some Bap.Float.evaluate)
-  resetRegisters emu
+  emu.intrinsicServer.set (some (Bap.Float.evaluateWith (match architecture with
+    | .x86_64 => .x86
+    | .aarch64 => .arm)))
+  resetRegisters emu architecture
   let top ← mapProgram emu data program base
   let lowest := program.segments.foldl (fun lowest segment => min lowest segment.address) (2 ^ 63)
   let entry ← match interpreter with
@@ -507,16 +533,20 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
       let _ ← mapProgram emu bytes loaded interpreterBase
       pure (interpreterBase + loaded.entry)
     | none => pure (base + program.entry)
+  -- What the processor has: on AArch64, FP and ASIMD, and not CPUID, so that libc doesn't choose routines by the implementer.
+  let capabilities := match architecture with
+    | .x86_64 => 0x07888f9f
+    | .aarch64 => 3
   -- AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_FLAGS, AT_ENTRY, the ids of root, AT_HWCAP, AT_CLKTCK, AT_SECURE
   let auxiliary := [(3, base + lowest + program.headerOffset), (4, 56), (5, program.headerCount), (6, 4096),
     (7, if interpreter.isSome then interpreterBase else 0), (8, 0), (9, base + program.entry), (11, 0), (12, 0), (13, 0), (14, 0),
-    (16, 0x07888f9f), (17, 100), (23, 0)]
-  mapStack emu (if arguments.isEmpty then [path] else arguments) environment auxiliary
+    (16, capabilities), (17, 100), (23, 0)]
+  mapStack emu architecture (if arguments.isEmpty then [path] else arguments) environment auxiliary
   setPc emu entry
   let first := (← currentTask emu).group
   let kernel := kernel.withConsole first input
   let kernel := kernel.setProcess first { kernel.process first with breakStart := top, breakEnd := top }
-  let machine : Machine := { emu, kernel := ← IO.mkRef kernel }
+  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
@@ -524,7 +554,7 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   let _ ← serveKernelCalls machine
   let _ ← serveTaskCalls emu
   let _ ← serveRest emu
-  serveCpu emu
+  if architecture == .x86_64 then serveCpu emu
   emu.processHooks.modify ((fun parent child => machine.kernel.modify (·.fork parent child)) :: ·)
   pure machine
 
@@ -583,13 +613,16 @@ def Kernel.copyFromHost (kernel : Kernel) (path : String) (into : String := path
   walk 16 kernel path into
 
 /-- What a dynamic program needs, for a kernel, before a run: the program, its interpreter and each library that it needs, from
-the directories that libraries are in, with the links of their paths resolved to files. -/
-def Kernel.copyProgramFromHost (kernel : Kernel) (path : String) : IO Kernel := do
-  let directories := ["/lib64", "/usr/lib64", "/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib", "/usr/lib"]
+the directories that libraries are in, with the links of their paths resolved to files. `root` is where the libraries of its
+architecture are, which is the root of the host only if it is of the same one. They get the paths that they have under it. -/
+def Kernel.copyProgramFromHost (kernel : Kernel) (path : String) (root : String := "") : IO Kernel := do
+  let directories := ["/lib64", "/usr/lib64", "/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib/aarch64-linux-gnu",
+    "/usr/lib/aarch64-linux-gnu", "/lib", "/usr/lib"]
   let copy (kernel : Kernel) (target : String) : IO (Kernel × ByteArray) := do
-    let data ← IO.FS.readBinFile target
+    let data ← IO.FS.readBinFile (root ++ target)
     pure (kernel.addFile target data, data)
-  let (kernel, data) ← copy kernel path
+  let data ← IO.FS.readBinFile path
+  let kernel := kernel.addFile path data
   let mut kernel := kernel
   let mut pending := Elf.needed data
   let mut seen : List String := []
@@ -606,7 +639,7 @@ def Kernel.copyProgramFromHost (kernel : Kernel) (path : String) : IO Kernel := 
       pending := rest
       if !seen.contains name then
         seen := name :: seen
-        let found ← directories.findM? fun directory => System.FilePath.pathExists (directory ++ "/" ++ name)
+        let found ← directories.findM? fun directory => System.FilePath.pathExists (root ++ directory ++ "/" ++ name)
         if let some directory := found then
           let (next, bytes) ← copy kernel (directory ++ "/" ++ name)
           kernel := next

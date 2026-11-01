@@ -17,7 +17,7 @@ private def aarch64StatusRegister (name : String) : Option Primus.Semantics.Valu
 private def aarch64Register (name : String) : Primus.Semantics.Value :=
   let name := if name = "LR" then "X30" else if name = "FP" then "X29" else name
   if name = "XZR" || name = "WZR" then
-    .register "XZR" 64 64
+    if name = "XZR" then .register "XZR" 64 64 else .register "XZR" 32 64
   else if name = "WSP" then
     .register "SP" 32 64
   else if let some register := aarch64StatusRegister name then

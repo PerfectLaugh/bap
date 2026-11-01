@@ -542,6 +542,36 @@ private def testBlrLink : IO Unit := do
   assertEqual "Emu blr x30 goes where it said" 8 (← Bap.Emu.pc emu)
   assertBits "Emu blr x30 links" (BitVec.ofNat 64 4) (.ok (← Bap.Emu.reg emu x30))
 
+/-- `wzr` is as wide as the 32 bits of what it is compared with: `0 - 0` has to set Z, which is how ld.so tells that hashes are
+the same. -/
+private def testZeroRegisterWidth : IO Unit := do
+  let emu ← Bap.Emu.aarch64 (← LLVM.assemble "aarch64" "cmp wzr, w0, lsr #1") 0 0
+  Bap.Emu.setReg emu ⟨"X0", .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 1))
+  let _ ← Bap.Emu.step emu
+  assertBits "Emu cmp wzr is of 32 bits" (BitVec.ofNat 1 1) (.ok (← Bap.Emu.reg emu ⟨"ZF", .imm 1, 0, false⟩))
+
+/-- Programs of another machine than this one, which need no compiler: static, with musl, from `testsuite/src`. What is printed
+is what they print under qemu. -/
+def testLinuxAArch64 : IO Unit := do
+  let run (name : String) : IO (Bap.Tasks.ScheduleOutcome × ByteArray) := do
+    let path := s!"testsuite/bin/aarch64-linux-musl-{name}"
+    let written ← IO.mkRef ByteArray.empty
+    let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile path)) "/test" ["/test", "arg1"]
+    let outcome ← machine.run fun data => written.modify (· ++ data)
+    pure (outcome, ← written.get)
+  let (outcome, text) ← run "libc-files"
+  assertEqual "Linux AArch64 a program has its status" (Bap.Tasks.ScheduleOutcome.finished (Bap.Tasks.exitedStatus 5)) outcome
+  assertEqual "Linux AArch64 a program finds its files"
+    "args 2 arg1\ncwd /\nread hello 42\nsize 9 dir 0\nseek yz\ndup x\nlink c\nentries 3\ngone -1\ntime 1\nmalloc 1\nnope 1\n"
+    (String.fromUTF8! text)
+  let (outcome, text) ← run "libc-threads"
+  assertEqual "Linux AArch64 threads end" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual "Linux AArch64 threads count to what they should" "y" (String.fromUTF8! text)
+  assertEqual "Linux AArch64 no program of another machine starts" (Bap.Linux.Architecture.ofElf 3) none
+  let (outcome, text) ← run "libc-floats"
+  assertEqual "Linux AArch64 a program of floating point ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual "Linux AArch64 floating point is what qemu does" (← IO.FS.readBinFile "testsuite/data/aarch64-libc-floats.out").toList text.toList
+
 /-- The kernel itself: a program isn't needed to say what it does. -/
 private def testKernel : IO Unit := do
   let unwrap {α} (result : Bap.Linux.Result α) : IO α := match result with
@@ -2051,6 +2081,7 @@ def run : IO Unit := do
   mipsLittle
   testRealPthreads
   testBlrLink
+  testZeroRegisterWidth
   testKernel
   testLinuxPrograms
   allEmulatorTests

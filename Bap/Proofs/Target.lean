@@ -843,6 +843,7 @@ theorem aarch64Register_shape (name : String) :
   repeat' refine shape_ite ?_ ?_
   · exact ⟨_, _, _, rfl, by decide⟩
   · exact ⟨_, _, _, rfl, by decide⟩
+  · exact ⟨_, _, _, rfl, by decide⟩
   · split
     · rename_i register h
       revert h

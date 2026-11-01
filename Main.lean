@@ -22,7 +22,7 @@ open Bap
 open Bap.Bil
 
 private def usage : String :=
-  "usage: bap check FILE | bap run [--copy PATH].. [--strace] PROGRAM [ARGS] | bap print FILE | bap eval FILE [FUEL] | bap image FILE | bap raw FILE BASE | bap mc HEX | bap disassemble FILE | bap lisp FILE | bap analyze FILE | bap symbolic FILE"
+  "usage: bap check FILE | bap run [--copy PATH].. [--root DIR] [--env NAME=VALUE].. [--strace] PROGRAM [ARGS] | bap print FILE | bap eval FILE [FUEL] | bap image FILE | bap raw FILE BASE | bap mc HEX | bap disassemble FILE | bap lisp FILE | bap analyze FILE | bap symbolic FILE"
 
 private def loadProgram (path : String) : IO Program := do
   let input ← IO.FS.readFile path
@@ -108,21 +108,23 @@ private def analyze (path : String) : IO Unit := do
   IO.println s!"callgraph edges: {callgraph.graph.edges.length}"
 
 /-- Runs a program in a virtual Linux, with the status of its first process as ours. It sees only what was copied in before it
-started: itself, the libraries that it needs and each `--copy PATH`. -/
+started: itself, the libraries that it needs, from under `--root DIR` if they aren't of this machine, and each `--copy PATH`. -/
 private def runProgram (args : List String) : IO Unit := do
-  let rec split : List String → List String → Bool → List String × List String × Bool
-    | "--copy" :: path :: rest, copies, trace => split rest (path :: copies) trace
-    | "--strace" :: rest, copies, _ => split rest copies true
-    | rest, copies, trace => (copies, rest, trace)
-  let (copies, command, trace) := split args [] false
+  let rec split : List String → List String → List String → String → Bool → List String × List String × List String × String × Bool
+    | "--copy" :: path :: rest, copies, environment, root, trace => split rest (path :: copies) environment root trace
+    | "--env" :: entry :: rest, copies, environment, root, trace => split rest copies (entry :: environment) root trace
+    | "--root" :: path :: rest, copies, environment, _, trace => split rest copies environment path trace
+    | "--strace" :: rest, copies, environment, root, _ => split rest copies environment root true
+    | rest, copies, environment, root, trace => (copies, rest, environment.reverse, root, trace)
+  let (copies, command, environment, root, trace) := split args [] [] "" false
   let some path := command.head? | IO.println usage
-  let mut kernel ← Linux.Kernel.empty.copyProgramFromHost path
+  let mut kernel ← Linux.Kernel.empty.copyProgramFromHost path root
   for copy in copies do
     kernel ← kernel.copyFromHost copy
   let stderr ← IO.getStderr
   let watch : Option (Nat → List Nat → IO Unit) :=
     if trace then some fun number args => stderr.putStrLn s!"syscall {number} {args.take 4}" else none
-  let machine ← Linux.start kernel path command (watch := watch)
+  let machine ← Linux.start kernel path command environment (watch := watch)
   let stdout ← IO.getStdout
   match ← machine.run fun data => do
       stdout.write data

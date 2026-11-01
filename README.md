@@ -19,8 +19,8 @@ The OCaml and Rust implementation it came from is on the
 - **Emulates** with a JIT, hooks and checkpoints. Tasks follow the Linux model: a thread and a process are tasks that differ
   in what `clone` shares. `runProcesses` schedules them, and `serveTaskCalls` gives guests the system calls of processes and
   pthreads: `fork`, `clone`, `waitpid`, `exit`, `futex`, `mmap` and others.
-- **Runs Linux programs** in a virtual kernel of pure Lean, static and dynamic, on x86-64: files, descriptors and the clock are
-  all in it, and nothing reaches the host. A program sees only what was copied in before it started.
+- **Runs Linux programs** in a virtual kernel of pure Lean, static and dynamic, on x86-64 and AArch64: files, descriptors and the
+  clock are all in it, and nothing reaches the host. A program sees only what was copied in before it started.
 - **Executes symbolically**, solving path conditions with Z3.
 
 ## Building
@@ -45,8 +45,9 @@ lake exe bap disassemble /usr/bin/bash  # instructions and their BIL
 lake exe bap image /usr/bin/bash        # what the loader sees
 lake exe bap symbolic program.bil       # paths of a BIL program
 lake exe bap mc c3                      # one instruction, from hex
-lake exe bap run program args           # an x86-64 Linux program, in a virtual Linux
+lake exe bap run program args           # an x86-64 or AArch64 Linux program, in a virtual Linux
 lake exe bap run --copy dir program     # the same, with a directory copied in first
+lake exe bap run --root dir program     # the same, with its libraries from under a root of its architecture
 lake exe bap run --strace program       # the same, saying each system call
 ```
 

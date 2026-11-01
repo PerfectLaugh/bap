@@ -1,4 +1,4 @@
-import Bap.Linux.Kernel
+import Bap.Linux.Calls
 import Bap.Linux.Elf
 
 /-! What the virtual kernel says of itself. That it can't reach the machine it runs on needs no theorem: its operations are pure
@@ -50,6 +50,26 @@ theorem statx_size (value : Kernel.Stat) : (Abi.statx value).size = 256 := by
 /-- `struct timespec` has its 16 bytes. -/
 theorem time_size (now scale : Nat) : (Abi.time now scale).size = 16 := by
   simp [Abi.time, ByteArray.size_append]
+
+/-- `struct stat` of `asm-generic` has its 128 bytes, whatever is in it. -/
+theorem genericStat_size (value : Kernel.Stat) : (Abi.genericStat value).size = 128 := by
+  simp [Abi.genericStat, ByteArray.size_append]
+
+/-- No number of x86-64 means two calls, so that the order of the table doesn't matter. -/
+theorem x86_64Calls_nodup : (x86_64Calls.map (·.1)).Nodup := by decide +kernel
+
+/-- No number of `asm-generic` means two calls. -/
+theorem genericCalls_nodup : (genericCalls.map (·.1)).Nodup := by decide +kernel
+
+/-- Translating the flags of `open` twice gives them back, for each of the bits that move, on their own and with others. -/
+theorem openFlags_involutive : ∀ flags ∈ (List.range 16).map (fun bits => 0o102 + (bits &&& 3) * 0x4000 + (bits / 4) * 0x10000),
+    Architecture.aarch64.openFlags (Architecture.aarch64.openFlags flags) = flags := by decide +kernel
+
+/-- `O_DIRECTORY` of AArch64 is what the kernel calls so. -/
+theorem openFlags_directory : Architecture.aarch64.openFlags 0x4000 = Kernel.oDirectory := by decide +kernel
+
+/-- `O_NOFOLLOW` of AArch64 is what the kernel calls so. -/
+theorem openFlags_nofollow : Architecture.aarch64.openFlags 0x8000 = Kernel.oNofollow := by decide +kernel
 
 /-- A file has what was written where it was written, and no less than it had. -/
 theorem writeAt_size (data : ByteArray) (offset : Nat) (bytes : ByteArray) (h : offset ≤ data.size) :

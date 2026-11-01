@@ -283,8 +283,9 @@ private def serveClone (emu : Emu) (flags stack parentTid threadPointer childTid
   let setParentTid := 0x100000
   let clearChildTid := 0x200000
   let setChildTid := 0x1000000
+  -- `CLONE_DETACHED`, 0x400000, has been ignored since Linux 2.6.2, and musl still passes it.
   let known := 0xff ||| cloneVm ||| 0x200 ||| 0x400 ||| 0x800 ||| cloneThreadFlag ||| 0x40000 ||| setTls ||| setParentTid |||
-    clearChildTid ||| setChildTid
+    clearChildTid ||| 0x400000 ||| setChildTid
   let has (flag : Nat) : Bool := flags &&& flag != 0
   if flags ||| known != known then
     syscallReturn emu (.error (enosys emu))
@@ -446,10 +447,14 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
         current.taskTable.modify (·.setClearTid (← thread current) (arg 0))
         syscallReturn current (.ok (← thread current))
       else if is calls.sigprocmask || is calls.sigaction then
-        -- The old mask or action, if it asks for one, has nothing in it. Sizes are 8 bytes of a mask, or an action's.
+        -- The old mask or action, if it asks for one, has nothing in it. Sizes are 8 bytes of a mask, or an action's, which has
+        -- a restorer on x86-64, and on MIPS a mask of 16 bytes, and otherwise a handler, flags and a mask.
         let old := arg 2
         if old != 0 then
-          let size := if is calls.sigprocmask then arg 3 else 32
+          let size := if is calls.sigprocmask then arg 3
+            else match current.config.syscallAbi with
+              | .x86_64 | .mips => 32
+              | .riscv | .aarch64 => 24
           try write current old (ByteArray.mk (Array.replicate size 0))
           catch _ => return ← syscallReturn current (.error efault)
         syscallReturn current (.ok 0)

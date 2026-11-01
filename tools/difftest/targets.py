@@ -1,4 +1,5 @@
 """What each target is to the differential test: its registers, how to run it, and its instructions, see difftest.py."""
+import dataclasses
 import os
 import re
 import struct
@@ -824,6 +825,33 @@ def aarch64_shapes():
     return shapes
 
 
+def aarch64_zero_forms():
+    """The zero register in each position of a source, whose width is that of the instruction: the shapes never use it."""
+    forms = []
+    for r, z in [("w", "wzr"), ("x", "xzr")]:
+        a, b, c = f"{r}1", f"{r}2", f"{r}3"
+        for op in ["add", "adds", "sub", "subs", "and", "ands", "orr", "orn", "eor", "eon", "bic", "bics", "adc", "adcs", "sbc", "sbcs", "lsl", "lsr", "asr", "ror", "mul", "udiv", "sdiv"]:
+            forms += [f"{op} {a}, {z}, {b}", f"{op} {a}, {b}, {z}"]
+        for op in ["add", "adds", "sub", "subs", "and", "ands", "orr", "orn", "eor", "eon", "bic", "bics"]:
+            forms += [f"{op} {a}, {z}, {b}, lsr #1"]
+        for op in ["cmp", "cmn", "tst"]:
+            forms += [f"{op} {z}, {b}", f"{op} {b}, {z}", f"{op} {z}, {b}, lsr #1"]
+        for op in ["csel", "csinc", "csinv", "csneg"]:
+            forms += [f"{op} {a}, {z}, {b}, eq", f"{op} {a}, {b}, {z}, ne", f"{op} {a}, {z}, {z}, eq"]
+        for op in ["ccmp", "ccmn"]:
+            forms += [f"{op} {z}, {b}, #5, eq", f"{op} {b}, {z}, #5, ne", f"{op} {z}, #3, #5, ne"]
+        for op in ["madd", "msub"]:
+            forms += [f"{op} {a}, {z}, {b}, {c}", f"{op} {a}, {b}, {z}, {c}", f"{op} {a}, {b}, {c}, {z}"]
+        for op in ["rev", "rbit", "clz", "cls", "mov", "mvn", "neg", "negs", "sxtb", "sxth", "uxtb", "uxth"]:
+            forms += [f"{op} {a}, {z}"]
+        forms += [f"ubfx {a}, {z}, #1, #3", f"sbfx {a}, {z}, #1, #3", f"bfi {a}, {z}, #3, #5", f"bfxil {a}, {z}, #3, #5", f"extr {a}, {z}, {b}, #5", f"extr {a}, {b}, {z}, #5"]
+        forms += [f"dup v1.2d, {z}" if r == "x" else f"dup v1.4s, {z}", f"ins v1.d[1], {z}" if r == "x" else f"ins v1.s[1], {z}", f"fmov d1, {z}" if r == "x" else f"fmov s1, {z}"]
+        forms += [f"scvtf d1, {z}", f"ucvtf s1, {z}"]
+    forms += ["crc32b w1, wzr, w2", "crc32w w1, w2, wzr", "crc32x w1, wzr, x2", "crc32x w1, w2, xzr", "smull x1, wzr, w2", "umull x1, w2, wzr", "smaddl x1, wzr, w2, x3", "umsubl x1, w2, wzr, x3", "smaddl x1, w2, w3, xzr",
+        "add x1, x2, wzr, uxtw #2", "sub x1, x2, wzr, sxtw", "adds x1, x2, wzr, uxtb", "cmp x2, wzr, uxtw", "sxtw x1, wzr", "smulh x1, xzr, x2", "umulh x1, x2, xzr"]
+    return forms
+
+
 SVE_PREDICATES = [f"P{i}" for i in range(16)] + ["FFR"]
 
 
@@ -907,6 +935,7 @@ class AArch64(Risc):
             pins = self.sve_memory(text, layout)
             if pins is not None:
                 result.append(Case(code=code, text=text, pins=pins))
+        result += [dataclasses.replace(case, always=True) for case in self.text_cases(assemble, [(line,) for line in aarch64_zero_forms()])]
         return result
 
     def excluded(self, opcode, case):

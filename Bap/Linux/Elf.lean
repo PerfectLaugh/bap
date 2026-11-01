@@ -15,6 +15,8 @@ structure Segment where
 structure Program where
   /-- Whether it can go anywhere: `ET_DYN`. -/
   relocatable : Bool
+  /-- `e_machine`. -/
+  machine : Nat
   entry : Nat
   headerOffset : Nat
   headerCount : Nat
@@ -57,6 +59,7 @@ def parse (data : ByteArray) : Except String Program := do
       flags := header.2.2.2.2 }
   pure {
     relocatable := kind == 3
+    machine := little data 18 2
     entry := little data 24 8
     headerOffset := little data 32 8
     headerCount := little data 56 2

@@ -595,14 +595,14 @@ def takeOutput (kernel : Kernel) : Kernel × ByteArray :=
 
 end Kernel
 
-/-! ### What the calls write to memory, on x86-64 -/
+/-! ### What the calls write to memory -/
 
 namespace Abi
 
 def bytesOf (size value : Nat) : ByteArray :=
   ByteArray.mk ((List.range size).map fun index => (value >>> (8 * index)).toUInt8).toArray
 
-/-- `struct stat`. -/
+/-- `struct stat` of x86-64. -/
 def stat (value : Kernel.Stat) : ByteArray :=
   let seconds := value.time / 1000000000
   let nanos := value.time % 1000000000
@@ -610,6 +610,15 @@ def stat (value : Kernel.Stat) : ByteArray :=
   bytesOf 8 1 ++ bytesOf 8 value.inode ++ bytesOf 8 value.links ++ bytesOf 4 value.mode ++ bytesOf 4 0 ++ bytesOf 4 0 ++
     bytesOf 4 0 ++ bytesOf 8 0 ++ bytesOf 8 value.size ++ bytesOf 8 4096 ++ bytesOf 8 ((value.size + 511) / 512) ++
     time ++ time ++ time ++ bytesOf 24 0
+
+/-- `struct stat` of `asm-generic/stat.h`, which has the order of the fields of 32-bit systems and is smaller. -/
+def genericStat (value : Kernel.Stat) : ByteArray :=
+  let seconds := value.time / 1000000000
+  let nanos := value.time % 1000000000
+  let time := bytesOf 8 seconds ++ bytesOf 8 nanos
+  bytesOf 8 1 ++ bytesOf 8 value.inode ++ bytesOf 4 value.mode ++ bytesOf 4 value.links ++ bytesOf 4 0 ++ bytesOf 4 0 ++
+    bytesOf 8 0 ++ bytesOf 8 0 ++ bytesOf 8 value.size ++ bytesOf 4 4096 ++ bytesOf 4 0 ++ bytesOf 8 ((value.size + 511) / 512) ++
+    time ++ time ++ time ++ bytesOf 8 0
 
 /-- `struct statx`. -/
 def statx (value : Kernel.Stat) : ByteArray :=
@@ -642,11 +651,11 @@ def time (now scale : Nat) : ByteArray :=
   bytesOf 8 (now / 1000000000) ++ bytesOf 8 (now % 1000000000 / scale)
 
 /-- `struct utsname`, of six fields of 65 bytes. -/
-def utsname (nodename : String) : ByteArray :=
+def utsname (nodename machine : String) : ByteArray :=
   let field (text : String) : ByteArray :=
     let bytes := text.toUTF8
     bytes ++ bytesOf (65 - bytes.size) 0
-  field "Linux" ++ field nodename ++ field "6.1.0" ++ field "#1 SMP" ++ field "x86_64" ++ field "(none)"
+  field "Linux" ++ field nodename ++ field "6.1.0" ++ field "#1 SMP" ++ field machine ++ field "(none)"
 
 end Abi
 
