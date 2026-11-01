@@ -516,7 +516,7 @@ private def testProcesses : IO Unit := do
 
 /-- A real pthread program under real libc, if there is a compiler to make one: threads, a mutex that they fight over, and
 joins. It is 3 s, most of it compiling hot code. -/
-private def testRealPthreads : IO Unit := do
+def testRealPthreads : IO Unit := do
   let binary := "native/build/pthreads-test"
   -- What gcc makes elsewhere isn't a static x86-64 program for Linux.
   let compiled ← if System.Platform.isWindows || !System.Platform.target.startsWith "x86_64" then
@@ -574,6 +574,47 @@ def testLinuxMusl (triple : String) : IO Unit := do
   assertEqual s!"Linux {triple} a program of floating point ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
   assertEqual s!"Linux {triple} floating point is what qemu does" (← IO.FS.readBinFile s!"testsuite/data/{triple}-libc-floats.out").toList text.toList
 
+/-- A machine stopped anywhere and saved goes on from the bytes alone, in a new machine, to the same end. -/
+def testLinuxCheckpoints (triple : String) : IO Unit := do
+  let start (name : String) : IO Bap.Linux.Machine := do
+    let path := s!"testsuite/bin/{triple}-linux-musl-{name}"
+    Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile path)) "/test" ["/test", "arg1"]
+  let runOn (machine : Bap.Linux.Machine) (fuel : Nat) : IO (Bap.Tasks.ScheduleOutcome × ByteArray) := do
+    let written ← IO.mkRef ByteArray.empty
+    let outcome ← machine.run (fuel := fuel) fun data => written.modify (· ++ data)
+    pure (outcome, ← written.get)
+  for name in ["libc-files", "libc-threads", "libc-fork"] do
+    let (wholeOutcome, wholeText) ← runOn (← start name) 1000000000
+    -- These end at some tens of thousands of instructions.
+    let mut stops := 0
+    for cut in [1, 12000] do
+      let first ← start name
+      let (outcome, before) ← runOn first cut
+      if outcome == .outOfFuel then
+        stops := stops + 1
+        let data ← first.checkpoint
+        let second ← Bap.Linux.Machine.ofCheckpoint data
+        -- The file of the same state is the same file, so that nothing was lost or made up on the way.
+        assertEqual s!"Linux {triple} {name} at {cut} saves again as it was" (data == (← second.checkpoint)) true
+        let (outcome, after) ← runOn second 1000000000
+        assertEqual s!"Linux {triple} {name} ends from {cut} as it would have" wholeOutcome outcome
+        assertEqual s!"Linux {triple} {name} says from {cut} what it would have" wholeText.toList (before ++ after).toList
+        -- What saves is still as it was, and goes on to the same end.
+        let (outcome, after) ← runOn first 1000000000
+        assertEqual s!"Linux {triple} {name} saving at {cut} changes nothing" (wholeOutcome, wholeText.toList) (outcome, (before ++ after).toList)
+    assertTrue s!"Linux {triple} {name} was stopped at {stops} places" (stops == 2)
+    -- Going back in the same machine, past what it did to its files, its tasks and its memory.
+    let machine ← start name
+    let (_, before) ← runOn machine 12000
+    let saved ← machine.save
+    let (outcome, after) ← runOn machine 1000000000
+    machine.restore saved
+    let (again, afterAgain) ← runOn machine 1000000000
+    assertEqual s!"Linux {triple} {name} goes back and does it again" (outcome, after.toList) (again, afterAgain.toList)
+    assertEqual s!"Linux {triple} {name} from going back says what it would have" wholeText.toList (before ++ afterAgain).toList
+  expectThrow s!"Linux what isn't a checkpoint is refused" (Bap.Linux.Machine.ofCheckpoint "BAPLINUX".toUTF8)
+  expectThrow s!"Linux what isn't a checkpoint is refused" (Bap.Linux.Machine.ofCheckpoint "not one".toUTF8)
+
 /-- The kernel itself: a program isn't needed to say what it does. -/
 private def testKernel : IO Unit := do
   let unwrap {α} (result : Bap.Linux.Result α) : IO α := match result with
@@ -623,7 +664,7 @@ private def testKernel : IO Unit := do
 
 /-- Programs of libc under the virtual kernel, dynamic, if there is a compiler to make them. The program does all of
 what it does to files in the kernel's, and says what it found. -/
-private def testLinuxPrograms : IO Unit := do
+def testLinuxPrograms : IO Unit := do
   if System.Platform.isWindows || !System.Platform.target.startsWith "x86_64" then
     IO.println "ok: skipped the programs of libc, as nothing here compiles them"
   else
@@ -2081,11 +2122,9 @@ chain, so that they say the same of native code, ranges and the interpreter. -/
 def run : IO Unit := do
   nopInLoop
   mipsLittle
-  testRealPthreads
   testBlrLink
   testZeroRegisterWidth
   testKernel
-  testLinuxPrograms
   allEmulatorTests
   tuningRef.set (some (1, 4096, 16))
   allEmulatorTests

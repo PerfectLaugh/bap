@@ -20,7 +20,8 @@ The OCaml and Rust implementation it came from is on the
   in what `clone` shares. `runProcesses` schedules them, and `serveTaskCalls` gives guests the system calls of processes and
   pthreads: `fork`, `clone`, `waitpid`, `exit`, `futex`, `mmap` and others.
 - **Runs Linux programs** in a virtual kernel of pure Lean, static and dynamic, on x86-64 and AArch64, and static on 64-bit RISC-V: files, descriptors and the
-  clock are all in it, and nothing reaches the host. A program sees only what was copied in before it started.
+  clock are all in it, and nothing reaches the host. A program sees only what was copied in before it started. A machine can be
+  saved at any instruction and go on from the file alone, with its tasks, its memory and its files.
 - **Executes symbolically**, solving path conditions with Z3.
 
 ## Building
@@ -49,6 +50,8 @@ lake exe bap run program args           # an x86-64, AArch64 or RISC-V 64 Linux 
 lake exe bap run --copy dir program     # the same, with a directory copied in first
 lake exe bap run --root dir program     # the same, with its libraries from under a root of its architecture
 lake exe bap run --strace program       # the same, saying each system call
+lake exe bap run --stop-after 1000000 file program  # the same, saved to a file after that many instructions
+lake exe bap resume file                # goes on from it, in another process or on another machine
 ```
 
 Run `lake exe bap` for the other commands. Everything is also a library: `Bap.Runtime` has

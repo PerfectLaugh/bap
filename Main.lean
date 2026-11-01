@@ -22,7 +22,7 @@ open Bap
 open Bap.Bil
 
 private def usage : String :=
-  "usage: bap check FILE | bap run [--copy PATH].. [--root DIR] [--env NAME=VALUE].. [--strace] PROGRAM [ARGS] | bap print FILE | bap eval FILE [FUEL] | bap image FILE | bap raw FILE BASE | bap mc HEX | bap disassemble FILE | bap lisp FILE | bap analyze FILE | bap symbolic FILE"
+  "usage: bap check FILE | bap run [--copy PATH].. [--root DIR] [--env NAME=VALUE].. [--strace] [--stop-after COUNT FILE] PROGRAM [ARGS] | bap resume [--strace] [--stop-after COUNT FILE] CHECKPOINT | bap print FILE | bap eval FILE [FUEL] | bap image FILE | bap raw FILE BASE | bap mc HEX | bap disassemble FILE | bap lisp FILE | bap analyze FILE | bap symbolic FILE"
 
 private def loadProgram (path : String) : IO Program := do
   let input ← IO.FS.readFile path
@@ -107,31 +107,62 @@ private def analyze (path : String) : IO Unit := do
   IO.println s!"xrefs: {xrefs.xrefs.length}"
   IO.println s!"callgraph edges: {callgraph.graph.edges.length}"
 
-/-- Runs a program in a virtual Linux, with the status of its first process as ours. It sees only what was copied in before it
-started: itself, the libraries that it needs, from under `--root DIR` if they aren't of this machine, and each `--copy PATH`. -/
-private def runProgram (args : List String) : IO Unit := do
-  let rec split : List String → List String → List String → String → Bool → List String × List String × List String × String × Bool
-    | "--copy" :: path :: rest, copies, environment, root, trace => split rest (path :: copies) environment root trace
-    | "--env" :: entry :: rest, copies, environment, root, trace => split rest copies (entry :: environment) root trace
-    | "--root" :: path :: rest, copies, environment, _, trace => split rest copies environment path trace
-    | "--strace" :: rest, copies, environment, root, _ => split rest copies environment root true
-    | rest, copies, environment, root, trace => (copies, rest, environment.reverse, root, trace)
-  let (copies, command, environment, root, trace) := split args [] [] "" false
-  let some path := command.head? | IO.println usage
-  let mut kernel ← Linux.Kernel.empty.copyProgramFromHost path root
-  for copy in copies do
-    kernel ← kernel.copyFromHost copy
-  let stderr ← IO.getStderr
-  let watch : Option (Nat → List Nat → IO Unit) :=
-    if trace then some fun number args => stderr.putStrLn s!"syscall {number} {args.take 4}" else none
-  let machine ← Linux.start kernel path command environment (watch := watch)
+/-- Runs a machine until it finishes, with the status of its first process as ours, or for as many instructions as `stop` says,
+and then saves it where that says. -/
+private def runMachine (machine : Linux.Machine) (stop : Option (Nat × String)) : IO Unit := do
   let stdout ← IO.getStdout
-  match ← machine.run fun data => do
+  let fuel := match stop with
+    | some (count, _) => count
+    | none => 1000000000
+  match ← machine.run (fuel := fuel) fun data => do
       stdout.write data
       stdout.flush with
   | .finished status =>
     IO.Process.exit (if status % 128 != 0 then 128 + (status % 128).toUInt8 else (status / 256).toUInt8)
+  | .outOfFuel =>
+    match stop with
+    | some (_, path) => machine.saveFile path
+    | none => throw <| IO.userError s!"the program didn't finish: at {← Emu.pc machine.emu}"
   | outcome => throw <| IO.userError s!"the program didn't finish: {repr outcome} at {← Emu.pc machine.emu}"
+
+/-- What `run` and `resume` take. -/
+private structure RunOptions where
+  copies : List String := []
+  environment : List String := []
+  root : String := ""
+  trace : Bool := false
+  stop : Option (Nat × String) := none
+
+private def runOptions : List String → RunOptions → RunOptions × List String
+  | "--copy" :: path :: rest, options => runOptions rest { options with copies := path :: options.copies }
+  | "--env" :: entry :: rest, options => runOptions rest { options with environment := options.environment ++ [entry] }
+  | "--root" :: path :: rest, options => runOptions rest { options with root := path }
+  | "--strace" :: rest, options => runOptions rest { options with trace := true }
+  | "--stop-after" :: count :: path :: rest, options =>
+    match count.toNat? with
+    | some count => runOptions rest { options with stop := some (count, path) }
+    | none => (options, ["--stop-after", count, path] ++ rest)
+  | rest, options => (options, rest)
+
+private def tracer (options : RunOptions) : IO (Option (Nat → List Nat → IO Unit)) := do
+  let stderr ← IO.getStderr
+  pure (if options.trace then some fun number args => stderr.putStrLn s!"syscall {number} {args.take 4}" else none)
+
+/-- Runs a program in a virtual Linux. It sees only what was copied in before it started: itself, the libraries that it needs,
+from under `--root DIR` if they aren't of this machine, and each `--copy PATH`. -/
+private def runProgram (args : List String) : IO Unit := do
+  let (options, command) := runOptions args {}
+  let some path := command.head? | IO.println usage
+  let mut kernel ← Linux.Kernel.empty.copyProgramFromHost path options.root
+  for copy in options.copies do
+    kernel ← kernel.copyFromHost copy
+  runMachine (← Linux.start kernel path command options.environment (watch := ← tracer options)) options.stop
+
+/-- Goes on from a checkpoint of `--stop-after`, which may have been made on another machine. -/
+private def resumeProgram (args : List String) : IO Unit := do
+  let (options, command) := runOptions args {}
+  let [path] := command | IO.println usage
+  runMachine (← Linux.Machine.loadFile path (← tracer options)) options.stop
 
 private def symbolic (path : String) : IO Unit := do
   let program ← loadProgram path
@@ -157,6 +188,7 @@ private def run (args : List String) : IO Unit := do
   | ["lisp", path] => lisp path
   | ["analyze", path] => analyze path
   | "run" :: args => runProgram args
+  | "resume" :: args => resumeProgram args
   | ["symbolic", path] => symbolic path
   | "mc" :: atoms => mc (String.intercalate " " atoms)
   | _ => IO.println usage

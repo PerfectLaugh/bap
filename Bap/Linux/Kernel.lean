@@ -74,6 +74,8 @@ structure Kernel where
   output : ByteArray := ByteArray.empty
   /-- Nanoseconds since the epoch. -/
   clock : Nat := 1700000000 * 1000000000
+  /-- What the time stamp counter of the processor reads, which is kept here so that it is part of what a checkpoint holds. -/
+  cycles : Nat := 1000000
 
 /-- A result, or the number of an error. -/
 abbrev Result (α : Type) := Except Nat α

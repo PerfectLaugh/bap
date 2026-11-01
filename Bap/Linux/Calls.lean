@@ -16,6 +16,12 @@ def Architecture.ofElf : Nat → Option Architecture
   | 243 => some .riscv64
   | _ => none
 
+/-- The value of `e_machine` of an architecture. -/
+def Architecture.elfMachine : Architecture → Nat
+  | .x86_64 => 62
+  | .aarch64 => 183
+  | .riscv64 => 243
+
 /-- The system calls that the kernel serves, whatever their numbers. Those of tasks are for `Bap.Emu.serveTaskCalls`. -/
 inductive Call where
   | read | write | open_ | openat | close | stat | lstat | fstat | fstatat | statx | lseek | pread | pwrite | readv | writev

@@ -1,5 +1,7 @@
 import Bap.Emu.Tasks
+import Bap.Emu.Checkpoint
 import Bap.Linux.Calls
+import Bap.Linux.Image
 import Bap.Linux.Elf
 import Bap.Float
 
@@ -335,7 +337,7 @@ private def serveRest (emu : Emu) : IO HookId :=
 
 /-- An x86-64 of level 2, which is what the libc of current distributions asks for: SSE4.2 and POPCNT, without AVX, so that
 libc doesn't pick the routines that need it. -/
-private def serveCpu (emu : Emu) : IO Unit := do
+private def serveCpu (emu : Emu) (kernel : IO.Ref Kernel) : IO Unit := do
   let _ ← onIntrinsic emu "cpuid" fun current _ => do
     let leaf := match Value.asBits (← reg current (word "RAX")) with
       | .ok value => value.2.toNat % 2 ^ 32
@@ -400,10 +402,9 @@ private def serveCpu (emu : Emu) : IO Unit := do
       load current
       pure .proceed
   -- It counts up, so that what measures with it sees time pass.
-  let counter ← IO.mkRef 1000000
   let _ ← onIntrinsic emu "rdtsc" fun current _ => do
-    let now ← counter.get
-    counter.set (now + 1000)
+    let now := (← kernel.get).cycles
+    kernel.modify fun kernel => { kernel with cycles := now + 1000 }
     setReg current (word "RAX") (bits 64 (now % 2 ^ 32))
     setReg current (word "RDX") (bits 64 (now / 2 ^ 32))
     pure .proceed
@@ -504,6 +505,40 @@ private def mapStack (emu : Emu) (architecture : Architecture) (arguments enviro
     write emu (pointer + 8 * index) (Abi.bytesOf 8 cell)
   setReg emu (word (threadRegisters emu.config.syscallAbi).1) (bits 64 pointer)
 
+/-- An emulator of an architecture, as a Linux machine needs it, with nothing mapped. -/
+private def emulatorOf (architecture : Architecture) : IO Emu := do
+  -- A real program runs more code than the working set of a few thousand blocks that the default is for, and past it, each one
+  -- would be lifted each time it runs. Most of its code runs at its start, a few times, and compiling that takes longer than
+  -- running it: with this threshold, `ls` takes a third of the time, and a long loop no longer.
+  let tuned (config : Config) : Config := { config with cacheLimit := 1048576, hotThreshold := 1024 }
+  -- Nothing is in its one page, which goes at once.
+  let page := ByteArray.mk (Array.replicate 16 0)
+  let emu ← match architecture with
+    | .x86_64 => x86_64 page 0x1000 0 tuned
+    | .aarch64 => aarch64 page 0x1000 0 tuned
+    | .riscv64 => riscv64 page 0x1000 0 tuned
+  unmap emu 0x1000 16
+  emu.intrinsicServer.set (some (Bap.Float.evaluateWith (match architecture with
+    | .x86_64 => .x86
+    | .aarch64 => .arm
+    | .riscv64 => .riscv)))
+  pure emu
+
+/-- What makes an emulator a machine: its kernel behind its system calls. None of it is in a checkpoint. -/
+private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel) (watch : Option (Nat → List Nat → IO Unit)) :
+    IO Machine := do
+  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel }
+  if let some watch := watch then
+    let _ ← onSyscall emu fun _ number args => do
+      watch number args
+      pure .default
+  let _ ← serveKernelCalls machine
+  let _ ← serveTaskCalls emu
+  let _ ← serveRest emu
+  if architecture == .x86_64 then serveCpu emu machine.kernel
+  emu.processHooks.modify ((fun parent child => machine.kernel.modify (·.fork parent child)) :: ·)
+  pure machine
+
 /-- A machine at the start of `path`, which is in `kernel`. Its first process has the standard descriptors, on a console, with
 `input` to read. `watch` sees each system call before it is served. -/
 def start (kernel : Kernel) (path : String) (arguments : List String) (environment : List String := [])
@@ -521,18 +556,7 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   -- A real program runs more code than the working set of a few thousand blocks that the default is for, and past it, each one
   -- would be lifted each time it runs. Most of its code runs at its start, a few times, and compiling that takes longer than
   -- running it: with this threshold, `ls` takes a third of the time, and a long loop no longer.
-  let tuned (config : Config) : Config := { config with cacheLimit := 1048576, hotThreshold := 1024 }
-  -- Nothing is in its one page, which goes at once.
-  let page := ByteArray.mk (Array.replicate 16 0)
-  let emu ← match architecture with
-    | .x86_64 => x86_64 page 0x1000 0 tuned
-    | .aarch64 => aarch64 page 0x1000 0 tuned
-    | .riscv64 => riscv64 page 0x1000 0 tuned
-  unmap emu 0x1000 16
-  emu.intrinsicServer.set (some (Bap.Float.evaluateWith (match architecture with
-    | .x86_64 => .x86
-    | .aarch64 => .arm
-    | .riscv64 => .riscv)))
+  let emu ← emulatorOf architecture
   resetRegisters emu architecture
   let top ← mapProgram emu data program base
   let lowest := program.segments.foldl (fun lowest segment => min lowest segment.address) (2 ^ 63)
@@ -556,17 +580,7 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   let first := (← currentTask emu).group
   let kernel := kernel.withConsole first input
   let kernel := kernel.setProcess first { kernel.process first with breakStart := top, breakEnd := top }
-  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel }
-  if let some watch := watch then
-    let _ ← onSyscall emu fun _ number args => do
-      watch number args
-      pure .default
-  let _ ← serveKernelCalls machine
-  let _ ← serveTaskCalls emu
-  let _ ← serveRest emu
-  if architecture == .x86_64 then serveCpu emu
-  emu.processHooks.modify ((fun parent child => machine.kernel.modify (·.fork parent child)) :: ·)
-  pure machine
+  machineOf architecture emu kernel watch
 
 /-- Runs it until nothing can run, with what it writes to the console going to `output` as it comes. -/
 def Machine.run (machine : Machine) (output : ByteArray → IO Unit) (quantum : Nat := 100000) (fuel : Nat := 1000000000) :
@@ -596,6 +610,34 @@ def Machine.save (machine : Machine) : IO Machine.Saved := do
 def Machine.restore (machine : Machine) (saved : Machine.Saved) : IO Unit := do
   Bap.Emu.restore machine.emu saved.emulator
   machine.kernel.set saved.kernel
+
+private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
+
+/-- All that a machine is, as bytes: its architecture, its kernel with the files in it, and its emulator. What is compiled isn't in
+them, and is compiled again as it runs. -/
+def Machine.checkpoint (machine : Machine) : IO ByteArray := do
+  let header := Wire.putNat checkpointMagic machine.architecture.elfMachine
+  pure (Image.encode header (← machine.kernel.get).image ++ (← checkpointBytes machine.emu))
+
+/-- A new machine where a checkpoint was, which goes on as that one would. This is all it takes: nothing has to be running, or
+even to be on the host, but what the bytes hold. A turn of a thread that a run stopped in starts again. `watch` is as in `start`. -/
+def Machine.ofCheckpoint (data : ByteArray) (watch : Option (Nat → List Nat → IO Unit) := none) : IO Machine := do
+  if data.extract 0 checkpointMagic.size != checkpointMagic then
+    throw <| IO.userError "not a checkpoint of a Linux machine"
+  let (number, at_) ← IO.ofExcept (Wire.getNat data checkpointMagic.size)
+  let some architecture := Architecture.ofElf number
+    | throw <| IO.userError s!"a checkpoint of ELF machine {number}, which isn't one here"
+  let (image, at_) ← IO.ofExcept (Image.decode data at_)
+  let kernel ← IO.ofExcept image.kernel
+  let emu ← emulatorOf architecture
+  Bap.Emu.restore emu (← snapshotOfBytes emu (data.extract at_ data.size))
+  machineOf architecture emu kernel watch
+
+def Machine.saveFile (machine : Machine) (path : System.FilePath) : IO Unit := do
+  IO.FS.writeBinFile path (← machine.checkpoint)
+
+def Machine.loadFile (path : System.FilePath) (watch : Option (Nat → List Nat → IO Unit) := none) : IO Machine := do
+  Machine.ofCheckpoint (← IO.FS.readBinFile path) watch
 
 /-- A file of the host for a kernel, before a run: this is the only way that anything gets from there to in here. -/
 def Kernel.copyFromHost (kernel : Kernel) (path : String) (into : String := path) : IO Kernel := do

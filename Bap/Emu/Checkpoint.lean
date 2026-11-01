@@ -391,34 +391,26 @@ def withoutMemory (memoryVar : Bap.Var) (snapshot : Snapshot) : Snapshot :=
       { thread with state := { env := thread.state.env.filter fun binding => binding.1 != memoryVar } }
   }
 
-def save (emu : Emu) (path : String) : IO Unit := do
+/-- The bytes of what the emulator holds now. -/
+def checkpointBytes (emu : Emu) : IO ByteArray := do
   let originalRegions ← emu.regions.get
   refreshSharedRegions emu
   let snapshot ← snapshot emu
   let encoded := encodeBinarySnapshot (withoutMemory emu.config.memory snapshot)
   emu.regions.set originalRegions
-  match encoded with
-  | .ok data => IO.FS.writeBinFile path data
-  | .error error => throw <| IO.userError error
+  IO.ofExcept encoded
 
-private def timed (label : String) (action : IO α) : IO α := do
-  let start ← IO.monoMsNow
-  let result ← action
-  let elapsed := (← IO.monoMsNow) - start
-  IO.println s!"checkpoint {label}: {elapsed} ms"
-  pure result
+def save (emu : Emu) (path : String) : IO Unit := do
+  IO.FS.writeBinFile path (← checkpointBytes emu)
+
+/-- A snapshot from the bytes of `checkpointBytes`. -/
+def snapshotOfBytes (emu : Emu) (data : ByteArray) : IO Snapshot := do
+  materializeSnapshot emu (← IO.ofExcept (decodeBinarySnapshot data))
 
 def loadSnapshot (emu : Emu) (path : String) : IO Snapshot := do
-  let data ← timed "read" (IO.FS.readBinFile path)
-  if data.extract 0 binaryMagic.size = binaryMagic then
-    match ← timed "binary decode" (pure (decodeBinarySnapshot data)) with
-    | .error error => throw <| IO.userError error
-    | .ok snapshot => timed "memory materialize" (materializeSnapshot emu snapshot)
-  else
-    throw <| IO.userError s!"{path} is not a checkpoint"
+  snapshotOfBytes emu (← IO.FS.readBinFile path)
 
 def load (emu : Emu) (path : String) : IO Unit := do
-  let snapshot ← loadSnapshot emu path
-  timed "restore" (restore emu snapshot)
+  restore emu (← loadSnapshot emu path)
 
 end Bap.Emu
