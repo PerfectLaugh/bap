@@ -242,15 +242,25 @@ private theorem toNat_add_ofNat {addressWidth : Nat} (address : BitVec addressWi
   have hsum := add_lt_limit address hw h
   rw [BitVec.toNat_add, BitVec.toNat_ofNat, Nat.mod_eq_of_lt (a := offset) (by omega), Nat.mod_eq_of_lt hsum]
 
+/-- The byte at an offset of a page, and zero past it, which only a page made by hand has. -/
+private def pageByte (page : ByteArray) (offset : Nat) : UInt8 :=
+  if h : offset < page.size then page[offset] else 0
+
+private theorem pageByte_eq (page : ByteArray) (offset : Nat) : pageByte page offset = page[offset]! := by
+  simp only [pageByte]
+  split
+  · next h => exact (getElem!_pos page offset h).symm
+  · next h => exact (getElem!_neg page offset h).symm
+
 /-- The bytes `offset + n - 1` down to `offset` of a page, the first one read becoming the most significant. -/
 private def readDown (page : ByteArray) (offset : Nat) : Nat → Nat → Nat
   | 0, value => value
-  | n + 1, value => readDown page offset n (value * 256 + page[offset + n]!.toNat)
+  | n + 1, value => readDown page offset n (value * 256 + (pageByte page (offset + n)).toNat)
 
 /-- The `n` bytes from `offset` of a page, the first one read becoming the most significant. -/
 private def readUp (page : ByteArray) : Nat → Nat → Nat → Nat
   | 0, _, value => value
-  | n + 1, offset, value => readUp page n (offset + 1) (value * 256 + page[offset]!.toNat)
+  | n + 1, offset, value => readUp page n (offset + 1) (value * 256 + (pageByte page offset).toNat)
 
 private theorem readDown_eq (byte : Nat → UInt8) (page : ByteArray) (offset : Nat) (hbyte : ∀ i, byte i = page[offset + i]!)
     (n value : Nat) : readDown page offset n value =
@@ -259,7 +269,7 @@ private theorem readDown_eq (byte : Nat → UInt8) (page : ByteArray) (offset : 
   | zero => rfl
   | succ n ih =>
     rw [readDown, ih, List.range_succ, List.map_append, List.reverse_append]
-    simp [hbyte]
+    simp [hbyte, pageByte_eq]
 
 private theorem readUp_eq (byte : Nat → UInt8) (page : ByteArray) (hbyte : ∀ i, byte i = page[i]!)
     (n offset value : Nat) : readUp page n offset value =
@@ -268,7 +278,7 @@ private theorem readUp_eq (byte : Nat → UInt8) (page : ByteArray) (hbyte : ∀
   | zero => rfl
   | succ n ih =>
     rw [readUp, ih, List.range'_succ]
-    simp [hbyte]
+    simp [hbyte, pageByte_eq]
 
 /-- `read`, for an access inside of one page. -/
 private def readFast (memory : Memory addressWidth) (address : BitVec addressWidth) (endian : Endian) (size : Nat) :

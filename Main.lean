@@ -111,6 +111,9 @@ private def analyze (path : String) : IO Unit := do
 and then saves it where that says. -/
 private def runMachine (machine : Linux.Machine) (stop : Option (Nat × String)) : IO Unit := do
   let stdout ← IO.getStdout
+  -- A program that ends first has nothing to go on from: what an earlier run left must not look like it.
+  if let some (_, path) := stop then
+    if ← System.FilePath.pathExists path then IO.FS.removeFile path
   let fuel := match stop with
     | some (count, _) => count
     | none => 1000000000
