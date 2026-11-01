@@ -555,7 +555,7 @@ private def decimalDigits (digits : List Char) : Option Nat :=
 
 private def arm32Register (name : String) : Primus.Semantics.Value :=
   let name := if name.isEmpty || name = "NoRegister" then "Nil" else name
-  if ["NF", "ZF", "CF", "VF", "QF", "GE0", "GE1", "GE2", "GE3"].contains name then .register name 1 1
+  if ["NF", "ZF", "CF", "VF", "QF", "GE0", "GE1", "GE2", "GE3", "ISET"].contains name then .register name 1 1
   else
     match name.toList with
     | 'D' :: digits => .register name (if (decimalDigits digits).isSome then 64 else 32) (if (decimalDigits digits).isSome then 64 else 32)
@@ -581,7 +581,7 @@ private def armAliases (name : String) : Option Alias :=
 private def arm32Globals : Primus.Semantics.Globals :=
   let registers := (List.range 16).map fun n => s!"R{n}"
   let doubles := (List.range 32).map fun n => s!"D{n}"
-  (registers ++ doubles ++ ["SP", "LR", "PC", "CPSR", "Nil", "NF", "ZF", "CF", "VF", "QF", "GE0", "GE1", "GE2", "GE3", "FPSCR", "TPIDRURO", "TPIDRURW"]).map
+  (registers ++ doubles ++ ["SP", "LR", "PC", "CPSR", "Nil", "NF", "ZF", "CF", "VF", "QF", "GE0", "GE1", "GE2", "GE3", "FPSCR", "ISET", "EXCLUSIVE_MONITOR", "TPIDRURO", "TPIDRURW"]).map
     fun name => (name, arm32Register name)
 
 private def semanticsContext (address nextPc : Nat) : Primus.Semantics.Context :=
@@ -745,6 +745,13 @@ structure MipsVariant where
   endian : Endian := .big
   release6 : Bool := false
   deriving DecidableEq, Repr
+
+/-- The registers of 32-bit ARM, with their widths, as what holds them is called: what a machine has to start with. -/
+def arm32Registers : List (String × Nat) :=
+  (arm32Globals.filterMap fun entry =>
+    match entry.2 with
+    | .register name _ width => if name == "Nil" || name == "PC" then none else some (name, width)
+    | _ => none).eraseDups
 
 /-- The registers of i686, with their widths, as what holds them is called: what a machine has to start with. -/
 def x8632Registers : List (String × Nat) :=
@@ -987,7 +994,12 @@ def armMultipleBody (pc : Nat) (context : Primus.Semantics.Context) (load : Bool
   let stores := (List.range list.length).zip list |>.map fun (index, name) =>
     let value : Bil.Exp := if name = "PC" then armWord pc else .var ⟨name, .imm 32, 0, false⟩
     Bil.Stmt.move context.memory (.store memory (address index) value context.endian 4)
-  .move armMultipleBase (.var baseVar) :: (if load then write ++ loads else stores ++ write)
+  -- A load of PC says by its low bit which instruction set comes next, before it jumps.
+  let mode : Bil.Program := (List.range list.length).zip list |>.filterMap fun (index, name) =>
+    if name = "PC" then
+      some (Bil.Stmt.move ⟨"ISET", .imm 1, 0, false⟩ (.cast .low 1 (.load memory (address index) context.endian 4)))
+    else none
+  .move armMultipleBase (.var baseVar) :: (if load then write ++ (mode ++ loads) else stores ++ write)
 
 /-- A load or store of multiple registers, under its condition. `arm-a32-multiple` does the same on the A32 and the wide
 T32 forms, which `testArmMultipleAgree` checks, but the semantics have no narrow forms, this is what the proofs of the
@@ -1838,12 +1850,13 @@ def thumbItConditions (firstcond mask : Nat) : List Int :=
 a block, whose narrow forms set the flags, so AL in a block is its other encoding, which also always holds. -/
 def thumbBlockPredicate (condition : Int) : Int := if condition = 14 then 15 else condition
 
-/-- An instruction as it is in an IT block: the predicate operand holds its condition and it does not set the flags,
-which is what its narrow encoding means there. A decoder of a single instruction cannot know this. -/
-def thumbPredicated (condition : Int) (operands : List LLVM.Operand) : List LLVM.Operand :=
+/-- An instruction as it is in an IT block: the predicate operand holds its condition, and if `narrow` it does not set the flags,
+which is what its narrow encoding means there. A wide one says whether it does in its encoding. A decoder of a single instruction
+cannot know this. -/
+def thumbPredicated (condition : Int) (narrow : Bool) (operands : List LLVM.Operand) : List LLVM.Operand :=
   let rec go : List LLVM.Operand → List LLVM.Operand
     | [] => []
-    | .reg "CPSR" :: rest => .reg "Nil" :: go rest
+    | .reg "CPSR" :: rest => (if narrow then .reg "Nil" else .reg "CPSR") :: go rest
     | .imm 14 :: .reg "Nil" :: rest => .imm (thumbBlockPredicate condition) :: .reg "Nil" :: go rest
     | operand :: rest => operand :: go rest
   go operands
@@ -1865,7 +1878,7 @@ private def decodeThumbIt (globals : Primus.Semantics.Environment) (base address
   let mut last : Option (LLVM.Decoded × Nat) := none
   for condition in conditions do
     let decoded ← LLVM.disassemble "thumbv7" (instructionBytes data (cursor - base)) cursor
-    let predicated := { decoded with operands := thumbPredicated condition decoded.operands }
+    let predicated := { decoded with operands := thumbPredicated condition (decoded.size == 2) decoded.operands }
     let body ← liftThumb globals cursor predicated
     bil := bil ++ (match armCondition condition with
       | some holds => [Bil.Stmt.ifElse holds body []]

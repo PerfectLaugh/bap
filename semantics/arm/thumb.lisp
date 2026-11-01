@@ -153,6 +153,7 @@
   "blx imm; A7-215, the A32 code is relative to the word-aligned pc"
   (when (condition-holds pre)
     (thumb-link 4)
+    (set ISET 0:1)
     (exec-addr (+ (logand (t2pc) (lnot 3)) off))))
 
 (defun tBLXr (pre _ rm)
@@ -160,12 +161,15 @@
   (when (condition-holds pre)
     (let ((dst rm))
       (thumb-link 2)
+      (set ISET (cast-low 1 dst))
       (exec-addr (logand dst (lnot 1))))))
 
 (defun tBX (rm pre _)
   "bx rm; A7-250"
   (when (condition-holds pre)
-    (exec-addr (logand (if (= (symbol rm) 'PC) (t2pc) rm) (lnot 1)))))
+    (let ((dst (if (= (symbol rm) 'PC) (t2pc) rm)))
+      (set ISET (cast-low 1 dst))
+      (exec-addr (logand dst (lnot 1))))))
 
 (defun t2TBB (rn rm _ _)
   "tbb [rn, rm]"
@@ -176,7 +180,7 @@
 (defun t2TBH (rn rm _ _)
   "tbh [rn, rm, lsl #1]"
   (let ((addr (+ (t2reg rn) (lshift rm 1)))
-        (halfwords (cast-unsigned 32 (load-hword addr))))
+        (halfwords (load-half32 addr)))
     (exec-addr (+ (t2pc) (* halfwords 2)))))
 
 (defun t2LDRs (rt rn rm imm pre _)
@@ -239,7 +243,7 @@
   "a write to PC branches to the address without the bit 0, which
    selects the instruction set"
   (if (is-pc reg)
-      (exec-addr (logand val 0xfffffffe))
+      (prog (set ISET (cast-low 1 val)) (exec-addr (logand val 0xfffffffe)))
     (set$ reg val)))
 
 ;; the supervisor call, as in AArch64, the condition is the one of the

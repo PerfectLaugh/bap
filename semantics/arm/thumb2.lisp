@@ -332,18 +332,21 @@
 
 ;; the exclusive monitor is not modeled, an exclusive store succeeds
 (defun t2LDREX (rt rn off cnd _)
-  (when (condition-holds cnd) (set$ rt (load-word (+ rn (lshift off 2))))))
-(defun t2LDREXB (rt rn cnd _) (when (condition-holds cnd) (set$ rt (load-byte32 rn))))
-(defun t2LDREXH (rt rn cnd _) (when (condition-holds cnd) (set$ rt (load-half32 rn))))
+  (when (condition-holds cnd)
+    (set EXCLUSIVE_MONITOR (+ rn (lshift off 2) 1))
+    (set$ rt (load-word (+ rn (lshift off 2))))))
+(defun t2LDREXB (rt rn cnd _)
+  (when (condition-holds cnd) (set EXCLUSIVE_MONITOR (+ rn 1)) (set$ rt (load-byte32 rn))))
+(defun t2LDREXH (rt rn cnd _)
+  (when (condition-holds cnd) (set EXCLUSIVE_MONITOR (+ rn 1)) (set$ rt (load-half32 rn))))
 (defun t2STREX (rd rt rn off cnd _)
   (when (condition-holds cnd)
-    (store-word (+ rn (lshift off 2)) rt)
-    (set$ rd 0)))
+    (a32-store-exclusive rd (+ rn (lshift off 2)) (store-word (+ rn (lshift off 2)) rt))))
 (defun t2STREXB (rd rt rn cnd _)
-  (when (condition-holds cnd) (store-byte rn rt) (set$ rd 0)))
+  (when (condition-holds cnd) (a32-store-exclusive rd rn (store-byte rn rt))))
 (defun t2STREXH (rd rt rn cnd _)
-  (when (condition-holds cnd) (store-word rn (cast-low 16 rt)) (set$ rd 0)))
-(defun t2CLREX (_ _) (empty))
+  (when (condition-holds cnd) (a32-store-exclusive rd rn (store-word rn (cast-low 16 rt)))))
+(defun t2CLREX (_ _) (set EXCLUSIVE_MONITOR 0))
 
 ;; the 16-bit register shifts and CMN, the flags are set outside of an
 ;; IT block, where the second operand is CPSR
@@ -567,9 +570,10 @@
   (when (condition-holds cnd)
     (let ((a rn)) (a32-store-pair rt rt2 a) (set$ wb (+ a off)))))
 
-(defun t2LDREXD (rt rt2 rn cnd _) (when (condition-holds cnd) (a32-load-pair rt rt2 rn)))
+(defun t2LDREXD (rt rt2 rn cnd _)
+  (when (condition-holds cnd) (set EXCLUSIVE_MONITOR (+ rn 1)) (a32-load-pair rt rt2 rn)))
 (defun t2STREXD (rd rt rt2 rn cnd _)
-  (when (condition-holds cnd) (a32-store-pair rt rt2 rn) (set$ rd 0)))
+  (when (condition-holds cnd) (a32-store-exclusive rd rn (a32-store-pair rt rt2 rn))))
 
 (defun t2CPS1p (_) (empty))
 (defun t2CPS2p (_ _) (empty))

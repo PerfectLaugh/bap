@@ -10,7 +10,7 @@ import Bap.Float
 
 The virtual kernel of `Bap.Linux.Kernel` behind the system calls of the emulator, and what the kernel does to start a program:
 its segments, and those of the interpreter that it asks for, in pages, and the stack that it starts on. No request ever
-reaches the machine that this runs on: a program has what was put in its kernel. For x86, AArch64, RISC-V, MIPS and PowerPC. What
+reaches the machine that this runs on: a program has what was put in its kernel. For x86, ARM, RISC-V, MIPS and PowerPC. What
 is in here is in 64 bits whatever the guest has, with an error as its negative, as on x86-64, until `kernelCall` hands it over. -/
 
 namespace Bap.Linux
@@ -413,7 +413,10 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       returning emu (arg 1) (Abi.time now 1 big 8)
     | .clockGetres64 => returning emu (arg 1) (Abi.time 1 1 big 8)
     | .setThreadArea =>
-      if architecture == .i686 then
+      if architecture == .arm then
+        setReg emu ⟨"TPIDRURO", .imm 32, 0, false⟩ (bits 32 (arg 0))
+        pure (.returnValue 0)
+      else if architecture == .i686 then
         -- A `struct user_desc`: it says which entry it wants, or that any will do, and gets one, whose base is at 4.
         match ← (read emu (arg 0) 8).toBaseIO with
         | .error _ => pure (errorOf Errno.efault)
@@ -596,6 +599,10 @@ private def resetRegisters (emu : Emu) : Architecture → IO Unit
       setReg emu ⟨name, .imm wide, 0, false⟩ (bits wide 0)
     for index in List.range 8 do
       setReg emu ⟨s!"FCC{index}", .imm 1, 0, false⟩ (bits 1 0)
+  | .arm => do
+    -- Without `ISET`, which says what comes first.
+    for (name, width) in Target.LLVMLift.arm32Registers do
+      if name != "ISET" then setReg emu ⟨name, .imm width, 0, false⟩ (bits width 0)
   | .i686 => do
     for (name, width) in Target.LLVMLift.x8632Registers do
       setReg emu ⟨name, .imm width, 0, false⟩ (bits width 0)
@@ -648,6 +655,21 @@ private def fileOf (kernel : Kernel) (path : String) : Result ByteArray := do
   | some { content := .file data, .. } => .ok data
   | _ => .error Errno.einval
 
+/-- The page of helpers at the top of the memory of 32-bit ARM, of which old code calls these: `__kuser_cmpxchg`, which `ldrex` and
+`strex` make atomic, `__kuser_memory_barrier`, `__kuser_get_tls`, and the version of them. -/
+private def mapHelpers (emu : Emu) : IO Unit := do
+  let base := 0xffff0000
+  let words (offset : Nat) (values : List Nat) (page : ByteArray) : ByteArray :=
+    (values.zipIdx).foldl (init := page) fun page (value, index) =>
+      (List.range 4).foldl (init := page) fun page byte =>
+        page.set! (offset + 4 * index + byte) ((value >>> (8 * byte)).toUInt8)
+  let page := Bap.zeroBytes 4096
+  let page := words 0xfa0 [0xe12fff1e] page
+  let page := words 0xfc0 [0xe1923f9f, 0xe0533000, 0x01823f91, 0x03330001, 0x0afffffa, 0xe2730000, 0xe12fff1e] page
+  let page := words 0xfe0 [0xee1d0f70, 0xe12fff1e] page
+  let page := words 0xffc [5] page
+  map emu ⟨base, page, ⟨true, false, true⟩⟩
+
 /-- The stack that the kernel hands over: where the arguments, the environment and the auxiliary vector are. -/
 private def mapStack (emu : Emu) (architecture : Architecture) (arguments environment : List String) (auxiliary : List (Nat × Nat)) : IO Unit := do
   map emu ⟨stackTop architecture - stackSize, Bap.zeroBytes stackSize, ⟨true, true, false⟩⟩
@@ -691,6 +713,7 @@ private def emulatorOf (architecture : Architecture) : IO Emu := do
     | .x86_64 => x86_64 page 0x1000 0 tuned
     | .i686 => x86_32 page 0x1000 0 tuned
     | .aarch64 => aarch64 page 0x1000 0 tuned
+    | .arm => arm32 page 0x1000 0 false tuned
     | .riscv64 => riscv64 page 0x1000 0 tuned
     | .riscv32 => riscv32 page 0x1000 0 tuned
     | .mips 32 big release6 => mips32 page 0x1000 0 release6 (if big then .big else .little) tuned
@@ -699,7 +722,7 @@ private def emulatorOf (architecture : Architecture) : IO Emu := do
   unmap emu 0x1000 16
   emu.intrinsicServer.set (some (Bap.Float.evaluateWith (match architecture with
     | .x86_64 | .i686 => .x86
-    | .aarch64 => .arm
+    | .aarch64 | .arm => .arm
     | .riscv64 | .riscv32 => .riscv
     | .mips _ _ true => .powerpc
     | .mips _ _ false => .mips
@@ -754,6 +777,8 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   let capabilities := match architecture with
     | .x86_64 | .i686 => 0x07888f9f
     | .aarch64 => 3
+    -- HALF, THUMB, FAST_MULT, VFP, EDSP, NEON, VFPv3 and TLS
+    | .arm => 0xb0d6
     | .riscv64 | .riscv32 => 0x112d
     | .mips _ _ _ => 0
     -- A 32-bit or a 64-bit machine, with floating point, AltiVec and VSX.
@@ -763,6 +788,12 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
     (7, if interpreter.isSome then interpreterBase architecture else 0), (8, 0), (9, base + program.entry), (11, 0), (12, 0), (13, 0), (14, 0),
     (16, capabilities), (17, 100), (23, 0)]
   mapStack emu architecture (if arguments.isEmpty then [path] else arguments) environment auxiliary
+  -- On ARM, the low bit of where a program starts says that it is in Thumb.
+  let entry ← if architecture == .arm then do
+      setReg emu ⟨"ISET", .imm 1, 0, false⟩ (bits 1 (entry % 2))
+      mapHelpers emu
+      pure (entry / 2 * 2)
+    else pure entry
   setPc emu entry
   -- ELFv2: a function that is called from elsewhere finds its table of contents from where it is, and a program is called so.
   if let .powerpc 64 _ := architecture then setReg emu (word "R12") (bits 64 entry)

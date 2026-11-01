@@ -1156,7 +1156,7 @@ theorem x8632Globals_keys : (x8632Globals.map (·.1)).Nodup ∧ x8632Globals.len
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
-theorem arm32Globals_keys : (arm32Globals.map (·.1)).Nodup ∧ arm32Globals.length = 65 :=
+theorem arm32Globals_keys : (arm32Globals.map (·.1)).Nodup ∧ arm32Globals.length = 67 :=
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
@@ -1309,7 +1309,8 @@ theorem armMultiple_load_pc (pc : Nat) (context : Primus.Semantics.Context) (dec
   refine programJump_of_top_jmp _ ?_
   have ⟨i, hi⟩ := mem_indexed list "PC" hpc
   simp only [↓reduceIte, List.mem_cons, List.mem_append, List.mem_map, reduceCtorEq, false_or]
-  exact ⟨_, .inr ⟨(i, "PC"), hi, ite_eq_left rfl⟩⟩
+  simp only [List.mem_filterMap]
+  exact ⟨_, .inr (.inr ⟨(i, "PC"), hi, ite_eq_left rfl⟩)⟩
 
 /-- A load of multiple registers without PC, as `pop {r0}`, has no jump and falls through. -/
 theorem armMultiple_load_no_pc (pc : Nat) (context : Primus.Semantics.Context) (decoded : LLVM.Decoded)
@@ -1335,6 +1336,11 @@ theorem armMultiple_load_no_pc (pc : Nat) (context : Primus.Semantics.Context) (
   · cases writeback <;> simp at hs
     subst hs
     exact ⟨_, _, rfl⟩
+  rcases List.mem_append.1 hs with hs | hs
+  · rcases List.mem_filterMap.1 hs with ⟨⟨i, name⟩, hm, he⟩
+    have hname : name ∈ list := (List.of_mem_zip hm).2
+    have hne : name ≠ "PC" := fun he => hpc (he ▸ hname)
+    simp [hne] at he
   · rcases List.mem_map.1 hs with ⟨⟨i, name⟩, hm, rfl⟩
     have hname : name ∈ list := (List.of_mem_zip hm).2
     have hne : name ≠ "PC" := fun he => hpc (he ▸ hname)
@@ -1558,6 +1564,11 @@ theorem armMultipleBody_load_eval (pc : Nat) (context : Primus.Semantics.Context
         ((if writeback then [.move (armVar base) (armMultipleAfter addressing (4 * list.length))] else []) ++
           (armLoads (armMultipleFirst addressing (4 * list.length)) context.memory context.endian entries ++ [])) := by
     rw [List.append_nil, ← hprogram]
+    have hnone : ∀ f : Nat × String → Option Bil.Stmt, (∀ x ∈ (List.range list.length).zip list, f x = none) →
+        ((List.range list.length).zip list).filterMap f = [] := fun f hf => List.filterMap_eq_nil_iff.2 hf
+    unfold armMultipleBody
+    dsimp only
+    rw [hnone _ (fun x hx => ite_eq_right (hnotPc x hx))]
     rfl
   rw [hbody]
   have h1 : Bil.evalExp env (.var (armVar base)) = .ok (.bits b) := hbase
@@ -2099,20 +2110,22 @@ theorem thumbItConditions_examples :
     thumbItConditions 0 0b1100 = [0, 1] ∧ thumbItConditions 0b1011 0b1010 = [0b1011, 0b1011, 0b1010] := by
   decide
 
-/-- In a block, nothing sets the flags. -/
+/-- In a block, what is narrow doesn't set the flags. -/
 theorem thumbPredicated_no_flags (condition : Int) (operands : List LLVM.Operand) :
-    LLVM.Operand.reg "CPSR" ∉ thumbPredicated condition operands := by
+    LLVM.Operand.reg "CPSR" ∉ thumbPredicated condition true operands := by
   unfold thumbPredicated
-  fun_induction thumbPredicated.go condition operands <;> simp_all
+  fun_induction thumbPredicated.go condition true operands <;> simp_all
   rename_i h _ _
   exact fun e => h e.symm
 
-/-- The predicate operand of an instruction of a block holds its condition, and the flags operand does not ask for them. -/
-theorem thumbPredicated_operands (condition : Int) (rest : List LLVM.Operand) :
-    thumbPredicated condition (.imm 14 :: .reg "Nil" :: rest) =
-        .imm (thumbBlockPredicate condition) :: .reg "Nil" :: thumbPredicated condition rest ∧
-      thumbPredicated condition (.reg "CPSR" :: rest) = .reg "Nil" :: thumbPredicated condition rest := by
-  constructor <;> (unfold thumbPredicated; rw [thumbPredicated.go])
+/-- The predicate operand of an instruction of a block holds its condition, and what is narrow doesn't ask for the flags, as what is
+wide says for itself. -/
+theorem thumbPredicated_operands (condition : Int) (narrow : Bool) (rest : List LLVM.Operand) :
+    thumbPredicated condition narrow (.imm 14 :: .reg "Nil" :: rest) =
+        .imm (thumbBlockPredicate condition) :: .reg "Nil" :: thumbPredicated condition narrow rest ∧
+      thumbPredicated condition true (.reg "CPSR" :: rest) = .reg "Nil" :: thumbPredicated condition true rest ∧
+      thumbPredicated condition false (.reg "CPSR" :: rest) = .reg "CPSR" :: thumbPredicated condition false rest := by
+  refine ⟨?_, ?_, ?_⟩ <;> (unfold thumbPredicated; rw [thumbPredicated.go]; try rfl)
 
 /-- A predicate in a block is never the one of an instruction out of a block, whose narrow forms set the flags, and
 it is its condition if that can fail. -/

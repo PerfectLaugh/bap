@@ -60,11 +60,15 @@ def main : IO Unit := do
     Bap.Tests.Emu.run,
     Bap.Tests.Emu.testRealPthreads,
     Bap.Tests.Emu.testLinuxPrograms,
-    -- Floating point is much the longest of each, so only one of each family runs it here: of ARM, x87, RISC-V, MIPS and PowerPC.
+    -- Floating point is much the longest of each, so only one of each family runs it here: of AArch64, Thumb, x87, RISC-V, MIPS and PowerPC.
     -- The others were compared with qemu by hand.
     Bap.Tests.Emu.testLinuxMusl "aarch64",
     Bap.Tests.Emu.testLinuxMusl "riscv64" (floats := false),
     Bap.Tests.Emu.testLinuxMusl "i686" (exclusive := false),
+    Bap.Tests.Emu.testLinuxMusl "arm" (floats := false),
+    Bap.Tests.Emu.testLinuxMusl "thumb",
+    Bap.Tests.Emu.testLinuxInterworking "arm",
+    Bap.Tests.Emu.testLinuxInterworking "thumb",
     Bap.Tests.Emu.testLinuxMusl "riscv32",
     Bap.Tests.Emu.testLinuxMusl "mips",
     Bap.Tests.Emu.testLinuxMusl "mipsel" (floats := false),
@@ -78,6 +82,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxCheckpoints "aarch64" (cuts := [1, 12000]),
     Bap.Tests.Emu.testLinuxCheckpoints "riscv64",
     Bap.Tests.Emu.testLinuxCheckpoints "i686",
+    Bap.Tests.Emu.testLinuxCheckpoints "thumb",
     Bap.Tests.Emu.testLinuxCheckpoints "riscv32",
     Bap.Tests.Emu.testLinuxCheckpoints "mips",
     Bap.Tests.Emu.testLinuxCheckpoints "mips64el",

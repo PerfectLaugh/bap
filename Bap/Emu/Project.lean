@@ -10,6 +10,7 @@ private def imageArch : SyscallAbi → Image.Arch
   | .mips => .mips
   | .powerpc | .powerpc64 => .powerpc
   | .x86_32 => .x86
+  | .arm => .arm
 
 private def imageWidth (config : Config) : Except String Nat :=
   match config.memory.typ with

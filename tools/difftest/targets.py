@@ -1089,10 +1089,10 @@ class Arm32(Risc):
     default_pins = {"SP": "window+256"}
     base_pins = {"R5": "window+248", "R6": 8}
     semantics = ["arm/arm-a32.lisp", "arm/arm-a32-mem.lisp", "arm/arm-a32-multiple.lisp", "arm/arm-bits.lisp", "arm/arm-float.lisp", "arm/arm-vfp.lisp", "arm/thumb.lisp", "arm/thumb2.lisp", "arm/thumb-multiple.lisp", "arm/thumb-vfp.lisp"]
-    excluded_prefix = ("SVC", "tSVC", "t2SVC", "BKPT", "tBKPT", "UDF", "tUDF", "t2UDF", "HLT", "tHLT", "MRC", "MCR", "t2MRC", "t2MCR", "MRS", "MSR", "t2MRS", "t2MSR", "VMRS", "VMSR", "HINT", "tHINT", "t2HINT", "CLREX", "t2CLREX", "DMB", "DSB", "ISB", "t2DMB", "t2DSB", "t2ISB", "CPS", "tCPS", "t2CPS", "SETEND", "tSETEND", "RFE", "SRS", "t2RFE", "t2SRS", "PLD", "PLI", "t2PLD", "t2PLI", "tIT", "t2IT", "t2TBB", "t2TBH", "LDC", "STC", "t2LDC", "t2STC", "CDP", "t2CDP", "STREX", "LDREX", "t2STREX", "t2LDREX", "STLEX", "LDAEX", "t2STLEX", "t2LDAEX")
+    excluded_prefix = ("SVC", "tSVC", "t2SVC", "BKPT", "tBKPT", "UDF", "tUDF", "t2UDF", "HLT", "tHLT", "MRC", "MCR", "t2MRC", "t2MCR", "MRS", "MSR", "t2MRS", "t2MSR", "VMRS", "VMSR", "HINT", "tHINT", "t2HINT", "CLREX", "t2CLREX", "DMB", "DSB", "ISB", "t2DMB", "t2DSB", "t2ISB", "CPS", "tCPS", "t2CPS", "SETEND", "tSETEND", "RFE", "SRS", "t2RFE", "t2SRS", "PLD", "PLI", "t2PLD", "t2PLI", "tIT", "t2IT", "t2TBB", "t2TBH", "LDC", "STC", "t2LDC", "t2STC", "CDP", "t2CDP", "STLEX", "LDAEX", "t2STLEX", "t2LDAEX")
 
     def aux_spec(self):
-        spec = {"Nil": (0, 32), "CPSR": (0, 32), "FPSCR": (0, 32), "TPIDRURO": (0, 32), "TPIDRURW": (0, 32), "PC": (0, 32)}
+        spec = {"Nil": (0, 32), "EXCLUSIVE_MONITOR": (0, 32), "ISET": (0, 1), "CPSR": (0, 32), "FPSCR": (0, 32), "TPIDRURO": (0, 32), "TPIDRURW": (0, 32), "PC": (0, 32)}
         return spec
 
     def encode_extra(self, values, out):

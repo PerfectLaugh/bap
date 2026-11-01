@@ -604,6 +604,28 @@ def testLinuxProc (triple : String) : IO Unit := do
   let (_, mine) ← runOn (← Bap.Linux.start (kernel.addGenerated "/proc/sys/kernel/ostype" fun _ => "Mine\n".toUTF8) "/test" ["/test", "arg1"])
   assertTrue s!"Linux {triple} /proc can be replaced: {mine}" ((mine.splitOn "ostype Mine").length > 1)
 
+/-- Calls between ARM and Thumb, whichever a program starts in, and the helpers of the kernel, as qemu has them. -/
+def testLinuxInterworking (triple : String) : IO Unit := do
+  let path := s!"testsuite/bin/{triple}-linux-musl-interworking"
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile path)) "/test" ["/test"]
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual s!"Linux {triple} goes between ARM and Thumb" (Bap.Tasks.ScheduleOutcome.finished 0, "104 214 110\ntls 1\ncas 0 9\ncas 1 9\nversion 1\n")
+    (outcome, String.fromUTF8! (← written.get))
+
+/-- A wide instruction of an IT block that says that it sets the flags does, which a narrow one there doesn't. -/
+private def testThumbItFlags : IO Unit := do
+  -- cmp r0, #1; it ne; orrsne.w r3, r1, r2
+  let code := ByteArray.mk #[0x01, 0x28, 0x18, 0xbf, 0x51, 0xea, 0x02, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  let emu ← Bap.Emu.arm32 code 0 0 (thumb := true)
+  let word (name : String) : Bap.Var := ⟨name, .imm 32, 0, false⟩
+  let flag (name : String) : Bap.Var := ⟨name, .imm 1, 0, false⟩
+  for name in ["R0", "R1", "R2", "R3"] do Bap.Emu.setReg emu (word name) (.bits (BitVec.ofNat 32 0))
+  for name in ["NF", "ZF", "CF", "VF"] do Bap.Emu.setReg emu (flag name) (.bits (BitVec.ofNat 1 0))
+  let _ ← Bap.Emu.step emu
+  let _ ← Bap.Emu.step emu
+  assertBits "Emu orrs.w in an IT block sets Z" (BitVec.ofNat 1 1) (.ok (← Bap.Emu.reg emu (flag "ZF")))
+
 /-- A machine stopped anywhere and saved goes on from the bytes alone, in a new machine, to the same end. -/
 def testLinuxCheckpoints (triple : String) (cuts : List Nat := [12000]) : IO Unit := do
   let start (name : String) : IO Bap.Linux.Machine := do
@@ -2154,6 +2176,7 @@ def run : IO Unit := do
   mipsLittle
   testBlrLink
   testZeroRegisterWidth
+  testThumbItFlags
   testKernel
   allEmulatorTests
   tuningRef.set (some (1, 4096, 16))

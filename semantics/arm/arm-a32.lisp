@@ -232,7 +232,8 @@
 
 (defun a32-write-pc (x)
   "(a32-write-pc X) branches to X, the bit 0 of which selects the
-   instruction set and is not a part of the address"
+   instruction set and is not a part of the address: ISET is 1 in Thumb"
+  (set ISET (cast-low 1 x))
   (exec-addr (logand x 0xfffffffe)))
 
 (defmacro a32-set (rd x)
@@ -826,7 +827,7 @@
 (defun Bcc (off cnd _) (a32-cond cnd (a32-branch off)))
 (defun BL (off) (a32-link) (a32-branch off))
 (defun BL_pred (off cnd _) (a32-cond cnd (prog (a32-link) (a32-branch off))))
-(defun BLXi (off) (a32-link) (a32-branch off))
+(defun BLXi (off) (a32-link) (set ISET 1:1) (a32-branch off))
 (defun BX (rm) (a32-write-pc rm))
 (defun BX_pred (rm cnd _) (a32-cond cnd (a32-write-pc rm)))
 (defun BX_RET (cnd _) (a32-cond cnd (a32-write-pc LR)))
@@ -890,7 +891,7 @@
 (defun PLDrs (_ _ _) (empty))
 (defun PLIi12 (_ _) (empty))
 (defun PLIrs (_ _ _) (empty))
-(defun CLREX () (empty))
+(defun CLREX () (set EXCLUSIVE_MONITOR 0))
 ;; the hint to a debugger, which has no architectural effect
 (defun DBG (_ _ _) (empty))
 

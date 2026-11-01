@@ -171,16 +171,28 @@
 ;; store succeeds, as in T32. The doubleword ones take a register pair,
 ;; e.g., R2_R3
 
-(defun LDREX (rt rn cnd _) (a32-cond cnd (set$ rt (load-word32 rn))))
-(defun LDREXB (rt rn cnd _) (a32-cond cnd (set$ rt (load-byte32 rn))))
-(defun LDREXH (rt rn cnd _) (a32-cond cnd (set$ rt (load-half32 rn))))
-(defun STREX (rd rt rn cnd _) (a32-cond cnd (prog (store-word rn rt) (set$ rd 0))))
-(defun STREXB (rd rt rn cnd _) (a32-cond cnd (prog (store-byte rn rt) (set$ rd 0))))
-(defun STREXH (rd rt rn cnd _) (a32-cond cnd (prog (store-half32 rn rt) (set$ rd 0))))
+;; The exclusive monitor of a thread is EXCLUSIVE_MONITOR, one more than
+;; the address of the exclusive load that it follows, and 0 if there is
+;; none. A thread is alone until it is switched, when the emulator clears
+;; it, as Linux does with CLREX.
+(defmacro a32-store-exclusive (rd addr store)
+  (prog
+     (if (= EXCLUSIVE_MONITOR (+ addr 1))
+         (prog store (set$ rd 0))
+       (set$ rd 1))
+     (set EXCLUSIVE_MONITOR 0)))
+
+(defun LDREX (rt rn cnd _) (a32-cond cnd (prog (set EXCLUSIVE_MONITOR (+ rn 1)) (set$ rt (load-word32 rn)))))
+(defun LDREXB (rt rn cnd _) (a32-cond cnd (prog (set EXCLUSIVE_MONITOR (+ rn 1)) (set$ rt (load-byte32 rn)))))
+(defun LDREXH (rt rn cnd _) (a32-cond cnd (prog (set EXCLUSIVE_MONITOR (+ rn 1)) (set$ rt (load-half32 rn)))))
+(defun STREX (rd rt rn cnd _) (a32-cond cnd (a32-store-exclusive rd rn (store-word rn rt))))
+(defun STREXB (rd rt rn cnd _) (a32-cond cnd (a32-store-exclusive rd rn (store-byte rn rt))))
+(defun STREXH (rd rt rn cnd _) (a32-cond cnd (a32-store-exclusive rd rn (store-half32 rn rt))))
 
 (defun LDREXD (p rn cnd _)
   (a32-cond cnd
     (let ((addr rn))
+      (set EXCLUSIVE_MONITOR (+ addr 1))
       (case (symbol p)
         'R0_R1 (a32-load-named-pair R0 R1 addr)
         'R2_R3 (a32-load-named-pair R2 R3 addr)
@@ -193,15 +205,15 @@
 (defun STREXD (rd p rn cnd _)
   (a32-cond cnd
     (let ((addr rn))
-      (case (symbol p)
-        'R0_R1 (a32-store-pair R0 R1 addr)
-        'R2_R3 (a32-store-pair R2 R3 addr)
-        'R4_R5 (a32-store-pair R4 R5 addr)
-        'R6_R7 (a32-store-pair R6 R7 addr)
-        'R8_R9 (a32-store-pair R8 R9 addr)
-        'R10_R11 (a32-store-pair R10 R11 addr)
-        'R12_SP (a32-store-pair R12 SP addr))
-      (set$ rd 0))))
+      (a32-store-exclusive rd addr
+        (case (symbol p)
+          'R0_R1 (a32-store-pair R0 R1 addr)
+          'R2_R3 (a32-store-pair R2 R3 addr)
+          'R4_R5 (a32-store-pair R4 R5 addr)
+          'R6_R7 (a32-store-pair R6 R7 addr)
+          'R8_R9 (a32-store-pair R8 R9 addr)
+          'R10_R11 (a32-store-pair R10 R11 addr)
+          'R12_SP (a32-store-pair R12 SP addr))))))
 
 ;; the deprecated swap
 (defun SWP (rt rt2 rn cnd _)

@@ -6219,7 +6219,9 @@ theorem atCodeStop_restores (lowering : Lowering) (pc : Nat) (checkpoint : Nat �
 
 theorem directEdges_length (block : Block) (chain : Bool) : (directEdges block chain).length ≤ 2 := by
   simp only [directEdges]
-  split <;> (try split) <;> simp
+  split
+  · simp
+  · split <;> (try split) <;> simp
 
 /-- Graph edges that stay inside the compiled range become gotos; all others leave through a jump. -/
 theorem graphEdgeOps_internal (lowering : Lowering) (labels : List (Nat × Nat)) (edges : List (Nat × Nat))

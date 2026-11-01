@@ -598,8 +598,22 @@ private def blockExit (block : Block) : BlockExit :=
   | some (.ifElse ..) | some (.while ..) | some (.special _) | some (.cpuExn _) => .other
   | _ => .fall
 
+/-- Whether a program may change which instruction set comes next, as `ISET` of ARM says: what follows it can't be decoded before
+that, and most of what writes it does so on a condition. -/
+private def writesInstructionSet : Nat → Bil.Program → Bool
+  | 0, _ => true
+  | fuel + 1, program => program.any fun stmt =>
+    match stmt with
+    | .move var _ => var.name == "ISET"
+    | .ifElse _ yes no => writesInstructionSet fuel yes || writesInstructionSet fuel no
+    | .while _ body => writesInstructionSet fuel body
+    | _ => false
+
+private def changesInstructionSet (block : Block) : Bool := writesInstructionSet 16 block.program
+
 /-- The blocks that may follow `block` in a range. -/
 private def directEdges (block : Block) (chainFallthrough : Bool := false) : List Nat :=
+  if changesInstructionSet block then [] else
   match blockExit block with
   | .direct target => [target]
   | .branch _ yes no falls => if falls && !chainFallthrough then [yes] else [yes, no]

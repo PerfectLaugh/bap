@@ -4,6 +4,8 @@ import Bap.Target.X86
 import Bap.Target.X8632
 import Bap.Target.AArch64
 import Bap.Target.PowerPC
+import Bap.Target.ARM32
+import Bap.Target.Thumb
 import Bap.Target.MIPS
 import Bap.Target.MIPS32
 import Bap.Primus.Lifted
@@ -15,7 +17,7 @@ import Std.Data.HashSet
 namespace Bap.Emu
 
 inductive SyscallAbi where
-  | riscv | x86_64 | aarch64 | mips | powerpc | powerpc64 | x86_32
+  | riscv | x86_64 | aarch64 | mips | powerpc | powerpc64 | x86_32 | arm
   deriving DecidableEq, Repr
 
 inductive DelayPolicy where
@@ -25,6 +27,8 @@ inductive DelayPolicy where
 structure Config where
   disassembler : Disasm.Disassembler
   disassemblerAt : Option (Nat → IO Disasm.Disassembler) := none
+  /-- The decoder of Thumb, if the target has it as well as the other: `ISET` says which of them comes next. -/
+  thumbAt : Option (Nat → IO Disasm.Disassembler) := none
   memory : Bap.Var
   endian : Endian := .little
   syscallAbi : SyscallAbi := .riscv
@@ -450,7 +454,7 @@ def exclusiveMonitor (width : Nat) : Bap.Var := ⟨"EXCLUSIVE_MONITOR", .imm wid
 /-- A state without a monitor, for a target that has one. -/
 private def clearMonitor (config : Config) (env : Bil.Env) : Bil.Env :=
   match config.syscallAbi, memoryWidth config with
-  | .aarch64, .ok width | .riscv, .ok width | .mips, .ok width | .powerpc, .ok width | .powerpc64, .ok width => Bil.bind env (exclusiveMonitor width) (.bits (BitVec.ofNat width 0))
+  | .aarch64, .ok width | .riscv, .ok width | .mips, .ok width | .powerpc, .ok width | .powerpc64, .ok width | .arm, .ok width => Bil.bind env (exclusiveMonitor width) (.bits (BitVec.ofNat width 0))
   | _, _ => env
 
 def switchThread (emu : Emu) (id : ThreadId) : IO Unit := do
@@ -1027,6 +1031,7 @@ def syscallRegisters : SyscallAbi → String × List String × String
   | .mips => ("R2", ["R4", "R5", "R6", "R7", "R8", "R9"], "R2")
   | .powerpc | .powerpc64 => ("R0", ["R3", "R4", "R5", "R6", "R7", "R8"], "R3")
   | .x86_32 => ("EAX", ["EBX", "ECX", "EDX", "ESI", "EDI", "EBP"], "EAX")
+  | .arm => ("R7", ["R0", "R1", "R2", "R3", "R4", "R5"], "R0")
 
 def wordWidth (emu : Emu) : IO Nat :=
   match memoryWidth emu.config with
@@ -1093,6 +1098,7 @@ def threadRegisters : SyscallAbi → String × String
   | .powerpc => ("R1", "R2")
   | .powerpc64 => ("R1", "R13")
   | .x86_32 => ("ESP", "GS_BASE")
+  | .arm => ("SP", "TPIDRURO")
 
 def cloneProcessMemory (emu : Emu) (child : ThreadId) : IO Unit := do
   let parent ← match ← emu.engine.persistentMemory.get with
@@ -1226,7 +1232,8 @@ def fetchSpan (regions : List Region) (address limit : Nat) : Except String Nat 
 
 private def fetch (emu : Emu) (address : Nat) : IO ByteArray := do
   try
-    let limit := match emu.config.syscallAbi with | .x86_64 | .x86_32 => 16 | _ => 4
+    -- An IT block of Thumb is decoded whole: its two bytes and four instructions of up to four.
+    let limit := match emu.config.syscallAbi with | .x86_64 | .x86_32 => 16 | .arm => 18 | _ => 4
     match fetchSpan (← emu.regions.get) address limit with
     | .error error => throw <| IO.userError error
     | .ok span =>
@@ -1251,10 +1258,20 @@ private def namesFloat : Nat → List Bil.Stmt → Bool
     | .while _ body => namesFloat fuel body
     | _ => false
 
-private def lift (emu : Emu) (address : Nat) (code : ByteArray) : IO Primus.Lifted.Block := do
-  let disassembler ← match emu.config.disassemblerAt with
-    | some create => create address
-    | none => pure emu.config.disassembler
+/-- Whether what a state runs next is Thumb. -/
+private def isThumb (state : Bil.State) : Bool :=
+  match Bil.lookup state.env ⟨"ISET", .imm 1, 0, false⟩ with
+  | .ok (.bits bits) => bits.toNat == 1
+  | _ => false
+
+private def lift (emu : Emu) (thumb : Bool) (address : Nat) (code : ByteArray) : IO Primus.Lifted.Block := do
+  let disassembler ← match emu.config.thumbAt, emu.config.disassemblerAt with
+    | some create, _ => if thumb then create address else
+      match emu.config.disassemblerAt with
+      | some arm => arm address
+      | none => pure emu.config.disassembler
+    | none, some create => create address
+    | none, none => pure emu.config.disassembler
   let decoded ← disassembler.decode address code
   match decoded with
   | .error error => throw <| IO.userError s!"Emu instruction at {address}: {error}"
@@ -1452,7 +1469,7 @@ private def runRange (emu : Emu) (address budget : Nat) : IO (Nat × Bil.Effect)
   let quiet ← rangeIsQuiet emu
   emu.rangeQuiet.set quiet
   emu.rangeStart.set (some address)
-  let result ← Primus.Lifted.runBlockObserved emu.engine (fetch emu) (lift emu) state address
+  let result ← Primus.Lifted.runBlockObserved emu.engine (fetch emu) (lift emu (isThumb state)) state address
     (some (notifyMemory emu)) (some (observeRangeCode emu)) (!quiet) budget
   Primus.Lifted.flushDirtyRange emu.engine
   emu.state.set result.state
@@ -1721,6 +1738,7 @@ private def callAbi : SyscallAbi → List String × String × String × Bool
   | .mips => (["R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11"], "R31", "R2", false)
   | .powerpc | .powerpc64 => (["R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10"], "LR", "R3", false)
   | .x86_32 => ([], "", "EAX", true)
+  | .arm => (["R0", "R1", "R2", "R3"], "LR", "R0", false)
   | .x86_64 => (["RDI", "RSI", "RDX", "RCX", "R8", "R9"], "", "RAX", true)
 
 def call (emu : Emu) (address returnTo : Nat) (args : List UInt64) (fuel : Nat := 100000) :
@@ -1812,6 +1830,21 @@ def powerpc (code : ByteArray) (base entry : Nat) (variant : Target.LLVMLift.Pow
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
   create (adjust config) [region] { env := clearMonitor config {} } entry
+
+/-- ARM and Thumb, of which it starts in Thumb if `thumb`. -/
+def arm32 (code : ByteArray) (base entry : Nat) (thumb : Bool := false) (adjust : Config → Config := id) : IO Emu := do
+  let disassembler ← Target.ARM32.disassembler base
+  let config : Config := {
+    disassembler
+    disassemblerAt := some (fun base => Target.ARM32.disassembler base)
+    thumbAt := some (fun base => Target.Thumb.disassembler base)
+    memory := ⟨"mem", .mem 32 8, 0, false⟩
+    endian := .little
+    syscallAbi := .arm
+  }
+  let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
+  let env := Bil.bind (clearMonitor config {}) ⟨"ISET", .imm 1, 0, false⟩ (.bits (BitVec.ofNat 1 (if thumb then 1 else 0)))
+  create (adjust config) [region] { env } entry
 
 def x86_32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
   let disassembler ← Target.X8632.disassembler base

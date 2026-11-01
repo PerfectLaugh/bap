@@ -251,6 +251,11 @@ private def callsOf (abi : SyscallAbi) (width : Nat) : Calls :=
       schedYield := 124, futex := 98, futexTime64 := if width == 32 then some 422 else none, setTidAddress := 96,
       setRobustList := 99, rseq := 293, sigprocmask := 135, sigaction := 134, tgkill := 131, mmap := 222, munmap := 215,
       mprotect := 226, madvise := 233 }
+  | .arm =>
+    { fork := some 2, vfork := some 190, clone := 120, clone3 := 435, wait4 := 114, exit := 1, exitGroup := 248, getpid := 20,
+      getppid := 64, gettid := 224, schedYield := 158, futex := 240, futexTime64 := some 422, setTidAddress := 256,
+      setRobustList := 338, rseq := 398, sigprocmask := 175, sigaction := 174, tgkill := 268, mmap := 192, munmap := 91,
+      mprotect := 125, madvise := 220 }
   | .x86_32 =>
     { fork := some 2, vfork := some 190, clone := 120, clone3 := 435, wait4 := 114, waitpid := some 7, exit := 1, exitGroup := 252,
       getpid := 20, getppid := 64, gettid := 224, schedYield := 158, futex := 240, futexTime64 := some 422, setTidAddress := 258,
@@ -476,10 +481,10 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
         syscallReturn current (.ok (← thread current))
       else if is calls.sigprocmask || is calls.sigaction then
         -- The old mask or action, if it asks for one, has nothing in it. Sizes are those of a mask, which it says, or of an action:
-        -- a handler, flags and a mask, and a restorer on x86 and PowerPC.
+        -- a handler, flags and a mask, and a restorer on x86, PowerPC and 32-bit ARM.
         let old := arg 2
         if old != 0 then
-          let size := if is calls.sigprocmask then arg 3 else (if x86 || isPowerPC current || current.config.syscallAbi == .x86_32 then 3 else 2) * (width / 8) + arg 3
+          let size := if is calls.sigprocmask then arg 3 else (if x86 || isPowerPC current || current.config.syscallAbi == .x86_32 || current.config.syscallAbi == .arm then 3 else 2) * (width / 8) + arg 3
           try write current old (ByteArray.mk (Array.replicate size 0))
           catch _ => return ← syscallReturn current (.error efault)
         syscallReturn current (.ok 0)
