@@ -21,10 +21,33 @@ open Bap.Tasks (ScheduleOutcome)
 private def word (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
 private def bits (width value : Nat) : Bap.Value := .bits (BitVec.ofNat width value)
 
+/-- A model that a machine has, with what it holds. -/
+structure AttachedModel where
+  id : String
+  version : Nat
+  state : ModelState
+
 structure Machine where
   architecture : Architecture
   emu : Emu
   kernel : IO.Ref Kernel
+  /-- The models of the runtime that it has, in the order that they were attached. -/
+  models : IO.Ref (List AttachedModel)
+  /-- What it was started from, which a checkpoint says: see `targetDigest`. -/
+  target : Nat := 0
+  /-- Whether it was given a `SyscallHandler`, which has to be given again to go on from a checkpoint. -/
+  handled : Bool := false
+
+/-- A model of a runtime that isn't in the kernel or the emulator: pthreads served by hooks, a debugger, a managed language.
+`id` is what a checkpoint knows it by, so that it stays the same, and `version` says what its bytes mean.
+
+`attach` runs when a machine starts and again when one goes on from a checkpoint, as what it registers are functions, which can't be
+in a file. It puts its hooks on `machine.emu`, in front of the kernel, and gives what holds its state. It should do nothing else to
+the guest, whose memory is already what the checkpoint says when it runs again. -/
+structure RuntimeModel where
+  id : String
+  version : Nat := 1
+  attach : Machine → IO ModelState
 
 /-- A signed word of `width` bits, as whether it is negative and how far from zero it is. -/
 private def signed (width value : Nat) : Bool × Nat :=
@@ -986,14 +1009,19 @@ abbrev SyscallHandler := Emu → Nat → List Nat → IO SyscallAction
 
 /-- What makes an emulator a machine: its kernel behind its system calls. None of it is in a checkpoint. -/
 private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel) (watch : Option (Nat → List Nat → IO Unit))
-    (handler : Option SyscallHandler) : IO Machine := do
-  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel }
+    (handler : Option SyscallHandler) (target : Nat) (models : List RuntimeModel) : IO Machine := do
+  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
       pure .default
   if let some handler := handler then
     let _ ← onSyscall emu handler
+  for model in models do
+    if (← machine.models.get).any (·.id == model.id) then
+      throw <| IO.userError s!"two models of a runtime are called {model.id}"
+    let state ← model.attach machine
+    machine.models.modify (· ++ [{ id := model.id, version := model.version, state }])
   let _ ← onSyscall emu fun emu number args => do
     if machine.architecture.call number == some .execve then handOver machine emu (← execute { machine with emu } emu args)
     else pure .default
@@ -1004,11 +1032,16 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   emu.processHooks.modify ((fun parent child => machine.kernel.modify (·.fork parent child)) :: ·)
   pure machine
 
+/-- What a program is to a checkpoint: its architecture and its bytes. -/
+def targetDigest (architecture : Architecture) (program : ByteArray) : Nat :=
+  let (number, bits, big, flags) := architecture.elf
+  (Wire.digest program (Wire.digest s!"{number} {bits} {big} {flags}".toUTF8)).toNat
+
 /-- A machine at the start of `path`, which is in `kernel`. Its first process has the standard descriptors, on a console, with
 `input` to read. `watch` sees each system call before it is served, and then `handler`, which may serve it in place of the kernel. -/
 def start (kernel : Kernel) (path : String) (arguments : List String) (environment : List String := [])
     (input : ByteArray := ByteArray.empty) (watch : Option (Nat → List Nat → IO Unit) := none)
-    (handler : Option SyscallHandler := none) : IO Machine := do
+    (handler : Option SyscallHandler := none) (models : List RuntimeModel := []) : IO Machine := do
   let data ← IO.ofExcept ((fileOf kernel path).mapError fun errno => s!"{path}: error {errno}")
   let program ← IO.ofExcept (Elf.parse data)
   let some architecture := Architecture.ofElf program.machine program.bits program.big program.flags
@@ -1028,7 +1061,7 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   let kernel := kernel.setProcess first { kernel.process first with
     breakStart := top, breakEnd := top, command := if arguments.isEmpty then [path] else arguments, environment, program := path, auxiliary }
   let kernel := Proc.install kernel
-  machineOf architecture emu kernel watch handler
+  machineOf architecture emu kernel watch handler (targetDigest architecture data) models
 
 /-- Runs it until nothing can run, with what it writes to the console going to `output` as it comes. -/
 def Machine.run (machine : Machine) (output : ByteArray → IO Unit) (quantum : Nat := 100000) (fuel : Nat := 1000000000) :
@@ -1047,54 +1080,173 @@ def Machine.run (machine : Machine) (output : ByteArray → IO Unit) (quantum : 
       | other => pure other
   go (fuel + 1) fuel
 
-/-- What is in the kernel and in the emulator at once, to go back to: it is all a value. -/
+/-- What is in the kernel, in the emulator and in the models at once, to go back to. -/
 structure Machine.Saved where
   emulator : Snapshot
+  run : RunState
   kernel : Kernel
+  models : List (String × ByteArray)
+
+private def Machine.modelBytes (machine : Machine) : IO (List (AttachedModel × ByteArray)) := do
+  (← machine.models.get).mapM fun model => do pure (model, ← model.state.save)
 
 def Machine.save (machine : Machine) : IO Machine.Saved := do
-  pure { emulator := ← snapshot machine.emu, kernel := ← machine.kernel.get }
+  pure {
+    emulator := ← snapshot machine.emu
+    run := ← runState machine.emu
+    kernel := ← machine.kernel.get
+    models := (← machine.modelBytes).map fun (model, bytes) => (model.id, bytes)
+  }
 
 def Machine.restore (machine : Machine) (saved : Machine.Saved) : IO Unit := do
   Bap.Emu.restore machine.emu saved.emulator
+  -- Which breakpoints there are is up to who is debugging it now.
+  setRunState machine.emu { saved.run with breakpoints := [] }
   machine.kernel.set saved.kernel
+  for model in ← machine.models.get do
+    if let some bytes := saved.models.lookup model.id then model.state.load bytes
 
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 
-/-- All that a machine is, as bytes: its architecture, its kernel with the files in it, and its emulator. What is compiled isn't in
-them, and is compiled again as it runs. -/
+/-- What the bytes after the magic mean. -/
+def checkpointFormat : Nat := 2
+
+/-- What this BAP does with a guest, which goes up when the same state could go on differently. A checkpoint is refused by a BAP
+of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/
+def bapRevision : String := s!"bap-1 lean-{Lean.versionString}"
+
+/-- The semantics that a machine lifts by, as all the files of its directory in the order of their paths. -/
+def semanticsDigest : IO Nat := do
+  let root : System.FilePath ← Bap.Target.LLVMLift.semanticsRoot
+  if !(← root.pathExists) then return 0
+  let files ← root.walkDir
+  let mut named : List (String × System.FilePath) := []
+  for file in files do
+    unless ← file.isDir do
+      let relative := (file.toString.drop (root.toString.length + 1)).toString
+      named := (relative.replace "\\" "/", file) :: named
+  let mut hash := Wire.digest ByteArray.empty
+  for (name, file) in named.mergeSort (fun left right => left.1 ≤ right.1) do
+    hash := Wire.digest (← IO.FS.readBinFile file) (Wire.digest name.toUTF8 hash)
+  return hash.toNat
+
+/-- What a checkpoint says that it belongs to. -/
+structure Machine.Identity where
+  format : Nat := checkpointFormat
+  bap : String := bapRevision
+  semantics : Nat
+  target : Nat
+  deriving DecidableEq, Repr
+
+/-- Why a checkpoint of `saved` can't go on here, if it can't. -/
+def Machine.Identity.conflict (saved here : Machine.Identity) (expectedTarget : Option Nat := none) : Option String :=
+  if saved.format != here.format then
+    some s!"a checkpoint of format {saved.format}, and this BAP reads {here.format}"
+  else if saved.bap != here.bap then
+    some s!"a checkpoint of {saved.bap}, and this is {here.bap}"
+  else if saved.semantics != here.semantics then
+    some "a checkpoint of other semantics than those here"
+  else match expectedTarget with
+    | some target => if target != saved.target then some "a checkpoint of another program than was asked for" else none
+    | none => none
+
+/-- What a checkpoint has of a model: its name, what its bytes mean and the bytes. -/
+private def putModel (out : ByteArray) (model : String × Nat × ByteArray) : ByteArray :=
+  Wire.putBytes (Wire.putNat (Wire.putText out model.1) model.2.1) model.2.2
+
+private def getModel : Wire.Decoder (String × Nat × ByteArray) := fun data at_ => do
+  let (id, at_) ← Wire.getText data at_
+  let (version, at_) ← Wire.getNat data at_
+  let (bytes, at_) ← Wire.getBytes data at_
+  .ok ((id, version, bytes), at_)
+
+/-- All that a machine is, as bytes: what it belongs to, its architecture, its kernel with the files in it, its emulator, what its
+models hold and a digest of all that. What is compiled isn't in them, and is compiled again as it runs. All of it is of one moment,
+as nothing runs while it is made, and if a part can't be saved there is no checkpoint. -/
 def Machine.checkpoint (machine : Machine) : IO ByteArray := do
   let (number, bits, big, flags) := machine.architecture.elf
-  let header := Wire.putNat (Wire.putNat (Wire.putNat (Wire.putNat checkpointMagic number) bits) (if big then 1 else 0)) flags
-  pure (Image.encode header (← machine.kernel.get).image ++ (← checkpointBytes machine.emu))
+  -- First, as it refuses to save in the middle of an instruction, when the rest wouldn't be of one moment either.
+  let emulator ← checkpointBytes machine.emu
+  let out := Wire.putNat checkpointMagic checkpointFormat
+  let out := Wire.putText out bapRevision
+  let out := Wire.putNat out (← semanticsDigest)
+  let out := Wire.putNat out machine.target
+  let out := Wire.putNat (Wire.putNat (Wire.putNat (Wire.putNat out number) bits) (if big then 1 else 0)) flags
+  let out := Wire.putFlag out machine.handled
+  let out := Image.encode out (← machine.kernel.get).image
+  let out := Wire.putBytes out emulator
+  let models := (← machine.modelBytes).map fun (model, bytes) => (model.id, model.version, bytes)
+  let out := Wire.putSorted putModel out models
+  pure (out ++ Wire.fixedBytes (Wire.digest out))
+
+/-- Says what can't be restored of the models of a checkpoint, as going on without one or with another isn't going on as it would have. -/
+private def modelConflict (saved : List (String × Nat × ByteArray)) (models : List RuntimeModel) : Option String :=
+  match saved.find? (fun entry => !(models.any (·.id == entry.1))) with
+  | some entry => some s!"a checkpoint with the state of model {entry.1}, which wasn't given"
+  | none =>
+    match models.find? (fun model => !(saved.any (·.1 == model.id))) with
+    | some model => some s!"model {model.id} was given, and the checkpoint has nothing of it"
+    | none =>
+      (saved.findSome? fun entry =>
+        (models.find? (·.id == entry.1)).bind fun model =>
+          if model.version == entry.2.1 then none
+          else some s!"a checkpoint with version {entry.2.1} of model {entry.1}, and this is version {model.version}")
 
 /-- A new machine where a checkpoint was, which goes on as that one would. This is all it takes: nothing has to be running, or
-even to be on the host, but what the bytes hold. A turn of a thread that a run stopped in starts again. `watch` is as in `start`.
-So is `handler`, as neither is a thing that can be in a file. What `Kernel.addGenerated` put in has its functions given again, by the normal paths that they were put in at, as a function can't be
-in a file: a file without its function gives `EIO` when it is opened. -/
+even to be on the host, but what the bytes hold. `watch` is as in `start`. So is `handler`, as neither is a thing that can be in a file. What `Kernel.addGenerated` put in has its functions given again, by the normal paths that they were put in at, as a function can't be
+in a file: a file without its function gives `EIO` when it is opened. `models` are attached again and given what they held.
+
+A checkpoint that it can't go on from as that one would is refused: a damaged one, or one of another format, BAP or semantics, with a
+model or a handler that isn't given, or of a program other than `expectedTarget`, the `targetDigest` of what is expected. -/
 def Machine.ofCheckpoint (data : ByteArray) (watch : Option (Nat → List Nat → IO Unit) := none)
-    (generators : List (String × Generator) := []) (handler : Option SyscallHandler := none) : IO Machine := do
-  if data.extract 0 checkpointMagic.size != checkpointMagic then
+    (generators : List (String × Generator) := []) (handler : Option SyscallHandler := none)
+    (models : List RuntimeModel := []) (expectedTarget : Option Nat := none) : IO Machine := do
+  if data.extract 0 checkpointMagic.size != checkpointMagic || data.size < checkpointMagic.size + 8 then
     throw <| IO.userError "not a checkpoint of a Linux machine"
-  let (number, at_) ← IO.ofExcept (Wire.getNat data checkpointMagic.size)
-  let (bits, at_) ← IO.ofExcept (Wire.getNat data at_)
-  let (big, at_) ← IO.ofExcept (Wire.getNat data at_)
-  let (flags, at_) ← IO.ofExcept (Wire.getNat data at_)
+  let body := data.extract 0 (data.size - 8)
+  if Wire.digest body != Wire.ofFixedBytes data (data.size - 8) then
+    throw <| IO.userError "a checkpoint that is damaged, or of another format"
+  let (format, at_) ← IO.ofExcept (Wire.getNat body checkpointMagic.size)
+  let (bap, at_) ← IO.ofExcept (Wire.getText body at_)
+  let (semantics, at_) ← IO.ofExcept (Wire.getNat body at_)
+  let (target, at_) ← IO.ofExcept (Wire.getNat body at_)
+  let saved : Machine.Identity := { format, bap, semantics, target }
+  let here : Machine.Identity := { semantics := ← semanticsDigest, target }
+  if let some conflict := saved.conflict here expectedTarget then
+    throw <| IO.userError conflict
+  let (number, at_) ← IO.ofExcept (Wire.getNat body at_)
+  let (bits, at_) ← IO.ofExcept (Wire.getNat body at_)
+  let (big, at_) ← IO.ofExcept (Wire.getNat body at_)
+  let (flags, at_) ← IO.ofExcept (Wire.getNat body at_)
   let some architecture := Architecture.ofElf number bits (big == 1) flags
     | throw <| IO.userError s!"a checkpoint of ELF machine {number}, which isn't one here"
-  let (image, at_) ← IO.ofExcept (Image.decode data at_)
+  let (handled, at_) ← IO.ofExcept (Wire.getFlag body at_)
+  if handled && handler.isNone then
+    throw <| IO.userError "a checkpoint of a machine with a handler of system calls, which wasn't given"
+  let (image, at_) ← IO.ofExcept (Image.decode body at_)
   let kernel ← IO.ofExcept image.kernel
   let kernel := { kernel with generators := generators.foldl (fun table entry => table.insert entry.1 entry.2) {} }
+  let (emulator, at_) ← IO.ofExcept (Wire.getBytes body at_)
+  let (savedModels, at_) ← IO.ofExcept (Wire.getList getModel body at_)
+  IO.ofExcept (Wire.expectEnd body at_)
+  if let some conflict := modelConflict savedModels models then
+    throw <| IO.userError conflict
   let emu ← emulatorOf architecture
-  Bap.Emu.restore emu (← snapshotOfBytes emu (data.extract at_ data.size))
-  machineOf architecture emu kernel watch handler
+  Bap.Emu.restore emu (← snapshotOfBytes emu emulator)
+  let machine ← machineOf architecture emu kernel watch handler target models
+  -- After what is attached, so that its hooks have the numbers that they had.
+  setRunState emu (← runStateOfBytes emulator)
+  for model in ← machine.models.get do
+    if let some (_, _, bytes) := savedModels.find? (·.1 == model.id) then model.state.load bytes
+  pure machine
 
 def Machine.saveFile (machine : Machine) (path : System.FilePath) : IO Unit := do
-  IO.FS.writeBinFile path (← machine.checkpoint)
+  writeAtomically path (← machine.checkpoint)
 
 def Machine.loadFile (path : System.FilePath) (watch : Option (Nat → List Nat → IO Unit) := none)
-    (generators : List (String × Generator) := []) (handler : Option SyscallHandler := none) : IO Machine := do
-  Machine.ofCheckpoint (← IO.FS.readBinFile path) watch generators handler
+    (generators : List (String × Generator) := []) (handler : Option SyscallHandler := none)
+    (models : List RuntimeModel := []) (expectedTarget : Option Nat := none) : IO Machine := do
+  Machine.ofCheckpoint (← IO.FS.readBinFile path) watch generators handler models expectedTarget
 
 /-- A file of the host for a kernel, before a run: this is the only way that anything gets from there to in here. -/
 def Kernel.copyFromHost (kernel : Kernel) (path : String) (into : String := path) : IO Kernel := do

@@ -117,7 +117,15 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxCheckpoints "powerpc",
     Bap.Tests.Emu.testLinuxCheckpoints "powerpc64le",
     Bap.Tests.Emu.testLinuxCheckpoints "x86_64",
-    Bap.Tests.Jni.run
+    Bap.Tests.Emu.testLinuxResumeTraces "aarch64",
+    Bap.Tests.Emu.testLinuxResumeTraces "x86_64" (quanta := [100]) (names := ["libc-threads"]),
+    Bap.Tests.Emu.testLinuxResumeTraces "thumb" (quanta := [13]) (names := ["libc-threads"]),
+    Bap.Tests.Emu.testLinuxResumeTraces "mips" (quanta := [31]) (names := ["libc-fork"]),
+    Bap.Tests.Emu.testLinuxRuntimeModels "aarch64" 17,
+    Bap.Tests.Emu.testLinuxRuntimeModels "mips" 4203,
+    Bap.Tests.Emu.testLinuxServedCheckpoint "aarch64" 17,
+    Bap.Tests.Jni.run,
+    Bap.Tests.Jni.testState
   ]
   Bap.Tests.Optimize.scaling
   Bap.Tests.Lifted.invalidationScales

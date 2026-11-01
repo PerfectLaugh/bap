@@ -1,5 +1,6 @@
 import Bap.Emu
 import Bap.Bil.Wire
+import Bap.Linux.Wire
 
 namespace Bap.Emu
 
@@ -391,26 +392,113 @@ def withoutMemory (memoryVar : Bap.Var) (snapshot : Snapshot) : Snapshot :=
       { thread with state := { env := thread.state.env.filter fun binding => binding.1 != memoryVar } }
   }
 
-/-- The bytes of what the emulator holds now. -/
+/-- What the emulator holds that a `Snapshot` doesn't and that a guest or who runs it can tell: how far the turn of the thread that
+runs has gone, which fault stopped it, and where it stops of its own. Hooks are functions, and whoever put them there puts them back,
+all but the breakpoints, which are only addresses. `threadControl` isn't here, as a parallel round forgets it when it starts, and what
+is left is what an instruction holds while it runs, and a checkpoint isn't made during one. -/
+structure RunState where
+  turnUsed : Nat := 0
+  fault : Option MemoryFault := none
+  breakpoints : List Nat := []
+  deriving DecidableEq, Repr
+
+namespace RunState
+
+private def operationTag : MemoryOperation → Nat
+  | .fetch => 0
+  | .read => 1
+  | .write => 2
+
+private def operationOf : Nat → Except String MemoryOperation
+  | 0 => .ok .fetch
+  | 1 => .ok .read
+  | 2 => .ok .write
+  | tag => .error s!"a checkpoint with a memory operation of kind {tag}"
+
+private def putFault (out : ByteArray) (fault : MemoryFault) : ByteArray :=
+  Bap.Linux.Wire.putNat (Bap.Linux.Wire.putNat (Bap.Linux.Wire.putNat (Bap.Linux.Wire.putNat out fault.pc) fault.address) (operationTag fault.operation)) fault.thread
+
+private def getFault : Bap.Linux.Wire.Decoder MemoryFault := fun data at_ => do
+  let (pc, at_) ← Bap.Linux.Wire.getNat data at_
+  let (address, at_) ← Bap.Linux.Wire.getNat data at_
+  let (tag, at_) ← Bap.Linux.Wire.getNat data at_
+  let operation ← operationOf tag
+  let (thread, at_) ← Bap.Linux.Wire.getNat data at_
+  .ok (⟨pc, address, operation, thread⟩, at_)
+
+def encode (out : ByteArray) (state : RunState) : ByteArray :=
+  let out := Bap.Linux.Wire.putNat out state.turnUsed
+  let out := Bap.Linux.Wire.putOption putFault out state.fault
+  Bap.Linux.Wire.putList Bap.Linux.Wire.putNat out state.breakpoints
+
+def decode : Bap.Linux.Wire.Decoder RunState := fun data at_ => do
+  let (turnUsed, at_) ← Bap.Linux.Wire.getNat data at_
+  let (fault, at_) ← Bap.Linux.Wire.getOption getFault data at_
+  let (breakpoints, at_) ← Bap.Linux.Wire.getList Bap.Linux.Wire.getNat data at_
+  .ok ({ turnUsed, fault, breakpoints }, at_)
+
+end RunState
+
+/-- What `RunState` says of the emulator now. -/
+def runState (emu : Emu) : IO RunState := do
+  pure { turnUsed := ← emu.turnUsed.get, fault := ← emu.lastFault.get, breakpoints := ← breakpoints emu }
+
+/-- Puts it back, with the breakpoints that aren't there yet. -/
+def setRunState (emu : Emu) (state : RunState) : IO Unit := do
+  emu.turnUsed.set state.turnUsed
+  emu.lastFault.set state.fault
+  let existing ← breakpoints emu
+  for address in state.breakpoints do
+    unless existing.contains address do
+      let _ ← addBreakpoint emu address
+
+private def frameMagic : ByteArray := "BAPEMU01".toUTF8
+
+/-- The bytes of what the emulator holds now: its run state, and a snapshot in the format that `binary_lossless_or_rejecting` is about. -/
 def checkpointBytes (emu : Emu) : IO ByteArray := do
+  if ← emu.serving.get then
+    throw <| IO.userError "a checkpoint can't be made while a system call is being served: stop the thread, and make it once the run returns"
   let originalRegions ← emu.regions.get
   refreshSharedRegions emu
   let snapshot ← snapshot emu
   let encoded := encodeBinarySnapshot (withoutMemory emu.config.memory snapshot)
   setRegions emu originalRegions
-  IO.ofExcept encoded
+  pure (Bap.Linux.Wire.putBytes (RunState.encode frameMagic (← runState emu)) (← IO.ofExcept encoded))
+
+/-- The two parts of `checkpointBytes`. -/
+private def splitFrame (data : ByteArray) : Except String (RunState × ByteArray) := do
+  if data.extract 0 frameMagic.size != frameMagic then
+    .error "not a binary checkpoint"
+  else
+    let (state, at_) ← RunState.decode data frameMagic.size
+    let (snapshot, at_) ← Bap.Linux.Wire.getBytes data at_
+    Bap.Linux.Wire.expectEnd data at_
+    .ok (state, snapshot)
+
+/-- Writes the whole of a file or none of it, so that a run that dies while it saves leaves the checkpoint that was there. -/
+def writeAtomically (path : System.FilePath) (data : ByteArray) : IO Unit := do
+  let unfinished : System.FilePath := path.toString ++ ".partial"
+  IO.FS.writeBinFile unfinished data
+  IO.FS.rename unfinished path
 
 def save (emu : Emu) (path : String) : IO Unit := do
-  IO.FS.writeBinFile path (← checkpointBytes emu)
+  writeAtomically path (← checkpointBytes emu)
 
 /-- A snapshot from the bytes of `checkpointBytes`. -/
 def snapshotOfBytes (emu : Emu) (data : ByteArray) : IO Snapshot := do
-  materializeSnapshot emu (← IO.ofExcept (decodeBinarySnapshot data))
+  let (_, snapshot) ← IO.ofExcept (splitFrame data)
+  materializeSnapshot emu (← IO.ofExcept (decodeBinarySnapshot snapshot))
+
+/-- The run state from the bytes of `checkpointBytes`. -/
+def runStateOfBytes (data : ByteArray) : IO RunState := do
+  pure (← IO.ofExcept (splitFrame data)).1
 
 def loadSnapshot (emu : Emu) (path : String) : IO Snapshot := do
   snapshotOfBytes emu (← IO.FS.readBinFile path)
 
 def load (emu : Emu) (path : String) : IO Unit := do
-  restore emu (← loadSnapshot emu path)
+  let data ← IO.FS.readBinFile path
+  restore emu (← snapshotOfBytes emu data)
+  setRunState emu (← runStateOfBytes data)
 
 end Bap.Emu

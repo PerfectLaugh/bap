@@ -59,6 +59,7 @@ import Bap.Primus.System
 import Bap.Emu.Semantics
 import Bap.Emu
 import Bap.Emu.Tasks
+import Bap.Linux.Wire
 import Bap.Linux.Image
 import Bap.Linux.Proc
 import Bap.Linux.Machine

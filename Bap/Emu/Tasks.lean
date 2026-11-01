@@ -546,6 +546,12 @@ private def runGuest (emu : Emu) (quantum fuel : Nat) : IO Nat := do
 private def scheduleLoop (emu : Emu) (quantum : Nat) : Nat → Nat → IO ScheduleOutcome
   | 0, _ => pure .outOfFuel
   | rounds + 1, fuel => do
+    -- In the middle of a turn nothing has happened yet that the scheduler should look at: it looks when the turn ends, as it would
+    -- have if the fuel hadn't run out here.
+    if (← emu.turnUsed.get) > 0 then
+      if fuel = 0 then pure .outOfFuel
+      else scheduleLoop emu quantum rounds (fuel - (← runGuest emu quantum fuel))
+    else
     settleWaiters emu
     saveCurrentThread emu
     let current ← thread emu

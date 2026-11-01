@@ -1,4 +1,5 @@
 import Bap.Emu
+import Bap.Linux.Wire
 
 namespace Bap.Emu.Jni
 
@@ -561,5 +562,217 @@ def serveVm (model : Model) (emu : Emu) : IO Unit := do
     writeWord emu (← readReg emu "X1") (← model.env.get)
   writeReg emu "X0" result
   Bap.Emu.setPc emu (← readReg emu "X30")
+
+/-! What a model holds, for a checkpoint. A method or a field is saved by what it is called, and takes its function or its value from
+the declarations that the new model was made with, which have to be the same ones. -/
+
+namespace State
+
+open Bap.Linux.Wire
+
+private def putIdentity (out : ByteArray) : Identity → ByteArray
+  | .external value => putNat (putNat out 0) value
+  | .internal value => putNat (putNat out 1) value
+
+private def getIdentity : Decoder Identity := fun data at_ => do
+  let (tag, at_) ← getNat data at_
+  let (value, at_) ← getNat data at_
+  match tag with
+  | 0 => .ok (.external value, at_)
+  | 1 => .ok (.internal value, at_)
+  | _ => .error "a checkpoint with a JNI identity that isn't"
+
+private def kindTag : RefKind → Nat
+  | .local => 0
+  | .global => 1
+  | .weak => 2
+
+private def kindOf : Nat → Except String RefKind
+  | 0 => .ok .local
+  | 1 => .ok .global
+  | 2 => .ok .weak
+  | _ => .error "a checkpoint with a JNI reference that isn't"
+
+private def putAnswer (out : ByteArray) : Answer → ByteArray
+  | .value value => putNat (putNat out 0) value
+  | .object identity => putNat (putNat out 1) identity
+  | .string contents => putText (putNat out 2) contents
+  | .handle value => putNat (putNat out 3) value
+  | .fresh => putNat out 4
+
+private def getAnswer : Decoder Answer := fun data at_ => do
+  let (tag, at_) ← getNat data at_
+  match tag with
+  | 0 => let (value, at_) ← getNat data at_; .ok (.value value, at_)
+  | 1 => let (value, at_) ← getNat data at_; .ok (.object value, at_)
+  | 2 => let (value, at_) ← getText data at_; .ok (.string value, at_)
+  | 3 => let (value, at_) ← getNat data at_; .ok (.handle value, at_)
+  | 4 => .ok (.fresh, at_)
+  | _ => .error "a checkpoint with a JNI answer that isn't"
+
+private def putKey (out : ByteArray) (key : BindingKey) : ByteArray :=
+  putFlag (putText (putText (putIdentity out key.owner) key.name) key.signature) key.static
+
+private def getKey : Decoder BindingKey := fun data at_ => do
+  let (owner, at_) ← getIdentity data at_
+  let (name, at_) ← getText data at_
+  let (signature, at_) ← getText data at_
+  let (static, at_) ← getFlag data at_
+  .ok (⟨owner, name, signature, static⟩, at_)
+
+private def putPair (putKey : ByteArray → κ → ByteArray) (putValue : ByteArray → ν → ByteArray) (out : ByteArray)
+    (entry : κ × ν) : ByteArray :=
+  putValue (putKey out entry.1) entry.2
+
+private def getPair (getKey : Decoder κ) (getValue : Decoder ν) : Decoder (κ × ν) := fun data at_ => do
+  let (key, at_) ← getKey data at_
+  let (value, at_) ← getValue data at_
+  .ok ((key, value), at_)
+
+private def putTable [BEq κ] [Hashable κ] (putKey : ByteArray → κ → ByteArray) (putValue : ByteArray → ν → ByteArray) (out : ByteArray)
+    (table : Std.HashMap κ ν) : ByteArray :=
+  putSorted (putPair putKey putValue) out table.toList
+
+private def getTable [BEq κ] [Hashable κ] (getKey : Decoder κ) (getValue : Decoder ν) : Decoder (Std.HashMap κ ν) := fun data at_ => do
+  let (entries, at_) ← getList (getPair getKey getValue) data at_
+  .ok (Std.HashMap.ofList entries, at_)
+
+private def putRefKey (out : ByteArray) (key : RefKind × Identity) : ByteArray :=
+  putIdentity (putNat out (kindTag key.1)) key.2
+
+private def getRefKey : Decoder (RefKind × Identity) := fun data at_ => do
+  let (tag, at_) ← getNat data at_
+  let kind ← kindOf tag
+  let (identity, at_) ← getIdentity data at_
+  .ok ((kind, identity), at_)
+
+private def putStringInfo (out : ByteArray) (info : StringInfo) : ByteArray :=
+  putOption putNat (putOption putNat (putText out info.contents) info.address) info.wideAddress
+
+private def getStringInfo : Decoder StringInfo := fun data at_ => do
+  let (contents, at_) ← getText data at_
+  let (address, at_) ← getOption getNat data at_
+  let (wideAddress, at_) ← getOption getNat data at_
+  .ok ({ contents, address, wideAddress }, at_)
+
+private def putDynamicKey (out : ByteArray) (key : Nat × Identity × String × String) : ByteArray :=
+  putText (putText (putIdentity (putNat out key.1) key.2.1) key.2.2.1) key.2.2.2
+
+private def getDynamicKey : Decoder (Nat × Identity × String × String) := fun data at_ => do
+  let (index, at_) ← getNat data at_
+  let (owner, at_) ← getIdentity data at_
+  let (name, at_) ← getText data at_
+  let (signature, at_) ← getText data at_
+  .ok ((index, owner, name, signature), at_)
+
+/-- A method or a field without what it does: what it is called, and whose it is. -/
+private def putBinding (out : ByteArray) (entry : Identity × String × String × Identity × Bool) : ByteArray :=
+  putFlag (putIdentity (putText (putText (putIdentity out entry.1) entry.2.1) entry.2.2.1) entry.2.2.2.1) entry.2.2.2.2
+
+private def getBinding : Decoder (Identity × String × String × Identity × Bool) := fun data at_ => do
+  let (id, at_) ← getIdentity data at_
+  let (name, at_) ← getText data at_
+  let (signature, at_) ← getText data at_
+  let (owner, at_) ← getIdentity data at_
+  let (static, at_) ← getFlag data at_
+  .ok ((id, name, signature, owner, static), at_)
+
+private def putBytesOf (model : Model) : IO ByteArray := do
+  let out := putNat (putNat (putNat ByteArray.empty (← model.nextHandle.get)) (← model.nextIdentity.get)) (← model.nextDynamic.get)
+  let out := putTable putRefKey putNat out (← model.handles.get)
+  let out := putTable putNat putIdentity out (← model.sources.get)
+  let out := putTable putText putIdentity out (← model.classes.get)
+  let out := putTable putIdentity putText out (← model.classNames.get)
+  let out := putTable putIdentity putIdentity out (← model.objectClasses.get)
+  let out := putTable putIdentity (putList putAnswer) out (← model.arrays.get)
+  let out := putTable putIdentity putNat out (← model.arrayAddresses.get)
+  let methods := (← model.methods.get).toList.map fun (id, info) => (id, info.decl.name, info.decl.signature, info.owner, info.static)
+  let out := putSorted putBinding out methods
+  let out := putTable putKey putIdentity out (← model.methodIds.get)
+  let fields := (← model.fields.get).toList.map fun (id, info) => (id, info.decl.name, info.decl.signature, info.owner, info.static)
+  let out := putSorted putBinding out fields
+  let out := putTable putKey putIdentity out (← model.fieldIds.get)
+  let out := putTable putIdentity putStringInfo out (← model.strings.get)
+  let out := putTable putText putIdentity out (← model.stringsByContent.get)
+  let out := putTable putDynamicKey putNat out (← model.dynamicIds.get)
+  let out := putTable putIdentity putText out (← model.dynamicNames.get)
+  let out := putOption putIdentity out (← model.exception.get)
+  pure (putNat (putNat out (← model.env.get)) (← model.vm.get))
+
+/-- The declarations of a saved table of methods or fields, from those that the model was made with. -/
+private def rebind {δ : Type} (kind : String) (saved : Std.HashMap Identity String)
+    (declarations : List (String × String × String × Bool × δ))
+    (entries : List (Identity × String × String × Identity × Bool)) :
+    Except String (List (Identity × δ × Identity × Bool)) := do
+  if entries.length != declarations.length then
+    throw s!"a checkpoint with {entries.length} JNI {kind}s, and this model declares {declarations.length}"
+  entries.mapM fun (id, name, signature, owner, static) => do
+    let className := saved.getD owner ""
+    match declarations.find? fun (ownerName, otherName, otherSignature, otherStatic, _) =>
+        ownerName == className && otherName == name && otherSignature == signature && otherStatic == static with
+    | some (_, _, _, _, decl) => .ok (id, decl, owner, static)
+    | none => .error s!"a checkpoint with the JNI {kind} {className}.{name} {signature}, which this model doesn't declare"
+
+private def loadBytes (model : Model) (data : ByteArray) : IO Unit := do
+  let decode : Except String (IO Unit) := do
+    let (nextHandle, at_) ← getNat data 0
+    let (nextIdentity, at_) ← getNat data at_
+    let (nextDynamic, at_) ← getNat data at_
+    let (handles, at_) ← getTable getRefKey getNat data at_
+    let (sources, at_) ← getTable getNat getIdentity data at_
+    let (classes, at_) ← getTable getText getIdentity data at_
+    let (classNames, at_) ← getTable getIdentity getText data at_
+    let (objectClasses, at_) ← getTable getIdentity getIdentity data at_
+    let (arrays, at_) ← getTable getIdentity (getList getAnswer) data at_
+    let (arrayAddresses, at_) ← getTable getIdentity getNat data at_
+    let (methods, at_) ← getList getBinding data at_
+    let (methodIds, at_) ← getTable getKey getIdentity data at_
+    let (fields, at_) ← getList getBinding data at_
+    let (fieldIds, at_) ← getTable getKey getIdentity data at_
+    let (strings, at_) ← getTable getIdentity getStringInfo data at_
+    let (stringsByContent, at_) ← getTable getText getIdentity data at_
+    let (dynamicIds, at_) ← getTable getDynamicKey getNat data at_
+    let (dynamicNames, at_) ← getTable getIdentity getText data at_
+    let (exception, at_) ← getOption getIdentity data at_
+    let (env, at_) ← getNat data at_
+    let (vm, at_) ← getNat data at_
+    expectEnd data at_
+    .ok do
+      let names ← model.classNames.get
+      let methodDecls := (← model.methods.get).toList.map fun (_, info) =>
+        (names.getD info.owner "", info.decl.name, info.decl.signature, info.static, info.decl)
+      let fieldDecls := (← model.fields.get).toList.map fun (_, info) =>
+        (names.getD info.owner "", info.decl.name, info.decl.signature, info.static, info.decl)
+      let methods ← IO.ofExcept (rebind "method" classNames methodDecls methods)
+      let fields ← IO.ofExcept (rebind "field" classNames fieldDecls fields)
+      model.nextHandle.set nextHandle
+      model.nextIdentity.set nextIdentity
+      model.nextDynamic.set nextDynamic
+      model.handles.set handles
+      model.sources.set sources
+      model.classes.set classes
+      model.classNames.set classNames
+      model.objectClasses.set objectClasses
+      model.arrays.set arrays
+      model.arrayAddresses.set arrayAddresses
+      model.methods.set (Std.HashMap.ofList (methods.map fun (id, decl, owner, static) => (id, ⟨decl, owner, static⟩)))
+      model.methodIds.set methodIds
+      model.fields.set (Std.HashMap.ofList (fields.map fun (id, decl, owner, static) => (id, ⟨decl, owner, static⟩)))
+      model.fieldIds.set fieldIds
+      model.strings.set strings
+      model.stringsByContent.set stringsByContent
+      model.dynamicIds.set dynamicIds
+      model.dynamicNames.set dynamicNames
+      model.exception.set exception
+      model.env.set env
+      model.vm.set vm
+  (← IO.ofExcept decode)
+
+end State
+
+/-- What holds the state of a model, for the `attach` of a `RuntimeModel`. -/
+def state (model : Model) : Bap.Linux.ModelState where
+  save := State.putBytesOf model
+  load := State.loadBytes model
 
 end Bap.Emu.Jni

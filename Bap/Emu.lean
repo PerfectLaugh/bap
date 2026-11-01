@@ -180,6 +180,10 @@ structure Emu where
   nextPc : IO.Ref Nat
   /-- Where the instruction that runs goes after all, for a program that a system call has replaced. -/
   redirect : IO.Ref (Option Nat)
+  /-- How much of its turn the thread that runs had had when the fuel ran out, or 0 between turns. -/
+  turnUsed : IO.Ref Nat
+  /-- Whether a system call is being served, in the middle of its instruction. -/
+  serving : IO.Ref Bool
 
 /-- Compiled ranges chain blocks along their branches, which leaves delay slots out. -/
 private def rangeLimitOf (config : Config) : Nat :=
@@ -269,6 +273,8 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     processHooks := ← IO.mkRef []
     nextPc := ← IO.mkRef 0
     redirect := ← IO.mkRef none
+    turnUsed := ← IO.mkRef 0
+    serving := ← IO.mkRef false
   }
 
 /-- The address space of a thread. -/
@@ -402,7 +408,8 @@ def snapshot (emu : Emu) : IO Snapshot := do
   let parked ← emu.parkedRegions.get
   let space := table.spaceOf (← emu.currentThreadRef.get)
   let mapOf (id : Nat) : List Region := if id == space then mapped else parked.getD id mapped
-  let processMemory ← processes.toList.mapM fun (id, memory) => do
+  -- In order of id, as what a table gives depends on what was done to it.
+  let processMemory ← (processes.toList.mergeSort fun left right => left.1 ≤ right.1).mapM fun (id, memory) => do
     let regions ← regionsFromNative (mapOf id) memory
     pure (id, regions)
   pure {
@@ -550,6 +557,7 @@ private def clearMonitor (config : Config) (env : Bil.Env) : Bil.Env :=
   | _, _ => env
 
 def switchThread (emu : Emu) (id : ThreadId) : IO Unit := do
+  emu.turnUsed.set 0
   saveCurrentThread emu
   let table ← emu.taskTable.get
   let leaving ← thread emu
@@ -1291,7 +1299,8 @@ private def dispatchSyscall (emu : Emu) : IO (Option Nat) := serialize emu <| do
           setReg emu ⟨resultRegister, .imm width, 0, false⟩ (.bits (BitVec.ofNat width value))
           pure (some value)
         | .default => serve rest
-    serve hooks
+    emu.serving.set true
+    try serve hooks finally emu.serving.set false
 
 private def dispatchIntrinsic (emu : Emu) (name : String) : IO Bool := serialize emu <| do
   let address ← emu.pc.get
@@ -1665,11 +1674,30 @@ private def switchNextThread (emu : Emu) : IO Bool := do
     pure true
   | none => pure !(← stopped emu)
 
-/-- Turns of `quantum` instructions until a thread stops. `runProcesses` runs this between what it has to do when one stops. -/
+/-- Turns of `quantum` instructions until a thread stops. `runProcesses` runs this between what it has to do when one stops.
+A turn that the fuel ended goes on from there the next time, so that where the fuel runs out, as where a run stops to save itself,
+isn't something that the threads can see. -/
 def runPreemptive (emu : Emu) (quantum : Nat := 100) (fuel : Nat := 100000) : IO Nat := do
   if quantum = 0 then
     throw <| IO.userError "Emu thread quantum must be positive"
-  preemptiveM (run emu ·) (stopped emu) (switchNextThread emu) quantum fuel (fuel + 1) fuel 0
+  let carried ← emu.turnUsed.get
+  emu.turnUsed.set 0
+  -- The fuel ran out at the very end of a turn, where the next thread would have come.
+  if carried ≥ quantum then
+    unless ← switchNextThread emu do
+      return 0
+  let taken ← IO.mkRef (if carried ≥ quantum then 0 else carried)
+  let turn ← IO.mkRef 0
+  let total ← preemptiveM
+    (fun count => do
+      let before ← taken.get
+      taken.set 0
+      let steps ← run emu (min count (quantum - before))
+      turn.set (before + steps)
+      pure steps)
+    (stopped emu) (switchNextThread emu) quantum fuel (fuel + 1) fuel 0
+  if total == fuel && !(← stopped emu) then emu.turnUsed.set (← turn.get)
+  return total
 
 private def workerMemory (emu : Emu) (context : ThreadContext) (fallback : Jit.Memory) : IO Jit.Memory := do
   let memories ← emu.processMemory.get

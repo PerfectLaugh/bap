@@ -809,6 +809,199 @@ def testLinuxCheckpoints (triple : String) (cuts : List Nat := [12000]) : IO Uni
   expectThrow s!"Linux what isn't a checkpoint is refused" (Bap.Linux.Machine.ofCheckpoint "BAPLINUX".toUTF8)
   expectThrow s!"Linux what isn't a checkpoint is refused" (Bap.Linux.Machine.ofCheckpoint "not one".toUTF8)
 
+/-- What a run does to the last instruction: where each instruction was, in the order that they ran over all the threads, the system
+calls, what it says, how it ends and the bytes of all that is left at the end. -/
+private structure RunTrace where
+  outcome : Bap.Tasks.ScheduleOutcome
+  pcs : List Nat
+  syscalls : List (Nat × List Nat)
+  written : ByteArray
+  final : ByteArray
+
+/-- Runs a machine in pieces of `cuts`, and after each one goes on in a new machine from the bytes of a checkpoint. `.none` runs it whole. -/
+private def tracedRun (start : (Nat → List Nat → IO Unit) → IO Bap.Linux.Machine)
+    (resume : (Nat → List Nat → IO Unit) → ByteArray → IO Bap.Linux.Machine)
+    (quantum : Nat) (cuts : Nat → Option Nat) : IO RunTrace := do
+  let pcs ← IO.mkRef ([] : List (List Nat))
+  let syscalls ← IO.mkRef ([] : List (Nat × List Nat))
+  let written ← IO.mkRef ByteArray.empty
+  let watch : Nat → List Nat → IO Unit := fun number args => syscalls.modify ((number, args) :: ·)
+  let rec go : Nat → Nat → Bap.Linux.Machine → IO RunTrace
+    | 0, _, _ => throw <| IO.userError "more pieces than a run should have"
+    | fuel + 1, index, machine => do
+      Bap.Emu.traceStartCapacity machine.emu 100000000
+      let outcome ← machine.run (quantum := quantum) (fuel := (cuts index).getD 1000000000) fun data => written.modify (· ++ data)
+      pcs.modify ((← Bap.Emu.traceStop machine.emu) :: ·)
+      if outcome == .outOfFuel then
+        go fuel (index + 1) (← resume watch (← machine.checkpoint))
+      else
+        pure { outcome, pcs := (← pcs.get).reverse.flatten, syscalls := (← syscalls.get).reverse, written := ← written.get, final := ← machine.checkpoint }
+  go 2000 0 (← start watch)
+
+/-- Going on from a checkpoint is the same run: the same instructions in the same order over all the threads, wherever it stops, however
+often, in the middle of a turn, at its end or the first instruction of the run, to the same bytes at the end. -/
+def testLinuxResumeTraces (triple : String) (quanta : List Nat := [100, 7])
+    (names : List String := ["libc-threads", "libc-fork", "libc-files"]) : IO Unit := do
+  for name in names do
+    let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-{name}"
+    let kernel := Bap.Linux.Kernel.empty.addFile "/test" program
+    let start (watch : Nat → List Nat → IO Unit) := Bap.Linux.start kernel "/test" ["/test", "arg1"] (watch := some watch)
+    let resume (watch : Nat → List Nat → IO Unit) (data : ByteArray) := Bap.Linux.Machine.ofCheckpoint data (watch := some watch)
+    for quantum in quanta do
+      let whole ← tracedRun start resume quantum fun _ => none
+      assertTrue s!"Linux {triple} {name} the whole run has a trace" (whole.pcs.length > 1000)
+      -- A single stop, at places in a turn, and stops every so often: at the end of each turn, between turns and in the middle of them.
+      let stops : List (String × (Nat → Option Nat)) :=
+        [("first", fun index => if index == 0 then some 1 else none),
+         ("mid-turn", fun index => if index == 0 then some (quantum / 2 + 1 + 3 * quantum) else none),
+         ("turn-end", fun index => if index == 0 then some (5 * quantum) else none),
+         ("every-turn-end", fun _ => some (whole.pcs.length / 6 / quantum * quantum + quantum)),
+         ("every-odd", fun _ => some ((whole.pcs.length / 5) ||| 1))]
+      for (label, cuts) in stops do
+        let pieces ← tracedRun start resume quantum cuts
+        let label := s!"Linux {triple} {name} quantum {quantum} stopped {label}"
+        assertEqual s!"{label} ends as it would have" whole.outcome pieces.outcome
+        let firstDifference := (whole.pcs.zip pieces.pcs).findIdx? fun (left, right) => left != right
+        assertEqual s!"{label} runs the same instructions" (whole.pcs.length, none) (pieces.pcs.length, firstDifference)
+        assertEqual s!"{label} makes the same system calls" whole.syscalls pieces.syscalls
+        assertEqual s!"{label} says the same" whole.written.toList pieces.written.toList
+        assertTrue s!"{label} ends in the same state" (whole.final == pieces.final)
+
+/-- A model of a runtime: it counts the system calls, and what a guest gets depends on the count. -/
+private def countingModel (getcwd threshold : Nat) (seen : IO.Ref Nat) (version : Nat := 1) (id : String := "counter") : Bap.Linux.RuntimeModel where
+  id := id
+  version := version
+  attach := fun machine => do
+    let count ← IO.mkRef 0
+    let _ ← Bap.Emu.onSyscall machine.emu fun emu number _ => do
+      count.modify (· + 1)
+      seen.set (← count.get)
+      if number == getcwd && (← count.get) ≥ threshold then Bap.Emu.syscallReturn emu (.error 13) else pure .default
+    pure {
+      save := do pure (Bap.Linux.Wire.putNat ByteArray.empty (← count.get))
+      load := fun data => do
+        let (value, at_) ← IO.ofExcept (Bap.Linux.Wire.getNat data 0)
+        IO.ofExcept (Bap.Linux.Wire.expectEnd data at_)
+        count.set value
+    }
+
+/-- What a runtime model holds goes with the machine, its callbacks come back under its name, and a checkpoint that can't go on as it
+would have is refused and not run. -/
+def testLinuxRuntimeModels (triple : String) (getcwd : Nat) : IO Unit := do
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-files"
+  let kernel := Bap.Linux.Kernel.empty.addFile "/test" program
+  let seen ← IO.mkRef 0
+  let model := countingModel getcwd 1 seen
+  let runOn (machine : Bap.Linux.Machine) : IO (Bap.Tasks.ScheduleOutcome × String) := do
+    let console ← IO.mkRef ByteArray.empty
+    let outcome ← machine.run fun data => console.modify (· ++ data)
+    pure (outcome, String.fromUTF8! (← console.get))
+  let start (model : Bap.Linux.RuntimeModel) := Bap.Linux.start kernel "/test" ["/test", "arg1"] (models := [model])
+  -- At what count it comes to `getcwd`, which is what the threshold has to be to tell a count that is kept from one that started again.
+  let calls ← IO.mkRef 0
+  let counter : Bap.Linux.RuntimeModel := { id := "calls", attach := fun machine => do
+    let _ ← Bap.Emu.onSyscall machine.emu fun _ number _ => do
+      unless (← calls.get) >= 1000000 do
+        calls.modify (· + 1)
+        if number == getcwd then calls.modify (· + 1000000)
+      pure .default
+    pure { save := pure ByteArray.empty, load := fun _ => pure () } }
+  let _ ← runOn (← start counter)
+  let threshold := (← calls.get) - 1000000
+  let model := countingModel getcwd threshold seen
+  let (wholeOutcome, wholeText) ← runOn (← start model)
+  assertTrue s!"Linux {triple} a model changes what a guest sees: {wholeText}" ((wholeText.splitOn "cwd ?").length > 1)
+  let whole ← seen.get
+  -- Stops once it has made some of its calls and before it comes to that one.
+  let first ← start model
+  let _ ← first.run (fuel := 2000) fun _ => pure ()
+  assertTrue s!"Linux {triple} a model stops before it matters" ((← seen.get) < threshold && (← seen.get) > 0)
+  let before := String.fromUTF8! (← first.kernel.get).output
+  let data ← first.checkpoint
+  let (outcome, after) ← runOn (← Bap.Linux.Machine.ofCheckpoint data (models := [model]))
+  assertEqual s!"Linux {triple} a model goes on from a checkpoint" (wholeOutcome, wholeText) (outcome, before ++ after)
+  assertEqual s!"Linux {triple} a model's count goes on" whole (← seen.get)
+  let again ← Bap.Linux.Machine.ofCheckpoint data (models := [model])
+  assertTrue s!"Linux {triple} a model saves again as it was" (data == (← again.checkpoint))
+  -- Going back in the same machine takes the model back too.
+  let machine ← start model
+  let _ ← machine.run (fuel := 2000) fun _ => pure ()
+  let saved ← machine.save
+  let (once, onceText) ← runOn machine
+  machine.restore saved
+  assertEqual s!"Linux {triple} a model goes back with the machine" (once, onceText) (← runOn machine)
+  -- What can't go on as it would have.
+  expectThrow s!"Linux {triple} a checkpoint without its model is refused" (Bap.Linux.Machine.ofCheckpoint data)
+  expectThrow s!"Linux {triple} a checkpoint with another version of a model is refused"
+    (Bap.Linux.Machine.ofCheckpoint data (models := [countingModel getcwd threshold seen (version := 2)]))
+  expectThrow s!"Linux {triple} a model that a checkpoint has nothing of is refused"
+    (Bap.Linux.Machine.ofCheckpoint data (models := [model, countingModel getcwd threshold seen (id := "other")]))
+  expectThrow s!"Linux {triple} two models of a name are refused" (Bap.Linux.start kernel "/test" ["/test"] (models := [model, model]))
+  let tampered := data.set! (data.size / 2) (data[data.size / 2]! + 1)
+  expectThrow s!"Linux {triple} a damaged checkpoint is refused" (Bap.Linux.Machine.ofCheckpoint tampered (models := [model]))
+  expectThrow s!"Linux {triple} a cut checkpoint is refused" (Bap.Linux.Machine.ofCheckpoint (data.extract 0 (data.size - 1)) (models := [model]))
+  let target := Bap.Linux.targetDigest first.architecture program
+  assertEqual s!"Linux {triple} a checkpoint says what it is of" target first.target
+  let _ ← Bap.Linux.Machine.ofCheckpoint data (models := [model]) (expectedTarget := some target)
+  expectThrow s!"Linux {triple} a checkpoint of another program is refused"
+    (Bap.Linux.Machine.ofCheckpoint data (models := [model]) (expectedTarget := some (target + 1)))
+  -- A handler has no name to come back by, but that there was one is known.
+  let handler : Bap.Linux.SyscallHandler := fun _ _ _ => pure .default
+  let handled ← Bap.Linux.start kernel "/test" ["/test"] (handler := some handler)
+  expectThrow s!"Linux {triple} a checkpoint without its handler is refused" (do Bap.Linux.Machine.ofCheckpoint (← handled.checkpoint))
+  -- The same state makes the same bytes, as many processes as it has.
+  let twice (name : String) : IO ByteArray := do
+    let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-{name}")) "/test" ["/test"]
+    let _ ← machine.run (fuel := 15000) fun _ => pure ()
+    machine.checkpoint
+  for name in ["libc-fork", "libc-threads"] do
+    assertTrue s!"Linux {triple} {name} the same run makes the same file" ((← twice name) == (← twice name))
+  -- A file that was there stays until the whole of the new one is.
+  let path := s!"native/build/emu-atomic-{triple}.bin"
+  first.saveFile path
+  assertTrue s!"Linux {triple} saving leaves nothing behind" !(← System.FilePath.pathExists (path ++ ".partial"))
+  let _ ← Bap.Linux.Machine.loadFile path (models := [model])
+  -- Where it stops of its own goes with it.
+  let stopping ← start model
+  let entry ← Bap.Emu.pc stopping.emu
+  let _ ← Bap.Emu.addBreakpoint stopping.emu (entry + 0x100000)
+  let reloaded ← Bap.Linux.Machine.ofCheckpoint (← stopping.checkpoint) (models := [model])
+  assertEqual s!"Linux {triple} breakpoints go on from a checkpoint" [entry + 0x100000] (← Bap.Emu.breakpoints reloaded.emu)
+  IO.FS.removeFile path
+
+/-- A system call that a model is serving: there isn't a checkpoint in the middle of its instruction. A model stops the thread, and
+there is one when the run returns, which goes on to what the run would have done. -/
+def testLinuxServedCheckpoint (triple : String) (getcwd : Nat) : IO Unit := do
+  let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-files")
+  let inside ← IO.mkRef (none : Option (Except IO.Error ByteArray))
+  let machine ← IO.mkRef (none : Option Bap.Linux.Machine)
+  let model : Bap.Linux.RuntimeModel := { id := "stopper", attach := fun attached => do
+    let _ ← Bap.Emu.onSyscall attached.emu fun emu number _ => do
+      if number == getcwd then
+        if let some machine := ← machine.get then
+          inside.set (some (← machine.checkpoint.toBaseIO))
+        Bap.Emu.stopThread emu (← Bap.Emu.thread emu)
+      pure .default
+    pure { save := pure ByteArray.empty, load := fun _ => pure () } }
+  let runOn (machine : Bap.Linux.Machine) : IO (Bap.Tasks.ScheduleOutcome × String) := do
+    let console ← IO.mkRef ByteArray.empty
+    let outcome ← machine.run fun data => console.modify (· ++ data)
+    pure (outcome, String.fromUTF8! (← console.get))
+  let plain ← Bap.Linux.start kernel "/test" ["/test", "arg1"]
+  let (wholeOutcome, wholeText) ← runOn plain
+  let first ← Bap.Linux.start kernel "/test" ["/test", "arg1"] (models := [model])
+  machine.set (some first)
+  let (_, before) ← runOn first
+  match ← inside.get with
+  | some (.error _) => pure ()
+  | _ => throw <| IO.userError s!"Linux {triple} a checkpoint in the middle of a system call should be refused"
+  machine.set none
+  -- It goes on past the call, with the result that the kernel gave.
+  let second ← Bap.Linux.Machine.ofCheckpoint (← first.checkpoint) (models := [{ model with attach := fun _ => pure { save := pure ByteArray.empty, load := fun _ => pure () } }])
+  Bap.Emu.resumeThread second.emu (← Bap.Emu.thread second.emu)
+  let (outcome, after) ← runOn second
+  assertEqual s!"Linux {triple} a call that stopped goes on as it would have" (wholeOutcome, wholeText) (outcome, before ++ after)
+
 /-- The kernel itself: a program isn't needed to say what it does. -/
 private def testKernel : IO Unit := do
   let unwrap {α} (result : Bap.Linux.Result α) : IO α := match result with

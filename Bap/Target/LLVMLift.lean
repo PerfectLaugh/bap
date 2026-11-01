@@ -589,7 +589,7 @@ private def semanticsContext (address nextPc : Nat) : Primus.Semantics.Context :
 
 /-- Where the semantics are: what `BAP_SEMANTICS_DIR` says, or here, or in the nearest directory above the program that has
 them, which for a program that was built here is this tree, wherever it is run from. -/
-private def semanticsRoot : IO String := do
+def semanticsRoot : IO String := do
   if let some root ← IO.getEnv "BAP_SEMANTICS_DIR" then return root
   if ← System.FilePath.pathExists "semantics" then return "semantics"
   let rec above : Nat → System.FilePath → IO String

@@ -1,63 +1,10 @@
 import Bap.Linux.Kernel
+import Bap.Linux.Wire
 
 /-! What a kernel is as plain data and as bytes, to go in a checkpoint. Tables are sorted, so that a kernel has one image and the
 same state makes the same file. A number has as many bytes as it needs, so that none of them can be too wide for the format. -/
 
 namespace Bap.Linux
-
-namespace Wire
-
-/-- A number, seven bits at a time from the low end. A byte with its high bit set has another after it. -/
-def putNat (out : ByteArray) (value : Nat) : ByteArray :=
-  if value < 128 then out.push value.toUInt8
-  else putNat (out.push (value % 128 + 128).toUInt8) (value / 128)
-termination_by value
-decreasing_by omega
-
-def putBytes (out data : ByteArray) : ByteArray := putNat out data.size ++ data
-
-def putText (out : ByteArray) (text : String) : ByteArray := putBytes out text.toUTF8
-
-def putList (put : ByteArray → α → ByteArray) (out : ByteArray) (items : List α) : ByteArray :=
-  items.foldl put (putNat out items.length)
-
-/-- What a decoder gives, and the offset after it. -/
-abbrev Decoder (α : Type) := ByteArray → Nat → Except String (α × Nat)
-
-def getNatFrom (data : ByteArray) : Nat → Nat → Nat → Nat → Except String (Nat × Nat)
-  | 0, _, _, _ => .error "truncated Linux checkpoint"
-  | fuel + 1, at_, scale, value =>
-    if h : at_ < data.size then
-      let byte := data[at_].toNat
-      if byte < 128 then .ok (value + byte * scale, at_ + 1)
-      else getNatFrom data fuel (at_ + 1) (scale * 128) (value + (byte - 128) * scale)
-    else .error "truncated Linux checkpoint"
-
-def getNat : Decoder Nat := fun data at_ => getNatFrom data (data.size - at_) at_ 1 0
-
-def getBytes : Decoder ByteArray := fun data at_ => do
-  let (size, at_) ← getNat data at_
-  if at_ + size ≤ data.size then .ok (data.extract at_ (at_ + size), at_ + size)
-  else .error "truncated Linux checkpoint"
-
-def getText : Decoder String := fun data at_ => do
-  let (bytes, at_) ← getBytes data at_
-  match String.fromUTF8? bytes with
-  | some text => .ok (text, at_)
-  | none => .error "a Linux checkpoint with a path that isn't text"
-
-/-- `count` items. A list can't have more of them than there are bytes left, which a bad file might say. -/
-def getItems (get : Decoder α) (data : ByteArray) : Nat → Nat → List α → Except String (List α × Nat)
-  | 0, at_, items => .ok (items.reverse, at_)
-  | count + 1, at_, items => do
-    let (item, at_) ← get data at_
-    getItems get data count at_ (item :: items)
-
-def getList (get : Decoder α) : Decoder (List α) := fun data at_ => do
-  let (count, at_) ← getNat data at_
-  getItems get data count at_ []
-
-end Wire
 
 /-- A process, with its descriptors in order. -/
 structure ProcessImage where
