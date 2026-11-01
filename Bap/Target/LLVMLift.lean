@@ -523,7 +523,7 @@ private def mipsRegister (name : String) : Primus.Semantics.Value :=
 has the fields of that register but the condition codes, in the low half of its word on MIPS64. -/
 private def mipsRegisterNames : List String :=
   (List.range 32).map (fun n => s!"R{n}") ++ (List.range 32).map (fun n => s!"F{n}") ++
-    (List.range 8).map (fun n => s!"FCC{n}") ++ ["ZERO", "RA", "HI", "LO", "USERLOCAL", "FCSR"]
+    (List.range 8).map (fun n => s!"FCC{n}") ++ ["ZERO", "RA", "HI", "LO", "USERLOCAL", "FCSR", "EXCLUSIVE_MONITOR"]
 
 private def mipsGlobals : Primus.Semantics.Globals :=
   mipsRegisterNames.map fun name => (name, mipsRegister name)

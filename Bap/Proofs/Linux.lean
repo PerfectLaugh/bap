@@ -40,6 +40,13 @@ theorem setProcess_isolated (kernel : Kernel) {child parent : Nat} (value : Proc
 @[simp] theorem bytesOf_size (size value : Nat) : (Abi.bytesOf size value).size = size := by
   simp [Abi.bytesOf, ByteArray.size]
 
+/-- A field has the size that it says, in either order. -/
+@[simp] theorem field_size (big : Bool) (size value : Nat) : (Abi.field big size value).size = size := by
+  unfold Abi.field
+  cases big
+  · exact bytesOf_size size value
+  · exact (Array.size_reverse ..).trans (bytesOf_size size value)
+
 /-- `struct stat` has its 144 bytes, whatever is in it. -/
 theorem stat_size (value : Kernel.Stat) : (Abi.stat value).size = 144 := by
   simp [Abi.stat, ByteArray.size_append]
@@ -62,6 +69,19 @@ theorem x86_64Calls_nodup : (x86_64Calls.map (·.1)).Nodup := by decide +kernel
 /-- No number of `asm-generic` means two calls. -/
 theorem genericCalls_nodup : (genericCalls.map (·.1)).Nodup := by decide +kernel
 
+/-- No number of 32-bit `asm-generic` means two calls. -/
+theorem generic32Calls_nodup : (generic32Calls.map (·.1)).Nodup := by decide +kernel
+
+/-- No number of o32 means two calls. -/
+theorem o32Calls_nodup : (o32Calls.map (·.1)).Nodup := by decide +kernel
+
+/-- No number of n64 means two calls. -/
+theorem n64Calls_nodup : (n64Calls.map (·.1)).Nodup := by decide +kernel
+
+/-- `struct stat` of 64-bit MIPS has its 160 bytes, in either order. -/
+theorem mips64Stat_size (value : Kernel.Stat) (big : Bool) : (Abi.mips64Stat value big).size = 160 := by
+  simp [Abi.mips64Stat, ByteArray.size_append]
+
 /-- Translating the flags of `open` twice gives them back, for each of the bits that move, on their own and with others. -/
 theorem openFlags_involutive : ∀ flags ∈ (List.range 16).map (fun bits => 0o102 + (bits &&& 3) * 0x4000 + (bits / 4) * 0x10000),
     Architecture.aarch64.openFlags (Architecture.aarch64.openFlags flags) = flags := by decide +kernel
@@ -80,7 +100,7 @@ theorem writeAt_size (data : ByteArray) (offset : Nat) (bytes : ByteArray) (h : 
   omega
 
 /-- What is not an ELF file doesn't start. -/
-theorem parse_short (data : ByteArray) (h : data.size < 64) : ∃ error, Elf.parse data = .error error := by
+theorem parse_short (data : ByteArray) (h : data.size < 52) : ∃ error, Elf.parse data = .error error := by
   refine ⟨"not an ELF file", ?_⟩
   simp [Elf.parse, h, bind, Except.bind]
 

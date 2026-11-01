@@ -448,7 +448,7 @@ def exclusiveMonitor (width : Nat) : Bap.Var := ⟨"EXCLUSIVE_MONITOR", .imm wid
 /-- A state without a monitor, for a target that has one. -/
 private def clearMonitor (config : Config) (env : Bil.Env) : Bil.Env :=
   match config.syscallAbi, memoryWidth config with
-  | .aarch64, .ok width | .riscv, .ok width => Bil.bind env (exclusiveMonitor width) (.bits (BitVec.ofNat width 0))
+  | .aarch64, .ok width | .riscv, .ok width | .mips, .ok width => Bil.bind env (exclusiveMonitor width) (.bits (BitVec.ofNat width 0))
   | _, _ => env
 
 def switchThread (emu : Emu) (id : ThreadId) : IO Unit := do
@@ -1151,6 +1151,17 @@ private def dispatchSyscall (emu : Emu) : IO (Option Nat) := serialize emu <| do
     let (numberRegister, argumentRegisters, resultRegister) := syscallRegisters emu.config.syscallAbi
     let number ← readWord emu numberRegister
     let args ← argumentRegisters.mapM (readWord emu)
+    -- On o32, what is past the four registers of arguments is on the stack of the caller, at 16.
+    let args ← if emu.config.syscallAbi == .mips && width == 32 then do
+        let stack ← readWord emu "R29"
+        let onStack ← [16, 20].mapM fun offset => do
+          match ← (read emu (stack + offset) 4).toBaseIO with
+          | .ok bytes =>
+            let bytes := if emu.config.endian == .big then bytes.toList else bytes.toList.reverse
+            pure (bytes.foldl (fun value byte => value * 256 + byte.toNat) 0)
+          | .error _ => pure 0
+        pure (args.take 4 ++ onStack)
+      else pure args
     let context := hookContext emu
     let rec serve : List SyscallHook → IO (Option Nat)
       | [] => pure none
@@ -1821,7 +1832,7 @@ private def mipsOf (variant : Target.LLVMLift.MipsVariant) (code : ByteArray) (b
     delayPolicy := .mips variant.release6
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create (adjust config) [region] {} entry
+  create (adjust config) [region] { env := clearMonitor config {} } entry
 
 def mips64 (code : ByteArray) (base entry : Nat) (release6 : Bool := false) (endian : Endian := .big) (adjust : Config → Config := id) : IO Emu :=
   mipsOf { bits := 64, endian, release6 } code base entry adjust

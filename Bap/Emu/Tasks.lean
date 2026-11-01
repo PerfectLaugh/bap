@@ -50,6 +50,8 @@ def clone (emu : Emu) (options : CloneOptions) : IO ThreadId := do
     | some value => Bil.bind env (wordVar width name) (wordOf width value)
     | none => env
   let env := bindIn (bindIn current.env stackRegister options.stack) threadRegister options.threadPointer
+  -- On MIPS, a result that isn't an error has the flag in the register after the arguments clear, whatever that held.
+  let env := bindIn env "R7" (if emu.config.syscallAbi == .mips then some 0 else none)
   emu.threadsRef.modify (spawnContext id { env } (wordVar width result) (wordOf width 0) options.start :: ·)
   if !options.shareMemory then cloneProcessMemory emu id
   if !options.sameGroup then
@@ -149,7 +151,7 @@ private def setSyscallResult (emu : Emu) (id : ThreadId) (result : Except Nat Na
   setThreadReg emu id (wordVar width register) (wordOf width word)
 
 /-- The action of a result of the system call of the thread that runs. -/
-private def syscallReturn (emu : Emu) (result : Except Nat Nat) : IO SyscallAction := do
+def syscallReturn (emu : Emu) (result : Except Nat Nat) : IO SyscallAction := do
   let width ← wordWidth emu
   let (word, flag) := syscallWord (isMips emu) width result
   setErrorFlag emu (← thread emu) width flag
@@ -219,6 +221,7 @@ private structure Calls where
   sigaction : Nat
   tgkill : Nat
   mmap : Nat
+  mmap2 : Option Nat := none
   munmap : Nat
   mprotect : Nat
   madvise : Nat
@@ -241,7 +244,7 @@ private def callsOf (abi : SyscallAbi) (width : Nat) : Calls :=
       { fork := some 4002, clone := 4120, clone3 := 4435, wait4 := 4114, waitpid := some 4007, exit := 4001, exitGroup := 4246,
         getpid := 4020, getppid := 4064, gettid := 4222, schedYield := 4162, futex := 4238, futexTime64 := some 4422,
         setTidAddress := 4252, setRobustList := 4309, rseq := 4367, sigprocmask := 4195, sigaction := 4194, tgkill := 4266,
-        mmap := 4090, munmap := 4091, mprotect := 4125, madvise := 4218 }
+        mmap := 4090, mmap2 := some 4210, munmap := 4091, mprotect := 4125, madvise := 4218 }
     else
       { fork := some 5056, vfork := some 5057, clone := 5055, clone3 := 5435, wait4 := 5059, exit := 5058, exitGroup := 5205,
         getpid := 5038, getppid := 5108, gettid := 5178, schedYield := 5023, futex := 5194, setTidAddress := 5212,
@@ -356,12 +359,13 @@ private def serveFutex (emu : Emu) (address operation value timeout target compa
   | _ => syscallReturn emu (.error (enosys emu))
 
 /-- Where a mapping goes that doesn't say: below the others, from the top down, as in Linux. -/
-private def mappingBase : Nat := 0x7f0000000000
+private def mappingBase (width : Nat) : Nat := if width == 32 then 0x70000000 else 0x7f0000000000
 
 private def freeAddress (emu : Emu) (size : Nat) : IO Nat := do
   let taken := (← emu.regions.get).map (fun region => (region.address, region.data.size))
   let sorted := taken.toArray.qsort (fun left right => left.1 > right.1)
-  pure (gapBelow size mappingBase (sorted.toList.filter (·.1 < mappingBase)))
+  let base := mappingBase (← wordWidth emu)
+  pure (gapBelow size base (sorted.toList.filter (·.1 < base)))
 
 private def protectionOf (bits : Nat) : Primus.Protection := ⟨bits &&& 1 != 0, bits &&& 2 != 0, bits &&& 4 != 0⟩
 
@@ -412,7 +416,7 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
     let known := is calls.clone || is calls.clone3 || is calls.wait4 || isSome calls.waitpid || isSome calls.fork ||
       isSome calls.vfork || is calls.exit || is calls.exitGroup || is calls.getpid || is calls.getppid || is calls.gettid ||
       is calls.schedYield || is calls.futex || isSome calls.futexTime64 || is calls.setTidAddress || is calls.setRobustList ||
-      is calls.rseq || is calls.sigprocmask || is calls.sigaction || is calls.tgkill || is calls.mmap || is calls.munmap ||
+      is calls.rseq || is calls.sigprocmask || is calls.sigaction || is calls.tgkill || is calls.mmap || isSome calls.mmap2 || is calls.munmap ||
       is calls.mprotect || is calls.madvise || isSome calls.archPrctl
     if !known then
       pure .default
@@ -447,14 +451,11 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
         current.taskTable.modify (·.setClearTid (← thread current) (arg 0))
         syscallReturn current (.ok (← thread current))
       else if is calls.sigprocmask || is calls.sigaction then
-        -- The old mask or action, if it asks for one, has nothing in it. Sizes are 8 bytes of a mask, or an action's, which has
-        -- a restorer on x86-64, and on MIPS a mask of 16 bytes, and otherwise a handler, flags and a mask.
+        -- The old mask or action, if it asks for one, has nothing in it. Sizes are those of a mask, which it says, or of an action:
+        -- a handler, flags and a mask, and a restorer on x86-64.
         let old := arg 2
         if old != 0 then
-          let size := if is calls.sigprocmask then arg 3
-            else match current.config.syscallAbi with
-              | .x86_64 | .mips => 32
-              | .riscv | .aarch64 => 24
+          let size := if is calls.sigprocmask then arg 3 else (if x86 then 3 else 2) * (width / 8) + arg 3
           try write current old (ByteArray.mk (Array.replicate size 0))
           catch _ => return ← syscallReturn current (.error efault)
         syscallReturn current (.ok 0)
@@ -466,7 +467,7 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
             if arg 2 != 0 then kill current group (arg 2)
             syscallReturn current (.ok 0)
         | _ => syscallReturn current (.error esrch)
-      else if is calls.mmap then
+      else if is calls.mmap || isSome calls.mmap2 then
         serveMmap current (arg 0) (arg 1) (arg 2) (arg 3)
       else if is calls.munmap then
         unmap current (arg 0) ((arg 1 + 4095) / 4096 * 4096)

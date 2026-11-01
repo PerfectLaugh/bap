@@ -62,11 +62,20 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxPrograms,
     Bap.Tests.Emu.testLinuxMusl "aarch64",
     Bap.Tests.Emu.testLinuxMusl "riscv64",
+    Bap.Tests.Emu.testLinuxMusl "riscv32",
+    Bap.Tests.Emu.testLinuxMusl "mips",
+    Bap.Tests.Emu.testLinuxMusl "mipsel",
+    Bap.Tests.Emu.testLinuxMusl "mips64",
+    Bap.Tests.Emu.testLinuxMusl "mips64el",
     Bap.Tests.Emu.testLinuxCheckpoints "aarch64",
     Bap.Tests.Emu.testLinuxCheckpoints "riscv64",
+    Bap.Tests.Emu.testLinuxCheckpoints "riscv32",
+    Bap.Tests.Emu.testLinuxCheckpoints "mips",
+    Bap.Tests.Emu.testLinuxCheckpoints "mips64el",
     Bap.Tests.Emu.testLinuxCheckpoints "x86_64",
     Bap.Tests.Jni.run
   ]
+  Bap.Tests.Optimize.scaling
   let tasks ← tests.mapM fun test => liftM <| IO.asTask do
     try test catch error =>
       IO.eprintln s!"FAILED: {error}"

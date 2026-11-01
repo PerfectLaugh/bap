@@ -315,6 +315,21 @@ private def randomSub (seed : Nat) : Sub := Id.run do
     blks := blks.push { tid := i + 1, phis := phis, defs := defs, jmps := jmps }
   return ⟨1, s!"random", [], blks.toList⟩
 
+/-- How long passes take, which says something only with nothing else running: `main` runs this before the other tests. -/
+def scaling : IO Unit := do
+  -- a chain of phis that read what is assigned later: nothing about it is quadratic any more
+  let chainStarted ← IO.monoMsNow
+  for sub in [chainSub 7000, toSsa (chainSub 7000)] do
+    assertTrue "a chain of 7000 blocks stays" ((optimize sub).blks.length == 7000)
+  let chainElapsed := (← IO.monoMsNow) - chainStarted
+  assertTrue s!"a chain of 7000 blocks is optimized in under a second, not {chainElapsed} ms" (chainElapsed < 1000)
+  -- a pass costs what it removes: these take a pass a block, and many blocks mention the one variable
+  let started ← IO.monoMsNow
+  for sub in [selfChain 7000, hubChain false 7000, hubChain true 7000] do
+    assertEqual "a line of 7000 blocks dies" 0 ((optimize sub).blks.foldl (fun count blk => count + blk.defs.length) 0)
+  let elapsed := (← IO.monoMsNow) - started
+  assertTrue s!"a line of 7000 blocks takes a pass a block in under a second, not {elapsed} ms" (elapsed < 1000)
+
 private def deadCodeFastPath : IO Unit := do
   sameConstants "a sample" sample
   sameConstants "a loop" loop
@@ -338,18 +353,6 @@ private def deadCodeFastPath : IO Unit := do
     toString (Wire.printSub ((constantsBySpec cfg).intoSub sub)) == fast && toString (Wire.printSub ((constantsBySpec cfg true).intoSub sub)) == fast
   assertEqual "constants: 1000 random CFGs" ([] : List Nat)
     ((List.range 1000).filter fun seed => !agreesConstants (randomSub seed) || !agreesConstants (toSsa (randomSub seed)))
-  -- a chain of phis that read what is assigned later: nothing about it is quadratic any more
-  let chainStarted ← IO.monoMsNow
-  for sub in [chainSub 7000, toSsa (chainSub 7000)] do
-    assertTrue "a chain of 7000 blocks stays" ((optimize sub).blks.length == 7000)
-  let chainElapsed := (← IO.monoMsNow) - chainStarted
-  assertTrue s!"a chain of 7000 blocks is optimized in under a second, not {chainElapsed} ms" (chainElapsed < 1000)
-  -- a pass costs what it removes: these take a pass a block, and many blocks mention the one variable
-  let started ← IO.monoMsNow
-  for sub in [selfChain 7000, hubChain false 7000, hubChain true 7000] do
-    assertEqual "a line of 7000 blocks dies" 0 ((optimize sub).blks.foldl (fun count blk => count + blk.defs.length) 0)
-  let elapsed := (← IO.monoMsNow) - started
-  assertTrue s!"a line of 7000 blocks takes a pass a block in under a second, not {elapsed} ms" (elapsed < 1000)
   sameDeadCode "dead code: a sample" sample
   sameDeadCode "dead code: a loop" loop
   sameDeadCode "dead code: an entry loop" entryLoop

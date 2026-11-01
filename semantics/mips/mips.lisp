@@ -255,22 +255,35 @@
 (defun LW (rt base off) (set$ rt (sext32 (load-bits 32 (+ base off)))))
 (defun LWu (rt base off) (set$ rt (zext (low32 (load-bits 32 (+ base off))))))
 (defun LD (rt base off) (set$ rt (cast-low 64 (load-bits 64 (+ base off)))))
-(defun LL (rt base off) (LW rt base off))
-(defun LLD (rt base off) (LD rt base off))
+;; The reservation of a thread is EXCLUSIVE_MONITOR, one more than the
+;; address of the LL that it follows, and 0 if there is none. A thread is
+;; alone until it is switched, when the emulator clears it, as the
+;; kernel does.
+(defun LL (rt base off)
+  (set EXCLUSIVE_MONITOR (+ base off 1))
+  (LW rt base off))
+(defun LLD (rt base off)
+  (set EXCLUSIVE_MONITOR (+ base off 1))
+  (LD rt base off))
 
 (defun SB (rt base off) (store-byte (+ base off) (cast-low 8 rt)))
 (defun SH (rt base off) (store-word (+ base off) (cast-low 16 rt)))
 (defun SW (rt base off) (store-word (+ base off) (low32 rt)))
 (defun SD (rt base off) (store-word (+ base off) (cast-low 64 rt)))
 
-;; the store-conditional succeeds, as the reservation isn't modeled
+;; the store-conditional takes place if it is to the address of the
+;; reservation, and says so in RT, and leaves no reservation
 (defun SC (rt _ base off)
-  (SW rt base off)
-  (set$ rt (zext 1:1)))
+  (if (= EXCLUSIVE_MONITOR (+ base off 1))
+      (prog (SW rt base off) (set$ rt (zext 1:1)))
+    (set$ rt (zext 0:1)))
+  (set EXCLUSIVE_MONITOR 0))
 
 (defun SCD (rt _ base off)
-  (SD rt base off)
-  (set$ rt (zext 1:1)))
+  (if (= EXCLUSIVE_MONITOR (+ base off 1))
+      (prog (SD rt base off) (set$ rt (zext 1:1)))
+    (set$ rt (zext 0:1)))
+  (set EXCLUSIVE_MONITOR 0))
 
 ;; The unaligned loads and stores access the bytes of the aligned word
 ;; that contains the address from the address to an end of the word, the
@@ -408,7 +421,7 @@
 ;; there are no caches, no pipeline and no other processors here, so the
 ;; instructions that only order or time what those do have no effect:
 ;; the barriers, SSNOP, which only takes up an issue slot, and PAUSE,
-;; which only waits for the reservation of LL, that isn't modeled, see SC
+;; which only waits for the reservation of LL
 (defun SYNC (_) (empty))
 (defun EHB () (empty))
 (defun SSNOP () (empty))

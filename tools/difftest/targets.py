@@ -1331,7 +1331,7 @@ class Mips(Risc):
     mnemonics_of = staticmethod(mips_stems)
     base_pins = {"R5": "window+248", "R6": 8}
     default_pins = {"R29": "window+256"}
-    excluded_prefix = ("SYSCALL", "BREAK", "RDHWR", "SDBBP", "WAIT", "ERET", "DERET", "EI", "DI", "MFC0", "MTC0", "CACHE", "LL", "SC", "LLD", "SCD")
+    excluded_prefix = ("SYSCALL", "BREAK", "RDHWR", "SDBBP", "WAIT", "ERET", "DERET", "EI", "DI", "MFC0", "MTC0", "CACHE")
     shape_list = ["", "$2, $3, $4", "$2, $3, 5", "$2, $3, 200", "$2, $3, -1", "$2, $3", "$2", "$2, 5", "$2, 1000", "$2, 8($5)", "$2, -8($5)", "$2, ($5)", "$2, $3, 5, 6", "$2, $3, 3, 5", "$6($5)", "$2, $6($5)", "$f2, $f4", "$f2, $f4, $f6", "$f2, $f4, $f6, $f8", "$f2, $6($5)", "$f2, 8($5)", "$f2, $f4, $3", "$f2, $f4, $fcc1", "$2, $3, $fcc1", "$2, $f2", "$f2, $2", "$2, $3, $4, 2", "$2, $3, $4, 1", "$2, 8", "$f2, $f4, 1", "$f2, $f4, $f6", "$2, $3, 8", "$2, 8", "8", "$f2, 8", "$2, $3, $4, 1", "$2, $3, 8", "$2, $3, 3, 8"]
     corpus_name = ""
 
@@ -1356,7 +1356,7 @@ class Mips(Risc):
         return self.word == 8 or not only_64
 
     def aux_spec(self):
-        spec = {"XZR": (0, self.word * 8), "USERLOCAL": (0, self.word * 8), "F31": (0, 64 if self.release6 else self.word * 8)}
+        spec = {"XZR": (0, self.word * 8), "EXCLUSIVE_MONITOR": (0, self.word * 8), "USERLOCAL": (0, self.word * 8), "F31": (0, 64 if self.release6 else self.word * 8)}
         if self.release6:
             spec["HI"], spec["LO"] = (0, self.word * 8), (0, self.word * 8)
             for i in range(8):

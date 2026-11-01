@@ -604,6 +604,11 @@ namespace Abi
 def bytesOf (size value : Nat) : ByteArray :=
   ByteArray.mk ((List.range size).map fun index => (value >>> (8 * index)).toUInt8).toArray
 
+/-- A field of a structure, in the order of the guest. -/
+def field (big : Bool) (size value : Nat) : ByteArray :=
+  let bytes := bytesOf size value
+  if big then ByteArray.mk bytes.data.reverse else bytes
+
 /-- `struct stat` of x86-64. -/
 def stat (value : Kernel.Stat) : ByteArray :=
   let seconds := value.time / 1000000000
@@ -622,35 +627,44 @@ def genericStat (value : Kernel.Stat) : ByteArray :=
     bytesOf 8 0 ++ bytesOf 8 0 ++ bytesOf 8 value.size ++ bytesOf 4 4096 ++ bytesOf 4 0 ++ bytesOf 8 ((value.size + 511) / 512) ++
     time ++ time ++ time ++ bytesOf 8 0
 
+/-- `struct stat` of 64-bit MIPS, which holds its times in 32 bits. -/
+def mips64Stat (value : Kernel.Stat) (big : Bool) : ByteArray :=
+  let get := field big
+  let time := get 4 (value.time / 1000000000) ++ get 4 (value.time % 1000000000)
+  get 4 1 ++ bytesOf 12 0 ++ get 8 value.inode ++ get 4 value.mode ++ get 4 value.links ++ get 4 0 ++ get 4 0 ++ get 4 0 ++
+    bytesOf 12 0 ++ get 8 value.size ++ time ++ time ++ time ++ get 4 4096 ++ bytesOf 4 0 ++ get 8 ((value.size + 511) / 512) ++
+    bytesOf 56 0
+
 /-- `struct statx`. -/
-def statx (value : Kernel.Stat) : ByteArray :=
+def statx (value : Kernel.Stat) (big : Bool := false) : ByteArray :=
+  let get := field big
   let seconds := value.time / 1000000000
   let nanos := value.time % 1000000000
-  let time := bytesOf 8 seconds ++ bytesOf 4 nanos ++ bytesOf 4 0
+  let time := get 8 seconds ++ get 4 nanos ++ get 4 0
   -- STATX_BASIC_STATS
-  bytesOf 4 0x7ff ++ bytesOf 4 4096 ++ bytesOf 8 0 ++ bytesOf 4 value.links ++ bytesOf 4 0 ++ bytesOf 4 0 ++
-    bytesOf 2 value.mode ++ bytesOf 2 0 ++ bytesOf 8 value.inode ++ bytesOf 8 value.size ++
-    bytesOf 8 ((value.size + 511) / 512) ++ bytesOf 8 0 ++ time ++ time ++ time ++ time ++ bytesOf 128 0
+  get 4 0x7ff ++ get 4 4096 ++ get 8 0 ++ get 4 value.links ++ get 4 0 ++ get 4 0 ++
+    get 2 value.mode ++ get 2 0 ++ get 8 value.inode ++ get 8 value.size ++
+    get 8 ((value.size + 511) / 512) ++ get 8 0 ++ time ++ time ++ time ++ time ++ get 128 0
 
 /-- One `struct linux_dirent64`, aligned to 8. -/
-def dirent (number : Nat) (next : Nat) (kind : Nat) (name : String) : ByteArray :=
+def dirent (number : Nat) (next : Nat) (kind : Nat) (name : String) (big : Bool := false) : ByteArray :=
   let text := name.toUTF8
   let size := (19 + text.size + 1 + 7) / 8 * 8
-  bytesOf 8 number ++ bytesOf 8 next ++ bytesOf 2 size ++ bytesOf 1 kind ++ text ++ bytesOf (size - 19 - text.size) 0
+  field big 8 number ++ field big 8 next ++ field big 2 size ++ bytesOf 1 kind ++ text ++ bytesOf (size - 19 - text.size) 0
 
 /-- As many entries as fit in `room`, and how many that is. -/
-def dirents (entries : List (Nat × Nat × String)) (first room : Nat) : ByteArray × Nat :=
+def dirents (entries : List (Nat × Nat × String)) (first room : Nat) (big : Bool := false) : ByteArray × Nat :=
   let rec go : List (Nat × Nat × String) → Nat → ByteArray → Nat → ByteArray × Nat
     | [], _, out, count => (out, count)
     | (number, kind, name) :: rest, index, out, count =>
-      let entry := dirent number (index + 1) kind name
+      let entry := dirent number (index + 1) kind name big
       if out.size + entry.size > room then (out, count)
       else go rest (index + 1) (out ++ entry) (count + 1)
   go entries first ByteArray.empty 0
 
-/-- `struct timespec`, or `struct timeval` with `scale` 1000. -/
-def time (now scale : Nat) : ByteArray :=
-  bytesOf 8 (now / 1000000000) ++ bytesOf 8 (now % 1000000000 / scale)
+/-- `struct timespec`, or `struct timeval` with `scale` 1000, of fields of `size` bytes. -/
+def time (now scale : Nat) (big : Bool := false) (size : Nat := 8) : ByteArray :=
+  field big size (now / 1000000000) ++ field big size (now % 1000000000 / scale)
 
 /-- `struct utsname`, of six fields of 65 bytes. -/
 def utsname (nodename machine : String) : ByteArray :=
