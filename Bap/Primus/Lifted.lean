@@ -29,6 +29,8 @@ structure Statistics where
   invalidations : Nat := 0
   evictions : Nat := 0
   graphBlocks : Nat := 0
+  /-- What runs a range from the middle, where it would have had one of its own. -/
+  entriesReused : Nat := 0
   /-- What was compiled again with optimization, for having run a lot. -/
   optimized : Nat := 0
   deriving Repr
@@ -110,6 +112,15 @@ private structure CachedBlock where
   settled : Bool := false
   /-- Whether its code is that of `Jit.compileOptimized`. -/
   optimized : Bool := false
+  /-- For a range: the labels that it can be entered at, and the slot that says which. -/
+  entryLabels : List Nat := []
+  /-- For a range: each block that it can be entered at, with its label, and what must be bound for that. That a block has a
+  variable written on all ways to it is a reason for it not to read it from the state, and the first has to have been written
+  for a run to say that it was, so that a run that starts here needs them to be there for what it reads and writes back. -/
+  entryPoints : List (Nat × Nat × List Bap.Var) := []
+  /-- Which of them a run starts at, as one more than its label, and what that needs. -/
+  entered : Nat := 0
+  enteredNeeds : List Bap.Var := []
 
 structure Engine where
   cache : IO.Ref (Std.HashMap Nat CachedBlock)
@@ -119,6 +130,13 @@ structure Engine where
   /-- What the blocks that graphs took in were lifted from and to, and whether they lower, as most of a graph is what the
   graphs of other seeds have. An entry counts for the same bytes only. -/
   gathered : IO.Ref (Std.HashMap Nat (ByteArray × Block × Bool))
+  /-- Whether a block that gets hot and is in a range runs that range from the middle where it may, and doesn't have its own. It
+  saves compiling, and costs a little on every run for being able to, and a block runs fewer of what comes next that way. On
+  flattened programs that comes to 2% to 15% more time for 8% to 22% fewer compilations, so that it isn't what is done unless
+  asked for. -/
+  rangeEntries : Bool
+  /-- The range that has each block that a range can be entered at. -/
+  entryRanges : IO.Ref (Std.HashMap Nat Nat)
   /-- What of `cache` and `ranges` may be on which page, and so may be changed by a write there. -/
   blockIndex : IO.Ref CodeIndex.CodeIndex
   rangeIndex : IO.Ref CodeIndex.CodeIndex
@@ -155,7 +173,7 @@ structure Result where
 def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimit : Nat := 1)
     (rangeCacheLimit : Nat := 16) (writeCooldown : Nat := 0) (deferMemorySync : Bool := false)
     (nativeLimit : Nat := 512) (persistentFrom : Nat := 100000) (wrapFaults : Bool := false)
-    (chainFallthrough : Bool := false) : IO Engine := do
+    (chainFallthrough : Bool := false) (rangeEntries : Bool := false) : IO Engine := do
   return {
     cache := ← IO.mkRef {}
     ranges := ← IO.mkRef {}
@@ -164,6 +182,8 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimi
     cacheVersions := ← IO.mkRef {}
     rangeVersions := ← IO.mkRef {}
     gathered := ← IO.mkRef {}
+    entryRanges := ← IO.mkRef {}
+    rangeEntries
     statistics := ← IO.mkRef {}
     persistentMemory := ← IO.mkRef none
     persistentVariable := ← IO.mkRef none
@@ -218,6 +238,7 @@ def clearCache (engine : Engine) : IO Unit := do
   engine.cacheVersions.set {}
   engine.rangeVersions.set {}
   engine.gathered.set {}
+  engine.entryRanges.set {}
   engine.blockIndex.set {}
   engine.rangeIndex.set {}
   engine.nativeLive.set 0
@@ -1230,7 +1251,8 @@ private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Optio
   | .interpreted _ => return none
   | .native lowering _ fallback =>
     let started ← IO.monoMsNow
-    let program ← Jit.compileOptimized lowering.ops
+    let program ← if entry.entryLabels.isEmpty then Jit.compileOptimized lowering.ops
+      else Jit.compileEntries lowering.ops entry.entryLabels lowering.nextSlot true
     let elapsed := (← IO.monoMsNow) - started
     engine.statistics.modify fun stats =>
       { stats with nativeCompilations := stats.nativeCompilations + 1, compileMs := stats.compileMs + elapsed
@@ -1361,8 +1383,40 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
           match lowerGraph blocks edges engine.wrapFaults with
           | none => settle first
           | some lowering =>
+            -- It is in a range already, with these bytes, that has no more to move in and out than a graph of its own would, as
+            -- that is what each run of it costs: then that range from here saves compiling one.
+            let live ← engine.ranges.get
+            let holders ← engine.entryRanges.get
+            let holder : Option CachedBlock := if engine.rangeEntries then holders[address]?.bind fun holder => live[holder]? else none
+            let reuse := holder.bind fun range =>
+              match range.plan, range.entryPoints.find? fun point => point.1 == address with
+              | .native held program _, some (_, label, needs) =>
+                if range.sources.contains (address, code) && held.layout.length ≤ lowering.layout.length then
+                  some (range, held, program, label, needs)
+                else none
+              | _, _ => none
+            if let some (range, held, program, label, needs) := reuse then
+              let entry := { first with
+                next := range.next, last := range.last, coverage := range.coverage, sources := range.sources
+                plan := .native held program firstProgram, optimized := range.optimized
+                entryLabels := range.entryLabels, entered := label + 1, enteredNeeds := needs }
+              engine.statistics.modify fun stats => { stats with entriesReused := stats.entriesReused + 1 }
+              engine.ranges.modify (·.insert address entry)
+              indexRange engine address entry
+              engine.cache.modify (·.erase address)
+              return entry
+            else
               let started ← IO.monoMsNow
-              let program ← Jit.compile lowering.ops
+              -- A block that an edge leads to has a label, as the label of an edge is the place of its block.
+              let definite := definitelyWritten seed.address blocks edges
+              let targets : Std.HashSet Nat := Std.HashSet.ofList (edges.map (·.2))
+              let points : List (Nat × Nat × List Bap.Var) := blocks.zipIdx.filterMap fun (block, label) =>
+                if engine.rangeEntries && targets.contains block.address && block.address != seed.address then
+                  some (block.address, label, writtenAt definite block.address ++ leadingMoves seed.program)
+                else none
+              let labels := points.map (·.2.1)
+              let program ← if labels.isEmpty then Jit.compile lowering.ops
+                else Jit.compileEntries lowering.ops labels lowering.nextSlot false
               let elapsed := (← IO.monoMsNow) - started
               engine.nativeLive.modify (· + 1)
               engine.statistics.modify fun stats =>
@@ -1378,7 +1432,10 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
                 plan
                 coverage := blocks.map fun block => (block.address, block.next - 1)
                 sources
+                entryLabels := labels
+                entryPoints := points
               }
+              engine.entryRanges.modify fun ranges => points.foldl (init := ranges) fun ranges point => ranges.insert point.1 address
               let ranges ← engine.ranges.get
               let ranges ← if ranges.size ≥ engine.rangeCacheLimit then do
                 engine.statistics.modify fun stats => { stats with evictions := stats.evictions + 1 }
@@ -1683,7 +1740,7 @@ def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bi
     (observer : Option Jit.MemoryObserver) (codeObserver : Option Jit.CodeObserver := none)
     (observed : Bool := true) (budget : Nat := engine.rangeLimit) : IO Result := do
   -- A run cannot chain more than the slot that counts them holds.
-  let budget := min budget (2 ^ 64 - 1)
+  let budget := min budget (2 ^ 64 - 2)
   engine.nativeCooldown.modify fun cooldown => if cooldown = 0 then 0 else cooldown - 1
   engine.chained.set 0
   let code ← fetch pc
@@ -1691,10 +1748,28 @@ def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bi
   match entry.plan with
   | .interpreted program => runInterpreted engine entry.next pc program state observer
   | .native lowering program fallback =>
-    match encodeState lowering state.env with
-    | .error _ => runInterpreted engine entry.firstNext pc fallback state observer
-    | .ok slots => do
-      let slots := withControl lowering slots budget observed
+    let bound := entry.enteredNeeds.all fun var => match Bil.lookup state.env var with
+      | .ok _ => true
+      | .error _ => false
+    match encodeState lowering state.env, bound with
+    | .error _, _ | _, false => runInterpreted engine entry.firstNext pc fallback state observer
+    | .ok slots, true => do
+      -- Going in at a label is entering a block, which is out of the budget, and is no more than the block that a run starts at.
+      let slots := withControl lowering slots (if entry.entered == 0 then budget else budget + 1) observed
+      let slots := if entry.entryLabels.isEmpty then slots else slots.push (UInt64.ofNat entry.entered)
+      -- The site of the block that a run goes in at is the step's, which has been, as a run that starts at a block has none.
+      let codeObserver ← if entry.entered == 0 then pure codeObserver else
+        match codeObserver with
+        | none => pure none
+        | some observe =>
+          let passed ← IO.mkRef false
+          pure (some fun address => do
+            if !(← passed.get) && address == pc then
+              passed.set true
+              pure false
+            else
+              passed.set true
+              observe address)
       let persistent ← engine.persistentMemory.get
       match persistent, lowering.memory with
       | some memory, some _ =>

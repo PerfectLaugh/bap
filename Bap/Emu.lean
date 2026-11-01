@@ -37,6 +37,9 @@ structure Config where
   hundreds of them: most of a program runs a few times at most. -/
   hotThreshold : Nat := 16
   cacheLimit : Nat := 4096
+  /-- Whether a block that gets hot may run a range that has it from the middle, see `Lifted.Engine.rangeEntries`. The variable
+  `BAP_RANGE_ENTRIES` of the environment says so too. -/
+  rangeEntries : Bool := false
   /-- How many blocks a compiled range holds. 16 runs tight loops whole, and the cost of compiling a range grows faster than its
   size. A step of 1 has no ranges. -/
   rangeLimit : Nat := 16
@@ -221,9 +224,11 @@ private def initializeMemory (config : Config) (regions : List Region) : Except 
 
 /-- An engine for the emulator. Its memory is native from the start, its observer is `notifyMemory`, which rejects
 an access past the end of the address space, and a block that runs off its end goes on with the next one. -/
-private def createEngine (config : Config) (deferMemorySync : Bool) : IO Primus.Lifted.Engine :=
+private def createEngine (config : Config) (deferMemorySync : Bool) : IO Primus.Lifted.Engine := do
+  let asked := (← IO.getEnv "BAP_RANGE_ENTRIES").isSome
   Primus.Lifted.Engine.create config.hotThreshold config.cacheLimit (rangeLimitOf config) config.cacheLimit config.jitCooldown
     deferMemorySync (nativeLimit := 4 * config.cacheLimit) (persistentFrom := 0) (wrapFaults := true) (chainFallthrough := true)
+    (rangeEntries := config.rangeEntries || asked)
 
 def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry : Nat) : IO Emu := do
   let initial ← match initializeMemory config mapped with
@@ -1833,6 +1838,7 @@ def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
           evictions := total.evictions + current.evictions
           graphBlocks := total.graphBlocks + current.graphBlocks
           optimized := total.optimized + current.optimized
+          entriesReused := total.entriesReused + current.entriesReused
         })
         let control ← emu.threadControl.get
         let workerResults ← workers.mapM fun worker => do

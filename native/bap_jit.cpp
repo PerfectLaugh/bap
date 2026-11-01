@@ -295,7 +295,9 @@ bool getSlot(lean_obj_arg value, size_t &slot) {
 
 } // namespace
 
-static lean_obj_res compileOps(lean_obj_arg ops, bool optimized) {
+// With ENTRIES, a list of labels, the program starts at the label that the slot ENTRY_SLOT says, as one more than it, and where
+// it would otherwise when that holds zero.
+static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg entries = nullptr, size_t entrySlot = 0) {
   try {
     std::string initializationError;
     if (!initialize(initializationError))
@@ -690,6 +692,24 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized) {
         return ioError("a JIT basic block has no terminator: " +
                        block.getName().str());
 
+    if (entries != nullptr) {
+      // Before all that there is, so that a run that goes somewhere else has done nothing of it. Nothing is held in a register
+      // from one operation to the next, so that it can start at any label.
+      llvm::BasicBlock *dispatch = llvm::BasicBlock::Create(*context, "dispatch", function, entry);
+      builder.SetInsertPoint(dispatch);
+      llvm::Value *selected = builder.CreateLoad(word, builder.CreateConstGEP1_64(word, state, entrySlot));
+      llvm::SwitchInst *choice = builder.CreateSwitch(selected, entry);
+      for (lean_obj_arg rest = entries; !lean_is_scalar(rest); rest = lean_ctor_get(rest, 1)) {
+        size_t id;
+        if (!getSlot(lean_ctor_get(rest, 0), id))
+          return ioError("invalid JIT entry");
+        llvm::BasicBlock *target = findLabel(id);
+        if (target == nullptr)
+          return ioError("a JIT entry with no label");
+        choice->addCase(llvm::ConstantInt::get(llvm::cast<llvm::IntegerType>(word), id + 1), target);
+      }
+    }
+
     std::string verificationErrors;
     llvm::raw_string_ostream verificationStream(verificationErrors);
     if (llvm::verifyModule(*module, &verificationStream))
@@ -715,7 +735,7 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized) {
         address->toPtr<uint64_t(uint64_t *, BapCells *)>();
     program->shared = shared;
     program->resources = resources;
-    program->maxSlot = hasSlots ? maxSlot + 1 : 0;
+    program->maxSlot = entries != nullptr ? std::max(hasSlots ? maxSlot + 1 : 0, entrySlot + 1) : (hasSlots ? maxSlot + 1 : 0);
     program->memoryStores = memoryStores;
     return lean_io_result_mk_ok(
         lean_alloc_external(programClass(), program.release()));
@@ -727,6 +747,13 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized) {
 extern "C" lean_obj_res bap_jit_compile(lean_obj_arg ops, lean_obj_arg) { return compileOps(ops, false); }
 
 extern "C" lean_obj_res bap_jit_compile_optimized(lean_obj_arg ops, lean_obj_arg) { return compileOps(ops, true); }
+
+extern "C" lean_obj_res bap_jit_compile_entries(lean_obj_arg ops, lean_obj_arg entries, lean_obj_arg slot, uint8_t optimized, lean_obj_arg) {
+  size_t entrySlot;
+  if (!getSlot(slot, entrySlot))
+    return ioError("invalid JIT entry slot");
+  return compileOps(ops, optimized != 0, entries, entrySlot);
+}
 
 extern "C" lean_obj_res bap_jit_run(lean_obj_arg programObject,
                                     lean_obj_arg stateObject, lean_obj_arg) {

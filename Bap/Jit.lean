@@ -87,6 +87,11 @@ opaque compile (ops : @& List Op) : IO Program
 @[extern "bap_jit_compile_optimized"]
 opaque compileOptimized (ops : @& List Op) : IO Program
 
+/-- A program that starts at the label that the slot `entrySlot` of its state says, as one more than it, of those that are
+`entries`, and where it would otherwise when that holds zero. It takes a state that has that slot. -/
+@[extern "bap_jit_compile_entries"]
+opaque compileEntries (ops : @& List Op) (entries : @& List Nat) (entrySlot : @& Nat) (optimized : Bool) : IO Program
+
 abbrev MemoryObserver := Bool → Nat → Nat → Nat → IO Unit
 abbrev CodeObserver := Nat → IO Bool
 

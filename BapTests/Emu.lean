@@ -677,6 +677,38 @@ def testLinuxRaises (name : String) : IO Unit := do
   assertEqual s!"Linux {name} is what qemu does" (String.fromUTF8! (← IO.FS.readBinFile s!"testsuite/data/{name}.out"))
     (String.fromUTF8! (← written.get))
 
+/-- A range from the middle: a loop of three blocks that goes on as a loop of the last two, whose first gets hot in a range that
+it is in already. It comes to what it does without, and it is what happens. -/
+def testRangeEntries : IO Unit := do
+  let code ← LLVM.assemble "riscv64"
+    "addi a2, a2, 1\nj 4\naddi a0, a0, 1\naddi a2, a2, 2\nj 4\naddi a1, a1, -1\nbeqz a1, 8\njr t0\nnop"
+  let register (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
+  let run (entries : Bool) : IO (Nat × Nat × Nat) := do
+    let emu ← Bap.Emu.riscv64 code 0 0
+      (adjust := fun config => { config with hotThreshold := 2, cacheLimit := 256, rangeLimit := 8, rangeEntries := entries })
+    for (name, value) in [("X10", 0), ("X11", 2000), ("X12", 0), ("X5", 0)] do
+      Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 64 value))
+    -- Until the loop has been round enough to have a range, and it is where it reads where to go.
+    let _ ← Bap.Emu.runUntil emu 28 (fuel := 100)
+    let _ ← Bap.Emu.step emu
+    let _ ← Bap.Emu.runUntil emu 28 (fuel := 100)
+    let _ ← Bap.Emu.step emu
+    let _ ← Bap.Emu.runUntil emu 28 (fuel := 100)
+    Bap.Emu.setReg emu (register "X5") (.bits (BitVec.ofNat 64 8))
+    let _ ← Bap.Emu.runUntil emu 32 (fuel := 40000)
+    let value (name : String) : IO Nat := do
+      match ← Bap.Emu.reg emu (register name) with
+      | .bits bits => pure bits.toNat
+      | _ => pure 0
+    let stats ← Primus.Lifted.stats emu.engine
+    pure (← value "X10", ← value "X12", stats.entriesReused)
+  let (plainFirst, plainSecond, plainReused) ← run false
+  let (first, second, reused) ← run true
+  assertEqual "A range is run from its middle only if asked" 0 plainReused
+  assertTrue s!"A range is run from its middle ({reused})" (reused ≥ 1)
+  assertEqual "A range from its middle comes to the same" (plainFirst, plainSecond) (first, second)
+  assertTrue s!"A loop that ran ends with what it counted ({first})" (first > 1000)
+
 /-- What the rounding modes of a machine do, as qemu has it. -/
 def testLinuxRound (triple : String) : IO Unit := do
   let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-round"
