@@ -620,10 +620,14 @@
 
 ;; the reservations of the atomic accesses are not modeled, the
 ;; conditional stores succeed
-(defun LBARX (rt ra rb) (LBZX rt ra rb))
-(defun LHARX (rt ra rb) (LHZX rt ra rb))
-(defun LWARX (rt ra rb) (LWZX rt ra rb))
-(defun LDARX (rt ra rb) (LDX rt ra rb))
+;; The reservation of a thread is EXCLUSIVE_MONITOR, one more than the
+;; address of the load that it follows, and 0 if there is none. A thread
+;; is alone until it is switched, when the emulator clears it, as the
+;; kernel does.
+(defun LBARX (rt ra rb) (set EXCLUSIVE_MONITOR (+ ra rb 1)) (LBZX rt ra rb))
+(defun LHARX (rt ra rb) (set EXCLUSIVE_MONITOR (+ ra rb 1)) (LHZX rt ra rb))
+(defun LWARX (rt ra rb) (set EXCLUSIVE_MONITOR (+ ra rb 1)) (LWZX rt ra rb))
+(defun LDARX (rt ra rb) (set EXCLUSIVE_MONITOR (+ ra rb 1)) (LDX rt ra rb))
 
 (defun store-size (size rs addr) (store-word addr (cast-low size rs)))
 
@@ -652,9 +656,13 @@
 (defun STWBRX (rs ra rb) (store-word (+ ra rb) (byte-reversed (low32 rs))))
 (defun STDBRX (rs ra rb) (store-word (+ ra rb) (byte-reversed (cast-low 64 rs))))
 
+;; It takes place if it is to the address of the reservation, and says
+;; so in EQ of CR0, and it leaves no reservation.
 (defun store-conditional (size rs addr)
-  (store-size size rs addr)
-  (set-field 'CR0 false false true))
+  (if (= EXCLUSIVE_MONITOR (+ addr 1))
+      (prog (store-size size rs addr) (set-field 'CR0 false false true))
+    (set-field 'CR0 false false false))
+  (set EXCLUSIVE_MONITOR 0))
 
 (defun STBCX (rs ra rb) (store-conditional 8 rs (+ ra rb)))
 (defun STHCX (rs ra rb) (store-conditional 16 rs (+ ra rb)))
@@ -1947,11 +1955,13 @@
   (store-word a (concat (u64 rs) (u64 (unquote (gpr-name (mod (+ (gpr-index rs) 1) 32)))))))
 (defun LQ (rt d ra) (load-pair rt (+ ra d)))
 (defun STQ (rs d ra) (store-pair rs (+ ra d)))
-(defun LQARX (rt ra rb) (load-pair rt (+ ra rb)))
-(defun LQARXL (rt ra rb) (load-pair rt (+ ra rb)))
+(defun LQARX (rt ra rb) (set EXCLUSIVE_MONITOR (+ ra rb 1)) (load-pair rt (+ ra rb)))
+(defun LQARXL (rt ra rb) (LQARX rt ra rb))
 (defun STQCX (rs ra rb)
-  (store-pair rs (+ ra rb))
-  (set-field 'CR0 false false true))
+  (if (= EXCLUSIVE_MONITOR (+ ra rb 1))
+      (prog (store-pair rs (+ ra rb)) (set-field 'CR0 false false true))
+    (set-field 'CR0 false false false))
+  (set EXCLUSIVE_MONITOR 0))
 
 ;; EH, the hint that is the last bit of these, changes nothing
 (defun LBARXL (rt ra rb) (LBARX rt ra rb))

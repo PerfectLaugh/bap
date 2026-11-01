@@ -2,6 +2,7 @@ import Bap.Target.RISCV
 import Bap.Target.RISCV32
 import Bap.Target.X86
 import Bap.Target.AArch64
+import Bap.Target.PowerPC
 import Bap.Target.MIPS
 import Bap.Target.MIPS32
 import Bap.Primus.Lifted
@@ -13,7 +14,7 @@ import Std.Data.HashSet
 namespace Bap.Emu
 
 inductive SyscallAbi where
-  | riscv | x86_64 | aarch64 | mips
+  | riscv | x86_64 | aarch64 | mips | powerpc | powerpc64
   deriving DecidableEq, Repr
 
 inductive DelayPolicy where
@@ -448,7 +449,7 @@ def exclusiveMonitor (width : Nat) : Bap.Var := ⟨"EXCLUSIVE_MONITOR", .imm wid
 /-- A state without a monitor, for a target that has one. -/
 private def clearMonitor (config : Config) (env : Bil.Env) : Bil.Env :=
   match config.syscallAbi, memoryWidth config with
-  | .aarch64, .ok width | .riscv, .ok width | .mips, .ok width => Bil.bind env (exclusiveMonitor width) (.bits (BitVec.ofNat width 0))
+  | .aarch64, .ok width | .riscv, .ok width | .mips, .ok width | .powerpc, .ok width | .powerpc64, .ok width => Bil.bind env (exclusiveMonitor width) (.bits (BitVec.ofNat width 0))
   | _, _ => env
 
 def switchThread (emu : Emu) (id : ThreadId) : IO Unit := do
@@ -1023,6 +1024,7 @@ def syscallRegisters : SyscallAbi → String × List String × String
   | .x86_64 => ("RAX", ["RDI", "RSI", "RDX", "R10", "R8", "R9"], "RAX")
   | .aarch64 => ("X8", ["X0", "X1", "X2", "X3", "X4", "X5"], "X0")
   | .mips => ("R2", ["R4", "R5", "R6", "R7", "R8", "R9"], "R2")
+  | .powerpc | .powerpc64 => ("R0", ["R3", "R4", "R5", "R6", "R7", "R8"], "R3")
 
 def wordWidth (emu : Emu) : IO Nat :=
   match memoryWidth emu.config with
@@ -1086,6 +1088,8 @@ def threadRegisters : SyscallAbi → String × String
   | .x86_64 => ("RSP", "FS_BASE")
   | .aarch64 => ("SP", "TPIDR_EL0")
   | .mips => ("R29", "USERLOCAL")
+  | .powerpc => ("R1", "R2")
+  | .powerpc64 => ("R1", "R13")
 
 def cloneProcessMemory (emu : Emu) (child : ThreadId) : IO Unit := do
   let parent ← match ← emu.engine.persistentMemory.get with
@@ -1712,6 +1716,7 @@ private def callAbi : SyscallAbi → List String × String × String × Bool
   | .riscv => (["X10", "X11", "X12", "X13", "X14", "X15", "X16", "X17"], "X1", "X10", false)
   | .aarch64 => (["X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7"], "X30", "X0", false)
   | .mips => (["R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11"], "R31", "R2", false)
+  | .powerpc | .powerpc64 => (["R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10"], "LR", "R3", false)
   | .x86_64 => (["RDI", "RSI", "RDX", "RCX", "R8", "R9"], "", "RAX", true)
 
 def call (emu : Emu) (address returnTo : Nat) (args : List UInt64) (fuel : Nat := 100000) :
@@ -1787,6 +1792,19 @@ def riscv32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config :=
     disassemblerAt := some decoders
     memory := ⟨"mem", .mem 32 8, 0, false⟩
     endian := .little
+  }
+  let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
+  create (adjust config) [region] { env := clearMonitor config {} } entry
+
+def powerpc (code : ByteArray) (base entry : Nat) (variant : Target.LLVMLift.PowerPCVariant) (adjust : Config → Config := id) : IO Emu := do
+  let decoders (base : Nat) : IO Disasm.Disassembler := Target.PowerPC.disassembler base variant
+  let disassembler ← decoders base
+  let config : Config := {
+    disassembler
+    disassemblerAt := some decoders
+    memory := ⟨"mem", .mem variant.bits 8, 0, false⟩
+    endian := variant.endian
+    syscallAbi := if variant.bits == 64 then .powerpc64 else .powerpc
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
   create (adjust config) [region] { env := clearMonitor config {} } entry

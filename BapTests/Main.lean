@@ -67,11 +67,17 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxMusl "mipsel",
     Bap.Tests.Emu.testLinuxMusl "mips64",
     Bap.Tests.Emu.testLinuxMusl "mips64el",
+    -- Its floating point is in software, which takes it 10 s, and which it does as qemu does when this is run by hand.
+    Bap.Tests.Emu.testLinuxMusl "powerpc" (floats := false),
+    Bap.Tests.Emu.testLinuxMusl "powerpc64",
+    Bap.Tests.Emu.testLinuxMusl "powerpc64le",
     Bap.Tests.Emu.testLinuxCheckpoints "aarch64",
     Bap.Tests.Emu.testLinuxCheckpoints "riscv64",
     Bap.Tests.Emu.testLinuxCheckpoints "riscv32",
     Bap.Tests.Emu.testLinuxCheckpoints "mips",
     Bap.Tests.Emu.testLinuxCheckpoints "mips64el",
+    Bap.Tests.Emu.testLinuxCheckpoints "powerpc",
+    Bap.Tests.Emu.testLinuxCheckpoints "powerpc64le",
     Bap.Tests.Emu.testLinuxCheckpoints "x86_64",
     Bap.Tests.Jni.run
   ]

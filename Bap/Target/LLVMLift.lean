@@ -454,7 +454,7 @@ private def powerpcGlobals : Primus.Semantics.Globals :=
     [s!"CR{n}LT", s!"CR{n}GT", s!"CR{n}EQ", s!"CR{n}UN"]
   let fields := (List.range 8).map fun n => s!"CR{n}"
   (registers ++ conditionFields ++ fields ++ powerpcFloatFlags ++ powerpcVectorGlobals ++
-    ["ZERO", "LR", "CTR", "TAR", "SO", "OV", "CA", "OV32", "CA32"]).map
+    ["ZERO", "LR", "CTR", "TAR", "SO", "OV", "CA", "OV32", "CA32", "EXCLUSIVE_MONITOR"]).map
     fun name => (name, powerpcRegister name)
 
 private def powerpc32Register (name : String) : Primus.Semantics.Value :=
@@ -480,7 +480,7 @@ private def powerpc32Globals : Primus.Semantics.Globals :=
     [s!"CR{n}LT", s!"CR{n}GT", s!"CR{n}EQ", s!"CR{n}UN"]
   let fields := (List.range 8).map fun n => s!"CR{n}"
   (registers ++ conditionFields ++ fields ++ powerpcFloatFlags ++ powerpcVectorGlobals ++
-    ["ZERO", "LR", "CTR", "TAR", "SO", "OV", "CA", "OV32", "CA32"]).map
+    ["ZERO", "LR", "CTR", "TAR", "SO", "OV", "CA", "OV32", "CA32", "EXCLUSIVE_MONITOR"]).map
     fun name => (name, powerpc32Register name)
 
 private def mipsRegisterName (name : String) : String :=
@@ -745,6 +745,17 @@ structure MipsVariant where
   endian : Endian := .big
   release6 : Bool := false
   deriving DecidableEq, Repr
+
+/-- The registers of a PowerPC, with their widths, as what holds them is called: what a machine has to start with. -/
+def powerpcRegisters (bits : Nat) : List (String × Nat) :=
+  let register := if bits == 64 then powerpcRegister else powerpc32Register
+  -- Those that only operands name, as LLVM has them.
+  let operands := (List.range 32).flatMap fun n => [s!"F{n}", s!"V{n}"]
+  let all := ((if bits == 64 then powerpcGlobals else powerpc32Globals) ++ operands.map fun name => (name, register name)).filterMap fun entry =>
+    match entry.2 with
+    | .register name _ width => if name == "XZR" then none else some (name, width)
+    | _ => none
+  all.eraseDups
 
 /-- The LLVM target of a PowerPC. -/
 def PowerPCVariant.triple (variant : PowerPCVariant) : String :=

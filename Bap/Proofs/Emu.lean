@@ -764,7 +764,7 @@ private theorem lookup_flatMap (lower upper : Nat) (p : Primus.Protection) (regi
   | cons head rest ih =>
     simp only [List.flatMap_cons, List.find?_append, List.find?_cons]
     cases hc : head.contains address with
-    | true => 
+    | true =>
       obtain ⟨piece, hp, hpc⟩ := (split_spec lower upper p head address).2 hc
       have : (splitRegion lower upper p head).find? (fun region => region.contains address) ≠ none := by
         intro hn
@@ -2496,8 +2496,10 @@ section Project
 
 open_private Bap.Emu.Project Bap.Emu imageArch imageWidth mergeInstructions mergeEdges mergeDisasm
 
-theorem imageArch_injective (left right : SyscallAbi) (h : imageArch left = imageArch right) : left = right := by
-  cases left <;> cases right <;> first | rfl | (simp [imageArch] at h)
+/-- Each target has an architecture of its own, but the widths of PowerPC, which an image tells apart by its word size. -/
+theorem imageArch_injective (left right : SyscallAbi) (h : imageArch left = imageArch right) :
+    left = right ∨ (left = .powerpc ∧ right = .powerpc64) ∨ (left = .powerpc64 ∧ right = .powerpc) := by
+  cases left <;> cases right <;> simp_all [imageArch]
 
 theorem imageWidth_ok_iff (config : Config) (width : Nat) :
     imageWidth config = .ok width ↔ config.memory.typ = .mem width 8 := by

@@ -9,7 +9,7 @@ import Bap.Float
 
 The virtual kernel of `Bap.Linux.Kernel` behind the system calls of the emulator, and what the kernel does to start a program:
 its segments, and those of the interpreter that it asks for, in pages, and the stack that it starts on. No request ever
-reaches the machine that this runs on: a program has what was put in its kernel. For x86-64, AArch64, RISC-V and MIPS. What
+reaches the machine that this runs on: a program has what was put in its kernel. For x86-64, AArch64, RISC-V, MIPS and PowerPC. What
 is in here is in 64 bits whatever the guest has, with an error as its negative, as on x86-64, until `kernelCall` hands it over. -/
 
 namespace Bap.Linux
@@ -471,6 +471,9 @@ private def resetRegisters (emu : Emu) : Architecture → IO Unit
       setReg emu (word s!"F{index}") (bits 64 0)
     for name in ["FCSR", "VXRM"] do
       setReg emu ⟨name, .imm 32, 0, false⟩ (bits 32 0)
+  | .powerpc wide _ => do
+    for (name, width) in Target.LLVMLift.powerpcRegisters wide do
+      setReg emu ⟨name, .imm width, 0, false⟩ (bits width 0)
   | .mips wide _ release6 => do
     for index in List.range 32 do
       setReg emu ⟨s!"R{index}", .imm wide, 0, false⟩ (bits wide 0)
@@ -572,13 +575,15 @@ private def emulatorOf (architecture : Architecture) : IO Emu := do
     | .riscv32 => riscv32 page 0x1000 0 tuned
     | .mips 32 big release6 => mips32 page 0x1000 0 release6 (if big then .big else .little) tuned
     | .mips _ big release6 => mips64 page 0x1000 0 release6 (if big then .big else .little) tuned
+    | .powerpc wide big => powerpc page 0x1000 0 { bits := wide, endian := if big then .big else .little } tuned
   unmap emu 0x1000 16
   emu.intrinsicServer.set (some (Bap.Float.evaluateWith (match architecture with
     | .x86_64 => .x86
     | .aarch64 => .arm
     | .riscv64 | .riscv32 => .riscv
     | .mips _ _ true => .powerpc
-    | .mips _ _ false => .mips)))
+    | .mips _ _ false => .mips
+    | .powerpc _ _ => .powerpc)))
   pure emu
 
 /-- What makes an emulator a machine: its kernel behind its system calls. None of it is in a checkpoint. -/
@@ -631,12 +636,16 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
     | .aarch64 => 3
     | .riscv64 | .riscv32 => 0x112d
     | .mips _ _ _ => 0
+    -- A 32-bit or a 64-bit machine, with floating point, AltiVec and VSX.
+    | .powerpc wide _ => (if wide == 64 then 0xc0000000 else 0x80000000) + 0x18000080
   -- AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_FLAGS, AT_ENTRY, the ids of root, AT_HWCAP, AT_CLKTCK, AT_SECURE
   let auxiliary := [(3, base + lowest + program.headerOffset), (4, program.headerSize), (5, program.headerCount), (6, 4096),
     (7, if interpreter.isSome then interpreterBase architecture else 0), (8, 0), (9, base + program.entry), (11, 0), (12, 0), (13, 0), (14, 0),
     (16, capabilities), (17, 100), (23, 0)]
   mapStack emu architecture (if arguments.isEmpty then [path] else arguments) environment auxiliary
   setPc emu entry
+  -- ELFv2: a function that is called from elsewhere finds its table of contents from where it is, and a program is called so.
+  if let .powerpc 64 _ := architecture then setReg emu (word "R12") (bits 64 entry)
   let first := (← currentTask emu).group
   let kernel := kernel.withConsole first input
   let kernel := kernel.setProcess first { kernel.process first with breakStart := top, breakEnd := top }

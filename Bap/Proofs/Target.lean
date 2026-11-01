@@ -1168,11 +1168,11 @@ theorem mips32Globals_keys : (mips32Globals.map (·.1)).Nodup ∧ mips32Globals.
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
-theorem powerpcGlobals_keys : (powerpcGlobals.map (·.1)).Nodup ∧ powerpcGlobals.length = 183 :=
+theorem powerpcGlobals_keys : (powerpcGlobals.map (·.1)).Nodup ∧ powerpcGlobals.length = 184 :=
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
-theorem powerpc32Globals_keys : (powerpc32Globals.map (·.1)).Nodup ∧ powerpc32Globals.length = 183 :=
+theorem powerpc32Globals_keys : (powerpc32Globals.map (·.1)).Nodup ∧ powerpc32Globals.length = 184 :=
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 100000 in

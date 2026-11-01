@@ -609,13 +609,14 @@ def field (big : Bool) (size value : Nat) : ByteArray :=
   let bytes := bytesOf size value
   if big then ByteArray.mk bytes.data.reverse else bytes
 
-/-- `struct stat` of x86-64. -/
-def stat (value : Kernel.Stat) : ByteArray :=
+/-- `struct stat` of x86-64 and 64-bit PowerPC. -/
+def stat (value : Kernel.Stat) (big : Bool := false) : ByteArray :=
+  let get := field big
   let seconds := value.time / 1000000000
   let nanos := value.time % 1000000000
-  let time := bytesOf 8 seconds ++ bytesOf 8 nanos
-  bytesOf 8 1 ++ bytesOf 8 value.inode ++ bytesOf 8 value.links ++ bytesOf 4 value.mode ++ bytesOf 4 0 ++ bytesOf 4 0 ++
-    bytesOf 4 0 ++ bytesOf 8 0 ++ bytesOf 8 value.size ++ bytesOf 8 4096 ++ bytesOf 8 ((value.size + 511) / 512) ++
+  let time := get 8 seconds ++ get 8 nanos
+  get 8 1 ++ get 8 value.inode ++ get 8 value.links ++ get 4 value.mode ++ get 4 0 ++ get 4 0 ++
+    get 4 0 ++ get 8 0 ++ get 8 value.size ++ get 8 4096 ++ get 8 ((value.size + 511) / 512) ++
     time ++ time ++ time ++ bytesOf 24 0
 
 /-- `struct stat` of `asm-generic/stat.h`, which has the order of the fields of 32-bit systems and is smaller. -/

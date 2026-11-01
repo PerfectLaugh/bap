@@ -1532,7 +1532,7 @@ class Ppc(Risc):
     default_pins = {"R1": "window+256"}
     semantics = ["powerpc/powerpc.lisp", "powerpc/powerpc-vector.lisp", "powerpc/powerpc-vsx.lisp", "powerpc/powerpc-decimal.lisp"]
     mnemonics_of = staticmethod(powerpc_stems)
-    excluded_prefix = ("SC", "TW", "TD", "TRAP", "ATTN", "MFMSR", "MTMSR", "MFSPR", "MTSPR", "MFTB", "SYNC", "ISYNC", "EIEIO", "DCB", "ICB", "MFVSCR", "MTVSCR", "MFFS", "MTFS", "MCRFS", "RFI", "TLB", "HRFID", "NAP", "MFOCRF", "MTOCRF", "DSS", "LWARX", "STWCX", "LDARX", "STDCX", "LBARX", "LHARX", "STBCX", "STHCX", "MSG", "LQARX", "STQCX", "WAIT", "DARN", "HASH", "CP_", "TBEGIN", "TEND", "TABORT", "TCHECK", "TSR", "RFEBB", "CLRBHRB", "MFBHRBE", "MFUDSCR", "MTUDSCR")
+    excluded_prefix = ("SC", "TW", "TD", "TRAP", "ATTN", "MFMSR", "MTMSR", "MFSPR", "MTSPR", "MFTB", "SYNC", "ISYNC", "EIEIO", "DCB", "ICB", "MFVSCR", "MTVSCR", "MFFS", "MTFS", "MCRFS", "RFI", "TLB", "HRFID", "NAP", "MFOCRF", "MTOCRF", "DSS", "MSG", "WAIT", "DARN", "HASH", "CP_", "TBEGIN", "TEND", "TABORT", "TCHECK", "TSR", "RFEBB", "CLRBHRB", "MFBHRBE", "MFUDSCR", "MTUDSCR")
     shape_list = ["", "3, 4, 7", "3, 4", "3", "3, 4, 100", "3, 4, -1", "3, 4, 1000", "3, 100", "3, -1", "3, 8(5)", "3, -8(5)", "3, 0(5)", "3, 5, 6", "3, 4, 7, 8", "3, 4, 7, 8, 9", "3, 4, 5, 6, 7", "3, 4, 3, 5, 7", "3, 4, 3, 5", "3, 4, 3", "3, 4, 7, 5", "0, 3, 4", "3, 3, 4", "0, 0, 3, 4", "0, 1, 3, 4", "0, 1, 3, 100", "0, 3, 100", "0, 3", "2, 3, 4", "1, 3, 4", "1, 3", "3, 0", "3, 1", "7, 1, 2, 3", "1, 2, 3"]
     corpus_name = "powerpc"
 
@@ -1606,7 +1606,7 @@ class Ppc(Risc):
         return masked | {rt, "OV", "SO", "OV32", "CR0LT", "CR0GT", "CR0EQ", "CR0UN"}
 
     def aux_spec(self):
-        spec = {"XZR": (0, self.word * 8), "TAR": (0, self.word * 8), "FL": (0, 1), "FG": (0, 1), "FE": (0, 1), "FU": (0, 1), "OV32": (0, 1), "CA32": (0, 1), "FPSCR": (0, 64), "VSCR": (0, 32)}
+        spec = {"XZR": (0, self.word * 8), "EXCLUSIVE_MONITOR": (0, self.word * 8), "TAR": (0, self.word * 8), "FL": (0, 1), "FG": (0, 1), "FE": (0, 1), "FU": (0, 1), "OV32": (0, 1), "CA32": (0, 1), "FPSCR": (0, 64), "VSCR": (0, 32)}
         return {k: v for k, v in spec.items() if k not in dict(self.xer32())}
 
     def encode_extra(self, values, out):

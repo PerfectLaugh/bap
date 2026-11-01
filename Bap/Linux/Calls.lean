@@ -9,6 +9,8 @@ inductive Architecture where
   | x86_64 | aarch64 | riscv64 | riscv32
   /-- Of 32 or 64 bits, big-endian or not, of release 6 or not. -/
   | mips (bits : Nat) (big release6 : Bool)
+  /-- Of 32 or 64 bits and big-endian or not. 64 bits means ELFv2. -/
+  | powerpc (bits : Nat) (big : Bool)
   deriving DecidableEq, Repr
 
 /-- The architecture of what `e_machine`, the width, the order and the flags of a file say, if a machine can run it. -/
@@ -20,6 +22,9 @@ def Architecture.ofElf (machine bits : Nat) (big : Bool) (flags : Nat) : Option 
   | 243, 32, false => some .riscv32
   -- EF_MIPS_ARCH, of which `EF_MIPS_ARCH_32R6` and `EF_MIPS_ARCH_64R6` are release 6.
   | 8, 32, big | 8, 64, big => some (.mips bits big (flags / 2 ^ 28 == 9 || flags / 2 ^ 28 == 10))
+  | 20, 32, big => some (.powerpc 32 big)
+  -- A file of ELFv1 starts at a descriptor, which isn't there to test against.
+  | 21, 64, big => if flags % 4 == 2 then some (.powerpc 64 big) else none
   | _, _, _ => none
 
 /-- What `ofElf` takes to give it back, which is what a checkpoint says. -/
@@ -29,14 +34,16 @@ def Architecture.elf : Architecture → Nat × Nat × Bool × Nat
   | .riscv64 => (243, 64, false, 0)
   | .riscv32 => (243, 32, false, 0)
   | .mips bits big release6 => (8, bits, big, if release6 then 10 * 2 ^ 28 else 0)
+  | .powerpc 32 big => (20, 32, big, 0)
+  | .powerpc bits big => (21, bits, big, 2)
 
 def Architecture.bits : Architecture → Nat
   | .riscv32 => 32
-  | .mips bits _ _ => bits
+  | .mips bits _ _ | .powerpc bits _ => bits
   | _ => 64
 
 def Architecture.big : Architecture → Bool
-  | .mips _ big _ => big
+  | .mips _ big _ | .powerpc _ big => big
   | _ => false
 
 /-- The system calls that the kernel serves, whatever their numbers. Those of tasks are for `Bap.Emu.serveTaskCalls`. -/
@@ -116,12 +123,27 @@ def n64Calls : List (Nat × Call) :=
    (89, .succeeds), (90, .succeeds), (91, .succeeds), (92, .succeeds), (250, .succeeds), (275, .succeeds), (34, .succeeds),
    (224, .succeeds), (100, .succeeds), (102, .succeeds), (105, .succeeds), (106, .succeeds)]
 
+/-- The numbers of PowerPC, where those of each width that the other doesn't have are left to it not asking for them. -/
+def powerpcCalls : List (Nat × Call) :=
+  [(3, .read), (4, .write), (5, .open_), (286, .openat), (6, .close), (106, .stat), (107, .lstat), (108, .fstat), (291, .fstatat),
+   (383, .statx), (19, .lseek), (140, .llseek), (179, .pread), (180, .pwrite), (145, .readv), (146, .writev), (33, .access),
+   (298, .faccessat), (439, .faccessat), (41, .dup), (63, .dup2), (316, .dup3), (55, .fcntl), (204, .fcntl), (54, .ioctl),
+   (202, .getdents), (182, .getcwd), (12, .chdir), (133, .fchdir), (39, .mkdir), (287, .mkdirat), (40, .rmdir), (10, .unlink),
+   (292, .unlinkat), (38, .rename), (293, .renameat), (357, .renameat), (83, .symlink), (295, .symlinkat), (85, .readlink),
+   (296, .readlinkat), (15, .chmod), (297, .fchmodat), (92, .truncate), (93, .ftruncate), (193, .truncate64), (194, .ftruncate64),
+   (60, .umask), (90, .mmap), (192, .mmap2), (163, .mremap), (45, .brk), (78, .gettimeofday), (246, .clockGettime),
+   (247, .clockGetres), (403, .clockGettime64), (406, .clockGetres64), (122, .uname), (76, .getrlimit), (190, .getrlimit),
+   (325, .prlimit), (359, .getrandom), (185, .sigaltstack), (223, .schedGetaffinity), (118, .succeeds), (148, .succeeds),
+   (94, .succeeds), (16, .succeeds), (95, .succeeds), (289, .succeeds), (304, .succeeds), (412, .succeeds), (162, .succeeds),
+   (248, .succeeds), (407, .succeeds), (24, .succeeds), (47, .succeeds), (49, .succeeds), (50, .succeeds)]
+
 def Architecture.calls : Architecture → List (Nat × Call)
   | .x86_64 => x86_64Calls
   | .aarch64 | .riscv64 => genericCalls
   | .riscv32 => generic32Calls
   | .mips 32 _ _ => o32Calls.map fun entry => (entry.1 + 4000, entry.2)
   | .mips _ _ _ => n64Calls.map fun entry => (entry.1 + 5000, entry.2)
+  | .powerpc _ _ => powerpcCalls
 
 /-- The call of a number, if the kernel serves it. -/
 def Architecture.call (architecture : Architecture) (number : Nat) : Option Call :=
@@ -131,6 +153,10 @@ def Architecture.call (architecture : Architecture) (number : Nat) : Option Call
 `O_CREAT`, `O_EXCL`, `O_NOCTTY` and `O_DSYNC`. -/
 def mipsOpenBits : List (Nat × Nat) :=
   [(0x8, 0x400), (0x80, 0x800), (0x100, 0x40), (0x400, 0x80), (0x800, 0x100), (0x10, 0x1000)]
+
+/-- Where PowerPC has `O_DIRECTORY`, `O_NOFOLLOW`, `O_LARGEFILE` and `O_DIRECT`. -/
+def powerpcOpenBits : List (Nat × Nat) :=
+  [(0x4000, 0x10000), (0x8000, 0x20000), (0x10000, 0x8000), (0x20000, 0x4000)]
 
 /-- `flags` with each bit of the first of a pair moved to the second, and the rest left. -/
 def moveBits (moves : List (Nat × Nat)) (flags : Nat) : Nat :=
@@ -142,6 +168,7 @@ where x86-64 has `O_DIRECT` and `O_LARGEFILE`, and the other way round. -/
 def Architecture.openFlags : Architecture → Nat → Nat
   | .x86_64, flags | .riscv64, flags | .riscv32, flags => flags
   | .mips _ _ _, flags => moveBits mipsOpenBits flags
+  | .powerpc _ _, flags => moveBits powerpcOpenBits flags
   | .aarch64, flags =>
     let low := flags &&& 0xc000
     let high := flags &&& 0x30000
@@ -150,6 +177,7 @@ def Architecture.openFlags : Architecture → Nat → Nat
 /-- The flags of `open` of a guest, from those of the kernel. -/
 def Architecture.guestFlags : Architecture → Nat → Nat
   | .mips _ _ _, flags => moveBits (mipsOpenBits.map fun move => (move.2, move.1)) flags
+  | .powerpc _ _, flags => moveBits (powerpcOpenBits.map fun move => (move.2, move.1)) flags
   | architecture, flags => architecture.openFlags flags
 
 /-- `struct stat`. 32-bit systems ask for `statx`, whose times are wide enough. -/
@@ -157,6 +185,7 @@ def Architecture.stat : Architecture → Kernel.Stat → ByteArray
   | .x86_64, value => Abi.stat value
   | .aarch64, value | .riscv64, value | .riscv32, value => Abi.genericStat value
   | .mips _ big _, value => Abi.mips64Stat value big
+  | .powerpc _ big, value => Abi.stat value big
 
 /-- The number of an error of a guest, which on MIPS isn't that of Linux elsewhere for those above 34. -/
 def Architecture.errno : Architecture → Nat → Nat
@@ -173,7 +202,7 @@ def Architecture.mapAnonymous : Architecture → Nat
 
 /-- Which argument the low or high word of the offset of `pread` starts at, on 32 bits: MIPS aligns a pair to an even register. -/
 def Architecture.pairBase : Architecture → Nat
-  | .mips _ _ _ => 4
+  | .mips _ _ _ | .powerpc _ _ => 4
   | _ => 3
 
 /-- What `uname` and `AT_PLATFORM` say. -/
@@ -184,5 +213,8 @@ def Architecture.name : Architecture → String
   | .riscv32 => "riscv32"
   | .mips 32 _ _ => "mips"
   | .mips _ _ _ => "mips64"
+  | .powerpc 32 _ => "ppc"
+  | .powerpc _ true => "ppc64"
+  | .powerpc _ false => "ppc64le"
 
 end Bap.Linux

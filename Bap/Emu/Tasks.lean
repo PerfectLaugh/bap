@@ -18,6 +18,10 @@ def parentPid (emu : Emu) : IO Nat := do pure (← currentTask emu).parent
 
 def tasks (emu : Emu) : IO (List Entry) := do pure (← emu.taskTable.get).tasks
 
+/-- The bit of the condition register that a system call of PowerPC says that it failed in: SO of CR0, which has a register of its
+own, as the other bits do. -/
+private def errorBit : Bap.Var := wordVar 1 "CR0UN"
+
 /-- What a new task shares, as the flags of `clone(2)` say it. -/
 structure CloneOptions where
   start : Nat
@@ -52,6 +56,7 @@ def clone (emu : Emu) (options : CloneOptions) : IO ThreadId := do
   let env := bindIn (bindIn current.env stackRegister options.stack) threadRegister options.threadPointer
   -- On MIPS, a result that isn't an error has the flag in the register after the arguments clear, whatever that held.
   let env := bindIn env "R7" (if emu.config.syscallAbi == .mips then some 0 else none)
+  let env := if emu.config.syscallAbi == .powerpc || emu.config.syscallAbi == .powerpc64 then Bil.bind env errorBit (wordOf 1 0) else env
   emu.threadsRef.modify (spawnContext id { env } (wordVar width result) (wordOf width 0) options.start :: ·)
   if !options.shareMemory then cloneProcessMemory emu id
   if !options.sameGroup then
@@ -137,23 +142,30 @@ def waitpid (emu : Emu) (target : Option Nat := none) : IO WaitResult := do
 
 private def isMips (emu : Emu) : Bool := emu.config.syscallAbi == .mips
 
-/-- The flag of a result, on MIPS, in the register after the arguments. -/
+private def isPowerPC (emu : Emu) : Bool := emu.config.syscallAbi == .powerpc || emu.config.syscallAbi == .powerpc64
+
+/-- Whether a target says that a call failed apart from its result: an error is then the number itself. -/
+private def flagsErrors (emu : Emu) : Bool := isMips emu || isPowerPC emu
+
+/-- The flag of a result: on MIPS, in the register after the arguments, and on PowerPC, in SO of CR0. -/
 private def setErrorFlag (emu : Emu) (id : ThreadId) (width : Nat) : Option Nat → IO Unit
-  | some flag => setThreadReg emu id (wordVar width "R7") (wordOf width flag)
+  | some flag =>
+    if isPowerPC emu then setThreadReg emu id errorBit (wordOf 1 flag)
+    else setThreadReg emu id (wordVar width "R7") (wordOf width flag)
   | none => pure ()
 
 /-- Gives a thread that isn't the one that runs the result of its system call. -/
 private def setSyscallResult (emu : Emu) (id : ThreadId) (result : Except Nat Nat) : IO Unit := do
   let width ← wordWidth emu
   let (_, _, register) := syscallRegisters emu.config.syscallAbi
-  let (word, flag) := syscallWord (isMips emu) width result
+  let (word, flag) := syscallWord (flagsErrors emu) width result
   setErrorFlag emu id width flag
   setThreadReg emu id (wordVar width register) (wordOf width word)
 
 /-- The action of a result of the system call of the thread that runs. -/
 def syscallReturn (emu : Emu) (result : Except Nat Nat) : IO SyscallAction := do
   let width ← wordWidth emu
-  let (word, flag) := syscallWord (isMips emu) width result
+  let (word, flag) := syscallWord (flagsErrors emu) width result
   setErrorFlag emu (← thread emu) width flag
   pure (.returnValue word)
 
@@ -239,6 +251,11 @@ private def callsOf (abi : SyscallAbi) (width : Nat) : Calls :=
       schedYield := 124, futex := 98, futexTime64 := if width == 32 then some 422 else none, setTidAddress := 96,
       setRobustList := 99, rseq := 293, sigprocmask := 135, sigaction := 134, tgkill := 131, mmap := 222, munmap := 215,
       mprotect := 226, madvise := 233 }
+  | .powerpc | .powerpc64 =>
+    { fork := some 2, vfork := some 189, clone := 120, clone3 := 435, wait4 := 114, waitpid := some 7, exit := 1, exitGroup := 234,
+      getpid := 20, getppid := 64, gettid := 207, schedYield := 158, futex := 221, futexTime64 := if width == 32 then some 422 else none,
+      setTidAddress := 232, setRobustList := 300, rseq := 387, sigprocmask := 174, sigaction := 173, tgkill := 250, mmap := 90,
+      mmap2 := if width == 32 then some 192 else none, munmap := 91, mprotect := 125, madvise := 205 }
   | .mips =>
     if width == 32 then
       { fork := some 4002, clone := 4120, clone3 := 4435, wait4 := 4114, waitpid := some 4007, exit := 4001, exitGroup := 4246,
@@ -452,10 +469,10 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
         syscallReturn current (.ok (← thread current))
       else if is calls.sigprocmask || is calls.sigaction then
         -- The old mask or action, if it asks for one, has nothing in it. Sizes are those of a mask, which it says, or of an action:
-        -- a handler, flags and a mask, and a restorer on x86-64.
+        -- a handler, flags and a mask, and a restorer on x86-64 and PowerPC.
         let old := arg 2
         if old != 0 then
-          let size := if is calls.sigprocmask then arg 3 else (if x86 then 3 else 2) * (width / 8) + arg 3
+          let size := if is calls.sigprocmask then arg 3 else (if x86 || isPowerPC current then 3 else 2) * (width / 8) + arg 3
           try write current old (ByteArray.mk (Array.replicate size 0))
           catch _ => return ← syscallReturn current (.error efault)
         syscallReturn current (.ok 0)

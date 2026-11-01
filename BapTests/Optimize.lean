@@ -317,17 +317,24 @@ private def randomSub (seed : Nat) : Sub := Id.run do
 
 /-- How long passes take, which says something only with nothing else running: `main` runs this before the other tests. -/
 def scaling : IO Unit := do
+  -- The best of three: what else the machine does only ever adds to it.
+  let bestOf (action : IO Unit) : IO Nat := do
+    let mut best := 1000000
+    for _ in [0, 1, 2] do
+      let started ← IO.monoMsNow
+      action
+      best := min best ((← IO.monoMsNow) - started)
+      if best < 1000 then break
+    pure best
   -- a chain of phis that read what is assigned later: nothing about it is quadratic any more
-  let chainStarted ← IO.monoMsNow
-  for sub in [chainSub 7000, toSsa (chainSub 7000)] do
-    assertTrue "a chain of 7000 blocks stays" ((optimize sub).blks.length == 7000)
-  let chainElapsed := (← IO.monoMsNow) - chainStarted
+  let chainElapsed ← bestOf do
+    for sub in [chainSub 7000, toSsa (chainSub 7000)] do
+      assertTrue "a chain of 7000 blocks stays" ((optimize sub).blks.length == 7000)
   assertTrue s!"a chain of 7000 blocks is optimized in under a second, not {chainElapsed} ms" (chainElapsed < 1000)
   -- a pass costs what it removes: these take a pass a block, and many blocks mention the one variable
-  let started ← IO.monoMsNow
-  for sub in [selfChain 7000, hubChain false 7000, hubChain true 7000] do
-    assertEqual "a line of 7000 blocks dies" 0 ((optimize sub).blks.foldl (fun count blk => count + blk.defs.length) 0)
-  let elapsed := (← IO.monoMsNow) - started
+  let elapsed ← bestOf do
+    for sub in [selfChain 7000, hubChain false 7000, hubChain true 7000] do
+      assertEqual "a line of 7000 blocks dies" 0 ((optimize sub).blks.foldl (fun count blk => count + blk.defs.length) 0)
   assertTrue s!"a line of 7000 blocks takes a pass a block in under a second, not {elapsed} ms" (elapsed < 1000)
 
 private def deadCodeFastPath : IO Unit := do

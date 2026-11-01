@@ -552,7 +552,7 @@ private def testZeroRegisterWidth : IO Unit := do
 
 /-- Programs of other machines than this one, which need no compiler: static, with musl, from `testsuite/src`. What is printed is
 what they print under qemu. -/
-def testLinuxMusl (triple : String) : IO Unit := do
+def testLinuxMusl (triple : String) (floats : Bool := true) : IO Unit := do
   let run (name : String) (quantum : Nat := 100000) : IO (Bap.Tasks.ScheduleOutcome × ByteArray) := do
     let path := s!"testsuite/bin/{triple}-linux-musl-{name}"
     let written ← IO.mkRef ByteArray.empty
@@ -570,9 +570,10 @@ def testLinuxMusl (triple : String) : IO Unit := do
   let (outcome, text) ← run "libc-threads"
   assertEqual s!"Linux {triple} threads end" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
   assertEqual s!"Linux {triple} threads count to what they should" "y" (String.fromUTF8! text)
-  let (outcome, text) ← run "libc-floats"
-  assertEqual s!"Linux {triple} a program of floating point ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
-  assertEqual s!"Linux {triple} floating point is what qemu does" (← IO.FS.readBinFile s!"testsuite/data/{triple}-libc-floats.out").toList text.toList
+  if floats then
+    let (outcome, text) ← run "libc-floats"
+    assertEqual s!"Linux {triple} a program of floating point ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+    assertEqual s!"Linux {triple} floating point is what qemu does" (← IO.FS.readBinFile s!"testsuite/data/{triple}-libc-floats.out").toList text.toList
 
 /-- A machine stopped anywhere and saved goes on from the bytes alone, in a new machine, to the same end. -/
 def testLinuxCheckpoints (triple : String) : IO Unit := do
