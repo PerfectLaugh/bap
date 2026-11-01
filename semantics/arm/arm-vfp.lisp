@@ -119,6 +119,27 @@
         (fp-select (= rmode 2) (fp-round-integral 'm x one half e f)
           (fp-round-integral 'z x one half e f))))))
 
+;; VRINT: to an integral value in the format of the operand, by the rounding mode of FPSCR for X and
+;; R, and otherwise by the one that the instruction names, which has no condition.
+(defmacro vrint-d (mode x) (fp-round-integral mode x (vfp-double-hi 0x3ff00000) (vfp-double-hi 0x3fe00000) 11 52))
+(defmacro vrint-s (mode x) (fp-round-integral mode x (cast-low 32 0x3f800000) (cast-low 32 0x3f000000) 8 23))
+(defun vrint-current-d (x) (vfp-round-integral x (vfp-double-hi 0x3ff00000) (vfp-double-hi 0x3fe00000) 11 52))
+(defun vrint-current-s (x) (vfp-round-integral x (cast-low 32 0x3f800000) (cast-low 32 0x3f000000) 8 23))
+(defun VRINTXD (dd dm cnd _) (vfp cnd (set$ dd (vrint-current-d dm))))
+(defun VRINTXS (sd sm cnd _) (vfp cnd (set$ sd (vrint-current-s sm))))
+(defun VRINTRD (dd dm cnd _) (vfp cnd (set$ dd (vrint-current-d dm))))
+(defun VRINTRS (sd sm cnd _) (vfp cnd (set$ sd (vrint-current-s sm))))
+(defun VRINTZD (dd dm cnd _) (vfp cnd (set$ dd (vrint-d 'z dm))))
+(defun VRINTZS (sd sm cnd _) (vfp cnd (set$ sd (vrint-s 'z sm))))
+(defun VRINTAD (dd dm) (set$ dd (vrint-d 'a dm)))
+(defun VRINTAS (sd sm) (set$ sd (vrint-s 'a sm)))
+(defun VRINTND (dd dm) (set$ dd (vrint-d 'n dm)))
+(defun VRINTNS (sd sm) (set$ sd (vrint-s 'n sm)))
+(defun VRINTPD (dd dm) (set$ dd (vrint-d 'p dm)))
+(defun VRINTPS (sd sm) (set$ sd (vrint-s 'p sm)))
+(defun VRINTMD (dd dm) (set$ dd (vrint-d 'm dm)))
+(defun VRINTMS (sd sm) (set$ sd (vrint-s 'm sm)))
+
 (defmacro VTO*IR (signed sd x one half e f cnd)
   (vfp cnd (set$ sd (fp-to-int signed 32
                                (vfp-round-integral x one half e f)

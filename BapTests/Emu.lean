@@ -657,6 +657,16 @@ def testOptimizedRange : IO Unit := do
   let stats ← Primus.Lifted.stats emu.engine
   assertTrue s!"A loop that runs a lot is compiled again ({stats.optimized})" (stats.optimized ≥ 1)
 
+/-- VRINT of ARMv8 under each of the rounding modes, as qemu has it. -/
+def testArmVrint : IO Unit := do
+  let program ← IO.FS.readBinFile "testsuite/bin/arm-linux-musl-vrint"
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual "Linux ARM VRINT ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual "Linux ARM VRINT is what qemu does" (String.fromUTF8! (← IO.FS.readBinFile "testsuite/data/arm-vrint.out"))
+    (String.fromUTF8! (← written.get))
+
 /-- What the rounding modes of a machine do, as qemu has it. -/
 def testLinuxRound (triple : String) : IO Unit := do
   let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-round"

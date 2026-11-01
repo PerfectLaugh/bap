@@ -1085,7 +1085,7 @@ def arm_shapes(thumb):
 class Arm32(Risc):
     word = 4
     cflags = []
-    mc_args = ["--mattr=+hwdiv,+hwdiv-arm,+vfp4,+neon,+dsp,+v7,+crc,+aes,+sha2"]
+    mc_args = ["--mattr=+hwdiv,+hwdiv-arm,+vfp4,+fp-armv8,+neon,+dsp,+v7,+crc,+aes,+sha2"]
     gpr_slots = [f"R{i}" for i in range(13)] + ["SP", "LR", None]
     gprs = [(f"R{i}", 32) for i in range(13)] + [("SP", 32), ("LR", 32)]
     flags = [("NF", 31), ("ZF", 30), ("CF", 29), ("VF", 28), ("QF", 27), ("GE3", 19), ("GE2", 18), ("GE1", 17), ("GE0", 16)]

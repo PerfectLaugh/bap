@@ -74,9 +74,9 @@ std::string targetFeatures(const Triple &triple, bool assembling) {
   if (triple.isRISCV())
     return assembling ? "+a,+d,+f,+m,+zba,+zbb,+zbs" : "+a,+c,+d,+f,+m,+zba,+zbb,+zbs";
   if (triple.getArch() == Triple::arm)
-    return "+hwdiv,+hwdiv-arm,+vfp4";
+    return "+hwdiv,+hwdiv-arm,+vfp4,+fp-armv8";
   if (triple.getArch() == Triple::thumb)
-    return "+thumb2,+hwdiv,+hwdiv-arm,+vfp4";
+    return "+thumb2,+hwdiv,+hwdiv-arm,+vfp4,+fp-armv8";
   if (triple.getArch() == Triple::aarch64)
     return "+v8.1a,+v8.2a,+v8.3a,+fullfp16,+aes,+sha2,+sha3,+sm4,+crc,+lse,+rdm,+dotprod,+fp16fml,"
            "+flagm,+rand,+pauth,+jsconv,+complxnum,+rcpc,+rcpc-immo,+fptoint,+sb,+predres,+ccdp,+sve";
