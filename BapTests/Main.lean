@@ -63,6 +63,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxPrograms,
     Bap.Tests.Emu.testLinuxLayouts,
     Bap.Tests.Emu.testThumbIt,
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-raises",
     Bap.Tests.Emu.testArmV8 "vrint",
     Bap.Tests.Emu.testArmV8 "v8fp",
     Bap.Tests.Emu.testOptimizedRange,

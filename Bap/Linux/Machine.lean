@@ -868,6 +868,36 @@ private def roundedName (architecture : Architecture) (env : Bil.Env) (name : St
   | .powerpc _ _ => field "FPSCR" 64 0 ["rne", "rtz", "rtp", "rtn", "rne", "rtz", "rtp", "rtn"]
   | .mips bits _ _ => field "FCSR" bits 0 ["rne", "rtz", "rtp", "rtn", "rne", "rtz", "rtp", "rtn"]
 
+/-- The flags of the machine that an intrinsic raises. Each is sticky, in a register whose bits for invalid, division by zero,
+overflow, underflow and inexact are these. -/
+private def raisedFlags (architecture : Architecture) (env : Bil.Env) (name : String) (inputs : List Nat) (result : Nat) :
+    List (Bap.Var × Bap.Value) :=
+  let rules : Bap.Float.NaNRules := match architecture with
+    | .x86_64 | .i686 => .x86
+    | .aarch64 | .arm => .arm
+    | .riscv64 | .riscv32 => .riscv
+    | .mips _ _ true => .powerpc
+    | .mips _ _ false => .mips
+    | .powerpc _ _ => .powerpc
+  let (register, width, invalid, divide, over, under, inexact) : String × Nat × Nat × Nat × Nat × Nat × Nat := match architecture with
+    | .x86_64 | .i686 =>
+      if (name.splitOn "binary_80").length > 1 then ("FPU_STATUS", 16, 0, 2, 3, 4, 5) else ("MXCSR", 32, 0, 2, 3, 4, 5)
+    | .aarch64 => ("FPSR", 32, 0, 1, 2, 3, 4)
+    | .arm => ("FPSCR", 32, 0, 1, 2, 3, 4)
+    | .riscv64 | .riscv32 => ("FCSR", 32, 4, 3, 2, 1, 0)
+    | .mips bits _ _ => ("FCSR", bits, 6, 5, 4, 3, 2)
+    | .powerpc _ _ => ("FPSCR", 64, 29, 26, 28, 27, 25)
+  let var : Bap.Var := ⟨register, .imm width, 0, false⟩
+  match Bil.lookup env var with
+  | .ok (.bits value) =>
+    let old := value.toNat
+    let raised := Bap.Float.raisedBy rules name inputs result (old.testBit inexact)
+    let flag (on : Bool) (bit : Nat) : Nat := if on then 1 <<< bit else 0
+    let added := flag raised.invalid invalid ||| flag raised.divideByZero divide ||| flag raised.overflow over |||
+      flag raised.underflow under ||| flag raised.inexact inexact
+    if old ||| added == old then [] else [(var, .bits (BitVec.ofNat width (old ||| added)))]
+  | _ => []
+
 /-- An emulator of an architecture, as a Linux machine needs it, with nothing mapped. -/
 private def emulatorOf (architecture : Architecture) : IO Emu := do
   -- A real program runs more code than the working set of a few thousand blocks that the default is for, and past it, each one
@@ -888,6 +918,7 @@ private def emulatorOf (architecture : Architecture) : IO Emu := do
     | .powerpc wide big => powerpc page 0x1000 0 { bits := wide, endian := if big then .big else .little } tuned
   unmap emu 0x1000 16
   emu.intrinsicName.set (roundedName architecture)
+  emu.intrinsicRaises.set (raisedFlags architecture)
   emu.intrinsicServer.set (some (Bap.Float.evaluateWith (match architecture with
     | .x86_64 | .i686 => .x86
     | .aarch64 | .arm => .arm

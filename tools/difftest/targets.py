@@ -1541,11 +1541,23 @@ def powerpc_stems(name):
 
 class Ppc(Risc):
 
+    def excluded(self, opcode, case):
+        # What is relative to where it is reaches what isn't the instruction, of which the lifted run has no bytes: these are
+        # in testsuite/src/powerpc64-prefixed.c against qemu.
+        if opcode.startswith("P") and opcode.endswith("pc"):
+            return "relative to the pc, which reaches what a lifted run doesn't have"
+        return super().excluded(opcode, case)
+
     def policy_of(self, differ):
         # qemu has 1/±0 as ±0.5 in fre and fres, and infinity for what is nearly zero, and the manual has it as infinity.
         half, infinity = ("3fe0000000000000", "bfe0000000000000"), ("7ff0000000000000", "fff0000000000000")
         if all(name.startswith("F") and ours in half and theirs in infinity for name, ours, theirs in differ):
             return "qemu's reciprocal of zero"
+        # Of an integer to a single, qemu rounds to a double first, so that what is just under a tie becomes one. The ISA has it
+        # rounded once. These are singles in the format of a double, a unit of the last place of a single apart.
+        if all(name.startswith("F") and int(ours, 16) & 0x1fffffff == 0 and int(theirs, 16) & 0x1fffffff == 0 and
+               abs(int(ours, 16) - int(theirs, 16)) == 0x20000000 for name, ours, theirs in differ):
+            return "qemu's rounding of an integer to a single twice"
         return None
     base_pins = {"R5": "window+248", "R6": 8}
     default_pins = {"R1": "window+256"}

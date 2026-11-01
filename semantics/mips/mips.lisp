@@ -908,8 +908,12 @@
         (r (intrinsic (symbol-concat 'fround mode 'ieee754_binary
                                      (fp-size m) :sep '_)
                       x :result m))
-        (b (fp-int-bound x n)))
-    (fp-select (logand (fp-lt r b) (not (fp-lt r (fp-neg b))))
+        (b (fp-int-bound x n))
+        (fits (logand (fp-lt r b) (not (fp-lt r (fp-neg b))))))
+    ;; The Flags field: inexact, and invalid.
+    (set FCSR (logor FCSR (lshift (cast-unsigned (word-width FCSR) (not fits)) 6)
+                     (lshift (cast-unsigned (word-width FCSR) (logand fits (not (= r x)))) 2)))
+    (fp-select fits
                (intrinsic (symbol-concat 'cast_sint 'rtz 'ieee754_binary
                                          (fp-size m) (fp-size n) :sep '_)
                           r :result n)

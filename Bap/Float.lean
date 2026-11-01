@@ -4,8 +4,8 @@ The operations that lifted code names as `fadd_rne_ieee754_binary_64` and the li
 the exact value in integers, with a sticky bit for what a division or a root leaves over, and one function rounds it to a format.
 So there is one path for all formats and rounding modes, and an answer doesn't depend on the machine or on its floating point.
 
-The NaNs are those of x86: the first NaN operand, made quiet, or else the default, which is negative. The flags that the
-operations raise aren't modelled. -/
+The NaNs are those of x86: the first NaN operand, made quiet, or else the default, which is negative. What an operation raises
+is worked out from its result, by `raisedBy`, apart from it. -/
 
 namespace Bap.Float
 
@@ -93,7 +93,7 @@ inductive Mode where
   deriving DecidableEq, Repr
 
 def Mode.ofName : String → Option Mode
-  | "rne" | "rnx" => some .rne
+  | "rne" | "rnx" | "rni" => some .rne
   | "rna" | "rmm" => some .rna
   | "rtz" => some .rtz
   | "rtp" | "rup" => some .rtp
@@ -433,6 +433,81 @@ def evaluateWith (rules : NaNRules) (name : String) (inputs : List Nat) : Option
 
 /-- By the rules of x86. -/
 def evaluate : String → List Nat → Option (Nat × Nat) := evaluateWith .x86
+
+/-- The exceptions of IEEE 754 that an operation raises. -/
+structure Raised where
+  invalid : Bool := false
+  divideByZero : Bool := false
+  overflow : Bool := false
+  underflow : Bool := false
+  inexact : Bool := false
+  deriving DecidableEq, Repr
+
+/-- The name of an operation with another rounding mode, as it is the same operation but for that. -/
+private def withMode (name mode : String) : String :=
+  "_".intercalate ((name.splitOn "_").map fun part => if (Mode.ofName part).isSome then mode else part)
+
+/-- What an operation that gave `result` raises. Whether a result was rounded is whether rounding up and down come to
+something else, which takes evaluating it twice, so that `known` says not to when `inexact` won't change anything. -/
+def raisedBy (rules : NaNRules) (name : String) (inputs : List Nat) (result : Nat) (known : Bool := false) : Raised := Id.run do
+  let parts := name.splitOn "_"
+  let some at_ := parts.findIdx? (· == "ieee754") | return {}
+  let before := parts.take at_
+  let hasMode := (before.getLast?.bind Mode.ofName).isSome
+  -- A step of what an instruction does, and not what it does.
+  if !hasMode || before.getLast? == some "rni" then return {}
+  let operation := "_".intercalate before.dropLast
+  let widths := (parts.drop (at_ + 2)).filterMap String.toNat?
+  let some first := widths.head? | return {}
+  let last := widths.getLast?.getD first
+  let some source := formatOf first | return {}
+  let rounded := if !known then true else false
+  let differs : Bool :=
+    match evaluateWith rules (withMode name "rtp") inputs, evaluateWith rules (withMode name "rtn") inputs with
+    | some up, some down =>
+      -- Exactly nothing has the sign of the mode.
+      let zero (bits : Nat) := match formatOf last with
+        | some target => (match unpack target bits with | .zero _ => true | _ => false)
+        | none => false
+      up.2 != down.2 && !(zero up.2 && zero down.2)
+    | _, _ => false
+  match operation with
+  | "cast_sfloat" | "cast_float" => return { inexact := rounded && differs }
+  | "cast_sint" | "cast_int" =>
+    let signed := operation == "cast_sint"
+    let some input := inputs.head? | return {}
+    let invalid := match unpack source input with
+      | .nan _ | .infinity _ => true
+      | .zero _ => false
+      | .finite negative m e =>
+        let exact := if e ≥ 0 then m <<< e.toNat else m >>> (-e).toNat
+        if negative then (if signed then exact > 2 ^ (last - 1) else exact > 0) else exact ≥ (if signed then 2 ^ (last - 1) else 2 ^ last)
+    return { invalid, inexact := !invalid && rounded && differs }
+  | "fadd" | "fsub" | "fmul" | "fdiv" | "fsqrt" | "fmad" | "fmadh" | "fconvert" =>
+    let target := if operation == "fconvert" then (formatOf last).getD source else source
+    -- The quiet bit of the NaNs of legacy MIPS says the opposite.
+    let signaling := inputs.any fun input =>
+      if rules.legacyMips then isNaN source input && !isSignaling source input else isSignaling source input
+    let anyNaN := inputs.any (isNaN source)
+    let resultNaN := isNaN target result
+    if anyNaN || resultNaN then return { invalid := signaling || !anyNaN }
+    let infiniteInput := inputs.any fun input => match unpack source input with | .infinity _ => true | _ => false
+    let divideByZero := operation == "fdiv" && !infiniteInput && (match inputs with
+      | [numerator, denominator] =>
+        (match unpack source denominator with | .zero _ => true | _ => false) &&
+          (match unpack source numerator with | .zero _ => false | _ => true)
+      | _ => false)
+    if infiniteInput || divideByZero then return { divideByZero }
+    -- What is at an end of the format has to be told from what fits there, whatever is known.
+    let field := (result >>> target.fieldBits) % 2 ^ target.exponentBits
+    let edge := field == 0 || field ≥ target.maxExponent - 1
+    if known && !edge then return {}
+    let inexact := differs
+    let huge := match evaluateWith rules (withMode name "rne") inputs with
+      | some nearest => (match unpack target nearest.2 with | .infinity _ => true | _ => false)
+      | none => false
+    return { inexact, overflow := inexact && huge, underflow := inexact && field == 0 }
+  | _ => return {}
 
 /-- Whether `evaluate` knows an operation of this name. -/
 def serves (name : String) : Bool :=

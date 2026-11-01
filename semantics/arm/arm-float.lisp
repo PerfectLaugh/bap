@@ -104,7 +104,7 @@
 
 (defun fp-is-even (x half e f)
   "(fp-is-even X HALF E F) is true if the integral X is even"
-  (let ((h (*. :rne x half)))
+  (let ((h (*. :rni x half)))
     (= h (fp-trunc h e f))))
 
 (defun fp-round-integral (mode x one half e f)
@@ -113,8 +113,8 @@
    from zero), 'p (toward +inf), 'm (toward -inf) and 'z (toward zero).
    ONE and HALF are 1.0 and 0.5 in the format of X."
   (let ((int (fp-trunc x e f))
-        (d (fp-abs (-. :rne x int)))
-        (away (fp-select (msb x) (-. :rne int one) (+. :rne int one)))
+        (d (fp-abs (-. :rni x int)))
+        (away (fp-select (msb x) (-. :rni int one) (+. :rni int one)))
         (rounded
          (case mode
            'z int
@@ -150,6 +150,27 @@
                              (fp-select (>= expn (+ bias n))
                                         (lnot (cast-unsigned 64 0))
                                         mag)))))))
+
+;; What a conversion to an integer raises, of R that is X rounded to an integral value.
+
+(defun fp-cvt-invalid (signed n r e f)
+  "(fp-cvt-invalid SIGNED N R E F) is whether the integral R doesn't fit
+   an N-bit integer. SIGNED must be static."
+  (let ((bias (fp-bias e))
+        (expn (fp-exponent r e f)))
+    (logor (is-nan r) (is-inf r)
+           (if signed
+               (logand (>= expn (- (+ bias n) 1))
+                       (not (= r (fp-neg (lshift (cast-unsigned (word-width r) (+ bias n -1)) f)))))
+             (logor (>= expn (+ bias n))
+                    (logand (msb r) (>= expn bias)))))))
+
+(defun fp-cvt-flags (signed n x r e f invalid inexact)
+  "(fp-cvt-flags SIGNED N X R E F INVALID INEXACT) is a 32-bit word of the bits
+   INVALID and INEXACT for what the conversion of X, rounded to R, raises"
+  (let ((bad (fp-cvt-invalid signed n r e f)))
+    (logor (lshift (cast-unsigned 32 bad) invalid)
+           (lshift (cast-unsigned 32 (logand (not bad) (not (= r x)))) inexact))))
 
 (defun fp-to-fixed (signed n x e f fbits)
   "(fp-to-fixed SIGNED N X E F FBITS) is FPToFixed: X times 2^FBITS as

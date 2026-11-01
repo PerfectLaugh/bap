@@ -667,6 +667,16 @@ def testArmV8 (name : String) : IO Unit := do
   assertEqual s!"Linux ARM {name} is what qemu does" (String.fromUTF8! (← IO.FS.readBinFile s!"testsuite/data/arm-{name}.out"))
     (String.fromUTF8! (← written.get))
 
+/-- What operations raise, on what their edges are, as qemu has it. -/
+def testLinuxRaises (name : String) : IO Unit := do
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{name}"
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual s!"Linux {name} ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual s!"Linux {name} is what qemu does" (String.fromUTF8! (← IO.FS.readBinFile s!"testsuite/data/{name}.out"))
+    (String.fromUTF8! (← written.get))
+
 /-- What the rounding modes of a machine do, as qemu has it. -/
 def testLinuxRound (triple : String) : IO Unit := do
   let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-round"

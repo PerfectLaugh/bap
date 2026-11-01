@@ -43,6 +43,9 @@ int main(void) {
   long first, second;
   __asm__ volatile("paddi %0, 0, 0, 1\n paddi %1, 0, 0, 1" : "=&r"(first), "=&r"(second));
   printf("%ld\n", second - first);
+#define NEAR(op) do { long value = 0; __asm__ volatile(op " %0, 12(0), 1\n b 12\n .quad 0x8123456789abcdef" : "=r"(value)); \
+    printf(op " %lx\n", value); } while (0)
+  NEAR("plbz"); NEAR("plhz"); NEAR("plha"); NEAR("plwz"); NEAR("plwa");
   long near;
   __asm__ volatile("pld %0, 12(0), 1\n b 12\n .quad 0x1234567890" : "=r"(near));
   printf("%lx\n", near);

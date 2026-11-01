@@ -128,8 +128,8 @@
 (defun FRINTMDr (rd rn) (FRINT*Dr 'm rd rn))
 (defun FRINTZSr (rd rn) (FRINT*Sr 'z rd rn))
 (defun FRINTZDr (rd rn) (FRINT*Dr 'z rd rn))
-(defun FRINTXSr (rd rn) (setd rd (a64-frint 'x rn)))
-(defun FRINTXDr (rd rn) (setd rd (a64-frint 'x rn)))
+(defun FRINTXSr (rd rn) (setd rd (a64-frintx rn)))
+(defun FRINTXDr (rd rn) (setd rd (a64-frintx rn)))
 (defun FRINTISr (rd rn) (setd rd (a64-frint 'x rn)))
 (defun FRINTIDr (rd rn) (setd rd (a64-frint 'x rn)))
 
@@ -186,14 +186,14 @@
 (defun UCVTFUXSri (rd rn) (setd rd (cast-float :rne 32 (cast-low 64 rn))))
 (defun UCVTFUXDri (rd rn) (setd rd (cast-float :rne 64 (cast-low 64 rn))))
 
-(defun FCVTZSUWSr (rd rn) (setw rd (cast-unsigned (word) (fp-to-int true 32 rn 8 23))))
-(defun FCVTZSUWDr (rd rn) (setw rd (cast-unsigned (word) (fp-to-int true 32 rn 11 52))))
-(defun FCVTZSUXSr (rd rn) (set$ rd (fp-to-int true 64 rn 8 23)))
-(defun FCVTZSUXDr (rd rn) (set$ rd (fp-to-int true 64 rn 11 52)))
-(defun FCVTZUUWSr (rd rn) (setw rd (cast-unsigned (word) (fp-to-int false 32 rn 8 23))))
-(defun FCVTZUUWDr (rd rn) (setw rd (cast-unsigned (word) (fp-to-int false 32 rn 11 52))))
-(defun FCVTZUUXSr (rd rn) (set$ rd (fp-to-int false 64 rn 8 23)))
-(defun FCVTZUUXDr (rd rn) (set$ rd (fp-to-int false 64 rn 11 52)))
+(defun FCVTZSUWSr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to true 'z 32 rn))))
+(defun FCVTZSUWDr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to true 'z 32 rn))))
+(defun FCVTZSUXSr (rd rn) (set$ rd (a64-fcvt-to true 'z 64 rn)))
+(defun FCVTZSUXDr (rd rn) (set$ rd (a64-fcvt-to true 'z 64 rn)))
+(defun FCVTZUUWSr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to false 'z 32 rn))))
+(defun FCVTZUUWDr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to false 'z 32 rn))))
+(defun FCVTZUUXSr (rd rn) (set$ rd (a64-fcvt-to false 'z 64 rn)))
+(defun FCVTZUUXDr (rd rn) (set$ rd (a64-fcvt-to false 'z 64 rn)))
 
 
 ;; the conversions to the integers of the other rounding modes, to the
@@ -201,8 +201,11 @@
 ;; +inf (P), and toward -inf (M), and of the halves (H)
 (defun a64-fcvt-to (signed mode bits a)
   "converts A to the integer of BITS, rounded by MODE, saturated"
-  (fp-to-int signed bits (if (= mode 'z) a (a64-frint mode a))
-             (a64-fexp-bits a) (a64-frac-bits a)))
+  (let ((e (a64-fexp-bits a))
+        (f (a64-frac-bits a))
+        (r (case mode 'z (fp-trunc a e f) (a64-frint mode a))))
+    (set FPSR (logor FPSR (fp-cvt-flags signed bits a r e f 0 4)))
+    (fp-to-int signed bits r e f)))
 
 (defun FCVTNSUWSr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to true 'n 32 rn))))
 (defun FCVTNSUXSr (rd rn) (set$ rd (a64-fcvt-to true 'n 64 rn)))
@@ -525,6 +528,12 @@
              (fp-select (= rmode 2) (a64-frint-as 'm a) (a64-frint-as 'z a)))))
     (a64-frint-as mode a)))
 
+(defun a64-frintx (a)
+  "FRINTX, which raises inexact for what it changes, unlike FRINTI"
+  (let ((r (a64-frint 'x a)))
+    (set FPSR (logor FPSR (lshift (cast-unsigned 32 (logand (not (is-nan a)) (not (= r a)))) 4)))
+    r))
+
 (defun a64-fcvt-int (signed mode a)
   "converts A to the integer of its size, rounded by MODE"
   (fp-to-int signed (word-width a) (if (= mode 'z) a (a64-frint mode a))
@@ -563,7 +572,8 @@
     'fabs (fp-abs a)
     'fsqrt (a64-fsqrt a)
     'frintn (a64-frint 'n a)
-    'frintx (a64-frint 'x a)
+    'frintx (a64-frintx a)
+    'frinti (a64-frint 'x a)
     'frinta (a64-frint 'a a)
     'frintp (a64-frint 'p a)
     'frintm (a64-frint 'm a)
@@ -861,11 +871,11 @@
 (defun FRINTXv2f32 (rd rn) (a64-setd rd (a64-map1 'frintx 32 2 rn)))
 (defun FRINTXv4f32 (rd rn) (set$ rd (a64-map1 'frintx 32 4 rn)))
 (defun FRINTXv2f64 (rd rn) (set$ rd (a64-map1 'frintx 64 2 rn)))
-(defun FRINTIv4f16 (rd rn) (a64-setd rd (a64-map1 'frintx 16 4 rn)))
-(defun FRINTIv8f16 (rd rn) (set$ rd (a64-map1 'frintx 16 8 rn)))
-(defun FRINTIv2f32 (rd rn) (a64-setd rd (a64-map1 'frintx 32 2 rn)))
-(defun FRINTIv4f32 (rd rn) (set$ rd (a64-map1 'frintx 32 4 rn)))
-(defun FRINTIv2f64 (rd rn) (set$ rd (a64-map1 'frintx 64 2 rn)))
+(defun FRINTIv4f16 (rd rn) (a64-setd rd (a64-map1 'frinti 16 4 rn)))
+(defun FRINTIv8f16 (rd rn) (set$ rd (a64-map1 'frinti 16 8 rn)))
+(defun FRINTIv2f32 (rd rn) (a64-setd rd (a64-map1 'frinti 32 2 rn)))
+(defun FRINTIv4f32 (rd rn) (set$ rd (a64-map1 'frinti 32 4 rn)))
+(defun FRINTIv2f64 (rd rn) (set$ rd (a64-map1 'frinti 64 2 rn)))
 ;; the comparisons with zero
 (defun FCMEQv4i16rz (rd rn) (a64-setd rd (a64-map1 'fcmeqz 16 4 rn)))
 (defun FCMEQv8i16rz (rd rn) (set$ rd (a64-map1 'fcmeqz 16 8 rn)))

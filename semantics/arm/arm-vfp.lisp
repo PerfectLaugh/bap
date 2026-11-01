@@ -103,10 +103,15 @@
 
 ;; the Z forms round toward zero, the R forms use the FPSCR rounding
 ;; mode, which is assumed to be to nearest
-(defun VTOSIZD (sd dm cnd _) (vfp cnd (set$ sd (fp-to-int true 32 dm 11 52))))
-(defun VTOUIZD (sd dm cnd _) (vfp cnd (set$ sd (fp-to-int false 32 dm 11 52))))
-(defun VTOSIZS (sd sm cnd _) (vfp cnd (set$ sd (fp-to-int true 32 sm 8 23))))
-(defun VTOUIZS (sd sm cnd _) (vfp cnd (set$ sd (fp-to-int false 32 sm 8 23))))
+;; A conversion to a word, of X that is rounded to R, with what it raises.
+(defun vfp-to-int (signed n x r e f)
+  (set FPSCR (logor FPSCR (fp-cvt-flags signed n x r e f 0 4)))
+  (fp-to-int signed n r e f))
+
+(defun VTOSIZD (sd dm cnd _) (vfp cnd (set$ sd (vfp-to-int true 32 dm (fp-trunc dm 11 52) 11 52))))
+(defun VTOUIZD (sd dm cnd _) (vfp cnd (set$ sd (vfp-to-int false 32 dm (fp-trunc dm 11 52) 11 52))))
+(defun VTOSIZS (sd sm cnd _) (vfp cnd (set$ sd (vfp-to-int true 32 sm (fp-trunc sm 8 23) 8 23))))
+(defun VTOUIZS (sd sm cnd _) (vfp cnd (set$ sd (vfp-to-int false 32 sm (fp-trunc sm 8 23) 8 23))))
 
 ;; the literals are words, so a double is made from its upper word
 (defun vfp-double-hi (hi) (lshift (cast-unsigned 64 hi) 32))
@@ -125,8 +130,10 @@
 (defmacro vrint-s (mode x) (fp-round-integral mode x (cast-low 32 0x3f800000) (cast-low 32 0x3f000000) 8 23))
 (defun vrint-current-d (x) (vfp-round-integral x (vfp-double-hi 0x3ff00000) (vfp-double-hi 0x3fe00000) 11 52))
 (defun vrint-current-s (x) (vfp-round-integral x (cast-low 32 0x3f800000) (cast-low 32 0x3f000000) 8 23))
-(defun VRINTXD (dd dm cnd _) (vfp cnd (set$ dd (vrint-current-d dm))))
-(defun VRINTXS (sd sm cnd _) (vfp cnd (set$ sd (vrint-current-s sm))))
+(defun vrintx-raises (x r)
+  (set FPSCR (logor FPSCR (lshift (cast-unsigned 32 (logand (not (is-nan x)) (not (= r x)))) 4))))
+(defun VRINTXD (dd dm cnd _) (vfp cnd (let ((r (vrint-current-d dm))) (vrintx-raises dm r) (set$ dd r))))
+(defun VRINTXS (sd sm cnd _) (vfp cnd (let ((r (vrint-current-s sm))) (vrintx-raises sm r) (set$ sd r))))
 (defun VRINTRD (dd dm cnd _) (vfp cnd (set$ dd (vrint-current-d dm))))
 (defun VRINTRS (sd sm cnd _) (vfp cnd (set$ sd (vrint-current-s sm))))
 (defun VRINTZD (dd dm cnd _) (vfp cnd (set$ dd (vrint-d 'z dm))))
@@ -160,9 +167,9 @@
 
 ;; VCVT by the rounding mode that it names, to a word, without a condition.
 (defmacro vcvt-s (signed mode sd sm)
-  (set$ sd (fp-to-int signed 32 (vrint-s mode sm) 8 23)))
+  (set$ sd (vfp-to-int signed 32 sm (vrint-s mode sm) 8 23)))
 (defmacro vcvt-d (signed mode sd dm)
-  (set$ sd (fp-to-int signed 32 (vrint-d mode dm) 11 52)))
+  (set$ sd (vfp-to-int signed 32 dm (vrint-d mode dm) 11 52)))
 (defun VCVTASS (sd sm) (vcvt-s true 'a sd sm))
 (defun VCVTAUS (sd sm) (vcvt-s false 'a sd sm))
 (defun VCVTASD (sd dm) (vcvt-d true 'a sd dm))
@@ -189,9 +196,7 @@
   (vfp cnd (set$ sd (concat (fconvert :rne 16 dm) (cast-low 16 sd0)))))
 
 (defmacro VTO*IR (signed sd x one half e f cnd)
-  (vfp cnd (set$ sd (fp-to-int signed 32
-                               (vfp-round-integral x one half e f)
-                               e f))))
+  (vfp cnd (set$ sd (vfp-to-int signed 32 x (vfp-round-integral x one half e f) e f))))
 
 (defun VTOSIRD (sd dm cnd _)
   (VTO*IR true sd dm (vfp-double-hi 0x3ff00000) (vfp-double-hi 0x3fe00000) 11 52 cnd))

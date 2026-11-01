@@ -168,6 +168,8 @@ structure Emu where
   intrinsicServer : IO.Ref (Option (String → List Nat → Option (Nat × Nat)))
   /-- What an intrinsic comes to on a state, for one that goes by the rounding mode of the machine. -/
   intrinsicName : IO.Ref (Bil.Env → String → String)
+  /-- What an intrinsic that gave a result changes of a state besides: the flags that it raises. -/
+  intrinsicRaises : IO.Ref (Bil.Env → String → List Nat → Nat → List (Bap.Var × Bap.Value))
   /-- The programs of the instructions that have such an intrinsic, by address. -/
   servedPrograms : IO.Ref (Std.HashMap Nat Bil.Program)
   /-- What wants to know of a new process: of the one that made it, and of it. -/
@@ -259,6 +261,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     fetchPages := ← IO.mkRef {}
     intrinsicServer := ← IO.mkRef none
     intrinsicName := ← IO.mkRef fun _ name => name
+    intrinsicRaises := ← IO.mkRef fun _ _ _ _ => []
     servedPrograms := ← IO.mkRef {}
     processHooks := ← IO.mkRef []
     nextPc := ← IO.mkRef 0
@@ -1513,11 +1516,16 @@ private def runServed (emu : Emu) (serve : String → List Nat → Option (Nat �
           | .error error => throw <| IO.userError error
         emu.state.modify fun state => { env := Bil.bind state.env var value }
       | .special name =>
-        match serve ((← emu.intrinsicName.get) (← emu.state.get).env name) (← operands.get) with
+        let env := (← emu.state.get).env
+        let named := (← emu.intrinsicName.get) env name
+        let inputs ← operands.get
+        match serve named inputs with
         | some (width, bits) =>
           operands.set []
+          let raises ← emu.intrinsicRaises.get
           emu.state.modify fun state =>
-            { env := Bil.bind state.env ⟨"intrinsic:y0", .imm width, 0, false⟩ (.bits (BitVec.ofNat width bits)) }
+            let env := Bil.bind state.env ⟨"intrinsic:y0", .imm width, 0, false⟩ (.bits (BitVec.ofNat width bits))
+            { env := (raises env named inputs bits).foldl (fun env update => Bil.bind env update.1 update.2) env }
         | none =>
           operands.set []
           if !(← dispatchIntrinsic emu name) then

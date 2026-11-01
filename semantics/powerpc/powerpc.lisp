@@ -951,8 +951,18 @@
                 (pick (msb x) (cast-signed 64 0x80000000:32) (cast-unsigned 64 0x7fffffff:32))
                 (pick (msb x) (neg mag) mag)))))
 
-(defun FCTIWZ (rt rb) (set$ rt (fp-to-word (fp-trunc rb))))
-(defun FCTIW (rt rb) (set$ rt (fp-to-word (fround :rne rb))))
+;; What a conversion of X, rounded to R, to a word raises: FPSCR has VX and XX, as bits from the right.
+(defun fp-to-int-raises (x r low high)
+  "the integral double R is invalid outside of LOW and HIGH, which are doubles"
+  (let ((bad (logor (is-nan r) (is-inf r) (not (logand (>=. r low) (>=. high r))))))
+    (set FPSCR (logor FPSCR (lshift (u64 bad) 29) (lshift (u64 (logand (not bad) (not (= r x)))) 25)))))
+(defun raises-signed-word (x r) (fp-to-int-raises x r 0xC1E0000000000000:64 0x41DFFFFFFFC00000:64))
+(defun raises-signed-dword (x r) (fp-to-int-raises x r 0xC3E0000000000000:64 0x43DFFFFFFFFFFFFF:64))
+(defun raises-unsigned-word (x r) (fp-to-int-raises x r 0x0000000000000000:64 0x41EFFFFFFFE00000:64))
+(defun raises-unsigned-dword (x r) (fp-to-int-raises x r 0x0000000000000000:64 0x43EFFFFFFFFFFFFF:64))
+
+(defun FCTIWZ (rt rb) (raises-signed-word rb (fp-trunc rb)) (set$ rt (fp-to-word (fp-trunc rb))))
+(defun FCTIW (rt rb) (raises-signed-word rb (fround :rne rb)) (set$ rt (fp-to-word (fround :rne rb))))
 
 (defun FCFID (rt rb) (set$ rt (cast-sfloat :rne 64 rb)))
 
@@ -2149,12 +2159,12 @@
 (defun to-ud (x) (fp-to-unsigned x 64 (u64 0)))
 (defun to-uw (x) (fp-to-unsigned x 32 (u64 0)))
 
-(defun FCTID (rt rb) (set$ rt (to-sd (fround :rne rb))))
-(defun FCTIDZ (rt rb) (set$ rt (to-sd rb)))
-(defun FCTIDU (rt rb) (set$ rt (to-ud (fround :rne rb))))
-(defun FCTIDUZ (rt rb) (set$ rt (to-ud rb)))
-(defun FCTIWU (rt rb) (set$ rt (to-uw (fround :rne rb))))
-(defun FCTIWUZ (rt rb) (set$ rt (to-uw rb)))
+(defun FCTID (rt rb) (raises-signed-dword rb (fround :rne rb)) (set$ rt (to-sd (fround :rne rb))))
+(defun FCTIDZ (rt rb) (raises-signed-dword rb (fp-trunc rb)) (set$ rt (to-sd rb)))
+(defun FCTIDU (rt rb) (raises-unsigned-dword rb (fround :rne rb)) (set$ rt (to-ud (fround :rne rb))))
+(defun FCTIDUZ (rt rb) (raises-unsigned-dword rb (fp-trunc rb)) (set$ rt (to-ud rb)))
+(defun FCTIWU (rt rb) (raises-unsigned-word rb (fround :rne rb)) (set$ rt (to-uw (fround :rne rb))))
+(defun FCTIWUZ (rt rb) (raises-unsigned-word rb (fp-trunc rb)) (set$ rt (to-uw rb)))
 (defun FCTID_rec (rt rb) (FCTID rt rb) (record-fp))
 (defun FCTIDZ_rec (rt rb) (FCTIDZ rt rb) (record-fp))
 (defun FCTIDU_rec (rt rb) (FCTIDU rt rb) (record-fp))
