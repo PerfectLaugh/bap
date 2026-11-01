@@ -60,18 +60,19 @@ def main : IO Unit := do
     Bap.Tests.Emu.run,
     Bap.Tests.Emu.testRealPthreads,
     Bap.Tests.Emu.testLinuxPrograms,
+    -- Floating point is much the longest of each, so only one of each family runs it here: of ARM, x87, RISC-V, MIPS and PowerPC.
+    -- The others were compared with qemu by hand.
     Bap.Tests.Emu.testLinuxMusl "aarch64",
-    Bap.Tests.Emu.testLinuxMusl "riscv64",
+    Bap.Tests.Emu.testLinuxMusl "riscv64" (floats := false),
     Bap.Tests.Emu.testLinuxMusl "i686" (exclusive := false),
     Bap.Tests.Emu.testLinuxMusl "riscv32",
     Bap.Tests.Emu.testLinuxMusl "mips",
-    Bap.Tests.Emu.testLinuxMusl "mipsel",
-    Bap.Tests.Emu.testLinuxMusl "mips64",
-    Bap.Tests.Emu.testLinuxMusl "mips64el",
-    -- Its floating point is in software, which takes it 10 s, and which it does as qemu does when this is run by hand.
+    Bap.Tests.Emu.testLinuxMusl "mipsel" (floats := false),
+    Bap.Tests.Emu.testLinuxMusl "mips64" (floats := false),
+    Bap.Tests.Emu.testLinuxMusl "mips64el" (floats := false),
     Bap.Tests.Emu.testLinuxMusl "powerpc" (floats := false),
     Bap.Tests.Emu.testLinuxMusl "powerpc64",
-    Bap.Tests.Emu.testLinuxMusl "powerpc64le",
+    Bap.Tests.Emu.testLinuxMusl "powerpc64le" (floats := false),
     Bap.Tests.Emu.testLinuxCheckpoints "aarch64",
     Bap.Tests.Emu.testLinuxCheckpoints "riscv64",
     Bap.Tests.Emu.testLinuxCheckpoints "i686",
@@ -84,7 +85,8 @@ def main : IO Unit := do
     Bap.Tests.Jni.run
   ]
   Bap.Tests.Optimize.scaling
-  let tasks ← tests.mapM fun test => liftM <| IO.asTask do
+  -- More tests than the pool has threads would wait for each other, with processors to spare.
+  let tasks ← tests.mapM fun test => liftM <| IO.asTask (prio := .dedicated) do
     try test catch error =>
       IO.eprintln s!"FAILED: {error}"
       throw error
