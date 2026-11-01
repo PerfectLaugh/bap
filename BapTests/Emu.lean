@@ -1423,6 +1423,40 @@ def testLinuxSignalCheckpoints (triple : String) (step : Nat) : IO Unit := do
   assertEqual s!"Linux {triple} signals say what they should, from pieces"
     (String.fromUTF8! (← IO.FS.readBinFile "testsuite/data/libc-signals.out")) (String.fromUTF8! (← written.get))
 
+/-- `brk`, `madvise`, `mremap` and shared mappings of files and of memory, also between processes: what `testsuite/src/libc-memory.c`
+says on Linux itself, on x86-64. qemu says the same as far as it goes, but for `madvise` of what isn't mapped, which it doesn't check: on
+64 bits it faults at a second mapping by `mremap`, the last line, and on 32 bits at growing in place, about half way. -/
+def testLinuxMemory (triple : String) : IO Unit := do
+  let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-memory")
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  let expected := String.fromUTF8! (← IO.FS.readBinFile "testsuite/data/libc-memory.out")
+  let actual := String.fromUTF8! (← written.get)
+  let different := ((expected.splitOn "\n").zip (actual.splitOn "\n")).find? fun (left, right) => left != right
+  assertEqual s!"Linux {triple} memory says what Linux does" none different
+  assertEqual s!"Linux {triple} memory ends as it should" (Bap.Tasks.ScheduleOutcome.finished 0, expected.length) (outcome, actual.length)
+
+/-- The same, stopped and saved all along the way: what is mapped of a file is in a checkpoint, and what was written to a shared mapping
+and hasn't reached the file yet still does. -/
+def testLinuxMemoryCheckpoints (triple : String) (step : Nat) : IO Unit := do
+  let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-memory")
+  let written ← IO.mkRef ByteArray.empty
+  let rec go : Nat → Bap.Linux.Machine → IO Bap.Tasks.ScheduleOutcome
+    | 0, _ => throw <| IO.userError "more pieces than a run should have"
+    | fuel + 1, machine => do
+      let outcome ← machine.run (fuel := step) fun data => written.modify (· ++ data)
+      if outcome == .outOfFuel then
+        let data ← machine.checkpoint
+        let next ← Bap.Linux.Machine.ofCheckpoint data
+        assertTrue s!"Linux {triple} memory saves again as it was" (data == (← next.checkpoint))
+        go fuel next
+      else pure outcome
+  let outcome ← go 400 (← Bap.Linux.start kernel "/test" ["/test"])
+  assertEqual s!"Linux {triple} memory ends as it should, from pieces" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual s!"Linux {triple} memory says what Linux does, from pieces"
+    (String.fromUTF8! (← IO.FS.readBinFile "testsuite/data/libc-memory.out")) (String.fromUTF8! (← written.get))
+
 /-- The allocator alone, on a long run of what it can be asked: blocks are aligned, within what is mapped and apart from each other, and
 when all have gone back so has all that was mapped, in mappings that may touch. -/
 def testGuestHeap : IO Unit := do

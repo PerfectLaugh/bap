@@ -26,6 +26,7 @@ The OCaml and Rust implementation it came from is on the
   in the same order as if it hadn't stopped. A model of a runtime outside the kernel (locks, a debugger, JNI, an allocator) is a
   `RuntimeModel`: a name and a version that a checkpoint knows it by, callbacks that it attaches again, and its state, which goes in
   the same file. A checkpoint says which format, BAP, semantics and program it is of, and one that can't go on as it would have is refused.
+  Memory is as Linux has it, as far as `testsuite/src/libc-memory.c` goes, which agrees with Linux itself: `brk` that gives back, `MADV_DONTNEED`, `mremap`, and `MAP_SHARED`, of files and of anonymous memory, between processes too, with `futex` on what they share. What is written to a shared mapping reaches its file and other processes at each system call and when another process runs, which is not within a parallel round. There is no `SIGBUS` past the end of a file, and `MADV_DONTNEED` of a segment of a program gives zeros instead of the file.
   Signals are as Linux has them on each of those, as far as `testsuite/src/libc-signals.c` goes, which agrees with qemu: handlers with their `siginfo_t` and a context that they can
   change, masks, `sigaltstack`, `sigsuspend`, `sigtimedwait`, `SIGCHLD`, a signal for a thread or a process, and faults that a handler takes. `pthread_cancel` works by them.
   `Machine.read` and `Machine.write` reach the memory of any of its processes by virtual address, without a program being able to tell, and `Machine.malloc`, `Machine.calloc`,

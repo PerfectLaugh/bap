@@ -353,12 +353,18 @@ private def serveClone (emu : Emu) (flags stack parentTid threadPointer childTid
     if has clearChildTid then emu.taskTable.modify (·.setClearTid id childTid)
     syscallReturn emu (.ok id)
 
-/-- `futex`, for the word at `address` of the space of the thread that runs. Waits and wakes, with masks, and requeues,
-which is what `pthread_join`, mutexes and condition variables use: no priority inheritance and no `FUTEX_WAKE_OP`. There is no
-clock, so a thread with a timeout times out when nothing else can run. -/
+/-- `futex`, for the word at `address` of the space of the thread that runs, or, without `FUTEX_PRIVATE_FLAG`, of what `futexKey` says
+it is shared as. Waits and wakes, with masks, and requeues, which is what `pthread_join`, mutexes and condition variables use: no
+priority inheritance and no `FUTEX_WAKE_OP`. There is no clock, so a thread with a timeout times out when nothing else can run. -/
 private def serveFutex (emu : Emu) (address operation value timeout target compare : Nat) : IO SyscallAction := do
-  let space := (← currentTask emu).space
-  -- Without FUTEX_PRIVATE_FLAG and FUTEX_CLOCK_REALTIME. Tasks share a word only through their space.
+  let own := (← currentTask emu).space
+  -- Where a word is to whoever else waits on it.
+  let keyOf (word : Nat) : IO (Nat × Nat) := do
+    if operation &&& 0x80 == 0 then
+      if let some key := ← emu.futexKey.get then
+        if let some found := ← key word then return found
+    pure (own, word)
+  -- Without FUTEX_PRIVATE_FLAG and FUTEX_CLOCK_REALTIME.
   let command := operation &&& 0x7f
   let all := 2 ^ 32 - 1
   let wait (bitset : Nat) : IO SyscallAction := do
@@ -368,18 +374,22 @@ private def serveFutex (emu : Emu) (address operation value timeout target compa
     | .ok word =>
       if word != value % 2 ^ 32 then syscallReturn emu (.error eagain)
       else
-        let waiter : FutexWaiter := { thread := ← thread emu, space, address, bitset, timed := timeout != 0 }
+        let (space, word) ← keyOf address
+        let waiter : FutexWaiter := { thread := ← thread emu, space, address := word, bitset, timed := timeout != 0 }
         emu.taskTable.modify (·.futexWait waiter)
         emu.stopped.set true
         syscallReturn emu (.ok 0)
   let wake (bitset : Nat) : IO SyscallAction := do
     if bitset == 0 then return ← syscallReturn emu (.error einval)
-    let (table, woken) := (← emu.taskTable.get).futexWake space address bitset value
+    let (space, word) ← keyOf address
+    let (table, woken) := (← emu.taskTable.get).futexWake space word bitset value
     emu.taskTable.set table
     wakeThreads emu woken
     syscallReturn emu (.ok woken.length)
   let requeue : IO SyscallAction := do
-    let (table, woken, moved) := (← emu.taskTable.get).futexRequeue space address target value timeout
+    let (space, word) ← keyOf address
+    let (targetSpace, targetWord) ← keyOf target
+    let (table, woken, moved) := (← emu.taskTable.get).futexRequeue space word targetWord value timeout targetSpace
     emu.taskTable.set table
     wakeThreads emu woken
     syscallReturn emu (.ok (woken.length + moved))
@@ -434,12 +444,24 @@ private def serveProtect (emu : Emu) (address size bits : Nat) : IO SyscallActio
     syscallReturn emu (.ok 0)
   catch _ => syscallReturn emu (.error enomem)
 
+/-- `madvise`, which is advice, but for what a program can tell, as `MADV_DONTNEED` is: what it had there reads as zeros from then on. -/
+private def serveAdvice (emu : Emu) (address size advice : Nat) : IO SyscallAction := do
+  let pages := (size + 4095) / 4096 * 4096
+  if address % 4096 != 0 then
+    syscallReturn emu (.error einval)
+  else if advice != 4 then
+    syscallReturn emu (.ok 0)
+  else if !coversRange (← emu.regions.get) address (address + pages) then
+    syscallReturn emu (.error enomem)
+  else
+    clearMapped emu address pages
+    syscallReturn emu (.ok 0)
+
 /-- The system calls of processes and of pthreads, as Linux has them, for programs that `runProcesses` runs: `fork`, `vfork`,
 which is `fork` as the standard allows, `clone`, `wait4`, `waitpid`, `exit`, `exit_group`, `getpid`, `getppid`, `gettid`,
 `sched_yield`, which goes on until the quantum ends, `futex`, `set_tid_address`, `set_robust_list`, which keeps nothing, so a
 mutex isn't released for a thread that dies with it, `rt_sigprocmask` and `rt_sigaction`, which change nothing, as no signal
-is delivered, `tgkill`, which ends the process, `mmap`, `munmap`, `mprotect`, `madvise`, which is advice, so `MADV_DONTNEED`
-doesn't zero, and `arch_prctl`. `clone3` and `rseq` say they aren't there, which libc falls back from.
+is delivered, `tgkill`, which ends the process, `mmap`, `munmap`, `mprotect`, `madvise` and `arch_prctl`. `clone3` and `rseq` say they aren't there, which libc falls back from.
 
 Parallel rounds can't serve them, since a worker has no table of threads to block in, and a call from one fails. -/
 def serveTaskCalls (emu : Emu) : IO HookId := do
@@ -511,6 +533,8 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
         syscallReturn current (.ok 0)
       else if is calls.mprotect then
         serveProtect current (arg 0) (arg 1) (arg 2)
+      else if is calls.madvise then
+        serveAdvice current (arg 0) (arg 1) (arg 2)
       else if isSome calls.archPrctl then
         let fsBase := wordVar width "FS_BASE"
         match arg 0 with
@@ -527,7 +551,7 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
           | .error _ => syscallReturn current (.error einval)
         | _ => syscallReturn current (.error einval)
       else
-        -- sched_yield, set_robust_list and madvise
+        -- sched_yield and set_robust_list
         syscallReturn current (.ok 0)
 
 /-- Whether the thread stopped because it waits or is over, which is for the scheduler to deal with. -/

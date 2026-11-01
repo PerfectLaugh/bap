@@ -348,15 +348,36 @@ theorem putInode_inverts : Inverts putInode getInode := by
   have h1 := putNat_inverts data out number ((putNat_extends _ mode).trans p2)
   simp [getInode, putInode, h1, h2, h3, h4, bind, Except.bind]
 
+theorem putMapping_extends : Extends putMapping := fun out _ =>
+  (putNat_extends out _).trans ((putNat_extends _ _).trans ((putNat_extends _ _).trans
+    ((putNat_extends _ _).trans ((putBool_extends _ _).trans (putBool_extends _ _)))))
+
+theorem putMapping_inverts : Inverts putMapping getMapping := by
+  rintro data out ⟨start, size, inode, offset, shared, mayWrite⟩ hp
+  have h6 := putBool_inverts data _ mayWrite hp
+  have p5 := (putBool_extends _ mayWrite).trans hp
+  have h5 := putBool_inverts data _ shared p5
+  have p4 := (putBool_extends _ shared).trans p5
+  have h4 := putNat_inverts data _ offset p4
+  have p3 := (putNat_extends _ offset).trans p4
+  have h3 := putNat_inverts data _ inode p3
+  have p2 := (putNat_extends _ inode).trans p3
+  have h2 := putNat_inverts data _ size p2
+  have h1 := putNat_inverts data out start ((putNat_extends _ size).trans p2)
+  simp [getMapping, putMapping, h1, h2, h3, h4, h5, h6, bind, Except.bind]
+
 theorem putProcess_extends : Extends putProcess := fun out _ =>
   (putNat_extends out _).trans ((putList_extends putDescriptor_extends _ _).trans ((putText_extends _ _).trans
     ((putNat_extends _ _).trans ((putNat_extends _ _).trans ((putNat_extends _ _).trans
-      ((putList_extends putText_extends _ _).trans ((putList_extends putText_extends _ _).trans ((putText_extends _ _).trans (putList_extends putNat_extends _ _)))))))))
+      ((putList_extends putText_extends _ _).trans ((putList_extends putText_extends _ _).trans ((putText_extends _ _).trans
+        ((putList_extends putNat_extends _ _).trans (putList_extends putMapping_extends _ _))))))))))
 
 theorem putProcess_inverts : Inverts putProcess getProcess := by
-  rintro data out ⟨group, descriptors, cwd, umask, breakStart, breakEnd, command, environment, program, auxiliary⟩ hp
-  have h10 := putList_inverts putNat_extends putNat_inverts data _ auxiliary hp
-  have p9 := (putList_extends putNat_extends _ auxiliary).trans hp
+  rintro data out ⟨group, descriptors, cwd, umask, breakStart, breakEnd, command, environment, program, auxiliary, mappings⟩ hp
+  have h11 := putList_inverts putMapping_extends putMapping_inverts data _ mappings hp
+  have p10 := (putList_extends putMapping_extends _ mappings).trans hp
+  have h10 := putList_inverts putNat_extends putNat_inverts data _ auxiliary p10
+  have p9 := (putList_extends putNat_extends _ auxiliary).trans p10
   have h9 := putText_inverts data _ program p9
   have p8 := (putText_extends _ program).trans p9
   have h8 := putList_inverts putText_extends putText_inverts data _ environment p8
@@ -373,7 +394,7 @@ theorem putProcess_inverts : Inverts putProcess getProcess := by
   have p2 := (putText_extends _ cwd).trans p3
   have h2 := putList_inverts putDescriptor_extends putDescriptor_inverts data _ descriptors p2
   have h1 := putNat_inverts data out group ((putList_extends putDescriptor_extends _ descriptors).trans p2)
-  simp [getProcess, putProcess, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, bind, Except.bind]
+  simp [getProcess, putProcess, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, bind, Except.bind]
 
 /-- A checkpoint reads back as the image that it was made from, wherever in a file that is and whatever comes after it. -/
 theorem decode_encode (data out : ByteArray) (image : Image) (hp : Prefix (encode out image) data) :

@@ -197,6 +197,10 @@ private def freshIdentity (model : Model) : IO Identity := do
 def resolve (model : Model) (handle : Nat) : IO Identity := do
   pure ((← model.sources.get).get? handle |>.getD (.external handle))
 
+def stringContents (model : Model) (handle : Nat) : IO (Option String) := do
+  let id ← resolve model handle
+  pure ((← model.strings.get).get? id |>.map fun info => info.contents)
+
 def internIdentity (model : Model) (kind : RefKind) (identity : Identity) : IO Nat := do
   if identity = .external 0 then pure 0 else
     let handles ← model.handles.get

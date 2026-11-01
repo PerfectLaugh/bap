@@ -201,6 +201,11 @@ structure Emu where
   afterSyscall : IO.Ref (Option (IO Unit))
   /-- What runs when a thread has been switched to and before it goes on. -/
   switchedIn : IO.Ref (Option (IO Unit))
+  /-- What runs before a thread of another address space takes over, in the one that it leaves, and after, in the one that it is in. -/
+  leavingSpace : IO.Ref (Option (IO Unit))
+  enteredSpace : IO.Ref (Option (IO Unit))
+  /-- What a word of memory that address spaces share is to `futex`, as what they wait on there isn't an address of any of them. -/
+  futexKey : IO.Ref (Option (Nat → IO (Option (Nat × Nat))))
   /-- What may take a fault of a guest of `runProcesses`, and says whether it did. -/
   faultHandler : IO.Ref (Option (MemoryFault → IO Bool))
   /-- What hears that a process is over, with its status. -/
@@ -315,6 +320,9 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     serving := ← IO.mkRef false
     afterSyscall := ← IO.mkRef none
     switchedIn := ← IO.mkRef none
+    leavingSpace := ← IO.mkRef none
+    enteredSpace := ← IO.mkRef none
+    futexKey := ← IO.mkRef none
     faultHandler := ← IO.mkRef none
     processExited := ← IO.mkRef none
     faultFresh := ← IO.mkRef false
@@ -654,6 +662,7 @@ def switchThread (emu : Emu) (id : ThreadId) : IO Unit := do
   let leaving ← thread emu
   let leavingSpace := table.spaceOf leaving
   if table.spaceOf id != leavingSpace then
+    if let some leave := ← emu.leavingSpace.get then leave
     match Bil.lookup (← emu.state.get).env emu.config.memory with
     | .ok memory =>
       emu.threadsRef.modify (parkShared · (fun other => table.spaceOf other != leavingSpace) emu.config.memory memory)
@@ -675,6 +684,8 @@ def switchThread (emu : Emu) (id : ThreadId) : IO Unit := do
     emu.currentThreadRef.set id
     emu.pendingRef.set context.pending
     emu.skipCode.set context.skip
+    if table.spaceOf id != leavingSpace then
+      if let some entered := ← emu.enteredSpace.get then entered
     if let some arrived := ← emu.switchedIn.get then arrived
 
 def resumeThread (emu : Emu) (id : ThreadId) : IO Unit := do
@@ -1049,6 +1060,14 @@ def read (emu : Emu) (address size : Nat) : IO ByteArray := do
     let bytes ← (List.range size).mapM fun offset => readByte emu (address + offset)
     pure (ByteArray.mk bytes.toArray)
 
+/-- The bytes at an address, whatever a program may do with them there, as a kernel sees them. -/
+def peek (emu : Emu) (address size : Nat) : IO ByteArray := do
+  match ← emu.engine.persistentMemory.get with
+  | some memory => Jit.readMemoryRange memory (UInt64.ofNat address) size
+  | none =>
+    let bytes ← (List.range size).mapM fun offset => rawByte emu (address + offset)
+    pure (ByteArray.mk bytes.toArray)
+
 private def synchronizeWrite (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
   let persistent ← emu.engine.persistentMemory.get
   let memoryVar ← emu.engine.persistentVariable.get
@@ -1095,6 +1114,16 @@ def write (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
       if region.protection.executable then
         Primus.Lifted.discardRange emu.engine address (address + data.size - 1)
       synchronizeWrite emu address data
+
+/-- Puts bytes at an address, whatever a program may do with them there, as a kernel does. -/
+def poke (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
+  if data.size > 0 then
+    let state ← emu.state.get
+    let ⟨_, memory⟩ ← cells emu state
+    let updated := Bap.Memory.writeRegion memory address data
+    emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
+    Primus.Lifted.discardRange emu.engine address (address + data.size - 1)
+    synchronizeWrite emu address data
 
 private def synchronizeBatch (emu : Emu) (writes : List (Nat × ByteArray)) : IO Unit := do
   let persistent ← emu.engine.persistentMemory.get
@@ -1212,15 +1241,10 @@ def protect (emu : Emu) (address size : Nat) (protection : Primus.Protection) : 
       if !protection.executable then Primus.Lifted.discardRange emu.engine address (address + size - 1)
     | none => throw <| IO.userError s!"unmapped Emu protection range at {address}"
 
-/-- `munmap`: the bytes in the range are gone, and read as zeros if the addresses are mapped again. -/
-def unmap (emu : Emu) (address size : Nat) : IO Unit := do
+/-- `MADV_DONTNEED`: the bytes in the range read as zeros, and take no memory of the host until they are written. -/
+def clearMapped (emu : Emu) (address size : Nat) : IO Unit := do
   if size > 0 then
     let upper := address + size
-    setRegions emu <| (← emu.regions.get).flatMap (fun region =>
-      let finish := region.address + region.data.size
-      if finish ≤ address || upper ≤ region.address then [region]
-      else regionPiece region region.address (min address finish) region.protection ++
-        regionPiece region (max upper region.address) finish region.protection)
     Primus.Lifted.discardRange emu.engine address (upper - 1)
     let state ← emu.state.get
     let ⟨_, memory⟩ ← cells emu state
@@ -1230,6 +1254,17 @@ def unmap (emu : Emu) (address size : Nat) : IO Unit := do
       if upper > address then
         Jit.zeroMemory native (UInt64.ofNat address) (UInt64.ofNat (upper - 1))
         Jit.trimMemory native (UInt64.ofNat address) (UInt64.ofNat (upper - 1))
+
+/-- `munmap`: the bytes in the range are gone, and read as zeros if the addresses are mapped again. -/
+def unmap (emu : Emu) (address size : Nat) : IO Unit := do
+  if size > 0 then
+    let upper := address + size
+    setRegions emu <| (← emu.regions.get).flatMap (fun region =>
+      let finish := region.address + region.data.size
+      if finish ≤ address || upper ≤ region.address then [region]
+      else regionPiece region region.address (min address finish) region.protection ++
+        regionPiece region (max upper region.address) finish region.protection)
+    clearMapped emu address size
 
 def regions (emu : Emu) : IO (List (Nat × Nat × Primus.Protection)) := do
   let mapped ← emu.regions.get

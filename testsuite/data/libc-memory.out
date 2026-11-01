@@ -1,0 +1,33 @@
+brk grows 1
+brk shrinks 1
+brk regrows 1
+brk is zeros 0
+brk below stays 1
+advice anonymous 0 0 2
+advice normal 3
+advice unaligned -1 22
+advice unmapped -1 12
+advice private z a
+advice shared q
+remap shrinks 1 1 2
+remap blocked 1 12
+remap moves 1 1 2 0
+remap grows in place 1 1 5
+remap to 1 1 5
+remap no such 1 14
+remap unaligned 1 22
+remap file a b
+shared write reaches the file M
+shared file reaches memory F
+shared aliases AB A B
+shared read into itself R R
+shared read-only for write 1 13
+shared read-only sees M -1 13
+private stays P M
+msync 0
+shared child 0 C
+shared stays in the file E
+shared truncated M 0
+shared regrown 0
+shared anonymous 15 0
+shared second mapping 1 11

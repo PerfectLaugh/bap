@@ -18,6 +18,7 @@ structure ProcessImage where
   environment : List String
   program : String
   auxiliary : List Nat
+  mappings : List FileMapping
   deriving DecidableEq
 
 /-- An inode, with what is in it as a tag and bytes: a link has its target in them. -/
@@ -61,7 +62,7 @@ def Kernel.image (kernel : Kernel) : Image where
   processes := (sorted kernel.processes.toList).map fun (group, process) =>
     { group, cwd := process.cwd, umask := process.umask, breakStart := process.breakStart, breakEnd := process.breakEnd
       command := process.command, environment := process.environment, program := process.program
-      auxiliary := process.auxiliary
+      auxiliary := process.auxiliary, mappings := process.mappings
       descriptors := (sorted process.descriptors.toList).map fun (fd, entry) => (fd, entry.openFile, entry.closeOnExec) }
   output := kernel.output
   clock := kernel.clock
@@ -94,7 +95,7 @@ def Image.kernel (image : Image) : Except String Kernel := do
       processes.insert process.group
         { cwd := process.cwd, umask := process.umask, breakStart := process.breakStart, breakEnd := process.breakEnd
           command := process.command, environment := process.environment, program := process.program
-          auxiliary := process.auxiliary
+          auxiliary := process.auxiliary, mappings := process.mappings
           descriptors := process.descriptors.foldl (init := {}) fun descriptors (fd, openFile, closeOnExec) =>
             descriptors.insert fd { openFile, closeOnExec } }
     output := image.output
@@ -123,6 +124,20 @@ def getDescriptor : Decoder (Nat × Nat × Bool) := fun data at_ => do
   let (closeOnExec, at_) ← getBool data at_
   .ok ((fd, openFile, closeOnExec), at_)
 
+def putMapping (out : ByteArray) (mapping : FileMapping) : ByteArray :=
+  let out := putNat (putNat out mapping.start) mapping.size
+  let out := putNat (putNat out mapping.inode) mapping.offset
+  putBool (putBool out mapping.shared) mapping.mayWrite
+
+def getMapping : Decoder FileMapping := fun data at_ => do
+  let (start, at_) ← getNat data at_
+  let (size, at_) ← getNat data at_
+  let (inode, at_) ← getNat data at_
+  let (offset, at_) ← getNat data at_
+  let (shared, at_) ← getBool data at_
+  let (mayWrite, at_) ← getBool data at_
+  .ok ({ start, size, inode, offset, shared, mayWrite }, at_)
+
 def putProcess (out : ByteArray) (process : ProcessImage) : ByteArray :=
   let out := putNat out process.group
   let out := putList putDescriptor out process.descriptors
@@ -132,7 +147,8 @@ def putProcess (out : ByteArray) (process : ProcessImage) : ByteArray :=
   let out := putList putText out process.command
   let out := putList putText out process.environment
   let out := putText out process.program
-  putList putNat out process.auxiliary
+  let out := putList putNat out process.auxiliary
+  putList putMapping out process.mappings
 
 def getProcess : Decoder ProcessImage := fun data at_ => do
   let (group, at_) ← getNat data at_
@@ -145,7 +161,8 @@ def getProcess : Decoder ProcessImage := fun data at_ => do
   let (environment, at_) ← getList getText data at_
   let (program, at_) ← getText data at_
   let (auxiliary, at_) ← getList getNat data at_
-  .ok ({ group, descriptors, cwd, umask, breakStart, breakEnd, command, environment, program, auxiliary }, at_)
+  let (mappings, at_) ← getList getMapping data at_
+  .ok ({ group, descriptors, cwd, umask, breakStart, breakEnd, command, environment, program, auxiliary, mappings }, at_)
 
 def putInode (out : ByteArray) (inode : InodeImage) : ByteArray :=
   putBytes (putNat (putNat (putNat out inode.number) inode.mode) inode.kind) inode.data

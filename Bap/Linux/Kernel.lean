@@ -58,6 +58,33 @@ structure Descriptor where
   openFile : Nat
   closeOnExec : Bool := false
 
+/-- A part of the memory of a process that has a file behind it, or for memory that processes share, an inode with no path. What a
+shared one holds is what the file holds, and the file is what is written to it. -/
+structure FileMapping where
+  start : Nat
+  size : Nat
+  inode : Nat
+  offset : Nat
+  shared : Bool
+  /-- Whether the file was opened so that this can write to it, which it needn't do yet. -/
+  mayWrite : Bool
+  deriving DecidableEq, Repr
+
+namespace FileMapping
+
+/-- What is left of a mapping without `lower`..`upper`. -/
+def without (mapping : FileMapping) (lower upper : Nat) : List FileMapping :=
+  let stop := mapping.start + mapping.size
+  if stop ≤ lower || upper ≤ mapping.start then [mapping]
+  else
+    (if mapping.start < lower then [{ mapping with size := lower - mapping.start }] else []) ++
+    (if upper < stop then [{ mapping with start := upper, size := stop - upper, offset := mapping.offset + (upper - mapping.start) }] else [])
+
+def overlaps (mapping : FileMapping) (lower upper : Nat) : Bool :=
+  mapping.start < upper && lower < mapping.start + mapping.size
+
+end FileMapping
+
 /-- What belongs to a process. -/
 structure Process where
   descriptors : Std.HashMap Nat Descriptor := {}
@@ -72,6 +99,8 @@ structure Process where
   program : String := ""
   /-- The auxiliary vector that it started with, as a type and a value by turns. -/
   auxiliary : List Nat := []
+  /-- What of its memory has a file behind it, which a child has too and `execve` ends. -/
+  mappings : List FileMapping := []
 
 /-- What a mapping of a process is: where, how much, and what it may do. -/
 structure MappedRange where
@@ -680,6 +709,54 @@ def chmod (kernel : Kernel) (base path : String) (mode : Nat) : Result Kernel :=
     let inode ← inodeOf kernel number
     let kept := inode.mode - (inode.mode &&& 0o7777)
     .ok { kernel with inodes := kernel.inodes.insert number { inode with mode := kept ||| (mode &&& 0o7777) } }
+
+/-- The bytes of `size` that a mapping of an inode holds, with zeros after the end of the file. -/
+def inodeBytes (kernel : Kernel) (number offset size : Nat) : ByteArray :=
+  match kernel.inodes.get? number with
+  | some { content := .file data, .. } =>
+    let bytes := readAt data offset size
+    bytes ++ Bap.zeroBytes (size - bytes.size)
+  | _ => Bap.zeroBytes size
+
+/-- What of a mapping of an inode is in the file, as the file doesn't grow by a write to memory. -/
+def inodeExtent (kernel : Kernel) (number offset size : Nat) : Nat :=
+  match kernel.inodes.get? number with
+  | some { content := .file data, .. } => min size (data.size - offset)
+  | _ => 0
+
+/-- A file with the bytes in `memory` at `offset` where they aren't those of `before`, which leaves what others changed. -/
+def writeChanges (kernel : Kernel) (number offset : Nat) (before memory : ByteArray) : Kernel :=
+  match kernel.inodes.get? number with
+  | some inode =>
+    match inode.content with
+    | .file data =>
+      let data := (List.range (min before.size memory.size)).foldl (init := data) fun data index =>
+        if before[index]! != memory[index]! then data.set! (offset + index) memory[index]! else data
+      { kernel with inodes := kernel.inodes.insert number { inode with content := .file data } }
+    | _ => kernel
+  | none => kernel
+
+/-- An inode of zeros that no path leads to, which is what memory that processes share is. -/
+def anonymousInode (kernel : Kernel) (size : Nat) : Kernel × Nat :=
+  let number := kernel.nextInode
+  ({ kernel with
+    inodes := kernel.inodes.insert number { number, content := .file (Bap.zeroBytes size), mode := 0o100600 }
+    nextInode := number + 1 }, number)
+
+/-- The inode of a descriptor and how it was opened: whether it can be read, and whether written. -/
+def mappingSource (kernel : Kernel) (group fd : Nat) : Result (Nat × Bool × Bool) := do
+  let (_, file) ← openFileOf kernel group fd
+  .ok (file.inode, file.flags &&& 3 != 1, file.flags &&& 3 == 2)
+
+/-- A process without what it had mapped in `lower`..`upper`. -/
+def dropMappings (kernel : Kernel) (group lower upper : Nat) : Kernel :=
+  let process := kernel.process group
+  if process.mappings.isEmpty then kernel
+  else kernel.setProcess group { process with mappings := process.mappings.flatMap (·.without lower upper) }
+
+def addMapping (kernel : Kernel) (group : Nat) (mapping : FileMapping) : Kernel :=
+  let process := kernel.process group
+  kernel.setProcess group { process with mappings := mapping :: process.mappings }
 
 /-- The bytes that a file mapping of `fd` holds, whole pages at most, with zeros after the end of the file. -/
 def mappedBytes (kernel : Kernel) (group fd offset size : Nat) : Result ByteArray := do

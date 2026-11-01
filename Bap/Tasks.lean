@@ -194,11 +194,11 @@ def futexWake (table : TaskTable) (space address bitset count : Nat) : TaskTable
   ({ table with futexes := kept }, woken)
 
 /-- Wakes up to `wake` of those that wait on `source`, and moves up to `move` of the others to `target`. -/
-def futexRequeue (table : TaskTable) (space source target wake move : Nat) : TaskTable × List Nat × Nat :=
+def futexRequeue (table : TaskTable) (space source target wake move : Nat) (targetSpace : Nat := space) : TaskTable × List Nat × Nat :=
   let (table, woken) := table.futexWake space source (2 ^ 32 - 1) wake
   let (kept, moved) := table.futexes.foldl (init := (([] : List FutexWaiter), 0)) fun current waiter =>
     if waiter.space == space && waiter.address == source && current.2 < move then
-      (current.1 ++ [{ waiter with address := target }], current.2 + 1)
+      (current.1 ++ [{ waiter with space := targetSpace, address := target }], current.2 + 1)
     else (current.1 ++ [waiter], current.2)
   ({ table with futexes := kept }, woken, moved)
 

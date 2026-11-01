@@ -114,19 +114,200 @@ private def applyNat (machine : Machine) (change : Kernel → Result (Kernel × 
     pure (.returnValue value)
   | .error errno => pure (errorOf errno)
 
-/-- `mmap`: of a file, here. What is anonymous is for `serveTaskCalls`. A writable shared mapping isn't written back. -/
+/-- The bits of a protection, as `mmap` has them. -/
+private def protectionBits (protection : Primus.Protection) : Nat :=
+  (if protection.readable then 1 else 0) + (if protection.writable then 2 else 0) + (if protection.executable then 4 else 0)
+
+/-- `MAP_SHARED` or `MAP_SHARED_VALIDATE`. -/
+private def mapsShared (flags : Nat) : Bool := flags &&& 1 != 0
+
+/-- The task that runs, if it is still in the table. -/
+private def runningGroup (emu : Emu) : IO (Option Nat) := do
+  pure (((← emu.taskTable.get).find? (← thread emu)).map (·.group))
+
+/-- A mapping has what the file has, in the pages where it has something else. -/
+private def refreshMapping (emu : Emu) (kernel : Kernel) (mapping : FileMapping) : IO Unit := do
+  let wanted := kernel.inodeBytes mapping.inode mapping.offset mapping.size
+  let memory ← peek emu mapping.start mapping.size
+  if wanted != memory then
+    for index in List.range ((mapping.size + 4095) / 4096) do
+      let first := index * 4096
+      let page := wanted.extract first (first + 4096)
+      if page != memory.extract first (first + 4096) then
+        poke emu (mapping.start + first) page
+
+/-- What a process wrote to its shared mappings goes to their files, which is how any other mapping or a `read` sees it. A running
+process is the only one that can have written since it came to run, and whatever else it has mapped of a file is as the file was, so
+that what differs from the file is what it wrote: it happens before any system call and when another process is to run. -/
+private def flushShared (machine : Machine) (emu : Emu) : IO Unit := do
+  let some group ← runningGroup emu | return
+  let start ← machine.kernel.get
+  let shared := (start.process group).mappings.filter (·.shared)
+  if shared.isEmpty then return
+  let mut changed := false
+  for mapping in shared do
+    if mapping.mayWrite then
+      let size := start.inodeExtent mapping.inode mapping.offset mapping.size
+      if size > 0 then
+        let memory ← peek emu mapping.start size
+        let before := start.inodeBytes mapping.inode mapping.offset size
+        if memory != before then
+          machine.kernel.modify (·.writeChanges mapping.inode mapping.offset before memory)
+          changed := true
+  -- Another mapping of the same file sees it.
+  if changed then
+    let flushed ← machine.kernel.get
+    for mapping in shared do refreshMapping emu flushed mapping
+
+/-- What the files of a process's shared mappings hold, for when it comes to run. -/
+private def refreshShared (machine : Machine) (emu : Emu) : IO Unit := do
+  let some group ← runningGroup emu | return
+  let kernel ← machine.kernel.get
+  for mapping in (kernel.process group).mappings do
+    if mapping.shared then refreshMapping emu kernel mapping
+
+/-- A call changed a file: its mappings have that now. Only those, as a call may have left something in a mapping itself. -/
+private def refreshChanged (machine : Machine) (emu : Emu) (before : Kernel) : IO Unit := do
+  let some group ← runningGroup emu | return
+  let kernel ← machine.kernel.get
+  for mapping in (kernel.process group).mappings do
+    if mapping.shared &&
+        kernel.inodeBytes mapping.inode mapping.offset mapping.size != before.inodeBytes mapping.inode mapping.offset mapping.size then
+      refreshMapping emu kernel mapping
+
+/-- `mmap`: of a file, here, of which a shared one writes back. What is anonymous is for `serveTaskCalls`. -/
 private def serveFileMap (machine : Machine) (group address size bits flags fd offset : Nat) : IO SyscallAction := do
   let emu := machine.emu
-  if flags &&& 3 == 1 && bits &&& 2 != 0 then
-    return errorOf Errno.enosys
-  match (← machine.kernel.get).mappedBytes group fd offset (pageUp size) with
+  let fixed := flags &&& 0x10 != 0
+  if size == 0 || offset % 4096 != 0 || flags &&& 3 == 0 || (fixed && address % 4096 != 0) then
+    return errorOf Errno.einval
+  let kernel ← machine.kernel.get
+  match kernel.mappingSource group fd with
   | .error errno => pure (errorOf errno)
-  | .ok data =>
-    try
-      pure (.returnValue (← placeMapping emu address (flags &&& 0x10 != 0) data bits))
-    catch _ => pure (errorOf Errno.enomem)
+  | .ok (inode, canRead, canWrite) =>
+    let shared := mapsShared flags
+    if !canRead || (shared && bits &&& 2 != 0 && !canWrite) then
+      return errorOf Errno.eacces
+    match kernel.mappedBytes group fd offset (pageUp size) with
+    | .error errno => pure (errorOf errno)
+    | .ok data =>
+      try
+        let start ← placeMapping emu address fixed data bits
+        machine.kernel.modify fun kernel =>
+          (kernel.dropMappings group start (start + data.size)).addMapping group
+            { start, size := data.size, inode, offset, shared, mayWrite := canWrite }
+        pure (.returnValue start)
+      catch _ => pure (errorOf Errno.enomem)
 
-/-- `brk`: it grows by mapping zeros and doesn't give back what it had, as far as the program can tell. -/
+/-- `mmap` of memory that a child goes on sharing, which is a file that nothing else can open. -/
+private def serveSharedMemory (machine : Machine) (group address size bits flags : Nat) : IO SyscallAction := do
+  let fixed := flags &&& 0x10 != 0
+  if size == 0 || (fixed && address % 4096 != 0) then
+    return errorOf Errno.einval
+  let pages := pageUp size
+  try
+    let start ← placeMapping machine.emu address fixed (Bap.zeroBytes pages) bits
+    machine.kernel.modify fun kernel =>
+      let (kernel, inode) := kernel.anonymousInode pages
+      (kernel.dropMappings group start (start + pages)).addMapping group
+        { start, size := pages, inode, offset := 0, shared := true, mayWrite := true }
+    pure (.returnValue start)
+  catch _ => pure (errorOf Errno.enomem)
+
+/-- `madvise`, for what has a file behind it: `MADV_DONTNEED` leaves what the file has, and zeros elsewhere. A shared mapping has been
+written back by now, so that for it nothing changes. The segments of a program and of a library aren't known as files here and get zeros. -/
+private def serveAdvice (machine : Machine) (group address size advice : Nat) : IO SyscallAction := do
+  let emu := machine.emu
+  let pages := pageUp size
+  let kernel ← machine.kernel.get
+  let mappings := (kernel.process group).mappings.filter (·.overlaps address (address + pages))
+  if advice != 4 || mappings.isEmpty then return .default
+  if address % 4096 != 0 then return errorOf Errno.einval
+  if !coversRange (← emu.regions.get) address (address + pages) then return errorOf Errno.enomem
+  clearMapped emu address pages
+  for mapping in mappings do
+    let first := max mapping.start address
+    let stop := min (mapping.start + mapping.size) (address + pages)
+    poke emu first (kernel.inodeBytes mapping.inode (mapping.offset + (first - mapping.start)) (stop - first))
+  pure (.returnValue 0)
+
+/-- `mremap`, of one mapping as Linux has it: what is the same protection in one piece, and the same file throughout or none. It shrinks
+in place, grows in place if nothing is in the way, and otherwise moves if it may, which takes a second mapping of a shared one if the old size is 0. -/
+private def serveRemap (machine : Machine) (group old oldSize newSize flags target : Nat) : IO SyscallAction := do
+  let emu := machine.emu
+  let mayMove := flags &&& 1 != 0
+  let fixed := flags &&& 2 != 0
+  let keep := flags &&& 4 != 0
+  let oldPages := pageUp oldSize
+  let newPages := pageUp newSize
+  if old % 4096 != 0 || newPages == 0 || flags ≥ 8 || (fixed && !mayMove) || (keep && (!mayMove || oldPages != newPages)) then
+    return errorOf Errno.einval
+  if fixed && (target % 4096 != 0 || (target < old + oldPages && old < target + newPages)) then
+    return errorOf Errno.einval
+  let kernel ← machine.kernel.get
+  let mappings := (kernel.process group).mappings
+  let placed (start : Nat) (mapping : FileMapping) (offset : Nat) : FileMapping :=
+    { mapping with start, size := newPages, offset }
+  if oldPages == 0 then
+    match mappings.find? (fun mapping => mapping.shared && mapping.overlaps old (old + 1)) with
+    | some mapping =>
+      if !mayMove then return errorOf Errno.einval
+      let offset := mapping.offset + (old - mapping.start)
+      let some region := lookupRegion (← emu.regions.get) old | return errorOf Errno.efault
+      try
+        let start ← placeMapping emu target fixed (kernel.inodeBytes mapping.inode offset newPages) (protectionBits region.protection)
+        machine.kernel.modify fun kernel => (kernel.dropMappings group start (start + newPages)).addMapping group (placed start mapping offset)
+        return .returnValue start
+      catch _ => return errorOf Errno.enomem
+    | none => return errorOf Errno.einval
+  let regions ← emu.regions.get
+  if !coversRange regions old (old + min oldPages newPages) then return errorOf Errno.efault
+  if !fixed && !keep && newPages ≤ oldPages then
+    if newPages < oldPages then
+      unmap emu (old + newPages) (oldPages - newPages)
+      machine.kernel.modify (·.dropMappings group (old + newPages) (old + oldPages))
+    return .returnValue old
+  if !coversRange regions old (old + oldPages) then return errorOf Errno.efault
+  let some first := lookupRegion regions old | return errorOf Errno.efault
+  let touching := regions.filter fun region => region.address < old + oldPages && old < region.address + region.data.size
+  if touching.any (·.protection != first.protection) then return errorOf Errno.efault
+  let behind := mappings.filter (·.overlaps old (old + oldPages))
+  let mapping ← match behind with
+    | [] => pure none
+    | [mapping] =>
+      if mapping.start ≤ old && old + oldPages ≤ mapping.start + mapping.size then pure (some mapping)
+      else return errorOf Errno.efault
+    | _ => return errorOf Errno.efault
+  if keep && mapping.isSome then return errorOf Errno.einval
+  let offset := match mapping with
+    | some mapping => mapping.offset + (old - mapping.start)
+    | none => 0
+  let tail : ByteArray := if newPages ≤ oldPages then ByteArray.empty else
+    match mapping with
+    | some mapping => kernel.inodeBytes mapping.inode (offset + oldPages) (newPages - oldPages)
+    | none => Bap.zeroBytes (newPages - oldPages)
+  let note (start : Nat) : IO Unit :=
+    machine.kernel.modify fun kernel =>
+      let kernel := (kernel.dropMappings group old (old + oldPages)).dropMappings group start (start + newPages)
+      match mapping with
+      | some mapping => kernel.addMapping group (placed start mapping offset)
+      | none => kernel
+  let free := !regions.any fun region => region.address < old + newPages && old + oldPages < region.address + region.data.size
+  try
+    if !fixed && !keep && free then
+      map emu ⟨old + oldPages, tail, first.protection⟩
+      note old
+      return .returnValue old
+    if !mayMove then return errorOf Errno.enomem
+    let data := (← peek emu old (min oldPages newPages)) ++ tail
+    let start ← placeMapping emu target fixed data (protectionBits first.protection)
+    if keep then clearMapped emu old oldPages else unmap emu old oldPages
+    note start
+    pure (.returnValue start)
+  catch _ => pure (errorOf Errno.enomem)
+
+/-- `brk`: it grows by mapping zeros, and what it gives back is gone, so that it is zeros if it grows again. What is left of a page
+stays as it was, as in Linux. -/
 private def serveBreak (machine : Machine) (group wanted : Nat) : IO SyscallAction := do
   let kernel ← machine.kernel.get
   let process := kernel.process group
@@ -138,6 +319,8 @@ private def serveBreak (machine : Machine) (group wanted : Nat) : IO SyscallActi
     try
       if needed > mappedTo then
         map machine.emu ⟨mappedTo, Bap.zeroBytes (needed - mappedTo), ⟨true, true, false⟩⟩
+      else if needed < mappedTo then
+        unmap machine.emu needed (mappedTo - needed)
       machine.kernel.set (kernel.setProcess group { process with breakEnd := wanted })
       pure (.returnValue wanted)
     catch _ => pure (.returnValue process.breakEnd)
@@ -272,6 +455,16 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       let (next, now) := (← machine.kernel.get).tick
       machine.kernel.set next
       returning emu out (Abi.time now scale big wordSize)
+    -- Anonymous and private is for `serveTaskCalls`, once what it takes the place of isn't mapped.
+    let mapMemory (offset : Nat) : IO SyscallAction := do
+      if arg 3 &&& architecture.mapAnonymous == 0 then
+        serveFileMap machine group (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) offset
+      else if mapsShared (arg 3) then
+        serveSharedMemory machine group (arg 0) (arg 1) (arg 2) (arg 3)
+      else
+        if arg 3 &&& 0x10 != 0 then
+          machine.kernel.modify (·.dropMappings group (arg 0) (arg 0 + pageUp (arg 1)))
+        pure .default
     let vectors (fd address count : Nat) (action : Nat → Nat → Nat → IO SyscallAction) : IO SyscallAction := do
       let mut total := 0
       for index in List.range count do
@@ -442,13 +635,20 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       let process := kernel.process group
       machine.kernel.set (kernel.setProcess group { process with umask := arg 0 &&& 0o777 })
       pure (.returnValue process.umask)
-    | .mmap =>
-      if arg 3 &&& architecture.mapAnonymous != 0 then pure .default
-      else serveFileMap machine group (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) (arg 5)
-    | .mmap2 =>
-      if arg 3 &&& architecture.mapAnonymous != 0 then pure .default
-      else serveFileMap machine group (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) (arg 5 * 4096)
-    | .mremap => pure (errorOf Errno.enomem)
+    | .mmap => mapMemory (arg 5)
+    | .mmap2 => mapMemory (arg 5 * 4096)
+    | .munmap =>
+      if arg 0 % 4096 != 0 || arg 1 == 0 then pure (errorOf Errno.einval)
+      else
+        machine.kernel.modify (·.dropMappings group (arg 0) (arg 0 + pageUp (arg 1)))
+        pure .default
+    | .mprotect =>
+      let upper := arg 0 + pageUp (arg 1)
+      if arg 2 &&& 2 != 0 && (kernel.process group).mappings.any (fun mapping => mapping.shared && !mapping.mayWrite && mapping.overlaps (arg 0) upper) then
+        pure (errorOf Errno.eacces)
+      else pure .default
+    | .madvise => serveAdvice machine group (arg 0) (arg 1) (arg 2)
+    | .mremap => serveRemap machine group (arg 0) (arg 1) (arg 2) (arg 3) (arg 4)
     | .brk => serveBreak machine group (arg 0)
     | .gettimeofday => clock (arg 0) 1000
     | .time =>
@@ -530,7 +730,10 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
     | none => pure .default
     | some call =>
       refreshProc machine emu call args
-      handOver machine emu (← kernelCall machine emu call args)
+      let before ← machine.kernel.get
+      let action ← kernelCall machine emu call args
+      refreshChanged machine emu before
+      handOver machine emu action
 
 /-- What is left: nothing else serves it, and it isn't there. -/
 private def serveRest (machine : Machine) : IO HookId :=
@@ -876,7 +1079,7 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
       let process := kernel.process group
       machine.kernel.set (kernel.setProcess group { process with
         descriptors := process.descriptors.filter fun _ entry => !entry.closeOnExec
-        breakStart := top, breakEnd := top, command := arguments, environment, program := name, auxiliary })
+        breakStart := top, breakEnd := top, command := arguments, environment, program := name, auxiliary, mappings := [] })
       pure (.returnValue 0)
 
 /-- The name of an intrinsic that goes by the rounding mode of the machine, by its mode. That is to nearest nearly always, so
@@ -1022,6 +1225,9 @@ private def heapModelId : String := "bap.heap"
 /-- What a checkpoint knows what `Machine.loadLibrary` has loaded by. -/
 private def libraryModelId : String := "bap.libraries"
 
+/-- Where a word is to `futex` that is in the file of a shared mapping, which is no address space, of which there are as many as tasks. -/
+private def sharedFutexSpace : Nat := 2 ^ 62
+
 /-- What makes an emulator a machine: its kernel behind its system calls. None of it is in a checkpoint. -/
 private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel) (watch : Option (Nat → List Nat → IO Unit))
     (handler : Option SyscallHandler) (target : Nat) (models : List RuntimeModel) : IO Machine := do
@@ -1033,6 +1239,17 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
       pure .default
   if let some handler := handler then
     let _ ← onSyscall emu handler
+  -- What a process wrote to shared memory is in the file before anything can look at the file.
+  let _ ← onSyscall emu fun emu _ _ => do
+    flushShared machine emu
+    pure .default
+  emu.leavingSpace.set (some (flushShared machine emu))
+  emu.enteredSpace.set (some (refreshShared machine emu))
+  emu.futexKey.set (some fun address => do
+    let some group ← runningGroup emu | return none
+    let mappings := ((← machine.kernel.get).process group).mappings
+    pure ((mappings.find? fun mapping => mapping.shared && mapping.overlaps address (address + 1)).map fun mapping =>
+      (sharedFutexSpace + mapping.inode, mapping.offset + (address - mapping.start))))
   for model in models do
     if (← machine.models.get).any (·.id == model.id) then
       throw <| IO.userError s!"two models of a runtime are called {model.id}"
@@ -1127,6 +1344,7 @@ def Machine.run (machine : Machine) (output : ByteArray → IO Unit) (quantum : 
     | rounds + 1, left => do
       let turn := min left (64 * quantum)
       let outcome ← runProcesses machine.emu quantum turn
+      flushShared machine machine.emu
       let (kernel, written) := (← machine.kernel.get).takeOutput
       machine.kernel.set kernel
       if written.size > 0 then output written
@@ -1300,7 +1518,7 @@ def Machine.restore (machine : Machine) (saved : Machine.Saved) : IO Unit := do
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 
 /-- What the bytes after the magic mean. -/
-def checkpointFormat : Nat := 6
+def checkpointFormat : Nat := 7
 
 /-- What this BAP does with a guest, which goes up when the same state could go on differently. A checkpoint is refused by a BAP
 of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/
