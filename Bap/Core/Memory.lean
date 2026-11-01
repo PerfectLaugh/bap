@@ -1,5 +1,6 @@
 import Bap.Core.Types
 import Bap.Core.Word
+import Bap.Core.Zeros
 import Std.Data.TreeMap
 
 namespace Bap
@@ -154,7 +155,7 @@ def clearRange (memory : Memory addressWidth) (address size : Nat) : Memory addr
     let first := max base address
     let stop := min (base + page.size) (address + size)
     if first < stop then
-      current.writeRegion first (ByteArray.mk (Array.replicate (stop - first) 0))
+      current.writeRegion first (zeroBytes (stop - first))
     else current
 
 def writeSortedCells (memory : Memory addressWidth) (cells : List (BitVec addressWidth × UInt8)) : Memory addressWidth :=

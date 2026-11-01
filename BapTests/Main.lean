@@ -73,6 +73,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxMusl "powerpc" (floats := false),
     Bap.Tests.Emu.testLinuxMusl "powerpc64",
     Bap.Tests.Emu.testLinuxMusl "powerpc64le" (floats := false),
+    Bap.Tests.Emu.testLinuxProc "aarch64",
+    Bap.Tests.Emu.testLinuxProc "mips",
     Bap.Tests.Emu.testLinuxCheckpoints "aarch64" (cuts := [1, 12000]),
     Bap.Tests.Emu.testLinuxCheckpoints "riscv64",
     Bap.Tests.Emu.testLinuxCheckpoints "i686",

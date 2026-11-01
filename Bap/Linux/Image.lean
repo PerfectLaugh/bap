@@ -67,6 +67,9 @@ structure ProcessImage where
   umask : Nat
   breakStart : Nat
   breakEnd : Nat
+  command : List String
+  environment : List String
+  program : String
   deriving DecidableEq
 
 /-- An inode, with what is in it as a tag and bytes: a link has its target in them. -/
@@ -102,12 +105,14 @@ def Kernel.image (kernel : Kernel) : Image where
       | .directory => (1, ByteArray.empty)
       | .symlink target => (2, target.toUTF8)
       | .console input => (3, input)
+      | .generated name => (4, name.toUTF8)
     { number, mode := inode.mode, kind, data }
   nextInode := kernel.nextInode
   openFiles := (sorted kernel.openFiles.toList).map fun (id, file) => (id, file.inode, file.offset, file.flags)
   nextOpenFile := kernel.nextOpenFile
   processes := (sorted kernel.processes.toList).map fun (group, process) =>
     { group, cwd := process.cwd, umask := process.umask, breakStart := process.breakStart, breakEnd := process.breakEnd
+      command := process.command, environment := process.environment, program := process.program
       descriptors := (sorted process.descriptors.toList).map fun (fd, entry) => (fd, entry.openFile, entry.closeOnExec) }
   output := kernel.output
   clock := kernel.clock
@@ -124,6 +129,10 @@ def Image.kernel (image : Image) : Except String Kernel := do
         | some target => pure (Content.symlink target)
         | none => .error "a Linux checkpoint with a link that isn't text"
       | 3 => pure (Content.console entry.data)
+      | 4 =>
+        match String.fromUTF8? entry.data with
+        | some name => pure (Content.generated name)
+        | none => .error "a Linux checkpoint with a generator that isn't text"
       | kind => .error s!"a Linux checkpoint with an inode of kind {kind}"
     pure (inodes.insert entry.number { number := entry.number, content, mode := entry.mode })
   pure {
@@ -135,6 +144,7 @@ def Image.kernel (image : Image) : Except String Kernel := do
     processes := image.processes.foldl (init := {}) fun processes process =>
       processes.insert process.group
         { cwd := process.cwd, umask := process.umask, breakStart := process.breakStart, breakEnd := process.breakEnd
+          command := process.command, environment := process.environment, program := process.program
           descriptors := process.descriptors.foldl (init := {}) fun descriptors (fd, openFile, closeOnExec) =>
             descriptors.insert fd { openFile, closeOnExec } }
     output := image.output
@@ -168,7 +178,10 @@ def putProcess (out : ByteArray) (process : ProcessImage) : ByteArray :=
   let out := putList putDescriptor out process.descriptors
   let out := putText out process.cwd
   let out := putNat out process.umask
-  putNat (putNat out process.breakStart) process.breakEnd
+  let out := putNat (putNat out process.breakStart) process.breakEnd
+  let out := putList putText out process.command
+  let out := putList putText out process.environment
+  putText out process.program
 
 def getProcess : Decoder ProcessImage := fun data at_ => do
   let (group, at_) ← getNat data at_
@@ -177,7 +190,10 @@ def getProcess : Decoder ProcessImage := fun data at_ => do
   let (umask, at_) ← getNat data at_
   let (breakStart, at_) ← getNat data at_
   let (breakEnd, at_) ← getNat data at_
-  .ok ({ group, descriptors, cwd, umask, breakStart, breakEnd }, at_)
+  let (command, at_) ← getList getText data at_
+  let (environment, at_) ← getList getText data at_
+  let (program, at_) ← getText data at_
+  .ok ({ group, descriptors, cwd, umask, breakStart, breakEnd, command, environment, program }, at_)
 
 def putInode (out : ByteArray) (inode : InodeImage) : ByteArray :=
   putBytes (putNat (putNat (putNat out inode.number) inode.mode) inode.kind) inode.data

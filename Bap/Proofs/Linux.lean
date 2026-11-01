@@ -1,6 +1,7 @@
 import Bap.Linux.Calls
 import Bap.Linux.Elf
 import Bap.Linux.Image
+import Bap.Linux.Proc
 
 /-! What the virtual kernel says of itself. That it can't reach the machine it runs on needs no theorem: its operations are pure
 functions of its state, which their types say. -/
@@ -109,6 +110,19 @@ theorem writeAt_size (data : ByteArray) (offset : Nat) (bytes : ByteArray) (h : 
 theorem parse_short (data : ByteArray) (h : data.size < 52) : ∃ error, Elf.parse data = .error error := by
   refine ⟨"not an ELF file", ?_⟩
   simp [Elf.parse, h, bind, Except.bind]
+
+/-! ### `/proc` -/
+
+/-- Every file of `/proc` and `/sys` that the kernel puts in has what makes it, so that none of them fails to open. -/
+theorem systemFiles_generated : ∀ entry ∈ Proc.systemFiles, (Proc.builtin entry.2).isSome = true := by
+  simp [Proc.systemFiles, Proc.builtin]
+
+/-- Every file of a process has what makes it. -/
+theorem processFiles_generated : ∀ name ∈ Proc.processFiles, (Proc.builtin name).isSome = true := by
+  simp [Proc.processFiles, Proc.builtin]
+
+/-- The arguments of a process have a zero after each, as `/proc/PID/cmdline` is read: nothing, for none. -/
+theorem zeroEnded_nil : Proc.zeroEnded [] = "".toUTF8 := rfl
 
 /-! ### What a checkpoint holds of a kernel comes back -/
 
@@ -333,12 +347,19 @@ theorem putInode_inverts : Inverts putInode getInode := by
 
 theorem putProcess_extends : Extends putProcess := fun out _ =>
   (putNat_extends out _).trans ((putList_extends putDescriptor_extends _ _).trans ((putText_extends _ _).trans
-    ((putNat_extends _ _).trans ((putNat_extends _ _).trans (putNat_extends _ _)))))
+    ((putNat_extends _ _).trans ((putNat_extends _ _).trans ((putNat_extends _ _).trans
+      ((putList_extends putText_extends _ _).trans ((putList_extends putText_extends _ _).trans (putText_extends _ _))))))))
 
 theorem putProcess_inverts : Inverts putProcess getProcess := by
-  rintro data out ⟨group, descriptors, cwd, umask, breakStart, breakEnd⟩ hp
-  have h6 := putNat_inverts data _ breakEnd hp
-  have p5 := (putNat_extends _ breakEnd).trans hp
+  rintro data out ⟨group, descriptors, cwd, umask, breakStart, breakEnd, command, environment, program⟩ hp
+  have h9 := putText_inverts data _ program hp
+  have p8 := (putText_extends _ program).trans hp
+  have h8 := putList_inverts putText_extends putText_inverts data _ environment p8
+  have p7 := (putList_extends putText_extends _ environment).trans p8
+  have h7 := putList_inverts putText_extends putText_inverts data _ command p7
+  have p6 := (putList_extends putText_extends _ command).trans p7
+  have h6 := putNat_inverts data _ breakEnd p6
+  have p5 := (putNat_extends _ breakEnd).trans p6
   have h5 := putNat_inverts data _ breakStart p5
   have p4 := (putNat_extends _ breakStart).trans p5
   have h4 := putNat_inverts data _ umask p4
@@ -347,7 +368,7 @@ theorem putProcess_inverts : Inverts putProcess getProcess := by
   have p2 := (putText_extends _ cwd).trans p3
   have h2 := putList_inverts putDescriptor_extends putDescriptor_inverts data _ descriptors p2
   have h1 := putNat_inverts data out group ((putList_extends putDescriptor_extends _ descriptors).trans p2)
-  simp [getProcess, putProcess, h1, h2, h3, h4, h5, h6, bind, Except.bind]
+  simp [getProcess, putProcess, h1, h2, h3, h4, h5, h6, h7, h8, h9, bind, Except.bind]
 
 /-- A checkpoint reads back as the image that it was made from, wherever in a file that is and whatever comes after it. -/
 theorem decode_encode (data out : ByteArray) (image : Image) (hp : Prefix (encode out image) data) :

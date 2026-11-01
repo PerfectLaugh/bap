@@ -576,6 +576,34 @@ def testLinuxMusl (triple : String) (floats : Bool := true) (exclusive : Bool :=
     assertEqual s!"Linux {triple} a program of floating point ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
     assertEqual s!"Linux {triple} floating point is what qemu does" (← IO.FS.readBinFile s!"testsuite/data/{triple}-libc-floats.out").toList text.toList
 
+/-- What a program finds in `/proc`, of itself and its child, and a file that a function makes, across a checkpoint. -/
+def testLinuxProc (triple : String) : IO Unit := do
+  let path := s!"testsuite/bin/{triple}-linux-musl-libc-proc"
+  let custom : Bap.Linux.Generator := fun view => s!"made for {view.machine}\n".toUTF8
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile path)).addGenerated "/custom" custom
+  let runOn (machine : Bap.Linux.Machine) : IO (Bap.Tasks.ScheduleOutcome × String) := do
+    let written ← IO.mkRef ByteArray.empty
+    let outcome ← machine.run fun data => written.modify (· ++ data)
+    pure (outcome, String.fromUTF8! (← written.get))
+  let machineName := if triple == "mips" then "mips" else triple
+  let expected (customLine : String) :=
+    "cmdline 11 /test arg1\nexe /test\nmaps stack 1 exec 1\nstatus name test same 1\ncomm by pid test\nself is pid 1\nfd link /made\nfds 1\n" ++
+    "cpuinfo size 0 read 1\nostype Linux\n" ++ customLine ++ "write refused 1\nchild seen 1\nchild 7 gone 1\n"
+  let made := s!"made for {machineName}\n"
+  let (outcome, text) ← runOn (← Bap.Linux.start kernel "/test" ["/test", "arg1"])
+  assertEqual s!"Linux {triple} /proc says what a process is" (Bap.Tasks.ScheduleOutcome.finished (Bap.Tasks.exitedStatus 4), expected s!"custom {made.utf8ByteSize} {made}") (outcome, text)
+  -- A checkpoint has the name of what makes it, and goes on with the function that it is given again.
+  let first ← Bap.Linux.start kernel "/test" ["/test", "arg1"]
+  let _ ← first.run (fuel := 1) fun _ => pure ()
+  let data ← first.checkpoint
+  let (_, again) ← runOn (← Bap.Linux.Machine.ofCheckpoint data (generators := [("/custom", custom)]))
+  assertEqual s!"Linux {triple} a generated file goes on from a checkpoint" text again
+  let (_, without) ← runOn (← Bap.Linux.Machine.ofCheckpoint data)
+  assertTrue s!"Linux {triple} a generated file without what makes it fails to open: {without}" ((without.splitOn "custom -1").length > 1)
+  -- What is put in over a file of /proc is what a program gets.
+  let (_, mine) ← runOn (← Bap.Linux.start (kernel.addGenerated "/proc/sys/kernel/ostype" fun _ => "Mine\n".toUTF8) "/test" ["/test", "arg1"])
+  assertTrue s!"Linux {triple} /proc can be replaced: {mine}" ((mine.splitOn "ostype Mine").length > 1)
+
 /-- A machine stopped anywhere and saved goes on from the bytes alone, in a new machine, to the same end. -/
 def testLinuxCheckpoints (triple : String) (cuts : List Nat := [12000]) : IO Unit := do
   let start (name : String) : IO Bap.Linux.Machine := do

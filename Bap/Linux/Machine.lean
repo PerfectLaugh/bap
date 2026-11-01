@@ -2,6 +2,7 @@ import Bap.Emu.Tasks
 import Bap.Emu.Checkpoint
 import Bap.Linux.Calls
 import Bap.Linux.Image
+import Bap.Linux.Proc
 import Bap.Linux.Elf
 import Bap.Float
 
@@ -104,13 +105,73 @@ private def serveBreak (machine : Machine) (group wanted : Nat) : IO SyscallActi
     let needed := pageUp wanted
     try
       if needed > mappedTo then
-        map machine.emu ⟨mappedTo, ByteArray.mk (Array.replicate (needed - mappedTo) 0), ⟨true, true, false⟩⟩
+        map machine.emu ⟨mappedTo, Bap.zeroBytes (needed - mappedTo), ⟨true, true, false⟩⟩
       machine.kernel.set (kernel.setProcess group { process with breakEnd := wanted })
       pure (.returnValue wanted)
     catch _ => pure (.returnValue process.breakEnd)
 
 private def base (machine : Machine) (group directory : Nat) : IO (Result String) := do
   pure ((← machine.kernel.get).baseOf group directory (atCwd directory))
+
+private def stackTop (architecture : Architecture) : Nat := if architecture.bits == 32 then 0x7fff0000 else 0x7ffffffff000
+private def stackSize : Nat := 8 * 1024 * 1024
+
+/-- What makes a generated file: what the kernel was given for it, or else its own. -/
+private def generatorOf (kernel : Kernel) (name : String) : Option Generator :=
+  (kernel.generators.get? name).or (Proc.builtin name)
+
+/-- The name of what makes the file of a path, if it is generated, and the path without links. -/
+private def generatedAt (kernel : Kernel) (base path : String) : Option (String × String) :=
+  match kernel.resolve base path with
+  | .ok (normal, some number) =>
+    match kernel.inodes.get? number with
+    | some { content := .generated name, .. } => some (name, normal)
+    | _ => none
+  | _ => none
+
+/-- The process that a path is about, if it is under `/proc/PID`, and otherwise the one that asks. -/
+private def processOfPath (path : String) (group : Nat) : Nat :=
+  match path.splitOn "/" with
+  | "" :: "proc" :: number :: _ => number.toNat?.getD group
+  | _ => group
+
+/-- The processes that are running. -/
+private def liveProcesses (emu : Emu) : IO (List Nat) := do
+  pure (((← emu.taskTable.get).tasks.filter fun task => task.status.isNone && task.tid == task.group).map (·.tid))
+
+/-- What a generated file sees of a process. -/
+private def viewOf (machine : Machine) (emu : Emu) (group : Nat) : IO ProcessView := do
+  let kernel ← machine.kernel.get
+  let process := kernel.process group
+  let table ← emu.taskTable.get
+  let ownSpace := table.spaceOf (← thread emu)
+  let space := table.spaceOf group
+  let regions ← if space == ownSpace then emu.regions.get
+    else pure ((← emu.parkedRegions.get).getD space [])
+  let architecture := machine.architecture
+  let stackStart := stackTop architecture - stackSize
+  let bootClock := (1700000000 : Nat) * 1000000000
+  pure {
+    pid := group
+    parent := match table.find? group with
+      | some task => task.parent
+      | none => 0
+    threads := (table.tasks.filter fun task => task.group == group && task.status.isNone).map (·.tid)
+    command := process.command
+    environment := process.environment
+    program := process.program
+    cwd := process.cwd
+    ranges := regions.map fun region =>
+      { start := region.address, size := region.data.size, readable := region.protection.readable
+        writable := region.protection.writable, executable := region.protection.executable }
+    breakStart := process.breakStart
+    breakEnd := process.breakEnd
+    stackStart
+    bits := architecture.bits
+    machine := architecture.name
+    clock := kernel.clock
+    uptime := kernel.clock - bootClock
+    processes := ← liveProcesses emu }
 
 /-- The system calls of files, memory that files are mapped into, time and what a process asks of itself. -/
 private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : List Nat) : IO SyscallAction := do
@@ -139,7 +200,19 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
         | .ok path => action from_ path
     let here := 2 ^ 64 - 100
     let openAt (directory address flags mode : Nat) : IO SyscallAction :=
-      at_ directory address fun from_ path => applyNat machine (·.openPath group from_ path (architecture.openFlags flags) mode)
+      at_ directory address fun from_ path => do
+        let flags := architecture.openFlags flags
+        let current ← machine.kernel.get
+        match generatedAt current from_ path with
+        | some (name, normal) =>
+          if flags &&& 3 != 0 then pure (errorOf Errno.eacces)
+          else
+            match generatorOf current name with
+            | none => pure (errorOf Errno.eio)
+            | some generate =>
+              let bytes := generate (← viewOf machine emu (processOfPath normal group))
+              applyNat machine fun kernel => .ok (kernel.openBytes group bytes flags)
+        | none => applyNat machine (·.openPath group from_ path flags mode)
     let accessAt (directory address : Nat) : IO SyscallAction :=
       at_ directory address fun from_ path =>
         pure (match kernel.statPath from_ path with
@@ -368,6 +441,26 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     | .schedGetaffinity => returning emu (arg 2) (cell wordSize 1) wordSize
     | .succeeds => pure (.returnValue 0)
 
+/-- The argument of a call that is a path, if it has one, and whether it is relative to a descriptor. -/
+private def pathArgument : Call → Option Nat
+  | .open_ | .stat | .lstat | .access | .readlink | .chdir | .truncate | .truncate64 => some 0
+  | .openat | .fstatat | .statx | .faccessat | .readlinkat => some 1
+  | _ => none
+
+/-- Makes `/proc` what it has to be for a call that may look at it, which only a path can tell. -/
+private def refreshProc (machine : Machine) (emu : Emu) (call : Call) (args : List Nat) : IO Unit := do
+  if let some index := pathArgument call then
+    match ← (readString emu (args.getD index 0)).toBaseIO with
+    | .error _ => pure ()
+    | .ok path =>
+      let group := (← currentTask emu).group
+      let cwd := ((← machine.kernel.get).process group).cwd
+      let relative := !path.startsWith "/"
+      if path.startsWith "/proc" || (relative && (index == 1 || cwd.startsWith "/proc")) then
+        let self ← thread emu
+        let live ← liveProcesses emu
+        machine.kernel.modify (Proc.refresh · group self live)
+
 /-- What a call gives, as the guest has it. -/
 private def handOver (machine : Machine) (emu : Emu) : SyscallAction → IO SyscallAction
   | .returnValue value =>
@@ -380,7 +473,9 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
     match machine.architecture.call number with
     -- What serveTaskCalls serves.
     | none => pure .default
-    | some call => handOver machine emu (← kernelCall machine emu call args)
+    | some call =>
+      refreshProc machine emu call args
+      handOver machine emu (← kernelCall machine emu call args)
 
 /-- What is left: nothing else serves it, and it isn't there. -/
 private def serveRest (machine : Machine) : IO HookId :=
@@ -542,8 +637,6 @@ private def mapProgram (emu : Emu) (data : ByteArray) (program : Elf.Program) (b
       mappedTo := stop
   pure mappedTo
 
-private def stackTop (architecture : Architecture) : Nat := if architecture.bits == 32 then 0x7fff0000 else 0x7ffffffff000
-private def stackSize : Nat := 8 * 1024 * 1024
 /-- Where a program goes that can go anywhere, and an interpreter. Those of Linux, without the randomness. -/
 private def programBase (architecture : Architecture) : Nat := if architecture.bits == 32 then 0x400000 else 0x555555554000
 private def interpreterBase (architecture : Architecture) : Nat := if architecture.bits == 32 then 0x70000000 else 0x7ffff7fc0000
@@ -557,7 +650,7 @@ private def fileOf (kernel : Kernel) (path : String) : Result ByteArray := do
 
 /-- The stack that the kernel hands over: where the arguments, the environment and the auxiliary vector are. -/
 private def mapStack (emu : Emu) (architecture : Architecture) (arguments environment : List String) (auxiliary : List (Nat × Nat)) : IO Unit := do
-  map emu ⟨stackTop architecture - stackSize, ByteArray.mk (Array.replicate stackSize 0), ⟨true, true, false⟩⟩
+  map emu ⟨stackTop architecture - stackSize, Bap.zeroBytes stackSize, ⟨true, true, false⟩⟩
   let mut cursor := stackTop architecture - 16
   let wordSize := architecture.bits / 8
   let place (cursor : Nat) (text : ByteArray) : IO Nat := do
@@ -675,7 +768,9 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   if let .powerpc 64 _ := architecture then setReg emu (word "R12") (bits 64 entry)
   let first := (← currentTask emu).group
   let kernel := kernel.withConsole first input
-  let kernel := kernel.setProcess first { kernel.process first with breakStart := top, breakEnd := top }
+  let kernel := kernel.setProcess first { kernel.process first with
+    breakStart := top, breakEnd := top, command := if arguments.isEmpty then [path] else arguments, environment, program := path }
+  let kernel := Proc.install kernel
   machineOf architecture emu kernel watch
 
 /-- Runs it until nothing can run, with what it writes to the console going to `output` as it comes. -/
@@ -717,9 +812,12 @@ def Machine.checkpoint (machine : Machine) : IO ByteArray := do
   pure (Image.encode header (← machine.kernel.get).image ++ (← checkpointBytes machine.emu))
 
 /-- A new machine where a checkpoint was, which goes on as that one would. This is all it takes: nothing has to be running, or
-even to be on the host, but what the bytes hold. A turn of a thread that a run stopped in starts again. `watch` is as in `start`. -/
+even to be on the host, but what the bytes hold. A turn of a thread that a run stopped in starts again. `watch` is as in `start`.
+What `Kernel.addGenerated` put in has its functions given again, by the normal paths that they were put in at, as a function can't be
+in a file: a file without its function gives `EIO` when it is opened. -/
 def Machine.ofCheckpoint (data : ByteArray) (watch : Option (Nat → List Nat → IO Unit) := none)
-    (fallback : Option (Emu → Nat → List Nat → IO SyscallAction) := none) : IO Machine := do
+    (fallback : Option (Emu → Nat → List Nat → IO SyscallAction) := none)
+    (generators : List (String × Generator) := []) : IO Machine := do
   if data.extract 0 checkpointMagic.size != checkpointMagic then
     throw <| IO.userError "not a checkpoint of a Linux machine"
   let (number, at_) ← IO.ofExcept (Wire.getNat data checkpointMagic.size)
@@ -730,6 +828,7 @@ def Machine.ofCheckpoint (data : ByteArray) (watch : Option (Nat → List Nat �
     | throw <| IO.userError s!"a checkpoint of ELF machine {number}, which isn't one here"
   let (image, at_) ← IO.ofExcept (Image.decode data at_)
   let kernel ← IO.ofExcept image.kernel
+  let kernel := { kernel with generators := generators.foldl (fun table entry => table.insert entry.1 entry.2) {} }
   let emu ← emulatorOf architecture
   Bap.Emu.restore emu (← snapshotOfBytes emu (data.extract at_ data.size))
   machineOf architecture emu kernel watch fallback

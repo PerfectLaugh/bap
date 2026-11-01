@@ -411,7 +411,7 @@ private def serveMmap (emu : Emu) (address size bits flags : Nat) : IO SyscallAc
   else
     let pages := (size + 4095) / 4096 * 4096
     try
-      syscallReturn emu (.ok (← placeMapping emu address fixed (ByteArray.mk (Array.replicate pages 0)) bits))
+      syscallReturn emu (.ok (← placeMapping emu address fixed (zeroBytes pages) bits))
     catch _ => syscallReturn emu (.error enomem)
 
 /-- `mprotect`. -/

@@ -1,4 +1,5 @@
 import Std.Data.HashMap
+import Bap.Core.Zeros
 
 /-! # A virtual Linux kernel
 
@@ -13,6 +14,7 @@ namespace Bap.Linux
 
 namespace Errno
 def eperm : Nat := 1
+def eacces : Nat := 13
 def enoent : Nat := 2
 def eio : Nat := 5
 def ebadf : Nat := 9
@@ -37,6 +39,8 @@ inductive Content where
   | symlink (target : String)
   /-- What reads get from it, in order, and writes go to the output of the kernel. It can't seek. -/
   | console (input : ByteArray)
+  /-- What a generator of this name makes when it is opened, as the files of `/proc` are: see `addGenerated`. -/
+  | generated (name : String)
 
 structure Inode where
   number : Nat
@@ -61,6 +65,46 @@ structure Process where
   /-- Where the heap starts and where it ends now. -/
   breakStart : Nat := 0
   breakEnd : Nat := 0
+  /-- What it was started with, as `/proc` says. A child has what its parent has. -/
+  command : List String := []
+  environment : List String := []
+  program : String := ""
+
+/-- What a mapping of a process is: where, how much, and what it may do. -/
+structure MappedRange where
+  start : Nat
+  size : Nat
+  readable : Bool
+  writable : Bool
+  executable : Bool
+  deriving DecidableEq, Repr
+
+/-- What a generator of a file sees: the process that it is about, and the machine. It is plain data, which comes from the kernel
+and from the emulator when the file is opened. -/
+structure ProcessView where
+  pid : Nat
+  parent : Nat
+  /-- The tasks of the process. -/
+  threads : List Nat := []
+  command : List String := []
+  environment : List String := []
+  program : String := ""
+  cwd : String := "/"
+  ranges : List MappedRange := []
+  breakStart : Nat := 0
+  breakEnd : Nat := 0
+  stackStart : Nat := 0
+  /-- How many bits it has, and what `uname` calls it. -/
+  bits : Nat := 64
+  machine : String := ""
+  /-- Nanoseconds since the epoch, and since the kernel started. -/
+  clock : Nat := 0
+  uptime : Nat := 0
+  /-- The processes that there are. -/
+  processes : List Nat := []
+
+/-- What makes the bytes of a generated file. -/
+abbrev Generator := ProcessView → ByteArray
 
 structure Kernel where
   /-- From an absolute path without `.`, `..` or a trailing slash to its inode. -/
@@ -76,6 +120,9 @@ structure Kernel where
   clock : Nat := 1700000000 * 1000000000
   /-- What the time stamp counter of the processor reads, which is kept here so that it is part of what a checkpoint holds. -/
   cycles : Nat := 1000000
+  /-- What makes the generated files that aren't those of `/proc`, by name. A function can't go in a checkpoint: only the names do,
+  and these are given again to go on from it. -/
+  generators : Std.HashMap String Generator := {}
 
 /-- A result, or the number of an error. -/
 abbrev Result (α : Type) := Except Nat α
@@ -160,6 +207,44 @@ def addFile (kernel : Kernel) (path : String) (data : ByteArray) (mode : Nat := 
     { kernel with inodes := kernel.inodes.insert number { number, content := .file data, mode } }
   | none => (addInode kernel normal (.file data) mode).1
 
+/-- Puts a file in whose bytes `generate` makes each time that it is opened, for what it sees of the process that opens it. What is
+open has those bytes until it is closed, and stat says that it is empty, as for a file of `/proc`. For setting up, before a run. It
+replaces what is there, so that this can say what a file of `/proc` has. -/
+def addGenerated (kernel : Kernel) (path : String) (generate : Generator) (mode : Nat := 0o100444) : Kernel :=
+  let normal := Path.ofParts (Path.parts "/" path)
+  let kernel := addDirectories kernel (Path.parent normal)
+  let kernel := { kernel with generators := kernel.generators.insert normal generate }
+  match kernel.paths.get? normal with
+  | some number =>
+    { kernel with inodes := kernel.inodes.insert number { number, content := .generated normal, mode } }
+  | none => (addInode kernel normal (.generated normal) mode).1
+
+/-- A file that some generator of the kernel's own makes, by its name, if there is nothing there yet. -/
+def addBuiltin (kernel : Kernel) (path name : String) (mode : Nat := 0o100444) : Kernel :=
+  let normal := Path.ofParts (Path.parts "/" path)
+  if kernel.paths.contains normal then kernel
+  else
+    let kernel := addDirectories kernel (Path.parent normal)
+    (addInode kernel normal (.generated name) mode).1
+
+/-- Forgets what is under a directory, which stays. -/
+def removeUnder (kernel : Kernel) (directory : String) : Kernel :=
+  let inside := directory ++ "/"
+  let gone := kernel.paths.toList.filter fun entry => entry.1.startsWith inside
+  gone.foldl (init := kernel) fun kernel entry =>
+    { kernel with
+      paths := kernel.paths.erase entry.1
+      inodes := kernel.inodes.erase entry.2 }
+
+/-- A link at a path, whatever was there. -/
+def setSymlink (kernel : Kernel) (path target : String) : Kernel :=
+  let normal := Path.ofParts (Path.parts "/" path)
+  let kernel := addDirectories kernel (Path.parent normal)
+  match kernel.paths.get? normal with
+  | some number =>
+    { kernel with inodes := kernel.inodes.insert number { number, content := .symlink target, mode := 0o120777 } }
+  | none => (addInode kernel normal (.symlink target) 0o120777).1
+
 /-- Puts a symbolic link in. For setting up, before a run. -/
 def addSymlink (kernel : Kernel) (path target : String) : Kernel :=
   let normal := Path.ofParts (Path.parts "/" path)
@@ -181,6 +266,17 @@ def addDescriptor (kernel : Kernel) (group openFile : Nat) (closeOnExec : Bool :
   let process := kernel.process group
   let fd := lowestFree process.descriptors from_
   (kernel.setProcess group { process with descriptors := process.descriptors.insert fd { openFile, closeOnExec } }, fd)
+
+/-- A descriptor of bytes that are nowhere in the tree: what a generated file gives the one that opens it. -/
+def openBytes (kernel : Kernel) (group : Nat) (data : ByteArray) (flags : Nat) (mode : Nat := 0o100444) : Kernel × Nat :=
+  let number := kernel.nextInode
+  let openFile := kernel.nextOpenFile
+  let kernel := { kernel with
+    inodes := kernel.inodes.insert number { number, content := .file data, mode }
+    nextInode := number + 1
+    openFiles := kernel.openFiles.insert openFile { inode := number, flags := flags &&& 3 }
+    nextOpenFile := openFile + 1 }
+  kernel.addDescriptor group openFile (flags &&& 0x80000 != 0)
 
 /-- The three standard descriptors, on a console, for the first process. -/
 def withConsole (kernel : Kernel) (group : Nat) (input : ByteArray := ByteArray.empty) : Kernel :=
@@ -221,7 +317,7 @@ def readAt (data : ByteArray) (offset count : Nat) : ByteArray :=
 
 /-- A file with `bytes` at `offset`, and zeros in what it skips. -/
 def writeAt (data : ByteArray) (offset : Nat) (bytes : ByteArray) : ByteArray :=
-  let filled := if data.size < offset then data ++ ByteArray.mk (Array.replicate (offset - data.size) 0) else data
+  let filled := if data.size < offset then data ++ Bap.zeroBytes (offset - data.size) else data
   filled.extract 0 offset ++ bytes ++ filled.extract (offset + bytes.size) filled.size
 
 def oCreat : Nat := 0x40
@@ -263,6 +359,8 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
       if writable flags then .error Errno.eisdir
       .ok kernel
     | .symlink _ => .error Errno.eloop
+    -- `Machine` opens these, with what they see, which this doesn't know.
+    | .generated _ => .error Errno.eacces
     | .file _ =>
       if has flags oDirectory then .error Errno.enotdir
       if has flags oTrunc && writable flags then
@@ -285,7 +383,7 @@ def read (kernel : Kernel) (group fd count : Nat) : Result (Kernel × ByteArray)
   let data ← match inode.content with
     | .file data | .console data => .ok data
     | .directory => .error Errno.eisdir
-    | .symlink _ => .error Errno.einval
+    | .symlink _ | .generated _ => .error Errno.einval
   let bytes := readAt data file.offset count
   .ok ({ kernel with openFiles := kernel.openFiles.insert id { file with offset := file.offset + bytes.size } }, bytes)
 
@@ -298,7 +396,7 @@ def readFrom (kernel : Kernel) (group fd count offset : Nat) : Result ByteArray 
   | .file data => .ok (readAt data offset count)
   | .console _ => .error Errno.espipe
   | .directory => .error Errno.eisdir
-  | .symlink _ => .error Errno.einval
+  | .symlink _ | .generated _ => .error Errno.einval
 
 /-- `write`, at the offset of the file, or at its end if it was opened to append. -/
 def write (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Result (Kernel × Nat) := do
@@ -313,7 +411,7 @@ def write (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Result (Kerne
       inodes := kernel.inodes.insert file.inode { inode with content := .file (writeAt data offset bytes) }
       openFiles := kernel.openFiles.insert id { file with offset := offset + bytes.size } }, bytes.size)
   | .directory => .error Errno.eisdir
-  | .symlink _ => .error Errno.einval
+  | .symlink _ | .generated _ => .error Errno.einval
 
 /-- `pwrite`, which leaves the offset. -/
 def writeTo (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Nat) : Result (Kernel × Nat) := do
@@ -326,7 +424,7 @@ def writeTo (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Nat
       bytes.size)
   | .console _ => .error Errno.espipe
   | .directory => .error Errno.eisdir
-  | .symlink _ => .error Errno.einval
+  | .symlink _ | .generated _ => .error Errno.einval
 
 /-- `lseek`. A signed offset comes as `(negative, size)`. -/
 def seek (kernel : Kernel) (group fd : Nat) (negative : Bool) (distance whence : Nat) : Result (Kernel × Nat) := do
@@ -336,7 +434,7 @@ def seek (kernel : Kernel) (group fd : Nat) (negative : Bool) (distance whence :
     | .file data => .ok data.size
     | .directory => .ok 0
     | .console _ => .error Errno.espipe
-    | .symlink _ => .error Errno.einval
+    | .symlink _ | .generated _ => .error Errno.einval
   let start ← match whence with
     | 0 => .ok 0
     | 1 => .ok file.offset
@@ -408,7 +506,7 @@ private def statOf (kernel : Kernel) (inode : Inode) : Stat :=
     | .file data => (data.size, 1)
     | .directory => (4096, 2)
     | .symlink target => (target.utf8ByteSize, 1)
-    | .console _ => (0, 1)
+    | .console _ | .generated _ => (0, 1)
   { inode := inode.number, mode := inode.mode, size, links, time := kernel.clock }
 
 /-- `stat` and `lstat`. -/
@@ -460,6 +558,7 @@ def directoryEntries (kernel : Kernel) (group fd : Nat) : Result (Nat × Nat × 
       | some { content := .symlink _, .. } => 10
       | some { content := .file _, .. } => 8
       | some { content := .console _, .. } => 2
+      | some { content := .generated _, .. } => 8
       | none => 0
     let parentNumber := (kernel.paths.get? (Path.parent path)).getD inode.number
     let all := [(inode.number, 4, "."), (parentNumber, 4, "..")] ++
@@ -551,7 +650,7 @@ def truncateInode (kernel : Kernel) (number size : Nat) : Result Kernel := do
   match inode.content with
   | .file data =>
     let data := if size ≤ data.size then data.extract 0 size
-      else data ++ ByteArray.mk (Array.replicate (size - data.size) 0)
+      else data ++ Bap.zeroBytes (size - data.size)
     .ok { kernel with inodes := kernel.inodes.insert number { inode with content := .file data } }
   | .directory => .error Errno.eisdir
   | _ => .error Errno.einval
@@ -583,7 +682,7 @@ def mappedBytes (kernel : Kernel) (group fd offset size : Nat) : Result ByteArra
   match (← inodeOf kernel file.inode).content with
   | .file data =>
     let bytes := readAt data offset size
-    .ok (bytes ++ ByteArray.mk (Array.replicate (size - bytes.size) 0))
+    .ok (bytes ++ Bap.zeroBytes (size - bytes.size))
   | .directory => .error Errno.eisdir
   | _ => .error Errno.einval
 
