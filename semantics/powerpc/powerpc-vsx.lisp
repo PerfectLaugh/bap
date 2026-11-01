@@ -693,7 +693,9 @@
 
 (defun XSCVDPSP (xt xb) (set-scalar xt (dp-to-sp-copies xb)))
 (defun XSCVSPDP (xt xb) (set-scalar xt (sp-to-dp (word0 xb))))
-(defun XSCVDPSPN (xt xb) (let ((s (concat (dp-to-sp xb) (dp-to-sp xb)))) (set$ xt (concat s s))))
+;; ConvertDPtoSP_NS: it doesn't signal, a NaN stays what it is and the rest is truncated, in the two words of the first doubleword
+(defun dp-to-sp-ns (x) (pick (fp-nan x) (double-to-single x) (fconvert :rtz 32 x)))
+(defun XSCVDPSPN (xt xb) (let ((s (dp-to-sp-ns xb))) (set-scalar xt (concat s s))))
 (defun XSCVSPDPN (xt xb) (set-scalar xt (single-to-double (extract 127 96 xb))))
 (defun XVCVDPSP (xt xb) (set$ xt (lanes64-1 dp-to-sp-copies xb)))
 (defun sp-to-dp-first (x) (sp-to-dp (word0 x)))

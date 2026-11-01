@@ -480,7 +480,9 @@
 ;; Enables field asks for, which are disabled at the reset. The NaNs are of the
 ;; legacy encoding of the Release 2 (FCSR.NAN2008 = 0), whose quiet
 ;; bit, the most significant bit of the fraction, is set in the
-;; signaling NaNs: an operation, whose operand is a signaling NaN, or
+;; signaling NaNs, and a quiet NaN goes through, as the manual and the
+;; emulator of Linux have it, while qemu gives the default NaN for every
+;; NaN: an operation, whose operand is a signaling NaN, or
 ;; which is invalid, e.g., 0/0, returns the default NaN, 0x7FBFFFFF or
 ;; 0x7FF7FFFFFFFFFFFF, and else the quiet NaN of its first operand,
 ;; that is a NaN. The Release 6 has the NaNs of IEEE 754-2008

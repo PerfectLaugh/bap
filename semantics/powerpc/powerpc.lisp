@@ -947,7 +947,7 @@
         (big (logand (>= expn (u64 1054)) (not (= x 0xC1E0000000000000:64)))))
     (pick (is-nan x) most-negative
           (pick big
-                (pick (msb x) most-negative (cast-unsigned 64 0x7fffffff:32))
+                (pick (msb x) (cast-signed 64 0x80000000:32) (cast-unsigned 64 0x7fffffff:32))
                 (pick (msb x) (neg mag) mag)))))
 
 (defun FCTIWZ (rt rb) (set$ rt (fp-to-word (fp-trunc rb))))
@@ -1555,9 +1555,14 @@
 (defun addfp (x y) (nj (+. :rne (nj x) (nj y))))
 (defun subfp (x y) (nj (-. :rne (nj x) (nj y))))
 
+;; the NaN of the addend Z comes before that of the multiplier Y, as VB
+;; comes before VC
 (defun fmad32 (x y z)
-  (nj (intrinsic (symbol-concat 'fmad 'rne 'ieee754_binary '32 :sep '_)
-                 (nj x) (nj y) (nj z) :result 32)))
+  (pick (is-nan x) (quiet32 x)
+    (pick (is-nan z) (quiet32 z)
+      (pick (is-nan y) (quiet32 y)
+        (nj (intrinsic (symbol-concat 'fmad 'rne 'ieee754_binary '32 :sep '_)
+                       (nj x) (nj y) (nj z) :result 32))))))
 
 (defun fp-negate32 (x) (pick (is-nan x) x (fp-neg x)))
 

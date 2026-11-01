@@ -56,6 +56,11 @@ def corpus_lines(name):
 class Target:
     """The common part: a state is a dictionary from the names of the Lean variables to their values."""
 
+    def policy_of(self, differ):
+        """The name of what the runner is known to do otherwise than the semantics, where neither is wrong, if that is all that differs. What
+        differs is (name, runner, lifter)."""
+        return None
+
     name = ""
     word = 8
     endian = "<"
@@ -1326,6 +1331,13 @@ def mips_stems(name):
 
 class Mips(Risc):
     nop = bytes(4)
+
+    def policy_of(self, differ):
+        # Legacy qemu is in default-NaN mode, and gives 0x7FBFFFFF for a quiet NaN that the manual has go through: see semantics/mips/mips.lisp.
+        defaults = ("7fbfffff", "ffbfffff", "7ff7ffff", "fff7ffff")
+        if not self.release6 and all(name.startswith("F") and (ours == "ffffffff" or any(d in ours for d in defaults)) for name, ours, _ in differ):
+            return "qemu's default NaN"
+        return None
     asm_prelude = ".set noreorder\n.set noat\n"
     semantics = ["mips/mips.lisp", "mips/mips-r6.lisp"]
     mnemonics_of = staticmethod(mips_stems)
@@ -1528,6 +1540,13 @@ def powerpc_stems(name):
 
 
 class Ppc(Risc):
+
+    def policy_of(self, differ):
+        # qemu has 1/±0 as ±0.5 in fre and fres, and infinity for what is nearly zero, and the manual has it as infinity.
+        half, infinity = ("3fe0000000000000", "bfe0000000000000"), ("7ff0000000000000", "fff0000000000000")
+        if all(name.startswith("F") and ours in half and theirs in infinity for name, ours, theirs in differ):
+            return "qemu's reciprocal of zero"
+        return None
     base_pins = {"R5": "window+248", "R6": 8}
     default_pins = {"R1": "window+256"}
     semantics = ["powerpc/powerpc.lisp", "powerpc/powerpc-vector.lisp", "powerpc/powerpc-vsx.lisp", "powerpc/powerpc-decimal.lisp"]

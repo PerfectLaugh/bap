@@ -398,7 +398,10 @@ def compare_case(cfg, case, layout, states, hw, lean, stats, report):
             stats["undefined, differ"] += 1
         elif memory_lean != memory_hw.hex():
             differ.append(("memory", memory_hw.hex(), memory_lean))
-        if differ:
+        if differ and cfg.policy_of(differ):
+            stats[cfg.policy_of(differ)] += 1
+            stats["agreements"] += 1
+        elif differ:
             stats["disagreements"] += 1
             if len(known) < 3:
                 known.append({"text": case.text, "bytes": case.code.hex(), "asm": case.asm, "kind": "value",
