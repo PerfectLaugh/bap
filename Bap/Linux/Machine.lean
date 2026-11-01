@@ -730,8 +730,8 @@ private def emulatorOf (architecture : Architecture) : IO Emu := do
   pure emu
 
 /-- What makes an emulator a machine: its kernel behind its system calls. None of it is in a checkpoint. -/
-private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel) (watch : Option (Nat → List Nat → IO Unit))
-    (fallback : Option (Emu → Nat → List Nat → IO SyscallAction) := none) : IO Machine := do
+private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel) (watch : Option (Nat → List Nat → IO Unit)) :
+    IO Machine := do
   let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
@@ -739,9 +739,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
       pure .default
   let _ ← serveKernelCalls machine
   let _ ← serveTaskCalls emu
-  match fallback with
-  | some serve => let _ ← onSyscall emu serve
-  | none => let _ ← serveRest machine
+  let _ ← serveRest machine
   if architecture == .x86_64 || architecture == .i686 then serveCpu emu machine.kernel architecture.bits
   emu.processHooks.modify ((fun parent child => machine.kernel.modify (·.fork parent child)) :: ·)
   pure machine
@@ -847,7 +845,6 @@ even to be on the host, but what the bytes hold. A turn of a thread that a run s
 What `Kernel.addGenerated` put in has its functions given again, by the normal paths that they were put in at, as a function can't be
 in a file: a file without its function gives `EIO` when it is opened. -/
 def Machine.ofCheckpoint (data : ByteArray) (watch : Option (Nat → List Nat → IO Unit) := none)
-    (fallback : Option (Emu → Nat → List Nat → IO SyscallAction) := none)
     (generators : List (String × Generator) := []) : IO Machine := do
   if data.extract 0 checkpointMagic.size != checkpointMagic then
     throw <| IO.userError "not a checkpoint of a Linux machine"
@@ -862,7 +859,7 @@ def Machine.ofCheckpoint (data : ByteArray) (watch : Option (Nat → List Nat �
   let kernel := { kernel with generators := generators.foldl (fun table entry => table.insert entry.1 entry.2) {} }
   let emu ← emulatorOf architecture
   Bap.Emu.restore emu (← snapshotOfBytes emu (data.extract at_ data.size))
-  machineOf architecture emu kernel watch fallback
+  machineOf architecture emu kernel watch
 
 def Machine.saveFile (machine : Machine) (path : System.FilePath) : IO Unit := do
   IO.FS.writeBinFile path (← machine.checkpoint)
