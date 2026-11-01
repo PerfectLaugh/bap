@@ -2429,7 +2429,11 @@ theorem eval_set_let_variable (fuel : Nat) (locals : Locals) (context : Context)
     simp only
   have hassign : applyPrimitive context "set" [.register target width width, value] =
       .ok (value, [.move ⟨target, .imm width, 0, false⟩ exp]) := by
-    simp [applyPrimitive, assign, assignRegister, hzero, hvalue, bind, Except.bind, pure, Except.pure]
+    -- By definition: unfolding all that `applyPrimitive` has for this one case took a minute and a half.
+    have step : applyPrimitive context "set" [.register target width width, value] =
+        assign context (.register target width width) value >>= fun bil => .ok (value, bil) := rfl
+    rw [step]
+    simp [assign, assignRegister, hzero, hvalue, bind, Except.bind, pure, Except.pure]
   have hresult : intrinsicResult "set" = false := by decide +kernel
   have hdestination : resolveDestination after "set" [.register target width width, value] =
       [.register target width width, value] := rfl
