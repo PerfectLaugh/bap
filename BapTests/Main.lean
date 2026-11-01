@@ -81,6 +81,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxMusl "mipsel" (floats := false),
     Bap.Tests.Emu.testLinuxMusl "mips64" (floats := false),
     Bap.Tests.Emu.testLinuxMusl "mips64el" (floats := false),
+    Bap.Tests.Emu.testLinuxMusl "mipsr6" (floats := false),
+    Bap.Tests.Emu.testLinuxMusl "mips64r6" (floats := false),
     Bap.Tests.Emu.testLinuxMusl "powerpc" (floats := false),
     Bap.Tests.Emu.testLinuxMusl "powerpc64",
     Bap.Tests.Emu.testLinuxMusl "powerpc64le" (floats := false),
