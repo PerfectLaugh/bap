@@ -599,6 +599,23 @@ def testLinuxExec (triple : String) : IO Unit := do
       "child: /script x env=none kept=1 closed=0\nscript 7\n")
     (String.fromUTF8! (← written.get))
 
+/-- A program that its loader and libc load, which says what the same program does when it is static. -/
+def testLinuxDynamic (triple : String) : IO Unit := do
+  let run (kernel : Bap.Linux.Kernel) : IO (Bap.Tasks.ScheduleOutcome × String) := do
+    let written ← IO.mkRef ByteArray.empty
+    let machine ← Bap.Linux.start kernel "/test" ["/test", "arg1"]
+    let outcome ← machine.run fun data => written.modify (· ++ data)
+    pure (outcome, String.fromUTF8! (← written.get))
+  let file (name : String) : IO ByteArray := IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-{name}"
+  let loader ← file "loader"
+  let dynamic := ((Bap.Linux.Kernel.empty.addFile "/test" (← file "dynamic")).addFile "/lib/ld-musl.so.1" loader).addFile
+    "/lib/libc_musl.so" loader
+  let alone := Bap.Linux.Kernel.empty.addFile "/test" (← file "libc-files")
+  let (dynamicOutcome, dynamicText) ← run dynamic
+  let (staticOutcome, staticText) ← run alone
+  assertEqual s!"Linux {triple} a dynamic program has the status of a static one" staticOutcome dynamicOutcome
+  assertEqual s!"Linux {triple} a dynamic program does what a static one does" staticText dynamicText
+
 /-- What a program finds in `/proc`, of itself and its child, and a file that a function makes, across a checkpoint. -/
 def testLinuxProc (triple : String) : IO Unit := do
   let path := s!"testsuite/bin/{triple}-linux-musl-libc-proc"

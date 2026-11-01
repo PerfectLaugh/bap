@@ -63,6 +63,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxPrograms,
     Bap.Tests.Emu.testLinuxLayouts,
     Bap.Tests.Emu.testThumbIt,
+    Bap.Tests.Emu.testLinuxDynamic "arm",
     Bap.Tests.Emu.testLinuxExec "aarch64",
     Bap.Tests.Emu.testLinuxExec "i686",
     Bap.Tests.Emu.testLinuxExec "thumb",

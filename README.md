@@ -19,7 +19,7 @@ The OCaml and Rust implementation it came from is on the
 - **Emulates** with a JIT, hooks and checkpoints. Tasks follow the Linux model: a thread and a process are tasks that differ
   in what `clone` shares. `runProcesses` schedules them, and `serveTaskCalls` gives guests the system calls of processes and
   pthreads: `fork`, `clone`, `waitpid`, `exit`, `futex`, `mmap` and others.
-- **Runs Linux programs** in a virtual kernel of pure Lean, static and dynamic, on x86-64 and AArch64, and static on i686, ARM with Thumb, and RISC-V, MIPS and PowerPC of either width and order: files, descriptors and the
+- **Runs Linux programs** in a virtual kernel of pure Lean, static and dynamic, on x86-64, AArch64, i686 and ARM with Thumb, and static on RISC-V, MIPS and PowerPC of either width and order: files, descriptors and the
   clock are all in it, and nothing reaches the host. A program sees only what was copied in before it started, and can run others of it with `execve`, scripts too. It has `/proc` and what libc reads of `/sys`, made by pure functions when they
   are opened, and `Kernel.addGenerated` puts a file of any path in that way. A machine can be
   saved at any instruction and go on from the file alone, with its tasks, its memory and its files.
