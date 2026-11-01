@@ -31,7 +31,9 @@ structure Statistics where
   deriving Repr
 
 private structure Lowering where
-  ops : List Jit.Op := []
+  /-- The operations so far, the last one first, as most of what lowering does is to add one, and adding to the end of a list costs all
+  that is in it: `Lowering.ops` is them in order. -/
+  reversed : List Jit.Op := []
   layout : List (Bap.Var × Nat) := []
   inputs : List Bap.Var := []
   outputs : List (Bap.Var × Nat) := []
@@ -51,6 +53,32 @@ private structure Lowering where
   observed : Option Nat := none
   /-- The outputs that a run of a range may not reach, each with a slot that is not 0 once it was written. -/
   flags : List (Nat × Nat) := []
+
+/-- The operations, in order. -/
+private def Lowering.ops (lowering : Lowering) : List Jit.Op := lowering.reversed.reverse
+
+/-- With more operations after those that it has, at the cost of those. -/
+private def Lowering.push (lowering : Lowering) (ops : List Jit.Op) : Lowering :=
+  { lowering with reversed := ops.reverseAux lowering.reversed }
+
+@[simp] private theorem Lowering.ops_push (lowering : Lowering) (ops : List Jit.Op) :
+    (lowering.push ops).ops = lowering.ops ++ ops := by
+  simp [Lowering.ops, Lowering.push, List.reverseAux_eq]
+
+@[simp] private theorem Lowering.layout_push (lowering : Lowering) (ops : List Jit.Op) : (lowering.push ops).layout = lowering.layout := rfl
+@[simp] private theorem Lowering.inputs_push (lowering : Lowering) (ops : List Jit.Op) : (lowering.push ops).inputs = lowering.inputs := rfl
+@[simp] private theorem Lowering.outputs_push (lowering : Lowering) (ops : List Jit.Op) : (lowering.push ops).outputs = lowering.outputs := rfl
+@[simp] private theorem Lowering.checkpoints_push (lowering : Lowering) (ops : List Jit.Op) : (lowering.push ops).checkpoints = lowering.checkpoints := rfl
+@[simp] private theorem Lowering.written_push (lowering : Lowering) (ops : List Jit.Op) : (lowering.push ops).written = lowering.written := rfl
+@[simp] private theorem Lowering.nextSlot_push (lowering : Lowering) (ops : List Jit.Op) : (lowering.push ops).nextSlot = lowering.nextSlot := rfl
+@[simp] private theorem Lowering.nextLabel_push (lowering : Lowering) (ops : List Jit.Op) : (lowering.push ops).nextLabel = lowering.nextLabel := rfl
+@[simp] private theorem Lowering.next_push (lowering : Lowering) (ops : List Jit.Op) : (lowering.push ops).next = lowering.next := rfl
+@[simp] private theorem Lowering.effectSlot_push (lowering : Lowering) (ops : List Jit.Op) : (lowering.push ops).effectSlot = lowering.effectSlot := rfl
+@[simp] private theorem Lowering.memory_push (lowering : Lowering) (ops : List Jit.Op) : (lowering.push ops).memory = lowering.memory := rfl
+@[simp] private theorem Lowering.wrapFaults_push (lowering : Lowering) (ops : List Jit.Op) : (lowering.push ops).wrapFaults = lowering.wrapFaults := rfl
+@[simp] private theorem Lowering.budget_push (lowering : Lowering) (ops : List Jit.Op) : (lowering.push ops).budget = lowering.budget := rfl
+@[simp] private theorem Lowering.observed_push (lowering : Lowering) (ops : List Jit.Op) : (lowering.push ops).observed = lowering.observed := rfl
+@[simp] private theorem Lowering.flags_push (lowering : Lowering) (ops : List Jit.Op) : (lowering.push ops).flags = lowering.flags := rfl
 
 private structure Operand where
   slot : Nat
@@ -287,18 +315,18 @@ private def writeVar (lowering : Lowering) (var : Bap.Var) : Option (Lowering ×
 
 private def setEffect (lowering : Lowering) (value : UInt64) : Lowering × Nat :=
   match lowering.effectSlot with
-  | some slot => ({ lowering with ops := lowering.ops ++ [.set slot value] }, slot)
+  | some slot => ((lowering.push [.set slot value]), slot)
   | none =>
     let (lowering, slot) := temporary lowering
-    ({ lowering with ops := lowering.ops ++ [.set slot value], effectSlot := some slot }, slot)
+    ({ lowering.push [.set slot value] with effectSlot := some slot }, slot)
 
 private def jumpConstant (lowering : Lowering) (target : UInt64) : Lowering :=
   let (lowering, _) := setEffect lowering 1
-  { lowering with ops := lowering.ops ++ [.jump target] }
+  (lowering.push [.jump target])
 
 private def jumpSlot (lowering : Lowering) (target : Nat) : Lowering :=
   let (lowering, _) := setEffect lowering 1
-  { lowering with ops := lowering.ops ++ [.jumpSlot target] }
+  (lowering.push [.jumpSlot target])
 
 private def immediate {width : Nat} (value : BitVec width) : UInt64 := UInt64.ofNat value.toNat
 
@@ -326,10 +354,10 @@ private def isSigned (op : Jit.BinOp) : Bool :=
 
 private def signExtend (lowering : Lowering) (width slot : Nat) : Lowering × Nat :=
   let (lowering, dst) := temporary lowering
-  ({ lowering with ops := lowering.ops ++ [.signExtend width dst slot] }, dst)
+  ((lowering.push [.signExtend width dst slot]), dst)
 
 private def narrow (lowering : Lowering) (width slot : Nat) : Lowering :=
-  if width < 64 then { lowering with ops := lowering.ops ++ [.andImm slot slot (mask width)] }
+  if width < 64 then (lowering.push [.andImm slot slot (mask width)])
   else lowering
 
 /-- Whether native code gets an access of this size right. It does not wrap at the end of the address space, as
@@ -370,7 +398,7 @@ private def lowerExp (lowering : Lowering) : Bil.Exp → Option (Lowering × Ope
   | @Bil.Exp.int width value =>
     if 0 < width && width ≤ 64 then
       let (lowering, dst) := temporary lowering
-      some ({ lowering with ops := lowering.ops ++ [.set dst (immediate value)] }, ⟨dst, width⟩)
+      some ((lowering.push [.set dst (immediate value)]), ⟨dst, width⟩)
     else none
   | .load memory address endian size => do
     let memory ← match memory with
@@ -380,8 +408,7 @@ private def lowerExp (lowering : Lowering) : Bil.Exp → Option (Lowering × Ope
     let (lowering, address) ← lowerExp lowering address
     if size = 0 || size > 8 || !addressOf memory address.width then none
     let (lowering, dst) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++
-      [.memLoad dst address.slot size (endian == .big)] }
+    let lowering := (lowering.push [.memLoad dst address.slot size (endian == .big)])
     some (lowering, ⟨dst, size * 8⟩)
   | .var var => do
     let width ← widthOf var
@@ -391,52 +418,45 @@ private def lowerExp (lowering : Lowering) : Bil.Exp → Option (Lowering × Ope
     let (lowering, value) ← lowerExp lowering value
     let (lowering, dst) := temporary lowering
     let lowering ← match op with
-      | .neg => some { lowering with ops := lowering.ops ++ [.neg dst value.slot] }
-      | .not => some { lowering with ops := lowering.ops ++ [.not dst value.slot] }
+      | .neg => some (lowering.push [.neg dst value.slot])
+      | .not => some (lowering.push [.not dst value.slot])
     some (narrow lowering value.width dst, ⟨dst, value.width⟩)
   | .bin .smod left right => do
     let (lowering, left) ← lowerExp lowering left
     let (lowering, right) ← lowerExp lowering right
     if left.width != right.width then none
     let (lowering, zeroSlot) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++ [.set zeroSlot 0] }
+    let lowering := (lowering.push [.set zeroSlot 0])
     let (lowering, signedLeft) := signExtend lowering left.width left.slot
     let (lowering, signedRight) := signExtend lowering right.width right.slot
     let (lowering, leftSign) := temporary lowering
     let (lowering, rightSign) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++
-      [.bin .slt leftSign signedLeft zeroSlot, .bin .slt rightSign signedRight zeroSlot] }
+    let lowering := (lowering.push [.bin .slt leftSign signedLeft zeroSlot, .bin .slt rightSign signedRight zeroSlot])
     let (lowering, negatedLeft) := temporary lowering
     let (lowering, negatedRight) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++ [.neg negatedLeft left.slot, .neg negatedRight right.slot] }
+    let lowering := (lowering.push [.neg negatedLeft left.slot, .neg negatedRight right.slot])
     let lowering := narrow lowering left.width negatedLeft
     let lowering := narrow lowering left.width negatedRight
     let (lowering, absLeft) := temporary lowering
     let (lowering, absRight) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++
-      [.select absLeft leftSign negatedLeft left.slot, .select absRight rightSign negatedRight right.slot] }
+    let lowering := (lowering.push [.select absLeft leftSign negatedLeft left.slot, .select absRight rightSign negatedRight right.slot])
     let (lowering, remainder) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++ [.bin .urem remainder absLeft absRight] }
+    let lowering := (lowering.push [.bin .urem remainder absLeft absRight])
     let (lowering, negated) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++ [.neg negated remainder] }
+    let lowering := (lowering.push [.neg negated remainder])
     let (lowering, leftAdjusted) := temporary lowering
     let (lowering, rightAdjusted) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++
-      [.bin .add leftAdjusted negated right.slot, .bin .add rightAdjusted remainder right.slot] }
+    let lowering := (lowering.push [.bin .add leftAdjusted negated right.slot, .bin .add rightAdjusted remainder right.slot])
     let (lowering, leftResult) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++
-      [.select leftResult leftSign leftAdjusted remainder] }
+    let lowering := (lowering.push [.select leftResult leftSign leftAdjusted remainder])
     let (lowering, bothResult) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++
-      [.select bothResult leftSign negated rightAdjusted] }
+    let lowering := (lowering.push [.select bothResult leftSign negated rightAdjusted])
     let (lowering, rightResult) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++
-      [.select rightResult rightSign bothResult leftResult] }
+    let lowering := (lowering.push [.select rightResult rightSign bothResult leftResult])
     let (lowering, nonzero) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++ [.bin .eq nonzero remainder zeroSlot] }
+    let lowering := (lowering.push [.bin .eq nonzero remainder zeroSlot])
     let (lowering, dst) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++
-      [.select dst nonzero remainder rightResult] }
+    let lowering := (lowering.push [.select dst nonzero remainder rightResult])
     some (narrow lowering left.width dst, ⟨dst, left.width⟩)
   | .bin .ashift left right => do
     let (lowering, left) ← lowerExp lowering left
@@ -444,7 +464,7 @@ private def lowerExp (lowering : Lowering) : Bil.Exp → Option (Lowering × Ope
     if left.width != right.width then none
     let (lowering, signed) := signExtend lowering left.width left.slot
     let (lowering, dst) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++ [.ashr left.width dst signed right.slot] }
+    let lowering := (lowering.push [.ashr left.width dst signed right.slot])
     some (narrow lowering left.width dst, ⟨dst, left.width⟩)
   | .bin op left right => do
     let op ← binaryOp op
@@ -455,7 +475,7 @@ private def lowerExp (lowering : Lowering) : Bil.Exp → Option (Lowering × Ope
     let (lowering, rightSlot) := if isSigned op then signExtend lowering right.width right.slot else (lowering, right.slot)
     let (lowering, dst) := temporary lowering
     let width := if isComparison op then 1 else left.width
-    let lowering := { lowering with ops := lowering.ops ++ [.bin op dst leftSlot rightSlot] }
+    let lowering := (lowering.push [.bin op dst leftSlot rightSlot])
     some (narrow lowering width dst, ⟨dst, width⟩)
   | .ite condition yes no => do
     if readsMemory yes || readsMemory no then none
@@ -464,18 +484,18 @@ private def lowerExp (lowering : Lowering) : Bil.Exp → Option (Lowering × Ope
     let (lowering, no) ← lowerExp lowering no
     if condition.width != 1 || yes.width != no.width then none
     let (lowering, dst) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++ [.select dst condition.slot yes.slot no.slot] }
+    let lowering := (lowering.push [.select dst condition.slot yes.slot no.slot])
     some (lowering, ⟨dst, yes.width⟩)
   | .extract high low value => do
     let (lowering, value) ← lowerExp lowering value
     if high < low || high ≥ value.width then none
     let width := high - low + 1
     let (lowering, amount) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++ [.set amount (UInt64.ofNat low)] }
+    let lowering := (lowering.push [.set amount (UInt64.ofNat low)])
     let (lowering, shifted) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++ [.bin .rshift shifted value.slot amount] }
+    let lowering := (lowering.push [.bin .rshift shifted value.slot amount])
     let (lowering, dst) := temporary lowering
-    some ({ lowering with ops := lowering.ops ++ [.andImm dst shifted (mask width)] }, ⟨dst, width⟩)
+    some ((lowering.push [.andImm dst shifted (mask width)]), ⟨dst, width⟩)
   | .cast .signed width value => do
     if width = 0 || width > 64 then none
     let (lowering, value) ← lowerExp lowering value
@@ -484,16 +504,16 @@ private def lowerExp (lowering : Lowering) : Bil.Exp → Option (Lowering × Ope
       some (narrow lowering width dst, ⟨dst, width⟩)
     else
       let (lowering, dst) := temporary lowering
-      some ({ lowering with ops := lowering.ops ++ [.andImm dst value.slot (mask width)] }, ⟨dst, width⟩)
+      some ((lowering.push [.andImm dst value.slot (mask width)]), ⟨dst, width⟩)
   | .cast .high width value => do
     let (lowering, value) ← lowerExp lowering value
     if width = 0 || width > value.width then none
     let (lowering, amount) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++ [.set amount (UInt64.ofNat (value.width - width))] }
+    let lowering := (lowering.push [.set amount (UInt64.ofNat (value.width - width))])
     let (lowering, shifted) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++ [.bin .rshift shifted value.slot amount] }
+    let lowering := (lowering.push [.bin .rshift shifted value.slot amount])
     let (lowering, dst) := temporary lowering
-    some ({ lowering with ops := lowering.ops ++ [.andImm dst shifted (mask width)] }, ⟨dst, width⟩)
+    some ((lowering.push [.andImm dst shifted (mask width)]), ⟨dst, width⟩)
   | .cast kind width value => do
     if (kind != .low && kind != .unsigned) || width = 0 || width > 64 then none
     let (lowering, value) ← lowerExp lowering value
@@ -501,7 +521,7 @@ private def lowerExp (lowering : Lowering) : Bil.Exp → Option (Lowering × Ope
       some (lowering, ⟨value.slot, width⟩)
     else
       let (lowering, dst) := temporary lowering
-      some ({ lowering with ops := lowering.ops ++ [.andImm dst value.slot (mask width)] }, ⟨dst, width⟩)
+      some ((lowering.push [.andImm dst value.slot (mask width)]), ⟨dst, width⟩)
   | _ => none
 
 private def lowerMove (lowering : Lowering) (dst : Bap.Var) (value : Bil.Exp) :
@@ -515,14 +535,13 @@ private def lowerMove (lowering : Lowering) (dst : Bap.Var) (value : Bil.Exp) :
     let (lowering, address) ← lowerExp lowering address
     let (lowering, stored) ← lowerExp lowering stored
     if size = 0 || size > 8 || stored.width != size * 8 || !addressOf memory address.width then none
-    some { lowering with ops := lowering.ops ++
-      [.memStore address.slot stored.slot size (endian == .big)] }
+    some (lowering.push [.memStore address.slot stored.slot size (endian == .big)])
   | _, _ => do
     let dstWidth ← widthOf dst
     let (lowering, value) ← lowerExp lowering value
     if value.width != dstWidth then none
     let (lowering, dst) ← writeVar lowering dst
-    some { lowering with ops := lowering.ops ++ [.move dst value.slot] }
+    some (lowering.push [.move dst value.slot])
 
 mutual
   private def lowerStmt (lowering : Lowering) : Bil.Stmt → Option (Lowering × Bool)
@@ -541,22 +560,18 @@ mutual
       let noLabel := yesLabel + 1
       let doneLabel := noLabel + 1
       let lowering := { lowering with nextLabel := doneLabel + 1 }
-      let lowering := { lowering with ops := lowering.ops ++
-        [.branch condition.slot yesLabel noLabel, .label yesLabel] }
+      let lowering := (lowering.push [.branch condition.slot yesLabel noLabel, .label yesLabel])
       let initialWritten := lowering.written
       let initialOutputs := lowering.outputs
       let (yesLowering, yesTerminated) ← lowerStatements lowering yes
-      let noLowering ← lowerStatements { yesLowering with
+      let noLowering ← lowerStatements { yesLowering.push ((if yesTerminated then [] else [.goto doneLabel]) ++ [.label noLabel]) with
         written := initialWritten,
-        outputs := initialOutputs,
-        ops := yesLowering.ops ++ (if yesTerminated then [] else [.goto doneLabel]) ++ [.label noLabel] } no
+        outputs := initialOutputs } no
       if yesLowering.written.length != noLowering.1.written.length ||
         yesLowering.written.any fun var => !noLowering.1.written.contains var then none
       -- the else branch was lowered last, so it has every slot and label; its writes are the same
-      let resultOps := noLowering.1.ops ++
-        (if noLowering.2 then [] else [.goto doneLabel]) ++
-        (if yesTerminated && noLowering.2 then [] else [.label doneLabel])
-      some ({ noLowering.1 with ops := resultOps }, yesTerminated && noLowering.2)
+      some (noLowering.1.push ((if noLowering.2 then [] else [.goto doneLabel]) ++
+        (if yesTerminated && noLowering.2 then [] else [.label doneLabel])), yesTerminated && noLowering.2)
     | .while condition body => do
       let conditionLabel := lowering.nextLabel
       let checkLabel := conditionLabel + 1
@@ -565,26 +580,21 @@ mutual
       let exhaustedLabel := doneLabel + 1
       let lowering := { lowering with nextLabel := exhaustedLabel + 1 }
       let (lowering, counter) := temporary lowering
-      let lowering := { lowering with ops := lowering.ops ++
-        [.set counter 0, .goto conditionLabel, .label conditionLabel, .add counter counter 1] }
+      let lowering := (lowering.push [.set counter 0, .goto conditionLabel, .label conditionLabel, .add counter counter 1])
       let (lowering, limit) := temporary lowering
       let (lowering, tooMuch) := temporary lowering
-      let lowering := { lowering with ops := lowering.ops ++
-        [.set limit 100000, .bin .ge tooMuch counter limit,
-         .branch tooMuch exhaustedLabel checkLabel, .label checkLabel] }
+      let lowering := (lowering.push [.set limit 100000, .bin .ge tooMuch counter limit,
+         .branch tooMuch exhaustedLabel checkLabel, .label checkLabel])
       let (lowering, condition) ← lowerExp lowering condition
       if condition.width != 1 then none
-      let lowering := { lowering with ops := lowering.ops ++
-        [.branch condition.slot bodyLabel doneLabel, .label bodyLabel] }
+      let lowering := (lowering.push [.branch condition.slot bodyLabel doneLabel, .label bodyLabel])
       let initialWritten := lowering.written
       let (bodyLowering, bodyTerminated) ← lowerStatements lowering body
       if bodyLowering.written.any fun var => !initialWritten.contains var then none
-      let bodyOps := bodyLowering.ops ++ (if bodyTerminated then [] else [.goto conditionLabel]) ++
-        [.label exhaustedLabel]
-      let (resultLowering, _) := setEffect { bodyLowering with ops := bodyOps } 2
+      let (resultLowering, _) := setEffect (bodyLowering.push ((if bodyTerminated then [] else [.goto conditionLabel]) ++
+        [.label exhaustedLabel])) 2
       -- a finished loop continues with the next statement
-      some ({ resultLowering with ops := resultLowering.ops ++
-        [.jump (UInt64.ofNat lowering.next), .label doneLabel] }, false)
+      some ((resultLowering.push [.jump (UInt64.ofNat lowering.next), .label doneLabel]), false)
     | _ => none
 
   private def lowerStatements (lowering : Lowering) : Bil.Program → Option (Lowering × Bool)
@@ -596,8 +606,7 @@ end
 
 private def codeSite (lowering : Lowering) (pc : Nat) : Lowering :=
   let (lowering, slot) := setEffect lowering 0
-  { lowering with
-    ops := lowering.ops ++ [.code slot (UInt64.ofNat pc)]
+  { lowering.push [.code slot (UInt64.ofNat pc)] with
     checkpoints := lowering.checkpoints ++ [(pc, lowering.outputs)]
   }
 
@@ -731,7 +740,7 @@ private def graphEdgeOps (lowering : Lowering) (labels : List (Nat × Nat))
     | some (_, label) => some [.goto label]
     | none => none
   else
-    some (jumpConstant { lowering with ops := [] } (UInt64.ofNat target)).ops
+    some (jumpConstant { lowering with reversed := [] } (UInt64.ofNat target)).ops
 
 /-- A fresh label. -/
 private def freshLabel (lowering : Lowering) : Lowering × Nat :=
@@ -744,18 +753,18 @@ its code site only if it and the blocks before it have none: `guarded` says whet
 private def enterBlock (lowering : Lowering) (budget observed address : Nat) (guarded : Bool) : Lowering :=
   let (lowering, go) := freshLabel lowering
   let (lowering, leave) := freshLabel lowering
-  let lowering := { lowering with ops := lowering.ops ++ [.branch budget go leave, .label leave] }
+  let lowering := (lowering.push [.branch budget go leave, .label leave])
   let lowering := jumpConstant lowering (UInt64.ofNat address)
-  let lowering := { lowering with ops := lowering.ops ++ [.label go] }
+  let lowering := (lowering.push [.label go])
   let lowering :=
     if guarded then
       let (lowering, site) := freshLabel lowering
       let (lowering, done) := freshLabel lowering
-      let lowering := { lowering with ops := lowering.ops ++ [.branch observed site done, .label site] }
+      let lowering := (lowering.push [.branch observed site done, .label site])
       let lowering := codeSite lowering address
-      { lowering with ops := lowering.ops ++ [.goto done, .label done] }
+      (lowering.push [.goto done, .label done])
     else codeSite lowering address
-  { lowering with ops := lowering.ops ++ [.add budget budget (UInt64.ofNat (2 ^ 64 - 1))] }
+  (lowering.push [.add budget budget (UInt64.ofNat (2 ^ 64 - 1))])
 
 mutual
   /-- Whether a statement can end in any other way than running off its end. -/
@@ -841,7 +850,7 @@ private def flagOutputs (seedWritten : List Bap.Var) (lowering : Lowering) : Low
   { lowering with
     nextSlot := next
     flags
-    ops := lowering.ops.flatMap (flagged flags)
+    reversed := (lowering.ops.flatMap (flagged flags)).reverse
     checkpoints := lowering.checkpoints.map fun checkpoint => (checkpoint.1, lowering.outputs) }
 
 /-- The variables that a program writes before it can do anything else, and so at every end of it. The others of
@@ -897,9 +906,6 @@ private structure GraphPlan where
   chained : Bool
   definite : Nat → List Bap.Var
   guarded : Block → Bool
-
-private def Lowering.push (lowering : Lowering) (ops : List Jit.Op) : Lowering :=
-  { lowering with ops := lowering.ops ++ ops }
 
 private def Lowering.withWritten (lowering : Lowering) (written : List Bap.Var) : Lowering :=
   { lowering with written }

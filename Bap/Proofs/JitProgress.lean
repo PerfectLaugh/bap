@@ -17,7 +17,7 @@ bound as memory, ends in the interpreter with a result, or for want of fuel, and
 namespace Bap.Proofs.Jit
 
 open Bap.Primus.Lifted Bap.Proofs.Primus
-open_private Bap.Primus.Lifted Bap.Primus.Lifted Lowering Lowering.ops Lowering.layout Lowering.nextSlot Lowering.memory
+open_private Bap.Primus.Lifted Bap.Primus.Lifted Lowering Lowering.push Lowering.written_push Lowering.ops Lowering.layout Lowering.nextSlot Lowering.memory
   Lowering.effectSlot Lowering.nextLabel Lowering.next Lowering.written Lowering.outputs Lowering.inputs Lowering.push Lowering.withWritten
   Operand Operand.slot Operand.width lowerExp lowerMove lowerStmt lowerStatements setEffect temporary jumpConstant jumpSlot immediate useMemory
   useMemoryAt writeVar slot widthOf wrapSafe recordWrite addressOf readVar readsMemory signExtend narrow binaryOp isSigned isComparison
@@ -76,7 +76,7 @@ theorem exp_int {width : Nat} (value : BitVec width) : ExpOK (.int value) := by
   intro first second operand h
   rw [lowerExp] at h
   split at h
-  · simp only [temporary, Option.some.injEq, Prod.mk.injEq] at h
+  · simp only [Lowering.push, temporary, Option.some.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
     exact ⟨⟨rfl, fun _ h => h, fun _ h => h⟩, fun _ _ => ⟨value, rfl⟩⟩
   · simp at h
@@ -159,7 +159,7 @@ theorem exp_load (memory address : Bil.Exp) (endian : Endian) (size : Nat) (ih :
   split at h
   · simp at h
   · next hc =>
-    simp only [temporary, Option.some.injEq, Prod.mk.injEq] at h
+    simp only [Lowering.push, temporary, Option.some.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
     obtain ⟨m, value⟩ := useMemoryAt_spec hl1
     obtain ⟨htyp, m1, hl⟩ := value
@@ -183,7 +183,7 @@ theorem exp_un (op : Bil.UnOp) (value : Bil.Exp) (ih : ExpOK value) : ExpOK (.un
   intro first second operand h
   rw [lowerExp] at h
   obtain ⟨⟨l1, v⟩, h1, h⟩ := obind h
-  simp only [temporary] at h
+  simp only [Lowering.push, temporary] at h
   obtain ⟨m, ev⟩ := ih h1
   cases op <;> simp only [bind, Option.bind_some, Option.some.injEq, Prod.mk.injEq] at h <;> obtain ⟨hs, rfl⟩ := h
   all_goals
@@ -205,7 +205,7 @@ theorem exp_ite (condition yes no : Bil.Exp) (ihc : ExpOK condition) (ihy : ExpO
   split at h
   · simp at h
   next hc =>
-  simp only [temporary, Option.some.injEq, Prod.mk.injEq] at h
+  simp only [Lowering.push, temporary, Option.some.injEq, Prod.mk.injEq] at h
   obtain ⟨hs, rfl⟩ := h
   simp only [Bool.or_eq_true, bne_iff_ne, ne_eq, not_or, Decidable.not_not] at hc
   obtain ⟨mc, ec⟩ := ihc h1
@@ -238,7 +238,7 @@ theorem exp_extract (high low : Nat) (value : Bil.Exp) (ih : ExpOK value) : ExpO
   split at h
   · simp at h
   next hc =>
-  simp only [temporary, Option.some.injEq, Prod.mk.injEq] at h
+  simp only [Lowering.push, temporary, Option.some.injEq, Prod.mk.injEq] at h
   obtain ⟨hs, rfl⟩ := h
   obtain ⟨m, ev⟩ := ih h1
   have last : ExpMono l1 second := by subst hs; exact ⟨rfl, fun _ h => h, fun _ h => h⟩
@@ -271,7 +271,7 @@ theorem exp_smod (left right : Bil.Exp) (ihl : ExpOK left) (ihr : ExpOK right) :
   split at h
   · simp at h
   next hc =>
-  simp only [temporary, signExtend, Option.some.injEq, Prod.mk.injEq] at h
+  simp only [Lowering.push, temporary, signExtend, Option.some.injEq, Prod.mk.injEq] at h
   obtain ⟨hs, rfl⟩ := h
   obtain ⟨m1, e1⟩ := ihl h1
   obtain ⟨m2, e2⟩ := ihr h2
@@ -298,7 +298,7 @@ theorem exp_ashift (left right : Bil.Exp) (ihl : ExpOK left) (ihr : ExpOK right)
   split at h
   · simp at h
   next hc =>
-  simp only [temporary, signExtend, Option.some.injEq, Prod.mk.injEq] at h
+  simp only [Lowering.push, temporary, signExtend, Option.some.injEq, Prod.mk.injEq] at h
   obtain ⟨hs, rfl⟩ := h
   obtain ⟨m1, e1⟩ := ihl h1
   obtain ⟨m2, e2⟩ := ihr h2
@@ -339,7 +339,7 @@ theorem exp_bin (op : Bil.BinOp) (left right : Bil.Exp) (ihl : ExpOK left) (ihr 
   split at h
   · simp at h
   next hc =>
-  simp only [temporary, signExtend, Option.some.injEq, Prod.mk.injEq] at h
+  simp only [Lowering.push, temporary, signExtend, Option.some.injEq, Prod.mk.injEq] at h
   obtain ⟨hs, rfl⟩ := h
   obtain ⟨m1, e1⟩ := ihl h1
   obtain ⟨m2, e2⟩ := ihr h2
@@ -370,11 +370,11 @@ theorem exp_cast (kind : Bil.Cast) (width : Nat) (value : Bil.Exp) (ih : ExpOK v
     have key : ExpMono l1 second ∧ Operand.width operand = width := by
       dsimp only at h
       split at h
-      · simp only [signExtend, temporary, Option.some.injEq, Prod.mk.injEq] at h
+      · simp only [Lowering.push, signExtend, temporary, Option.some.injEq, Prod.mk.injEq] at h
         obtain ⟨hs, rfl⟩ := h
         subst hs
         exact ⟨by mono_ops, rfl⟩
-      · simp only [temporary, Option.some.injEq, Prod.mk.injEq] at h
+      · simp only [Lowering.push, temporary, Option.some.injEq, Prod.mk.injEq] at h
         obtain ⟨hs, rfl⟩ := h
         subst hs
         exact ⟨by mono_ops, rfl⟩
@@ -391,7 +391,7 @@ theorem exp_cast (kind : Bil.Cast) (width : Nat) (value : Bil.Exp) (ih : ExpOK v
     split at h
     · simp at h
     next hc =>
-    simp only [temporary, Option.some.injEq, Prod.mk.injEq] at h
+    simp only [Lowering.push, temporary, Option.some.injEq, Prod.mk.injEq] at h
     obtain ⟨hs, rfl⟩ := h
     have last : ExpMono l1 second := by subst hs; mono_ops
     refine ⟨m.trans last, fun env ready => ?_⟩
@@ -415,7 +415,7 @@ theorem exp_cast (kind : Bil.Cast) (width : Nat) (value : Bil.Exp) (ih : ExpOK v
         obtain ⟨hs, rfl⟩ := h
         subst hs
         exact ⟨ExpMono.refl _, rfl⟩
-      · simp only [temporary, Option.some.injEq, Prod.mk.injEq] at h
+      · simp only [Lowering.push, temporary, Option.some.injEq, Prod.mk.injEq] at h
         obtain ⟨hs, rfl⟩ := h
         subst hs
         exact ⟨by mono_ops, rfl⟩
@@ -440,7 +440,7 @@ theorem exp_cast (kind : Bil.Cast) (width : Nat) (value : Bil.Exp) (ih : ExpOK v
         obtain ⟨hs, rfl⟩ := h
         subst hs
         exact ⟨ExpMono.refl _, rfl⟩
-      · simp only [temporary, Option.some.injEq, Prod.mk.injEq] at h
+      · simp only [Lowering.push, temporary, Option.some.injEq, Prod.mk.injEq] at h
         obtain ⟨hs, rfl⟩ := h
         subst hs
         exact ⟨by mono_ops, rfl⟩
@@ -933,9 +933,9 @@ private theorem ifElse_progress {condition : Bil.Exp} {yes no : Bil.Program} (hy
   obtain ⟨mn, okn⟩ := hn _ _ _ hno
   obtain ⟨Y, ry, ny, dy⟩ := my.written
   obtain ⟨N, rn, nn, dn⟩ := mn.written
-  have ry' : Lowering.written yesEnd = Lowering.written first ++ Y := by rw [ry, mc.written]
-  have rn' : Lowering.written noEnd = Lowering.written first ++ N := rn.trans (by rw [mc.written])
-  have rs : Lowering.written second = Lowering.written noEnd := by rw [← hs]
+  have ry' : Lowering.written yesEnd = Lowering.written first ++ Y := ry.trans (congrArg (· ++ Y) mc.written)
+  have rn' : Lowering.written noEnd = Lowering.written first ++ N := rn.trans (congrArg (· ++ N) mc.written)
+  have rs : Lowering.written second = Lowering.written noEnd := by rw [← hs]; rfl
   have is : ∀ v ∈ Lowering.inputs noEnd, v ∈ Lowering.inputs second := by rw [← hs]; exact fun _ h => h
   have ms : ∀ v, Lowering.memory noEnd = some v → Lowering.memory second = some v := by rw [← hs]; exact fun _ h => h
   have dy' : ∀ v ∈ Y, v ∉ Lowering.written first := by rw [← mc.written]; exact dy
@@ -1022,7 +1022,7 @@ private theorem while_progress {condition : Bil.Exp} {body : Bil.Program} (hb : 
   have rs : Lowering.written second = Lowering.written bodyEnd := by rw [← hs]; exact (setEffect_fields _ _).1
   have is : Lowering.inputs second = Lowering.inputs bodyEnd := by rw [← hs]; exact (setEffect_fields _ _).2.1
   have ms : Lowering.memory second = Lowering.memory bodyEnd := by rw [← hs]; exact (setEffect_fields _ _).2.2
-  have rm : Lowering.written mid = Lowering.written first := by rw [mc.written]
+  have rm : Lowering.written mid = Lowering.written first := by rw [mc.written]; rfl
   have hnone : E = [] := by
     cases E with
     | nil => rfl
@@ -1048,7 +1048,7 @@ private theorem while_progress {condition : Bil.Exp} {body : Bil.Program} (hb : 
     intro state ready
     obtain ⟨bits, hbits⟩ := ec state.env ⟨ready.written, fun v hv => ready.inputs v (by rw [is]; exact mb.inputs v hv), fun v hv => ready.memory v (by rw [ms]; exact mb.memory v hv)⟩
     by_cases hbit : bits = 1
-    · rcases okb fuel state ⟨by rw [show _ = Lowering.written mid from rfl, rm]; exact ready.written, fun v hv => ready.inputs v (by rw [is]; exact hv), fun v hv => ready.memory v (by rw [ms]; exact hv)⟩ with he | ⟨⟨next, effect⟩, he, ran⟩
+    · rcases okb fuel state ⟨by rw [Lowering.written_push, rm]; exact ready.written, fun v hv => ready.inputs v (by rw [is]; exact hv), fun v hv => ready.memory v (by rw [ms]; exact hv)⟩ with he | ⟨⟨next, effect⟩, he, ran⟩
       · refine Or.inl ?_
         simp [Bil.execStmt, Bil.execExp, hbits, hbit, he, bind, Except.bind, bits_asBits]
       · by_cases hn : isNormal effect

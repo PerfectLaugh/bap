@@ -188,19 +188,19 @@ end Operators
 section Emission
 
 open Bap.Primus.Lifted
-open_private Bap.Primus.Lifted Bap.Primus.Lifted Lowering Lowering.ops Lowering.effectSlot Lowering.nextSlot
+open_private Bap.Primus.Lifted Bap.Primus.Lifted Lowering Lowering.push Lowering.ops_push Lowering.ops Lowering.effectSlot Lowering.nextSlot
   Lowering.checkpoints Lowering.outputs temporary setEffect jumpConstant jumpSlot codeSite signExtend graphEdgeOps
 
 /-- Effect code 1 means "jump taken": a native jump always sets the effect slot first. -/
 theorem jumpConstant_ops (lowering : Lowering) (target : UInt64) :
     Lowering.ops (jumpConstant lowering target) =
       Lowering.ops lowering ++ [.set (setEffect lowering 1).2 1] ++ [.jump target] := by
-  cases h : Lowering.effectSlot lowering <;> simp [jumpConstant, setEffect, h, temporary]
+  cases h : Lowering.effectSlot lowering <;> simp [jumpConstant, setEffect, h, temporary, Lowering.ops, Lowering.push, List.reverseAux_eq]
 
 theorem jumpSlot_ops (lowering : Lowering) (target : Nat) :
     Lowering.ops (jumpSlot lowering target) =
       Lowering.ops lowering ++ [.set (setEffect lowering 1).2 1] ++ [.jumpSlot target] := by
-  cases h : Lowering.effectSlot lowering <;> simp [jumpSlot, setEffect, h, temporary]
+  cases h : Lowering.effectSlot lowering <;> simp [jumpSlot, setEffect, h, temporary, Lowering.ops, Lowering.push, List.reverseAux_eq]
 
 /-- The jump effect slot is the one `nativeResult` later reads back. -/
 theorem jumpConstant_effect (lowering : Lowering) (target : UInt64) :
@@ -211,7 +211,7 @@ theorem jumpConstant_effect (lowering : Lowering) (target : UInt64) :
 theorem codeSite_ops (lowering : Lowering) (pc : Nat) :
     Lowering.ops (codeSite lowering pc) =
       Lowering.ops lowering ++ [.set (setEffect lowering 0).2 0] ++ [.code (setEffect lowering 0).2 (UInt64.ofNat pc)] := by
-  cases h : Lowering.effectSlot lowering <;> simp [codeSite, setEffect, h, temporary]
+  cases h : Lowering.effectSlot lowering <;> simp [codeSite, setEffect, h, temporary, Lowering.ops, Lowering.push, List.reverseAux_eq]
 
 theorem codeSite_checkpoint (lowering : Lowering) (pc : Nat) :
     Lowering.checkpoints (codeSite lowering pc) =
@@ -223,7 +223,7 @@ theorem signExtend_fresh (lowering : Lowering) (width source : Nat) :
     (signExtend lowering width source).2 = Lowering.nextSlot lowering ∧
       Lowering.ops (signExtend lowering width source).1 =
         Lowering.ops lowering ++ [.signExtend width (Lowering.nextSlot lowering) source] := by
-  simp [signExtend, temporary]
+  simp [signExtend, temporary, Lowering.ops, Lowering.push, List.reverseAux_eq]
 
 /-- Edges leaving the compiled range exit through the jump protocol rather than a goto. -/
 theorem graphEdgeOps_external (lowering : Lowering) (labels : List (Nat × Nat)) (edges : List (Nat × Nat))
@@ -679,7 +679,7 @@ section Statements
 
 open Bap.Primus.Lifted Bap.Proofs.Primus
 open Proofs.Core.MemoryLaws
-open_private Bap.Primus.Lifted Bap.Primus.Lifted Lowering Lowering.ops Lowering.layout Lowering.nextSlot Lowering.memory
+open_private Bap.Primus.Lifted Bap.Primus.Lifted Lowering Lowering.push Lowering.ops_push Lowering.ops Lowering.layout Lowering.nextSlot Lowering.memory
   Lowering.effectSlot Lowering.nextLabel Lowering.next Lowering.written Lowering.outputs Lowering.inputs Operand Operand.slot
   Operand.width lowerExp lowerMove lowerStmt lowerStatements setEffect temporary jumpConstant jumpSlot immediate useMemory
   useMemoryAt writeVar slot widthOf wrapSafe recordWrite addressOf readVar readsMemory
@@ -1322,12 +1322,12 @@ theorem lowerMove_register_ok {first second : Lowering} {dst : Bap.Var} {value :
     simp only [hwidth, bne_self_eq_false, Bool.false_eq_true, ↓reduceIte] at h
     obtain ⟨⟨after, index⟩, h2, h⟩ := obind h
     simp only [Option.some.injEq] at h
-    have fOps : Lowering.ops second = Lowering.ops after ++ [.move index (Operand.slot operand)] := by rw [← h]
-    have fNext : Lowering.nextSlot second = Lowering.nextSlot after := by rw [← h]
-    have fLayout : Lowering.layout second = Lowering.layout after := by rw [← h]
-    have fMemory : Lowering.memory second = Lowering.memory after := by rw [← h]
-    have fLabel : Lowering.nextLabel second = Lowering.nextLabel after := by rw [← h]
-    have fEffect : Lowering.effectSlot second = Lowering.effectSlot after := by rw [← h]
+    have fOps : Lowering.ops second = Lowering.ops after ++ [.move index (Operand.slot operand)] := by rw [← h]; exact Lowering.ops_push _ _
+    have fNext : Lowering.nextSlot second = Lowering.nextSlot after := by rw [← h]; rfl
+    have fLayout : Lowering.layout second = Lowering.layout after := by rw [← h]; rfl
+    have fMemory : Lowering.memory second = Lowering.memory after := by rw [← h]; rfl
+    have fLabel : Lowering.nextLabel second = Lowering.nextLabel after := by rw [← h]; rfl
+    have fEffect : Lowering.effectSlot second = Lowering.effectSlot after := by rw [← h]; rfl
     obtain ⟨hindex, hops, hnext, hlayout, hmemory⟩ := writeVar_inv h2
     obtain ⟨hlabel, heffect⟩ := writeVar_fields h2
     subst hindex
@@ -1511,12 +1511,12 @@ theorem lowerMove_store_ok {first second : Lowering} {dst : Bap.Var} {memory add
     · simp only [Bool.not_eq_false] at hc
       simp [hc] at h
   simp only [hchecks, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at h
-  have fOps : Lowering.ops second = Lowering.ops l2 ++ [.memStore (Operand.slot o1) (Operand.slot o2) size (endian == .big)] := by rw [← h]
-  have fNext : Lowering.nextSlot second = Lowering.nextSlot l2 := by rw [← h]
-  have fLayout : Lowering.layout second = Lowering.layout l2 := by rw [← h]
-  have fMemory : Lowering.memory second = Lowering.memory l2 := by rw [← h]
-  have fLabel : Lowering.nextLabel second = Lowering.nextLabel l2 := by rw [← h]
-  have fEffect : Lowering.effectSlot second = Lowering.effectSlot l2 := by rw [← h]
+  have fOps : Lowering.ops second = Lowering.ops l2 ++ [.memStore (Operand.slot o1) (Operand.slot o2) size (endian == .big)] := by rw [← h]; exact Lowering.ops_push _ _
+  have fNext : Lowering.nextSlot second = Lowering.nextSlot l2 := by rw [← h]; rfl
+  have fLayout : Lowering.layout second = Lowering.layout l2 := by rw [← h]; rfl
+  have fMemory : Lowering.memory second = Lowering.memory l2 := by rw [← h]; rfl
+  have fLabel : Lowering.nextLabel second = Lowering.nextLabel l2 := by rw [← h]; rfl
+  have fEffect : Lowering.effectSlot second = Lowering.effectSlot l2 := by rw [← h]; rfl
   simp only [Bool.or_eq_false_iff, decide_eq_false_iff_not, bne_eq_false_iff_eq, Bool.not_eq_false'] at hchecks
   obtain ⟨⟨⟨_, hsize8⟩, hsw⟩, _⟩ := hchecks
   have a3 : Appended l2 second [.memStore (Operand.slot o1) (Operand.slot o2) size (endian == .big)] := {
@@ -1732,7 +1732,7 @@ theorem setEffect_pushed {lowering : Lowering} {slot : Nat} (h : Lowering.effect
   constructor
   · simp [setEffect, h]
   · simp only [setEffect, h]
-    exact ⟨rfl, rfl, rfl, rfl, h.symm, rfl⟩
+    exact ⟨by simp [Lowering.ops, Lowering.push, List.reverseAux_eq], rfl, rfl, rfl, rfl, rfl⟩
 
 private def StmtOK (stmt : Bil.Stmt) : Prop :=
   ∀ (first second : Lowering) (terminated : Bool) (effect : Nat), LayoutWF first → Lowering.effectSlot first = some effect →
@@ -1781,7 +1781,7 @@ private theorem jmp_constant_ok {width : Nat} (target : BitVec width) : StmtOK (
     have hops : Lowering.ops (jumpConstant first (immediate target)) =
         Lowering.ops first ++ [.set effect 1, .jump (immediate target)] := by
       simp only [jumpConstant]
-      show Lowering.ops (setEffect first 1).1 ++ _ = _
+      rw [Lowering.ops_push]
       rw [hp.ops, List.append_assoc]
       rfl
     have g : Grows first (setEffect first 1).1 [.set effect 1] := hp.grows wf
@@ -1834,7 +1834,7 @@ private theorem jmp_slot_ok (target : Bil.Exp) (hnot : ∀ (width : Nat) (value 
     have hops : Lowering.ops (jumpSlot mid (Operand.slot operand)) =
         Lowering.ops mid ++ [.set effect 1, .jumpSlot (Operand.slot operand)] := by
       simp only [jumpSlot]
-      show Lowering.ops (setEffect mid 1).1 ++ _ = _
+      rw [Lowering.ops_push]
       rw [hp.ops, List.append_assoc]
       rfl
     have a2 : Appended mid (jumpSlot mid (Operand.slot operand)) [.set effect 1, .jumpSlot (Operand.slot operand)] :=
@@ -2618,9 +2618,9 @@ private theorem ifElse_ok {condition : Bil.Exp} {yes no : Bil.Program} (hy : Pro
   · simp only [Option.some.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
     refine ifElse_core hy hn wf heff hlow h1 hw ?_ hyes ?_ hno ?_
-    · exact ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
-    · exact ⟨List.append_assoc _ _ _, rfl, rfl, rfl, rfl, rfl⟩
-    · exact ⟨List.append_assoc _ _ _, rfl, rfl, rfl, rfl, rfl⟩
+    · exact ⟨by simp [Lowering.ops, Lowering.push, List.reverseAux_eq, List.append_assoc], rfl, rfl, rfl, rfl, rfl⟩
+    · exact ⟨by simp [Lowering.ops, Lowering.push, List.reverseAux_eq, List.append_assoc], rfl, rfl, rfl, rfl, rfl⟩
+    · exact ⟨by simp [Lowering.ops, Lowering.push, List.reverseAux_eq, List.append_assoc], rfl, rfl, rfl, rfl, rfl⟩
 
 private theorem while_ok {condition : Bil.Exp} {body : Bil.Program} (hb : ProgramOK body) : StmtOK (.while condition body) := by
   intro first second terminated effect wf heff hlow h
@@ -2637,10 +2637,10 @@ private theorem while_ok {condition : Bil.Exp} {body : Bil.Program} (hb : Progra
   · simp at h
   · simp only [Option.some.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
-    refine while_core hb wf heff hlow ?_ h1 hw ?_ hbody ?_ (fun he => (setEffect_pushed he 2).2) ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
-    · exact ⟨List.append_assoc _ _ _, rfl, rfl, rfl, rfl, rfl⟩
-    · exact ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
-    · exact ⟨List.append_assoc _ _ _, rfl, rfl, rfl, rfl, rfl⟩
+    refine while_core hb wf heff hlow ?_ h1 hw ?_ hbody ?_ (fun he => (setEffect_pushed he 2).2) ⟨Lowering.ops_push _ _, rfl, rfl, rfl, rfl, rfl⟩
+    · exact ⟨by simp [Lowering.ops, Lowering.push, List.reverseAux_eq, List.append_assoc], rfl, rfl, rfl, rfl, rfl⟩
+    · exact ⟨Lowering.ops_push _ _, rfl, rfl, rfl, rfl, rfl⟩
+    · exact ⟨by simp [Lowering.ops, Lowering.push, List.reverseAux_eq, List.append_assoc], rfl, rfl, rfl, rfl, rfl⟩
 
 /-- Every statement and program that lowers is correct, by the structure of the program. -/
 private theorem lowered_all : (∀ stmt, StmtOK stmt) ∧ (∀ program, ProgramOK program) := by
@@ -2942,7 +2942,7 @@ theorem enterBlock_starts {lowering : Lowering} {effect : Nat} (budget observed 
       [.branch budget (Lowering.nextLabel lowering) (Lowering.nextLabel lowering + 1), .label (Lowering.nextLabel lowering + 1),
         .set effect 1, .jump (UInt64.ofNat address), .label (Lowering.nextLabel lowering)] ++ rest := by
   simp only [enterBlock, freshLabel, jumpConstant, setEffect, h]
-  split <;> simp [codeSite, setEffect, List.append_assoc]
+  split <;> simp [codeSite, setEffect, List.append_assoc, Lowering.ops, Lowering.push, List.reverseAux_eq]
 
 end Accesses
 
@@ -2950,7 +2950,7 @@ end Accesses
 
 section Graph
 open Bap.Primus.Lifted Bap.Proofs.Primus Bap.Emu
-open_private Bap.Primus.Lifted Bap.Primus.Lifted Lowering Lowering.ops Lowering.layout Lowering.nextSlot Lowering.memory
+open_private Bap.Primus.Lifted Bap.Primus.Lifted Lowering Lowering.push Lowering.ops_push Lowering.ops Lowering.layout Lowering.nextSlot Lowering.memory
   Lowering.effectSlot Lowering.nextLabel Lowering.next Lowering.written Lowering.outputs Lowering.inputs Lowering.flags
   Lowering.checkpoints Lowering.budget Lowering.observed Lowering.wrapFaults Lowering.push Lowering.withWritten
   Operand Operand.slot Operand.width lowerExp lowerStatements setEffect temporary jumpConstant immediate widthOf
@@ -3296,7 +3296,7 @@ private theorem graphEdgeOps_sim {lowering : Lowering} {plan : GraphPlan} {sourc
   · simp only [Option.some.injEq] at h
     refine Or.inr ?_
     rw [← h]
-    simp [jumpConstant, setEffect, heff]
+    simp [jumpConstant, setEffect, heff, Lowering.ops, Lowering.push, List.reverseAux_eq]
 
 /-- The jump to a closed target. -/
 private theorem exec_closed {fuel : Nat} {state : Bil.State} {exp : Bil.Exp} {target : Nat} {result : Bil.State × Bil.Effect}
@@ -3638,7 +3638,7 @@ private theorem enterBlock_pushed {lowering : Lowering} {effect : Nat} (budget o
     Pushed lowering (enterBlock lowering budget observed address guarded)
       (entryOps effect budget observed (Lowering.nextLabel lowering) address guarded) (if guarded then 4 else 2) 0 := by
   cases guarded <;>
-    (constructor <;> simp [enterBlock, freshLabel, jumpConstant, setEffect, h, codeSite, entryOps, siteOps, List.append_assoc])
+    (constructor <;> simp [enterBlock, freshLabel, jumpConstant, setEffect, h, codeSite, entryOps, siteOps, List.append_assoc, Lowering.ops, Lowering.push, List.reverseAux_eq])
 
 private theorem RunAt.pass {stops : Nat → Bool} {program rest : List Op} {effect : Nat} {target : UInt64} {m : Machine}
     (h : ¬ stops target.toNat = true) : RunAt stops program (.code effect target :: rest, m) (rest, m) :=
@@ -3770,7 +3770,7 @@ theorem lowerExit_spec {plan : GraphPlan} {first second : Lowering} {block : Blo
       obtain ⟨ops, hgo, h⟩ := obind h
       simp only [Option.some.injEq] at h
       subst h
-      exact lowerExit_direct wf heff hlow he h1 hgo ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+      exact lowerExit_direct wf heff hlow he h1 hgo ⟨by simp [Lowering.ops, Lowering.push, List.reverseAux_eq], rfl, rfl, rfl, rfl, rfl⟩
   · next condition yes no falls he =>
     obtain ⟨⟨lowered, terminated⟩, h1, h⟩ := obind h
     cases terminated with
@@ -3790,7 +3790,7 @@ theorem lowerExit_spec {plan : GraphPlan} {first second : Lowering} {block : Blo
               .label (Lowering.nextLabel mid)] ++ yesOps ++ [.label (Lowering.nextLabel mid + 1)]))
             ([.branch (Operand.slot operand) (Lowering.nextLabel mid) (Lowering.nextLabel mid + 1),
               .label (Lowering.nextLabel mid)] ++ yesOps ++ [.label (Lowering.nextLabel mid + 1)]) 2 0 :=
-          ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+          ⟨Lowering.ops_push _ _, rfl, rfl, rfl, rfl, rfl⟩
         split at h
         · next hc =>
           obtain ⟨noOps, hno, h⟩ := obind h
@@ -3799,12 +3799,12 @@ theorem lowerExit_spec {plan : GraphPlan} {first second : Lowering} {block : Blo
           simp only [Bool.and_eq_true] at hc
           subst h
           exact lowerExit_branch wf heff hlow he hnextLt h1 h2 hyes (noLowering := mid) (Or.inl ⟨rfl, hc.1⟩) hmidEff hmidEff
-            p ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+            p ⟨Lowering.ops_push _ _, rfl, rfl, rfl, rfl, rfl⟩
         · obtain ⟨noOps, hno, h⟩ := obind h
           simp only [Option.some.injEq] at h
           subst h
           exact lowerExit_branch wf heff hlow he hnextLt h1 h2 hyes (Or.inr hno) hmidEff hmidEff
-            p ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+            p ⟨Lowering.ops_push _ _, rfl, rfl, rfl, rfl, rfl⟩
   · obtain ⟨⟨lowered, terminated⟩, h1, h⟩ := obind h
     simp only at h
     split at h
@@ -3817,10 +3817,10 @@ theorem lowerExit_spec {plan : GraphPlan} {first second : Lowering} {block : Blo
       · obtain ⟨ops, hgo, h⟩ := obind h
         simp only [Option.some.injEq] at h
         subst h
-        exact lowerExit_other wf heff hlow hnextLt h1 (Or.inr (Or.inr hgo)) ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+        exact lowerExit_other wf heff hlow hnextLt h1 (Or.inr (Or.inr hgo)) ⟨by simp [Lowering.ops, Lowering.push, List.reverseAux_eq], rfl, rfl, rfl, rfl, rfl⟩
       · simp only [Option.some.injEq] at h
         subst h
-        exact lowerExit_other (plan := plan) wf heff hlow hnextLt h1 (Or.inr (Or.inl rfl)) ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+        exact lowerExit_other (plan := plan) wf heff hlow hnextLt h1 (Or.inr (Or.inl rfl)) ⟨by simp [Lowering.ops, Lowering.push, List.reverseAux_eq], rfl, rfl, rfl, rfl, rfl⟩
 
 /-- What the way into a lowered block does, in a program. -/
 def EntryOK (stops : Nat → Bool) (program start body : List Op) (effect budget address : Nat) : Prop :=
@@ -3876,7 +3876,7 @@ private theorem lowerEntry_cases {plan : GraphPlan} {lowering second : Lowering}
       refine Or.inr ⟨rfl, address, label, hf, ?_⟩
       have p := enterBlock_pushed (lowering := Lowering.push lowering [.label label]) (effect := effect)
         (GraphPlan.budget plan) (GraphPlan.observed plan) block.address (GraphPlan.guarded plan block) heff
-      exact ⟨by rw [p.ops]; simp [Lowering.push], p.layout, p.next, p.memory, p.effect, p.label⟩
+      exact ⟨by rw [p.ops]; simp [Lowering.ops, Lowering.push, List.reverseAux_eq, List.append_assoc], p.layout, p.next, p.memory, p.effect, p.label⟩
     · simp at h
 
 private theorem find_same {plan : GraphPlan} {address : Nat} {a b l l' : Nat}
@@ -3902,7 +3902,7 @@ theorem lowerBlock_spec {plan : GraphPlan} {first second : Lowering} {block : Bl
     rw [← hl0]
     split
     · exact (show Pushed first (Lowering.withWritten first (GraphPlan.definite plan block.address)) [] 0 0 from
-        ⟨by simp [Lowering.withWritten], rfl, rfl, rfl, rfl, rfl⟩).grows wf
+        ⟨by simp [Lowering.withWritten, Lowering.ops], rfl, rfl, rfl, rfl, rfl⟩).grows wf
     · exact (show Pushed first first [] 0 0 from ⟨by simp, rfl, rfl, rfl, rfl, rfl⟩).grows wf
   have heff0 : Lowering.effectSlot l0 = some effect := by rw [g0.effect]; exact heff
   have hbudgetE : (GraphPlan.edges plan).any (fun edge => edge.2 == block.address) = true → GraphPlan.budget plan ≠ effect := by
@@ -3920,13 +3920,13 @@ theorem lowerBlock_spec {plan : GraphPlan} {first second : Lowering} {block : Bl
     obtain ⟨l2, h2, h⟩ := obind h
     rw [hany] at h2
     let body := Lowering.nextLabel l0
-    have p1 : Pushed l0 (Lowering.push (freshLabel l0).1 [.goto body]) [.goto body] 1 0 := ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+    have p1 : Pushed l0 (Lowering.push (freshLabel l0).1 [.goto body]) [.goto body] 1 0 := ⟨Lowering.ops_push _ _, rfl, rfl, rfl, rfl, rfl⟩
     have g1 := p1.grows g0.wf
     have heff1 : Lowering.effectSlot (Lowering.push (freshLabel l0).1 [.goto body]) = some effect := heff0
     rcases lowerEntry_cases heff1 h2 with ⟨hf, _⟩ | ⟨_, address, label, hfind, p2⟩
     · simp at hf
     · have g2 := p2.grows g1.wf
-      have p3 : Pushed l2 (Lowering.push l2 [.goto body, .label body]) [.goto body, .label body] 0 0 := ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+      have p3 : Pushed l2 (Lowering.push l2 [.goto body, .label body]) [.goto body, .label body] 0 0 := ⟨Lowering.ops_push _ _, rfl, rfl, rfl, rfl, rfl⟩
       have g3 := p3.grows g2.wf
       have gAll := ((g0.trans g1).trans g2).trans g3
       have heff3 : Lowering.effectSlot (Lowering.push l2 [.goto body, .label body]) = some effect := by rw [gAll.effect]; exact heff
@@ -4875,8 +4875,8 @@ private theorem lowerGraph_parts {blocks : List Block} {edges : List (Nat × Nat
       simp only [Option.some.injEq] at h
       refine ⟨seed, rest, _, _, final, rfl, h.symm, h1, hc, rfl, rfl, rfl, ?_⟩
       cases edges with
-      | nil => simp [graphInitial, graphPlan, setEffect, temporary]
-      | cons e es => simp [graphInitial, graphPlan, setEffect, temporary]
+      | nil => simp [graphInitial, graphPlan, setEffect, temporary, Lowering.ops, Lowering.push, List.reverseAux_eq]
+      | cons e es => simp [graphInitial, graphPlan, setEffect, temporary, Lowering.ops, Lowering.push, List.reverseAux_eq]
     · rw [ite_eq_right hc] at h
       cases h
 
@@ -4893,7 +4893,7 @@ private theorem flagOutputs_parts (written : List Bap.Var) (final : Lowering) :
     Lowering.budget (flagOutputs written final) = Lowering.budget final ∧
     Lowering.observed (flagOutputs written final) = Lowering.observed final ∧
     Lowering.inputs (flagOutputs written final) = Lowering.inputs final :=
-  ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+  ⟨by simp only [flagOutputs, Lowering.ops, List.reverse_reverse]; rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
 
 /-- The encoding of a state has found each input bound. -/
 private theorem encode_bound (env : Bil.Env) (inputs : List Bap.Var) (layout : List (Bap.Var × Nat)) (init : Array UInt64) (result : Array UInt64)
