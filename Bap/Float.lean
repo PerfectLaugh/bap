@@ -93,7 +93,7 @@ inductive Mode where
   deriving DecidableEq, Repr
 
 def Mode.ofName : String → Option Mode
-  | "rne" => some .rne
+  | "rne" | "rnx" => some .rne
   | "rna" | "rmm" => some .rna
   | "rtz" => some .rtz
   | "rtp" | "rup" => some .rtp

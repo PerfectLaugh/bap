@@ -7,9 +7,10 @@
 
 ;;; SCALAR FLOATING-POINT INSTRUCTIONS
 ;;
-;; The operations round to nearest with ties to even, which is the
-;; rounding mode FPCR resets to; FPCR itself is not modeled, so the
-;; FZ, DN and AHP controls and the exception flags are ignored. The
+;; The operations go by the rounding mode of FPCR where something serves
+;; their intrinsics, and otherwise round to nearest with ties to even, which
+;; is what it resets to. The FZ, DN and AHP controls and the exception
+;; flags are ignored. The
 ;; helpers are in arm-float.lisp.
 
 (defun fp-compare (x y) (set-nzcv (fp-nzcv x y)))
@@ -127,10 +128,10 @@
 (defun FRINTMDr (rd rn) (FRINT*Dr 'm rd rn))
 (defun FRINTZSr (rd rn) (FRINT*Sr 'z rd rn))
 (defun FRINTZDr (rd rn) (FRINT*Dr 'z rd rn))
-(defun FRINTXSr (rd rn) (FRINT*Sr 'n rd rn))
-(defun FRINTXDr (rd rn) (FRINT*Dr 'n rd rn))
-(defun FRINTISr (rd rn) (FRINT*Sr 'n rd rn))
-(defun FRINTIDr (rd rn) (FRINT*Dr 'n rd rn))
+(defun FRINTXSr (rd rn) (setd rd (a64-frint 'x rn)))
+(defun FRINTXDr (rd rn) (setd rd (a64-frint 'x rn)))
+(defun FRINTISr (rd rn) (setd rd (a64-frint 'x rn)))
+(defun FRINTIDr (rd rn) (setd rd (a64-frint 'x rn)))
 
 ;; COMPARISON AND SELECTION
 
@@ -510,11 +511,19 @@
                  (intrinsic (symbol-concat 'fmadh 'rne 'ieee754_binary (a64-fsize-symbol a) :sep '_)
                             (fp-neg a) b (a64-fthree a) :result (word-width a))))))
 
-(defun a64-frint (mode a)
-  "rounds to an integral value, FRINTX and FRINTI use the rounding
-   mode of FPCR, which is assumed to be to nearest"
+(defun a64-frint-as (mode a)
   (fp-round-integral mode a (a64-fone a) (a64-fhalf a)
                      (a64-fexp-bits a) (a64-frac-bits a)))
+
+(defun a64-frint (mode a)
+  "rounds to an integral value, mode x is the rounding mode of FPCR,
+   which FRINTX and FRINTI use"
+  (case mode
+    'x (let ((rmode (extract 23 22 FPCR)))
+         (fp-select (= rmode 0) (a64-frint-as 'n a)
+           (fp-select (= rmode 1) (a64-frint-as 'p a)
+             (fp-select (= rmode 2) (a64-frint-as 'm a) (a64-frint-as 'z a)))))
+    (a64-frint-as mode a)))
 
 (defun a64-fcvt-int (signed mode a)
   "converts A to the integer of its size, rounded by MODE"

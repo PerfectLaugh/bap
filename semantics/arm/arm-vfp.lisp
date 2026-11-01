@@ -9,10 +9,11 @@
 
 ;;; VFP INSTRUCTIONS
 ;;
-;; The operations round to nearest with ties to even, which is the
-;; rounding mode FPSCR resets to; only the NZCV bits of FPSCR are
-;; modeled, so the FZ and DN controls, the rounding mode and the
-;; exception flags are ignored. The helpers are in arm-float.lisp.
+;; The operations go by the rounding mode of FPSCR where something serves
+;; their intrinsics, and otherwise round to nearest with ties to even, which
+;; is what it resets to. Of the rest of FPSCR only the NZCV bits are modeled,
+;; so the FZ and DN controls and the exception flags are ignored. The helpers
+;; are in arm-float.lisp.
 
 (defmacro vfp (cnd body)
   "(vfp CND BODY) evaluates BODY if the condition CND holds"
@@ -184,10 +185,10 @@
    with the base RN and the encoded offset OFF, which is the number of
    words in the low byte and the subtraction flag in the bit 8"
   (let ((base (vfp-base pc rn))
-        (disp (lshift (extract 7 0 off) 2)))
+        (disp (lshift (cast-unsigned (word-width) (extract 7 0 off)) 2)))
     (if (= 1 (select 8 off))
-        (- base (cast-unsigned (word-width) disp))
-      (+ base (cast-unsigned (word-width) disp)))))
+        (- base disp)
+      (+ base disp))))
 
 (defun VSTRD (dd rn off cnd _) (vfp cnd (store-word (vfp-address 8 rn off) dd)))
 (defun VSTRS (sd rn off cnd _) (vfp cnd (store-word (vfp-address 8 rn off) sd)))

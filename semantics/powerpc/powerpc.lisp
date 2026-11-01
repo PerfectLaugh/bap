@@ -800,9 +800,10 @@
 
 ;;; FLOATING-POINT INSTRUCTIONS
 ;;
-;; The floating-point registers F0 to F31 hold doubles, the operations
-;; round to nearest with ties to even, the mode of FPSCR after reset,
-;; they don't update FPSCR nor obey its controls, except for FPCC, the
+;; The floating-point registers F0 to F31 hold doubles, the operations go
+;; by the rounding mode of FPSCR where something serves their intrinsics,
+;; and otherwise round to nearest with ties to even, its mode after reset.
+;; They don't update FPSCR nor obey its other controls, except for FPCC, the
 ;; flags FL, FG, FE and FU, that the comparisons set. The moves to and
 ;; from FPSCR are near the end of this file.
 ;; The operands of the multiply-add instructions are FRT, FRA, FRC and
@@ -2260,10 +2261,11 @@
 (defun MTFSB0 (bt) (set-fpscr (logand (fpscr) (lnot (lshift (u64 1) (- 31 bt))))))
 (defun MTFSB1 (bt) (set-fpscr (logor (fpscr) (lshift (u64 1) (- 31 bt)))))
 
-;; the fields are numbered from the most significant one of the word W
+;; the fields are numbered from the most significant one of the word W,
+;; which is the low word of FPSCR for W of 0
 (defun field-mask (flm i w)
   (if (non-zero (logand flm (lshift 1 (- 7 i))))
-      (lshift (u64 15) (+ (* 4 (- 7 i)) (* 32 (- 1 w))))
+      (lshift (u64 15) (+ (* 4 (- 7 i)) (* 32 w)))
     (u64 0)))
 (defun fields-mask (flm w)
   (logor (field-mask flm 0 w) (field-mask flm 1 w) (field-mask flm 2 w) (field-mask flm 3 w)
@@ -2275,7 +2277,7 @@
 (defun MTFSF_rec (flm rb l w) (MTFSF flm rb l w) (record-fp))
 
 (defun MTFSFI (bf u w)
-  (let ((sh (+ (* 4 (- 7 bf)) (* 32 (- 1 w)))))
+  (let ((sh (+ (* 4 (- 7 bf)) (* 32 w))))
     (set-fpscr (insert-fields (lshift (u64 u) sh) (lshift (u64 15) sh)))))
 (defun MTFSFI_rec (bf u w) (MTFSFI bf u w) (record-fp))
 

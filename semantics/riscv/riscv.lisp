@@ -965,9 +965,10 @@
 ;; <op>_<rmode>_ieee754_binary_<from>_<to>, which Primus runs exactly,
 ;; with the canonical NaNs, and the saturated integers, of RISC-V, see
 ;; ieee754-intrinsics.lisp. The fused multiply-adds round once, with
-;; fmad. The rounding mode is the static rm field of the instruction,
-;; and the dynamic one (7) is to nearest, ties to even, rather than
-;; frm of FCSR, and the accrued exception flags are not raised.
+;; fmad. The rounding mode is the static rm field of the instruction, and
+;; the dynamic one (7) is frm of FCSR where something serves the intrinsic,
+;; which reads it, and otherwise to nearest, ties to even. The accrued
+;; exception flags are not raised.
 ;;
 ;; The F registers are of 64 bits (FLEN), on RV32 too, and the
 ;; single-precision values in them are NaN-boxed, i.e., their upper 32
@@ -1058,9 +1059,10 @@
   (case n 32 '32 64 '64 'unknown))
 
 (defun frm (rm)
-  "the rounding mode of the rm field, the dynamic one is to nearest"
+  "the rounding mode of the rm field: a mode, or rne for the dynamic one,
+   which is the one that goes by frm where something serves the intrinsic"
   (declare (visibility :private))
-  (case rm 0 'rne 1 'rtz 2 'rtn 3 'rtp 4 'rna 'rne))
+  (case rm 0 'rnx 1 'rtz 2 'rtn 3 'rtp 4 'rna 'rne))
 
 (defun fcall (name rm n x y)
   (declare (visibility :private))
@@ -1471,7 +1473,7 @@
 ;;; CONTROL AND STATUS REGISTERS, as far as the compilers emit them,
 ;;; i.e., the ones of the floating point: fflags (1), frm (2), and fcsr
 ;;; (3), which are the fields of FCSR, whose writes are kept, though
-;;; the operations don't accrue the exceptions, and don't round by frm,
+;;; the operations don't accrue the exceptions,
 ;;; the vector rounding mode vxrm (0xa), and the counters, which are read
 ;;; with the intrinsics riscv_csr_<name>.
 

@@ -474,8 +474,9 @@
 ;; The condition codes are the registers FCC0-FCC7, the bits of FCSR,
 ;; named by the operands of the instructions. The register FCSR has the
 ;; other fields, which only CFC1 and CTC1 read and write, see them below:
-;; the operations round to nearest (the reset value of FCSR.RM) whatever
-;; FCSR.RM says, don't flush subnormals whatever FCSR.FS says, don't set
+;; the operations go by FCSR.RM where something serves their intrinsics, and
+;; otherwise round to nearest, its reset value, don't flush subnormals whatever
+;; FCSR.FS says, don't set
 ;; the Cause and Flags fields, and don't take the exceptions that the
 ;; Enables field asks for, which are disabled at the reset. The NaNs are of the
 ;; legacy encoding of the Release 2 (FCSR.NAN2008 = 0), whose quiet

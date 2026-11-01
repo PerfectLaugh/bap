@@ -166,6 +166,8 @@ structure Emu where
   /-- What serves intrinsics in the code that names them: the bits of what is computed from the name and the bits of the
   operands, as its width and its bits. Lifted code runs up to an intrinsic, and what comes after it wouldn't run. -/
   intrinsicServer : IO.Ref (Option (String → List Nat → Option (Nat × Nat)))
+  /-- What an intrinsic comes to on a state, for one that goes by the rounding mode of the machine. -/
+  intrinsicName : IO.Ref (Bil.Env → String → String)
   /-- The programs of the instructions that have such an intrinsic, by address. -/
   servedPrograms : IO.Ref (Std.HashMap Nat Bil.Program)
   /-- What wants to know of a new process: of the one that made it, and of it. -/
@@ -256,6 +258,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     parkedRegions := ← IO.mkRef {}
     fetchPages := ← IO.mkRef {}
     intrinsicServer := ← IO.mkRef none
+    intrinsicName := ← IO.mkRef fun _ name => name
     servedPrograms := ← IO.mkRef {}
     processHooks := ← IO.mkRef []
     nextPc := ← IO.mkRef 0
@@ -1509,7 +1512,7 @@ private def runServed (emu : Emu) (serve : String → List Nat → Option (Nat �
           | .error error => throw <| IO.userError error
         emu.state.modify fun state => { env := Bil.bind state.env var value }
       | .special name =>
-        match serve name (← operands.get) with
+        match serve ((← emu.intrinsicName.get) (← emu.state.get).env name) (← operands.get) with
         | some (width, bits) =>
           operands.set []
           emu.state.modify fun state =>

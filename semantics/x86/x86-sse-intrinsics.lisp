@@ -9,9 +9,11 @@
 ;; The floating-point operations are calls to the intrinsic functions
 ;; <op>_<rmode>_ieee754_binary_<size> and, for the conversions,
 ;; <op>_<rmode>_ieee754_binary_<from>_<to>, with the operands and the
-;; results of the sizes in their names. The rounding mode is the one
-;; of MXCSR after reset, to nearest with ties to even, the other
-;; controls of MXCSR and the exceptions are not modeled.
+;; results of the sizes in their names. The rounding mode is rne, which
+;; is the one of MXCSR, and of the x87 control word for 80 bits, where
+;; something serves the intrinsic, and otherwise to nearest with ties to
+;; even; rnx is to nearest whatever they say. The other controls of MXCSR
+;; and the exceptions are not modeled.
 
 (defparameter *sse-rmode* 'rne)
 
@@ -260,7 +262,7 @@
 (defun sse-round-imm (rt x imm)
   (if (= (logand imm 4) 4) (sse-round *sse-rmode* rt x)
     (case (logand imm 3)
-      0 (sse-round 'rne rt x)
+      0 (sse-round 'rnx rt x)
       1 (sse-round 'rtn rt x)
       2 (sse-round 'rtp rt x)
       3 (sse-round 'rtz rt x))))

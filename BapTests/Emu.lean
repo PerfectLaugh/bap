@@ -616,6 +616,16 @@ def testLinuxDynamic (triple : String) : IO Unit := do
   assertEqual s!"Linux {triple} a dynamic program has the status of a static one" staticOutcome dynamicOutcome
   assertEqual s!"Linux {triple} a dynamic program does what a static one does" staticText dynamicText
 
+/-- What the rounding modes of a machine do, as qemu has it. -/
+def testLinuxRound (triple : String) : IO Unit := do
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-round"
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual s!"Linux {triple} a program that rounds ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual s!"Linux {triple} rounding is what qemu does" (String.fromUTF8! (← IO.FS.readBinFile s!"testsuite/data/{triple}-libc-round.out"))
+    (String.fromUTF8! (← written.get))
+
 /-- What a program finds in `/proc`, of itself and its child, and a file that a function makes, across a checkpoint. -/
 def testLinuxProc (triple : String) : IO Unit := do
   let path := s!"testsuite/bin/{triple}-linux-musl-libc-proc"

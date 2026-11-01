@@ -831,6 +831,27 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
         breakStart := top, breakEnd := top, command := arguments, environment, program := name })
       pure (.returnValue 0)
 
+/-- The name of an intrinsic that goes by the rounding mode of the machine, by its mode. That is to nearest nearly always, so
+that a register is all that it costs then. -/
+private def roundedName (architecture : Architecture) (env : Bil.Env) (name : String) : String :=
+  let field (register : String) (width shift : Nat) (modes : List String) : String :=
+    match Bil.lookup env ⟨register, .imm width, 0, false⟩ with
+    | .ok (.bits value) =>
+      let index := (value.toNat >>> shift) % 8
+      if index == 0 then name else "_".intercalate ((name.splitOn "_").map fun part =>
+        if part == "rne" then modes.getD index "rne" else part)
+    | _ => name
+  let binaryModes := ["rne", "rtp", "rtn", "rtz", "rne", "rtp", "rtn", "rtz"]
+  match architecture with
+  | .x86_64 | .i686 =>
+    if (name.splitOn "binary_80").length > 1 then field "FPU_CONTROL" 16 10 ["rne", "rtn", "rtp", "rtz", "rne", "rtn", "rtp", "rtz"]
+    else field "MXCSR" 32 13 ["rne", "rtn", "rtp", "rtz", "rne", "rtn", "rtp", "rtz"]
+  | .aarch64 => field "FPCR" 32 22 binaryModes
+  | .arm => field "FPSCR" 32 22 binaryModes
+  | .riscv64 | .riscv32 => field "FCSR" 32 5 ["rne", "rtz", "rtn", "rtp", "rna", "rne", "rne", "rne"]
+  | .powerpc _ _ => field "FPSCR" 64 0 ["rne", "rtz", "rtp", "rtn", "rne", "rtz", "rtp", "rtn"]
+  | .mips bits _ _ => field "FCSR" bits 0 ["rne", "rtz", "rtp", "rtn", "rne", "rtz", "rtp", "rtn"]
+
 /-- An emulator of an architecture, as a Linux machine needs it, with nothing mapped. -/
 private def emulatorOf (architecture : Architecture) : IO Emu := do
   -- A real program runs more code than the working set of a few thousand blocks that the default is for, and past it, each one
@@ -850,6 +871,7 @@ private def emulatorOf (architecture : Architecture) : IO Emu := do
     | .mips _ big release6 => mips64 page 0x1000 0 release6 (if big then .big else .little) tuned
     | .powerpc wide big => powerpc page 0x1000 0 { bits := wide, endian := if big then .big else .little } tuned
   unmap emu 0x1000 16
+  emu.intrinsicName.set (roundedName architecture)
   emu.intrinsicServer.set (some (Bap.Float.evaluateWith (match architecture with
     | .x86_64 | .i686 => .x86
     | .aarch64 | .arm => .arm
