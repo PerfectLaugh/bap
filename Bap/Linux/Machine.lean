@@ -2,6 +2,7 @@ import Bap.Emu.Tasks
 import Bap.Emu.Checkpoint
 import Bap.Linux.Calls
 import Bap.Linux.Signals
+import Bap.Linux.GuestHeap
 import Bap.Linux.Image
 import Bap.Linux.Proc
 import Bap.Linux.Elf
@@ -40,6 +41,8 @@ structure Machine where
   handled : Bool := false
   /-- What its processes do with signals, and what is pending. -/
   signals : Signals
+  /-- What `Machine.malloc` has given out, by address space. -/
+  heaps : IO.Ref (Std.HashMap Nat GuestHeap)
 
 /-- A model of a runtime that isn't in the kernel or the emulator: pthreads served by hooks, a debugger, a managed language.
 `id` is what a checkpoint knows it by, so that it stays the same, and `version` says what its bytes mean.
@@ -1010,11 +1013,14 @@ private def emulatorOf (architecture : Architecture) : IO Emu := do
 on any architecture, as some say that a call failed apart from its value. -/
 abbrev SyscallHandler := Emu → Nat → List Nat → IO SyscallAction
 
+/-- What a checkpoint knows the heaps of `Machine.malloc` by. -/
+private def heapModelId : String := "bap.heap"
+
 /-- What makes an emulator a machine: its kernel behind its system calls. None of it is in a checkpoint. -/
 private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel) (watch : Option (Nat → List Nat → IO Unit))
     (handler : Option SyscallHandler) (target : Nat) (models : List RuntimeModel) : IO Machine := do
   let signals : Signals := { architecture, returnPage := stackTop architecture + 4096, table := ← IO.mkRef {} }
-  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome, signals }
+  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome, signals, heaps := ← IO.mkRef {} }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
@@ -1029,11 +1035,24 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   -- Signals are part of what it is, and it is in a checkpoint like what a model holds.
   machine.models.modify (· ++ [{ id := Signals.modelId, version := 1, state := { save := signals.save, load := signals.load } }])
   signals.serve emu
+  -- So is what was allocated in it, as what has an address has to go on having it.
+  machine.models.modify (· ++ [{
+    id := heapModelId, version := 1,
+    state := {
+      save := do
+        -- Of what is still there, as a process that went doesn't say so.
+        let table ← emu.taskTable.get
+        pure (GuestHeap.encode ((← machine.heaps.get).filter fun space _ => table.tasks.any (·.space == space)))
+      load := fun data => do machine.heaps.set (← IO.ofExcept (GuestHeap.decode data)) } }])
   let _ ← onSyscall emu fun emu number args => do
     if machine.architecture.call number == some .execve then
       let action ← handOver machine emu (← execute { machine with emu } emu args)
       -- It is a new program if it is going there, and nothing else sends it anywhere in the middle of a system call.
-      if (← emu.redirect.get).isSome then signals.executed (← currentTask emu).group (← thread emu)
+      if (← emu.redirect.get).isSome then
+        signals.executed (← currentTask emu).group (← thread emu)
+        -- What it had is gone with its memory.
+        let space := (← currentTask emu).space
+        machine.heaps.modify (·.erase space)
       pure action
     else pure .default
   let _ ← serveKernelCalls machine
@@ -1041,6 +1060,12 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   let _ ← serveRest machine
   if architecture == .x86_64 || architecture == .i686 then serveCpu emu machine.kernel architecture.bits
   emu.processHooks.modify ((fun parent child => machine.kernel.modify (·.fork parent child)) :: ·)
+  -- A new process has its own copy of the memory, and what is allocated in it.
+  emu.processHooks.modify ((fun _ child => do
+    let space := (← currentTask emu).space
+    machine.heaps.modify fun heaps => match heaps.get? space with
+      | some heap => heaps.insert child heap
+      | none => heaps) :: ·)
   pure machine
 
 /-- What a program is to a checkpoint: its architecture and its bytes. -/
@@ -1091,6 +1116,139 @@ def Machine.run (machine : Machine) (output : ByteArray → IO Unit) (quantum : 
       | other => pure other
   go (fuel + 1) fuel
 
+/-! Memory of a guest for who runs it. -/
+
+/-- Runs this in the address space of a process, which is that of the thread that runs if it is of that process. Going there and back is
+a switch of threads to the emulator, which takes what threads hold exclusively and what is left of a turn, and a look at memory isn't
+to change what a guest does, so that those stay. It can't be done in the middle of an instruction. -/
+private def Machine.inProcess (machine : Machine) (pid : Option Nat) (action : IO α) : IO α := do
+  let emu := machine.emu
+  let home ← thread emu
+  let some wanted := pid | action
+  let table ← emu.taskTable.get
+  if (table.find? home).map (·.group) == some wanted then return ← action
+  let some target := table.tasks.find? (fun task => task.group == wanted && task.status.isNone)
+    | throw <| IO.userError s!"no running process {wanted}"
+  if ← emu.serving.get then
+    throw <| IO.userError "the memory of another process can't be reached in the middle of an instruction: stop the thread, and do it once the run returns"
+  let width ← wordWidth emu
+  let monitorVar := exclusiveMonitor width
+  let monitorOf (id : ThreadId) : IO (Option Bap.Value) := do
+    match ← (threadReg emu id monitorVar).toBaseIO with
+    | .ok value => pure (some value)
+    | .error _ => pure none
+  let turn ← emu.turnUsed.get
+  let homeMonitor ← monitorOf home
+  let targetMonitor ← monitorOf target.tid
+  let arrived ← emu.switchedIn.get
+  emu.switchedIn.set none
+  try
+    switchThread emu target.tid
+    try action
+    finally switchThread emu home
+  finally
+    emu.switchedIn.set arrived
+    if let some value := homeMonitor then setThreadReg emu home monitorVar value
+    if let some value := targetMonitor then setThreadReg emu target.tid monitorVar value
+    emu.turnUsed.set turn
+
+/-- The bytes at a virtual address, of the process that runs or of the one given, as the program itself could read them: what isn't
+mapped or readable is an error. -/
+def Machine.read (machine : Machine) (address size : Nat) (pid : Option Nat := none) : IO ByteArray :=
+  machine.inProcess pid (Bap.Emu.read machine.emu address size)
+
+/-- Writes at a virtual address, of the process that runs or of the one given, as the program itself could: what isn't mapped or
+writable is an error, and then nothing has been written. Code that it changes runs as changed. -/
+def Machine.write (machine : Machine) (address : Nat) (data : ByteArray) (pid : Option Nat := none) : IO Unit :=
+  machine.inProcess pid do
+    let emu := machine.emu
+    let regions ← emu.regions.get
+    -- What has to hold all of it, to have written none of it otherwise.
+    let rec pieces : Nat → Nat → List (Nat × Nat) → IO (List (Nat × Nat))
+      | 0, _, done => pure done.reverse
+      | fuel + 1, position, done => do
+        if position ≥ address + data.size then return done.reverse
+        match lookupRegion regions position with
+        | none => throw <| IO.userError s!"unmapped address {position}"
+        | some region =>
+          if !region.protection.writable then throw <| IO.userError s!"read-only address {position}"
+          let stop := min (region.address + region.data.size) (address + data.size)
+          pieces fuel stop ((position, stop) :: done)
+    for (first, stop) in ← pieces (regions.length + 1) address [] do
+      Bap.Emu.write emu first (data.extract (first - address) (stop - address))
+
+/-- The most that one block can have: a mapping is held in memory of the host from the start. -/
+def Machine.mallocLimit : Nat := 2 ^ 32
+
+/-- The heap of the address space that runs, with what is no longer mapped gone from it. -/
+private def Machine.currentHeap (machine : Machine) : IO (Nat × GuestHeap) := do
+  let space := (← currentTask machine.emu).space
+  let regions ← machine.emu.regions.get
+  let heap := ((← machine.heaps.get).getD space {}).keepChunks fun chunk => coversRange regions chunk.1 (chunk.1 + chunk.2)
+  pure (space, heap)
+
+/-- Memory of a guest that nothing else there has: of the process that runs or of the one given, at a multiple of 16, readable and
+writable, and not cleared if it was used before. It has its own mappings, so that it is nothing that the program's `malloc` knows of,
+and a `free` of that program doesn't take it. It stays through a checkpoint and a `fork`, and goes on `execve`. -/
+def Machine.malloc (machine : Machine) (size : Nat) (pid : Option Nat := none) : IO Nat :=
+  machine.inProcess pid do
+    if size > Machine.mallocLimit then throw <| IO.userError s!"malloc of {size} bytes is more than a block can have"
+    let (space, heap) ← machine.currentHeap
+    let heap ← match heap.alloc size with
+      | some _ => pure heap
+      | none =>
+        let mapping := GuestHeap.mappingFor size
+        pure (heap.addChunk (← placeMapping machine.emu 0 false (zeroBytes mapping) 3) mapping)
+    match heap.alloc size with
+    | some (address, heap) =>
+      machine.heaps.modify (·.insert space heap)
+      pure address
+    | none => throw <| IO.userError s!"malloc of {size} bytes found no room after mapping it"
+
+/-- Gives back what `Machine.malloc` gave, of the process that runs or of the one given. Of 0 it does nothing, as `free` does. Anything
+else is an error, such as what it didn't give or has had back, or what the program has unmapped since. -/
+def Machine.free (machine : Machine) (address : Nat) (pid : Option Nat := none) : IO Unit := do
+  if address == 0 then return
+  machine.inProcess pid do
+    let (space, heap) ← machine.currentHeap
+    match heap.release address with
+    | none => throw <| IO.userError s!"free of {address}, which malloc didn't give or has had back"
+    | some (heap, empty) =>
+      machine.heaps.modify (·.insert space heap)
+      if let some (first, size) := empty then unmap machine.emu first size
+
+/-- `count` blocks of `size`, as one, cleared: what `Machine.malloc` gives may have been used before. That they come to more than a block
+can have is an error, however much that is in the words of a target. -/
+def Machine.calloc (machine : Machine) (count size : Nat) (pid : Option Nat := none) : IO Nat := do
+  let total := count * size
+  if total > Machine.mallocLimit then throw <| IO.userError s!"calloc of {count} of {size} bytes is more than a block can have"
+  machine.inProcess pid do
+    let address ← machine.malloc total
+    machine.write address (zeroBytes total)
+    pure address
+
+/-- Another size for a block, keeping what it has as far as both go: where it is if it can, and somewhere else if not. Of 0 it is
+`Machine.malloc`. To 0 it keeps the least that a block can be and says where, as what a libc does with that is its own, and an address
+always means that it worked. If it fails, the block is as it was. What is more than it had isn't cleared. -/
+def Machine.realloc (machine : Machine) (address size : Nat) (pid : Option Nat := none) : IO Nat := do
+  if address == 0 then return ← machine.malloc size pid
+  machine.inProcess pid do
+    if size > Machine.mallocLimit then throw <| IO.userError s!"realloc to {size} bytes is more than a block can have"
+    let (space, heap) ← machine.currentHeap
+    let some held := heap.sizeOf address
+      | throw <| IO.userError s!"realloc of {address}, which malloc didn't give or has had back"
+    if let some resized := heap.resize address size then
+      machine.heaps.modify (·.insert space resized)
+      return address
+    let moved ← machine.malloc size
+    try
+      machine.write moved (← Bap.Emu.read machine.emu address held)
+    catch error =>
+      machine.free moved
+      throw error
+    machine.free address
+    pure moved
+
 /-- What is in the kernel, in the emulator and in the models at once, to go back to. -/
 structure Machine.Saved where
   emulator : Snapshot
@@ -1123,7 +1281,7 @@ def Machine.restore (machine : Machine) (saved : Machine.Saved) : IO Unit := do
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 
 /-- What the bytes after the magic mean. -/
-def checkpointFormat : Nat := 3
+def checkpointFormat : Nat := 4
 
 /-- What this BAP does with a guest, which goes up when the same state could go on differently. A checkpoint is refused by a BAP
 of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/
@@ -1202,7 +1360,7 @@ def Machine.checkpoint (machine : Machine) : IO ByteArray := do
 /-- Says what can't be restored of the models of a checkpoint, as going on without one or with another isn't going on as it would have. -/
 private def modelConflict (saved : List (String × Nat × ByteArray)) (models : List RuntimeModel) : Option String :=
   -- Those that every machine has are no one's to give.
-  let saved := saved.filter (·.1 != Signals.modelId)
+  let saved := saved.filter fun entry => entry.1 != Signals.modelId && entry.1 != heapModelId
   match saved.find? (fun entry => !(models.any (·.id == entry.1))) with
   | some entry => some s!"a checkpoint with the state of model {entry.1}, which wasn't given"
   | none =>

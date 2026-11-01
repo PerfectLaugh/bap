@@ -28,6 +28,8 @@ The OCaml and Rust implementation it came from is on the
   the same file. A checkpoint says which format, BAP, semantics and program it is of, and one that can't go on as it would have is refused.
   Signals are as Linux has them on each of those, as far as `testsuite/src/libc-signals.c` goes, which agrees with qemu: handlers with their `siginfo_t` and a context that they can
   change, masks, `sigaltstack`, `sigsuspend`, `sigtimedwait`, `SIGCHLD`, a signal for a thread or a process, and faults that a handler takes. `pthread_cancel` works by them.
+  `Machine.read` and `Machine.write` reach the memory of any of its processes by virtual address, without a program being able to tell, and `Machine.malloc`, `Machine.calloc`,
+  `Machine.realloc` and `Machine.free` allocate in it from outside, in mappings of their own.
 - **Executes symbolically**, solving path conditions with Z3.
 
 ## Building

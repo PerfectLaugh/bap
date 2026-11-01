@@ -1423,6 +1423,316 @@ def testLinuxSignalCheckpoints (triple : String) (step : Nat) : IO Unit := do
   assertEqual s!"Linux {triple} signals say what they should, from pieces"
     (String.fromUTF8! (← IO.FS.readBinFile "testsuite/data/libc-signals.out")) (String.fromUTF8! (← written.get))
 
+/-- The allocator alone, on a long run of what it can be asked: blocks are aligned, within what is mapped and apart from each other, and
+when all have gone back so has all that was mapped, in mappings that may touch. -/
+def testGuestHeap : IO Unit := do
+  let random ← IO.mkRef (0x9E3779B97F4A7C15 : UInt64)
+  let next : IO Nat := do
+    let value ← random.get
+    let value := value ^^^ (value <<< 13)
+    let value := value ^^^ (value >>> 7)
+    let value := value ^^^ (value <<< 17)
+    random.set value
+    pure value.toNat
+  let mut heap : Bap.Linux.GuestHeap := {}
+  let mut live : List (Nat × Nat) := []
+  -- Where the next mapping goes: right after the last, or apart from it.
+  let mut cursor := 0x10000
+  let mut mapped := 0
+  let mut unmapped := 0
+  for round in [0:6000] do
+    if (← next) % 5 < 3 then
+      let kind := (← next) % 8
+      let drawn ← next
+      let size := match kind with
+        | 0 => 0
+        | 1 => drawn % 200000
+        | _ => drawn % 3000
+      let mut prepared := heap
+      if (prepared.alloc size).isNone then
+        let mapping := Bap.Linux.GuestHeap.mappingFor size
+        prepared := prepared.addChunk cursor mapping
+        cursor := cursor + mapping + (if (← next) % 2 == 0 then 0 else 4096)
+        mapped := mapped + 1
+      match prepared.alloc size with
+      | none => throw <| IO.userError s!"Guest heap has no room for {size} after mapping it"
+      | some (address, updated) =>
+        heap := updated
+        let wanted := max size 1
+        if address % 16 != 0 then throw <| IO.userError s!"Guest heap gave {address}, which isn't aligned"
+        unless heap.chunks.any (fun chunk => chunk.1 ≤ address && address + wanted ≤ chunk.1 + chunk.2) do
+          throw <| IO.userError s!"Guest heap gave {address}, which isn't in what it has mapped"
+        if live.any (fun block => address < block.1 + block.2 && block.1 < address + wanted) then
+          throw <| IO.userError s!"Guest heap gave {address} of {wanted} in round {round}, which is in use"
+        live := (address, wanted) :: live
+    else if !live.isEmpty && (← next) % 3 == 0 then
+      -- Another size where it is, if it can have that: to nothing that is another's.
+      let index := (← next) % live.length
+      let block := live[index]!
+      let size := (← next) % 4000
+      let wanted := max size 1
+      if let some updated := heap.resize block.1 size then
+        heap := updated
+        if !heap.chunks.any (fun chunk => chunk.1 ≤ block.1 && block.1 + wanted ≤ chunk.1 + chunk.2) then
+          throw <| IO.userError s!"Guest heap resized {block.1} out of what it has mapped"
+        if (live.eraseIdx index).any (fun other => block.1 < other.1 + other.2 && other.1 < block.1 + wanted) then
+          throw <| IO.userError s!"Guest heap resized {block.1} over another, in round {round}"
+        live := live.set index (block.1, wanted)
+    else if !live.isEmpty then
+      let index := (← next) % live.length
+      let block := live[index]!
+      match heap.release block.1 with
+      | none => throw <| IO.userError s!"Guest heap refused its own {block.1}"
+      | some (updated, empty) =>
+        heap := updated
+        if let some (first, size) := empty then
+          unmapped := unmapped + 1
+          if live.any (fun other => other != block && other.1 < first + size && first < other.1 + other.2) then
+            throw <| IO.userError s!"Guest heap gave back what has a block in it, in round {round}"
+        live := live.eraseIdx index
+        if (heap.release block.1).isSome then throw <| IO.userError s!"Guest heap took {block.1} twice"
+    -- What is free is in order, and touches only where a mapping starts.
+    for pair in heap.free.zip (heap.free.drop 1) do
+      unless pair.1.1 + pair.1.2 < pair.2.1 || (pair.1.1 + pair.1.2 == pair.2.1 && heap.chunks.any (·.1 == pair.2.1)) do
+        throw <| IO.userError s!"Guest heap has free ranges that touch or are out of order, in round {round}"
+  for block in live do
+    match heap.release block.1 with
+    | some (updated, _) => heap := updated
+    | none => throw <| IO.userError s!"Guest heap refused its own {block.1}"
+  assertEqual "Guest heap with everything back has nothing" (([] : List (Nat × Nat)), ([] : List (Nat × Nat)), ([] : List (Nat × Nat)))
+    (heap.chunks, heap.free, heap.used)
+  assertTrue s!"Guest heap mapped and unmapped: {mapped} {unmapped}" (mapped > 10 && unmapped > 10)
+
+/-- Reading and writing the memory of a guest, and allocating in it, from outside it, on a real program. -/
+def testMachineMemory (triple : String) : IO Unit := do
+  let file (name : String) : IO Bap.Linux.Kernel := do
+    pure (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-{name}"))
+  let label := s!"Machine {triple}"
+  let silent (_ : ByteArray) : IO Unit := pure ()
+  let collected (machine : Bap.Linux.Machine) : IO (Bap.Tasks.ScheduleOutcome × String) := do
+    let written ← IO.mkRef ByteArray.empty
+    let outcome ← machine.run fun data => written.modify (· ++ data)
+    pure (outcome, String.fromUTF8! (← written.get))
+  let kernel ← file "libc-files"
+  let expected ← collected (← Bap.Linux.start kernel "/test" ["/test", "arg1"])
+  let machine ← Bap.Linux.start kernel "/test" ["/test", "arg1"]
+  let _ ← machine.run (fuel := 5000) silent
+  -- What is allocated can be written and read, and blocks are apart.
+  let first ← machine.malloc 100
+  let second ← machine.malloc 100
+  assertEqual s!"{label} a block is aligned" 0 (first % 16)
+  assertTrue s!"{label} blocks are apart" (first + 100 ≤ second || second + 100 ≤ first)
+  let data := ByteArray.mk ((List.range 100).map fun index => (index + 1).toUInt8).toArray
+  machine.write first data
+  machine.write second (ByteArray.mk (Array.replicate 100 0xAB))
+  assertEqual s!"{label} what is written is read" data.toList (← machine.read first 100).toList
+  assertEqual s!"{label} a block is left alone by another" 0xAB (← machine.read second 1)[0]!.toNat
+  -- Past what a chunk has, and more than one could.
+  let large ← machine.malloc (3 * 1024 * 1024)
+  machine.write (large + 3 * 1024 * 1024 - 8) (ByteArray.mk #[1, 2, 3, 4, 5, 6, 7, 8])
+  assertEqual s!"{label} a large block goes to its end" 8 (← machine.read (large + 3 * 1024 * 1024 - 1) 1)[0]!.toNat
+  -- It goes back, and what was all free is unmapped.
+  machine.free large
+  expectThrow s!"{label} reading what was unmapped" (machine.read large 1)
+  expectThrow s!"{label} a second free" (machine.free large)
+  expectThrow s!"{label} a free in the middle of a block" (machine.free (first + 16))
+  expectThrow s!"{label} a free of what it didn't give" (machine.free 0x1000)
+  machine.free 0
+  -- What can't be reached, or written, with nothing written then.
+  expectThrow s!"{label} reading nowhere" (machine.read 8 4)
+  expectThrow s!"{label} writing nowhere" (machine.write 8 (ByteArray.mk #[1]))
+  expectThrow s!"{label} another process that isn't there" (machine.read first 1 (pid := some 99999))
+  expectThrow s!"{label} an absurd block" (machine.malloc (2 ^ 40))
+  let entry ← Bap.Emu.pc machine.emu
+  expectThrow s!"{label} writing to code" (machine.write entry (ByteArray.mk #[0]))
+  -- calloc: all zeros, also of what has been used, and nothing that is too much.
+  let used ← machine.malloc 256
+  machine.write used (ByteArray.mk (Array.replicate 256 0xCC))
+  machine.free used
+  let cleared ← machine.calloc 8 32
+  assertEqual s!"{label} calloc clears what was used" (List.replicate 256 (0 : UInt8)) (← machine.read cleared 256).toList
+  assertEqual s!"{label} calloc is aligned" 0 (cleared % 16)
+  expectThrow s!"{label} calloc that overflows a word" (machine.calloc (2 ^ 40) (2 ^ 40))
+  let none_ ← machine.calloc 0 8
+  machine.free none_
+  machine.free cleared
+  -- realloc: what it has stays, smaller or larger, where it is if it can be.
+  let pattern (size : Nat) : ByteArray := ByteArray.mk ((List.range size).map fun index => (index % 251 + 1).toUInt8).toArray
+  let growing ← machine.malloc 64
+  machine.write growing (pattern 64)
+  let fence ← machine.malloc 16
+  machine.free fence
+  let grown ← machine.realloc growing 128
+  assertEqual s!"{label} realloc stays if what is after it is free" growing grown
+  assertEqual s!"{label} realloc in place keeps what it had" (pattern 64).toList (← machine.read grown 64).toList
+  let shrunk ← machine.realloc grown 32
+  assertEqual s!"{label} realloc to less stays" growing shrunk
+  assertEqual s!"{label} realloc to less keeps what fits" (pattern 32).toList (← machine.read shrunk 32).toList
+  -- With something right after it, it has to go elsewhere, and what it left is free.
+  let neighbour ← machine.malloc 16
+  machine.write neighbour (ByteArray.mk (Array.replicate 16 0x77))
+  let blocked ← machine.malloc 32
+  machine.write blocked (pattern 32)
+  let barrier ← machine.malloc 16
+  machine.write barrier (ByteArray.mk (Array.replicate 16 0x55))
+  let movedBlock ← machine.realloc blocked 4096
+  assertTrue s!"{label} realloc moves when it has to" (movedBlock != blocked)
+  assertEqual s!"{label} realloc that moves keeps what it had" (pattern 32).toList (← machine.read movedBlock 32).toList
+  assertEqual s!"{label} realloc leaves others alone" [0x55, 0x77] [(← machine.read barrier 1)[0]!.toNat, (← machine.read neighbour 1)[0]!.toNat]
+  expectThrow s!"{label} what realloc moved from isn't a block" (machine.free blocked)
+  -- More than any mapping has, across chunks, to its end.
+  let huge ← machine.realloc movedBlock (1024 * 1024)
+  assertEqual s!"{label} a large realloc keeps what it had" (pattern 32).toList (← machine.read huge 32).toList
+  machine.write (huge + 1024 * 1024 - 1) (ByteArray.mk #[9])
+  -- The edges.
+  let fromNothing ← machine.realloc 0 48
+  machine.write fromNothing (pattern 48)
+  let toNothing ← machine.realloc fromNothing 0
+  assertEqual s!"{label} realloc to nothing still has a block" fromNothing toNothing
+  machine.free toNothing
+  expectThrow s!"{label} realloc of what has gone back" (machine.realloc toNothing 16)
+  expectThrow s!"{label} realloc of what it didn't give" (machine.realloc 0x1000 16)
+  expectThrow s!"{label} realloc of too much" (machine.realloc huge (2 ^ 40))
+  assertEqual s!"{label} a realloc that failed leaves it" (pattern 32).toList (← machine.read huge 32).toList
+  -- A block that can't be read any more can't be moved, and stays a block, with nothing else left over.
+  let guarded ← machine.malloc (128 * 1024)
+  machine.write guarded (pattern 16)
+  Bap.Emu.protect machine.emu guarded (128 * 1024 - (128 * 1024 % 4096)) ⟨false, false, false⟩
+  expectThrow s!"{label} a move that can't read fails" (machine.realloc guarded (1024 * 1024))
+  Bap.Emu.protect machine.emu guarded (128 * 1024 - (128 * 1024 % 4096)) ⟨true, true, false⟩
+  assertEqual s!"{label} and the block is as it was" (pattern 16).toList (← machine.read guarded 16).toList
+  machine.free guarded
+  machine.free huge
+  machine.free neighbour
+  machine.free barrier
+  machine.free shrunk
+  -- Across mappings that touch it is written, and past them none of it is.
+  Bap.Emu.map machine.emu ⟨0x50000000, ByteArray.mk (Array.replicate 4096 3), ⟨true, true, false⟩⟩
+  expectThrow s!"{label} a write that runs off what is there" (machine.write 0x50000FFE (ByteArray.mk #[1, 2, 3, 4]))
+  assertEqual s!"{label} nothing was written of that" [3, 3] (← machine.read 0x50000FFE 2).toList
+  Bap.Emu.map machine.emu ⟨0x50001000, ByteArray.mk (Array.replicate 4096 3), ⟨true, true, false⟩⟩
+  machine.write 0x50000FFE (ByteArray.mk #[1, 2, 3, 4])
+  assertEqual s!"{label} a write goes across what touches" [1, 2, 3, 4] (← machine.read 0x50000FFE 4).toList
+  -- Native memory and the state agree, and the program doesn't notice any of this.
+  let saved ← machine.save
+  let third ← machine.malloc 40
+  machine.write third (ByteArray.mk #[9])
+  machine.restore saved
+  expectThrow s!"{label} a block that was gone back past" (machine.free third)
+  assertEqual s!"{label} going back keeps what was there" 0xAB (← machine.read second 1)[0]!.toNat
+  let data2 ← machine.checkpoint
+  let resumed ← Bap.Linux.Machine.ofCheckpoint data2
+  assertTrue s!"{label} saves again as it was" (data2 == (← resumed.checkpoint))
+  assertEqual s!"{label} what was written is in a checkpoint" data.toList (← resumed.read first 100).toList
+  let fourth ← resumed.malloc 100
+  assertTrue s!"{label} a checkpoint knows what is given out"
+    ((first + 100 ≤ fourth || fourth + 100 ≤ first) && (second + 100 ≤ fourth || fourth + 100 ≤ second))
+  resumed.free first
+  expectThrow s!"{label} a free after a checkpoint, twice" (resumed.free first)
+  let (outcome, text) ← collected resumed
+  assertEqual s!"{label} a program doesn't notice" expected.1 outcome
+  assertTrue s!"{label} a program says what it would have" (expected.2.endsWith text)
+  -- A program can't be told from one that nobody looked at: to the instruction, across its processes and threads.
+  for name in ["libc-threads", "libc-fork"] do
+    let kernel ← file name
+    let run (looking : Bool) : IO (Bap.Tasks.ScheduleOutcome × List Nat × ByteArray) := do
+      let machine ← Bap.Linux.start kernel "/test" ["/test", "arg1"]
+      Bap.Emu.traceStartCapacity machine.emu 100000000
+      let written ← IO.mkRef ByteArray.empty
+      let rec go : Nat → IO Bap.Tasks.ScheduleOutcome
+        | 0 => throw <| IO.userError "more pieces than a run should have"
+        | fuel + 1 => do
+          let outcome ← machine.run (quantum := 13) (fuel := 811) fun data => written.modify (· ++ data)
+          if outcome != .outOfFuel then return outcome
+          if looking then
+            let table ← machine.emu.taskTable.get
+            let regions ← Bap.Emu.regions machine.emu
+            for task in table.tasks do
+              if task.status.isNone && task.tid == task.group then
+                match regions.head? with
+                | some (address, _, _) => let _ ← (machine.read address 1 (pid := some task.group)).toBaseIO
+                | none => pure ()
+          go fuel
+      let outcome ← go 2000
+      pure (outcome, ← Bap.Emu.traceStop machine.emu, ← written.get)
+    let (plainOutcome, plainTrace, plainText) ← run false
+    let (lookOutcome, lookTrace, lookText) ← run true
+    assertEqual s!"{label} {name} ends the same looked at" plainOutcome lookOutcome
+    assertEqual s!"{label} {name} says the same looked at" plainText.toList lookText.toList
+    let different := (plainTrace.zip lookTrace).findIdx? fun (left, right) => left != right
+    assertEqual s!"{label} {name} runs the same looked at" (plainTrace.length, none) (lookTrace.length, different)
+  -- Each process its own: a child has a copy of what was allocated, which goes its own way, and its memory can be reached from outside.
+  let forking ← Bap.Linux.start (← file "libc-fork") "/test" ["/test", "arg1"]
+  let before ← forking.malloc 64
+  forking.write before (ByteArray.mk #[5])
+  let parent := (← Bap.Emu.currentTask forking.emu).group
+  let rec untilChild : Nat → IO (Option Nat)
+    | 0 => pure none
+    | fuel + 1 => do
+      let _ ← forking.run (quantum := 50) (fuel := 500) silent
+      match (← forking.emu.taskTable.get).tasks.find? (fun task => task.group != parent && task.status.isNone) with
+      | some child => pure (some child.group)
+      | none => untilChild fuel
+  match ← untilChild 400 with
+  | none => throw <| IO.userError s!"{label} a child should have come"
+  | some child =>
+    assertEqual s!"{label} a child has what was written" 5 (← forking.read before 1 (pid := some child))[0]!.toNat
+    forking.write before (ByteArray.mk #[6]) (pid := some child)
+    assertEqual s!"{label} a child's own memory is written" 6 (← forking.read before 1 (pid := some child))[0]!.toNat
+    assertEqual s!"{label} a parent's isn't" 5 (← forking.read before 1 (pid := some parent))[0]!.toNat
+    -- Through another process.
+    let inOther ← forking.calloc 4 4 (pid := some child)
+    assertEqual s!"{label} calloc in a child" [0, 0, 0, 0] (← forking.read inOther 4 (pid := some child)).toList
+    let bigger ← forking.realloc inOther 4096 (pid := some child)
+    forking.free bigger (pid := some child)
+    expectThrow s!"{label} what is a child's isn't a parent's" (forking.free bigger (pid := some parent))
+    forking.free before (pid := some child)
+    expectThrow s!"{label} a child's free, twice" (forking.free before (pid := some child))
+    let inChild ← forking.malloc 16 (pid := some child)
+    assertEqual s!"{label} a child's block is aligned" 0 (inChild % 16)
+    forking.free before (pid := some parent)
+    let (ending, _) ← collected forking
+    assertTrue s!"{label} a run goes on after all that" (ending != .outOfFuel)
+  -- From a hook, another process can't be reached, and the one that runs can.
+  let holder ← IO.mkRef (none : Option Bap.Linux.Machine)
+  let results ← IO.mkRef ([] : List Bool)
+  let hooked ← Bap.Linux.start (← file "libc-fork") "/test" ["/test", "arg1"] (handler := some fun current _ _ => do
+    if (← results.get).isEmpty then
+      if let some machine := ← holder.get then
+        let own := (← Bap.Emu.currentTask current).group
+        -- Once there is another process, which is what it takes to have to go somewhere.
+        if let some other := (← current.taskTable.get).tasks.find? (fun task => task.group != own && task.status.isNone) then
+          let mine ← (machine.malloc 8).toBaseIO
+          let theirs ← (machine.read 0 0 (pid := some other.group)).toBaseIO
+          results.set [(match mine with | .ok _ => true | .error _ => false), (match theirs with | .ok _ => true | .error _ => false)]
+    pure .default)
+  holder.set (some hooked)
+  let _ ← hooked.run silent
+  assertEqual s!"{label} from a hook, this process and not another" [true, false] (← results.get)
+
+/-- `execve`: what was allocated has gone with its memory. -/
+def testMachineHeapExec (triple : String) : IO Unit := do
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-exec")).addFile "/script" "#!/test child\n".toUTF8
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let block ← machine.malloc 32
+  let first := (← Bap.Emu.currentTask machine.emu).space
+  -- It runs others in children, and a child has a copy of what its parent had until it runs another.
+  let has (space : Nat) : IO Bool := do
+    pure (((← machine.heaps.get).get? space).any fun heap => heap.used.any (·.1 == block))
+  let mut copied : List Nat := []
+  let mut executed := false
+  for _ in [0:4000] do
+    let outcome ← machine.run (quantum := 50) (fuel := 100) fun _ => pure ()
+    let spaces := (← machine.heaps.get).toList.map (·.1)
+    for space in spaces do
+      if space != first && !copied.contains space then copied := space :: copied
+    for space in copied do
+      if !(← has space) then executed := true
+    if outcome != .outOfFuel then break
+  assertTrue s!"Machine {triple} a child has a copy" (!copied.isEmpty)
+  assertTrue s!"Machine {triple} the first still has what it was given" (← has first)
+  assertTrue s!"Machine {triple} what was allocated goes on execve" executed
+
 /-- The kernel itself: a program isn't needed to say what it does. -/
 private def testKernel : IO Unit := do
   let unwrap {α} (result : Bap.Linux.Result α) : IO α := match result with
