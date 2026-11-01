@@ -1733,6 +1733,204 @@ def testMachineHeapExec (triple : String) : IO Unit := do
   assertTrue s!"Machine {triple} the first still has what it was given" (← has first)
   assertTrue s!"Machine {triple} what was allocated goes on execve" executed
 
+/-- Shared libraries from outside a program, as `dlopen` has them, on a machine with no libc or linker to do it. -/
+def testLinuxLibraries (triple : String) (ifunc : Bool := false) : IO Unit := do
+  let label := s!"Library {triple}"
+  let binary (name : String) : IO ByteArray := IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-{name}"
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" (← binary "libc-files"))
+    |>.addFile "/lib/libmain.so" (← binary "libmain")
+    |>.addFile "/lib/libdep.so" (← binary "libdep")
+    |>.addFile "/lib/libother.so" (← binary "libother")
+    |>.addFile "/lib/libtls.so" (← binary "libtls")
+    |>.addFile "/nothing" "not a library".toUTF8
+  let start : IO Bap.Linux.Machine := Bap.Linux.start kernel "/test" ["/test", "arg1"]
+  let machine ← start
+  -- What the host gives it: here, what is in another library, to have something that can run on every target.
+  let dep ← machine.loadLibrary "libdep.so"
+  let some either := ← machine.findSymbol "either_one"
+    | throw <| IO.userError s!"{label} has no either_one"
+  let given : String → Option Nat := fun name => if name == "host_given" then some either else none
+  let library ← machine.loadLibrary "libmain.so" (resolve := given)
+  let call (name : String) (arguments : List Nat := []) : IO Nat := do
+    match ← machine.findSymbol name (some library) with
+    | some address => machine.call address arguments
+    | none => throw <| IO.userError s!"{label} has no {name}"
+  let signed32 (value : Nat) : Nat := value % 2 ^ 32
+  assertEqual s!"{label} its initializers ran" 1007 (signed32 (← call "own_data"))
+  assertEqual s!"{label} a table of its own functions" (42, 21)
+    (signed32 (← call "table_call" [0, 21]), signed32 (← call "table_call" [1, 7]))
+  assertEqual s!"{label} what isn't in the file is zero" 1 (signed32 (← call "bss_is_zero"))
+  assertEqual s!"{label} a pointer into its own, with what is added" 1 (signed32 (← call "bss_offset_right"))
+  assertEqual s!"{label} that can be written" 9 (signed32 (← call "set_bss" [100, 9]))
+  assertEqual s!"{label} a string through a table" 116 ((← call "text_char" [2, 0]) % 256)
+  assertEqual s!"{label} data of another, as a word and as code has it" (105, 105)
+    (signed32 (← call "dep_data_through_pointer"), signed32 (← call "dep_data_directly"))
+  assertEqual s!"{label} a function of another, by its table and a pointer" (108, 108)
+    (signed32 (← call "dep_call" [1, 2]), signed32 (← call "dep_call_through_pointer" [1, 2]))
+  assertEqual s!"{label} a string of another" 100 ((← call "dep_text" [0]) % 256)
+  assertEqual s!"{label} what the host gives" 1 (signed32 (← call "from_host" [5]))
+  assertEqual s!"{label} what is weak and nowhere is 0" 1 (signed32 (← call "weak_is_absent"))
+  assertEqual s!"{label} the first that has it is what it gets" 1 (signed32 (← call "which_one"))
+  assertEqual s!"{label} all its arguments" 4321 (signed32 (← call "many" [1, 2, 3, 4]))
+  -- In the order that they are to be: what it needs, then its own, the one with a priority first.
+  let wordOf (bytes : ByteArray) : Nat :=
+    let list := if machine.architecture.big then bytes.toList else bytes.toList.reverse
+    list.foldl (fun value byte => value * 256 + byte.toNat) 0
+  let notes : IO (List Nat) := do
+    let some orders := ← machine.findSymbol "dep_orders" | throw <| IO.userError "no dep_orders"
+    let some order := ← machine.findSymbol "dep_order" | throw <| IO.userError "no dep_order"
+    let count := wordOf (← machine.read orders 4)
+    (List.range count).mapM fun index => do pure (wordOf (← machine.read (order + index * 4) 4))
+  assertEqual s!"{label} what runs first runs first" [1, 3, 2] (← notes)
+  -- What only relocating writes is read-only, and code is.
+  let some relocated := ← machine.findSymbol "to_own_data" (some library)
+    | throw <| IO.userError "no to_own_data"
+  expectThrow s!"{label} what is read-only after relocating" (machine.write relocated (ByteArray.mk #[0]))
+  let some code := ← machine.findSymbol "own_data" (some library)
+    | throw <| IO.userError "no own_data"
+  expectThrow s!"{label} code isn't written" (machine.write (code - code % 2) (ByteArray.mk #[0]))
+  let some data := ← machine.findSymbol "main_data" (some library)
+    | throw <| IO.userError "no main_data"
+  machine.write data (ByteArray.mk #[0, 0, 0, 0])
+  assertEqual s!"{label} data is written" 0 (signed32 (← call "own_data"))
+  machine.write data (if machine.architecture.big then ByteArray.mk #[0, 0, 3, 0xEF] else ByteArray.mk #[0xEF, 3, 0, 0])
+  -- A call changes nothing of who is running.
+  let registers : IO String := do
+    let memoryVar := machine.emu.config.memory
+    pure (repr ((← machine.emu.state.get).env.filter fun binding => binding.1 != memoryVar)).pretty
+  let before ← registers
+  let pcBefore ← Bap.Emu.pc machine.emu
+  let _ ← call "many" [1, 2, 3, 4]
+  assertTrue s!"{label} a call leaves its registers" (before == (← registers))
+  assertEqual s!"{label} a call leaves its place" pcBefore (← Bap.Emu.pc machine.emu)
+  expectThrow s!"{label} a call of nowhere" (machine.call 16 [])
+  assertTrue s!"{label} and it leaves them then too" (before == (← registers))
+  -- A second load holds on to it; going needs both to let go.
+  let again ← machine.loadLibrary "/lib/libmain.so" (resolve := given)
+  assertEqual s!"{label} a second load is the same" library.base again.base
+  machine.unloadLibrary library
+  assertEqual s!"{label} it stays while something holds it" 1007 (signed32 (← call "own_data"))
+  -- Into a checkpoint, and on from it.
+  let saved ← machine.checkpoint
+  let resumed ← Bap.Linux.Machine.ofCheckpoint saved
+  assertTrue s!"{label} saves again as it was" (saved == (← resumed.checkpoint))
+  let some resumedCall := ← resumed.findSymbol "dep_call"
+    | throw <| IO.userError s!"{label} a checkpoint has no dep_call"
+  assertEqual s!"{label} goes on from a checkpoint" 108 (signed32 (← resumed.call resumedCall [1, 2]))
+  assertEqual s!"{label} a checkpoint knows what is loaded" ["/lib/libdep.so", "/lib/libmain.so"]
+    ((← resumed.loadedLibraries).map (·.path))
+  let (originalOutcome, originalText) ← (do
+    let plain ← Bap.Linux.start kernel "/test" ["/test", "arg1"]
+    let written ← IO.mkRef ByteArray.empty
+    let outcome ← plain.run fun data => written.modify (· ++ data)
+    pure (outcome, (← written.get).toList))
+  let written ← IO.mkRef ByteArray.empty
+  let outcome ← resumed.run fun data => written.modify (· ++ data)
+  assertEqual s!"{label} a program doesn't notice" (originalOutcome, originalText) (outcome, (← written.get).toList)
+  -- Going for good: its finalizers, and it is gone, in order; what it needed too when nothing else holds it.
+  machine.unloadLibrary library
+  assertEqual s!"{label} it goes with what undoes it" [1, 3, 2, 8] (← notes)
+  expectThrow s!"{label} what went can't be read" (machine.read relocated 1)
+  assertEqual s!"{label} what it needed stays while held" ["/lib/libdep.so"] ((← machine.loadedLibraries).map (·.path))
+  expectThrow s!"{label} what isn't loaded can't go" (machine.unloadLibrary library)
+  let some counter := ← machine.findSymbol "dep_counter" | throw <| IO.userError "no dep_counter"
+  machine.unloadLibrary dep
+  expectThrow s!"{label} all of it is gone" (machine.read counter 1)
+  assertEqual s!"{label} nothing is left" ([] : List String) ((← machine.loadedLibraries).map (·.path))
+  -- From nothing, all at once: what it needs comes with it, and goes with it.
+  let fresh ← start
+  -- The page that calls return to stays once it is there, and isn't a library's.
+  let _ ← (fresh.call 16 []).toBaseIO
+  let regions ← Bap.Emu.regions fresh.emu
+  let other ← fresh.loadLibrary "libother.so"
+  let main ← fresh.loadLibrary "libmain.so"
+  assertEqual s!"{label} what is first is found first" 2 (signed32 (← fresh.call (← (do
+    let some address := ← fresh.findSymbol "which_one" | throw <| IO.userError "no which_one"
+    pure address)) []))
+  assertEqual s!"{label} what is loaded is in that order" ["/lib/libother.so", "/lib/libmain.so", "/lib/libdep.so"]
+    ((← fresh.loadedLibraries).map (·.path))
+  fresh.unloadLibrary main
+  assertEqual s!"{label} what it needed goes with it" ["/lib/libother.so"] ((← fresh.loadedLibraries).map (·.path))
+  fresh.unloadLibrary other
+  assertEqual s!"{label} all that was mapped went" regions.length (← Bap.Emu.regions fresh.emu).length
+  -- What can't be done leaves nothing behind.
+  let empty ← start
+  let untouched ← Bap.Emu.regions empty.emu
+  let check (what : String) (action : IO Bap.Linux.LoadedLibrary) : IO Unit := do
+    expectThrow s!"{label} {what}" action
+    assertEqual s!"{label} {what} leaves nothing" (([] : List String), untouched.length)
+      ((← empty.loadedLibraries).map (·.path), (← Bap.Emu.regions empty.emu).length)
+  check "what is nowhere" (empty.loadLibrary "libnothing.so")
+  check "what isn't a library" (empty.loadLibrary "/nothing")
+  check "what isn't one that can go anywhere" (empty.loadLibrary "/test")
+  check "what uses thread-local storage" (empty.loadLibrary "libtls.so")
+  let messages ← IO.mkRef ""
+  match ← (empty.loadLibrary "libmain.so").toBaseIO with
+  | .ok _ => throw <| IO.userError s!"{label} an import that isn't there should be refused"
+  | .error error => messages.set (toString error)
+  assertTrue s!"{label} it says what isn't there: {← messages.get}" (((← messages.get).splitOn "host_given").length > 1)
+  assertEqual s!"{label} an import that isn't there leaves nothing" (([] : List String), untouched.length)
+    ((← empty.loadedLibraries).map (·.path), (← Bap.Emu.regions empty.emu).length)
+  -- Without what it needs, if it is told that it can do without and something gives what that would have.
+  let sparse ← Bap.Linux.start ((Bap.Linux.Kernel.empty.addFile "/test" (← binary "libc-files")).addFile "/lib/libmain.so" (← binary "libmain")
+    |>.addFile "/lib/libother.so" (← binary "libother")) "/test" ["/test"]
+  expectThrow s!"{label} what it needs isn't there" (sparse.loadLibrary "libmain.so")
+  let otherFirst ← sparse.loadLibrary "libother.so"
+  let some stand := ← sparse.findSymbol "host_given" (some otherFirst) | throw <| IO.userError "no host_given"
+  let standIn ← sparse.malloc 16
+  let sparseLibrary ← sparse.loadLibrary "libmain.so" (ignoreMissing := true) (resolve := fun name =>
+    if name == "dep_counter" then some standIn else if name.startsWith "dep_" then some stand else none)
+  assertEqual s!"{label} it goes on without" ["/lib/libother.so", "/lib/libmain.so"] ((← sparse.loadedLibraries).map (·.path))
+  let some fromHost := ← sparse.findSymbol "from_host" (some sparseLibrary) | throw <| IO.userError "no from_host"
+  assertEqual s!"{label} and what is given is what runs" 1005 (signed32 (← sparse.call fromHost [5]))
+  -- From a hook, in the middle of an instruction, none of this.
+  let holder ← IO.mkRef (none : Option Bap.Linux.Machine)
+  let hooked ← IO.mkRef ([] : List Bool)
+  let hookedMachine ← Bap.Linux.start kernel "/test" ["/test", "arg1"] (handler := some fun _ _ _ => do
+    if (← hooked.get).isEmpty then
+      if let some machine := ← holder.get then
+        let loaded ← (machine.loadLibrary "libother.so").toBaseIO
+        let called ← (machine.call 16 []).toBaseIO
+        hooked.set [(match loaded with | .ok _ => true | .error _ => false), (match called with | .ok _ => true | .error _ => false)]
+    pure .default)
+  holder.set (some hookedMachine)
+  let _ ← hookedMachine.run (fuel := 3000) fun _ => pure ()
+  assertEqual s!"{label} not in the middle of an instruction" [false, false] (← hooked.get)
+  if ifunc then
+    let chosen := (kernel.addFile "/lib/libifunc.so" (← binary "libifunc"))
+    let picking ← Bap.Linux.start chosen "/test" ["/test"]
+    let loaded ← picking.loadLibrary "libifunc.so"
+    let some direct := ← picking.findSymbol "chosen" (some loaded) | throw <| IO.userError "no chosen"
+    assertEqual s!"{label} a symbol is what its resolver chose" 77 (signed32 (← picking.call direct []))
+    let some plt := ← picking.findSymbol "through_plt" (some loaded) | throw <| IO.userError "no through_plt"
+    assertEqual s!"{label} by its table" 77 (signed32 (← picking.call plt []))
+    let some pointer := ← picking.findSymbol "through_pointer" (some loaded) | throw <| IO.userError "no through_pointer"
+    assertEqual s!"{label} by a pointer" 77 (signed32 (← picking.call pointer []))
+
+/-- Another architecture's library isn't one that this can load, and what `fork` and `execve` do to what is loaded. -/
+def testLinuxLibraryProcesses (triple other : String) : IO Unit := do
+  let label := s!"Library {triple}"
+  let binary (name : String) : IO ByteArray := IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-{name}"
+  let foreign := (Bap.Linux.Kernel.empty.addFile "/test" (← binary "libc-files")).addFile "/lib/libdep.so"
+    (← IO.FS.readBinFile s!"testsuite/bin/{other}-linux-musl-libdep")
+  expectThrow s!"{label} of another machine" ((← Bap.Linux.start foreign "/test" ["/test"]).loadLibrary "libdep.so")
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" (← binary "libc-exec")).addFile "/script" "#!/test child\n".toUTF8
+    |>.addFile "/lib/libdep.so" (← binary "libdep")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let _ ← machine.loadLibrary "libdep.so"
+  let first := (← Bap.Emu.currentTask machine.emu).space
+  let mut copied : List Nat := []
+  let mut executed := false
+  for _ in [0:4000] do
+    let outcome ← machine.run (quantum := 50) (fuel := 100) fun _ => pure ()
+    for (space, libraries) in (← machine.libraries.get).toList do
+      if space != first && !libraries.isEmpty && !copied.contains space then copied := space :: copied
+    for space in copied do
+      if ((← machine.libraries.get).get? space).isNone then executed := true
+    if outcome != .outOfFuel then break
+  assertTrue s!"{label} a child has what its parent had" (!copied.isEmpty)
+  assertTrue s!"{label} what runs another has none of it" executed
+
 /-- The kernel itself: a program isn't needed to say what it does. -/
 private def testKernel : IO Unit := do
   let unwrap {α} (result : Bap.Linux.Result α) : IO α := match result with

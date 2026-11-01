@@ -3,6 +3,7 @@ import Bap.Emu.Checkpoint
 import Bap.Linux.Calls
 import Bap.Linux.Signals
 import Bap.Linux.GuestHeap
+import Bap.Linux.LoadedLibrary
 import Bap.Linux.Image
 import Bap.Linux.Proc
 import Bap.Linux.Elf
@@ -43,6 +44,8 @@ structure Machine where
   signals : Signals
   /-- What `Machine.malloc` has given out, by address space. -/
   heaps : IO.Ref (Std.HashMap Nat GuestHeap)
+  /-- What `Machine.loadLibrary` has loaded, by address space. -/
+  libraries : IO.Ref (Std.HashMap Nat (List LoadedLibrary))
 
 /-- A model of a runtime that isn't in the kernel or the emulator: pthreads served by hooks, a debugger, a managed language.
 `id` is what a checkpoint knows it by, so that it stays the same, and `version` says what its bytes mean.
@@ -697,7 +700,7 @@ private def mapProgram (emu : Emu) (data : ByteArray) (program : Elf.Program) (b
 private def programBase (architecture : Architecture) : Nat := if architecture.bits == 32 then 0x400000 else 0x555555554000
 private def interpreterBase (architecture : Architecture) : Nat := if architecture.bits == 32 then 0x70000000 else 0x7ffff7fc0000
 
-private def fileOf (kernel : Kernel) (path : String) : Result ByteArray := do
+def fileOf (kernel : Kernel) (path : String) : Result ByteArray := do
   let (_, found) ← kernel.resolve "/" path
   let some number := found | .error Errno.enoent
   match kernel.inodes.get? number with
@@ -1016,11 +1019,14 @@ abbrev SyscallHandler := Emu → Nat → List Nat → IO SyscallAction
 /-- What a checkpoint knows the heaps of `Machine.malloc` by. -/
 private def heapModelId : String := "bap.heap"
 
+/-- What a checkpoint knows what `Machine.loadLibrary` has loaded by. -/
+private def libraryModelId : String := "bap.libraries"
+
 /-- What makes an emulator a machine: its kernel behind its system calls. None of it is in a checkpoint. -/
 private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel) (watch : Option (Nat → List Nat → IO Unit))
     (handler : Option SyscallHandler) (target : Nat) (models : List RuntimeModel) : IO Machine := do
   let signals : Signals := { architecture, returnPage := stackTop architecture + 4096, table := ← IO.mkRef {} }
-  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome, signals, heaps := ← IO.mkRef {} }
+  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome, signals, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {} }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
@@ -1044,6 +1050,13 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
         let table ← emu.taskTable.get
         pure (GuestHeap.encode ((← machine.heaps.get).filter fun space _ => table.tasks.any (·.space == space)))
       load := fun data => do machine.heaps.set (← IO.ofExcept (GuestHeap.decode data)) } }])
+  machine.models.modify (· ++ [{
+    id := libraryModelId, version := 1,
+    state := {
+      save := do
+        let table ← emu.taskTable.get
+        pure (LoadedLibrary.encode ((← machine.libraries.get).filter fun space _ => table.tasks.any (·.space == space)))
+      load := fun data => do machine.libraries.set (← IO.ofExcept (LoadedLibrary.decode data)) } }])
   let _ ← onSyscall emu fun emu number args => do
     if machine.architecture.call number == some .execve then
       let action ← handOver machine emu (← execute { machine with emu } emu args)
@@ -1053,6 +1066,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
         -- What it had is gone with its memory.
         let space := (← currentTask emu).space
         machine.heaps.modify (·.erase space)
+        machine.libraries.modify (·.erase space)
       pure action
     else pure .default
   let _ ← serveKernelCalls machine
@@ -1066,6 +1080,11 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
     machine.heaps.modify fun heaps => match heaps.get? space with
       | some heap => heaps.insert child heap
       | none => heaps) :: ·)
+  emu.processHooks.modify ((fun _ child => do
+    let space := (← currentTask emu).space
+    machine.libraries.modify fun table => match table.get? space with
+      | some libraries => table.insert child libraries
+      | none => table) :: ·)
   pure machine
 
 /-- What a program is to a checkpoint: its architecture and its bytes. -/
@@ -1281,7 +1300,7 @@ def Machine.restore (machine : Machine) (saved : Machine.Saved) : IO Unit := do
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 
 /-- What the bytes after the magic mean. -/
-def checkpointFormat : Nat := 4
+def checkpointFormat : Nat := 5
 
 /-- What this BAP does with a guest, which goes up when the same state could go on differently. A checkpoint is refused by a BAP
 of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/
@@ -1360,7 +1379,7 @@ def Machine.checkpoint (machine : Machine) : IO ByteArray := do
 /-- Says what can't be restored of the models of a checkpoint, as going on without one or with another isn't going on as it would have. -/
 private def modelConflict (saved : List (String × Nat × ByteArray)) (models : List RuntimeModel) : Option String :=
   -- Those that every machine has are no one's to give.
-  let saved := saved.filter fun entry => entry.1 != Signals.modelId && entry.1 != heapModelId
+  let saved := saved.filter fun entry => entry.1 != Signals.modelId && entry.1 != heapModelId && entry.1 != libraryModelId
   match saved.find? (fun entry => !(models.any (·.id == entry.1))) with
   | some entry => some s!"a checkpoint with the state of model {entry.1}, which wasn't given"
   | none =>

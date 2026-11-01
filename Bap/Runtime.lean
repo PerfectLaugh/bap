@@ -64,7 +64,9 @@ import Bap.Linux.Image
 import Bap.Linux.Proc
 import Bap.Linux.Signals
 import Bap.Linux.GuestHeap
+import Bap.Linux.LoadedLibrary
 import Bap.Linux.Machine
+import Bap.Linux.Library
 import Bap.Float
 import Bap.Emu.Jni
 import Bap.Emu.Checkpoint

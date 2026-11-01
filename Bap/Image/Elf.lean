@@ -867,6 +867,22 @@ def dynamicRelocations (image : Image) : Except String RelocationSpec := do
       relativeAddends := result.relativeAddends.reverse
       irelative := result.irelative.reverse }
 
+/-- All the relocations of an image, as they are, for what goes by each of them and not by what `dynamicRelocations` makes of them. -/
+def allDynamicRelocations (image : Image) : Except String (List DynamicRelocation) := do
+  let header ← parseHeader image.data
+  let headers ← programHeaders image.data
+  let tags ← dynamicTags image.data headers header.is64 image.endian
+  if tags.isEmpty then .ok [] else collectRelocations image headers tags header
+
+/-- All the symbols of `PT_DYNAMIC`, in their order. -/
+def allDynamicSymbols (image : Image) : Except String (List DynamicSymbol) := do
+  let header ← parseHeader image.data
+  let headers ← programHeaders image.data
+  let tags ← dynamicTags image.data headers header.is64 image.endian
+  let count ← dynamicSymbolCount image.data headers tags header.is64 header.endian
+  let symbols ← (List.range count).mapM fun index => dynamicSymbol image headers tags index
+  .ok (symbols.filterMap id)
+
 private def unversioned (name : String) : String :=
   (name.splitOn "@").headD name
 
@@ -908,6 +924,14 @@ def dynamicTagsOf (image : Image) : List (Nat × Nat) :=
   ((do
     let headers ← programHeaders image.data
     dynamicTags image.data headers (image.addrWidth = 64) image.endian : Except String _).toOption).getD []
+
+/-- A string of the table of a dynamic section. -/
+def dynamicText (image : Image) (offset : Nat) : Option String := do
+  let headers ← (programHeaders image.data).toOption
+  let tags := dynamicTagsOf image
+  let strings ← tagValue tags 5
+  let size ← tagValue tags 10
+  some (dynamicString image headers strings size offset)
 
 /-- The value of a tag of the dynamic linking of an image. -/
 def tagOf (image : Image) (tag : Nat) : Option Nat := tagValue (dynamicTagsOf image) tag
