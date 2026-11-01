@@ -62,6 +62,7 @@ import Bap.Emu.Tasks
 import Bap.Linux.Wire
 import Bap.Linux.Image
 import Bap.Linux.Proc
+import Bap.Linux.Signals
 import Bap.Linux.Machine
 import Bap.Float
 import Bap.Emu.Jni

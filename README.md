@@ -22,10 +22,12 @@ The OCaml and Rust implementation it came from is on the
 - **Runs Linux programs** in a virtual kernel of pure Lean, static and dynamic, on x86-64, AArch64, i686 and ARM with Thumb, and static on RISC-V, MIPS and PowerPC of either width and order: files, descriptors and the
   clock are all in it, and nothing reaches the host. A program sees only what was copied in before it started, and can run others of it with `execve`, scripts too. It has `/proc` and what libc reads of `/sys`, made by pure functions when they
   are opened, and `Kernel.addGenerated` puts a file of any path in that way. A machine can be
-  saved at any instruction and go on from the file alone, with its tasks, its memory and its files, and runs the same instructions
+  saved at any instruction and go on from the file alone, with its tasks, its memory, its files and its signals, and runs the same instructions
   in the same order as if it hadn't stopped. A model of a runtime outside the kernel (locks, a debugger, JNI, an allocator) is a
   `RuntimeModel`: a name and a version that a checkpoint knows it by, callbacks that it attaches again, and its state, which goes in
   the same file. A checkpoint says which format, BAP, semantics and program it is of, and one that can't go on as it would have is refused.
+  Signals are as Linux has them on each of those, as far as `testsuite/src/libc-signals.c` goes, which agrees with qemu: handlers with their `siginfo_t` and a context that they can
+  change, masks, `sigaltstack`, `sigsuspend`, `sigtimedwait`, `SIGCHLD`, a signal for a thread or a process, and faults that a handler takes. `pthread_cancel` works by them.
 - **Executes symbolically**, solving path conditions with Z3.
 
 ## Building

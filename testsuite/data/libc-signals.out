@@ -1,0 +1,72 @@
+a handler runs 1
+it is given its signal 1
+kill reaches this process 1
+info has the signal 1
+info says tkill 1
+info has the pid 1
+a handler has a context 1
+a signal is blocked in its handler 1
+it isn't after 0
+kill says the user 1
+a blocked signal waits 0
+and is pending 1
+unblocked it runs at once and once 1
+and isn't pending 0
+real time waits 0
+real time is each one 3
+a value comes with it 4242
+says queue 1
+what a handler masks waits for it 1
+an action reads back 1
+a handler can be in itself 3
+reset goes back to the default 1
+what is ignored does nothing 0
+kill can't be caught 1
+stop can't be caught 1
+kill can't be blocked 0
+what a function holds comes through 1
+sigsuspend runs it and fails 1
+sigsuspend puts the mask back 1
+sigwaitinfo takes it 1
+sigtimedwait of nothing times out 1
+there was no alternate stack 1
+a handler runs on it 1
+and knows that 1
+not after 0
+only if asked 0
+a store to nowhere faults 1
+says not mapped 1
+says where 1
+the mask is back 0
+a store to what can't be written faults 1
+says denied 1
+a load faults, and again 2
+a context can be sent elsewhere 1
+it says where it was 1
+and its stack 1
+a thread has the mask of what made it 1
+pthread_kill goes to the thread 1
+kill goes to a thread that takes it 1
+a wait is interrupted 1
+a wait is cancelled 1
+a loop is cancelled 1
+a wait comes to the child 1
+the signal ran 1
+a wait goes on if it may 1
+waitid has it 1
+waitid says killed 1
+waitid of nothing 1
+a child has handlers 1
+a child has the mask and nothing pending 2
+sigchld comes 1
+says it exited 1
+with its status 7
+and who 1
+and waiting got it 7
+a default ends the child 1
+kill ends the child 1
+a fault ends the child 1
+abort ends the child 1
+some defaults do nothing 3
+a default waits for its mask 1
+done

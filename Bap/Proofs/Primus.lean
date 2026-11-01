@@ -1978,9 +1978,17 @@ theorem compare_symbols_ordered (context : Context) (op : Bil.BinOp) (left right
 
 /-! Register writes. -/
 
-/-- Writes to the zero register are dropped. -/
+/-- Writes to the zero register keep nothing: they are dropped, or, for a value that reads memory, which can fault whatever becomes of
+it, go to a variable of that name, which nothing reads, as a read of this register is 0 without looking (`expectBil`). -/
 theorem assignRegister_zero (context : Context) (width base : Nat) (value : SV) :
-    assignRegister context "XZR" width base value = .ok [] := rfl
+    assignRegister context "XZR" width base value = .ok [] ∨
+      ∃ valueWidth exp, assignRegister context "XZR" width base value = .ok [.move ⟨"XZR", .imm valueWidth, 0, false⟩ exp] := by
+  simp only [assignRegister, ↓reduceIte, pure, Except.pure]
+  split
+  · split
+    · exact Or.inr ⟨_, _, rfl⟩
+    · exact Or.inl rfl
+  · exact Or.inl rfl
 
 /-- A successful register write is a single move at the register's own width. -/
 theorem assignRegister_ok {context : Context} {name : String} {width : Nat} {value : SV}

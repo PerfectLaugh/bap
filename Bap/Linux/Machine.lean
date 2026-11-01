@@ -1,6 +1,7 @@
 import Bap.Emu.Tasks
 import Bap.Emu.Checkpoint
 import Bap.Linux.Calls
+import Bap.Linux.Signals
 import Bap.Linux.Image
 import Bap.Linux.Proc
 import Bap.Linux.Elf
@@ -37,6 +38,8 @@ structure Machine where
   target : Nat := 0
   /-- Whether it was given a `SyscallHandler`, which has to be given again to go on from a checkpoint. -/
   handled : Bool := false
+  /-- What its processes do with signals, and what is pending. -/
+  signals : Signals
 
 /-- A model of a runtime that isn't in the kernel or the emulator: pthreads served by hooks, a debugger, a managed language.
 `id` is what a checkpoint knows it by, so that it stays the same, and `version` says what its bytes mean.
@@ -1010,7 +1013,8 @@ abbrev SyscallHandler := Emu → Nat → List Nat → IO SyscallAction
 /-- What makes an emulator a machine: its kernel behind its system calls. None of it is in a checkpoint. -/
 private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel) (watch : Option (Nat → List Nat → IO Unit))
     (handler : Option SyscallHandler) (target : Nat) (models : List RuntimeModel) : IO Machine := do
-  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome }
+  let signals : Signals := { architecture, returnPage := stackTop architecture + 4096, table := ← IO.mkRef {} }
+  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome, signals }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
@@ -1022,8 +1026,15 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
       throw <| IO.userError s!"two models of a runtime are called {model.id}"
     let state ← model.attach machine
     machine.models.modify (· ++ [{ id := model.id, version := model.version, state }])
+  -- Signals are part of what it is, and it is in a checkpoint like what a model holds.
+  machine.models.modify (· ++ [{ id := Signals.modelId, version := 1, state := { save := signals.save, load := signals.load } }])
+  signals.serve emu
   let _ ← onSyscall emu fun emu number args => do
-    if machine.architecture.call number == some .execve then handOver machine emu (← execute { machine with emu } emu args)
+    if machine.architecture.call number == some .execve then
+      let action ← handOver machine emu (← execute { machine with emu } emu args)
+      -- It is a new program if it is going there, and nothing else sends it anywhere in the middle of a system call.
+      if (← emu.redirect.get).isSome then signals.executed (← currentTask emu).group (← thread emu)
+      pure action
     else pure .default
   let _ ← serveKernelCalls machine
   let _ ← serveTaskCalls emu
@@ -1112,11 +1123,11 @@ def Machine.restore (machine : Machine) (saved : Machine.Saved) : IO Unit := do
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 
 /-- What the bytes after the magic mean. -/
-def checkpointFormat : Nat := 2
+def checkpointFormat : Nat := 3
 
 /-- What this BAP does with a guest, which goes up when the same state could go on differently. A checkpoint is refused by a BAP
 of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/
-def bapRevision : String := s!"bap-1 lean-{Lean.versionString}"
+def bapRevision : String := s!"bap-2 lean-{Lean.versionString}"
 
 /-- What a directory holds, as all of its files in the order of their paths under it, however the directory itself is written. -/
 def directoryDigest (root : System.FilePath) : IO Nat := do
@@ -1190,6 +1201,8 @@ def Machine.checkpoint (machine : Machine) : IO ByteArray := do
 
 /-- Says what can't be restored of the models of a checkpoint, as going on without one or with another isn't going on as it would have. -/
 private def modelConflict (saved : List (String × Nat × ByteArray)) (models : List RuntimeModel) : Option String :=
+  -- Those that every machine has are no one's to give.
+  let saved := saved.filter (·.1 != Signals.modelId)
   match saved.find? (fun entry => !(models.any (·.id == entry.1))) with
   | some entry => some s!"a checkpoint with the state of model {entry.1}, which wasn't given"
   | none =>

@@ -1389,6 +1389,40 @@ def testCheckpointMoments : IO Unit := do
   assertTrue "A directory that changed has another digest" (digest != (← Bap.Linux.directoryDigest root))
   IO.FS.removeDirAll root
 
+/-- Handlers, masks, waiting, threads, children, faults and what a context says, as `testsuite/src/libc-signals.c` has them, whose
+output is what qemu has it say on every target. -/
+def testLinuxSignals (triple : String) : IO Unit := do
+  let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-signals")
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  let expected := String.fromUTF8! (← IO.FS.readBinFile "testsuite/data/libc-signals.out")
+  let actual := String.fromUTF8! (← written.get)
+  -- The first line that differs says more than all of them.
+  let different := ((expected.splitOn "\n").zip (actual.splitOn "\n")).find? fun (left, right) => left != right
+  assertEqual s!"Linux {triple} signals say what they should" none different
+  assertEqual s!"Linux {triple} signals end as they should" (Bap.Tasks.ScheduleOutcome.finished 0, expected.length) (outcome, actual.length)
+
+/-- A run with all of that stopped and saved goes on as it would have: what is pending, the frames of handlers and what a process does
+with a signal are in a checkpoint, in every piece. -/
+def testLinuxSignalCheckpoints (triple : String) (step : Nat) : IO Unit := do
+  let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-signals")
+  let written ← IO.mkRef ByteArray.empty
+  let rec go : Nat → Bap.Linux.Machine → IO Bap.Tasks.ScheduleOutcome
+    | 0, _ => throw <| IO.userError "more pieces than a run should have"
+    | fuel + 1, machine => do
+      let outcome ← machine.run (fuel := step) fun data => written.modify (· ++ data)
+      if outcome == .outOfFuel then
+        let data ← machine.checkpoint
+        let next ← Bap.Linux.Machine.ofCheckpoint data
+        assertTrue s!"Linux {triple} signals save again as they were" (data == (← next.checkpoint))
+        go fuel next
+      else pure outcome
+  let outcome ← go 400 (← Bap.Linux.start kernel "/test" ["/test"])
+  assertEqual s!"Linux {triple} signals end as they should, from pieces" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual s!"Linux {triple} signals say what they should, from pieces"
+    (String.fromUTF8! (← IO.FS.readBinFile "testsuite/data/libc-signals.out")) (String.fromUTF8! (← written.get))
+
 /-- The kernel itself: a program isn't needed to say what it does. -/
 private def testKernel : IO Unit := do
   let unwrap {α} (result : Bap.Linux.Result α) : IO α := match result with

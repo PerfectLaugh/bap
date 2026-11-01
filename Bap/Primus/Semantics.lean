@@ -337,9 +337,27 @@ private def valueTag : Value → String
   | .list _ => "list"
   | .callable _ => "callable"
 
+/-- Whether an expression reads memory, which a machine does whatever becomes of what it read. -/
+private def readsMemory : Bil.Exp → Bool
+  | .load .. => true
+  | .store memory address value _ _ => readsMemory memory || readsMemory address || readsMemory value
+  | .bin _ left right => readsMemory left || readsMemory right
+  | .un _ value => readsMemory value
+  | .cast _ _ value => readsMemory value
+  | .letIn _ value body => readsMemory value || readsMemory body
+  | .ite condition yes no => readsMemory condition || readsMemory yes || readsMemory no
+  | .extract _ _ value => readsMemory value
+  | .concat left right => readsMemory left || readsMemory right
+  | _ => false
+
 private def assignRegister (context : Context) (name : String) (width baseWidth : Nat)
     (value : Value) : Except String Bil.Program := do
-  if name = "XZR" then return []
+  if name = "XZR" then
+    -- The zero register keeps nothing, but a load to it is a load, which can fault. It goes to a variable that nothing reads, as what
+    -- reads this register gets 0 without looking.
+    return match expectBil context value with
+      | .ok (valueWidth, value) => if readsMemory value then [.move ⟨"XZR", .imm valueWidth, 0, false⟩ value] else []
+      | .error _ => []
   let (valueWidth, value) ← expectBil context value
   if valueWidth != width then throw s!"Primus assignment width mismatch: {width} versus {valueWidth}"
   let var : Bap.Var := ⟨name, .imm baseWidth, 0, false⟩

@@ -197,6 +197,14 @@ structure Emu where
   redirect : IO.Ref (Option Nat)
   /-- How much of its turn the thread that runs had had when the fuel ran out, or 0 between turns. -/
   turnUsed : IO.Ref Nat
+  /-- What runs when a system call has its result, which may send the thread somewhere else. -/
+  afterSyscall : IO.Ref (Option (IO Unit))
+  /-- What runs when a thread has been switched to and before it goes on. -/
+  switchedIn : IO.Ref (Option (IO Unit))
+  /-- What may take a fault of a guest of `runProcesses`, and says whether it did. -/
+  faultHandler : IO.Ref (Option (MemoryFault → IO Bool))
+  /-- What hears that a process is over, with its status. -/
+  processExited : IO.Ref (Option (Nat → Nat → IO Unit))
   /-- Whether a hook runs in the middle of an instruction: of a system call, an intrinsic or an access. -/
   serving : IO.Ref Bool
   /-- Whether a fault has been recorded since the last rollback, which says why that one came. -/
@@ -305,6 +313,10 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     redirect := ← IO.mkRef none
     turnUsed := ← IO.mkRef 0
     serving := ← IO.mkRef false
+    afterSyscall := ← IO.mkRef none
+    switchedIn := ← IO.mkRef none
+    faultHandler := ← IO.mkRef none
+    processExited := ← IO.mkRef none
     faultFresh := ← IO.mkRef false
     stepNative := ← IO.mkRef none
     memorySwitched := ← IO.mkRef false
@@ -663,6 +675,7 @@ def switchThread (emu : Emu) (id : ThreadId) : IO Unit := do
     emu.currentThreadRef.set id
     emu.pendingRef.set context.pending
     emu.skipCode.set context.skip
+    if let some arrived := ← emu.switchedIn.get then arrived
 
 def resumeThread (emu : Emu) (id : ThreadId) : IO Unit := do
   emu.threadControl.modify (·.insert id false)
@@ -1402,7 +1415,9 @@ private def dispatchSyscall (emu : Emu) : IO (Option Nat) := serialize emu <| do
           setReg emu ⟨resultRegister, .imm width, 0, false⟩ (.bits (BitVec.ofNat width value))
           pure (some value)
         | .default => go rest
-    serve emu (go hooks)
+    let result ← serve emu (go hooks)
+    if let some after := ← emu.afterSyscall.get then after
+    pure result
 
 private def dispatchIntrinsic (emu : Emu) (name : String) : IO Bool := serialize emu <| serve emu <| do
   let address ← emu.pc.get

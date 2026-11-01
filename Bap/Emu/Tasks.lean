@@ -81,6 +81,7 @@ private def markExited (emu : Emu) (group status : Nat) : IO Unit := do
     if task.group == group then
       if task.tid == current then emu.stopped.set true
       else emu.threadsRef.modify (setThreadStopped · task.tid true)
+  if let some heard := ← emu.processExited.get then heard group status
 
 /-- The process that runs calls `exit_group` with `code`. -/
 def exitProcess (emu : Emu) (code : Nat) : IO Unit := do
@@ -155,7 +156,7 @@ private def setErrorFlag (emu : Emu) (id : ThreadId) (width : Nat) : Option Nat 
   | none => pure ()
 
 /-- Gives a thread that isn't the one that runs the result of its system call. -/
-private def setSyscallResult (emu : Emu) (id : ThreadId) (result : Except Nat Nat) : IO Unit := do
+def setSyscallResult (emu : Emu) (id : ThreadId) (result : Except Nat Nat) : IO Unit := do
   let width ← wordWidth emu
   let (_, _, register) := syscallRegisters emu.config.syscallAbi
   let (word, flag) := syscallWord (flagsErrors emu) width result
@@ -191,6 +192,9 @@ step: this switches threads. A zombie that runs and that one of them reaps stops
 its address space. -/
 private def settleWaiters (emu : Emu) : IO Unit := do
   let (table, woken) := (← emu.taskTable.get).settle
+  -- These switches are to write to their memory, and nothing runs for them: a thread is switched to when it has its result.
+  let arrived ← emu.switchedIn.get
+  emu.switchedIn.set none
   if let some (first, _) := woken.head? then
     if (table.find? (← thread emu)).isNone then switchThread emu first.thread
   emu.taskTable.set table
@@ -209,6 +213,10 @@ private def settleWaiters (emu : Emu) : IO Unit := do
     setSyscallResult emu waiter.thread result
     resumeThread emu waiter.thread
   if !woken.isEmpty then collectGone emu
+  emu.switchedIn.set arrived
+  -- What runs from here may be one of those, and wouldn't be switched to.
+  if !woken.isEmpty then
+    if let some arrived := arrived then arrived
 
 /-- The numbers of the system calls that this serves, as in Linux. -/
 private structure Calls where
@@ -536,8 +544,12 @@ private def runGuest (emu : Emu) (quantum fuel : Nat) : IO Nat := do
   try
     runPreemptive emu quantum fuel
   catch error =>
-    if (← failure emu).isSome then
-      markExited emu (← currentTask emu).group (signaledStatus 11)
+    if let some fault := ← failure emu then
+      -- Unless something takes it, which runs a handler there.
+      let taken ← match ← emu.faultHandler.get with
+        | some handler => handler fault
+        | none => pure false
+      unless taken do markExited emu (← currentTask emu).group (signaledStatus 11)
       emu.lastFault.set none
       pure 1
     else
