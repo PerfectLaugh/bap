@@ -216,7 +216,7 @@ theorem codeSite_ops (lowering : Lowering) (pc : Nat) :
 theorem codeSite_checkpoint (lowering : Lowering) (pc : Nat) :
     Lowering.checkpoints (codeSite lowering pc) =
       Lowering.checkpoints lowering ++ [(pc, Lowering.outputs lowering)] := by
-  cases h : Lowering.effectSlot lowering <;> simp [codeSite, setEffect, h, temporary]
+  cases h : Lowering.effectSlot lowering <;> simp [codeSite, setEffect, h, temporary, Lowering.checkpoints, Lowering.push]
 
 /-- Sign extension writes to a fresh temporary and never clobbers its source slot. -/
 theorem signExtend_fresh (lowering : Lowering) (width source : Nat) :
@@ -2955,7 +2955,7 @@ open_private Bap.Primus.Lifted Bap.Primus.Lifted Lowering Lowering.push Lowering
   Lowering.checkpoints Lowering.budget Lowering.observed Lowering.wrapFaults Lowering.push Lowering.withWritten
   Operand Operand.slot Operand.width lowerExp lowerStatements setEffect temporary jumpConstant immediate widthOf
   blockExit BlockExit BlockExit.direct BlockExit.branch BlockExit.other BlockExit.fall closedTarget graphEdgeOps freshLabel enterBlock codeSite GraphPlan GraphPlan.seed GraphPlan.labels GraphPlan.edges
-  GraphPlan.budget GraphPlan.observed GraphPlan.chained GraphPlan.definite GraphPlan.guarded lowerEntry lowerExit lowerBlock lowerBlocks lowerGraph
+  GraphPlan.budget GraphPlan.observed GraphPlan.chained GraphPlan.definite GraphPlan.guarded GraphPlan.edgeOps_eq GraphPlan.hasEdge_eq GraphPlan.labelOf_eq GraphPlan.incoming_eq lowerEntry lowerExit lowerBlock lowerBlocks lowerGraph
   lowerGraphChecked distinctNats leadingMoves opSlots opLabels flagOutputs encodeState syncState syncUpdates reachedOutputs slotBits withoutBindings atCodeStop
   definitelyWritten writtenAt flagged flagSlots withControl graphInitial graphPlan chainedCount nativeOutcome
 open_private Bap.Proofs.Primus Bap.Proofs.Primus obind pairwise_same lookup_bind_same lookup_bind_other bind_ok asBits_ok
@@ -3760,6 +3760,7 @@ theorem lowerExit_spec {plan : GraphPlan} {first second : Lowering} {block : Blo
     ∃ new, Grows first second new ∧ ∀ (stops : Nat → Bool) (global : Lowering) (program tail : List Op), Place first second global new program tail effect →
       BlockOK stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program (new ++ tail) effect block := by
   unfold lowerExit at h
+  simp only [GraphPlan.edgeOps_eq, GraphPlan.hasEdge_eq] at h
   split at h
   · next target he =>
     obtain ⟨⟨lowered, terminated⟩, h1, h⟩ := obind h
@@ -3861,6 +3862,7 @@ private theorem lowerEntry_cases {plan : GraphPlan} {lowering second : Lowering}
       Pushed lowering second (.label label :: entryOps effect (GraphPlan.budget plan) (GraphPlan.observed plan) (Lowering.nextLabel lowering) block.address (GraphPlan.guarded plan block))
         (if GraphPlan.guarded plan block then 4 else 2) 0) := by
   unfold lowerEntry at h
+  simp only [GraphPlan.labelOf_eq] at h
   cases hasEdge with
   | false =>
     simp only [Bool.not_false, ↓reduceIte] at h
@@ -3896,6 +3898,7 @@ theorem lowerBlock_spec {plan : GraphPlan} {first second : Lowering} {block : Bl
       ∃ start, SegOK stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program effect block start ∧
         (block.address = GraphPlan.seed plan → ∀ m, RunAt stops program (new ++ tail, m) (start, m)) := by
   unfold lowerBlock at h
+  simp only [GraphPlan.incoming_eq] at h
   -- the variables a block has written do not matter to what it does
   generalize hl0 : (if GraphPlan.chained plan = true then Lowering.withWritten first (GraphPlan.definite plan block.address) else first) = l0 at h
   have g0 : Grows first l0 [] := by
@@ -3911,7 +3914,6 @@ theorem lowerBlock_spec {plan : GraphPlan} {first second : Lowering} {block : Bl
     intro hnil
     rw [hnil] at hany
     simp at hany
-  dsimp only at h
   split at h
   · next hboth =>
     simp only [Bool.and_eq_true, decide_eq_true_eq] at hboth
@@ -4850,6 +4852,16 @@ private theorem blockAt_of_mem {blocks : List Block} {block : Block} (hd : (bloc
       simp only [hb]
       exact ih hd.2 hm
 
+/-- The labels of a plan, each block with its place. -/
+private theorem plan_labels (blocks : List Block) :
+    blocks.zipIdx.map (fun entry => (entry.1.address, entry.2)) =
+      (List.range blocks.length).map fun index => (blocks[index]!.address, index) := by
+  apply List.ext_getElem
+  · simp
+  · intro index h1 h2
+    have hlt : index < blocks.length := by simpa using h1
+    simp [hlt]
+
 /-- The labels of a graph are those of its blocks. -/
 private theorem labels_block {blocks : List Block} {target address label : Nat}
     (h : ((List.range blocks.length).map fun index => (blocks[index]!.address, index)).find? (fun (address, _) => address = target) = some (address, label)) :
@@ -4885,7 +4897,7 @@ private theorem lowerGraph_parts {blocks : List Block} {edges : List (Nat × Nat
     by_cases hc : lowerGraphChecked (seed :: rest) (graphInitial seed (seed :: rest).length wrapFaults !edges.isEmpty) final = true
     · rw [ite_eq_left hc] at h
       simp only [Option.some.injEq] at h
-      refine ⟨seed, rest, _, _, final, rfl, h.symm, h1, hc, rfl, rfl, rfl, ?_⟩
+      refine ⟨seed, rest, _, _, final, rfl, h.symm, h1, hc, rfl, rfl, plan_labels (seed :: rest), ?_⟩
       cases edges with
       | nil => simp [graphInitial, graphPlan, setEffect, temporary, Lowering.ops, Lowering.push, List.reverseAux_eq]
       | cons e es => simp [graphInitial, graphPlan, setEffect, temporary, Lowering.ops, Lowering.push, List.reverseAux_eq]
@@ -5212,7 +5224,7 @@ theorem atCodeStop_flagOutputs (written : List Bap.Var) (final : Lowering) (pc :
   · next checkpoint hfind =>
     have hmem := List.mem_of_find?_eq_some hfind
     have : checkpoint.2 = Lowering.outputs final := by
-      obtain ⟨c, _, he⟩ := List.mem_map.1 hmem
+      obtain ⟨c, _, he⟩ := List.mem_map.1 (List.mem_reverse.1 hmem)
       rw [← he]
     rw [this]
     rfl

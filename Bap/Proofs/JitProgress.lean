@@ -24,7 +24,7 @@ open_private Bap.Primus.Lifted Bap.Primus.Lifted Lowering Lowering.push Lowering
   stmtLeaves programLeaves stmtWrites programWrites writtenAt writtenVars writtenMask writtenMasks writtenMembers writtenStable definitelyWritten closedTarget closedTarget.closed
   blockExit BlockExit BlockExit.direct BlockExit.branch BlockExit.other BlockExit.fall graphEdgeOps freshLabel enterBlock codeSite
   GraphPlan GraphPlan.seed GraphPlan.labels GraphPlan.edges GraphPlan.budget GraphPlan.observed GraphPlan.chained GraphPlan.definite GraphPlan.guarded
-  lowerEntry lowerExit lowerBlock lowerBlocks
+  lowerEntry lowerExit lowerBlock lowerBlocks GraphPlan.edgeOps_eq GraphPlan.hasEdge_eq GraphPlan.labelOf_eq GraphPlan.incoming_eq
 open_private Bap.Bil.Eval Bap.Bil expectMemory evalUn
 open_private Bap.Proofs.Primus Bap.Proofs.Primus obind lookup_bind_same lookup_bind_other
 
@@ -1286,6 +1286,7 @@ theorem lowerExit_progress {plan : GraphPlan} {first second : Lowering} {block :
     StmtMono first second ∧ ∀ (fuel : Nat) (state : Bil.State), ExpReady state.env first second →
       Progress (Bil.execProgram fuel state block.program) (EndOK state.env (programWrites block.program)) := by
   unfold lowerExit at h
+  simp only [GraphPlan.edgeOps_eq, GraphPlan.hasEdge_eq] at h
   split at h
   · next target he =>
     obtain ⟨exp, hprog, hc⟩ := blockExit_direct he
@@ -1394,6 +1395,7 @@ private theorem enterBlock_mono (lowering : Lowering) (budget observed address :
 private theorem lowerEntry_mono {plan : GraphPlan} {first second : Lowering} {block : Block} {hasEdge : Bool} (h : lowerEntry plan first block hasEdge = some second) :
     ExpMono first second := by
   unfold lowerEntry at h
+  simp only [GraphPlan.labelOf_eq] at h
   split at h
   · split at h
     · simp only [Option.some.injEq] at h
@@ -1413,7 +1415,7 @@ theorem lowerBlock_progress {plan : GraphPlan} {first second : Lowering} {block 
       (∀ var ∈ Lowering.inputs second, Good state.env var) → (∀ var, Lowering.memory second = some var → GoodMem state.env var) →
       Progress (Bil.execProgram fuel state block.program) (EndOK state.env (programWrites block.program)) := by
   unfold lowerBlock at h
-  dsimp only at h
+  simp only [GraphPlan.incoming_eq] at h
   generalize hl0 : (if GraphPlan.chained plan = true then Lowering.withWritten first (GraphPlan.definite plan block.address) else first) = l0 at h
   have m0 : BlockMono first l0 := by
     subst hl0

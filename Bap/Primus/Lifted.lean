@@ -38,7 +38,7 @@ private structure Lowering where
   layout : List (Bap.Var × Nat) := []
   inputs : List Bap.Var := []
   outputs : List (Bap.Var × Nat) := []
-  checkpoints : List (Nat × List (Bap.Var × Nat)) := []
+  reversedCheckpoints : List (Nat × List (Bap.Var × Nat)) := []
   written : List Bap.Var := []
   nextSlot : Nat := 0
   nextLabel : Nat := 0
@@ -57,6 +57,10 @@ private structure Lowering where
 
 /-- The operations, in order. -/
 private def Lowering.ops (lowering : Lowering) : List Jit.Op := lowering.reversed.reverse
+
+/-- The places where a run can stop, the first first. -/
+private def Lowering.checkpoints (lowering : Lowering) : List (Nat × List (Bap.Var × Nat)) :=
+  lowering.reversedCheckpoints.reverse
 
 /-- With more operations after those that it has, at the cost of those. -/
 private def Lowering.push (lowering : Lowering) (ops : List Jit.Op) : Lowering :=
@@ -608,7 +612,7 @@ end
 private def codeSite (lowering : Lowering) (pc : Nat) : Lowering :=
   let (lowering, slot) := setEffect lowering 0
   { lowering.push [.code slot (UInt64.ofNat pc)] with
-    checkpoints := lowering.checkpoints ++ [(pc, lowering.outputs)]
+    reversedCheckpoints := (pc, lowering.outputs) :: lowering.reversedCheckpoints
   }
 
 private def atCodeStop (lowering : Lowering) (pc : Nat) : Lowering :=
@@ -877,7 +881,7 @@ private def flagOutputs (seedWritten : List Bap.Var) (lowering : Lowering) : Low
     nextSlot := next
     flags
     reversed := (lowering.ops.flatMap (flagged flags)).reverse
-    checkpoints := lowering.checkpoints.map fun checkpoint => (checkpoint.1, lowering.outputs) }
+    reversedCheckpoints := lowering.reversedCheckpoints.map fun checkpoint => (checkpoint.1, lowering.outputs) }
 
 /-- The variables that a program writes before it can do anything else, and so at every end of it. The others of
 a run may not have been written where it ended. -/
@@ -937,6 +941,26 @@ private structure GraphPlan where
   chained : Bool
   definite : Nat → List Bap.Var
   guarded : Block → Bool
+  /-- `labels` and `edges` by hash, as each block asks of them. -/
+  labelOf : Nat → Option (Nat × Nat)
+  labelOf_eq : ∀ target, labelOf target = labels.find? fun (address, _) => address = target
+  hasEdge : Nat × Nat → Bool
+  hasEdge_eq : ∀ edge, hasEdge edge = edges.contains edge
+  incoming : Nat → Bool
+  incoming_eq : ∀ address, incoming address = edges.any fun edge => edge.2 == address
+
+/-- `graphEdgeOps` of a plan, which is what this is. -/
+private def GraphPlan.edgeOps (plan : GraphPlan) (lowering : Lowering) (source target : Nat) : Option (List Jit.Op) :=
+  if plan.hasEdge (source, target) then
+    match plan.labelOf target with
+    | some (_, label) => some [.goto label]
+    | none => none
+  else
+    some (jumpConstant { lowering with reversed := [] } (UInt64.ofNat target)).ops
+
+private theorem GraphPlan.edgeOps_eq (plan : GraphPlan) (lowering : Lowering) (source target : Nat) :
+    plan.edgeOps lowering source target = graphEdgeOps lowering plan.labels plan.edges source target := by
+  simp only [GraphPlan.edgeOps, graphEdgeOps, plan.hasEdge_eq, plan.labelOf_eq]
 
 private def Lowering.withWritten (lowering : Lowering) (written : List Bap.Var) : Lowering :=
   { lowering with written }
@@ -946,7 +970,7 @@ private def lowerEntry (plan : GraphPlan) (lowering : Lowering) (block : Block) 
   if !hasEdge then
     if block.address = plan.seed then some lowering else none
   else
-    match plan.labels.find? fun (address, _) => address = block.address with
+    match plan.labelOf block.address with
     | some (_, label) =>
       some (enterBlock (lowering.push [.label label]) plan.budget plan.observed block.address
         (plan.guarded block))
@@ -959,7 +983,7 @@ private def lowerExit (plan : GraphPlan) (lowering : Lowering) (block : Block) :
     let (lowered, terminated) ← lowerStatements lowering block.program.dropLast
     if terminated then none
     else
-      let ops ← graphEdgeOps lowered plan.labels plan.edges block.address target
+      let ops ← plan.edgeOps lowered block.address target
       some (lowered.push ops)
   | .branch condition yes no falls => do
     let (lowered, terminated) ← lowerStatements lowering block.program.dropLast
@@ -970,25 +994,25 @@ private def lowerExit (plan : GraphPlan) (lowering : Lowering) (block : Block) :
       else
         let (lowered, yesLabel) := freshLabel lowered
         let (lowered, noLabel) := freshLabel lowered
-        let yesOps ← graphEdgeOps lowered plan.labels plan.edges block.address yes
+        let yesOps ← plan.edgeOps lowered block.address yes
         let lowered := lowered.push ([.branch condition.slot yesLabel noLabel, .label yesLabel] ++ yesOps ++ [.label noLabel])
         -- The else of a branch without one is no jump: its effect stays a normal one.
         let noOps ←
-          if falls && !plan.edges.contains (block.address, no) then some [.jump (UInt64.ofNat no)]
-          else graphEdgeOps lowered plan.labels plan.edges block.address no
+          if falls && !plan.hasEdge (block.address, no) then some [.jump (UInt64.ofNat no)]
+          else plan.edgeOps lowered block.address no
         some (lowered.push noOps)
   | _ => do
     let (lowered, terminated) ← lowerStatements lowering block.program
     if terminated then some lowered
-    else if plan.edges.contains (block.address, block.next) then
-      let ops ← graphEdgeOps lowered plan.labels plan.edges block.address block.next
+    else if plan.hasEdge (block.address, block.next) then
+      let ops ← plan.edgeOps lowered block.address block.next
       some (lowered.push ops)
     else some (lowered.push [.jump (UInt64.ofNat block.next)])
 
 private def lowerBlock (plan : GraphPlan) (lowering : Lowering) (block : Block) : Option Lowering := do
   -- A read of what the block does not have written on all ways to it is an input.
   let lowering := if plan.chained then lowering.withWritten (plan.definite block.address) else lowering
-  let incoming := plan.edges.any fun edge => edge.2 == block.address
+  let incoming := plan.incoming block.address
   if block.address = plan.seed && incoming then
     -- A seed that an edge leads back to has an entry and a body, which the first run goes to directly.
     let (lowering, body) := freshLabel lowering
@@ -1013,20 +1037,51 @@ private def graphInitial (seed : Block) (labelCount : Nat) (wrapFaults chained :
     { initial with budget := some budget, observed := some observed }
   else initial
 
+/-- The first entry of each address. -/
+private def labelTable (labels : List (Nat × Nat)) : Std.HashMap Nat (Nat × Nat) :=
+  labels.foldr (init := {}) fun entry table => table.insert entry.1 entry
+
+private theorem labelTable_get (labels : List (Nat × Nat)) (target : Nat) :
+    (labelTable labels)[target]? = labels.find? fun (address, _) => address = target := by
+  induction labels with
+  | nil => simp [labelTable]
+  | cons head rest ih =>
+    simp only [labelTable, List.foldr_cons, Std.HashMap.getElem?_insert, List.find?_cons] at ih ⊢
+    by_cases he : head.1 = target <;> simp [he, ih]
+
+private theorem incoming_contains (edges : List (Nat × Nat)) (address : Nat) :
+    (Std.HashSet.ofList (edges.map (·.2))).contains address = edges.any fun edge => edge.2 == address := by
+  rw [Std.HashSet.contains_ofList, Bool.eq_iff_iff]
+  simp only [List.contains_iff_mem, List.mem_map, List.any_eq_true, beq_iff_eq]
+
 private def graphPlan (blocks : List Block) (edges : List (Nat × Nat)) (wrapFaults : Bool) (seed : Block) (initial : Lowering) : GraphPlan :=
   -- The label of a block heads the entry over an edge; a run starts in the seed without one.
   let alone (block : Block) := lowerStatements { wrapFaults } block.program
   let touches (block : Block) : Bool := (alone block).elim true fun lowered => lowered.1.memory.isSome
+  -- Only a block that an edge leads to asks, and a block alone has no edges.
+  let touching : Std.HashSet Nat :=
+    if edges.isEmpty then {} else Std.HashSet.ofList ((blocks.filter touches).map (·.address))
+  let exposed : Std.HashSet Nat :=
+    Std.HashSet.ofList ((edges.filter fun edge => touching.contains edge.1).map (·.2))
   let definite := definitelyWritten seed.address blocks edges
+  let labels := blocks.zipIdx.map fun entry => (entry.1.address, entry.2)
+  let table := labelTable labels
+  let pairs := Std.HashSet.ofList edges
+  let targets := Std.HashSet.ofList (edges.map (·.2))
   { seed := seed.address
-    labels := (List.range blocks.length).map fun index => (blocks[index]!.address, index)
+    labels
     edges
     budget := initial.budget.getD 0
     observed := initial.observed.getD 0
     chained := !edges.isEmpty
     definite := writtenAt definite
-    guarded := fun block => !touches block && !(edges.any fun edge => edge.2 == block.address &&
-      blocks.any fun other => other.address == edge.1 && touches other) }
+    guarded := fun block => !touching.contains block.address && !exposed.contains block.address
+    labelOf := fun target => table[target]?
+    labelOf_eq := labelTable_get labels
+    hasEdge := pairs.contains
+    hasEdge_eq := fun _ => Std.HashSet.contains_ofList
+    incoming := targets.contains
+    incoming_eq := incoming_contains edges }
 
 private def lowerGraph (blocks : List Block) (edges : List (Nat × Nat)) (wrapFaults : Bool := false) :
     Option Lowering := do
