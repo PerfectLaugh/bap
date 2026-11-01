@@ -9,11 +9,10 @@
 
 ;;; VFP INSTRUCTIONS
 ;;
-;; The operations go by the rounding mode of FPSCR where something serves
-;; their intrinsics, and otherwise round to nearest with ties to even, which
-;; is what it resets to. Of the rest of FPSCR only the NZCV bits are modeled,
-;; so the FZ and DN controls and the exception flags are ignored. The helpers
-;; are in arm-float.lisp.
+;; The operations go by the rounding mode, FZ and DN of FPSCR and raise its
+;; flags where something serves their intrinsics, and otherwise round to
+;; nearest with ties to even, which is what it resets to. The helpers are in
+;; arm-float.lisp.
 
 (defmacro vfp (cnd body)
   "(vfp CND BODY) evaluates BODY if the condition CND holds"
@@ -105,7 +104,7 @@
 ;; mode, which is assumed to be to nearest
 ;; A conversion to a word, of X that is rounded to R, with what it raises.
 (defun vfp-to-int (signed n x r e f)
-  (set FPSCR (logor FPSCR (fp-cvt-flags signed n x r e f 0 4)))
+  (set FPSCR (logor FPSCR (fp-cvt-flags signed n x r e f 0 4 (select 24 FPSCR))))
   (fp-to-int signed n r e f))
 
 (defun VTOSIZD (sd dm cnd _) (vfp cnd (set$ sd (vfp-to-int true 32 dm (fp-trunc dm 11 52) 11 52))))
@@ -1613,11 +1612,21 @@
       (concat (cast-unsigned 32 0x7ff80000) (cast-unsigned 32 0))
     (cast-unsigned 32 0x7fc00000)))
 
+;; With DN of FPSCR, what is a NaN is the default one, whichever it would have been.
+(defun vfp-default-if-dn (v)
+  (fp-select (logand (select 25 FPSCR) (is-nan v)) (vfp-default-nan v) v))
+
 (defun vfp-nan1 (r x)
+  (vfp-default-if-dn (vfp-chosen-1 r x)))
+
+(defun vfp-chosen-1 (r x)
   (fp-select (is-nan x) (fp-quiet x (vfp-frac-bits x))
     (fp-select (is-nan r) (vfp-default-nan r) r)))
 
 (defun vfp-nan2 (r x y)
+  (vfp-default-if-dn (vfp-chosen-2 r x y)))
+
+(defun vfp-chosen-2 (r x y)
   (let ((f (vfp-frac-bits x)))
     (fp-select (vfp-is-snan x) (fp-quiet x f)
       (fp-select (vfp-is-snan y) (fp-quiet y f)
@@ -1632,6 +1641,9 @@
 (defun vfp-sqrt (x) (vfp-nan1 (fsqrt :rne x) x))
 
 (defun vfp-nan3 (r a x y)
+  (vfp-default-if-dn (vfp-chosen-3 r a x y)))
+
+(defun vfp-chosen-3 (r a x y)
   "(vfp-nan3 R A X Y) is FPProcessNaNs3 of the addend A and the factors
    X and Y, of FPMulAdd, with the result R"
   (let ((f (vfp-frac-bits x)))

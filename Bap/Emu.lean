@@ -170,6 +170,8 @@ structure Emu where
   intrinsicName : IO.Ref (Bil.Env → String → String)
   /-- What an intrinsic that gave a result changes of a state besides: the flags that it raises. -/
   intrinsicRaises : IO.Ref (Bil.Env → String → List Nat → Nat → List (Bap.Var × Bap.Value))
+  /-- What the controls of the machine make of the operands and of the result of an intrinsic. -/
+  intrinsicControls : IO.Ref (Bil.Env → String → (List Nat → List Nat) × (Nat → Nat))
   /-- The programs of the instructions that have such an intrinsic, by address. -/
   servedPrograms : IO.Ref (Std.HashMap Nat Bil.Program)
   /-- What wants to know of a new process: of the one that made it, and of it. -/
@@ -262,6 +264,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     intrinsicServer := ← IO.mkRef none
     intrinsicName := ← IO.mkRef fun _ name => name
     intrinsicRaises := ← IO.mkRef fun _ _ _ _ => []
+    intrinsicControls := ← IO.mkRef fun _ _ => (id, id)
     servedPrograms := ← IO.mkRef {}
     processHooks := ← IO.mkRef []
     nextPc := ← IO.mkRef 0
@@ -1519,8 +1522,10 @@ private def runServed (emu : Emu) (serve : String → List Nat → Option (Nat �
         let env := (← emu.state.get).env
         let named := (← emu.intrinsicName.get) env name
         let inputs ← operands.get
-        match serve named inputs with
+        let (controlled, finished) := (← emu.intrinsicControls.get) env named
+        match serve named (controlled inputs) with
         | some (width, bits) =>
+          let bits := finished bits
           operands.set []
           let raises ← emu.intrinsicRaises.get
           emu.state.modify fun state =>

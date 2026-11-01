@@ -868,17 +868,49 @@ private def roundedName (architecture : Architecture) (env : Bil.Env) (name : St
   | .powerpc _ _ => field "FPSCR" 64 0 ["rne", "rtz", "rtp", "rtn", "rne", "rtz", "rtp", "rtn"]
   | .mips bits _ _ => field "FCSR" bits 0 ["rne", "rtz", "rtp", "rtn", "rne", "rtz", "rtp", "rtn"]
 
+/-- Whether denormal operands are zeros, whether denormal results are, and whether a NaN that results is the default one: FZ
+and DN of ARM, and DAZ and FZ of SSE. -/
+private def floatControls (architecture : Architecture) (env : Bil.Env) (name : String) : Bool × Bool × Bool :=
+  let test (register : String) (width bit : Nat) : Bool :=
+    match Bil.lookup env ⟨register, .imm width, 0, false⟩ with
+    | .ok (.bits value) => value.toNat.testBit bit
+    | _ => false
+  match architecture with
+  | .aarch64 => let zero := test "FPCR" 32 24; (zero, zero, test "FPCR" 32 25)
+  | .arm => let zero := test "FPSCR" 32 24; (zero, zero, test "FPSCR" 32 25)
+  | .x86_64 | .i686 =>
+    if (name.splitOn "binary_80").length > 1 then (false, false, false) else (test "MXCSR" 32 6, test "MXCSR" 32 15, false)
+  | _ => (false, false, false)
+
+private def floatRules : Architecture → Bap.Float.NaNRules
+  | .x86_64 | .i686 => .x86
+  | .aarch64 | .arm => .arm
+  | .riscv64 | .riscv32 => .riscv
+  | .mips _ _ true => .powerpc
+  | .mips _ _ false => .mips
+  | .powerpc _ _ => .powerpc
+
+/-- What the controls make of an intrinsic. -/
+private def controlled (architecture : Architecture) (env : Bil.Env) (name : String) : (List Nat → List Nat) × (Nat → Nat) :=
+  let (zeroIn, zeroOut, defaultNaN) := floatControls architecture env name
+  if !zeroIn && !zeroOut && !defaultNaN then (id, id) else
+  let (source, target) := Bap.Float.formatsOf name
+  let inputs (values : List Nat) : List Nat :=
+    match source, zeroIn with
+    | some format, true => values.map (Bap.Float.flush format)
+    | _, _ => values
+  let result (bits : Nat) : Nat :=
+    let bits := if defaultNaN then Bap.Float.defaultFor (floatRules architecture) name bits else bits
+    match target, zeroOut with
+    | some format, true => Bap.Float.flush format bits
+    | _, _ => bits
+  (inputs, result)
+
 /-- The flags of the machine that an intrinsic raises. Each is sticky, in a register whose bits for invalid, division by zero,
 overflow, underflow and inexact are these. -/
 private def raisedFlags (architecture : Architecture) (env : Bil.Env) (name : String) (inputs : List Nat) (result : Nat) :
     List (Bap.Var × Bap.Value) :=
-  let rules : Bap.Float.NaNRules := match architecture with
-    | .x86_64 | .i686 => .x86
-    | .aarch64 | .arm => .arm
-    | .riscv64 | .riscv32 => .riscv
-    | .mips _ _ true => .powerpc
-    | .mips _ _ false => .mips
-    | .powerpc _ _ => .powerpc
+  let rules := floatRules architecture
   let (register, width, invalid, divide, over, under, inexact) : String × Nat × Nat × Nat × Nat × Nat × Nat := match architecture with
     | .x86_64 | .i686 =>
       if (name.splitOn "binary_80").length > 1 then ("FPU_STATUS", 16, 0, 2, 3, 4, 5) else ("MXCSR", 32, 0, 2, 3, 4, 5)
@@ -891,10 +923,28 @@ private def raisedFlags (architecture : Architecture) (env : Bil.Env) (name : St
   match Bil.lookup env var with
   | .ok (.bits value) =>
     let old := value.toNat
-    let raised := Bap.Float.raisedBy rules name inputs result (old.testBit inexact)
+    let (zeroIn, zeroOut, _) := floatControls architecture env name
+    let x86 := architecture == .x86_64 || architecture == .i686
+    let (source, target) := Bap.Float.formatsOf name
+    let flushedIn := match source with
+      | some format => inputs.any (Bap.Float.isDenormal format)
+      | none => false
+    let effective := match source, zeroIn with
+      | some format, true => inputs.map (Bap.Float.flush format)
+      | _, _ => inputs
+    let raised := Bap.Float.raisedBy rules name effective result (old.testBit inexact && !zeroOut)
+    -- What a denormal result would have been, had it not been a zero.
+    let flushedOut := zeroOut && (match target, Bap.Float.evaluateWith rules name effective with
+      | some format, some unflushed => Bap.Float.isDenormal format unflushed.2
+      | _, _ => false)
+    -- What underflows to a zero isn't inexact on ARM, as what is a zero is what it was to be.
+    let raised := if flushedOut then { raised with underflow := true, inexact := x86 }
+      else if zeroOut && !x86 && raised.underflow then { raised with inexact := false }
+      else raised
     let flag (on : Bool) (bit : Nat) : Nat := if on then 1 <<< bit else 0
     let added := flag raised.invalid invalid ||| flag raised.divideByZero divide ||| flag raised.overflow over |||
-      flag raised.underflow under ||| flag raised.inexact inexact
+      flag raised.underflow under ||| flag raised.inexact inexact |||
+      (if x86 then flag raised.denormal 1 else flag (zeroIn && flushedIn) 7)
     if old ||| added == old then [] else [(var, .bits (BitVec.ofNat width (old ||| added)))]
   | _ => []
 
@@ -919,6 +969,7 @@ private def emulatorOf (architecture : Architecture) : IO Emu := do
   unmap emu 0x1000 16
   emu.intrinsicName.set (roundedName architecture)
   emu.intrinsicRaises.set (raisedFlags architecture)
+  emu.intrinsicControls.set (controlled architecture)
   emu.intrinsicServer.set (some (Bap.Float.evaluateWith (match architecture with
     | .x86_64 | .i686 => .x86
     | .aarch64 | .arm => .arm

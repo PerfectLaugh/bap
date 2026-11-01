@@ -7,10 +7,9 @@
 
 ;;; SCALAR FLOATING-POINT INSTRUCTIONS
 ;;
-;; The operations go by the rounding mode of FPCR where something serves
-;; their intrinsics, and otherwise round to nearest with ties to even, which
-;; is what it resets to. The FZ, DN and AHP controls and the exception
-;; flags are ignored. The
+;; The operations go by the rounding mode, FZ and DN of FPCR and raise the
+;; flags of FPSR where something serves their intrinsics, and otherwise round
+;; to nearest with ties to even, which is what it resets to. AHP is ignored. The
 ;; helpers are in arm-float.lisp.
 
 (defun fp-compare (x y) (set-nzcv (fp-nzcv x y)))
@@ -204,7 +203,7 @@
   (let ((e (a64-fexp-bits a))
         (f (a64-frac-bits a))
         (r (case mode 'z (fp-trunc a e f) (a64-frint mode a))))
-    (set FPSR (logor FPSR (fp-cvt-flags signed bits a r e f 0 4)))
+    (set FPSR (logor FPSR (fp-cvt-flags signed bits a r e f 0 4 (select 24 FPCR))))
     (fp-to-int signed bits r e f)))
 
 (defun FCVTNSUWSr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to true 'n 32 rn))))
@@ -488,8 +487,11 @@
   (a64-inf-times-zero a b))
 
 ;; the square root of a negative number is the default NaN
+;; which a denormal isn't, with FZ, as it is a zero
 (defun a64-fsqrt (a)
-  (fp-select (logand (msb a) (not (is-fzero a)) (not (is-nan a)))
+  (fp-select (logand (msb a) (not (is-fzero a)) (not (is-nan a))
+                     (not (logand (select 24 FPCR)
+                                  (= (fp-exponent a (a64-fexp-bits a) (a64-frac-bits a)) (cast-unsigned 64 0)))))
              (a64-default-nan a)
              (fsqrt :rne a)))
 

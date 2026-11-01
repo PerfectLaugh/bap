@@ -165,12 +165,15 @@
              (logor (>= expn (+ bias n))
                     (logand (msb r) (>= expn bias)))))))
 
-(defun fp-cvt-flags (signed n x r e f invalid inexact)
-  "(fp-cvt-flags SIGNED N X R E F INVALID INEXACT) is a 32-bit word of the bits
-   INVALID and INEXACT for what the conversion of X, rounded to R, raises"
-  (let ((bad (fp-cvt-invalid signed n r e f)))
-    (logor (lshift (cast-unsigned 32 bad) invalid)
-           (lshift (cast-unsigned 32 (logand (not bad) (not (= r x)))) inexact))))
+(defun fp-cvt-flags (signed n x r e f invalid inexact flush)
+  "(fp-cvt-flags SIGNED N X R E F INVALID INEXACT FLUSH) is a 32-bit word of the bits
+   INVALID and INEXACT for what the conversion of X, rounded to R, raises. With FLUSH,
+   which is FZ, a denormal is a zero, which raises input denormal, the bit 7, and no more"
+  (let ((bad (fp-cvt-invalid signed n r e f))
+        (denormal (logand flush (= (fp-exponent x e f) (cast-unsigned 64 0)) (not (is-fzero x)))))
+    (fp-select denormal (cast-unsigned 32 0x80)
+      (logor (lshift (cast-unsigned 32 bad) invalid)
+             (lshift (cast-unsigned 32 (logand (not bad) (not (= r x)))) inexact)))))
 
 (defun fp-to-fixed (signed n x e f fbits)
   "(fp-to-fixed SIGNED N X E F FBITS) is FPToFixed: X times 2^FBITS as

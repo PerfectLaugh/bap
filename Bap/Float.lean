@@ -441,7 +441,41 @@ structure Raised where
   overflow : Bool := false
   underflow : Bool := false
   inexact : Bool := false
+  /-- Of what x86 alone says: that an operand is a denormal. -/
+  denormal : Bool := false
   deriving DecidableEq, Repr
+
+/-- Whether bits are a denormal of a format. -/
+def isDenormal (format : Format) (bits : Nat) : Bool :=
+  (bits >>> format.fieldBits) % 2 ^ format.exponentBits == 0 && bits % 2 ^ format.fieldBits != 0
+
+/-- A denormal as a zero of its sign. -/
+def flush (format : Format) (bits : Nat) : Nat :=
+  if isDenormal format bits then signBit format (bits >>> (format.width - 1) % 2 == 1) else bits
+
+/-- The formats of the operands and of the result of what is named, where they are floating point. -/
+def formatsOf (name : String) : Option Format × Option Format :=
+  let parts := name.splitOn "_"
+  match parts.findIdx? (· == "ieee754") with
+  | none => (none, none)
+  | some at_ =>
+    let widths := (parts.drop (at_ + 2)).filterMap String.toNat?
+    let first := widths.head?.bind formatOf
+    let last := widths.getLast?.bind formatOf
+    match parts.headD "" with
+    | "fadd" | "fsub" | "fmul" | "fdiv" | "fsqrt" | "fmad" | "fmadh" | "fround" | "fconvert" => (first, last)
+    | "forder" | "fgt" | "fge" | "feq" => (first, none)
+    | "cast" =>
+      match parts.getD 1 "" with
+      | "sint" | "int" => (first, none)
+      | _ => (none, last)
+    | _ => (none, none)
+
+/-- The result of what is named for one that must not be a NaN of its operands. -/
+def defaultFor (rules : NaNRules) (name : String) (bits : Nat) : Nat :=
+  match (formatsOf name).2 with
+  | some format => if isNaN format bits then chooseNaN { rules with signalingFirst := false } format [] else bits
+  | none => bits
 
 /-- The name of an operation with another rounding mode, as it is the same operation but for that. -/
 private def withMode (name mode : String) : String :=
@@ -455,7 +489,15 @@ def raisedBy (rules : NaNRules) (name : String) (inputs : List Nat) (result : Na
   let before := parts.take at_
   let hasMode := (before.getLast?.bind Mode.ofName).isSome
   -- A step of what an instruction does, and not what it does.
-  if !hasMode || before.getLast? == some "rni" then return {}
+  if before.getLast? == some "rni" then return {}
+  let comparing := ["forder", "fgt", "fge", "feq"].contains (before.headD "")
+  if comparing then
+    let widths := (parts.drop (at_ + 2)).filterMap String.toNat?
+    let some format := widths.head?.bind formatOf | return {}
+    let signaling := inputs.any fun input =>
+      if rules.legacyMips then isNaN format input && !isSignaling format input else isSignaling format input
+    return { invalid := signaling, denormal := inputs.any (isDenormal format) && !inputs.any (isNaN format) }
+  if !hasMode then return {}
   let operation := "_".intercalate before.dropLast
   let widths := (parts.drop (at_ + 2)).filterMap String.toNat?
   let some first := widths.head? | return {}
@@ -489,7 +531,9 @@ def raisedBy (rules : NaNRules) (name : String) (inputs : List Nat) (result : Na
     let signaling := inputs.any fun input =>
       if rules.legacyMips then isNaN source input && !isSignaling source input else isSignaling source input
     let anyNaN := inputs.any (isNaN source)
+    let denormal := inputs.any (isDenormal source)
     let resultNaN := isNaN target result
+    -- Of what is raised, these leave no denormal to say.
     if anyNaN || resultNaN then return { invalid := signaling || !anyNaN }
     let infiniteInput := inputs.any fun input => match unpack source input with | .infinity _ => true | _ => false
     let divideByZero := operation == "fdiv" && !infiniteInput && (match inputs with
@@ -497,16 +541,17 @@ def raisedBy (rules : NaNRules) (name : String) (inputs : List Nat) (result : Na
         (match unpack source denominator with | .zero _ => true | _ => false) &&
           (match unpack source numerator with | .zero _ => false | _ => true)
       | _ => false)
-    if infiniteInput || divideByZero then return { divideByZero }
+    if divideByZero then return { divideByZero }
+    if infiniteInput then return { denormal }
     -- What is at an end of the format has to be told from what fits there, whatever is known.
     let field := (result >>> target.fieldBits) % 2 ^ target.exponentBits
     let edge := field == 0 || field ≥ target.maxExponent - 1
-    if known && !edge then return {}
+    if known && !edge then return { denormal }
     let inexact := differs
     let huge := match evaluateWith rules (withMode name "rne") inputs with
       | some nearest => (match unpack target nearest.2 with | .infinity _ => true | _ => false)
       | none => false
-    return { inexact, overflow := inexact && huge, underflow := inexact && field == 0 }
+    return { inexact, overflow := inexact && huge, underflow := inexact && field == 0, denormal }
   | _ => return {}
 
 /-- Whether `evaluate` knows an operation of this name. -/
