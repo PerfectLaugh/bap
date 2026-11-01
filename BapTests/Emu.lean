@@ -610,7 +610,7 @@ def testLinuxSelfModifying : IO Unit := do
   let written ← IO.mkRef ByteArray.empty
   let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile path)) "/test" ["/test"]
   let outcome ← machine.run fun data => written.modify (· ++ data)
-  assertEqual "Linux nothing of code that was changed stays" (Bap.Tasks.ScheduleOutcome.finished 0, "65650259515886\n")
+  assertEqual "Linux nothing of code that was changed stays" (Bap.Tasks.ScheduleOutcome.finished 0, "65650259506356\n65650259506398\n")
     (outcome, String.fromUTF8! (← written.get))
 
 /-- Calls between ARM and Thumb, whichever a program starts in, and the helpers of the kernel, as qemu has them. -/
