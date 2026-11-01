@@ -128,6 +128,7 @@ def main : IO Unit := do
     Bap.Tests.Lifted.testNativeMemory,
     Bap.Tests.Lifted.testNativeMemoryModel,
     Bap.Tests.Emu.testRollbackMemory,
+    Bap.Tests.Emu.testCheckpointMoments,
     Bap.Tests.Emu.testParallelAtomics,
     Bap.Tests.Emu.testParallelTearing,
     Bap.Tests.Emu.testParallelFences,

@@ -1090,7 +1090,10 @@ structure Machine.Saved where
 private def Machine.modelBytes (machine : Machine) : IO (List (AttachedModel × ByteArray)) := do
   (← machine.models.get).mapM fun model => do pure (model, ← model.state.save)
 
+/-- It is as whole as a checkpoint has to be: not in the middle of an instruction, or from a worker of a parallel round. -/
 def Machine.save (machine : Machine) : IO Machine.Saved := do
+  if (← machine.emu.serving.get) || machine.emu.engine.deferMemorySync then
+    throw <| IO.userError "a machine can't be saved in the middle of an instruction, or by a worker of a parallel round: stop the thread, and save it once the run returns"
   pure {
     emulator := ← snapshot machine.emu
     run := ← runState machine.emu
@@ -1115,20 +1118,26 @@ def checkpointFormat : Nat := 2
 of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/
 def bapRevision : String := s!"bap-1 lean-{Lean.versionString}"
 
-/-- The semantics that a machine lifts by, as all the files of its directory in the order of their paths. -/
-def semanticsDigest : IO Nat := do
-  let root : System.FilePath ← Bap.Target.LLVMLift.semanticsRoot
+/-- What a directory holds, as all of its files in the order of their paths under it, however the directory itself is written. -/
+def directoryDigest (root : System.FilePath) : IO Nat := do
   if !(← root.pathExists) then return 0
+  -- Without what ends it, as what is under it is written from that, and the names shouldn't say.
+  let trimmed := (root.toString.dropEndWhile (· == System.FilePath.pathSeparator)).toString
+  let root : System.FilePath := if trimmed.isEmpty then root else trimmed
+  let prefixLength := root.toString.length + 1
   let files ← root.walkDir
   let mut named : List (String × System.FilePath) := []
   for file in files do
     unless ← file.isDir do
-      let relative := (file.toString.drop (root.toString.length + 1)).toString
-      named := (relative.replace "\\" "/", file) :: named
+      named := ((file.toString.drop prefixLength).toString.replace "\\" "/", file) :: named
   let mut hash := Wire.digest ByteArray.empty
   for (name, file) in named.mergeSort (fun left right => left.1 ≤ right.1) do
     hash := Wire.digest (← IO.FS.readBinFile file) (Wire.digest name.toUTF8 hash)
   return hash.toNat
+
+/-- The semantics that a machine lifts by. -/
+def semanticsDigest : IO Nat := do
+  directoryDigest (← Bap.Target.LLVMLift.semanticsRoot)
 
 /-- What a checkpoint says that it belongs to. -/
 structure Machine.Identity where

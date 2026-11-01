@@ -115,7 +115,7 @@ structure SyscallHook where
   action : CodeHookContext → Nat → List Nat → IO SyscallAction
 
 /-- How steps were taken back, and why: a fault of memory, an access to something watched that a range couldn't stop for, or anything
-else, such as a hook that threw. Of those that have a memory of their own or kept one, `patched` took back what the step wrote, and
+else, such as a hook that threw. A range that faults counts twice, as it goes back and comes again as one step, which faults as well. Of those that have a memory of their own or kept one, `patched` took back what the step wrote, and
 `rebuilt` made it again from all of the state, which takes as long as the process is big. A worker of a parallel round does neither. -/
 structure RollbackStats where
   faults : Nat := 0
@@ -197,8 +197,10 @@ structure Emu where
   redirect : IO.Ref (Option Nat)
   /-- How much of its turn the thread that runs had had when the fuel ran out, or 0 between turns. -/
   turnUsed : IO.Ref Nat
-  /-- Whether a system call is being served, in the middle of its instruction. -/
+  /-- Whether a hook runs in the middle of an instruction: of a system call, an intrinsic or an access. -/
   serving : IO.Ref Bool
+  /-- Whether a fault has been recorded since the last rollback, which says why that one came. -/
+  faultFresh : IO.Ref Bool
   /-- The native memory that the step that runs began with. -/
   stepNative : IO.Ref (Option Jit.Memory)
   /-- Whether the native memory has been replaced since then, when what was written to the old one is no help. -/
@@ -303,6 +305,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     redirect := ← IO.mkRef none
     turnUsed := ← IO.mkRef 0
     serving := ← IO.mkRef false
+    faultFresh := ← IO.mkRef false
     stepNative := ← IO.mkRef none
     memorySwitched := ← IO.mkRef false
     rollbacks := ← IO.mkRef {}
@@ -539,7 +542,9 @@ native memory, which is made to agree with the state. Threads created since the 
 is their memory. A parallel worker leaves all of this to the rollback of its round. -/
 private def rollbackBlock (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   let restarting ← emu.restarting.get
-  let faulted := (← emu.lastFault.get).isSome
+  -- What is in `lastFault` may be of an earlier step, which isn't why this one failed.
+  let faulted ← emu.faultFresh.get
+  emu.faultFresh.set false
   emu.rollbacks.modify fun stats =>
     if restarting then { stats with restarts := stats.restarts + 1 }
     else if faulted then { stats with faults := stats.faults + 1 }
@@ -821,6 +826,12 @@ def traceDroppedAccesses (emu : Emu) : IO Nat := do
   let current ← emu.trace.get
   pure (current.getD {}).droppedAccesses
 
+/-- Runs a hook that is in the middle of an instruction, as a checkpoint then couldn't be of anything whole. -/
+private def serve (emu : Emu) (action : IO α) : IO α := do
+  let before ← emu.serving.get
+  emu.serving.set true
+  try action finally emu.serving.set before
+
 private def serialize (emu : Emu) (action : IO α) : IO α := do
   match ← emu.parallelLock.get with
   | some mutex =>
@@ -924,6 +935,7 @@ private def recordFault (emu : Emu) (operation : MemoryOperation) (address : Nat
   let pc ← emu.pc.get
   let thread ← emu.currentThreadRef.get
   emu.lastFault.set (some ⟨pc, address, operation, thread⟩)
+  emu.faultFresh.set true
 
 private def notifyMemory (emu : Emu) (write : Bool) (address size value : Nat) : IO Unit := do
   let mapped ← emu.regions.get
@@ -942,11 +954,11 @@ private def notifyMemory (emu : Emu) (write : Bool) (address size value : Nat) :
       | none => pure ()
       let hit := hooksForAccess (·.first) (·.last) (← emu.writeHooks.get) address size
       takeBack !hit.isEmpty
-      hit.forM fun hook => serialize emu <| hook.action (hookContext emu) address size value
+      hit.forM fun hook => serialize emu <| serve emu <| hook.action (hookContext emu) address size value
     else do
       let hit := hooksForAccess (·.first) (·.last) (← emu.readHooks.get) address size
       takeBack !hit.isEmpty
-      hit.forM fun hook => serialize emu <| hook.action (hookContext emu) address size
+      hit.forM fun hook => serialize emu <| serve emu <| hook.action (hookContext emu) address size
   notifyAccess mapped write address size fault
     (Primus.Lifted.markDirtyRange emu.engine address (address + size - 1))
     (recordAccess emu write address size value) hooks
@@ -1005,11 +1017,24 @@ def read (emu : Emu) (address size : Nat) : IO ByteArray := do
   -- An absurd size fails right here, instead of allocating before it fails.
   if !coversRange (← emu.regions.get) address (address + size) then
     throw <| IO.userError s!"unmapped Emu address in {size} bytes at {address}"
-  let bytes ← (List.range size).mapM fun offset => readByte emu (address + offset)
   match ← emu.engine.persistentMemory.get with
-  -- Once more all at once, now that it may be read: what a worker of a parallel round stores is seen whole.
-  | some memory => Jit.readMemoryRange memory (UInt64.ofNat address) size
-  | none => pure (ByteArray.mk bytes.toArray)
+  -- All at once, as what a worker of a parallel round stores is seen whole.
+  | some memory =>
+    let regions ← emu.regions.get
+    let rec check : Nat → Nat → IO Unit
+      | 0, _ => pure ()
+      | fuel + 1, position => do
+        if position < address + size then
+          match lookupRegion regions position with
+          | none => throw <| IO.userError s!"unmapped Emu address {position}"
+          | some region =>
+            if !region.protection.readable then throw <| IO.userError s!"unreadable Emu address {position}"
+            check fuel (region.address + region.data.size)
+    check (regions.length + 1) address
+    Jit.readMemoryRange memory (UInt64.ofNat address) size
+  | none =>
+    let bytes ← (List.range size).mapM fun offset => readByte emu (address + offset)
+    pure (ByteArray.mk bytes.toArray)
 
 private def synchronizeWrite (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
   let persistent ← emu.engine.persistentMemory.get
@@ -1369,18 +1394,17 @@ private def dispatchSyscall (emu : Emu) : IO (Option Nat) := serialize emu <| do
         pure (args.take 4 ++ onStack)
       else pure args
     let context := hookContext emu
-    let rec serve : List SyscallHook → IO (Option Nat)
+    let rec go : List SyscallHook → IO (Option Nat)
       | [] => pure none
       | hook :: rest => do
         match ← hook.action context number args with
         | .returnValue value =>
           setReg emu ⟨resultRegister, .imm width, 0, false⟩ (.bits (BitVec.ofNat width value))
           pure (some value)
-        | .default => serve rest
-    emu.serving.set true
-    try serve hooks finally emu.serving.set false
+        | .default => go rest
+    serve emu (go hooks)
 
-private def dispatchIntrinsic (emu : Emu) (name : String) : IO Bool := serialize emu <| do
+private def dispatchIntrinsic (emu : Emu) (name : String) : IO Bool := serialize emu <| serve emu <| do
   let address ← emu.pc.get
   let hooks ← emu.intrinsicHooks.get
   let selected := hooks.filter fun hook => hook.name == "*" || hook.name == name

@@ -1005,12 +1005,14 @@ there is one when the run returns, which goes on to what the run would have done
 def testLinuxServedCheckpoint (triple : String) (getcwd : Nat) : IO Unit := do
   let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-files")
   let inside ← IO.mkRef (none : Option (Except IO.Error ByteArray))
+  let insideSave ← IO.mkRef (none : Option Bool)
   let machine ← IO.mkRef (none : Option Bap.Linux.Machine)
   let model : Bap.Linux.RuntimeModel := { id := "stopper", attach := fun attached => do
     let _ ← Bap.Emu.onSyscall attached.emu fun emu number _ => do
       if number == getcwd then
         if let some machine := ← machine.get then
           inside.set (some (← machine.checkpoint.toBaseIO))
+          insideSave.set (some (match ← machine.save.toBaseIO with | .ok _ => true | .error _ => false))
         Bap.Emu.stopThread emu (← Bap.Emu.thread emu)
       pure .default
     pure { save := pure ByteArray.empty, load := fun _ => pure () } }
@@ -1026,6 +1028,9 @@ def testLinuxServedCheckpoint (triple : String) (getcwd : Nat) : IO Unit := do
   match ← inside.get with
   | some (.error _) => pure ()
   | _ => throw <| IO.userError s!"Linux {triple} a checkpoint in the middle of a system call should be refused"
+  match ← insideSave.get with
+  | some false => pure ()
+  | _ => throw <| IO.userError s!"Linux {triple} a save in the middle of a system call should be refused"
   machine.set none
   -- It goes on past the call, with the result that the kernel gave.
   let second ← Bap.Linux.Machine.ofCheckpoint (← first.checkpoint) (models := [{ model with attach := fun _ => pure { save := pure ByteArray.empty, load := fun _ => pure () } }])
@@ -1036,10 +1041,10 @@ def testLinuxServedCheckpoint (triple : String) (getcwd : Nat) : IO Unit := do
 /-- What is atomic on a machine is atomic in a parallel round, against each other and against plain stores: each thread adds 1 many
 times to one counter, and nothing is lost. -/
 def testParallelAtomics : IO Unit := do
-  let trial (label : String) (make : IO Bap.Emu.Emu) (register : Nat → Bap.Var) (last threads count : Nat) : IO Unit := do
+  let trialWide (label : String) (make : IO Bap.Emu.Emu) (register : Nat → Bap.Var) (width threads count : Nat) (endian : Endian) : IO Unit := do
     let emu ← make
     Bap.Emu.map emu ⟨0x10000, ByteArray.mk (Array.replicate 16 0), ⟨true, true, false⟩⟩
-    let word (value : Nat) : Bap.Value := .bits (BitVec.ofNat 64 value)
+    let word (value : Nat) : Bap.Value := .bits (BitVec.ofNat width value)
     let setup (write : Bap.Var → Bap.Value → IO Unit) : IO Unit := do
       write (register 0) (word 0x10000)
       write (register 1) (word count)
@@ -1048,31 +1053,56 @@ def testParallelAtomics : IO Unit := do
     for _ in [1:threads] do
       let id ← Bap.Emu.spawnThread emu 0 0
       setup (Bap.Emu.setThreadReg emu id)
-    let mut finished := false
-    for _ in [0:100000] do
+    let counted : IO Nat := do
+      let bytes ← Bap.Emu.read emu 0x10000 4
+      pure ((List.range 4).foldl (init := 0) fun value index =>
+        value + bytes[index]!.toNat * 256 ^ (if endian == .big then 3 - index else index))
+    -- Until each has counted to its end, and a while past that, to show that nothing more comes of it.
+    let mut rounds := 0
+    while rounds < 20000 && (← counted) < threads * count do
       let _ ← Bap.Emu.runPreemptiveParallel emu 500
-      if ← (← Bap.Emu.threads emu).allM (fun thread => pure (thread.pc == last)) then
-        finished := true
-        break
-    assertTrue s!"{label} ends" finished
-    let bytes ← Bap.Emu.read emu 0x10000 4
-    let value := (List.range 4).foldl (init := 0) fun value index => value + bytes[index]!.toNat * 256 ^ index
+      rounds := rounds + 1
+    for _ in [0:20] do
+      let _ ← Bap.Emu.runPreemptiveParallel emu 500
+    let value ← counted
     assertEqual s!"{label} loses nothing" (threads * count) value
+  let trial (label : String) (make : IO Bap.Emu.Emu) (register : Nat → Bap.Var) (threads count : Nat) : IO Unit :=
+    trialWide label make register 64 threads count .little
   let riscv (source : String) : IO Bap.Emu.Emu := do Bap.Emu.riscv64 (← LLVM.assemble "riscv64" source) 0 0
   -- a0 is where, a2 how many, a3 by how much.
   let riscvRegister (index : Nat) : Bap.Var := ⟨s!"X{[10, 12, 13][index]!}", .imm 64, 0, false⟩
   trial "Parallel lr and sc" (riscv "lr.w t1, (a0)\naddi t1, t1, 1\nsc.w t2, t1, (a0)\nbnez t2, -12\naddi a2, a2, -1\nbnez a2, -20\nj 0")
-    riscvRegister 24 4 1000
-  trial "Parallel amoadd" (riscv "amoadd.w zero, a3, (a0)\naddi a2, a2, -1\nbnez a2, -8\nj 0") riscvRegister 12 4 1000
+    riscvRegister 4 1000
+  trial "Parallel amoadd" (riscv "amoadd.w zero, a3, (a0)\naddi a2, a2, -1\nbnez a2, -8\nj 0") riscvRegister 4 1000
   -- A lock that is taken by a swap and let go by a plain store, around what isn't atomic: a store that a swap went over would never end.
   trial "Parallel lock of a swap and a store"
     (riscv "addi t4, a0, 8\namoswap.w t3, a3, (t4)\nbnez t3, -4\nlw t1, (a0)\naddi t1, t1, 1\nsw t1, (a0)\nsw zero, (t4)\naddi a2, a2, -1\nbnez a2, -28\nj 0")
-    riscvRegister 36 4 300
+    riscvRegister 4 300
   let aarch64 (source : String) : IO Bap.Emu.Emu := do Bap.Emu.aarch64 (← LLVM.assemble "aarch64" source) 0 0
   let armRegister (index : Nat) : Bap.Var := ⟨s!"X{[0, 3, 4][index]!}", .imm 64, 0, false⟩
   trial "Parallel ldxr and stxr"
-    (aarch64 "ldxr w1, [x0]\nadd w1, w1, #1\nstxr w2, w1, [x0]\ncbnz w2, #-12\nsub x3, x3, #1\ncbnz x3, #-20\nb #0") armRegister 24 4 1000
-  trial "Parallel ldadd" (aarch64 "ldadd w4, wzr, [x0]\nsub x3, x3, #1\ncbnz x3, #-8\nb #0") armRegister 12 4 1000
+    (aarch64 "ldxr w1, [x0]\nadd w1, w1, #1\nstxr w2, w1, [x0]\ncbnz w2, #-12\nsub x3, x3, #1\ncbnz x3, #-20\nb #0") armRegister 4 1000
+  trial "Parallel ldadd" (aarch64 "ldadd w4, wzr, [x0]\nsub x3, x3, #1\ncbnz x3, #-8\nb #0") armRegister 4 1000
+  -- The others that have a monitor or instructions that are atomic.
+  let mips (source : String) : IO Bap.Emu.Emu := do Bap.Emu.mips32 (← LLVM.assemble "mips" source) 0 0
+  let mipsRegister (index : Nat) : Bap.Var := ⟨s!"R{[4, 5, 6][index]!}", .imm 32, 0, false⟩
+  trialWide "Parallel ll and sc" (mips "ll $8, 0($4)\naddiu $8, $8, 1\nsc $8, 0($4)\nbeqz $8, -16\nnop\naddiu $5, $5, -1\nbnez $5, -28\nnop\nb -4\nnop")
+    mipsRegister 32 4 1000 .big
+  let powerpc (source : String) : IO Bap.Emu.Emu := do Bap.Emu.powerpc (← LLVM.assemble "powerpc64le" source) 0 0 {}
+  let powerRegister (index : Nat) : Bap.Var := ⟨s!"R{[3, 4, 5][index]!}", .imm 64, 0, false⟩
+  let powerpc (source : String) : IO Bap.Emu.Emu := do
+    let emu ← powerpc source
+    Bap.Emu.setReg emu ⟨"SO", .imm 1, 0, false⟩ (.bits (BitVec.ofNat 1 0))
+    pure emu
+  trial "Parallel lwarx and stwcx" (powerpc "lwarx 6, 0, 3\naddi 6, 6, 1\nstwcx. 6, 0, 3\nbne 0, -12\naddi 4, 4, -1\ncmpdi 4, 0\nbne 0, -24\nb 0")
+    powerRegister 4 1000
+  let arm (source : String) : IO Bap.Emu.Emu := do Bap.Emu.arm32 (← LLVM.assemble "armv7" source) 0 0
+  let armRegister32 (index : Nat) : Bap.Var := ⟨s!"R{[0, 1, 2][index]!}", .imm 32, 0, false⟩
+  trialWide "Parallel ldrex and strex" (arm "ldrex r3, [r0]\nadd r3, r3, #1\nstrex r4, r3, [r0]\ncmp r4, #0\nbne #-24\nsub r1, r1, #1\ncmp r1, #0\nbne #-36\nb #-8")
+    armRegister32 32 4 1000 .little
+  -- `lock add dword ptr [rdi], 1; dec rsi; jnz back; jmp self`
+  let x86Register (index : Nat) : Bap.Var := ⟨["RDI", "RSI", "RDX"][index]!, .imm 64, 0, false⟩
+  trial "Parallel lock add" (Bap.Emu.x86_64 (ByteArray.mk #[0xF0, 0x83, 0x07, 0x01, 0x48, 0xFF, 0xCE, 0x75, 0xF7, 0xEB, 0xFE]) 0 0) x86Register 4 1000
   -- A round is turns of its own: what a run left of a turn isn't there after one, whether it had one thread to run or more.
   let turns ← riscv "nop\nj -4"
   let _ ← Bap.Emu.spawnThread turns 0 0
@@ -1294,6 +1324,70 @@ def testRollbackMemory : IO Unit := do
   let _ ← Bap.Emu.runPreemptiveParallel rounds 100
   if let some native := ← rounds.engine.persistentMemory.get then
     assertTrue "A round leaves no step open" ((← Jit.memoryStepWrites native).isNone)
+
+/-- A checkpoint is of a whole instruction and of everything at one moment: none is made by a hook of an access, or by a worker while
+the others run. A hook of the code comes before its instruction, which is a place to make one. -/
+def testCheckpointMoments : IO Unit := do
+  let reg (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
+  let tried (emu : Bap.Emu.Emu) (seen : IO.Ref (Option Bool)) : IO Unit := do
+    let result ← (Bap.Emu.checkpointBytes emu).toBaseIO
+    seen.set (some (match result with | .ok _ => true | .error _ => false))
+  let start (source : String) : IO Bap.Emu.Emu := do
+    let emu ← Bap.Emu.riscv64 (← LLVM.assemble "riscv64" source) 0 0
+    Bap.Emu.map emu ⟨0x10000, ByteArray.mk (Array.replicate 64 7), ⟨true, true, false⟩⟩
+    Bap.Emu.setReg emu (reg "X10") (.bits (BitVec.ofNat 64 0x10000))
+    Bap.Emu.setReg emu (reg "X12") (.bits (BitVec.ofNat 64 1))
+    pure emu
+  let reading ← start "lw t1, 0(a0)\nj -4"
+  let readSeen ← IO.mkRef none
+  let _ ← Bap.Emu.onRead reading (0x10000, 0x10000) fun current _ _ => tried current readSeen
+  let _ ← Bap.Emu.run reading 2
+  assertEqual "A checkpoint isn't made by a hook of a load" (some false) (← readSeen.get)
+  let writing ← start "sw a2, 0(a0)\nj -4"
+  let writeSeen ← IO.mkRef none
+  let _ ← Bap.Emu.onWrite writing (0x10000, 0x10000) fun current _ _ _ => tried current writeSeen
+  let _ ← Bap.Emu.run writing 2
+  assertEqual "A checkpoint isn't made by a hook of a store" (some false) (← writeSeen.get)
+  -- When the hook is over, it can be made again.
+  let _ ← Bap.Emu.checkpointBytes writing
+  let coded ← start "nop\nj -4"
+  let codeSeen ← IO.mkRef none
+  let _ ← Bap.Emu.onCode coded (0, 0) fun current _ => tried current codeSeen
+  let _ ← Bap.Emu.run coded 2
+  assertEqual "A checkpoint can be made by a hook of the code" (some true) (← codeSeen.get)
+  let round ← start "nop\nj -4"
+  let _ ← Bap.Emu.spawnThread round 0 0
+  let workerSeen ← IO.mkRef none
+  let _ ← Bap.Emu.onCode round (0, 0) fun current _ => tried current workerSeen
+  let _ ← Bap.Emu.runPreemptiveParallel round 10
+  assertEqual "A checkpoint isn't made by a worker of a round" (some false) (← workerSeen.get)
+  let _ ← Bap.Emu.checkpointBytes round
+  -- Why a step was taken back is that step's: a hook that throws after a fault that was dealt with isn't a fault.
+  let faulting ← start "lw t1, 0(a1)\nnop\necall"
+  Bap.Emu.setReg faulting (reg "X11") (.bits (BitVec.ofNat 64 0x90000000))
+  for name in ["X13", "X14", "X15", "X17"] do Bap.Emu.setReg faulting (reg name) (.bits (BitVec.ofNat 64 0))
+  let _ ← Bap.Emu.onSyscall faulting fun _ _ _ => throw (IO.userError "refused")
+  let _ ← (Bap.Emu.step faulting).toBaseIO
+  assertTrue "A fault is left to be seen" (← Bap.Emu.failure faulting).isSome
+  Bap.Emu.setPc faulting 8
+  let _ ← (Bap.Emu.step faulting).toBaseIO
+  let stats ← Bap.Emu.rollbackStats faulting
+  assertEqual "A hook that throws after a fault isn't one" (1, 1) (stats.faults, stats.others)
+  -- A file that can't be put in its place leaves nothing behind.
+  match ← (Bap.Emu.writeAtomically "native/build" (ByteArray.mk #[1])).toBaseIO with
+  | .ok _ => throw <| IO.userError "A directory isn't a place for a checkpoint"
+  | .error _ => pure ()
+  assertTrue "A save that fails leaves nothing" !(← System.FilePath.pathExists "native/build.partial")
+  -- How a directory is written isn't what it holds, and what it holds is.
+  let root : System.FilePath := "native/build/digest-test"
+  IO.FS.createDirAll (root / "under")
+  IO.FS.writeFile (root / "under" / "file") "one"
+  let digest ← Bap.Linux.directoryDigest root
+  assertEqual "A directory has one digest, however it is written" digest (← Bap.Linux.directoryDigest "native/build/digest-test/")
+  assertEqual "A directory has one digest, with two ends" digest (← Bap.Linux.directoryDigest "native/build/digest-test//")
+  IO.FS.writeFile (root / "under" / "file") "two"
+  assertTrue "A directory that changed has another digest" (digest != (← Bap.Linux.directoryDigest root))
+  IO.FS.removeDirAll root
 
 /-- The kernel itself: a program isn't needed to say what it does. -/
 private def testKernel : IO Unit := do

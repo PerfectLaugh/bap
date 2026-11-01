@@ -24,6 +24,7 @@
 #include <malloc.h>
 #else
 #include <sys/mman.h>
+#include <unistd.h>
 #endif
 
 class PagedMemory {
@@ -268,7 +269,11 @@ public:
   // A step begins: from here on what is written is remembered, by where it is and not what it was, as who takes it back has the bytes.
   void beginStep() {
     std::lock_guard<std::mutex> lock(stepLock);
-    stepWrites.clear();
+    // A step that wrote a lot shouldn't hold on to that for the rest of the run.
+    if (stepWrites.capacity() > (size_t{1} << 16))
+      std::vector<std::pair<uint64_t, uint8_t>>().swap(stepWrites);
+    else
+      stepWrites.clear();
     stepOverflowed = false;
     stepOpen.store(true, std::memory_order_release);
   }
@@ -390,7 +395,9 @@ public:
   // what has just been unmapped, which a store is refused at.
   void trim(uint64_t first, uint64_t last) {
 #if defined(__linux__)
-    if (last < first)
+    // The system goes by its own pages, and rounds up to them: with larger ones than these, this would lose the pages next to this one.
+    static const bool samePages = sysconf(_SC_PAGESIZE) == static_cast<long>(pageSize);
+    if (!samePages || last < first)
       return;
     uint64_t start = (first + pageSize - 1) & ~static_cast<uint64_t>(pageSize - 1);
     if (start < first)

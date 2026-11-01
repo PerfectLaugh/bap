@@ -457,7 +457,9 @@ private def frameMagic : ByteArray := "BAPEMU01".toUTF8
 /-- The bytes of what the emulator holds now: its run state, and a snapshot in the format that `binary_lossless_or_rejecting` is about. -/
 def checkpointBytes (emu : Emu) : IO ByteArray := do
   if ← emu.serving.get then
-    throw <| IO.userError "a checkpoint can't be made while a system call is being served: stop the thread, and make it once the run returns"
+    throw <| IO.userError "a checkpoint can't be made in the middle of an instruction, by a hook of a system call, an intrinsic or an access: stop the thread, and make it once the run returns"
+  if emu.engine.deferMemorySync then
+    throw <| IO.userError "a checkpoint can't be made by a worker of a parallel round, as the others are still running: stop the thread, and make it once the round is over"
   let originalRegions ← emu.regions.get
   refreshSharedRegions emu
   let snapshot ← snapshot emu
@@ -478,8 +480,13 @@ private def splitFrame (data : ByteArray) : Except String (RunState × ByteArray
 /-- Writes the whole of a file or none of it, so that a run that dies while it saves leaves the checkpoint that was there. -/
 def writeAtomically (path : System.FilePath) (data : ByteArray) : IO Unit := do
   let unfinished : System.FilePath := path.toString ++ ".partial"
-  IO.FS.writeBinFile unfinished data
-  IO.FS.rename unfinished path
+  try
+    IO.FS.writeBinFile unfinished data
+    IO.FS.rename unfinished path
+  catch error =>
+    -- What is left of it is no use to anyone, and looks like something that a run might have been in the middle of.
+    try IO.FS.removeFile unfinished catch _ => pure ()
+    throw error
 
 def save (emu : Emu) (path : String) : IO Unit := do
   writeAtomically path (← checkpointBytes emu)
