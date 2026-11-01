@@ -793,41 +793,66 @@ mutual
     | stmt :: rest => stmtWrites stmt ++ if stmtLeaves stmt then [] else programWrites rest
 end
 
+/-- The variables that any of the blocks writes, in the order they come, and which bit of a set each of them has. -/
+private def writtenVars (blocks : List Block) : Array Bap.Var × Std.HashMap Bap.Var Nat :=
+  blocks.foldl (init := (#[], {})) fun acc block =>
+    (programWrites block.program).foldl (init := acc) fun (vars, bits) var =>
+      if bits.contains var then (vars, bits) else (vars.push var, bits.insert var vars.size)
+
+/-- The set of the variables of a list. A bit stands for the variable at its place, which is looked at here. -/
+private def writtenMask (vars : Array Bap.Var) (bits : Std.HashMap Bap.Var Nat) (writes : List Bap.Var) : Nat :=
+  writes.foldr (init := 0) fun var mask =>
+    match bits[var]? with
+    | some bit => if vars[bit]? = some var then mask ||| 1 <<< bit else mask
+    | none => mask
+
+/-- What each block writes, the first block of an address counting. -/
+private def writtenMasks (vars : Array Bap.Var) (bits : Std.HashMap Bap.Var Nat) (blocks : List Block) : Std.HashMap Nat Nat :=
+  blocks.foldr (init := {}) fun block masks =>
+    masks.insert block.address (writtenMask vars bits (programWrites block.program))
+
+/-- The variables of a set. -/
+private def writtenMembers (vars : Array Bap.Var) (mask : Nat) : List Bap.Var :=
+  (List.range vars.size).filterMap fun bit => if mask.testBit bit then vars[bit]? else none
+
 /-- What a table of `definitelyWritten` says of a block. -/
-private def writtenAt (table : List (Nat × List Bap.Var)) (address : Nat) : List Bap.Var :=
-  (table.find? fun entry => entry.1 == address).elim [] Prod.snd
+private def writtenAt (table : Array Bap.Var × Std.HashMap Nat Nat) (address : Nat) : List Bap.Var :=
+  writtenMembers table.1 (table.2.getD address 0)
 
-/-- What the block at an address writes at every end of it. -/
-private def writesOf (blocks : List Block) (address : Nat) : List Bap.Var :=
-  (blocks.find? fun block => block.address == address).elim [] fun block => programWrites block.program
+/-- Takes from the targets of each block on the stack what the block does not have on its way out, and stacks those it
+changed. A set only shrinks, so `fuel` of one more than the blocks times one more than the variables is enough. -/
+private def writtenPass (successors : Std.HashMap Nat (List Nat)) (writes : Std.HashMap Nat Nat) :
+    Nat → List Nat → Std.HashMap Nat Nat → Std.HashMap Nat Nat
+  | 0, _, table => table
+  | _ + 1, [], table => table
+  | fuel + 1, block :: stack, table =>
+    let leaving := table.getD block 0 ||| writes.getD block 0
+    let (table, stack) := (successors.getD block []).foldl (init := (table, stack)) fun (table, stack) target =>
+      let held := table.getD target 0
+      let kept := held &&& leaving
+      if kept == held then (table, stack) else (table.insert target kept, target :: stack)
+    writtenPass successors writes fuel stack table
 
-/-- A round of `definitelyWritten`: what each block has written on all ways to it of one step more. -/
-private def writtenRound (seed : Nat) (blocks : List Block) (edges : List (Nat × Nat)) (all : List Bap.Var)
-    (current : List (Nat × List Bap.Var)) : List (Nat × List Bap.Var) :=
-  blocks.map fun block =>
-    (block.address,
-      if block.address = seed then [] else
-        (edges.filter fun edge => edge.2 == block.address).foldl (init := all) fun kept edge =>
-          let reaching := writtenAt current edge.1 ++ writesOf blocks edge.1
-          kept.filter reaching.contains)
+/-- The table is right if nothing is at the seed and along each edge what its target has is what its source has or
+writes: this is all that a proof asks of it. -/
+private def writtenStable (seed : Nat) (writes : Std.HashMap Nat Nat) (edges : List (Nat × Nat)) (table : Std.HashMap Nat Nat) : Bool :=
+  table.getD seed 0 == 0 && edges.all fun edge =>
+    let target := table.getD edge.2 0
+    target &&& (table.getD edge.1 0 ||| writes.getD edge.1 0) == target
 
-/-- Whether a table says only what holds on every way to a block: nothing at the seed, and along each edge only what
-its source has or writes. -/
-private def writtenStable (seed : Nat) (blocks : List Block) (edges : List (Nat × Nat))
-    (table : List (Nat × List Bap.Var)) : Bool :=
-  (writtenAt table seed).isEmpty &&
-    edges.all fun edge => (writtenAt table edge.2).all fun var =>
-      (writtenAt table edge.1).contains var || (writesOf blocks edge.1).contains var
-
-/-- What each block has written on all ways to it, starting from the seed, where nothing is written. A way around a
-loop only ever removes what the first way wrote, so that this converges from above in as many rounds as the longest
-way without a cycle, which is at most one for each block. A table that were not stable says nothing, which is always
-right: `writtenStable` is what its soundness rests on, not the number of rounds. -/
-private def definitelyWritten (seed : Nat) (blocks : List Block) (edges : List (Nat × Nat)) : List (Nat × List Bap.Var) :=
-  let all := (blocks.flatMap fun block => programWrites block.program).eraseDups
-  let table := (List.range blocks.length).foldl (init := blocks.map fun block => (block.address, all))
-    fun current _ => writtenRound seed blocks edges all current
-  if writtenStable seed blocks edges table then table else []
+/-- What each block has written on every way to it from the seed. It starts from all and takes away, so a block no way
+leads to keeps all; an edge from outside the blocks leaves its target nothing. -/
+private def definitelyWritten (seed : Nat) (blocks : List Block) (edges : List (Nat × Nat)) :
+    Array Bap.Var × Std.HashMap Nat Nat :=
+  let (vars, bits) := writtenVars blocks
+  let writes := writtenMasks vars bits blocks
+  let all : Std.HashMap Nat Nat := blocks.foldl (init := {}) fun table block => table.insert block.address (2 ^ vars.size - 1)
+  let initial := edges.foldl (init := all.insert seed 0) fun table edge =>
+    if writes.contains edge.1 then table else table.insert edge.2 0
+  let successors : Std.HashMap Nat (List Nat) := edges.foldr (init := {}) fun edge successors =>
+    successors.insert edge.1 (edge.2 :: successors.getD edge.1 [])
+  let table := writtenPass successors writes ((blocks.length + 1) * (vars.size + 1)) (blocks.map (·.address)) initial
+  (vars, if writtenStable seed writes edges table then table else {})
 
 /-- A flag for each of `outputs`, each with a slot of its own from `start` on. -/
 private def flagSlots (outputs : List (Bap.Var × Nat)) (start : Nat) : Nat × List (Nat × Nat) :=

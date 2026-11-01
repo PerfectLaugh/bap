@@ -21,7 +21,7 @@ open_private Bap.Primus.Lifted Bap.Primus.Lifted Lowering Lowering.push Lowering
   Lowering.effectSlot Lowering.nextLabel Lowering.next Lowering.written Lowering.outputs Lowering.inputs Lowering.push Lowering.withWritten
   Operand Operand.slot Operand.width lowerExp lowerMove lowerStmt lowerStatements setEffect temporary jumpConstant jumpSlot immediate useMemory
   useMemoryAt writeVar slot widthOf wrapSafe recordWrite addressOf readVar readsMemory signExtend narrow binaryOp isSigned isComparison
-  stmtLeaves programLeaves stmtWrites programWrites writtenAt writesOf writtenStable definitelyWritten closedTarget closedTarget.closed
+  stmtLeaves programLeaves stmtWrites programWrites writtenAt writtenVars writtenMask writtenMasks writtenMembers writtenStable definitelyWritten closedTarget closedTarget.closed
   blockExit BlockExit BlockExit.direct BlockExit.branch BlockExit.other BlockExit.fall graphEdgeOps freshLabel enterBlock codeSite
   GraphPlan GraphPlan.seed GraphPlan.labels GraphPlan.edges GraphPlan.budget GraphPlan.observed GraphPlan.chained GraphPlan.definite GraphPlan.guarded
   lowerEntry lowerExit lowerBlock lowerBlocks
@@ -1455,6 +1455,77 @@ theorem lowerBlocks_progress {plan : GraphPlan} (blocks : List Block) {first sec
 
 /-! ### What each block has written -/
 
+/-- What the block at an address writes at every end of it. -/
+def writesOf (blocks : List Block) (address : Nat) : List Bap.Var :=
+  (blocks.find? fun block => block.address == address).elim [] fun block => programWrites block.program
+
+/-- What a set has is the variable at a bit of it. -/
+theorem mem_writtenMembers {vars : Array Bap.Var} {mask : Nat} {var : Bap.Var} :
+    var ∈ writtenMembers vars mask ↔ ∃ bit, mask.testBit bit = true ∧ vars[bit]? = some var := by
+  simp only [writtenMembers, List.mem_filterMap, List.mem_range]
+  constructor
+  · rintro ⟨bit, -, h⟩
+    split at h
+    · exact ⟨bit, by assumption, h⟩
+    · simp at h
+  · rintro ⟨bit, hb, hv⟩
+    refine ⟨bit, (Array.getElem?_eq_some_iff.1 hv).1, ?_⟩
+    simp [hb, hv]
+
+/-- A bit of a set of a list stands for a variable of the list. -/
+theorem writtenMask_testBit {vars : Array Bap.Var} {bits : Std.HashMap Bap.Var Nat} {writes : List Bap.Var} {bit : Nat}
+    (h : (writtenMask vars bits writes).testBit bit = true) : ∃ var ∈ writes, vars[bit]? = some var := by
+  induction writes with
+  | nil => simp [writtenMask] at h
+  | cons head rest ih =>
+    simp only [writtenMask, Nat.one_shiftLeft, List.foldr_cons] at h ih
+    have ih' := fun h' => (ih h').imp fun var hv => (⟨List.mem_cons_of_mem _ hv.1, hv.2⟩ : var ∈ head :: rest ∧ _)
+    rcases hp : bits[head]? with _ | place
+    · simp only [hp] at h
+      exact ih' h
+    · simp only [hp] at h
+      by_cases hv : vars[place]? = some head
+      · simp only [hv, ite_true, Nat.testBit_or, Bool.or_eq_true, Nat.testBit_two_pow, decide_eq_true_eq] at h
+        rcases h with h | h
+        · exact ih' h
+        · exact ⟨head, List.mem_cons_self, h ▸ hv⟩
+      · simp only [hv, ite_false] at h
+        exact ih' h
+
+/-- A bit of what a block writes stands for what it writes. -/
+theorem writtenMasks_testBit {vars : Array Bap.Var} {bits : Std.HashMap Bap.Var Nat} {blocks : List Block} {address bit : Nat}
+    (h : ((writtenMasks vars bits blocks).getD address 0).testBit bit = true) :
+    ∃ var ∈ writesOf blocks address, vars[bit]? = some var := by
+  induction blocks with
+  | nil => simp [writtenMasks] at h
+  | cons head rest ih =>
+    simp only [writtenMasks, List.foldr_cons, Std.HashMap.getD_insert] at h
+    simp only [writesOf, List.find?_cons]
+    by_cases he : head.address = address
+    · simp only [he, beq_self_eq_true, ite_true] at h ⊢
+      simpa using writtenMask_testBit h
+    · have hb : (head.address == address) = false := by simpa using he
+      simp only [hb, ite_false, Bool.false_eq_true] at h ⊢
+      exact ih h
+
+/-- A table that passes the check says what `definitelyWritten` is to say. -/
+theorem writtenStable_sound {vars : Array Bap.Var} {writes table : Std.HashMap Nat Nat} {seed : Nat} {blocks : List Block}
+    {edges : List (Nat × Nat)}
+    (hw : ∀ address bit, (writes.getD address 0).testBit bit = true → ∃ var ∈ writesOf blocks address, vars[bit]? = some var)
+    (hs : writtenStable seed writes edges table = true) :
+    writtenAt (vars, table) seed = [] ∧ ∀ edge ∈ edges, ∀ var ∈ writtenAt (vars, table) edge.2,
+      var ∈ writtenAt (vars, table) edge.1 ∨ var ∈ writesOf blocks edge.1 := by
+  simp only [writtenStable, Bool.and_eq_true, beq_iff_eq, List.all_eq_true] at hs
+  refine ⟨by simp [writtenAt, writtenMembers, hs.1], fun edge he var hv => ?_⟩
+  obtain ⟨bit, hb, hp⟩ := mem_writtenMembers.1 hv
+  have hc := congrArg (·.testBit bit) (hs.2 edge he)
+  simp only [Nat.testBit_and, Nat.testBit_or, hb, Bool.true_and, Bool.or_eq_true] at hc
+  rcases hc with hc | hc
+  · exact Or.inl (mem_writtenMembers.2 ⟨bit, hc, hp⟩)
+  · obtain ⟨other, ho, hq⟩ := hw _ _ hc
+    have : other = var := by simpa [hp] using hq.symm
+    exact Or.inr (this ▸ ho)
+
 /-- **`definitelyWritten` is sound**: nothing at the seed, and along each edge what its target has is what its source has
 or writes at every end of it. -/
 theorem definitelyWritten_sound (seed : Nat) (blocks : List Block) (edges : List (Nat × Nat)) :
@@ -1463,10 +1534,8 @@ theorem definitelyWritten_sound (seed : Nat) (blocks : List Block) (edges : List
   unfold definitelyWritten
   dsimp only
   split
-  · next hs =>
-    simp only [writtenStable, Bool.and_eq_true, List.isEmpty_iff, List.all_eq_true, Bool.or_eq_true, List.contains_iff_mem] at hs
-    exact ⟨hs.1, fun edge he var hv => hs.2 edge he var hv⟩
-  · simp [writtenAt]
+  · next hs => exact writtenStable_sound (fun _ _ h => writtenMasks_testBit h) hs
+  · simp [writtenAt, writtenMembers]
 
 /-- What the block at its address writes. -/
 theorem writesOf_block {blocks : List Block} {block : Block} (hd : (blocks.map Block.address).Nodup) (hm : block ∈ blocks) :
