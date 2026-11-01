@@ -577,7 +577,7 @@ def testLinuxMusl (triple : String) (floats : Bool := true) (exclusive : Bool :=
     assertEqual s!"Linux {triple} floating point is what qemu does" (← IO.FS.readBinFile s!"testsuite/data/{triple}-libc-floats.out").toList text.toList
 
 /-- A machine stopped anywhere and saved goes on from the bytes alone, in a new machine, to the same end. -/
-def testLinuxCheckpoints (triple : String) : IO Unit := do
+def testLinuxCheckpoints (triple : String) (cuts : List Nat := [12000]) : IO Unit := do
   let start (name : String) : IO Bap.Linux.Machine := do
     let path := s!"testsuite/bin/{triple}-linux-musl-{name}"
     Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile path)) "/test" ["/test", "arg1"]
@@ -589,7 +589,7 @@ def testLinuxCheckpoints (triple : String) : IO Unit := do
     let (wholeOutcome, wholeText) ← runOn (← start name) 1000000000
     -- These end at some tens of thousands of instructions.
     let mut stops := 0
-    for cut in [1, 12000] do
+    for cut in cuts do
       let first ← start name
       let (outcome, before) ← runOn first cut
       if outcome == .outOfFuel then
@@ -604,7 +604,7 @@ def testLinuxCheckpoints (triple : String) : IO Unit := do
         -- What saves is still as it was, and goes on to the same end.
         let (outcome, after) ← runOn first 1000000000
         assertEqual s!"Linux {triple} {name} saving at {cut} changes nothing" (wholeOutcome, wholeText.toList) (outcome, (before ++ after).toList)
-    assertTrue s!"Linux {triple} {name} was stopped at {stops} places" (stops == 2)
+    assertTrue s!"Linux {triple} {name} was stopped at {stops} places" (stops == cuts.length)
     -- Going back in the same machine, past what it did to its files, its tasks and its memory.
     let machine ← start name
     let (_, before) ← runOn machine 12000

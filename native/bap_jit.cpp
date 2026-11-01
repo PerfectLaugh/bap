@@ -207,12 +207,14 @@ struct Program {
   }
 };
 
+// One for each thread: code generation holds the mutex of its JIT, so that threads that shared one would compile one at a time,
+// however many processors there are. A program keeps its JIT alive, and may run or be freed on any thread.
 std::shared_ptr<SharedJit> sharedJit() {
-  static std::mutex mutex;
-  static std::shared_ptr<SharedJit> shared;
-  std::lock_guard<std::mutex> lock(mutex);
+  thread_local std::shared_ptr<SharedJit> shared;
   if (shared != nullptr)
     return shared;
+  static std::mutex creation;
+  std::lock_guard<std::mutex> lock(creation);
   auto jit = llvm::orc::LLJITBuilder().create();
   if (!jit)
     throw std::runtime_error("LLVM ORC JIT creation failed: " +
