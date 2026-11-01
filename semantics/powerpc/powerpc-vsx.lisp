@@ -693,9 +693,20 @@
 
 (defun XSCVDPSP (xt xb) (set-scalar xt (dp-to-sp-copies xb)))
 (defun XSCVSPDP (xt xb) (set-scalar xt (sp-to-dp (word0 xb))))
-;; ConvertDPtoSP_NS: it doesn't signal, a NaN stays what it is and the rest is truncated, in the two words of the first doubleword
-(defun dp-to-sp-ns (x) (pick (fp-nan x) (double-to-single x) (fconvert :rtz 32 x)))
-(defun XSCVDPSPN (xt xb) (let ((s (dp-to-sp-ns xb))) (set-scalar xt (concat s s))))
+;; ConvertDPtoSP_NS: it doesn't signal. What a single holds as a denormal is shifted into place and
+;; truncated, and the bits of all else are moved, whatever they are.
+(defun dp-to-sp-ns (x)
+  (let ((exponent (u64 (extract 62 52 x))))
+    (pick (< exponent 897:64)
+          (fconvert :rtz 32 x)
+          (concat (extract 63 62 x) (extract 58 29 x)))))
+;; XT is a whole vector register, unlike what the other scalar conversions have: the single is in
+;; its first two words.
+(defun XSCVDPSPN (xt xb)
+  (let ((s (dp-to-sp-ns xb)))
+    (case (word-width xt)
+      128 (set$ xt (concat s s (u64 0)))
+      (set-scalar xt (concat s s)))))
 (defun XSCVSPDPN (xt xb) (set-scalar xt (single-to-double (extract 127 96 xb))))
 (defun XVCVDPSP (xt xb) (set$ xt (lanes64-1 dp-to-sp-copies xb)))
 (defun sp-to-dp-first (x) (sp-to-dp (word0 x)))

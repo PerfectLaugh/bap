@@ -632,7 +632,8 @@ def testPowerpcPrefixed : IO Unit := do
   let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
   let outcome ← machine.run fun data => written.modify (· ++ data)
   assertEqual "Linux PowerPC prefixed instructions end" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
-  assertEqual "Linux PowerPC prefixed instructions are what qemu does" "1000005 123456789 22 33 7 1\n" (String.fromUTF8! (← written.get))
+  assertEqual "Linux PowerPC prefixed instructions are what qemu does"
+    (String.fromUTF8! (← IO.FS.readBinFile "testsuite/data/powerpc64le-prefixed.out")) (String.fromUTF8! (← written.get))
 
 /-- What the rounding modes of a machine do, as qemu has it. -/
 def testLinuxRound (triple : String) : IO Unit := do
