@@ -952,7 +952,7 @@ private def flagOutputs (seedWritten : List Bap.Var) (lowering : Lowering) : Low
   { lowering with
     nextSlot := next
     flags
-    reversed := (lowering.ops.flatMap (flagged flags)).reverse
+    reversed := lowering.reversed.flatMap fun op => (flagged flags op).reverse
     reversedCheckpoints := lowering.reversedCheckpoints.map fun checkpoint => (checkpoint.1, lowering.outputs) }
 
 /-- The variables that a program writes before it can do anything else, and so at every end of it. The others of
@@ -991,14 +991,15 @@ have an address each and it fits, a label is where it is once, operations stay i
 the slots after them to the flags, an input has a slot, what is moved to, if it is a variable's, is an output, and the control slots stay.
 All hold of what lowering makes. A lowering that did not would stay out of native code. -/
 private def lowerGraphChecked (blocks : List Block) (initial lowering : Lowering) : Bool :=
+  let ops := lowering.ops
   lowering.budget == initial.budget && lowering.observed == initial.observed &&
     distinctNats {} (blocks.map Block.address) &&
     blocks.all (fun block => decide (block.address < 2 ^ 64) && decide (block.next < 2 ^ 64)) &&
-    distinctNats {} (opLabels lowering.ops) &&
-    lowering.ops.all (fun op => (opSlots op).all (· < lowering.nextSlot)) &&
+    distinctNats {} (opLabels ops) &&
+    ops.all (fun op => (opSlots op).all (· < lowering.nextSlot)) &&
     lowering.outputs.all lowering.layout.contains &&
     lowering.inputs.all (fun var => lowering.layout.any fun binding => binding.1 == var) &&
-    lowering.ops.all fun op =>
+    ops.all fun op =>
       match op with
       | .move dst _ => lowering.layout.all fun binding => binding.2 != dst || lowering.outputs.contains binding
       | _ => true
@@ -1109,6 +1110,18 @@ private def graphInitial (seed : Block) (labelCount : Nat) (wrapFaults chained :
     { initial with budget := some budget, observed := some observed }
   else initial
 
+mutual
+  /-- Whether a statement may reach memory, which all that isn't plainly a move or a branch is taken to do. -/
+  private def stmtTouches : Bil.Stmt → Bool
+    | .move _ value => readsMemory value
+    | .ifElse condition yes no => readsMemory condition || programTouches yes || programTouches no
+    | .jmp target => readsMemory target
+    | _ => true
+  private def programTouches : Bil.Program → Bool
+    | [] => false
+    | stmt :: rest => stmtTouches stmt || programTouches rest
+end
+
 /-- The first entry of each address. -/
 private def labelTable (labels : List (Nat × Nat)) : Std.HashMap Nat (Nat × Nat) :=
   labels.foldr (init := {}) fun entry table => table.insert entry.1 entry
@@ -1126,13 +1139,11 @@ private theorem incoming_contains (edges : List (Nat × Nat)) (address : Nat) :
   rw [Std.HashSet.contains_ofList, Bool.eq_iff_iff]
   simp only [List.contains_iff_mem, List.mem_map, List.any_eq_true, beq_iff_eq]
 
-private def graphPlan (blocks : List Block) (edges : List (Nat × Nat)) (wrapFaults : Bool) (seed : Block) (initial : Lowering) : GraphPlan :=
+private def graphPlan (blocks : List Block) (edges : List (Nat × Nat)) (seed : Block) (initial : Lowering) : GraphPlan :=
   -- The label of a block heads the entry over an edge; a run starts in the seed without one.
-  let alone (block : Block) := lowerStatements { wrapFaults } block.program
-  let touches (block : Block) : Bool := (alone block).elim true fun lowered => lowered.1.memory.isSome
   -- Only a block that an edge leads to asks, and a block alone has no edges.
   let touching : Std.HashSet Nat :=
-    if edges.isEmpty then {} else Std.HashSet.ofList ((blocks.filter touches).map (·.address))
+    if edges.isEmpty then {} else Std.HashSet.ofList ((blocks.filter (programTouches ·.program)).map (·.address))
   let exposed : Std.HashSet Nat :=
     Std.HashSet.ofList ((edges.filter fun edge => touching.contains edge.1).map (·.2))
   let definite := definitelyWritten seed.address blocks edges
@@ -1159,7 +1170,7 @@ private def lowerGraph (blocks : List Block) (edges : List (Nat × Nat)) (wrapFa
     Option Lowering := do
   let seed ← blocks.head?
   let initial := graphInitial seed blocks.length wrapFaults !edges.isEmpty
-  let lowering ← lowerBlocks (graphPlan blocks edges wrapFaults seed initial) initial blocks
+  let lowering ← lowerBlocks (graphPlan blocks edges seed initial) initial blocks
   if lowerGraphChecked blocks initial lowering then some (flagOutputs (leadingMoves seed.program) lowering) else none
 
 private def compilePlan (engine : Engine) (block : Block) : IO Plan := do

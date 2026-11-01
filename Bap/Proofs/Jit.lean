@@ -4917,7 +4917,7 @@ private theorem flagOutputs_parts (written : List Bap.Var) (final : Lowering) :
     Lowering.budget (flagOutputs written final) = Lowering.budget final ∧
     Lowering.observed (flagOutputs written final) = Lowering.observed final ∧
     Lowering.inputs (flagOutputs written final) = Lowering.inputs final :=
-  ⟨by simp only [flagOutputs, Lowering.ops, List.reverse_reverse]; rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+  ⟨by simp [flagOutputs, Lowering.ops, List.reverse_flatMap, flagOps, Function.comp_def], rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
 
 /-- The encoding of a state has found each input bound. -/
 private theorem encode_bound (env : Bil.Env) (inputs : List Bap.Var) (layout : List (Bap.Var × Nat)) (init : Array UInt64) (result : Array UInt64)
