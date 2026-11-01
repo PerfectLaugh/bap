@@ -341,13 +341,15 @@ private def riscvFloatGlobals : Primus.Semantics.Globals :=
   (List.range 32).map fun n => (s!"F{n}", .register s!"F{n}" 64 64)
 
 private def riscvGlobals : Primus.Semantics.Globals :=
-  (List.range 32).map (fun n => (s!"X{n}", riscvRegister s!"X{n}")) ++ riscvFloatGlobals ++ riscvStatusGlobals
+  (List.range 32).map (fun n => (s!"X{n}", riscvRegister s!"X{n}")) ++ riscvFloatGlobals ++ riscvStatusGlobals ++
+    [("EXCLUSIVE_MONITOR", .register "EXCLUSIVE_MONITOR" 64 64)]
 
 private def riscv32Register (name : String) : Primus.Semantics.Value :=
   if name = "X0" then .register "XZR" 32 32 else .register name 32 32
 
 private def riscv32Globals : Primus.Semantics.Globals :=
-  (List.range 32).map (fun n => (s!"X{n}", riscv32Register s!"X{n}")) ++ riscvFloatGlobals ++ riscvStatusGlobals
+  (List.range 32).map (fun n => (s!"X{n}", riscv32Register s!"X{n}")) ++ riscvFloatGlobals ++ riscvStatusGlobals ++
+    [("EXCLUSIVE_MONITOR", .register "EXCLUSIVE_MONITOR" 32 32)]
 
 /-- The flags of the floating point comparisons. -/
 private def powerpcFloatFlags : List String := ["FL", "FG", "FE", "FU"]

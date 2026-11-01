@@ -441,8 +441,15 @@ private def switchNativeMemory (emu : Emu) (current next : ThreadId) : IO Unit :
     | some native => attachMemory emu native
     | none => Primus.Lifted.discardMemory emu.engine
 
-/-- The exclusive monitor of a thread of AArch64: see `semantics/arm/aarch64-atomic.lisp`. -/
-def exclusiveMonitor : Bap.Var := ⟨"EXCLUSIVE_MONITOR", .imm 64, 0, false⟩
+/-- The exclusive monitor of a thread, of targets that have it in their semantics: see `semantics/arm/aarch64-atomic.lisp` and
+`semantics/riscv/riscv.lisp`. -/
+def exclusiveMonitor (width : Nat) : Bap.Var := ⟨"EXCLUSIVE_MONITOR", .imm width, 0, false⟩
+
+/-- A state without a monitor, for a target that has one. -/
+private def clearMonitor (config : Config) (env : Bil.Env) : Bil.Env :=
+  match config.syscallAbi, memoryWidth config with
+  | .aarch64, .ok width | .riscv, .ok width => Bil.bind env (exclusiveMonitor width) (.bits (BitVec.ofNat width 0))
+  | _, _ => env
 
 def switchThread (emu : Emu) (id : ThreadId) : IO Unit := do
   saveCurrentThread emu
@@ -465,8 +472,7 @@ def switchThread (emu : Emu) (id : ThreadId) : IO Unit := do
       | .error _ => context.state.env
     switchNativeMemory emu leaving id
     -- As a kernel does when it switches: what a thread loaded exclusively may have changed, so its exclusive store has to fail.
-    let env := if emu.config.syscallAbi == .aarch64 then Bil.bind env exclusiveMonitor (.bits (BitVec.ofNat 64 0)) else env
-    emu.state.set { env }
+    emu.state.set { env := clearMonitor emu.config env }
     emu.pc.set context.pc
     emu.stopped.set context.stopped
     emu.currentThreadRef.set id
@@ -1758,7 +1764,7 @@ def riscv64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config :=
     endian := .little
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create (adjust config) [region] {} entry
+  create (adjust config) [region] { env := clearMonitor config {} } entry
 
 def riscv32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
   let environment ← Target.LLVMLift.riscv32Environment
@@ -1772,7 +1778,7 @@ def riscv32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config :=
     endian := .little
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create (adjust config) [region] {} entry
+  create (adjust config) [region] { env := clearMonitor config {} } entry
 
 def x86_64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
   let disassembler ← Target.X86.disassembler base
@@ -1796,9 +1802,7 @@ def aarch64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config :=
     syscallAbi := .aarch64
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  let emu ← create (adjust config) [region] {} entry
-  setReg emu exclusiveMonitor (.bits (BitVec.ofNat 64 0))
-  pure emu
+  create (adjust config) [region] { env := clearMonitor config {} } entry
 
 private def mipsOf (variant : Target.LLVMLift.MipsVariant) (code : ByteArray) (base entry : Nat) (adjust : Config → Config) : IO Emu := do
   let environment ← Target.LLVMLift.mipsEnvironmentOf variant

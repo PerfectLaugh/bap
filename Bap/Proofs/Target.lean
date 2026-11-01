@@ -1141,11 +1141,11 @@ theorem mipsRegisterName_idempotent (name : String) :
 
 set_option maxRecDepth 20000 in
 /-- `riscvGlobals` binds each `Xn` for n below 32, once. -/
-theorem riscvGlobals_keys : (riscvGlobals.map (·.1)).Nodup ∧ riscvGlobals.length = 66 :=
+theorem riscvGlobals_keys : (riscvGlobals.map (·.1)).Nodup ∧ riscvGlobals.length = 67 :=
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
-theorem riscv32Globals_keys : (riscv32Globals.map (·.1)).Nodup ∧ riscv32Globals.length = 66 :=
+theorem riscv32Globals_keys : (riscv32Globals.map (·.1)).Nodup ∧ riscv32Globals.length = 67 :=
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in

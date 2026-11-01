@@ -7,7 +7,7 @@ import Bap.Float
 
 The virtual kernel of `Bap.Linux.Kernel` behind the system calls of the emulator, and what the kernel does to start a program:
 its segments, and those of the interpreter that it asks for, in pages, and the stack that it starts on. No request ever
-reaches the machine that this runs on: a program has what was put in its kernel. For x86-64 and AArch64. -/
+reaches the machine that this runs on: a program has what was put in its kernel. For x86-64, AArch64 and 64-bit RISC-V. -/
 
 namespace Bap.Linux
 
@@ -422,6 +422,12 @@ private def resetRegisters (emu : Emu) : Architecture → IO Unit
       setReg emu ⟨s!"Q{index}", .imm 128, 0, false⟩ (bits 128 0)
     for name in ["FPCR", "FPSR"] do
       setReg emu ⟨name, .imm 32, 0, false⟩ (bits 32 0)
+  | .riscv64 => do
+    for index in List.range 32 do
+      setReg emu (word s!"X{index}") (bits 64 0)
+      setReg emu (word s!"F{index}") (bits 64 0)
+    for name in ["FCSR", "VXRM"] do
+      setReg emu ⟨name, .imm 32, 0, false⟩ (bits 32 0)
   | .x86_64 => do
   for name in ["RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15",
       "FS_BASE", "GS_BASE"] do
@@ -521,10 +527,12 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   let emu ← match architecture with
     | .x86_64 => x86_64 page 0x1000 0 tuned
     | .aarch64 => aarch64 page 0x1000 0 tuned
+    | .riscv64 => riscv64 page 0x1000 0 tuned
   unmap emu 0x1000 16
   emu.intrinsicServer.set (some (Bap.Float.evaluateWith (match architecture with
     | .x86_64 => .x86
-    | .aarch64 => .arm)))
+    | .aarch64 => .arm
+    | .riscv64 => .riscv)))
   resetRegisters emu architecture
   let top ← mapProgram emu data program base
   let lowest := program.segments.foldl (fun lowest segment => min lowest segment.address) (2 ^ 63)
@@ -533,10 +541,12 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
       let _ ← mapProgram emu bytes loaded interpreterBase
       pure (interpreterBase + loaded.entry)
     | none => pure (base + program.entry)
-  -- What the processor has: on AArch64, FP and ASIMD, and not CPUID, so that libc doesn't choose routines by the implementer.
+  -- What the processor has: on AArch64, FP and ASIMD, and not CPUID, so that libc doesn't choose routines by the implementer, and
+  -- on RISC-V, a bit for each of the letters of IMAFDC.
   let capabilities := match architecture with
     | .x86_64 => 0x07888f9f
     | .aarch64 => 3
+    | .riscv64 => 0x112d
   -- AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_FLAGS, AT_ENTRY, the ids of root, AT_HWCAP, AT_CLKTCK, AT_SECURE
   let auxiliary := [(3, base + lowest + program.headerOffset), (4, 56), (5, program.headerCount), (6, 4096),
     (7, if interpreter.isSome then interpreterBase else 0), (8, 0), (9, base + program.entry), (11, 0), (12, 0), (13, 0), (14, 0),
@@ -617,7 +627,7 @@ the directories that libraries are in, with the links of their paths resolved to
 architecture are, which is the root of the host only if it is of the same one. They get the paths that they have under it. -/
 def Kernel.copyProgramFromHost (kernel : Kernel) (path : String) (root : String := "") : IO Kernel := do
   let directories := ["/lib64", "/usr/lib64", "/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib/aarch64-linux-gnu",
-    "/usr/lib/aarch64-linux-gnu", "/lib", "/usr/lib"]
+    "/usr/lib/aarch64-linux-gnu", "/lib/riscv64-linux-gnu", "/usr/lib/riscv64-linux-gnu", "/lib64/lp64d", "/usr/lib64/lp64d", "/lib", "/usr/lib"]
   let copy (kernel : Kernel) (target : String) : IO (Kernel × ByteArray) := do
     let data ← IO.FS.readBinFile (root ++ target)
     pure (kernel.addFile target data, data)

@@ -58,7 +58,8 @@ def main : IO Unit := do
     Bap.Tests.Symbolic.run,
     Bap.Tests.SymbolicMemory.run,
     Bap.Tests.Emu.run,
-    Bap.Tests.Emu.testLinuxAArch64,
+    Bap.Tests.Emu.testLinuxMusl "aarch64",
+    Bap.Tests.Emu.testLinuxMusl "riscv64",
     Bap.Tests.Jni.run
   ]
   let tasks ← tests.mapM fun test => liftM <| IO.asTask do

@@ -6,13 +6,14 @@ layout of `struct stat`, and the bits of the flags of `open`. The kernel itself 
 namespace Bap.Linux
 
 inductive Architecture where
-  | x86_64 | aarch64
+  | x86_64 | aarch64 | riscv64
   deriving DecidableEq, Repr
 
 /-- The architecture of the value of `e_machine`, if a machine can run it. -/
 def Architecture.ofElf : Nat → Option Architecture
   | 62 => some .x86_64
   | 183 => some .aarch64
+  | 243 => some .riscv64
   | _ => none
 
 /-- The system calls that the kernel serves, whatever their numbers. Those of tasks are for `Bap.Emu.serveTaskCalls`. -/
@@ -52,7 +53,7 @@ def genericCalls : List (Nat × Call) :=
 
 def Architecture.calls : Architecture → List (Nat × Call)
   | .x86_64 => x86_64Calls
-  | .aarch64 => genericCalls
+  | .aarch64 | .riscv64 => genericCalls
 
 /-- The call of a number, if the kernel serves it. -/
 def Architecture.call (architecture : Architecture) (number : Nat) : Option Call :=
@@ -61,7 +62,7 @@ def Architecture.call (architecture : Architecture) (number : Nat) : Option Call
 /-- The flags of `open` as the kernel has them, from those of a guest, or back: on AArch64, `O_DIRECTORY` and `O_NOFOLLOW` are
 where x86-64 has `O_DIRECT` and `O_LARGEFILE`, and the other way round. -/
 def Architecture.openFlags : Architecture → Nat → Nat
-  | .x86_64, flags => flags
+  | .x86_64, flags | .riscv64, flags => flags
   | .aarch64, flags =>
     let low := flags &&& 0xc000
     let high := flags &&& 0x30000
@@ -70,11 +71,12 @@ def Architecture.openFlags : Architecture → Nat → Nat
 /-- `struct stat`. -/
 def Architecture.stat : Architecture → Kernel.Stat → ByteArray
   | .x86_64, value => Abi.stat value
-  | .aarch64, value => Abi.genericStat value
+  | .aarch64, value | .riscv64, value => Abi.genericStat value
 
 /-- What `uname` and `AT_PLATFORM` say. -/
 def Architecture.name : Architecture → String
   | .x86_64 => "x86_64"
   | .aarch64 => "aarch64"
+  | .riscv64 => "riscv64"
 
 end Bap.Linux

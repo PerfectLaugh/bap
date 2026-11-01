@@ -1235,8 +1235,6 @@ class Riscv(Risc):
             result[f"F{index}"] = int.from_bytes(data[base + index * 8 : base + (index + 1) * 8], "little")
 
     def excluded(self, opcode, case):
-        if opcode.startswith(("SC_", "LR_")):
-            return "the reservation, which the semantics leave out"
         return super().excluded(opcode, case)
 
     def traps(self, opcode):
@@ -1251,7 +1249,7 @@ class Riscv(Risc):
     default_pins = {"X2": "window+256"}
 
     def aux_spec(self):
-        return {"XZR": (0, self.word * 8), "FCSR": (0, 32), "VXRM": (0, 32), "F31": (0, 64)}
+        return {"XZR": (0, self.word * 8), "EXCLUSIVE_MONITOR": (0, self.word * 8), "FCSR": (0, 32), "VXRM": (0, 32), "F31": (0, 64)}
 
     def hand(self, assemble, layout):
         items = [(f"{op} a0, a1, 64",) for op in ["beq", "bne", "blt", "bge", "bltu", "bgeu"]]

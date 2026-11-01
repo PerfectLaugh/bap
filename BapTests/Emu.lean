@@ -550,30 +550,29 @@ private def testZeroRegisterWidth : IO Unit := do
   let _ ← Bap.Emu.step emu
   assertBits "Emu cmp wzr is of 32 bits" (BitVec.ofNat 1 1) (.ok (← Bap.Emu.reg emu ⟨"ZF", .imm 1, 0, false⟩))
 
-/-- Programs of another machine than this one, which need no compiler: static, with musl, from `testsuite/src`. What is printed
-is what they print under qemu. -/
-def testLinuxAArch64 : IO Unit := do
+/-- Programs of other machines than this one, which need no compiler: static, with musl, from `testsuite/src`. What is printed is
+what they print under qemu. -/
+def testLinuxMusl (triple : String) : IO Unit := do
   let run (name : String) (quantum : Nat := 100000) : IO (Bap.Tasks.ScheduleOutcome × ByteArray) := do
-    let path := s!"testsuite/bin/aarch64-linux-musl-{name}"
+    let path := s!"testsuite/bin/{triple}-linux-musl-{name}"
     let written ← IO.mkRef ByteArray.empty
     let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile path)) "/test" ["/test", "arg1"]
     let outcome ← machine.run (quantum := quantum) fun data => written.modify (· ++ data)
     pure (outcome, ← written.get)
   -- Turns so short that many end between an exclusive load and its store, which then has to fail.
   let (outcome, text) ← run "exclusive" 11
-  assertEqual "Linux AArch64 exclusive updates aren't lost" ((Bap.Tasks.ScheduleOutcome.finished 0), "y") (outcome, String.fromUTF8! text)
+  assertEqual s!"Linux {triple} exclusive updates aren't lost" ((Bap.Tasks.ScheduleOutcome.finished 0), "y") (outcome, String.fromUTF8! text)
   let (outcome, text) ← run "libc-files"
-  assertEqual "Linux AArch64 a program has its status" (Bap.Tasks.ScheduleOutcome.finished (Bap.Tasks.exitedStatus 5)) outcome
-  assertEqual "Linux AArch64 a program finds its files"
+  assertEqual s!"Linux {triple} a program has its status" (Bap.Tasks.ScheduleOutcome.finished (Bap.Tasks.exitedStatus 5)) outcome
+  assertEqual s!"Linux {triple} a program finds its files"
     "args 2 arg1\ncwd /\nread hello 42\nsize 9 dir 0\nseek yz\ndup x\nlink c\nentries 3\ngone -1\ntime 1\nmalloc 1\nnope 1\n"
     (String.fromUTF8! text)
   let (outcome, text) ← run "libc-threads"
-  assertEqual "Linux AArch64 threads end" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
-  assertEqual "Linux AArch64 threads count to what they should" "y" (String.fromUTF8! text)
-  assertEqual "Linux AArch64 no program of another machine starts" (Bap.Linux.Architecture.ofElf 3) none
+  assertEqual s!"Linux {triple} threads end" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual s!"Linux {triple} threads count to what they should" "y" (String.fromUTF8! text)
   let (outcome, text) ← run "libc-floats"
-  assertEqual "Linux AArch64 a program of floating point ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
-  assertEqual "Linux AArch64 floating point is what qemu does" (← IO.FS.readBinFile "testsuite/data/aarch64-libc-floats.out").toList text.toList
+  assertEqual s!"Linux {triple} a program of floating point ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual s!"Linux {triple} floating point is what qemu does" (← IO.FS.readBinFile s!"testsuite/data/{triple}-libc-floats.out").toList text.toList
 
 /-- The kernel itself: a program isn't needed to say what it does. -/
 private def testKernel : IO Unit := do

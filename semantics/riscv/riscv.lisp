@@ -442,8 +442,26 @@
 
 
 ;;; ATOMICS, the A extension, whose orderings are of no concern here, as
-;;; the instructions run one at a time; the reservations of LR are not
-;;; modeled, and SC succeeds; the operands are RD, RS2, and RS1
+;;; the instructions run one at a time; the operands are RD, RS2, and RS1.
+;;; The reservation of a thread is EXCLUSIVE_MONITOR, one more than the
+;;; address of the LR that it follows, and 0 if there is none. An SC takes
+;;; place if it is to that address, and writes 0 to RD if so and 1 if not,
+;;; and leaves no reservation. A thread is alone until it is switched, when
+;;; the emulator clears it, as the kernel does with an SC of its own.
+
+(defun lr-reserve (address) (set EXCLUSIVE_MONITOR (+ address 1)))
+
+(defun sc-w (rd rs2 rs1)
+  (if (= EXCLUSIVE_MONITOR (+ rs1 1))
+      (prog (store-word rs1 (cast-low 32 rs2)) (set$ rd 0))
+    (set$ rd 1))
+  (set EXCLUSIVE_MONITOR 0))
+
+(defun sc-d (rd rs2 rs1)
+  (if (= EXCLUSIVE_MONITOR (+ rs1 1))
+      (prog (store-word rs1 rs2) (set$ rd 0))
+    (set$ rd 1))
+  (set EXCLUSIVE_MONITOR 0))
 
 (defun AMOADD_W (rd rs2 rs1)
   (let ((old (load-bits 32 rs1))
@@ -805,38 +823,22 @@
         (x rs2))
     (store-word rs1 (if (< old x) old x))
     (set$ rd old)))
-(defun LR_W (rd rs1) (word-result rd (load-bits 32 rs1)))
-(defun LR_D (rd rs1) (set$ rd (core:load-word rs1)))
-(defun SC_W (rd rs2 rs1)
-  (store-word rs1 (cast-low 32 rs2))
-  (set$ rd 0))
-(defun SC_D (rd rs2 rs1)
-  (store-word rs1 rs2)
-  (set$ rd 0))
-(defun LR_W_AQ (rd rs1) (word-result rd (load-bits 32 rs1)))
-(defun LR_D_AQ (rd rs1) (set$ rd (core:load-word rs1)))
-(defun SC_W_AQ (rd rs2 rs1)
-  (store-word rs1 (cast-low 32 rs2))
-  (set$ rd 0))
-(defun SC_D_AQ (rd rs2 rs1)
-  (store-word rs1 rs2)
-  (set$ rd 0))
-(defun LR_W_RL (rd rs1) (word-result rd (load-bits 32 rs1)))
-(defun LR_D_RL (rd rs1) (set$ rd (core:load-word rs1)))
-(defun SC_W_RL (rd rs2 rs1)
-  (store-word rs1 (cast-low 32 rs2))
-  (set$ rd 0))
-(defun SC_D_RL (rd rs2 rs1)
-  (store-word rs1 rs2)
-  (set$ rd 0))
-(defun LR_W_AQ_RL (rd rs1) (word-result rd (load-bits 32 rs1)))
-(defun LR_D_AQ_RL (rd rs1) (set$ rd (core:load-word rs1)))
-(defun SC_W_AQ_RL (rd rs2 rs1)
-  (store-word rs1 (cast-low 32 rs2))
-  (set$ rd 0))
-(defun SC_D_AQ_RL (rd rs2 rs1)
-  (store-word rs1 rs2)
-  (set$ rd 0))
+(defun LR_W (rd rs1) (lr-reserve rs1) (word-result rd (load-bits 32 rs1)))
+(defun LR_D (rd rs1) (lr-reserve rs1) (set$ rd (core:load-word rs1)))
+(defun SC_W (rd rs2 rs1) (sc-w rd rs2 rs1))
+(defun SC_D (rd rs2 rs1) (sc-d rd rs2 rs1))
+(defun LR_W_AQ (rd rs1) (lr-reserve rs1) (word-result rd (load-bits 32 rs1)))
+(defun LR_D_AQ (rd rs1) (lr-reserve rs1) (set$ rd (core:load-word rs1)))
+(defun SC_W_AQ (rd rs2 rs1) (sc-w rd rs2 rs1))
+(defun SC_D_AQ (rd rs2 rs1) (sc-d rd rs2 rs1))
+(defun LR_W_RL (rd rs1) (lr-reserve rs1) (word-result rd (load-bits 32 rs1)))
+(defun LR_D_RL (rd rs1) (lr-reserve rs1) (set$ rd (core:load-word rs1)))
+(defun SC_W_RL (rd rs2 rs1) (sc-w rd rs2 rs1))
+(defun SC_D_RL (rd rs2 rs1) (sc-d rd rs2 rs1))
+(defun LR_W_AQ_RL (rd rs1) (lr-reserve rs1) (word-result rd (load-bits 32 rs1)))
+(defun LR_D_AQ_RL (rd rs1) (lr-reserve rs1) (set$ rd (core:load-word rs1)))
+(defun SC_W_AQ_RL (rd rs2 rs1) (sc-w rd rs2 rs1))
+(defun SC_D_AQ_RL (rd rs2 rs1) (sc-d rd rs2 rs1))
 
 ;; the orderings of both, as some versions of LLVM name them
 (defun AMOADD_W_AQRL (rd rs2 rs1)
@@ -947,17 +949,13 @@
     (store-word rs1 (if (< old x) old x))
     (set$ rd old)))
 
-(defun LR_W_AQRL (rd rs1) (word-result rd (load-bits 32 rs1)))
+(defun LR_W_AQRL (rd rs1) (lr-reserve rs1) (word-result rd (load-bits 32 rs1)))
 
-(defun LR_D_AQRL (rd rs1) (set$ rd (core:load-word rs1)))
+(defun LR_D_AQRL (rd rs1) (lr-reserve rs1) (set$ rd (core:load-word rs1)))
 
-(defun SC_W_AQRL (rd rs2 rs1)
-  (store-word rs1 (cast-low 32 rs2))
-  (set$ rd 0))
+(defun SC_W_AQRL (rd rs2 rs1) (sc-w rd rs2 rs1))
 
-(defun SC_D_AQRL (rd rs2 rs1)
-  (store-word rs1 rs2)
-  (set$ rd 0))
+(defun SC_D_AQRL (rd rs2 rs1) (sc-d rd rs2 rs1))
 
 
 ;;; FLOATING POINT, the F and D extensions
