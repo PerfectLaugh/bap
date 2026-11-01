@@ -80,8 +80,12 @@ opaque Program : Type
 
 /-! The native functions read their arguments and don't release them, so that they all borrow: an owned argument would never be freed. -/
 
+/-- Compiled quickly, into code that is less quick than `compileOptimized` makes of the same. -/
 @[extern "bap_jit_compile"]
 opaque compile (ops : @& List Op) : IO Program
+
+@[extern "bap_jit_compile_optimized"]
+opaque compileOptimized (ops : @& List Op) : IO Program
 
 abbrev MemoryObserver := Bool → Nat → Nat → Nat → IO Unit
 abbrev CodeObserver := Nat → IO Bool

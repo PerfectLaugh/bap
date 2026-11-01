@@ -872,8 +872,8 @@ private def roundedName (architecture : Architecture) (env : Bil.Env) (name : St
 private def emulatorOf (architecture : Architecture) : IO Emu := do
   -- A real program runs more code than the working set of a few thousand blocks that the default is for, and past it, each one
   -- would be lifted each time it runs. Most of its code runs at its start, a few times, and compiling that takes longer than
-  -- running it: with this threshold, `ls` takes a third of the time, and a long loop no longer.
-  let tuned (config : Config) : Config := { config with cacheLimit := 1048576, hotThreshold := 1024 }
+  -- running it, up to about this threshold: at 16 a short program takes half as long again, and a long one no less.
+  let tuned (config : Config) : Config := { config with cacheLimit := 1048576, hotThreshold := 64 }
   -- Nothing is in its one page, which goes at once.
   let page := ByteArray.mk (Array.replicate 16 0)
   let emu ← match architecture with
@@ -938,7 +938,7 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
       pure (some (bytes, ← IO.ofExcept (Elf.parse bytes)))
   -- A real program runs more code than the working set of a few thousand blocks that the default is for, and past it, each one
   -- would be lifted each time it runs. Most of its code runs at its start, a few times, and compiling that takes longer than
-  -- running it: with this threshold, `ls` takes a third of the time, and a long loop no longer.
+  -- running it, up to about this threshold: at 16 a short program takes half as long again, and a long one no less.
   let emu ← emulatorOf architecture
   let (top, auxiliary) ← loadProgram emu architecture path data program interpreter arguments environment
   let first := (← currentTask emu).group

@@ -106,6 +106,8 @@ private structure CachedBlock where
   sources : List (Nat × ByteArray) := []
   /-- Whether a range was tried for these bytes and did not form, which is not worth trying on every step. -/
   settled : Bool := false
+  /-- Whether its code is that of `Jit.compileOptimized`. -/
+  optimized : Bool := false
 
 structure Engine where
   cache : IO.Ref (Std.HashMap Nat CachedBlock)
@@ -1216,6 +1218,22 @@ private def restoreBlockVersion (engine : Engine) (address : Nat) (code : ByteAr
   let versions ← engine.cacheVersions.get
   pure ((versions.getD address []).find? fun entry => entry.code = code)
 
+/-- How many runs make it worth compiling something again, with what that takes: as long as the runs themselves take by then. -/
+private def optimizeFrom : Nat := 65536
+
+/-- What is native and has run that many times, compiled again with optimization, if this is such a thing. -/
+private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Option CachedBlock) := do
+  if entry.optimized || (← entry.executions.get) < optimizeFrom then return none
+  match entry.plan with
+  | .interpreted _ => return none
+  | .native lowering _ fallback =>
+    let started ← IO.monoMsNow
+    let program ← Jit.compileOptimized lowering.ops
+    let elapsed := (← IO.monoMsNow) - started
+    engine.statistics.modify fun stats =>
+      { stats with nativeCompilations := stats.nativeCompilations + 1, compileMs := stats.compileMs + elapsed }
+    return some { entry with plan := .native lowering program fallback, optimized := true }
+
 private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : ByteArray)
     (compileSingle : Bool := true) : IO CachedBlock := do
   let cooldown ← engine.nativeCooldown.get
@@ -1252,7 +1270,12 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
       engine.statistics.modify fun stats => { stats with cacheHits := stats.cacheHits + 1 }
       entry.executions.modify (· + 1)
       match entry.plan with
-      | .native .. => return entry
+      | .native .. =>
+        match ← optimizedVersion engine entry with
+        | some updated =>
+          engine.cache.modify (·.insert address updated)
+          return updated
+        | none => return entry
       | .interpreted program =>
         let shouldCompile := compileSingle && cooldown = 0 && (← entry.executions.get) ≥ engine.hotThreshold
         if shouldCompile then
@@ -1294,7 +1317,11 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
   | some entry =>
     engine.statistics.modify fun stats => { stats with cacheHits := stats.cacheHits + 1 }
     entry.executions.modify (· + 1)
-    return entry
+    match ← optimizedVersion engine entry with
+    | some updated =>
+      engine.ranges.modify (·.insert address updated)
+      return updated
+    | none => return entry
   | none => do
     if engine.rangeLimit ≤ 1 then return ← prepare engine lift address code
     let cooldown ← engine.nativeCooldown.get
@@ -1630,17 +1657,20 @@ private def withControl (lowering : Lowering) (slots : Array UInt64) (budget : N
 private def chainedCount (lowering : Lowering) (budget : Nat) (slots : Array UInt64) : Option Nat :=
   lowering.budget.map fun slot => budget - (slots.getD slot 0).toNat
 
-private def recordChained (engine : Engine) (lowering : Lowering) (budget : Nat) (slots : Array UInt64) : IO Unit :=
-  (chainedCount lowering budget slots).forM engine.chained.set
+/-- How many blocks a run chained to, for the engine, and for what it ran, in that they are runs of it too. -/
+private def recordChained (engine : Engine) (executions : IO.Ref Nat) (lowering : Lowering) (budget : Nat) (slots : Array UInt64) : IO Unit :=
+  (chainedCount lowering budget slots).forM fun count => do
+    engine.chained.set count
+    executions.modify (· + count)
 
-private def runPersistent (engine : Engine) (lowering : Lowering) (following : Nat)
+private def runPersistent (engine : Engine) (executions : IO.Ref Nat) (lowering : Lowering) (following : Nat)
     (program : Jit.Program) (state : Bil.State) (slots : Array UInt64)
     (memory : Jit.Memory) (observer : Option Jit.MemoryObserver)
     (codeObserver : Option Jit.CodeObserver) (budget : Nat) : IO Result := do
   recordNative engine
   let (next, slots, addresses, values) ←
     Jit.runWithPersistentMemoryObservedCode program slots memory observer codeObserver
-  recordChained engine lowering budget slots
+  recordChained engine executions lowering budget slots
   let completed := atCodeStop lowering next
   let state := if engine.deferMemorySync then syncState completed state slots
     else syncMemoryDelta completed (syncState completed state slots) addresses values
@@ -1665,7 +1695,7 @@ def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bi
       let persistent ← engine.persistentMemory.get
       match persistent, lowering.memory with
       | some memory, some _ =>
-        runPersistent engine lowering entry.next program state slots memory observer codeObserver budget
+        runPersistent engine entry.executions lowering entry.next program state slots memory observer codeObserver budget
       | _, _ =>
         match memoryInput lowering state with
         | .error _ => runInterpreted engine entry.firstNext pc fallback state observer
@@ -1674,12 +1704,12 @@ def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bi
             let memory ← Jit.createMemory addresses values
             engine.persistentMemory.set (some memory)
             engine.persistentVariable.set lowering.memory
-            runPersistent engine lowering entry.next program state slots memory observer codeObserver budget
+            runPersistent engine entry.executions lowering entry.next program state slots memory observer codeObserver budget
           else do
             recordNative engine
             let (next, slots, addresses, values) ←
               Jit.runWithMemoryObservedCode program slots addresses values observer codeObserver
-            recordChained engine lowering budget slots
+            recordChained engine entry.executions lowering budget slots
             let completed := atCodeStop lowering next
             let state := syncMemory completed (syncState completed state slots) addresses values
             nativeResult lowering entry.next next state slots

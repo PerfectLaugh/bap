@@ -209,13 +209,22 @@ struct Program {
 
 // One for each thread: code generation holds the mutex of its JIT, so that threads that shared one would compile one at a time,
 // however many processors there are. A program keeps its JIT alive, and may run or be freed on any thread.
-std::shared_ptr<SharedJit> sharedJit() {
-  thread_local std::shared_ptr<SharedJit> shared;
+std::shared_ptr<SharedJit> sharedJit(bool optimized) {
+  thread_local std::shared_ptr<SharedJit> fast;
+  thread_local std::shared_ptr<SharedJit> full;
+  std::shared_ptr<SharedJit> &shared = optimized ? full : fast;
   if (shared != nullptr)
     return shared;
   static std::mutex creation;
   std::lock_guard<std::mutex> lock(creation);
-  auto jit = llvm::orc::LLJITBuilder().create();
+  auto machine = llvm::orc::JITTargetMachineBuilder::detectHost();
+  if (!machine)
+    throw std::runtime_error("LLVM ORC JIT host detection failed: " +
+                             llvm::toString(machine.takeError()));
+  // Most of a program runs few times, and what compiling takes is what that comes to: without optimizing it is a ninth. What
+  // then runs a lot is compiled again with it.
+  machine->setCodeGenOptLevel(optimized ? llvm::CodeGenOptLevel::Default : llvm::CodeGenOptLevel::None);
+  auto jit = llvm::orc::LLJITBuilder().setJITTargetMachineBuilder(std::move(*machine)).create();
   if (!jit)
     throw std::runtime_error("LLVM ORC JIT creation failed: " +
                              llvm::toString(jit.takeError()));
@@ -286,7 +295,7 @@ bool getSlot(lean_obj_arg value, size_t &slot) {
 
 } // namespace
 
-extern "C" lean_obj_res bap_jit_compile(lean_obj_arg ops, lean_obj_arg) {
+static lean_obj_res compileOps(lean_obj_arg ops, bool optimized) {
   try {
     std::string initializationError;
     if (!initialize(initializationError))
@@ -686,7 +695,7 @@ extern "C" lean_obj_res bap_jit_compile(lean_obj_arg ops, lean_obj_arg) {
     if (llvm::verifyModule(*module, &verificationStream))
       return ioError("invalid LLVM JIT module: " + verificationErrors);
 
-    auto shared = sharedJit();
+    auto shared = sharedJit(optimized);
     std::lock_guard<std::mutex> lock(shared->mutex);
     auto resources = shared->jit->getMainJITDylib().createResourceTracker();
     if (llvm::Error error = shared->jit->addIRModule(
@@ -714,6 +723,10 @@ extern "C" lean_obj_res bap_jit_compile(lean_obj_arg ops, lean_obj_arg) {
     return ioError(std::string("LLVM JIT compilation failed: ") + error.what());
   }
 }
+
+extern "C" lean_obj_res bap_jit_compile(lean_obj_arg ops, lean_obj_arg) { return compileOps(ops, false); }
+
+extern "C" lean_obj_res bap_jit_compile_optimized(lean_obj_arg ops, lean_obj_arg) { return compileOps(ops, true); }
 
 extern "C" lean_obj_res bap_jit_run(lean_obj_arg programObject,
                                     lean_obj_arg stateObject, lean_obj_arg) {
