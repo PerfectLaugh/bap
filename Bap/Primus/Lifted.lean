@@ -3,6 +3,7 @@ import Bap.Bil.Observe
 import Bap.Primus.Machine
 import Std.Data.HashMap
 import Bap.Emu.Core
+import Bap.Primus.CodeIndex
 
 namespace Bap.Primus.Lifted
 
@@ -78,6 +79,9 @@ structure Engine where
   ranges : IO.Ref (Std.HashMap Nat CachedBlock)
   cacheVersions : IO.Ref (Std.HashMap Nat (List CachedBlock))
   rangeVersions : IO.Ref (Std.HashMap Nat (List CachedBlock))
+  /-- What of `cache` and `ranges` may be on which page, and so may be changed by a write there. -/
+  blockIndex : IO.Ref CodeIndex.CodeIndex
+  rangeIndex : IO.Ref CodeIndex.CodeIndex
   statistics : IO.Ref Statistics
   persistentMemory : IO.Ref (Option Jit.Memory)
   persistentVariable : IO.Ref (Option Bap.Var)
@@ -115,6 +119,8 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimi
   return {
     cache := ← IO.mkRef {}
     ranges := ← IO.mkRef {}
+    blockIndex := ← IO.mkRef {}
+    rangeIndex := ← IO.mkRef {}
     cacheVersions := ← IO.mkRef {}
     rangeVersions := ← IO.mkRef {}
     statistics := ← IO.mkRef {}
@@ -154,42 +160,84 @@ private def rememberVersion (engine : Engine)
     engine.nativeLive.modify fun count => count - min count dropped.length
     versions.set (all.insert entry.address (candidates.take 4))
 
-private def forgetVersions (engine : Engine) (first last : Nat) : IO Unit := do
-  let blocks ← engine.cache.get
-  blocks.toList.forM fun (address, entry) =>
-    if first ≤ address && address ≤ last then rememberVersion engine engine.cacheVersions entry else pure ()
-  let ranges ← engine.ranges.get
-  ranges.toList.forM fun (_, entry) =>
-    let affected := if entry.coverage.isEmpty then first ≤ entry.address && entry.address ≤ last
-      else entry.coverage.any fun (lo, hi) => lo ≤ last && first ≤ hi
-    if affected then rememberVersion engine engine.rangeVersions entry else pure ()
+/-- Puts a block in the cache, and says where it is. -/
+private def insertBlock (engine : Engine) (address : Nat) (entry : CachedBlock) : IO Unit := do
+  engine.cache.modify (·.insert address entry)
+  engine.blockIndex.modify (CodeIndex.add · address address address)
+
+/-- Says where a range is, which is all that it was compiled from. -/
+private def indexRange (engine : Engine) (address : Nat) (entry : CachedBlock) : IO Unit := do
+  let spans := if entry.coverage.isEmpty then [(entry.address, entry.last)] else entry.coverage
+  engine.rangeIndex.modify fun index =>
+    spans.foldl (init := index) fun index (lo, hi) => CodeIndex.add index address (min lo hi) (max lo hi)
 
 def clearCache (engine : Engine) : IO Unit := do
   engine.cache.set {}
   engine.ranges.set {}
   engine.cacheVersions.set {}
   engine.rangeVersions.set {}
+  engine.blockIndex.set {}
+  engine.rangeIndex.set {}
   engine.nativeLive.set 0
 
 /-- Drops the compiled ranges, which go by the code they were compiled from only when it is written to. -/
 def forgetRanges (engine : Engine) : IO Unit := do
   (← engine.ranges.get).toList.forM fun (_, entry) => rememberVersion engine engine.rangeVersions entry
   engine.ranges.set {}
+  engine.rangeIndex.set {}
 
+/-- Forgets what a write changes: blocks that start in the range and ranges compiled from anything in it. Their native code stays as
+a version. It looks at what `CodeIndex` says may be there, which is all of it (`CodeIndex.candidates_complete`), so that it costs
+what is on the pages of the write, however much else is cached. -/
 def discardRange (engine : Engine) (first last : Nat) : IO Unit := do
   engine.statistics.modify fun stats => { stats with invalidations := stats.invalidations + 1 }
-  forgetVersions engine first last
-  engine.cache.modify fun entries => entries.filter fun address _ => address < first || last < address
-  engine.ranges.modify fun entries => entries.filter fun _ entry =>
-    if entry.coverage.isEmpty then entry.last < first || last < entry.address
-    else entry.coverage.all fun (lo, hi) => hi < first || last < lo
+  let (lo, hi) := (min first last, max first last)
+  -- A block is where it starts, so that for a small write those addresses are all that there is to look at, which is less than what is
+  -- on a page of code.
+  let index ← engine.blockIndex.get
+  let blocks := if hi - lo < 64 then (List.range (hi - lo + 1)).map (lo + ·) else CodeIndex.candidates index lo hi
+  for address in blocks do
+    if first ≤ address && address ≤ last then
+      if let some entry := (← engine.cache.get).get? address then
+        rememberVersion engine engine.cacheVersions entry
+        engine.cache.modify (·.erase address)
+  for address in CodeIndex.candidates (← engine.rangeIndex.get) lo hi do
+    if let some entry := (← engine.ranges.get).get? address then
+      let affected := if entry.coverage.isEmpty then first ≤ entry.address && entry.address ≤ last
+        else entry.coverage.any fun (lo, hi) => lo ≤ last && first ≤ hi
+      if affected then rememberVersion engine engine.rangeVersions entry
+      let kept := if entry.coverage.isEmpty then entry.last < first || last < entry.address
+        else entry.coverage.all fun (lo, hi) => hi < first || last < lo
+      if !kept then engine.ranges.modify (·.erase address)
   if engine.writeCooldown > 0 then engine.nativeCooldown.set (engine.writeCooldown + 1)
 
+/-- Whether a write changes anything that is cached: what `discardRange` would drop. A block that it doesn't start in goes by its bytes
+when it is next entered. A cooldown goes by each write, whatever it hits. -/
+private def writeHitsCode (engine : Engine) (first last : Nat) : IO Bool := do
+  if engine.writeCooldown > 0 then return true
+  let cache ← engine.cache.get
+  let blockIndex ← engine.blockIndex.get
+  let hitsBlock := if last - first < 64 then (List.range (last - first + 1)).any fun offset => cache.contains (first + offset)
+    else (CodeIndex.candidates blockIndex first last).any fun address =>
+      first ≤ address && address ≤ last && cache.contains address
+  if hitsBlock then return true
+  let ranges ← engine.ranges.get
+  let rangeIndex ← engine.rangeIndex.get
+  pure ((CodeIndex.candidates rangeIndex first last).any fun address =>
+    match ranges.get? address with
+    | some entry =>
+      if entry.coverage.isEmpty then !(entry.last < first || last < entry.address)
+      else entry.coverage.any fun (lo, hi) => lo ≤ last && first ≤ hi
+    | none => false)
+
+/-- Says that a write of code has to be dealt with when the instruction is over, if it changes what is cached. A write that doesn't can
+stay in the compiled range that made it, which is what the loop of a program that decrypts itself does for each byte. -/
 def markDirtyRange (engine : Engine) (first last : Nat) : IO Unit := do
-  engine.dirtyCode.modify fun current =>
-    match current with
-    | some (first', last') => some (min first first', max last last')
-    | none => some (first, last)
+  if ← writeHitsCode engine first last then
+    engine.dirtyCode.modify fun current =>
+      match current with
+      | some (first', last') => some (min first first', max last last')
+      | none => some (first, last)
 
 def flushDirtyRange (engine : Engine) : IO Unit := do
   match ← engine.dirtyCode.get with
@@ -1001,7 +1049,7 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
     match restored with
     | some entry =>
       engine.statistics.modify fun stats => { stats with versionHits := stats.versionHits + 1 }
-      engine.cache.modify (·.insert address entry)
+      insertBlock engine address entry
       return entry
     | none =>
       let entries ← engine.cache.get
@@ -1021,6 +1069,7 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
         executions := ← IO.mkRef 1, plan
       }
       engine.cache.set (entries.insert address entry)
+      engine.blockIndex.modify (CodeIndex.add · address address address)
       return entry
   match (← engine.cache.get).get? address with
   | some entry =>
@@ -1034,7 +1083,7 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
         if shouldCompile then
           let plan ← compilePlan engine ⟨entry.address, entry.next, program⟩
           let updated := { entry with plan }
-          engine.cache.modify (·.insert address updated)
+          insertBlock engine address updated
           return updated
         else return entry
     else
@@ -1079,6 +1128,7 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
     | some entry =>
       entry.executions.modify (· + 1)
       engine.ranges.modify (·.insert address entry)
+      indexRange engine address entry
       return entry
     | none => do
       let first ← prepare engine lift address code false
@@ -1086,7 +1136,7 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
       else
         let settle (entry : CachedBlock) : IO CachedBlock := do
           let updated := { entry with settled := true }
-          engine.cache.modify (·.insert address updated)
+          insertBlock engine address updated
           pure updated
         let firstProgram := match first.plan with
           | .native _ _ fallback => fallback
@@ -1130,6 +1180,7 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
                 evictColdest engine engine.rangeVersions ranges
               else pure ranges
               engine.ranges.set (ranges.insert address entry)
+              indexRange engine address entry
               engine.cache.modify (·.erase address)
               return entry
 

@@ -604,6 +604,15 @@ def testLinuxProc (triple : String) : IO Unit := do
   let (_, mine) ← runOn (← Bap.Linux.start (kernel.addGenerated "/proc/sys/kernel/ostype" fun _ => "Mine\n".toUTF8) "/test" ["/test", "arg1"])
   assertTrue s!"Linux {triple} /proc can be replaced: {mine}" ((mine.splitOn "ostype Mine").length > 1)
 
+/-- Code that a program changes under itself once it is hot, as the machine that made this test does it. -/
+def testLinuxSelfModifying : IO Unit := do
+  let path := "testsuite/bin/x86_64-linux-musl-selfmodify"
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile path)) "/test" ["/test"]
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual "Linux nothing of code that was changed stays" (Bap.Tasks.ScheduleOutcome.finished 0, "65650259515886\n")
+    (outcome, String.fromUTF8! (← written.get))
+
 /-- Calls between ARM and Thumb, whichever a program starts in, and the helpers of the kernel, as qemu has them. -/
 def testLinuxInterworking (triple : String) : IO Unit := do
   let path := s!"testsuite/bin/{triple}-linux-musl-interworking"

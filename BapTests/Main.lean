@@ -67,6 +67,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxMusl "i686" (exclusive := false),
     Bap.Tests.Emu.testLinuxMusl "arm" (floats := false),
     Bap.Tests.Emu.testLinuxMusl "thumb",
+    Bap.Tests.Emu.testLinuxSelfModifying,
     Bap.Tests.Emu.testLinuxInterworking "arm",
     Bap.Tests.Emu.testLinuxInterworking "thumb",
     Bap.Tests.Emu.testLinuxMusl "riscv32",
@@ -92,6 +93,7 @@ def main : IO Unit := do
     Bap.Tests.Jni.run
   ]
   Bap.Tests.Optimize.scaling
+  Bap.Tests.Lifted.invalidationScales
   -- More tests than the pool has threads would wait for each other, with processors to spare.
   let tasks ← tests.mapM fun test => liftM <| IO.asTask (prio := .dedicated) do
     try test catch error =>

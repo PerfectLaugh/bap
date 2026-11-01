@@ -21,6 +21,30 @@ private def expectThrow (name : String) (action : IO Unit) : IO Unit := do
     catch _ => pure true
   assertTrue name threw
 
+/-- Each invalidation of a write looks at what is on the pages that it touches, however much else is cached, as a program that writes
+its own code does millions of them. These 4000 took a second when each looked at all 20000. -/
+def invalidationScales : IO Unit := do
+  let blocks := 20000
+  let writes := 2000
+  let engine ← Primus.Lifted.Engine.create (hotThreshold := 1000000) (cacheLimit := 2 * blocks)
+  let fetch : Primus.Lifted.Fetch := fun _ => pure (ByteArray.mk #[0, 0, 0, 0])
+  let lift : Primus.Lifted.Lift := fun address _ => pure ⟨address, address + 4, []⟩
+  for index in List.range blocks do
+    let _ ← Primus.Lifted.runBlock engine fetch lift {} (0x100000 + 4 * index)
+  let started ← IO.monoMsNow
+  -- On pages without code, and on a page full of it, between what it holds.
+  for index in List.range writes do
+    Primus.Lifted.discardRange engine (0x40000000 + index) (0x40000000 + index)
+    Primus.Lifted.discardRange engine (0x100001 + 4 * (index % 1000)) (0x100001 + 4 * (index % 1000))
+  let elapsed := (← IO.monoMsNow) - started
+  assertTrue s!"4000 invalidations don't scan 20000 blocks: {elapsed} ms" (elapsed < 200)
+  -- And what they should drop is dropped, as the others stayed.
+  Primus.Lifted.discardRange engine 0x100000 0x100000
+  let _ ← Primus.Lifted.runBlock engine fetch lift {} 0x100000
+  let _ ← Primus.Lifted.runBlock engine fetch lift {} 0x100004
+  let stats ← Primus.Lifted.stats engine
+  assertEqual "an invalidation drops what starts there and only that" (blocks + 1) stats.lifts
+
 set_option maxRecDepth 4000 in
 def run : IO Unit := do
   let program ← Jit.compile [.set 0 40, .add 1 0 2, .jumpSlot 1]
