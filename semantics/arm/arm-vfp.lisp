@@ -111,9 +111,17 @@
 ;; the literals are words, so a double is made from its upper word
 (defun vfp-double-hi (hi) (lshift (cast-unsigned 64 hi) 32))
 
+(defun vfp-round-integral (x one half e f)
+  "rounds X to an integral value by the rounding mode of FPSCR"
+  (let ((rmode (extract 23 22 FPSCR)))
+    (fp-select (= rmode 0) (fp-round-integral 'n x one half e f)
+      (fp-select (= rmode 1) (fp-round-integral 'p x one half e f)
+        (fp-select (= rmode 2) (fp-round-integral 'm x one half e f)
+          (fp-round-integral 'z x one half e f))))))
+
 (defmacro VTO*IR (signed sd x one half e f cnd)
   (vfp cnd (set$ sd (fp-to-int signed 32
-                               (fp-round-integral 'n x one half e f)
+                               (vfp-round-integral x one half e f)
                                e f))))
 
 (defun VTOSIRD (sd dm cnd _)
