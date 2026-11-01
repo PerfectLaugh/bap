@@ -1359,6 +1359,57 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
               engine.cache.modify (·.erase address)
               return entry
 
+/-- A number below 60 for a variable, from what is at hand of it, which most others don't have. -/
+private def quickKey (var : Bap.Var) : Nat :=
+  let size := var.name.utf8ByteSize
+  let last := if h : size - 1 < size then (var.name.getUTF8Byte ⟨size - 1⟩ h).toNat else 0
+  let before := if h : size - 2 < size then (var.name.getUTF8Byte ⟨size - 2⟩ h).toNat else 0
+  (last * 7 + before * 3 + size + var.index) % 60
+
+/-- The bindings of an environment by the key of their variables, in their order. -/
+private def envIndex (env : Bil.Env) : Array Bil.Env :=
+  env.foldr (init := Array.replicate 60 []) fun binding index => index.modify (quickKey binding.1) (binding :: ·)
+
+/-- `Bil.lookup`, in what `envIndex` makes. -/
+private def lookupIndexed (index : Array Bil.Env) (var : Bap.Var) : Except String Value :=
+  match (index.getD (quickKey var) []).find? fun binding => binding.1 == var with
+  | some binding => .ok binding.2
+  | none => .error s!"unbound variable {var.name}"
+
+private theorem quickKey_lt (var : Bap.Var) : quickKey var < 60 := by
+  unfold quickKey
+  exact Nat.mod_lt _ (by omega)
+
+private theorem envIndex_find (env : Bil.Env) (var : Bap.Var) :
+    (envIndex env).size = 60 ∧ ((envIndex env).getD (quickKey var) []).find? (fun binding => binding.1 == var) =
+      env.find? fun binding => binding.1 == var := by
+  induction env with
+  | nil =>
+    have hk := quickKey_lt var
+    simp [envIndex, Array.getD_eq_getD_getElem?, hk]
+  | cons head rest ih =>
+    obtain ⟨hs, hf⟩ := ih
+    have hstep : envIndex (head :: rest) = (envIndex rest).modify (quickKey head.1) (head :: ·) := rfl
+    have hk := quickKey_lt var
+    refine ⟨by rw [hstep, Array.size_modify]; exact hs, ?_⟩
+    rw [hstep, Array.getD_eq_getD_getElem?, Array.getElem?_modify, List.find?_cons]
+    by_cases he : quickKey head.1 = quickKey var
+    · have hin : quickKey var < (envIndex rest).size := by omega
+      simp only [he, ite_true, Array.getElem?_eq_getElem hin, Option.map_some, Option.getD_some, List.find?_cons]
+      rw [Array.getD_eq_getD_getElem?, Array.getElem?_eq_getElem hin, Option.getD_some] at hf
+      rw [hf]
+    · have hne : (head.1 == var) = false := by
+        simp only [beq_eq_false_iff_ne, ne_eq]
+        intro h
+        exact he (congrArg quickKey h)
+      simp only [he, ite_false, hne]
+      rw [Array.getD_eq_getD_getElem?] at hf
+      exact hf
+
+private theorem lookupIndexed_eq (env : Bil.Env) (var : Bap.Var) : lookupIndexed (envIndex env) var = Bil.lookup env var := by
+  simp only [lookupIndexed, Bil.lookup, (envIndex_find env var).2]
+  rfl
+
 private def encodeState (lowering : Lowering) (env : Bil.Env) : Except String (Array UInt64) := do
   lowering.layout.foldlM (init := Array.replicate lowering.nextSlot 0) fun slots binding => do
     let var := binding.1
@@ -1372,6 +1423,35 @@ private def encodeState (lowering : Lowering) (env : Bil.Env) : Except String (A
       | none => .error s!"unsupported variable {var.name}"
     | .error error =>
       if lowering.inputs.contains var then .error error else .ok slots
+
+private def encodeStateIndexed (lowering : Lowering) (index : Array Bil.Env) : Except String (Array UInt64) := do
+  lowering.layout.foldlM (init := Array.replicate lowering.nextSlot 0) fun slots binding => do
+    let var := binding.1
+    match lookupIndexed index var with
+    | .ok value =>
+      let ⟨width, value⟩ ← Value.asBits value
+      match widthOf var with
+      | some expected =>
+        if width == expected then .ok (slots.set! binding.2 (immediate value))
+        else .error s!"variable {var.name} has width {width}, expected {expected}"
+      | none => .error s!"unsupported variable {var.name}"
+    | .error error =>
+      if lowering.inputs.contains var then .error error else .ok slots
+
+/-- From how many variables an index of the environment pays. -/
+private def indexedFrom : Nat := 32
+
+private def encodeStateFast (lowering : Lowering) (env : Bil.Env) : Except String (Array UInt64) :=
+  -- What a loop uses is near the front, and is found sooner than the index is made, unless there is a lot of it.
+  if lowering.layout.length < indexedFrom then encodeState lowering env
+  else encodeStateIndexed lowering (envIndex env)
+
+@[csimp] private theorem encodeState_eq_fast : @encodeState = @encodeStateFast := by
+  funext lowering env
+  unfold encodeStateFast
+  split
+  · rfl
+  · simp only [encodeState, encodeStateIndexed, lookupIndexed_eq]
 
 /-- The value of a slot in a variable, without working out `2 ^ 64` for the common width. -/
 private def slotBits (width : Nat) (slot : UInt64) : BitVec width :=
