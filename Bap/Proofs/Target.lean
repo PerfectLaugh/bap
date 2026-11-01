@@ -1176,7 +1176,7 @@ theorem powerpc32Globals_keys : (powerpc32Globals.map (·.1)).Nodup ∧ powerpc3
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 100000 in
-theorem aarch64Globals_keys : (aarch64Globals.map (·.1)).Nodup ∧ aarch64Globals.length = 210 :=
+theorem aarch64Globals_keys : (aarch64Globals.map (·.1)).Nodup ∧ aarch64Globals.length = 211 :=
   ⟨by decide +kernel, rfl⟩
 
 

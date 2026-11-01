@@ -441,6 +441,9 @@ private def switchNativeMemory (emu : Emu) (current next : ThreadId) : IO Unit :
     | some native => attachMemory emu native
     | none => Primus.Lifted.discardMemory emu.engine
 
+/-- The exclusive monitor of a thread of AArch64: see `semantics/arm/aarch64-atomic.lisp`. -/
+def exclusiveMonitor : Bap.Var := ⟨"EXCLUSIVE_MONITOR", .imm 64, 0, false⟩
+
 def switchThread (emu : Emu) (id : ThreadId) : IO Unit := do
   saveCurrentThread emu
   let table ← emu.taskTable.get
@@ -461,6 +464,8 @@ def switchThread (emu : Emu) (id : ThreadId) : IO Unit := do
       | .ok memory => Bil.bind context.state.env emu.config.memory memory
       | .error _ => context.state.env
     switchNativeMemory emu leaving id
+    -- As a kernel does when it switches: what a thread loaded exclusively may have changed, so its exclusive store has to fail.
+    let env := if emu.config.syscallAbi == .aarch64 then Bil.bind env exclusiveMonitor (.bits (BitVec.ofNat 64 0)) else env
     emu.state.set { env }
     emu.pc.set context.pc
     emu.stopped.set context.stopped
@@ -1791,7 +1796,9 @@ def aarch64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config :=
     syscallAbi := .aarch64
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create (adjust config) [region] {} entry
+  let emu ← create (adjust config) [region] {} entry
+  setReg emu exclusiveMonitor (.bits (BitVec.ofNat 64 0))
+  pure emu
 
 private def mipsOf (variant : Target.LLVMLift.MipsVariant) (code : ByteArray) (base entry : Nat) (adjust : Config → Config) : IO Emu := do
   let environment ← Target.LLVMLift.mipsEnvironmentOf variant

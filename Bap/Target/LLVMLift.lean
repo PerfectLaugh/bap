@@ -278,7 +278,7 @@ private def aarch64Globals : Primus.Semantics.Globals :=
   let registers := (List.range 31).map fun n => s!"X{n}"
   let vectors := (List.range 32).flatMap fun n => [s!"B{n}", s!"H{n}", s!"S{n}", s!"D{n}", s!"Q{n}"]
   (registers ++ vectors ++ ["SP", "LR", "XZR", "NF", "ZF", "CF", "VF", "TPIDR_EL0", "TPIDRRO_EL0", "DAIF", "SPSel",
-      "SP_EL0", "SP_EL1", "R31", "UAO", "PAN", "CNTVCT_EL0", "FPCR", "FPSR"]).map
+      "SP_EL0", "SP_EL1", "R31", "UAO", "PAN", "CNTVCT_EL0", "FPCR", "FPSR", "EXCLUSIVE_MONITOR"]).map
     fun name => (name, aarch64Register name)
 
 /-- The registers of x87 and the control and status words. -/

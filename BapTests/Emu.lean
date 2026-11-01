@@ -553,12 +553,15 @@ private def testZeroRegisterWidth : IO Unit := do
 /-- Programs of another machine than this one, which need no compiler: static, with musl, from `testsuite/src`. What is printed
 is what they print under qemu. -/
 def testLinuxAArch64 : IO Unit := do
-  let run (name : String) : IO (Bap.Tasks.ScheduleOutcome × ByteArray) := do
+  let run (name : String) (quantum : Nat := 100000) : IO (Bap.Tasks.ScheduleOutcome × ByteArray) := do
     let path := s!"testsuite/bin/aarch64-linux-musl-{name}"
     let written ← IO.mkRef ByteArray.empty
     let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile path)) "/test" ["/test", "arg1"]
-    let outcome ← machine.run fun data => written.modify (· ++ data)
+    let outcome ← machine.run (quantum := quantum) fun data => written.modify (· ++ data)
     pure (outcome, ← written.get)
+  -- Turns so short that many end between an exclusive load and its store, which then has to fail.
+  let (outcome, text) ← run "exclusive" 11
+  assertEqual "Linux AArch64 exclusive updates aren't lost" ((Bap.Tasks.ScheduleOutcome.finished 0), "y") (outcome, String.fromUTF8! text)
   let (outcome, text) ← run "libc-files"
   assertEqual "Linux AArch64 a program has its status" (Bap.Tasks.ScheduleOutcome.finished (Bap.Tasks.exitedStatus 5)) outcome
   assertEqual "Linux AArch64 a program finds its files"

@@ -271,18 +271,23 @@
 
 ;;; EXCLUSIVE AND ACQUIRE-RELEASE LOADS AND STORES
 ;;
-;; The exclusive monitor is not modeled, an exclusive store always
-;; succeeds and writes 0 to its status register. The memory ordering
-;; has no effect on a single thread.
+;; The exclusive monitor of a thread is EXCLUSIVE_MONITOR, one more than
+;; the address of the exclusive load that it follows, and 0 if there is
+;; none. An exclusive store takes place if it is to that address, writes
+;; 0 to its status register if so and 1 if not, and leaves no monitor. The
+;; monitor doesn't see what writes to the address, since a thread is alone
+;; until it is switched, when the emulator clears it, as Linux does with
+;; CLREX. The memory ordering has no effect on a single thread.
 
-(defun LDXRX (rt rn) (ld-x rt rn))
-(defun LDXRW (rt rn) (ld-w rt rn))
-(defun LDXRH (rt rn) (ld-h rt rn))
-(defun LDXRB (rt rn) (ld-b rt rn))
-(defun LDAXRX (rt rn) (ld-x rt rn))
-(defun LDAXRW (rt rn) (ld-w rt rn))
-(defun LDAXRH (rt rn) (ld-h rt rn))
-(defun LDAXRB (rt rn) (ld-b rt rn))
+(defmacro LDXR* (ld rt rn) (prog (set EXCLUSIVE_MONITOR (+ rn 1)) (ld rt rn)))
+(defun LDXRX (rt rn) (LDXR* ld-x rt rn))
+(defun LDXRW (rt rn) (LDXR* ld-w rt rn))
+(defun LDXRH (rt rn) (LDXR* ld-h rt rn))
+(defun LDXRB (rt rn) (LDXR* ld-b rt rn))
+(defun LDAXRX (rt rn) (LDXR* ld-x rt rn))
+(defun LDAXRW (rt rn) (LDXR* ld-w rt rn))
+(defun LDAXRH (rt rn) (LDXR* ld-h rt rn))
+(defun LDAXRB (rt rn) (LDXR* ld-b rt rn))
 (defun LDARX (rt rn) (ld-x rt rn))
 (defun LDARW (rt rn) (ld-w rt rn))
 (defun LDARH (rt rn) (ld-h rt rn))
@@ -297,7 +302,12 @@
 (defun STLRH (rt rn) (st-h rt rn))
 (defun STLRB (rt rn) (st-b rt rn))
 
-(defmacro STXR* (st rs rt rn) (prog (st rt rn) (setw rs 0)))
+(defmacro STXR* (st rs rt rn)
+  (prog
+     (if (= EXCLUSIVE_MONITOR (+ rn 1))
+         (prog (st rt rn) (setw rs 0))
+       (setw rs 1))
+     (set EXCLUSIVE_MONITOR 0)))
 (defun STXRX (rs rt rn) (STXR* st-x rs rt rn))
 (defun STXRW (rs rt rn) (STXR* st-w rs rt rn))
 (defun STXRH (rs rt rn) (STXR* st-h rs rt rn))
@@ -307,16 +317,23 @@
 (defun STLXRH (rs rt rn) (STXR* st-h rs rt rn))
 (defun STLXRB (rs rt rn) (STXR* st-b rs rt rn))
 
-(defun LDXPX (r1 r2 rn) (LDST*pair ld-x r1 r2 rn 8))
-(defun LDXPW (r1 r2 rn) (LDST*pair ld-w r1 r2 rn 4))
-(defun LDAXPX (r1 r2 rn) (LDST*pair ld-x r1 r2 rn 8))
-(defun LDAXPW (r1 r2 rn) (LDST*pair ld-w r1 r2 rn 4))
-(defun STXPX (rs r1 r2 rn) (prog (LDST*pair st-x r1 r2 rn 8) (setw rs 0)))
-(defun STXPW (rs r1 r2 rn) (prog (LDST*pair st-w r1 r2 rn 4) (setw rs 0)))
-(defun STLXPX (rs r1 r2 rn) (prog (LDST*pair st-x r1 r2 rn 8) (setw rs 0)))
-(defun STLXPW (rs r1 r2 rn) (prog (LDST*pair st-w r1 r2 rn 4) (setw rs 0)))
+(defmacro LDXP* (ld r1 r2 rn size) (prog (set EXCLUSIVE_MONITOR (+ rn 1)) (LDST*pair ld r1 r2 rn size)))
+(defun LDXPX (r1 r2 rn) (LDXP* ld-x r1 r2 rn 8))
+(defun LDXPW (r1 r2 rn) (LDXP* ld-w r1 r2 rn 4))
+(defun LDAXPX (r1 r2 rn) (LDXP* ld-x r1 r2 rn 8))
+(defun LDAXPW (r1 r2 rn) (LDXP* ld-w r1 r2 rn 4))
+(defmacro STXP* (st rs r1 r2 rn size)
+  (prog
+     (if (= EXCLUSIVE_MONITOR (+ rn 1))
+         (prog (LDST*pair st r1 r2 rn size) (setw rs 0))
+       (setw rs 1))
+     (set EXCLUSIVE_MONITOR 0)))
+(defun STXPX (rs r1 r2 rn) (STXP* st-x rs r1 r2 rn 8))
+(defun STXPW (rs r1 r2 rn) (STXP* st-w rs r1 r2 rn 4))
+(defun STLXPX (rs r1 r2 rn) (STXP* st-x rs r1 r2 rn 8))
+(defun STLXPW (rs r1 r2 rn) (STXP* st-w rs r1 r2 rn 4))
 
-(defun CLREX (_) (empty))
+(defun CLREX (_) (set EXCLUSIVE_MONITOR 0))
 
 ;; The compare and swap of a pair, CASP, of ARMv8.1. The pairs are lists
 ;; of an even register and the next one, which the semantics take by
