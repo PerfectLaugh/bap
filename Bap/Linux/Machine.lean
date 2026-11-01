@@ -732,6 +732,18 @@ private def loadProgram (emu : Emu) (architecture : Architecture) (path : String
       let _ ← mapProgram emu bytes loaded (interpreterBase architecture)
       pure (interpreterBase architecture + loaded.entry)
     | none => pure (base + program.entry)
+  -- ELFv1: where a program starts is a function descriptor, of the address of its code and its table of contents.
+  let (bias, flags) := match interpreter with
+    | some (_, loaded) => (interpreterBase architecture, loaded.flags)
+    | none => (base, program.flags)
+  let descriptor := match architecture with
+    | .powerpc 64 _ => flags % 4 != 2
+    | _ => false
+  let doubleword (address : Nat) : IO Nat := do
+    let bytes ← read emu address 8
+    pure ((if architecture.big then bytes.toList else bytes.toList.reverse).foldl (fun value byte => value * 256 + byte.toNat) 0)
+  let table ← if descriptor then doubleword (entry + 8) else pure 0
+  let entry ← if descriptor then pure ((← doubleword entry) + bias) else pure entry
   -- What the processor has: on AArch64, FP and ASIMD, and not CPUID, so that libc doesn't choose routines by the implementer, and
   -- on RISC-V, a bit for each of the letters of IMAFDC.
   let capabilities := match architecture with
@@ -756,7 +768,9 @@ private def loadProgram (emu : Emu) (architecture : Architecture) (path : String
     else pure entry
   setPc emu entry
   -- ELFv2: a function that is called from elsewhere finds its table of contents from where it is, and a program is called so.
-  if let .powerpc 64 _ := architecture then setReg emu (word "R12") (bits 64 entry)
+  if let .powerpc 64 _ := architecture then
+    if descriptor then setReg emu (word "R2") (bits 64 (table + bias))
+    else setReg emu (word "R12") (bits 64 entry)
   pure top
 
 /-- A program of a path of the kernel, as far as it can be told that it will run, and what its arguments come to: a script

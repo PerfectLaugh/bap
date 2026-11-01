@@ -84,6 +84,9 @@ std::string targetFeatures(const Triple &triple, bool assembling) {
   // of the triple and removes what these add to.
   if (triple.isMIPS() && triple.getSubArch() != Triple::MipsSubArch_r6)
     return triple.isMIPS64() ? "+mips64r2" : "+mips32r2";
+  // The instructions of eight bytes of Power10, whose second table the decoder doesn't look at otherwise.
+  if (triple.isPPC64())
+    return "+prefix-instrs,+pcrelative-memops,+paired-vector-memops,+isa-v31-instructions";
   return "";
 }
 

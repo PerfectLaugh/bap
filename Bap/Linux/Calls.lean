@@ -26,7 +26,7 @@ def Architecture.ofElf (machine bits : Nat) (big : Bool) (flags : Nat) : Option 
   | 8, 32, big | 8, 64, big => some (.mips bits big (flags / 2 ^ 28 == 9 || flags / 2 ^ 28 == 10))
   | 20, 32, big => some (.powerpc 32 big)
   -- A file of ELFv1 starts at a descriptor, which isn't there to test against.
-  | 21, 64, big => if flags % 4 == 2 then some (.powerpc 64 big) else none
+  | 21, 64, big => if flags % 4 == 3 then none else some (.powerpc 64 big)
   | _, _, _ => none
 
 /-- What `ofElf` takes to give it back, which is what a checkpoint says. -/

@@ -1345,7 +1345,8 @@ private def fetchSpanOf (emu : Emu) (address limit : Nat) : IO (Except String Na
 private def fetch (emu : Emu) (address : Nat) : IO ByteArray := do
   try
     -- An IT block of Thumb is decoded whole: its two bytes and four instructions of up to four.
-    let limit := match emu.config.syscallAbi with | .x86_64 | .x86_32 => 16 | .arm => 18 | _ => 4
+    -- And PowerPC has prefixed instructions of eight.
+    let limit := match emu.config.syscallAbi with | .x86_64 | .x86_32 => 16 | .arm => 18 | .powerpc | .powerpc64 => 8 | _ => 4
     match ← fetchSpanOf emu address limit with
     | .error error => throw <| IO.userError error
     | .ok span =>

@@ -616,6 +616,24 @@ def testLinuxDynamic (triple : String) : IO Unit := do
   assertEqual s!"Linux {triple} a dynamic program has the status of a static one" staticOutcome dynamicOutcome
   assertEqual s!"Linux {triple} a dynamic program does what a static one does" staticText dynamicText
 
+/-- A program of the older ABI of 64-bit PowerPC, that finds its data by what its function descriptor says. -/
+def testPowerpcElfv1 : IO Unit := do
+  let program ← IO.FS.readBinFile "testsuite/bin/powerpc64-linux-elfv1"
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual "Linux ELFv1 a program ends with its status" (Bap.Tasks.ScheduleOutcome.finished (Bap.Tasks.exitedStatus 7)) outcome
+  assertEqual "Linux ELFv1 a program finds its data" "from a descriptor\n" (String.fromUTF8! (← written.get))
+
+/-- Prefixed instructions of Power10, as qemu runs them. -/
+def testPowerpcPrefixed : IO Unit := do
+  let program ← IO.FS.readBinFile "testsuite/bin/powerpc64le-linux-musl-prefixed"
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual "Linux PowerPC prefixed instructions end" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual "Linux PowerPC prefixed instructions are what qemu does" "1000005 123456789 22 33 7 1\n" (String.fromUTF8! (← written.get))
+
 /-- What the rounding modes of a machine do, as qemu has it. -/
 def testLinuxRound (triple : String) : IO Unit := do
   let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-round"
