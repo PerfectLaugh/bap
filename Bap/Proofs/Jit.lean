@@ -2956,7 +2956,7 @@ open_private Bap.Primus.Lifted Bap.Primus.Lifted Lowering Lowering.push Lowering
   Operand Operand.slot Operand.width lowerExp lowerStatements setEffect temporary jumpConstant immediate widthOf
   blockExit BlockExit BlockExit.direct BlockExit.branch BlockExit.other BlockExit.fall closedTarget graphEdgeOps freshLabel enterBlock codeSite GraphPlan GraphPlan.seed GraphPlan.labels GraphPlan.edges
   GraphPlan.budget GraphPlan.observed GraphPlan.chained GraphPlan.definite GraphPlan.guarded lowerEntry lowerExit lowerBlock lowerBlocks lowerGraph
-  lowerGraphChecked leadingMoves opSlots opLabels flagOutputs encodeState syncState syncUpdates reachedOutputs slotBits withoutBindings atCodeStop
+  lowerGraphChecked distinctNats leadingMoves opSlots opLabels flagOutputs encodeState syncState syncUpdates reachedOutputs slotBits withoutBindings atCodeStop
   definitelyWritten writtenAt flagged flagSlots withControl graphInitial graphPlan chainedCount nativeOutcome
 open_private Bap.Proofs.Primus Bap.Proofs.Primus obind pairwise_same lookup_bind_same lookup_bind_other bind_ok asBits_ok
 
@@ -4802,11 +4802,23 @@ private structure Checked (blocks : List Block) (initial lowering : Lowering) : 
   inputs : ∀ var ∈ Lowering.inputs lowering, ∃ binding ∈ Lowering.layout lowering, binding.1 = var
   moves : ∀ dst src, Op.move dst src ∈ Lowering.ops lowering → ∀ binding ∈ Lowering.layout lowering, binding.2 = dst → binding ∈ Lowering.outputs lowering
 
+private theorem distinctNats_nodup {seen : Std.HashSet Nat} {list : List Nat} (h : distinctNats seen list = true) :
+    list.Nodup ∧ ∀ number ∈ list, number ∉ seen := by
+  induction list generalizing seen with
+  | nil => simp
+  | cons head rest ih =>
+    simp only [distinctNats, Bool.and_eq_true, Bool.not_eq_true', Std.HashSet.contains_eq_false_iff_not_mem] at h
+    obtain ⟨hr, hm⟩ := ih h.2
+    refine ⟨List.nodup_cons.2 ⟨fun hh => hm head hh (Std.HashSet.mem_insert_self), hr⟩, fun number hn => ?_⟩
+    rcases List.mem_cons.1 hn with rfl | hn
+    · exact h.1
+    · exact fun hs => hm number hn (Std.HashSet.mem_insert.2 (Or.inr hs))
+
 private theorem checked_of {blocks : List Block} {initial lowering : Lowering} (h : lowerGraphChecked blocks initial lowering = true) :
     Checked blocks initial lowering := by
   simp only [lowerGraphChecked, Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true, beq_iff_eq] at h
   obtain ⟨⟨⟨⟨⟨⟨⟨⟨h7, h8⟩, h1⟩, h2⟩, h3⟩, h4⟩, h5⟩, h9⟩, h6⟩ := h
-  refine ⟨h7, h8, h1, ?_, by rw [← opLabels_eq]; exact h3, ?_, ?_, ?_, ?_⟩
+  refine ⟨h7, h8, (distinctNats_nodup h1).1, ?_, by rw [← opLabels_eq]; exact (distinctNats_nodup h3).1, ?_, ?_, ?_, ?_⟩
   · intro block hb
     exact h2 block hb
   · intro op hop slot hs

@@ -2,6 +2,7 @@ import Bap.Jit
 import Bap.Bil.Observe
 import Bap.Primus.Machine
 import Std.Data.HashMap
+import Std.Data.HashSet
 import Bap.Emu.Core
 import Bap.Primus.CodeIndex
 
@@ -904,15 +905,20 @@ private def opLabels (ops : List Jit.Op) : List Nat :=
     | .label id => some id
     | _ => none
 
+/-- Whether no number of a list comes twice, or is among those seen. -/
+private def distinctNats (seen : Std.HashSet Nat) : List Nat → Bool
+  | [] => true
+  | head :: rest => !seen.contains head && distinctNats (seen.insert head) rest
+
 /-- What the proof of a whole range checks of what it lowered, rather than follows through every statement: blocks
 have an address each and it fits, a label is where it is once, operations stay in the slots allocated, which leaves
 the slots after them to the flags, an input has a slot, what is moved to, if it is a variable's, is an output, and the control slots stay.
 All hold of what lowering makes. A lowering that did not would stay out of native code. -/
 private def lowerGraphChecked (blocks : List Block) (initial lowering : Lowering) : Bool :=
   lowering.budget == initial.budget && lowering.observed == initial.observed &&
-    decide (blocks.map Block.address).Nodup &&
+    distinctNats {} (blocks.map Block.address) &&
     blocks.all (fun block => decide (block.address < 2 ^ 64) && decide (block.next < 2 ^ 64)) &&
-    decide (opLabels lowering.ops).Nodup &&
+    distinctNats {} (opLabels lowering.ops) &&
     lowering.ops.all (fun op => (opSlots op).all (· < lowering.nextSlot)) &&
     lowering.outputs.all lowering.layout.contains &&
     lowering.inputs.all (fun var => lowering.layout.any fun binding => binding.1 == var) &&
