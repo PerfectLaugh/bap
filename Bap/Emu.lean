@@ -208,8 +208,8 @@ private def initializeMemory (config : Config) (regions : List Region) : Except 
 /-- An engine for the emulator. Its memory is native from the start, its observer is `notifyMemory`, which rejects
 an access past the end of the address space, and a block that runs off its end goes on with the next one. -/
 private def createEngine (config : Config) (deferMemorySync : Bool) : IO Primus.Lifted.Engine :=
-  Primus.Lifted.Engine.create config.hotThreshold config.cacheLimit (rangeLimitOf config) 16 config.jitCooldown
-    deferMemorySync (persistentFrom := 0) (wrapFaults := true) (chainFallthrough := true)
+  Primus.Lifted.Engine.create config.hotThreshold config.cacheLimit (rangeLimitOf config) config.cacheLimit config.jitCooldown
+    deferMemorySync (nativeLimit := 4 * config.cacheLimit) (persistentFrom := 0) (wrapFaults := true) (chainFallthrough := true)
 
 def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry : Nat) : IO Emu := do
   let initial ← match initializeMemory config mapped with

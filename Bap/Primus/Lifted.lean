@@ -112,6 +112,9 @@ structure Engine where
   ranges : IO.Ref (Std.HashMap Nat CachedBlock)
   cacheVersions : IO.Ref (Std.HashMap Nat (List CachedBlock))
   rangeVersions : IO.Ref (Std.HashMap Nat (List CachedBlock))
+  /-- What the blocks that graphs took in were lifted from and to, and whether they lower, as most of a graph is what the
+  graphs of other seeds have. An entry counts for the same bytes only. -/
+  gathered : IO.Ref (Std.HashMap Nat (ByteArray × Block × Bool))
   /-- What of `cache` and `ranges` may be on which page, and so may be changed by a write there. -/
   blockIndex : IO.Ref CodeIndex.CodeIndex
   rangeIndex : IO.Ref CodeIndex.CodeIndex
@@ -156,6 +159,7 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimi
     rangeIndex := ← IO.mkRef {}
     cacheVersions := ← IO.mkRef {}
     rangeVersions := ← IO.mkRef {}
+    gathered := ← IO.mkRef {}
     statistics := ← IO.mkRef {}
     persistentMemory := ← IO.mkRef none
     persistentVariable := ← IO.mkRef none
@@ -209,6 +213,7 @@ def clearCache (engine : Engine) : IO Unit := do
   engine.ranges.set {}
   engine.cacheVersions.set {}
   engine.rangeVersions.set {}
+  engine.gathered.set {}
   engine.blockIndex.set {}
   engine.rangeIndex.set {}
   engine.nativeLive.set 0
@@ -697,6 +702,17 @@ private def reachable (edges : List (Nat × Nat)) (source target : Nat) : Bool :
           loop fuel (current :: visited) (next ++ rest)
   loop (edges.length + 1) [] [source]
 
+private def liftGathered (engine : Engine) (lift : Lift) (lowerable : Block → Bool) (target : Nat) (code : ByteArray) :
+    IO (Block × Bool) := do
+  engine.statistics.modify fun stats => { stats with lifts := stats.lifts + 1 }
+  let block ← lift target code
+  if block.address != target then
+    throw <| IO.userError s!"lifted graph block address {block.address} does not match {target}"
+  let lowers := lowerable block
+  engine.gathered.modify fun gathered =>
+    (if gathered.size ≥ engine.cacheLimit then {} else gathered).insert target (code, block, lowers)
+  pure (block, lowers)
+
 private def gatherGraph (engine : Engine) (fetch : Fetch) (lift : Lift) (limit : Nat)
     (seed : Block) (seedCode : ByteArray) (lowerable : Block → Bool) :
     IO (List Block × List (Nat × Nat) × List (Nat × ByteArray)) := do
@@ -718,12 +734,12 @@ private def gatherGraph (engine : Engine) (fetch : Fetch) (lift : Lift) (limit :
           else
             try
               let code ← fetch target
-              engine.statistics.modify fun stats => { stats with lifts := stats.lifts + 1 }
-              let block ← lift target code
-              if block.address != target then
-                throw <| IO.userError s!"lifted graph block address {block.address} does not match {target}"
+              let (block, lowers) ← match (← engine.gathered.get)[target]? with
+                | some (bytes, block, lowers) =>
+                  if bytes == code then pure (block, lowers) else liftGathered engine lift lowerable target code
+                | none => liftGathered engine lift lowerable target code
               -- A block that needs the interpreter stays out, and the range leaves for it.
-              if lowerable block then
+              if lowers then
                 pure (edges ++ [(current.address, target)], additions ++ [block], sources ++ [(target, code)])
               else
                 pure (edges, additions, sources)
@@ -1280,7 +1296,9 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
       return entry
     | none => do
       let first ← prepare engine lift address code false
-      if first.settled || (← first.executions.get) < engine.hotThreshold || cooldown != 0 then return first
+      -- Nothing to compile it with is a reason not to find and lower its graph either, each time it runs.
+      if first.settled || (← first.executions.get) < engine.hotThreshold || cooldown != 0 ||
+          (← engine.nativeLive.get) ≥ engine.nativeLimit then return first
       else
         let settle (entry : CachedBlock) : IO CachedBlock := do
           let updated := { entry with settled := true }
@@ -1302,8 +1320,6 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
           match lowerGraph blocks edges engine.wrapFaults with
           | none => settle first
           | some lowering =>
-            if (← engine.nativeLive.get) ≥ engine.nativeLimit then return first
-            else
               let started ← IO.monoMsNow
               let program ← Jit.compile lowering.ops
               let elapsed := (← IO.monoMsNow) - started

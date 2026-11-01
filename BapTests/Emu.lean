@@ -1040,6 +1040,18 @@ private def regionAudit : IO Unit := do
   assertTrue "Emu fetches execute-only memory" (← Bap.Emu.step executeOnly)
   assertBits "Emu runs execute-only code" (BitVec.ofNat 64 1) (.ok (← Bap.Emu.reg executeOnly a0))
   expectThrow "Emu execute-only memory is not readable" (Bap.Emu.read executeOnly 0 4)
+  -- What a fetch remembers of a page doesn't outlive the permission or the mapping.
+  let three ← LLVM.assemble "riscv64" "addi a0, a0, 1\naddi a0, a0, 1\naddi a0, a0, 1"
+  let protecting ← Tuned.riscv64 three 0 0
+  Bap.Emu.setReg protecting a0 (.bits (BitVec.ofNat 64 0))
+  assertTrue "Emu fetches before it loses the permission" (← Bap.Emu.step protecting)
+  Bap.Emu.protect protecting 0 12 rw
+  expectThrow "Emu doesn't fetch what lost the permission" (Bap.Emu.step protecting)
+  let unmapping ← Tuned.riscv64 three 0 0
+  Bap.Emu.setReg unmapping a0 (.bits (BitVec.ofNat 64 0))
+  assertTrue "Emu fetches before the unmapping" (← Bap.Emu.step unmapping)
+  Bap.Emu.unmap unmapping 0 12
+  expectThrow "Emu doesn't fetch what was unmapped" (Bap.Emu.step unmapping)
   -- Protection applies to the requested bytes only.
   let emu ← Tuned.riscv64 code 0 0
   Bap.Emu.map emu ⟨0x1000, zeros 0x30, rw⟩
