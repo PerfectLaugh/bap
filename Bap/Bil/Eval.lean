@@ -14,6 +14,39 @@ def lookup (env : Env) (var : Bap.Var) : Except String Value :=
 def bind (env : Env) (var : Bap.Var) (value : Value) : Env :=
   (var, value) :: env.filter fun binding => binding.1 != var
 
+/-- What an environment is without a variable, sharing all after where it was, as it is hardly ever there twice. What was written
+last is at the front, so that a program of many registers copies a few cells of them at each write and not all. -/
+private def withoutFast (env : Env) (var : Bap.Var) : Env :=
+  let different : Bap.Var × Value → Bool := fun binding => binding.1 != var
+  match env with
+  | [] => []
+  | binding :: rest =>
+    if different binding then binding :: withoutFast rest var
+    else if rest.all different then rest
+    else rest.filter different
+
+private theorem withoutFast_eq (env : Env) (var : Bap.Var) :
+    withoutFast env var = env.filter fun binding => binding.1 != var := by
+  induction env with
+  | nil => rfl
+  | cons binding rest ih =>
+    rw [withoutFast]
+    by_cases hb : (binding.1 != var) = true
+    · simp only [hb, ↓reduceIte, List.filter_cons, ih]
+    · simp only [hb, ↓reduceIte, Bool.false_eq_true, List.filter_cons]
+      split
+      · rename_i hall
+        exact (List.filter_eq_self.mpr (by simpa using hall)).symm
+      · rfl
+
+/-- `bind`, without copying what it doesn't change. -/
+def bindFast (env : Env) (var : Bap.Var) (value : Value) : Env :=
+  (var, value) :: withoutFast env var
+
+@[csimp] theorem bind_eq_bindFast : @bind = @bindFast := by
+  funext env var value
+  simp [bind, bindFast, withoutFast_eq]
+
 def bindMany (env : Env) (updates : List (Bap.Var × Value)) : Env :=
   let latest := updates.foldl (init := []) fun current update =>
     update :: current.filter (fun binding => binding.1 != update.1)
