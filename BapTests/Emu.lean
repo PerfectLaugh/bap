@@ -1248,6 +1248,31 @@ def testRollbackMemory : IO Unit := do
     Bap.Emu.setPc elsewhere 0
     let _ ← (Bap.Emu.run elsewhere 40).toBaseIO
     agrees s!"{label} of a range that faulted" elsewhere
+    -- What was unmapped in a step that then failed comes back in native memory too, and the state still has it.
+    let unmapping ← setup "sw a2, 0(a0)\nsw a2, 8(a0)\nj -8\necall" fork
+    Bap.Emu.map unmapping ⟨0x200000, ByteArray.mk (Array.replicate 8192 3), ⟨true, true, false⟩⟩
+    let _ ← Bap.Emu.onSyscall unmapping fun current _ _ => do
+      Bap.Emu.unmap current 0x200000 4096
+      throw (IO.userError "refused")
+    let _ ← Bap.Emu.run unmapping 300
+    Bap.Emu.setPc unmapping 12
+    let _ ← (Bap.Emu.run unmapping 1).toBaseIO
+    agrees s!"{label} of an unmap" unmapping
+    assertEqual s!"{label} of an unmap brings it back" 3 (← Bap.Emu.read unmapping 0x200000 1)[0]!.toNat
+    Bap.Emu.unmap unmapping 0x200000 4096
+    agrees s!"{label} of an unmap that stays" unmapping
+    assertEqual s!"{label} of an unmap leaves the rest" 3 (← Bap.Emu.read unmapping 0x201000 1)[0]!.toNat
+    -- What a state is given is what native memory has after, from the pages that it has.
+    let given ← setup "sw a2, 0(a0)\nsw a2, 8(a0)\nj -8" fork
+    let _ ← Bap.Emu.run given 300
+    match ← Bap.Emu.reg given memoryVar with
+    | .memory memory =>
+      Bap.Emu.setReg given memoryVar (.memory (Bap.Memory.writeRegion memory 0x100080 (ByteArray.mk #[42, 43])))
+    | _ => throw <| IO.userError "no memory"
+    agrees s!"{label} of a memory given" given
+    assertEqual s!"{label} of a memory given reads it" [42, 43] (← Bap.Emu.read given 0x100080 2).toList
+    let _ ← Bap.Emu.run given 100
+    agrees s!"{label} of a memory given goes on" given
     -- A step that replaced the memory has nothing to take back, and it is made again.
     let replacing ← setup "sw a2, 0(a0)\nsw a2, 8(a0)\nj -8\necall" fork
     let _ ← Bap.Emu.onSyscall replacing fun current _ _ => do

@@ -178,6 +178,63 @@ int main() {
     found.clear();
     check(memory.stepAddresses(found) && found.size() == 8000, "notes of threads at once");
   }
+  // Bulk bytes: later over earlier, zeros over what is there, none made of nothing, across pages, and to the end of the address space.
+  {
+    PagedMemory memory;
+    std::vector<uint8_t> bytes(10000, 5);
+    memory.fill(0x7FF0, bytes.data(), bytes.size());
+    check(memory.read(0x7FF0) == 5 && memory.read(0x7FF0 + 9999) == 5 && memory.read(0x7FEF) == 0 && memory.read(0x7FF0 + 10000) == 0, "a fill across pages");
+    std::vector<uint8_t> zeros(100, 0);
+    memory.fill(0x8000, zeros.data(), zeros.size());
+    check(memory.read(0x8000) == 0 && memory.read(0x8064) == 5, "zeros over what is there");
+    memory.fill(0x40000000, zeros.data(), zeros.size());
+    check(memory.find(0x40000000) == nullptr, "zeros make no page");
+    memory.fill(0xFFFFFFFFFFFFFFF0, bytes.data(), 100);
+    check(memory.read(0xFFFFFFFFFFFFFFFF) == 5 && memory.read(0) == 0, "a fill stops at the end");
+    uint8_t single = 9;
+    memory.fill(0x50000000, &single, 1);
+    check(memory.read(0x50000000) == 9, "a fill of one");
+  }
+  // Zeros in a range, to its very bytes, and only what wasn't zero is known to the step; a range can be nearly everything.
+  {
+    PagedMemory memory;
+    std::vector<uint8_t> bytes(20000, 6);
+    memory.fill(0x10000, bytes.data(), bytes.size());
+    memory.fill(0xFFFFFFFFFFFFF000, bytes.data(), 4096);
+    memory.beginStep();
+    memory.zeroRange(0x10003, 0x12FFD);
+    check(memory.read(0x10002) == 6 && memory.read(0x10003) == 0 && memory.read(0x12FFD) == 0 && memory.read(0x12FFE) == 6, "the ends of a range");
+    std::vector<uint64_t> found;
+    check(memory.stepAddresses(found) && found.size() == 0x12FFD - 0x10003 + 1 && found.front() == 0x10003 && found.back() == 0x12FFD, "a step knows what was zeroed");
+    memory.beginStep();
+    memory.zeroRange(0x10003, 0x12FFD);
+    found.clear();
+    check(memory.stepAddresses(found) && found.empty(), "what is zero already isn't a write");
+    memory.endStep();
+    memory.zeroRange(0xFFFFFFFFFFFFFFFE, 0xFFFFFFFFFFFFFFFF);
+    check(memory.read(0xFFFFFFFFFFFFFFFD) == 6 && memory.read(0xFFFFFFFFFFFFFFFE) == 0 && memory.read(0xFFFFFFFFFFFFFFFF) == 0, "at the very top");
+    memory.zeroRange(0, 0xFFFFFFFFFFFFFFFF);
+    check(memory.read(0x12FFE) == 0 && memory.read(0xFFFFFFFFFFFFF000) == 0, "all of it");
+    memory.zeroRange(5, 4);
+  }
+  // Zeroing a range while another thread stores next to it leaves what it stored, in the same word.
+  {
+    PagedMemory memory;
+    std::atomic<bool> stop{false};
+    std::thread neighbour([&] {
+      uint8_t value = 0x77;
+      while (!stop)
+        memory.store(0x6000, 1, &value);
+    });
+    std::vector<uint8_t> ones(7, 0xFF);
+    for (int round = 0; round != 3000; ++round) {
+      memory.store(0x6001, 7, ones.data());
+      memory.zeroRange(0x6001, 0x6007);
+    }
+    stop = true;
+    neighbour.join();
+    check(memory.read(0x6000) == 0x77 && memory.read(0x6001) == 0, "a word's other bytes are their own");
+  }
   // At the very top, nothing goes wrong with what wraps.
   {
     PagedMemory memory;

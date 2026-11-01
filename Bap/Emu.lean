@@ -494,11 +494,7 @@ private def restoreThreads (emu : Emu) (snapshot : Snapshot) : IO Unit := do
 /-- A native memory with the bytes of the memory variable of `state`. -/
 private def nativeFromState (emu : Emu) (state : Bil.State) : IO Jit.Memory := do
   match Bil.lookup state.env emu.config.memory with
-  | .ok (.memory memory) =>
-    let cells := Bap.Memory.cells memory
-    let addresses := (cells.map fun cell => UInt64.ofNat cell.1.toNat).toArray
-    let values := (cells.map fun cell => cell.2).toArray
-    Jit.createMemory addresses values
+  | .ok (.memory memory) => Primus.Lifted.nativeOfMemory memory
   | .ok _ => throw <| IO.userError "Emu memory is not a memory value"
   | .error error => throw <| IO.userError error
 
@@ -587,13 +583,7 @@ def restore (emu : Emu) (snapshot : Snapshot) : IO Unit := do
     setRegions emu mapped
   snapshot.processMemory.forM fun (id, regions) => do
     if id != space then emu.parkedRegions.modify (·.insert id regions)
-    let cells := regions.flatMap fun region =>
-      (List.range region.data.size).filterMap fun offset =>
-        let value := region.data[offset]!
-        if value = 0 then none else some (region.address + offset, value)
-    let addresses := (cells.map fun cell => UInt64.ofNat cell.1).toArray
-    let values := (cells.map fun cell => cell.2).toArray
-    let memory ← Jit.createMemory addresses values
+    let memory ← Jit.createMemoryChunks (regions.map fun region => UInt64.ofNat region.address).toArray (regions.map (·.data)).toArray
     emu.processMemory.modify (·.insert id memory)
   Primus.Lifted.discardMemory emu.engine
   match (← emu.processMemory.get).get? (snapshot.table.spaceOf snapshot.currentThread) with
@@ -1198,12 +1188,10 @@ def unmap (emu : Emu) (address size : Nat) : IO Unit := do
     let ⟨_, memory⟩ ← cells emu state
     emu.state.set { env := Bil.bind state.env emu.config.memory (.memory (Bap.Memory.clearRange memory address size)) }
     if let some native := ← emu.engine.persistentMemory.get then
-      let (addresses, values) ← Jit.dumpMemory native
-      let written := (addresses.zip values).filter fun cell =>
-        cell.2 != 0 && address ≤ cell.1.toNat && cell.1.toNat < upper
-      Jit.writeMemory native (written.map (·.1)) (written.map fun _ => 0)
       -- What isn't mapped any more needn't take memory of the host, as a program may map and unmap as long as it likes.
-      if upper > address then Jit.trimMemory native (UInt64.ofNat address) (UInt64.ofNat (upper - 1))
+      if upper > address then
+        Jit.zeroMemory native (UInt64.ofNat address) (UInt64.ofNat (upper - 1))
+        Jit.trimMemory native (UInt64.ofNat address) (UInt64.ofNat (upper - 1))
 
 def regions (emu : Emu) : IO (List (Nat × Nat × Primus.Protection)) := do
   let mapped ← emu.regions.get

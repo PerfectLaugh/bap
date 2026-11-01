@@ -1012,6 +1012,27 @@ extern "C" lean_obj_res bap_jit_memory_create(lean_obj_arg addressesObject,
   }
 }
 
+extern "C" lean_obj_res bap_jit_memory_create_chunks(lean_obj_arg basesObject, lean_obj_arg chunksObject, lean_obj_arg) {
+  try {
+    const size_t count = lean_array_size(basesObject);
+    if (count != lean_array_size(chunksObject))
+      return ioError("JIT memory bases and chunks have different lengths");
+    auto *memory = new PagedMemory;
+    for (size_t index = 0; index != count; ++index) {
+      lean_object *chunk = lean_array_get_core(chunksObject, index);
+      memory->fill(lean_unbox_uint64(lean_array_get_core(basesObject, index)), lean_sarray_cptr(chunk), lean_sarray_size(chunk));
+    }
+    return lean_io_result_mk_ok(lean_alloc_external(memoryClass(), memory));
+  } catch (const std::exception &error) {
+    return ioError(std::string("JIT memory creation failed: ") + error.what());
+  }
+}
+
+extern "C" lean_obj_res bap_jit_memory_zero(lean_obj_arg memoryObject, uint64_t first, uint64_t last, lean_obj_arg) {
+  static_cast<PagedMemory *>(lean_get_external_data(memoryObject))->zeroRange(first, last);
+  return lean_io_result_mk_ok(lean_box(0));
+}
+
 extern "C" lean_obj_res bap_jit_memory_write(lean_obj_arg memoryObject,
                                                lean_obj_arg addressesObject,
                                                lean_obj_arg valuesObject, lean_obj_arg) {

@@ -309,6 +309,69 @@ public:
     return true;
   }
 
+  // Bytes in bulk into a memory that nothing else can see yet, later over earlier, which is why it needs nothing to be atomic and takes
+  // no longer than a copy. What is all zeros makes no page. It doesn't go past the end of the address space.
+  void fill(uint64_t address, const uint8_t *bytes, size_t size) {
+    size_t done = 0;
+    while (done != size) {
+      uint64_t at = address + done;
+      if (at < address)
+        return;
+      size_t offset = at & (pageSize - 1);
+      size_t count = pageSize - offset < size - done ? pageSize - offset : size - done;
+      const uint8_t *from = bytes + done;
+      bool zero = from[0] == 0 && std::memcmp(from, from + 1, count - 1) == 0;
+      uint8_t *page = zero ? find(at) : ensure(at);
+      if (page != nullptr)
+        std::memcpy(page + offset, from, count);
+      done += count;
+    }
+  }
+
+  // Zeros from `first` to `last`, as a step can know of, in as long as the pages that there are between them. That is what unmapping comes
+  // to, which shouldn't take as long as all that the process holds.
+  void zeroRange(uint64_t first, uint64_t last) {
+    if (last < first)
+      return;
+    const uint8_t zeros[wordSize] = {0};
+    auto zeroInPage = [&](uint64_t base, uint8_t *page) {
+      uint64_t lower = first > base ? first : base;
+      uint64_t upper = last < base + (pageSize - 1) ? last : base + (pageSize - 1);
+      if (last < base || first > base + (pageSize - 1))
+        return;
+      uint64_t at = lower;
+      while (true) {
+        uint64_t wordEnd = at | (wordSize - 1);
+        uint64_t end = wordEnd < upper ? wordEnd : upper;
+        size_t count = static_cast<size_t>(end - at) + 1;
+        // Only what this range has of the word: the rest of it is someone else's.
+        uint64_t word = __atomic_load_n(wordAt(page, at), __ATOMIC_ACQUIRE);
+        uint8_t bytes[wordSize];
+        std::memcpy(bytes, &word, wordSize);
+        if (std::memcmp(bytes + (at & (wordSize - 1)), zeros, count) != 0) {
+          storeInWord(at, count, zeros);
+          noteStep(at, count);
+        }
+        if (end == upper)
+          break;
+        at = end + 1;
+      }
+    };
+    // By the page when that is fewer than all that there are, as a range can be most of the address space.
+    if ((last >> pageBits) - (first >> pageBits) < (size_t{1} << 16)) {
+      uint64_t base = first & ~static_cast<uint64_t>(pageSize - 1);
+      while (true) {
+        if (uint8_t *page = find(base))
+          zeroInPage(base, page);
+        if (base >= (last & ~static_cast<uint64_t>(pageSize - 1)))
+          break;
+        base += pageSize;
+      }
+    } else {
+      forEachPage(zeroInPage);
+    }
+  }
+
   // Each page there is, by ascending address.
   template <typename F> void forEachPage(F &&action) const { visit(&root, 0, 0, action); }
 

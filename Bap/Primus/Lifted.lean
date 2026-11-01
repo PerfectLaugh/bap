@@ -1625,6 +1625,12 @@ private def syncState (lowering : Lowering) (state : Bil.State) (slots : Array U
   let updates := syncUpdates (reachedOutputs lowering slots) slots
   { env := updates ++ withoutBindings (updates.map Prod.fst) state.env }
 
+/-- A native memory with what a memory holds, by the page as it holds it: what a process holds doesn't have to become a list of its bytes
+for this, which is as long as a copy. -/
+def nativeOfMemory {width : Nat} (memory : Bap.Memory width) : IO Jit.Memory := do
+  let pages := memory.pages.toArray
+  Jit.createMemoryChunks (pages.map fun page => UInt64.ofNat (page.1 * Bap.Memory.pageSize)) (pages.map (·.2))
+
 private def memoryInput (lowering : Lowering) (state : Bil.State) :
     Except String (Array UInt64 × Array UInt8) := do
   match lowering.memory with
@@ -1838,6 +1844,20 @@ def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bi
       | some memory, some _ =>
         runPersistent engine entry.executions lowering entry.next program state slots memory observer codeObserver budget
       | _, _ =>
+        -- A memory of its own from the start, which needs nothing of what `memoryInput` makes of the state.
+        let direct ← if engine.persistentFrom == 0 then
+            match lowering.memory with
+            | some var =>
+              match Bil.lookup state.env var with
+              | .ok (.memory memory) => pure (some (← nativeOfMemory memory))
+              | _ => pure none
+            | none => pure none
+          else pure none
+        if let some memory := direct then
+          unless engine.deferMemorySync do Jit.beginMemoryStep memory
+          engine.persistentMemory.set (some memory)
+          engine.persistentVariable.set lowering.memory
+          return ← runPersistent engine entry.executions lowering entry.next program state slots memory observer codeObserver budget
         match memoryInput lowering state with
         | .error _ => runInterpreted engine entry.firstNext pc fallback state observer
         | .ok (addresses, values) =>

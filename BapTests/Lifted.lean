@@ -190,7 +190,16 @@ def testNativeMemoryModel : IO Unit := do
           throw <| IO.userError s!"native model range of {size} at {address} in round {round}"
     | 6 =>
       let first ← place
-      Jit.trimMemory memory first (first + UInt64.ofNat ((← next) % 8192))
+      let last := first + UInt64.ofNat ((← next) % 8192)
+      if first ≤ last then
+        Jit.trimMemory memory first last
+        -- Now and then, zeros in a part of that.
+        if (← next) % 2 == 0 then
+          let upper := first + UInt64.ofNat ((← next) % 256)
+          if first ≤ upper then
+            Jit.zeroMemory memory first upper
+            for offset in [0:(upper - first).toNat + 1] do
+              if model.contains (first + offset.toUInt64) then model := model.insert (first + offset.toUInt64) 0
     | _ =>
       -- A clone goes on, and what it came from is left as it was, which it must still be.
       if (← next) % 16 == 0 then
@@ -202,6 +211,38 @@ def testNativeMemoryModel : IO Unit := do
   same "native model at its end" memory model
   memory ← Jit.cloneMemory memory
   same "native model of a clone at its end" memory model
+  -- What a memory of chunks holds is what a memory of those bytes would.
+  for round in [0:30] do
+    let chunkCount := (← next) % 6
+    let mut bases : Array UInt64 := #[]
+    let mut chunks : Array ByteArray := #[]
+    let mut addresses : Array UInt64 := #[]
+    let mut values : Array UInt8 := #[]
+    for _ in [0:chunkCount] do
+      let base ← place
+      let size := (← next) % 9000
+      let keepRoom := if base.toNat + size ≤ 2 ^ 64 then size else 2 ^ 64 - base.toNat
+      let mut chunk := ByteArray.empty
+      for index in [0:keepRoom] do
+        let extra ← next
+        let value := UInt8.ofNat (if index % 97 == 0 then 0 else index + extra % 3)
+        chunk := chunk.push value
+        addresses := addresses.push (base + index.toUInt64)
+        values := values.push value
+      bases := bases.push base
+      chunks := chunks.push chunk
+    let bulk ← Jit.createMemoryChunks bases chunks
+    let oneByOne ← Jit.createMemory addresses values
+    let (bulkAddresses, bulkValues) ← Jit.dumpMemory bulk
+    let (plainAddresses, plainValues) ← Jit.dumpMemory oneByOne
+    assertTrue s!"native chunks in round {round} are those bytes" (bulkAddresses == plainAddresses && bulkValues == plainValues)
+  -- And of a memory of Lean, what `nativeOfMemory` makes.
+  let held := Bap.Memory.writeRegion (Bap.Memory.writeRegion (Bap.Memory.empty 64) 0xFE (ByteArray.mk #[1, 0, 3, 4])) 0x10000 (ByteArray.mk (Array.replicate 600 9))
+  let made ← Primus.Lifted.nativeOfMemory held
+  let (madeAddresses, madeValues) ← Jit.dumpMemory made
+  assertEqual "native of a memory holds what it holds"
+    ((Bap.Memory.cells held).map (fun cell => (cell.1.toNat, cell.2)))
+    ((madeAddresses.toList.map (·.toNat)).zip madeValues.toList)
 
 set_option maxRecDepth 4000 in
 def run : IO Unit := do

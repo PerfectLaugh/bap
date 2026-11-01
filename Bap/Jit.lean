@@ -26,7 +26,7 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
 6. `runWithMemoryObservedCode` returns the final cells of the memory image, and
    `runWithPersistentMemoryObservedCode` the cells its stores changed, each once.
 
-**Persistent memory** (`Memory`, `createMemory`, `writeMemory`, `readMemory`, `readMemoryRange`, `dumpMemory`, `cloneMemory`, `trimMemory`)
+**Persistent memory** (`Memory`, `createMemory`, `createMemoryChunks`, `writeMemory`, `zeroMemory`, `readMemory`, `readMemoryRange`, `dumpMemory`, `cloneMemory`, `trimMemory`)
 7. A `Memory` is a total map from `UInt64` to `UInt8`, 0 where nothing was written. `readMemory` reads it,
    `writeMemory` and `createMemory` write pairs in array order, and `createMemory` starts from nothing.
 8. `dumpMemory` returns a cell for each address that doesn't hold 0, by ascending address, with no address twice
@@ -42,6 +42,9 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
 11. `readMemoryRange memory address size` is `size` bytes of what `readMemory` reads, from `address` on.
 12. `trimMemory` changes nothing that any operation here can tell. It may let the host have the memory of pages that
     hold only zeros, of those wholly between its bounds, when nothing stores there meanwhile.
+14. `createMemoryChunks bases chunks` is `createMemory` of each byte of each chunk at its base plus its offset, in that order,
+    without going past the end of the address space. `zeroMemory memory first last` is `writeMemory` of zeros at the
+    addresses from `first` to `last`, as obligation 13 knows of them, but that it needn't say those that were already zero.
 13. After `beginMemoryStep`, `memoryStepWrites` holds every address that a `writeMemory` or a program wrote to this memory
     since, once each, by ascending address, also for a program that failed: `some`, or `none` when it was too many or
     no step began. It may hold addresses that were written the same as they were. `endMemoryStep` stops it.
@@ -151,6 +154,12 @@ opaque readMemory (memory : @& Memory) (address : UInt64) : IO UInt8
 
 @[extern "bap_jit_memory_read_range"]
 opaque readMemoryRange (memory : @& Memory) (address : UInt64) (size : @& Nat) : IO ByteArray
+
+@[extern "bap_jit_memory_create_chunks"]
+opaque createMemoryChunks (bases : @& Array UInt64) (chunks : @& Array ByteArray) : IO Memory
+
+@[extern "bap_jit_memory_zero"]
+opaque zeroMemory (memory : @& Memory) (first last : UInt64) : IO Unit
 
 @[extern "bap_jit_memory_step_begin"]
 opaque beginMemoryStep (memory : @& Memory) : IO Unit
