@@ -604,6 +604,28 @@ def testLinuxProc (triple : String) : IO Unit := do
   let (_, mine) ← runOn (← Bap.Linux.start (kernel.addGenerated "/proc/sys/kernel/ostype" fun _ => "Mine\n".toUTF8) "/test" ["/test", "arg1"])
   assertTrue s!"Linux {triple} /proc can be replaced: {mine}" ((mine.splitOn "ostype Mine").length > 1)
 
+/-- What a machine is given sees each system call before the kernel: it may answer one, with a result or an error on any architecture,
+or hand it on. `getcwd` is the number that it answers. -/
+def testLinuxSyscallHandler (triple : String) (getcwd : Nat) : IO Unit := do
+  let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-files")
+  let seen ← IO.mkRef 0
+  let handler : Bap.Linux.SyscallHandler := fun emu number _ => do
+    seen.modify (· + 1)
+    if number == getcwd then Bap.Emu.syscallReturn emu (.error 13) else pure .default
+  let start := Bap.Linux.start kernel "/test" ["/test", "arg1"] (handler := some handler)
+  let runOn (machine : Bap.Linux.Machine) : IO (Bap.Tasks.ScheduleOutcome × String) := do
+    let console ← IO.mkRef ByteArray.empty
+    let outcome ← machine.run fun data => console.modify (· ++ data)
+    pure (outcome, String.fromUTF8! (← console.get))
+  let expected := "args 2 arg1\ncwd ?\nread hello 42\nsize 9 dir 0\nseek yz\ndup x\nlink c\nentries 3\ngone -1\ntime 1\nmalloc 1\nnope 1\n"
+  assertEqual s!"Linux {triple} a handler goes before the kernel" (Bap.Tasks.ScheduleOutcome.finished (Bap.Tasks.exitedStatus 5), expected) (← runOn (← start))
+  assertTrue s!"Linux {triple} a handler sees the others too" ((← seen.get) > 10)
+  -- After a checkpoint it is given again.
+  let first ← start
+  let _ ← first.run (fuel := 1) fun _ => pure ()
+  assertEqual s!"Linux {triple} a handler goes on from a checkpoint" (Bap.Tasks.ScheduleOutcome.finished (Bap.Tasks.exitedStatus 5), expected)
+    (← runOn (← Bap.Linux.Machine.ofCheckpoint (← first.checkpoint) (handler := some handler)))
+
 /-- Code that a program changes under itself once it is hot, as the machine that made this test does it. -/
 def testLinuxSelfModifying : IO Unit := do
   let path := "testsuite/bin/x86_64-linux-musl-selfmodify"

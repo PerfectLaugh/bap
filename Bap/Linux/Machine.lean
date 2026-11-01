@@ -729,14 +729,21 @@ private def emulatorOf (architecture : Architecture) : IO Emu := do
     | .powerpc _ _ => .powerpc)))
   pure emu
 
+/-- What sees a system call before the kernel does, with its number and arguments as the guest gave them. `.default` hands it on, and
+`.returnValue` answers it, with what goes in the register of the result as it is: `syscallReturn` makes that of a result or an error
+on any architecture, as some say that a call failed apart from its value. -/
+abbrev SyscallHandler := Emu → Nat → List Nat → IO SyscallAction
+
 /-- What makes an emulator a machine: its kernel behind its system calls. None of it is in a checkpoint. -/
-private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel) (watch : Option (Nat → List Nat → IO Unit)) :
-    IO Machine := do
+private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel) (watch : Option (Nat → List Nat → IO Unit))
+    (handler : Option SyscallHandler) : IO Machine := do
   let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
       pure .default
+  if let some handler := handler then
+    let _ ← onSyscall emu handler
   let _ ← serveKernelCalls machine
   let _ ← serveTaskCalls emu
   let _ ← serveRest machine
@@ -745,9 +752,10 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   pure machine
 
 /-- A machine at the start of `path`, which is in `kernel`. Its first process has the standard descriptors, on a console, with
-`input` to read. `watch` sees each system call before it is served. -/
+`input` to read. `watch` sees each system call before it is served, and then `handler`, which may serve it in place of the kernel. -/
 def start (kernel : Kernel) (path : String) (arguments : List String) (environment : List String := [])
-    (input : ByteArray := ByteArray.empty) (watch : Option (Nat → List Nat → IO Unit) := none) : IO Machine := do
+    (input : ByteArray := ByteArray.empty) (watch : Option (Nat → List Nat → IO Unit) := none)
+    (handler : Option SyscallHandler := none) : IO Machine := do
   let data ← IO.ofExcept ((fileOf kernel path).mapError fun errno => s!"{path}: error {errno}")
   let program ← IO.ofExcept (Elf.parse data)
   let some architecture := Architecture.ofElf program.machine program.bits program.big program.flags
@@ -800,7 +808,7 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   let kernel := kernel.setProcess first { kernel.process first with
     breakStart := top, breakEnd := top, command := if arguments.isEmpty then [path] else arguments, environment, program := path }
   let kernel := Proc.install kernel
-  machineOf architecture emu kernel watch
+  machineOf architecture emu kernel watch handler
 
 /-- Runs it until nothing can run, with what it writes to the console going to `output` as it comes. -/
 def Machine.run (machine : Machine) (output : ByteArray → IO Unit) (quantum : Nat := 100000) (fuel : Nat := 1000000000) :
@@ -842,10 +850,10 @@ def Machine.checkpoint (machine : Machine) : IO ByteArray := do
 
 /-- A new machine where a checkpoint was, which goes on as that one would. This is all it takes: nothing has to be running, or
 even to be on the host, but what the bytes hold. A turn of a thread that a run stopped in starts again. `watch` is as in `start`.
-What `Kernel.addGenerated` put in has its functions given again, by the normal paths that they were put in at, as a function can't be
+So is `handler`, as neither is a thing that can be in a file. What `Kernel.addGenerated` put in has its functions given again, by the normal paths that they were put in at, as a function can't be
 in a file: a file without its function gives `EIO` when it is opened. -/
 def Machine.ofCheckpoint (data : ByteArray) (watch : Option (Nat → List Nat → IO Unit) := none)
-    (generators : List (String × Generator) := []) : IO Machine := do
+    (generators : List (String × Generator) := []) (handler : Option SyscallHandler := none) : IO Machine := do
   if data.extract 0 checkpointMagic.size != checkpointMagic then
     throw <| IO.userError "not a checkpoint of a Linux machine"
   let (number, at_) ← IO.ofExcept (Wire.getNat data checkpointMagic.size)
@@ -859,13 +867,14 @@ def Machine.ofCheckpoint (data : ByteArray) (watch : Option (Nat → List Nat �
   let kernel := { kernel with generators := generators.foldl (fun table entry => table.insert entry.1 entry.2) {} }
   let emu ← emulatorOf architecture
   Bap.Emu.restore emu (← snapshotOfBytes emu (data.extract at_ data.size))
-  machineOf architecture emu kernel watch
+  machineOf architecture emu kernel watch handler
 
 def Machine.saveFile (machine : Machine) (path : System.FilePath) : IO Unit := do
   IO.FS.writeBinFile path (← machine.checkpoint)
 
-def Machine.loadFile (path : System.FilePath) (watch : Option (Nat → List Nat → IO Unit) := none) : IO Machine := do
-  Machine.ofCheckpoint (← IO.FS.readBinFile path) watch
+def Machine.loadFile (path : System.FilePath) (watch : Option (Nat → List Nat → IO Unit) := none)
+    (generators : List (String × Generator) := []) (handler : Option SyscallHandler := none) : IO Machine := do
+  Machine.ofCheckpoint (← IO.FS.readBinFile path) watch generators handler
 
 /-- A file of the host for a kernel, before a run: this is the only way that anything gets from there to in here. -/
 def Kernel.copyFromHost (kernel : Kernel) (path : String) (into : String := path) : IO Kernel := do

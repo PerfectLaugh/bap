@@ -68,6 +68,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxMusl "arm" (floats := false),
     Bap.Tests.Emu.testLinuxMusl "thumb",
     Bap.Tests.Emu.testLinuxSelfModifying,
+    Bap.Tests.Emu.testLinuxSyscallHandler "aarch64" 17,
+    Bap.Tests.Emu.testLinuxSyscallHandler "mips" 4203,
     Bap.Tests.Emu.testLinuxInterworking "arm",
     Bap.Tests.Emu.testLinuxInterworking "thumb",
     Bap.Tests.Emu.testLinuxMusl "riscv32",
