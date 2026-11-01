@@ -644,6 +644,19 @@ def testLinuxAuxv (triple : String) : IO Unit := do
   assertEqual s!"Linux {triple} auxv ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
   assertEqual s!"Linux {triple} auxv is what it started with" "1 1 1\n" (String.fromUTF8! (← written.get))
 
+/-- A loop that runs a lot is compiled again with optimization, in the middle of it, and comes to the same. -/
+def testOptimizedRange : IO Unit := do
+  let code ← LLVM.assemble "riscv64" "addi a0, a0, 3\naddi a1, a1, -1\nbnez a1, -8\nnop"
+  let count := 200000
+  let a0 : Bap.Var := ⟨"X10", .imm 64, 0, false⟩
+  let emu ← Tuned.riscv64 code 0 0
+  Bap.Emu.setReg emu a0 (.bits (BitVec.ofNat 64 0))
+  Bap.Emu.setReg emu ⟨"X11", .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 count))
+  let _ ← Bap.Emu.runUntil emu 12 (fuel := 3 * count + 100)
+  assertBits "A loop comes to the same when compiled again" (BitVec.ofNat 64 (3 * count)) (.ok (← Bap.Emu.reg emu a0))
+  let stats ← Primus.Lifted.stats emu.engine
+  assertTrue s!"A loop that runs a lot is compiled again ({stats.optimized})" (stats.optimized ≥ 1)
+
 /-- What the rounding modes of a machine do, as qemu has it. -/
 def testLinuxRound (triple : String) : IO Unit := do
   let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-round"

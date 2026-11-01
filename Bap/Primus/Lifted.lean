@@ -29,6 +29,8 @@ structure Statistics where
   invalidations : Nat := 0
   evictions : Nat := 0
   graphBlocks : Nat := 0
+  /-- What was compiled again with optimization, for having run a lot. -/
+  optimized : Nat := 0
   deriving Repr
 
 private structure Lowering where
@@ -1231,7 +1233,8 @@ private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Optio
     let program ← Jit.compileOptimized lowering.ops
     let elapsed := (← IO.monoMsNow) - started
     engine.statistics.modify fun stats =>
-      { stats with nativeCompilations := stats.nativeCompilations + 1, compileMs := stats.compileMs + elapsed }
+      { stats with nativeCompilations := stats.nativeCompilations + 1, compileMs := stats.compileMs + elapsed
+                   optimized := stats.optimized + 1 }
     return some { entry with plan := .native lowering program fallback, optimized := true }
 
 private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : ByteArray)

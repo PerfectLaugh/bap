@@ -1791,6 +1791,7 @@ def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
           invalidations := total.invalidations + current.invalidations
           evictions := total.evictions + current.evictions
           graphBlocks := total.graphBlocks + current.graphBlocks
+          optimized := total.optimized + current.optimized
         })
         let control ← emu.threadControl.get
         let workerResults ← workers.mapM fun worker => do
