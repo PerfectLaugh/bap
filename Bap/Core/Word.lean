@@ -8,6 +8,8 @@ def Bap.Word.ofNatFast (width value : Nat) : BitVec width :=
       have : (2 : Nat) ^ 32 ≤ 2 ^ width := Nat.pow_le_pow_right (by omega) h.2
       have h32 : (2 : Nat) ^ 32 = 4294967296 := by decide
       omega)⟩⟩
+  else if h64 : width = 64 ∧ value < 0x10000000000000000 then
+    ⟨⟨value, by rw [h64.1]; exact h64.2⟩⟩
   else BitVec.ofNat width value
 
 @[csimp] theorem Bap.Word.ofNat_eq_fast : @BitVec.ofNat = @Bap.Word.ofNatFast := by
@@ -21,7 +23,11 @@ def Bap.Word.ofNatFast (width value : Nat) : BitVec width :=
         have h32 : (2 : Nat) ^ 32 = 4294967296 := by decide
         omega)
     exact BitVec.eq_of_toNat_eq (by simp [Nat.mod_eq_of_lt hlt])
-  · rfl
+  · split
+    · rename_i h
+      obtain ⟨rfl, hv⟩ := h
+      exact BitVec.eq_of_toNat_eq (by simpa using Nat.mod_eq_of_lt hv)
+    · rfl
 
 namespace Bap
 
@@ -56,13 +62,37 @@ def shl (value amount : Word width) : Word width := value <<< amount.toNat
 
 /-- `shl` past the width is 0, without `Nat.shiftLeft` of an amount it can't represent, which aborts the process. -/
 def shlFast (value amount : Word width) : Word width :=
-  if width ≤ amount.toNat then 0#width else value <<< amount.toNat
+  if width ≤ amount.toNat then 0#width else BitVec.ofNat width (value.toNat <<< amount.toNat)
 
 @[csimp] theorem shl_eq_fast : @shl = @shlFast := by
   funext width value amount
   unfold shl shlFast
   split
   · next h => exact BitVec.shiftLeft_eq_zero h
+  · rfl
+
+/-- `+`, `*` and `-` by way of the `BitVec.ofNat` here, as those of the library work out the power of two each time, and for
+a difference that isn't negative without any. -/
+def addFast (left right : Word width) : Word width := BitVec.ofNat width (BitVec.toNat left + BitVec.toNat right)
+def mulFast (left right : Word width) : Word width := BitVec.ofNat width (BitVec.toNat left * BitVec.toNat right)
+def subFast (left right : Word width) : Word width :=
+  if BitVec.toNat right ≤ BitVec.toNat left then
+    ⟨⟨BitVec.toNat left - BitVec.toNat right, Nat.lt_of_le_of_lt (Nat.sub_le _ _) left.isLt⟩⟩
+  else left - right
+
+theorem addFast_eq (left right : Word width) : addFast left right = left + right := rfl
+theorem mulFast_eq (left right : Word width) : mulFast left right = left * right := rfl
+theorem subFast_eq (left right : Word width) : subFast left right = left - right := by
+  unfold subFast
+  split
+  · next h =>
+    apply BitVec.eq_of_toNat_eq
+    have hl := left.isLt
+    have hr := right.isLt
+    rw [BitVec.toNat_sub]
+    show BitVec.toNat left - BitVec.toNat right = _
+    rw [show 2 ^ width - BitVec.toNat right + BitVec.toNat left = (BitVec.toNat left - BitVec.toNat right) + 2 ^ width by omega,
+      Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
   · rfl
 
 def lshr (value amount : Word width) : Word width := value >>> amount.toNat

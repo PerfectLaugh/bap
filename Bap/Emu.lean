@@ -119,6 +119,8 @@ structure Emu where
   regions : IO.Ref (List Region)
   stopped : IO.Ref Bool
   hooks : IO.Ref (List CodeHook)
+  /-- The hooks of each page that code has run on, which is what an instruction goes by. All that changes `hooks` empties it. -/
+  hooksByPage : IO.Ref (Std.HashMap Nat (List CodeHook))
   readHooks : IO.Ref (List ReadHook)
   writeHooks : IO.Ref (List WriteHook)
   syscallHooks : IO.Ref (List SyscallHook)
@@ -225,6 +227,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     regions := ← IO.mkRef mapped
     stopped := ← IO.mkRef false
     hooks := ← IO.mkRef []
+    hooksByPage := ← IO.mkRef {}
     readHooks := ← IO.mkRef []
     writeHooks := ← IO.mkRef []
     syscallHooks := ← IO.mkRef []
@@ -615,6 +618,7 @@ def onCode (emu : Emu) (range : Nat × Nat) (action : Emu → Nat → IO Unit) :
     throw <| IO.userError "invalid Emu code-hook range"
   let id ← nextHookId emu
   emu.hooks.modify (· ++ [⟨id, range.1, range.2, fun context => action (withContext emu context)⟩])
+  emu.hooksByPage.set {}
   pure id
 
 /-- Calls `action emu address size` before each load of the range. -/
@@ -649,6 +653,7 @@ def onIntrinsic (emu : Emu) (name : String) (action : Emu → Nat → IO Intrins
 
 def removeHook (emu : Emu) (id : HookId) : IO Unit := do
   emu.hooks.modify fun hooks => hooks.filter fun hook => hook.id != id
+  emu.hooksByPage.set {}
   emu.readHooks.modify fun hooks => hooks.filter fun hook => hook.id != id
   emu.writeHooks.modify fun hooks => hooks.filter fun hook => hook.id != id
   emu.watchedSteps.set {}
@@ -658,6 +663,7 @@ def removeHook (emu : Emu) (id : HookId) : IO Unit := do
 
 def clearHooks (emu : Emu) : IO Unit := do
   emu.hooks.set []
+  emu.hooksByPage.set {}
   emu.readHooks.set []
   emu.writeHooks.set []
   emu.watchedSteps.set {}
@@ -780,13 +786,25 @@ private def recordAccess (emu : Emu) (write : Bool) (address size value : Nat) :
         droppedAccesses := state.droppedAccesses + entries.length - retained.length
       }
 
+/-- The hooks of the page of an address, in the order they came. -/
+private def hooksNear (emu : Emu) (address : Nat) : IO (List CodeHook) := do
+  let page := address / 4096
+  match (← emu.hooksByPage.get)[page]? with
+  | some hooks => pure hooks
+  | none =>
+    let hooks := hooksOnPage (·.first) (·.last) (← emu.hooks.get) page
+    emu.hooksByPage.modify (·.insert page hooks)
+    pure hooks
+
 private def notifyCode (emu : Emu) (address : Nat) : IO Unit := do
   if (← emu.hooks.get).isEmpty then return
+  let near ← hooksNear emu address
+  let fires (hook : CodeHook) : Bool := hook.first ≤ address && address ≤ hook.last
+  if !near.any fires then return
   serialize emu <| do
-  let hooks ← emu.hooks.get
   let context := hookContext emu
-  (hooksForCode (·.first) (·.last) hooks address).forM fun hook =>
-    hook.action context address
+  for hook in near do
+    if fires hook then hook.action context address
 
 /-- Whether nothing watches the code that runs. -/
 private def rangeIsQuiet (emu : Emu) : IO Bool := do
@@ -798,7 +816,7 @@ private def observeRangeCode (emu : Emu) (address : Nat) : IO Bool := do
   emu.pc.set address
   let dirty := (← emu.engine.dirtyCode.get).isSome
   let late := (← emu.rangeQuiet.get) && !(← rangeIsQuiet emu)
-  let hooked := !(hooksForCode (·.first) (·.last) (← emu.hooks.get) address).isEmpty
+  let hooked := (← hooksNear emu address).any fun hook => hook.first ≤ address && address ≤ hook.last
   -- A range that ends at its first site has done no good: where it starts, the step runs its one instruction by itself.
   match ← emu.rangeStart.get with
   | some start =>
@@ -1560,7 +1578,7 @@ private def runRange (emu : Emu) (address budget : Nat) : IO (Nat × Bil.Effect)
   let quiet ← rangeIsQuiet emu
   emu.rangeQuiet.set quiet
   emu.rangeStart.set (some address)
-  let result ← Primus.Lifted.runBlockObserved emu.engine (fetch emu) (lift emu (isThumb state)) state address
+  let result ← Primus.Lifted.runBlockObserved emu.engine (fetch emu) (fun target code => lift emu (isThumb state) target code) state address
     (some (notifyMemory emu)) (some (observeRangeCode emu)) (!quiet) budget
   Primus.Lifted.flushDirtyRange emu.engine
   emu.state.set result.state

@@ -2042,6 +2042,19 @@ theorem mem_hooksForCode (first last : β → Nat) (hooks : List β) (address : 
     hook ∈ hooksForCode first last hooks address ↔ hook ∈ hooks ∧ first hook ≤ address ∧ address ≤ last hook := by
   simp [hooksForCode]
 
+/-- What a page's hooks give for an address on it is what all of them give. -/
+theorem hooksForCode_onPage (first last : β → Nat) (hooks : List β) (address : Nat) :
+    hooksForCode first last (hooksOnPage first last hooks (address / 4096)) address = hooksForCode first last hooks address := by
+  simp only [hooksForCode, hooksOnPage, List.filter_filter]
+  apply List.filter_congr
+  intro hook _
+  by_cases h : first hook ≤ address ∧ address ≤ last hook
+  · have h1 := Nat.div_le_div_right (c := 4096) h.1
+    have h2 := Nat.div_le_div_right (c := 4096) h.2
+    simp [h.1, h.2, h1, h2]
+  · rw [Decidable.not_and_iff_or_not] at h
+    rcases h with h | h <;> simp [h]
+
 /-- Registration order: the hooks that fire come in the order of the table, which `onCode`, `onRead`,
 `onWrite`, `onSyscall` and `onIntrinsic` keep by appending. -/
 theorem hooksForAccess_sublist (first last : β → Nat) (hooks : List β) (address size : Nat) :

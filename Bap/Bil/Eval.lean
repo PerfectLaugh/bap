@@ -91,6 +91,47 @@ def evalBin (op : BinOp) (left right : Σ width, BitVec width) : Except String V
   else
     .error "binary operands have different widths"
 
+private def evalBinFast (op : BinOp) (left right : Σ width, BitVec width) : Except String Value := do
+  let ⟨leftWidth, left⟩ := left
+  let ⟨rightWidth, right⟩ := right
+  if h : leftWidth = rightWidth then
+    let right : BitVec leftWidth := h ▸ right
+    let bits {width : Nat} (value : BitVec width) : Except String Value := .ok (.bits value)
+    match op with
+    | .add => bits (Word.addFast left right)
+    | .sub => bits (Word.subFast left right)
+    | .mul => bits (Word.mulFast left right)
+    | .div => bits (Word.udiv left right)
+    | .sdiv => bits (Word.sdiv left right)
+    | .rem => bits (Word.urem left right)
+    | .srem => bits (Word.srem left right)
+    | .smod => bits (Word.smod left right)
+    | .lshift => bits (Word.shl left right)
+    | .rshift => bits (Word.lshr left right)
+    | .ashift => bits (Word.ashr left right)
+    | .and => bits (left &&& right)
+    | .or => bits (left ||| right)
+    | .xor => bits (left ^^^ right)
+    | .eq => bits (Word.eq left right)
+    | .neq => bits (Word.neq left right)
+    | .lt => bits (Word.lt left right)
+    | .le => bits (Word.le left right)
+    | .gt => bits (Word.lt right left)
+    | .ge => bits (Word.le right left)
+    | .slt => bits (Word.slt left right)
+    | .sle => bits (Word.sle left right)
+    | .sgt => bits (Word.slt right left)
+    | .sge => bits (Word.sle right left)
+  else
+    .error "binary operands have different widths"
+
+@[csimp] private theorem evalBin_eq_fast : @evalBin = @evalBinFast := by
+  funext op left right
+  obtain ⟨leftWidth, left⟩ := left
+  obtain ⟨rightWidth, right⟩ := right
+  unfold evalBin evalBinFast
+  cases op <;> simp only [Word.addFast_eq, Word.subFast_eq, Word.mulFast_eq]
+
 private def evalUn (op : UnOp) (value : Σ width, BitVec width) : Value :=
   match op with
   | .neg => .bits (-value.2)

@@ -438,6 +438,10 @@ def writesCode (regions : List Region) (address size : Nat) : Bool :=
 @[inline] def hooksForCode {β : Type} (first last : β → Nat) (hooks : List β) (address : Nat) : List β :=
   hooks.filter fun hook => first hook ≤ address && address ≤ last hook
 
+/-- The hooks of a page of 4096 bytes, of which `hooksForCode` gives the same for an address on it (`hooksForCode_onPage`). -/
+def hooksOnPage {β : Type} (first last : β → Nat) (hooks : List β) (page : Nat) : List β :=
+  hooks.filter fun hook => first hook / 4096 ≤ page && page ≤ last hook / 4096
+
 /-! ### Threads -/
 
 /-- The table with `context` replacing the previous context of its thread. -/
