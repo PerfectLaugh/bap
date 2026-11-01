@@ -875,7 +875,7 @@ class AArch64(Risc):
     semantics = ["arm/aarch64-arithmetic.lisp", "arm/aarch64-atomic.lisp", "arm/aarch64-branch.lisp", "arm/aarch64-data-movement.lisp", "arm/aarch64-float.lisp",
         "arm/aarch64-logical.lisp", "arm/aarch64-pstate.lisp", "arm/aarch64-simd.lisp", "arm/aarch64-special.lisp", "arm/aarch64-sve.lisp"]
     mnemonics_of = staticmethod(aarch64_stems)
-    excluded_prefix = ("SVC", "HVC", "SMC", "BRK", "HLT", "HINT", "SYS", "MSR", "MRS", "DCPS", "ERET", "DRPS", "CLREX", "WFE", "WFI", "PAC", "AUT", "XPAC", "RET", "BLRA", "BRA", "ERETA", "LDRAA", "LDRAB", "UDF", "GCS", "RNDR", "TSB", "CSDB", "PSB", "STXR", "STXP", "STLXR", "STLXP", "LDXR", "LDXP", "LDAXR", "LDAXP")
+    excluded_prefix = ("SVC", "HVC", "SMC", "BRK", "HLT", "HINT", "SYS", "MSR", "MRS", "DCPS", "ERET", "DRPS", "CLREX", "WFE", "WFI", "PAC", "AUT", "XPAC", "RET", "BLRA", "BRA", "ERETA", "LDRAA", "LDRAB", "UDF", "GCS", "RNDR", "TSB", "CSDB", "PSB")
     pc_mask = 0
 
     def __init__(self, scratch):
@@ -883,7 +883,7 @@ class AArch64(Risc):
         super().__init__(scratch)
 
     def aux_spec(self):
-        return {"XZR": (0, 64), "FPCR": (0, 32), "FPSR": (0, 32), "DAIF": (0, 4), "SPSel": (0, 1), "PAN": (0, 1), "UAO": (0, 1), "TPIDR_EL0": (0, 64), "TPIDRRO_EL0": (0, 64),
+        return {"XZR": (0, 64), "EXCLUSIVE_MONITOR": (0, 64), "FPCR": (0, 32), "FPSR": (0, 32), "DAIF": (0, 4), "SPSel": (0, 1), "PAN": (0, 1), "UAO": (0, 1), "TPIDR_EL0": (0, 64), "TPIDRRO_EL0": (0, 64),
             "SP_EL0": (0, 64), "SP_EL1": (0, 64), "CNTVCT_EL0": (0, 64)}
 
     def encode_extra(self, values, out):
