@@ -635,6 +635,15 @@ def testPowerpcPrefixed : IO Unit := do
   assertEqual "Linux PowerPC prefixed instructions are what qemu does"
     (String.fromUTF8! (← IO.FS.readBinFile "testsuite/data/powerpc64le-prefixed.out")) (String.fromUTF8! (← written.get))
 
+/-- What `/proc/self/auxv` says is what a program was started with. -/
+def testLinuxAuxv (triple : String) : IO Unit := do
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-auxv"
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual s!"Linux {triple} auxv ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual s!"Linux {triple} auxv is what it started with" "1 1 1\n" (String.fromUTF8! (← written.get))
+
 /-- What the rounding modes of a machine do, as qemu has it. -/
 def testLinuxRound (triple : String) : IO Unit := do
   let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-round"

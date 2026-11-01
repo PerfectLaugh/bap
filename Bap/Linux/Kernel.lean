@@ -70,6 +70,8 @@ structure Process where
   command : List String := []
   environment : List String := []
   program : String := ""
+  /-- The auxiliary vector that it started with, as a type and a value by turns. -/
+  auxiliary : List Nat := []
 
 /-- What a mapping of a process is: where, how much, and what it may do. -/
 structure MappedRange where
@@ -90,6 +92,8 @@ structure ProcessView where
   command : List String := []
   environment : List String := []
   program : String := ""
+  auxiliary : List Nat := []
+  big : Bool := false
   cwd : String := "/"
   ranges : List MappedRange := []
   breakStart : Nat := 0

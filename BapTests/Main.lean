@@ -63,6 +63,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxPrograms,
     Bap.Tests.Emu.testLinuxLayouts,
     Bap.Tests.Emu.testThumbIt,
+    Bap.Tests.Emu.testLinuxAuxv "aarch64",
+    Bap.Tests.Emu.testLinuxAuxv "mips",
     Bap.Tests.Emu.testPowerpcElfv1,
     Bap.Tests.Emu.testPowerpcPrefixed,
     Bap.Tests.Emu.testLinuxRound "aarch64",

@@ -76,6 +76,11 @@ def builtin : String → Option Generator
   | "stat" => some stat
   | "statm" => some statm
   | "cmdline" => some fun view => zeroEnded view.command
+  | "auxv" => some fun view =>
+    let size := view.bits / 8
+    (view.auxiliary ++ [0, 0]).foldl (init := ByteArray.empty) fun bytes word =>
+      let word := (List.range size).map fun index => (word >>> (8 * index)).toUInt8
+      bytes ++ ByteArray.mk (if view.big then word.reverse else word).toArray
   | "environ" => some fun view => zeroEnded view.environment
   | "comm" => some fun view => text (baseName view.program ++ "\n")
   | "limits" => some fun _ => limits
@@ -108,7 +113,7 @@ def systemFiles : List (String × String) :=
 
 /-- The files of each process, under `/proc/PID`, by the names of what makes them. -/
 def processFiles : List String :=
-  ["maps", "status", "stat", "statm", "cmdline", "environ", "comm", "limits", "mounts"]
+  ["maps", "status", "stat", "statm", "cmdline", "environ", "comm", "limits", "mounts", "auxv"]
 
 /-- Puts in what is in `/proc` and `/sys` of anything that runs. Nothing replaces what is already there. -/
 def install (kernel : Kernel) : Kernel :=

@@ -351,12 +351,14 @@ theorem putInode_inverts : Inverts putInode getInode := by
 theorem putProcess_extends : Extends putProcess := fun out _ =>
   (putNat_extends out _).trans ((putList_extends putDescriptor_extends _ _).trans ((putText_extends _ _).trans
     ((putNat_extends _ _).trans ((putNat_extends _ _).trans ((putNat_extends _ _).trans
-      ((putList_extends putText_extends _ _).trans ((putList_extends putText_extends _ _).trans (putText_extends _ _))))))))
+      ((putList_extends putText_extends _ _).trans ((putList_extends putText_extends _ _).trans ((putText_extends _ _).trans (putList_extends putNat_extends _ _)))))))))
 
 theorem putProcess_inverts : Inverts putProcess getProcess := by
-  rintro data out ⟨group, descriptors, cwd, umask, breakStart, breakEnd, command, environment, program⟩ hp
-  have h9 := putText_inverts data _ program hp
-  have p8 := (putText_extends _ program).trans hp
+  rintro data out ⟨group, descriptors, cwd, umask, breakStart, breakEnd, command, environment, program, auxiliary⟩ hp
+  have h10 := putList_inverts putNat_extends putNat_inverts data _ auxiliary hp
+  have p9 := (putList_extends putNat_extends _ auxiliary).trans hp
+  have h9 := putText_inverts data _ program p9
+  have p8 := (putText_extends _ program).trans p9
   have h8 := putList_inverts putText_extends putText_inverts data _ environment p8
   have p7 := (putList_extends putText_extends _ environment).trans p8
   have h7 := putList_inverts putText_extends putText_inverts data _ command p7
@@ -371,7 +373,7 @@ theorem putProcess_inverts : Inverts putProcess getProcess := by
   have p2 := (putText_extends _ cwd).trans p3
   have h2 := putList_inverts putDescriptor_extends putDescriptor_inverts data _ descriptors p2
   have h1 := putNat_inverts data out group ((putList_extends putDescriptor_extends _ descriptors).trans p2)
-  simp [getProcess, putProcess, h1, h2, h3, h4, h5, h6, h7, h8, h9, bind, Except.bind]
+  simp [getProcess, putProcess, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, bind, Except.bind]
 
 /-- A checkpoint reads back as the image that it was made from, wherever in a file that is and whatever comes after it. -/
 theorem decode_encode (data out : ByteArray) (image : Image) (hp : Prefix (encode out image) data) :

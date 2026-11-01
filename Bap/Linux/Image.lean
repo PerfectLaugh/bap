@@ -70,6 +70,7 @@ structure ProcessImage where
   command : List String
   environment : List String
   program : String
+  auxiliary : List Nat
   deriving DecidableEq
 
 /-- An inode, with what is in it as a tag and bytes: a link has its target in them. -/
@@ -113,6 +114,7 @@ def Kernel.image (kernel : Kernel) : Image where
   processes := (sorted kernel.processes.toList).map fun (group, process) =>
     { group, cwd := process.cwd, umask := process.umask, breakStart := process.breakStart, breakEnd := process.breakEnd
       command := process.command, environment := process.environment, program := process.program
+      auxiliary := process.auxiliary
       descriptors := (sorted process.descriptors.toList).map fun (fd, entry) => (fd, entry.openFile, entry.closeOnExec) }
   output := kernel.output
   clock := kernel.clock
@@ -145,6 +147,7 @@ def Image.kernel (image : Image) : Except String Kernel := do
       processes.insert process.group
         { cwd := process.cwd, umask := process.umask, breakStart := process.breakStart, breakEnd := process.breakEnd
           command := process.command, environment := process.environment, program := process.program
+          auxiliary := process.auxiliary
           descriptors := process.descriptors.foldl (init := {}) fun descriptors (fd, openFile, closeOnExec) =>
             descriptors.insert fd { openFile, closeOnExec } }
     output := image.output
@@ -181,7 +184,8 @@ def putProcess (out : ByteArray) (process : ProcessImage) : ByteArray :=
   let out := putNat (putNat out process.breakStart) process.breakEnd
   let out := putList putText out process.command
   let out := putList putText out process.environment
-  putText out process.program
+  let out := putText out process.program
+  putList putNat out process.auxiliary
 
 def getProcess : Decoder ProcessImage := fun data at_ => do
   let (group, at_) ← getNat data at_
@@ -193,7 +197,8 @@ def getProcess : Decoder ProcessImage := fun data at_ => do
   let (command, at_) ← getList getText data at_
   let (environment, at_) ← getList getText data at_
   let (program, at_) ← getText data at_
-  .ok ({ group, descriptors, cwd, umask, breakStart, breakEnd, command, environment, program }, at_)
+  let (auxiliary, at_) ← getList getNat data at_
+  .ok ({ group, descriptors, cwd, umask, breakStart, breakEnd, command, environment, program, auxiliary }, at_)
 
 def putInode (out : ByteArray) (inode : InodeImage) : ByteArray :=
   putBytes (putNat (putNat (putNat out inode.number) inode.mode) inode.kind) inode.data

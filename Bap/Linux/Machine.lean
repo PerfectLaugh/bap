@@ -160,6 +160,8 @@ private def viewOf (machine : Machine) (emu : Emu) (group : Nat) : IO ProcessVie
     command := process.command
     environment := process.environment
     program := process.program
+    auxiliary := process.auxiliary
+    big := architecture.big
     cwd := process.cwd
     ranges := regions.map fun region =>
       { start := region.address, size := region.data.size, readable := region.protection.readable
@@ -720,9 +722,9 @@ private def mapStack (emu : Emu) (architecture : Architecture) (arguments enviro
   setReg emu ⟨(threadRegisters emu.config.syscallAbi).1, .imm architecture.bits, 0, false⟩ (bits architecture.bits pointer)
 
 /-- A parsed program and what interprets it in an emulator that has nothing mapped: its registers, its memory, its stack and
-where it starts. It gives where its heap starts. -/
+where it starts. It gives where its heap starts and its auxiliary vector, as a type and a value by turns. -/
 private def loadProgram (emu : Emu) (architecture : Architecture) (path : String) (data : ByteArray) (program : Elf.Program)
-    (interpreter : Option (ByteArray × Elf.Program)) (arguments environment : List String) : IO Nat := do
+    (interpreter : Option (ByteArray × Elf.Program)) (arguments environment : List String) : IO (Nat × List Nat) := do
   let base := if program.relocatable then programBase architecture else 0
   resetRegisters emu architecture
   let top ← mapProgram emu data program base
@@ -771,7 +773,7 @@ private def loadProgram (emu : Emu) (architecture : Architecture) (path : String
   if let .powerpc 64 _ := architecture then
     if descriptor then setReg emu (word "R2") (bits 64 (table + bias))
     else setReg emu (word "R12") (bits 64 entry)
-  pure top
+  pure (top, auxiliary.flatMap fun entry => [entry.1, entry.2])
 
 /-- A program of a path of the kernel, as far as it can be told that it will run, and what its arguments come to: a script
 is run by what its first line names, with the script after that, to a depth that Linux has too. -/
@@ -837,12 +839,12 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
           emu.threadsRef.modify (setThreadStopped · task.tid true)
       for region in ← emu.regions.get do
         unmap emu region.address region.data.size
-      let top ← loadProgram emu architecture name data program interpreter arguments environment
+      let (top, auxiliary) ← loadProgram emu architecture name data program interpreter arguments environment
       emu.redirect.set (some (← pc emu))
       let process := kernel.process group
       machine.kernel.set (kernel.setProcess group { process with
         descriptors := process.descriptors.filter fun _ entry => !entry.closeOnExec
-        breakStart := top, breakEnd := top, command := arguments, environment, program := name })
+        breakStart := top, breakEnd := top, command := arguments, environment, program := name, auxiliary })
       pure (.returnValue 0)
 
 /-- The name of an intrinsic that goes by the rounding mode of the machine, by its mode. That is to nearest nearly always, so
@@ -938,11 +940,11 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   -- would be lifted each time it runs. Most of its code runs at its start, a few times, and compiling that takes longer than
   -- running it: with this threshold, `ls` takes a third of the time, and a long loop no longer.
   let emu ← emulatorOf architecture
-  let top ← loadProgram emu architecture path data program interpreter arguments environment
+  let (top, auxiliary) ← loadProgram emu architecture path data program interpreter arguments environment
   let first := (← currentTask emu).group
   let kernel := kernel.withConsole first input
   let kernel := kernel.setProcess first { kernel.process first with
-    breakStart := top, breakEnd := top, command := if arguments.isEmpty then [path] else arguments, environment, program := path }
+    breakStart := top, breakEnd := top, command := if arguments.isEmpty then [path] else arguments, environment, program := path, auxiliary }
   let kernel := Proc.install kernel
   machineOf architecture emu kernel watch handler
 
