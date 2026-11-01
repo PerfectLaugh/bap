@@ -140,6 +140,54 @@
 (defun VRINTMD (dd dm) (set$ dd (vrint-d 'm dm)))
 (defun VRINTMS (sd sm) (set$ sd (vrint-s 'm sm)))
 
+;; ARMv8: FPMaxNum and FPMinNum, without a condition.
+(defun VFP_VMAXNMS (sd sn sm) (set$ sd (fp-maxnm sn sm 23)))
+(defun VFP_VMAXNMD (dd dn dm) (set$ dd (fp-maxnm dn dm 52)))
+(defun VFP_VMINNMS (sd sn sm) (set$ sd (fp-minnm sn sm 23)))
+(defun VFP_VMINNMD (dd dn dm) (set$ dd (fp-minnm dn dm 52)))
+
+;; VSEL chooses by the flags, which are the condition of the instruction and not an execution of it.
+(defun vsel-ge () (= NF VF))
+(defun vsel-gt () (logand (not ZF) (= NF VF)))
+(defun VSELEQS (sd sn sm) (set$ sd (fp-select ZF sn sm)))
+(defun VSELEQD (dd dn dm) (set$ dd (fp-select ZF dn dm)))
+(defun VSELGES (sd sn sm) (set$ sd (fp-select (vsel-ge) sn sm)))
+(defun VSELGED (dd dn dm) (set$ dd (fp-select (vsel-ge) dn dm)))
+(defun VSELGTS (sd sn sm) (set$ sd (fp-select (vsel-gt) sn sm)))
+(defun VSELGTD (dd dn dm) (set$ dd (fp-select (vsel-gt) dn dm)))
+(defun VSELVSS (sd sn sm) (set$ sd (fp-select VF sn sm)))
+(defun VSELVSD (dd dn dm) (set$ dd (fp-select VF dn dm)))
+
+;; VCVT by the rounding mode that it names, to a word, without a condition.
+(defmacro vcvt-s (signed mode sd sm)
+  (set$ sd (fp-to-int signed 32 (vrint-s mode sm) 8 23)))
+(defmacro vcvt-d (signed mode sd dm)
+  (set$ sd (fp-to-int signed 32 (vrint-d mode dm) 11 52)))
+(defun VCVTASS (sd sm) (vcvt-s true 'a sd sm))
+(defun VCVTAUS (sd sm) (vcvt-s false 'a sd sm))
+(defun VCVTASD (sd dm) (vcvt-d true 'a sd dm))
+(defun VCVTAUD (sd dm) (vcvt-d false 'a sd dm))
+(defun VCVTNSS (sd sm) (vcvt-s true 'n sd sm))
+(defun VCVTNUS (sd sm) (vcvt-s false 'n sd sm))
+(defun VCVTNSD (sd dm) (vcvt-d true 'n sd dm))
+(defun VCVTNUD (sd dm) (vcvt-d false 'n sd dm))
+(defun VCVTPSS (sd sm) (vcvt-s true 'p sd sm))
+(defun VCVTPUS (sd sm) (vcvt-s false 'p sd sm))
+(defun VCVTPSD (sd dm) (vcvt-d true 'p sd dm))
+(defun VCVTPUD (sd dm) (vcvt-d false 'p sd dm))
+(defun VCVTMSS (sd sm) (vcvt-s true 'm sd sm))
+(defun VCVTMUS (sd sm) (vcvt-s false 'm sd sm))
+(defun VCVTMSD (sd dm) (vcvt-d true 'm sd dm))
+(defun VCVTMUD (sd dm) (vcvt-d false 'm sd dm))
+
+;; A half in a half of a word, from and to a double.
+(defun VCVTBHD (dd sm cnd _) (vfp cnd (set$ dd (fconvert :rne 64 (cast-low 16 sm)))))
+(defun VCVTTHD (dd sm cnd _) (vfp cnd (set$ dd (fconvert :rne 64 (cast-high 16 sm)))))
+(defun VCVTBDH (sd sd0 dm cnd _)
+  (vfp cnd (set$ sd (concat (cast-high 16 sd0) (fconvert :rne 16 dm)))))
+(defun VCVTTDH (sd sd0 dm cnd _)
+  (vfp cnd (set$ sd (concat (fconvert :rne 16 dm) (cast-low 16 sd0)))))
+
 (defmacro VTO*IR (signed sd x one half e f cnd)
   (vfp cnd (set$ sd (fp-to-int signed 32
                                (vfp-round-integral x one half e f)
