@@ -1020,7 +1020,15 @@ private theorem scan_digits (base n : Nat) (stack : List Char) :
 
 theorem balanced_ctype (typ : Bap.Typ) : Balanced (ctype typ) := by
   unfold ctype
-  split <;> (intro stack; simp [toString_string, String.toList_append, scan_append, scan, scan_digits])
+  split
+  · exact balanced_of_no_brackets (by decide)
+  · exact balanced_of_no_brackets (by decide)
+  · exact balanced_of_no_brackets (by decide)
+  · exact balanced_of_no_brackets (by decide)
+  · intro stack
+    simp [toString_string, String.toList_append, scan_append, scan, scan_digits]
+  · exact balanced_of_no_brackets (by decide)
+  · exact balanced_of_no_brackets (by decide)
 
 /-- A literal's width is written with brackets that nest. -/
 theorem balanced_withWidth (e : Exp) {rendered : String} (h : Balanced rendered) : Balanced (withWidth e rendered) := by
