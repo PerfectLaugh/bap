@@ -804,60 +804,116 @@ private def writtenVars (blocks : List Block) : Array Bap.Var × Std.HashMap Bap
     (programWrites block.program).foldl (init := acc) fun (vars, bits) var =>
       if bits.contains var then (vars, bits) else (vars.push var, bits.insert var vars.size)
 
-/-- The set of the variables of a list. A bit stands for the variable at its place, which is looked at here. -/
-private def writtenMask (vars : Array Bap.Var) (bits : Std.HashMap Bap.Var Nat) (writes : List Bap.Var) : Nat :=
-  writes.foldr (init := 0) fun var mask =>
+/-- The bits of a word of a set. A number of fewer bits than the 63 of a machine word is held in place in an array, and what
+is done with it allocates nothing, which an array of `UInt64` and a number as wide as the set can't say. -/
+private def wordBits : Nat := 60
+
+/-- The set of the variables of a list, in `width` words. A bit stands for the variable at its place, which is looked at here. -/
+private def writtenRow (vars : Array Bap.Var) (bits : Std.HashMap Bap.Var Nat) (width : Nat) (writes : List Bap.Var) : Array Nat :=
+  writes.foldr (init := Array.replicate width 0) fun var row =>
     match bits[var]? with
-    | some bit => if vars[bit]? = some var then mask ||| 1 <<< bit else mask
-    | none => mask
+    | some bit =>
+      if vars[bit]? = some var then row.modify (bit / wordBits) (· ||| 1 <<< (bit % wordBits)) else row
+    | none => row
 
 /-- What each block writes, the first block of an address counting. -/
-private def writtenMasks (vars : Array Bap.Var) (bits : Std.HashMap Bap.Var Nat) (blocks : List Block) : Std.HashMap Nat Nat :=
-  blocks.foldr (init := {}) fun block masks =>
-    masks.insert block.address (writtenMask vars bits (programWrites block.program))
+private def writtenRows (vars : Array Bap.Var) (bits : Std.HashMap Bap.Var Nat) (width : Nat) (blocks : List Block) :
+    Std.HashMap Nat (Array Nat) :=
+  blocks.foldr (init := {}) fun block rows =>
+    rows.insert block.address (writtenRow vars bits width (programWrites block.program))
 
-/-- The variables of a set. -/
-private def writtenMembers (vars : Array Bap.Var) (mask : Nat) : List Bap.Var :=
-  (List.range vars.size).filterMap fun bit => if mask.testBit bit then vars[bit]? else none
+/-- What each block has written, in `width` words for each row of `index`. -/
+private structure WrittenTable where
+  vars : Array Bap.Var
+  width : Nat
+  index : Std.HashMap Nat Nat
+  words : Array Nat
+
+/-- A word of a set of a table. -/
+private def wordAt (table : WrittenTable) (row : Option Nat) (word : Nat) : Nat :=
+  match row with
+  | some row => table.words.getD (row * table.width + word) 0
+  | none => 0
 
 /-- What a table of `definitelyWritten` says of a block. -/
-private def writtenAt (table : Array Bap.Var × Std.HashMap Nat Nat) (address : Nat) : List Bap.Var :=
-  writtenMembers table.1 (table.2.getD address 0)
+private def writtenAt (table : WrittenTable) (address : Nat) : List Bap.Var :=
+  let row := table.index[address]?
+  (List.range table.vars.size).filterMap fun bit =>
+    if (wordAt table row (bit / wordBits)).testBit (bit % wordBits) then table.vars[bit]? else none
 
-/-- Takes from the targets of each block on the stack what the block does not have on its way out, and stacks those it
-changed. A set only shrinks, so `fuel` of one more than the blocks times one more than the variables is enough. -/
-private def writtenPass (successors : Std.HashMap Nat (List Nat)) (writes : Std.HashMap Nat Nat) :
-    Nat → List Nat → Std.HashMap Nat Nat → Std.HashMap Nat Nat
-  | 0, _, table => table
-  | _ + 1, [], table => table
-  | fuel + 1, block :: stack, table =>
-    let leaving := table.getD block 0 ||| writes.getD block 0
-    let (table, stack) := (successors.getD block []).foldl (init := (table, stack)) fun (table, stack) target =>
-      let held := table.getD target 0
-      let kept := held &&& leaving
-      if kept == held then (table, stack) else (table.insert target kept, target :: stack)
-    writtenPass successors writes fuel stack table
+/-- Whether something holds of all numbers below one. -/
+private def allBelow (predicate : Nat → Bool) : Nat → Bool
+  | 0 => true
+  | count + 1 => predicate count && allBelow predicate count
+
+/-- Whether the target keeps only what the source has or writes, from `count` words down. -/
+private def rowKeeps (words writes : Array Nat) (source target : Nat) : Nat → Bool
+  | 0 => true
+  | count + 1 =>
+    let held := words.getD (target + count) 0
+    held &&& (words.getD (source + count) 0 ||| writes.getD count 0) == held && rowKeeps words writes source target count
+
+/-- Takes from the target what the source does not have or write, in place. -/
+private def rowNarrow (writes : Array Nat) (source target : Nat) (words : Array Nat) : Nat → Array Nat
+  | 0 => words
+  | count + 1 =>
+    let kept := words.getD (target + count) 0 &&& (words.getD (source + count) 0 ||| writes.getD count 0)
+    rowNarrow writes source target (words.setIfInBounds (target + count) kept) count
+
+/-- Takes from the targets of each row on the stack what the row does not have on its way out, and stacks those it changed.
+A set only shrinks, so `fuel` of one more than the blocks times one more than the variables is enough. -/
+private def writtenPass (successors : Array (List Nat)) (writes : Array (Array Nat)) (width : Nat) :
+    Nat → List Nat → Array Nat → Array Nat
+  | 0, _, words => words
+  | _ + 1, [], words => words
+  | fuel + 1, row :: stack, words =>
+    let leaving := writes.getD row #[]
+    let source := row * width
+    let (words, stack) := (successors.getD row []).foldl (init := (words, stack)) fun (words, stack) target =>
+      if rowKeeps words leaving source (target * width) width then (words, stack)
+      else (rowNarrow leaving source (target * width) words width, target :: stack)
+    writtenPass successors writes width fuel stack words
 
 /-- The table is right if nothing is at the seed and along each edge what its target has is what its source has or
 writes: this is all that a proof asks of it. -/
-private def writtenStable (seed : Nat) (writes : Std.HashMap Nat Nat) (edges : List (Nat × Nat)) (table : Std.HashMap Nat Nat) : Bool :=
-  table.getD seed 0 == 0 && edges.all fun edge =>
-    let target := table.getD edge.2 0
-    target &&& (table.getD edge.1 0 ||| writes.getD edge.1 0) == target
+private def writtenStable (seed : Nat) (writes : Std.HashMap Nat (Array Nat)) (edges : List (Nat × Nat)) (table : WrittenTable) : Bool :=
+  let seedRow := table.index[seed]?
+  allBelow (fun word => wordAt table seedRow word == 0) table.width && edges.all fun edge =>
+    let source := table.index[edge.1]?
+    let target := table.index[edge.2]?
+    let written := writes.getD edge.1 #[]
+    allBelow (fun word =>
+      let held := wordAt table target word
+      held &&& (wordAt table source word ||| written.getD word 0) == held) table.width
 
 /-- What each block has written on every way to it from the seed. It starts from all and takes away, so a block no way
-leads to keeps all; an edge from outside the blocks leaves its target nothing. -/
-private def definitelyWritten (seed : Nat) (blocks : List Block) (edges : List (Nat × Nat)) :
-    Array Bap.Var × Std.HashMap Nat Nat :=
+leads to keeps all; an edge from outside the blocks leaves its target nothing. A graph without edges doesn't ask. -/
+private def definitelyWritten (seed : Nat) (blocks : List Block) (edges : List (Nat × Nat)) : WrittenTable :=
+  if edges.isEmpty then { vars := #[], width := 0, index := {}, words := #[] } else
   let (vars, bits) := writtenVars blocks
-  let writes := writtenMasks vars bits blocks
-  let all : Std.HashMap Nat Nat := blocks.foldl (init := {}) fun table block => table.insert block.address (2 ^ vars.size - 1)
-  let initial := edges.foldl (init := all.insert seed 0) fun table edge =>
-    if writes.contains edge.1 then table else table.insert edge.2 0
-  let successors : Std.HashMap Nat (List Nat) := edges.foldr (init := {}) fun edge successors =>
-    successors.insert edge.1 (edge.2 :: successors.getD edge.1 [])
-  let table := writtenPass successors writes ((blocks.length + 1) * (vars.size + 1)) (blocks.map (·.address)) initial
-  (vars, if writtenStable seed writes edges table then table else {})
+  let width := vars.size / wordBits + 1
+  let writes := writtenRows vars bits width blocks
+  let index : Std.HashMap Nat Nat := blocks.zipIdx.foldr (init := {}) fun entry index => index.insert entry.1.address entry.2
+  let count := blocks.length
+  let leaving := (blocks.map fun block => writes.getD block.address #[]).toArray
+  let zero := Array.replicate width 0
+  -- With the top of a row in the last word more than there are variables, which means nothing.
+  let all := Array.replicate (count * width) (2 ^ wordBits - 1)
+  let clear (words : Array Nat) (address : Nat) : Array Nat :=
+    match index[address]? with
+    | some row => rowNarrow zero (count * width) (row * width) words width
+    | none => words
+  let initial := edges.foldl (init := clear all seed) fun words edge =>
+    if index.contains edge.1 then words else clear words edge.2
+  let successors := edges.foldr (init := Array.replicate count []) fun edge successors =>
+    match index[edge.1]?, index[edge.2]? with
+    | some source, some target => successors.modify source (target :: ·)
+    | _, _ => successors
+  let stack := blocks.zipIdx.filterMap fun entry =>
+    if index[entry.1.address]? == some entry.2 then some entry.2 else none
+  let words := writtenPass successors leaving width ((count + 1) * (vars.size + 1)) stack initial
+  let table : WrittenTable := { vars, width, index, words }
+  if writtenStable seed writes edges table then table else { table with words := #[] }
 
 /-- A flag for each of `outputs`, each with a slot of its own from `start` on. -/
 private def flagSlots (outputs : List (Bap.Var × Nat)) (start : Nat) : Nat × List (Nat × Nat) :=

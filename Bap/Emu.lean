@@ -158,6 +158,9 @@ structure Emu where
   taskTable : IO.Ref Tasks.TaskTable
   /-- What is mapped in the address spaces other than that of the thread that runs, whose map is `regions`. -/
   parkedRegions : IO.Ref (Std.HashMap Nat (List Region))
+  /-- For a page that instructions came from, the executable region that had them, which saves `fetch` going through the
+  regions. All that changes `regions` empties it, by `setRegions`. -/
+  fetchPages : IO.Ref (Std.HashMap Nat (Nat × Nat))
   /-- What serves intrinsics in the code that names them: the bits of what is computed from the name and the bits of the
   operands, as its width and its bits. Lifted code runs up to an intrinsic, and what comes after it wouldn't run. -/
   intrinsicServer : IO.Ref (Option (String → List Nat → Option (Nat × Nat)))
@@ -246,6 +249,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     watchedSteps := ← IO.mkRef {}
     taskTable := ← IO.mkRef (Tasks.TaskTable.initial 1)
     parkedRegions := ← IO.mkRef {}
+    fetchPages := ← IO.mkRef {}
     intrinsicServer := ← IO.mkRef none
     servedPrograms := ← IO.mkRef {}
     processHooks := ← IO.mkRef []
@@ -414,10 +418,15 @@ private def snapshotBlock (emu : Emu) : IO Snapshot := do
     table := ← emu.taskTable.get
   }
 
+/-- Changes what is mapped. -/
+def setRegions (emu : Emu) (regions : List Region) : IO Unit := do
+  emu.regions.set regions
+  emu.fetchPages.set {}
+
 private def restoreThreads (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   emu.state.set snapshot.state
   emu.pc.set snapshot.pc
-  emu.regions.set snapshot.regions
+  setRegions emu snapshot.regions
   emu.stopped.set snapshot.stopped
   emu.threadsRef.set snapshot.threads
   emu.currentThreadRef.set snapshot.currentThread
@@ -471,7 +480,7 @@ def restore (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   let space := snapshot.table.spaceOf snapshot.currentThread
   if let some mapped := snapshot.processMemory.lookup space then
     emu.parkedRegions.modify (·.insert (firstSpace snapshot.table) snapshot.regions)
-    emu.regions.set mapped
+    setRegions emu mapped
   snapshot.processMemory.forM fun (id, regions) => do
     if id != space then emu.parkedRegions.modify (·.insert id regions)
     let cells := regions.flatMap fun region =>
@@ -501,7 +510,7 @@ private def switchNativeMemory (emu : Emu) (current next : ThreadId) : IO Unit :
   if currentSpace != nextSpace then
     let mapped ← emu.regions.get
     let parked ← emu.parkedRegions.get
-    emu.regions.set (parked.getD nextSpace mapped)
+    setRegions emu (parked.getD nextSpace mapped)
     emu.parkedRegions.set (parked.insert currentSpace mapped)
     let processes ← emu.processMemory.get
     let native ← emu.engine.persistentMemory.get
@@ -911,7 +920,7 @@ private def writeByte (emu : Emu) (address : Nat) (value : UInt8) : IO Unit := d
     emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
     if region.protection.executable then Primus.Lifted.discardRange emu.engine address address
     synchronizeWrite emu address (ByteArray.mk #[value])
-    emu.regions.set (mapped.map fun current =>
+    setRegions emu (mapped.map fun current =>
       if current.contains address then
         { current with data := current.data.set! (address - current.address) value }
       else current)
@@ -976,7 +985,7 @@ def writeBatch (emu : Emu) (writes : List (Nat × ByteArray)) : IO Unit := do
         { current with data := current.data.extract 0 offset ++ data ++
           current.data.extract (offset + data.size) current.data.size }
       else current
-  emu.regions.set updatedRegions
+  setRegions emu updatedRegions
 
 private def checkInSpace (emu : Emu) (region : Region) : IO Unit := do
   match memoryWidth emu.config with
@@ -1001,7 +1010,7 @@ def map (emu : Emu) (region : Region) : IO Unit := do
   if region.protection.executable && region.data.size > 0 then
     Primus.Lifted.discardRange emu.engine region.address (region.address + region.data.size - 1)
   if written then synchronizeWrite emu region.address region.data
-  emu.regions.set (region :: mapped)
+  setRegions emu (region :: mapped)
 
 def overlay (emu : Emu) (region : Region) : IO Unit := do
   checkInSpace emu region
@@ -1015,7 +1024,7 @@ def overlay (emu : Emu) (region : Region) : IO Unit := do
   if region.protection.executable && region.data.size > 0 then
     Primus.Lifted.discardRange emu.engine region.address (region.address + region.data.size - 1)
   synchronizeWrite emu region.address region.data
-  emu.regions.set (region :: mapped.filter fun current => current.address != region.address)
+  setRegions emu (region :: mapped.filter fun current => current.address != region.address)
 
 private def regionPiece (region : Region) (first last : Nat) (protection : Primus.Protection) : List Region :=
   if first < last then
@@ -1045,7 +1054,7 @@ def protect (emu : Emu) (address size : Nat) (protection : Primus.Protection) : 
   else
     match protectRegions (← emu.regions.get) address size protection with
     | some regions =>
-      emu.regions.set regions
+      setRegions emu regions
       -- A compiled range would keep running code that lost its execute permission.
       if !protection.executable then Primus.Lifted.discardRange emu.engine address (address + size - 1)
     | none => throw <| IO.userError s!"unmapped Emu protection range at {address}"
@@ -1054,7 +1063,7 @@ def protect (emu : Emu) (address size : Nat) (protection : Primus.Protection) : 
 def unmap (emu : Emu) (address size : Nat) : IO Unit := do
   if size > 0 then
     let upper := address + size
-    emu.regions.modify (·.flatMap fun region =>
+    setRegions emu <| (← emu.regions.get).flatMap (fun region =>
       let finish := region.address + region.data.size
       if finish ≤ address || upper ≤ region.address then [region]
       else regionPiece region region.address (min address finish) region.protection ++
@@ -1298,11 +1307,22 @@ def fetchSpan (regions : List Region) (address limit : Nat) : Except String Nat 
     else
       .ok (extend regions.length (region.address + region.data.size))
 
+/-- `fetchSpan`, which for an instruction inside the region that the page's last one was in is all of it. -/
+private def fetchSpanOf (emu : Emu) (address limit : Nat) : IO (Except String Nat) := do
+  let page := address / 4096
+  if let some (lower, upper) := (← emu.fetchPages.get)[page]? then
+    if lower ≤ address && address + limit ≤ upper then return .ok limit
+  let regions ← emu.regions.get
+  if let some region := lookupRegion regions address then
+    if region.protection.executable then
+      emu.fetchPages.modify (·.insert page (region.address, region.address + region.data.size))
+  return fetchSpan regions address limit
+
 private def fetch (emu : Emu) (address : Nat) : IO ByteArray := do
   try
     -- An IT block of Thumb is decoded whole: its two bytes and four instructions of up to four.
     let limit := match emu.config.syscallAbi with | .x86_64 | .x86_32 => 16 | .arm => 18 | _ => 4
-    match fetchSpan (← emu.regions.get) address limit with
+    match ← fetchSpanOf emu address limit with
     | .error error => throw <| IO.userError error
     | .ok span =>
       match ← emu.engine.persistentMemory.get with
@@ -1358,14 +1378,14 @@ def refreshRegions (emu : Emu) : IO Unit := do
   let mapped ← emu.regions.get
   let state ← emu.state.get
   let ⟨_, memory⟩ ← cells emu state
-  emu.regions.set (mapped.map fun region =>
+  setRegions emu (mapped.map fun region =>
     { region with data := Bap.Memory.readRegion memory region.address region.data.size })
 
 def refreshPersistentRegions (emu : Emu) : IO Unit := do
   match ← emu.engine.persistentMemory.get with
   | none => refreshRegions emu
   | some native =>
-    emu.regions.set (← regionsFromNative (← emu.regions.get) native)
+    setRegions emu <| (← regionsFromNative (← emu.regions.get) native)
 
 /-- Refreshes the regions with the bytes of the memory that threads without their own memory share. -/
 def refreshSharedRegions (emu : Emu) : IO Unit := do

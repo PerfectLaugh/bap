@@ -397,7 +397,7 @@ def checkpointBytes (emu : Emu) : IO ByteArray := do
   refreshSharedRegions emu
   let snapshot ← snapshot emu
   let encoded := encodeBinarySnapshot (withoutMemory emu.config.memory snapshot)
-  emu.regions.set originalRegions
+  setRegions emu originalRegions
   IO.ofExcept encoded
 
 def save (emu : Emu) (path : String) : IO Unit := do
