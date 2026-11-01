@@ -114,6 +114,18 @@ structure SyscallHook where
   id : HookId
   action : CodeHookContext → Nat → List Nat → IO SyscallAction
 
+/-- How steps were taken back, and why: a fault of memory, an access to something watched that a range couldn't stop for, or anything
+else, such as a hook that threw. Of those that have a memory of their own or kept one, `patched` took back what the step wrote, and
+`rebuilt` made it again from all of the state, which takes as long as the process is big. A worker of a parallel round does neither. -/
+structure RollbackStats where
+  faults : Nat := 0
+  restarts : Nat := 0
+  others : Nat := 0
+  patched : Nat := 0
+  rebuilt : Nat := 0
+  bytesRestored : Nat := 0
+  deriving Repr, Inhabited
+
 structure Emu where
   config : Config
   engine : Primus.Lifted.Engine
@@ -187,6 +199,11 @@ structure Emu where
   turnUsed : IO.Ref Nat
   /-- Whether a system call is being served, in the middle of its instruction. -/
   serving : IO.Ref Bool
+  /-- The native memory that the step that runs began with. -/
+  stepNative : IO.Ref (Option Jit.Memory)
+  /-- Whether the native memory has been replaced since then, when what was written to the old one is no help. -/
+  memorySwitched : IO.Ref Bool
+  rollbacks : IO.Ref RollbackStats
   /-- Whether this is a worker of a parallel round that stops before what has to be atomic. -/
   atomicGated : IO.Ref Bool
   /-- Whether it has stopped there, and hasn't run it. -/
@@ -286,6 +303,9 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     redirect := ← IO.mkRef none
     turnUsed := ← IO.mkRef 0
     serving := ← IO.mkRef false
+    stepNative := ← IO.mkRef none
+    memorySwitched := ← IO.mkRef false
+    rollbacks := ← IO.mkRef {}
     atomicGated := ← IO.mkRef false
     atomicReached := ← IO.mkRef false
     atomicSites := ← IO.mkRef {}
@@ -484,28 +504,76 @@ private def nativeFromState (emu : Emu) (state : Bil.State) : IO Jit.Memory := d
 
 /-- Makes `native` the memory of the thread that runs. -/
 private def attachMemory (emu : Emu) (native : Jit.Memory) : IO Unit := do
+  emu.memorySwitched.set true
   emu.engine.persistentMemory.set (some native)
   emu.engine.persistentVariable.set (some emu.config.memory)
 
+/-- A step begins: what it writes to the native memory is remembered, to take back if it fails. A worker of a parallel round leaves
+that to the rollback of its round. -/
+private def beginStepMemory (emu : Emu) : IO Unit := do
+  if emu.engine.deferMemorySync then return
+  emu.memorySwitched.set false
+  match ← emu.engine.persistentMemory.get, ← emu.engine.persistentVariable.get with
+  | some native, some var =>
+    if var == emu.config.memory then
+      Jit.beginMemoryStep native
+      emu.stepNative.set (some native)
+    else emu.stepNative.set none
+  | _, _ => emu.stepNative.set none
+
+/-- Takes back what a failed step wrote to the native memory that it began with, from the memory of the state, which is exact: a
+memory that a process has made of all its bytes takes as long as they do, and this as long as what was written. Whether it could. -/
+private def undoStepMemory (emu : Emu) (live : Option Jit.Memory) (snapshot : Snapshot) : IO Bool := do
+  if ← emu.memorySwitched.get then return false
+  -- The step may be what made the memory, of what the state had when it started, and that keeps a log from then on.
+  let some native := (← emu.stepNative.get) <|> live | return false
+  let some written ← Jit.memoryStepWrites native | return false
+  match Bil.lookup snapshot.state.env emu.config.memory with
+  | .ok (@Value.memory width memory) =>
+    Jit.writeMemory native written (written.map fun address => Bap.Memory.readByte memory (BitVec.ofNat width address.toNat))
+    emu.rollbacks.modify fun stats => { stats with bytesRestored := stats.bytesRestored + written.size }
+    let space := snapshot.table.spaceOf snapshot.currentThread
+    if (← emu.processMemory.get).contains space then emu.processMemory.modify (·.insert space native)
+    attachMemory emu native
+    return true
+  | _ => return false
+
 /-- Undo a failed step. The memory of the state is exact, and a failed block may have written to the
-native memory, which the state replaces. Threads created since the step started are gone again, and so
+native memory, which is made to agree with the state. Threads created since the step started are gone again, and so
 is their memory. A parallel worker leaves all of this to the rollback of its round. -/
 private def rollbackBlock (emu : Emu) (snapshot : Snapshot) : IO Unit := do
+  let restarting ← emu.restarting.get
+  let faulted := (← emu.lastFault.get).isSome
+  emu.rollbacks.modify fun stats =>
+    if restarting then { stats with restarts := stats.restarts + 1 }
+    else if faulted then { stats with faults := stats.faults + 1 }
+    else { stats with others := stats.others + 1 }
   let created ← emu.nextThreadRef.get
+  let live ← match ← emu.engine.persistentVariable.get with
+    | some var => if var == emu.config.memory then emu.engine.persistentMemory.get else pure none
+    | none => pure none
   restoreThreads emu snapshot
   Primus.Lifted.discardMemory emu.engine
   if !emu.engine.deferMemorySync then
     if created != snapshot.nextThread then
       emu.processMemory.modify fun processes => processes.filter fun id _ => id < snapshot.nextThread
       emu.parkedRegions.modify fun parked => parked.filter fun id _ => id < snapshot.nextThread
-    let space := snapshot.table.spaceOf snapshot.currentThread
-    if (← emu.processMemory.get).contains space then
-      let native ← nativeFromState emu snapshot.state
-      emu.processMemory.modify (·.insert space native)
-      attachMemory emu native
+    if ← undoStepMemory emu live snapshot then
+      emu.rollbacks.modify fun stats => { stats with patched := stats.patched + 1 }
+    else
+      let space := snapshot.table.spaceOf snapshot.currentThread
+      if (← emu.processMemory.get).contains space then
+        let native ← nativeFromState emu snapshot.state
+        emu.processMemory.modify (·.insert space native)
+        attachMemory emu native
+        emu.rollbacks.modify fun stats => { stats with rebuilt := stats.rebuilt + 1 }
+
+/-- How steps have been taken back so far. -/
+def rollbackStats (emu : Emu) : IO RollbackStats := emu.rollbacks.get
 
 def restore (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   restoreThreads emu snapshot
+  emu.memorySwitched.set true
   -- A compiled range holds the code of all of its blocks. A version of it stays, for when those come back.
   Primus.Lifted.forgetRanges emu.engine
   emu.parallelWorkers.set []
@@ -558,7 +626,9 @@ private def switchNativeMemory (emu : Emu) (current next : ThreadId) : IO Unit :
     let processes ← emu.processMemory.get
     match nativeFor processes (← emu.sharedMemory.get) nextSpace with
     | some native => attachMemory emu native
-    | none => Primus.Lifted.discardMemory emu.engine
+    | none =>
+      emu.memorySwitched.set true
+      Primus.Lifted.discardMemory emu.engine
 
 /-- The exclusive monitor of a thread, of targets that have it in their semantics: see `semantics/arm/aarch64-atomic.lisp` and
 `semantics/riscv/riscv.lisp`. -/
@@ -1151,6 +1221,7 @@ def setReg (emu : Emu) (var : Bap.Var) (value : Bap.Value) : IO Unit := do
   emu.state.modify fun state => { env := Bil.bind state.env var value }
   -- The state now has the memory: what native memory has follows it, on the next access.
   if var == emu.config.memory then
+    emu.memorySwitched.set true
     Primus.Lifted.discardMemory emu.engine
     let space ← spaceOf emu (← emu.currentThreadRef.get)
     if (← emu.processMemory.get).contains space then
@@ -1685,7 +1756,9 @@ private def gateAtomic (emu : Emu) (address : Nat) : IO Unit := do
 /-- The references of the emulator as the environment of `stepM`. -/
 @[inline] private def stepOps (emu : Emu) : StepOps IO (Snapshot × Option TraceState) :=
   stepOpsOf (controlCells emu) (fun address => do notifyCode emu address; gateAtomic emu address)
-    (do pure (← snapshotBlock emu, ← emu.trace.get)) (delayFor emu)
+    (do
+      beginStepMemory emu
+      pure (← snapshotBlock emu, ← emu.trace.get)) (delayFor emu)
     (recordTrace emu)
     (fun address => do
       let result ← executeBlock emu address
@@ -1759,7 +1832,10 @@ private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared :
     | some (_, engine) => pure engine
     | none =>
       createEngine emu.config true
-  engine.persistentMemory.set (some (← workerMemory emu context shared))
+  let memory ← workerMemory emu context shared
+  -- It writes for a round, which isn't a step, and a round takes itself back.
+  Jit.endMemoryStep memory
+  engine.persistentMemory.set (some memory)
   engine.persistentVariable.set (some emu.config.memory)
   -- Workers of the space of the thread that runs share its map, and those of another have that space's.
   let table ← emu.taskTable.get

@@ -1154,6 +1154,122 @@ def testParallelUnaligned : IO Unit := do
   let readerAt := ((← Bap.Emu.threads emu).find? (·.id == reader)).map (·.pc)
   assertTrue "Parallel store within a word off its alignment is not seen in parts" (readerAt != some torn)
 
+/-- A step that fails is taken back in the native memory by what it wrote, which is what all of that memory being made again comes to:
+the same bytes as the state at each stop, and the same as a machine with no ranges at all, whether the process has its own memory or
+not. What it costs is counted by why. -/
+def testRollbackMemory : IO Unit := do
+  let reg (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
+  let word (value : Nat) : Bap.Value := .bits (BitVec.ofNat 64 value)
+  let memoryVar : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let setup (source : String) (fork : Bool) (adjust : Bap.Emu.Config → Bap.Emu.Config := id) : IO Bap.Emu.Emu := do
+    let emu ← Bap.Emu.riscv64 (← LLVM.assemble "riscv64" source) 0 0 (adjust := adjust)
+    Bap.Emu.map emu ⟨0x100000, ByteArray.mk (Array.replicate 8192 7), ⟨true, true, false⟩⟩
+    let registers := [("X10", 0x100000), ("X11", 0x90000000), ("X12", 5), ("X13", 0), ("X14", 0), ("X15", 0), ("X17", 64)]
+    for (name, value) in registers do Bap.Emu.setReg emu (reg name) (word value)
+    if fork then
+      let child ← Bap.Emu.forkThread emu 0
+      for (name, value) in registers do Bap.Emu.setThreadReg emu child (reg name) (word value)
+      Bap.Emu.resumeThread emu child
+      Bap.Emu.cloneProcessMemory emu child
+      Bap.Emu.switchThread emu child
+    pure emu
+  -- Whatever a native memory holds is what the state has.
+  let agrees (label : String) (emu : Bap.Emu.Emu) : IO Unit := do
+    if let some native := ← emu.engine.persistentMemory.get then
+      let (addresses, values) ← Jit.dumpMemory native
+      match ← Bap.Emu.reg emu memoryVar with
+      | .memory memory =>
+        let cells := (Bap.Memory.cells memory).map (fun cell => (cell.1.toNat, cell.2)) |>.mergeSort fun left right => left.1 ≤ right.1
+        assertTrue s!"{label} the native memory is the state's"
+          ((addresses.toList.map (·.toNat)).zip values.toList == cells)
+      | _ => throw <| IO.userError s!"{label} has no memory"
+  let faulting := "addi a2, a2, 1\nsw a2, 0(a0)\nsd a2, 8(a0)\nlw t1, 0(a1)\nj -16"
+  let cycle (emu : Bap.Emu.Emu) (label : String) : IO Unit := do
+    for _ in [0:40] do
+      Bap.Emu.setPc emu 0
+      match ← (Bap.Emu.run emu 40).toBaseIO with
+      | .ok _ => throw <| IO.userError s!"{label} should fault"
+      | .error _ => pure ()
+      agrees label emu
+  for fork in [false, true] do
+    let label := if fork then "Rollback of a fork" else "Rollback"
+    let emu ← setup faulting fork
+    cycle emu label
+    let stats ← Bap.Emu.rollbackStats emu
+    assertTrue s!"{label} counts its faults: {repr stats}" (stats.faults ≥ 40)
+    assertEqual s!"{label} doesn't count them as anything else" (0, 0) (stats.restarts, stats.others)
+    assertTrue s!"{label} takes back what was written: {repr stats}" (stats.patched ≥ 30)
+    assertTrue s!"{label} doesn't make the memory again: {repr stats}" (stats.rebuilt ≤ 1)
+    -- One step at a time, with nothing to take back, comes to the same.
+    let plain ← setup faulting fork fun config => { config with rangeLimit := 1, hotThreshold := 1000000000 }
+    cycle plain s!"{label} without ranges"
+    assertEqual s!"{label} comes to what it would without ranges" (← Bap.Emu.read plain 0x100000 32).toList (← Bap.Emu.read emu 0x100000 32).toList
+    assertEqual s!"{label} leaves registers as it would without ranges"
+      (repr (← Bap.Emu.reg plain (reg "X12"))).pretty (repr (← Bap.Emu.reg emu (reg "X12"))).pretty
+    -- A range that reaches what is watched goes back and comes again as one instruction.
+    let watched ← setup "addi a2, a2, 1\nsw a2, 0(a0)\naddi a2, a2, 1\nlw t1, 16(a0)\nsw a2, 8(a0)\nj -20" fork
+    let seen ← IO.mkRef 0
+    let _ ← Bap.Emu.run watched 400
+    let _ ← Bap.Emu.onRead watched (0x100010, 0x100010) fun _ _ _ => seen.modify (· + 1)
+    let _ ← Bap.Emu.run watched 400
+    agrees s!"{label} of a watched read" watched
+    assertTrue s!"{label} of a watched read fires" ((← seen.get) > 0)
+    assertTrue s!"{label} of a watched read restarts: {repr (← Bap.Emu.rollbackStats watched)}" ((← Bap.Emu.rollbackStats watched).restarts ≥ 1)
+    -- What a hook wrote in a step that then failed goes as well, with native memory there to have it: a run of the same step won't put
+    -- it right, as the hook doesn't do it again.
+    let writing ← setup "sw a2, 0(a0)\nsw a2, 8(a0)\nj -8\necall" fork
+    let _ ← Bap.Emu.onSyscall writing fun current _ _ => do
+      Bap.Emu.write current 0x100040 (ByteArray.mk #[99, 98, 97])
+      throw (IO.userError "refused")
+    let _ ← Bap.Emu.run writing 300
+    assertTrue s!"{label} of a hook's write has native memory" (← writing.engine.persistentMemory.get).isSome
+    Bap.Emu.setPc writing 12
+    let before ← Bap.Emu.rollbackStats writing
+    let _ ← (Bap.Emu.run writing 1).toBaseIO
+    agrees s!"{label} of a hook's write" writing
+    assertEqual s!"{label} of a hook's write takes it back" [7, 7, 7] (← Bap.Emu.read writing 0x100040 3).toList
+    let after ← Bap.Emu.rollbackStats writing
+    assertEqual s!"{label} of a hook's write isn't a fault" (before.faults, before.others + 1) (after.faults, after.others)
+    assertEqual s!"{label} of a hook's write is taken back, not made again" (before.patched + 1, before.rebuilt) (after.patched, after.rebuilt)
+    -- What a store of a failing run wrote is taken back too, which nothing else would do where the run isn't to come again: a run that
+    -- faults, and then goes somewhere else.
+    let elsewhere ← setup "sw a2, 0(a0)\nsw a2, 64(a0)\nlw t1, 0(a1)\nj -12" fork
+    let _ ← (Bap.Emu.run elsewhere 2).toBaseIO
+    let good : Bap.Value := word 0x100000
+    Bap.Emu.setReg elsewhere (reg "X11") good
+    let _ ← Bap.Emu.run elsewhere 200
+    Bap.Emu.setReg elsewhere (reg "X11") (word 0x90000000)
+    Bap.Emu.setReg elsewhere (reg "X12") (word 200)
+    Bap.Emu.setPc elsewhere 0
+    -- From the top, this range stores 200 twice and faults; a run of one step undoes the range and does its first store alone.
+    let _ ← (Bap.Emu.step elsewhere)
+    agrees s!"{label} of a step alone" elsewhere
+    assertEqual s!"{label} of a step alone stored one" [200] [(← Bap.Emu.read elsewhere 0x100000 1)[0]!.toNat]
+    Bap.Emu.setPc elsewhere 0
+    let _ ← (Bap.Emu.run elsewhere 40).toBaseIO
+    agrees s!"{label} of a range that faulted" elsewhere
+    -- A step that replaced the memory has nothing to take back, and it is made again.
+    let replacing ← setup "sw a2, 0(a0)\nsw a2, 8(a0)\nj -8\necall" fork
+    let _ ← Bap.Emu.onSyscall replacing fun current _ _ => do
+      Bap.Emu.setReg current memoryVar (← Bap.Emu.reg current memoryVar)
+      throw (IO.userError "refused")
+    let _ ← Bap.Emu.run replacing 300
+    assertTrue s!"{label} of a replaced memory has native memory" (← replacing.engine.persistentMemory.get).isSome
+    Bap.Emu.setPc replacing 12
+    let beforeReplacing ← Bap.Emu.rollbackStats replacing
+    let _ ← (Bap.Emu.run replacing 1).toBaseIO
+    agrees s!"{label} of a replaced memory" replacing
+    let afterReplacing ← Bap.Emu.rollbackStats replacing
+    assertEqual s!"{label} of a replaced memory patches nothing" beforeReplacing.patched afterReplacing.patched
+    if fork then
+      assertEqual s!"{label} of a replaced memory is made again" (beforeReplacing.rebuilt + 1) afterReplacing.rebuilt
+  -- What a worker writes in a round is no step's, and a step after it knows only its own.
+  let rounds ← setup "addi a2, a2, 1\nsw a2, 0(a0)\nj -8" false
+  let _ ← Bap.Emu.spawnThread rounds 0 0
+  let _ ← Bap.Emu.runPreemptiveParallel rounds 100
+  if let some native := ← rounds.engine.persistentMemory.get then
+    assertTrue "A round leaves no step open" ((← Jit.memoryStepWrites native).isNone)
+
 /-- The kernel itself: a program isn't needed to say what it does. -/
 private def testKernel : IO Unit := do
   let unwrap {α} (result : Bap.Linux.Result α) : IO α := match result with

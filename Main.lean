@@ -22,7 +22,7 @@ open Bap
 open Bap.Bil
 
 private def usage : String :=
-  "usage: bap check FILE | bap run [--copy PATH].. [--root DIR] [--env NAME=VALUE].. [--strace] [--stop-after COUNT FILE] PROGRAM [ARGS] | bap resume [--strace] [--stop-after COUNT FILE] CHECKPOINT | bap print FILE | bap eval FILE [FUEL] | bap image FILE | bap raw FILE BASE | bap mc HEX | bap disassemble FILE | bap lisp FILE | bap analyze FILE | bap symbolic FILE"
+  "usage: bap check FILE | bap run [--copy PATH].. [--root DIR] [--env NAME=VALUE].. [--strace] [--stats] [--stop-after COUNT FILE] PROGRAM [ARGS] | bap resume [--strace] [--stats] [--stop-after COUNT FILE] CHECKPOINT | bap print FILE | bap eval FILE [FUEL] | bap image FILE | bap raw FILE BASE | bap mc HEX | bap disassemble FILE | bap lisp FILE | bap analyze FILE | bap symbolic FILE"
 
 private def loadProgram (path : String) : IO Program := do
   let input ← IO.FS.readFile path
@@ -109,7 +109,7 @@ private def analyze (path : String) : IO Unit := do
 
 /-- Runs a machine until it finishes, with the status of its first process as ours, or for as many instructions as `stop` says,
 and then saves it where that says. -/
-private def runMachine (machine : Linux.Machine) (stop : Option (Nat × String)) : IO Unit := do
+private def runMachine (machine : Linux.Machine) (stop : Option (Nat × String)) (stats : Bool := false) : IO Unit := do
   let stdout ← IO.getStdout
   -- A program that ends first has nothing to go on from: what an earlier run left must not look like it.
   if let some (_, path) := stop then
@@ -117,9 +117,13 @@ private def runMachine (machine : Linux.Machine) (stop : Option (Nat × String))
   let fuel := match stop with
     | some (count, _) => count
     | none => 1000000000
-  match ← machine.run (fuel := fuel) fun data => do
-      stdout.write data
-      stdout.flush with
+  let outcome ← machine.run (fuel := fuel) fun data => do
+    stdout.write data
+    stdout.flush
+  if stats then
+    let rollbacks ← Emu.rollbackStats machine.emu
+    (← IO.getStderr).putStrLn s!"rollbacks: {rollbacks.faults} faults, {rollbacks.restarts} restarts, {rollbacks.others} others; {rollbacks.patched} patched ({rollbacks.bytesRestored} bytes), {rollbacks.rebuilt} rebuilt"
+  match outcome with
   | .finished status =>
     IO.Process.exit (if status % 128 != 0 then 128 + (status % 128).toUInt8 else (status / 256).toUInt8)
   | .outOfFuel =>
@@ -135,12 +139,14 @@ private structure RunOptions where
   root : String := ""
   trace : Bool := false
   stop : Option (Nat × String) := none
+  stats : Bool := false
 
 private def runOptions : List String → RunOptions → RunOptions × List String
   | "--copy" :: path :: rest, options => runOptions rest { options with copies := path :: options.copies }
   | "--env" :: entry :: rest, options => runOptions rest { options with environment := options.environment ++ [entry] }
   | "--root" :: path :: rest, options => runOptions rest { options with root := path }
   | "--strace" :: rest, options => runOptions rest { options with trace := true }
+  | "--stats" :: rest, options => runOptions rest { options with stats := true }
   | "--stop-after" :: count :: path :: rest, options =>
     match count.toNat? with
     | some count => runOptions rest { options with stop := some (count, path) }
@@ -159,13 +165,13 @@ private def runProgram (args : List String) : IO Unit := do
   let mut kernel ← Linux.Kernel.empty.copyProgramFromHost path options.root
   for copy in options.copies do
     kernel ← kernel.copyFromHost copy
-  runMachine (← Linux.start kernel path command options.environment (watch := ← tracer options)) options.stop
+  runMachine (← Linux.start kernel path command options.environment (watch := ← tracer options)) options.stop options.stats
 
 /-- Goes on from a checkpoint of `--stop-after`, which may have been made on another machine. -/
 private def resumeProgram (args : List String) : IO Unit := do
   let (options, command) := runOptions args {}
   let [path] := command | IO.println usage
-  runMachine (← Linux.Machine.loadFile path (← tracer options)) options.stop
+  runMachine (← Linux.Machine.loadFile path (← tracer options)) options.stop options.stats
 
 private def symbolic (path : String) : IO Unit := do
   let program ← loadProgram path

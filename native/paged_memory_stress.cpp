@@ -149,6 +149,35 @@ int main() {
     copy.store(0x1000, 1, &other);
     check(memory.read(0x1000) == 3 && copy.read(0x1000) == 4, "a copy is its own");
   }
+  // What a step wrote is known, once each and in order, from when it began; a new one forgets; none is known without one, or past the limit.
+  {
+    PagedMemory memory;
+    std::vector<uint64_t> found;
+    check(!memory.stepAddresses(found), "no step, nothing known");
+    memory.beginStep();
+    memory.noteStep(0x2000, 2);
+    uint64_t addresses[] = {0x2001, 0x2002, 0x3000};
+    uint8_t values[] = {1, 2, 3};
+    memory.writeAll(addresses, values, 3);
+    check(memory.stepAddresses(found) && found == std::vector<uint64_t>({0x2000, 0x2001, 0x2002, 0x3000}), "the writes of a step");
+    memory.beginStep();
+    found.clear();
+    check(memory.stepAddresses(found) && found.empty(), "a new step forgets");
+    for (size_t index = 0; index != (size_t{1} << 22) + 1; ++index)
+      memory.noteStep(index * 8, 8);
+    found.clear();
+    check(!memory.stepAddresses(found), "too many writes are not known");
+    memory.endStep();
+    check(!memory.stepAddresses(found), "after the end nothing is known");
+    // Threads that note at once lose nothing, as a worker might if a step was left open.
+    memory.beginStep();
+    together(4, [&](size_t thread) {
+      for (size_t index = 0; index != 2000; ++index)
+        memory.noteStep(0x100000 * (thread + 1) + index, 1);
+    });
+    found.clear();
+    check(memory.stepAddresses(found) && found.size() == 8000, "notes of threads at once");
+  }
   // At the very top, nothing goes wrong with what wraps.
   {
     PagedMemory memory;

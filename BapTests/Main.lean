@@ -127,6 +127,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxServedCheckpoint "aarch64" 17,
     Bap.Tests.Lifted.testNativeMemory,
     Bap.Tests.Lifted.testNativeMemoryModel,
+    Bap.Tests.Emu.testRollbackMemory,
     Bap.Tests.Emu.testParallelAtomics,
     Bap.Tests.Emu.testParallelTearing,
     Bap.Tests.Emu.testParallelFences,

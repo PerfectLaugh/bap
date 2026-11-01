@@ -1061,6 +1061,10 @@ extern "C" lean_obj_res bap_jit_run_memory_object_code(
     std::vector<StoreRecord> records;
     BapCells memory{nullptr, 0, 0, observer, nullptr, persistent, &records, codeObserver};
     uint64_t next = program->function(state.data(), &memory);
+    // Before anything else, as this is what a run that failed leaves to be taken back.
+    if (persistent->stepActive())
+      for (const StoreRecord &record : records)
+        persistent->noteStep(record.address, record.size);
     if (memory.error != nullptr)
       return lean_io_result_mk_error(memory.error);
     // What the stores came to, each byte once, the last that was written to it.
@@ -1147,6 +1151,28 @@ extern "C" lean_obj_res bap_jit_memory_read_range(lean_obj_arg memoryObject, uin
   lean_obj_res result = lean_alloc_sarray(1, size, size);
   memory->readRange(address, size, lean_sarray_cptr(result));
   return lean_io_result_mk_ok(result);
+}
+
+extern "C" lean_obj_res bap_jit_memory_step_begin(lean_obj_arg memoryObject, lean_obj_arg) {
+  static_cast<PagedMemory *>(lean_get_external_data(memoryObject))->beginStep();
+  return lean_io_result_mk_ok(lean_box(0));
+}
+
+extern "C" lean_obj_res bap_jit_memory_step_end(lean_obj_arg memoryObject, lean_obj_arg) {
+  static_cast<PagedMemory *>(lean_get_external_data(memoryObject))->endStep();
+  return lean_io_result_mk_ok(lean_box(0));
+}
+
+extern "C" lean_obj_res bap_jit_memory_step_writes(lean_obj_arg memoryObject, lean_obj_arg) {
+  std::vector<uint64_t> addresses;
+  if (!static_cast<PagedMemory *>(lean_get_external_data(memoryObject))->stepAddresses(addresses))
+    return lean_io_result_mk_ok(lean_box(0));
+  lean_obj_res array = lean_alloc_array(addresses.size(), addresses.size());
+  for (size_t index = 0; index != addresses.size(); ++index)
+    lean_array_set_core(array, index, lean_box_uint64(addresses[index]));
+  lean_obj_res some = lean_alloc_ctor(1, 1, 0);
+  lean_ctor_set(some, 0, array);
+  return lean_io_result_mk_ok(some);
 }
 
 extern "C" lean_obj_res bap_jit_memory_trim(lean_obj_arg memoryObject, uint64_t first, uint64_t last, lean_obj_arg) {

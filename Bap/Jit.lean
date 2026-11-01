@@ -42,6 +42,9 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
 11. `readMemoryRange memory address size` is `size` bytes of what `readMemory` reads, from `address` on.
 12. `trimMemory` changes nothing that any operation here can tell. It may let the host have the memory of pages that
     hold only zeros, of those wholly between its bounds, when nothing stores there meanwhile.
+13. After `beginMemoryStep`, `memoryStepWrites` holds every address that a `writeMemory` or a program wrote to this memory
+    since, once each, by ascending address, also for a program that failed: `some`, or `none` when it was too many or
+    no step began. It may hold addresses that were written the same as they were. `endMemoryStep` stops it.
 
 Everything else in `Bap.Emu`, from what the code hooks see to what a rollback restores, is proved against
 these. No theorem assumes anything of LLVM beyond them, and nothing depends on `memorySize`, which has no obligation.
@@ -148,6 +151,15 @@ opaque readMemory (memory : @& Memory) (address : UInt64) : IO UInt8
 
 @[extern "bap_jit_memory_read_range"]
 opaque readMemoryRange (memory : @& Memory) (address : UInt64) (size : @& Nat) : IO ByteArray
+
+@[extern "bap_jit_memory_step_begin"]
+opaque beginMemoryStep (memory : @& Memory) : IO Unit
+
+@[extern "bap_jit_memory_step_end"]
+opaque endMemoryStep (memory : @& Memory) : IO Unit
+
+@[extern "bap_jit_memory_step_writes"]
+opaque memoryStepWrites (memory : @& Memory) : IO (Option (Array UInt64))
 
 @[extern "bap_jit_memory_trim"]
 opaque trimMemory (memory : @& Memory) (first last : UInt64) : IO Unit

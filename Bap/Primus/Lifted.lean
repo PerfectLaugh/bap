@@ -1843,6 +1843,8 @@ def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bi
         | .ok (addresses, values) =>
           if lowering.memory.isSome && addresses.size ≥ engine.persistentFrom then do
             let memory ← Jit.createMemory addresses values
+            -- It is what the state has now, in the middle of a step that may fail, and is not to be made all over again for that.
+            unless engine.deferMemorySync do Jit.beginMemoryStep memory
             engine.persistentMemory.set (some memory)
             engine.persistentVariable.set lowering.memory
             runPersistent engine entry.executions lowering entry.next program state slots memory observer codeObserver budget

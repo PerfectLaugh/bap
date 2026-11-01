@@ -54,6 +54,7 @@ lake exe bap run program args           # an x86, ARM, RISC-V, MIPS or PowerPC L
 lake exe bap run --copy dir program     # the same, with a directory copied in first
 lake exe bap run --root dir program     # the same, with its libraries from under a root of its architecture
 lake exe bap run --strace program       # the same, saying each system call
+lake exe bap run --stats program        # the same, saying at the end how many steps were taken back, and why
 lake exe bap run --stop-after 1000000 file program  # the same, saved to a file after that many instructions
 lake exe bap resume file                # goes on from it, in another process or on another machine
 ```

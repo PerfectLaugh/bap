@@ -14,8 +14,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <mutex>
 #include <new>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -51,6 +53,12 @@ private:
   std::vector<uint8_t *> chunks;
   std::vector<uint8_t *> unused;
   size_t chunkUsed = chunkPages;
+  // What has been written since a step began, to take it back if the step fails.
+  static constexpr size_t stepLimit = size_t{1} << 22;
+  std::atomic<bool> stepOpen{false};
+  std::mutex stepLock;
+  std::vector<std::pair<uint64_t, uint8_t>> stepWrites;
+  bool stepOverflowed = false;
 
   static size_t indexAt(uint64_t address, size_t level) {
     return (address >> (pageBits + (levels - 1 - level) * levelBits)) & (fanout - 1);
@@ -252,8 +260,53 @@ public:
       while (run != room && index + run != count && addresses[index + run] == at + run)
         ++run;
       storeInWord(at, run, values + index);
+      noteStep(at, run);
       index += run;
     }
+  }
+
+  // A step begins: from here on what is written is remembered, by where it is and not what it was, as who takes it back has the bytes.
+  void beginStep() {
+    std::lock_guard<std::mutex> lock(stepLock);
+    stepWrites.clear();
+    stepOverflowed = false;
+    stepOpen.store(true, std::memory_order_release);
+  }
+
+  void endStep() {
+    std::lock_guard<std::mutex> lock(stepLock);
+    stepOpen.store(false, std::memory_order_release);
+    stepWrites.clear();
+    stepOverflowed = false;
+  }
+
+  bool stepActive() const { return stepOpen.load(std::memory_order_acquire); }
+
+  void noteStep(uint64_t address, size_t size) {
+    if (!stepActive())
+      return;
+    std::lock_guard<std::mutex> lock(stepLock);
+    if (stepOverflowed)
+      return;
+    if (stepWrites.size() >= stepLimit) {
+      stepOverflowed = true;
+      stepWrites.clear();
+      return;
+    }
+    stepWrites.emplace_back(address, static_cast<uint8_t>(size));
+  }
+
+  // Each address written since the step began, once, in order; or nothing when there were too many to remember or no step began.
+  bool stepAddresses(std::vector<uint64_t> &addresses) {
+    std::lock_guard<std::mutex> lock(stepLock);
+    if (stepOverflowed || !stepOpen.load(std::memory_order_acquire))
+      return false;
+    for (const auto &write : stepWrites)
+      for (size_t index = 0; index != write.second; ++index)
+        addresses.push_back(write.first + index);
+    std::sort(addresses.begin(), addresses.end());
+    addresses.erase(std::unique(addresses.begin(), addresses.end()), addresses.end());
+    return true;
   }
 
   // Each page there is, by ascending address.

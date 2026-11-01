@@ -23,7 +23,7 @@ are about the flows on the model, and Lean sees no more of `IO`, `Task` and `@[e
    `Bap.Primus.Lifted`, whose code around native runs is plumbing of the proved `encodeState`, `withControl`, `chainedCount`, `syncState` and `nativeOutcome`.
 2. **The arguments of `stepOpsOf`.** `save`, `restore`, `execute`, `notifyCode`, `dispatch` in `stepOps` have the
    effects that `Model.World` gives them: `restore` undoes all that happened since `save`, except for what the log of
-   the model keeps, what hooks did to the outside. That `save` takes all that `Snapshot` has but `processMemory`, which `rollbackBlock` goes without as it remakes the native memory of the thread, is by reading `snapshotBlock`.
+   the model keeps, what hooks did to the outside. That `save` takes all that `Snapshot` has but `processMemory`, which `rollbackBlock` goes without as it takes back what the step wrote to the native memory of the thread, by obligation 13 of `Bap.Jit`, or else makes that memory again, is by reading `snapshotBlock`. That the native memory is the memory of the state when a step begins, which taking it back rests on, is by reading too, and tested (`testRollbackMemory`).
 3. **What a run of a range does.** `executeRangeM`, `rangeAllowM`, `rangeRestartM`, `rangeAgainM` and `stepOpsOf` are what both the emulator and the model
    (`RangeWorld.ops`) make their steps with, so that the model of a step that may run a range is not a matter of reading, and `rangeLaws_real` and `restartLaws_real` prove
    `RangeLaws` and `RestartLaws` of it, and `run_real_fault` that a fault in a range is a fault in single steps. What they assume of `runRange` is `NativeRange`, which stays
