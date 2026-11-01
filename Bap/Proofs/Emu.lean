@@ -379,8 +379,8 @@ theorem syscallRegisters_number_not_argument (abi : SyscallAbi) :
 theorem callAbi_arguments_distinct (abi : SyscallAbi) : (callAbi abi).1.Nodup := by
   cases abi <;> decide
 
-/-- Only x86-64 passes the return address on the stack. -/
-theorem callAbi_stack_return_iff (abi : SyscallAbi) : (callAbi abi).2.2.2 = true ↔ abi = .x86_64 := by
+/-- Only x86 passes the return address on the stack. -/
+theorem callAbi_stack_return_iff (abi : SyscallAbi) : (callAbi abi).2.2.2 = true ↔ abi = .x86_64 ∨ abi = .x86_32 := by
   cases abi <;> simp [callAbi]
 
 theorem mipsWord_none_iff (code : ByteArray) (address : Nat) :

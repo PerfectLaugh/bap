@@ -746,6 +746,13 @@ structure MipsVariant where
   release6 : Bool := false
   deriving DecidableEq, Repr
 
+/-- The registers of i686, with their widths, as what holds them is called: what a machine has to start with. -/
+def x8632Registers : List (String × Nat) :=
+  (x8632Globals.filterMap fun entry =>
+    match entry.2 with
+    | .register name _ width => some (name, width)
+    | _ => none).eraseDups
+
 /-- The registers of a PowerPC, with their widths, as what holds them is called: what a machine has to start with. -/
 def powerpcRegisters (bits : Nat) : List (String × Nat) :=
   let register := if bits == 64 then powerpcRegister else powerpc32Register

@@ -75,6 +75,9 @@ theorem generic32Calls_nodup : (generic32Calls.map (·.1)).Nodup := by decide +k
 /-- No number of o32 means two calls. -/
 theorem o32Calls_nodup : (o32Calls.map (·.1)).Nodup := by decide +kernel
 
+/-- No number of i686 means two calls. -/
+theorem i686Calls_nodup : (i686Calls.map (·.1)).Nodup := by decide +kernel
+
 /-- No number of PowerPC means two calls. -/
 theorem powerpcCalls_nodup : (powerpcCalls.map (·.1)).Nodup := by decide +kernel
 

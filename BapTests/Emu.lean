@@ -552,7 +552,7 @@ private def testZeroRegisterWidth : IO Unit := do
 
 /-- Programs of other machines than this one, which need no compiler: static, with musl, from `testsuite/src`. What is printed is
 what they print under qemu. -/
-def testLinuxMusl (triple : String) (floats : Bool := true) : IO Unit := do
+def testLinuxMusl (triple : String) (floats : Bool := true) (exclusive : Bool := true) : IO Unit := do
   let run (name : String) (quantum : Nat := 100000) : IO (Bap.Tasks.ScheduleOutcome × ByteArray) := do
     let path := s!"testsuite/bin/{triple}-linux-musl-{name}"
     let written ← IO.mkRef ByteArray.empty
@@ -560,8 +560,9 @@ def testLinuxMusl (triple : String) (floats : Bool := true) : IO Unit := do
     let outcome ← machine.run (quantum := quantum) fun data => written.modify (· ++ data)
     pure (outcome, ← written.get)
   -- Turns so short that many end between an exclusive load and its store, which then has to fail.
-  let (outcome, text) ← run "exclusive" 11
-  assertEqual s!"Linux {triple} exclusive updates aren't lost" ((Bap.Tasks.ScheduleOutcome.finished 0), "y") (outcome, String.fromUTF8! text)
+  if exclusive then
+    let (outcome, text) ← run "exclusive" 11
+    assertEqual s!"Linux {triple} exclusive updates aren't lost" ((Bap.Tasks.ScheduleOutcome.finished 0), "y") (outcome, String.fromUTF8! text)
   let (outcome, text) ← run "libc-files"
   assertEqual s!"Linux {triple} a program has its status" (Bap.Tasks.ScheduleOutcome.finished (Bap.Tasks.exitedStatus 5)) outcome
   assertEqual s!"Linux {triple} a program finds its files"

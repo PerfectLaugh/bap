@@ -9,7 +9,7 @@ import Bap.Float
 
 The virtual kernel of `Bap.Linux.Kernel` behind the system calls of the emulator, and what the kernel does to start a program:
 its segments, and those of the interpreter that it asks for, in pages, and the stack that it starts on. No request ever
-reaches the machine that this runs on: a program has what was put in its kernel. For x86-64, AArch64, RISC-V, MIPS and PowerPC. What
+reaches the machine that this runs on: a program has what was put in its kernel. For x86, AArch64, RISC-V, MIPS and PowerPC. What
 is in here is in 64 bits whatever the guest has, with an error as its negative, as on x86-64, until `kernelCall` hands it over. -/
 
 namespace Bap.Linux
@@ -340,8 +340,18 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       returning emu (arg 1) (Abi.time now 1 big 8)
     | .clockGetres64 => returning emu (arg 1) (Abi.time 1 1 big 8)
     | .setThreadArea =>
-      setReg emu ⟨"USERLOCAL", .imm wide, 0, false⟩ (bits wide (arg 0))
-      pure (.returnValue 0)
+      if architecture == .i686 then
+        -- A `struct user_desc`: it says which entry it wants, or that any will do, and gets one, whose base is at 4.
+        match ← (read emu (arg 0) 8).toBaseIO with
+        | .error _ => pure (errorOf Errno.efault)
+        | .ok entry =>
+          let base := (List.range 4).foldl (fun value index => value + entry[4 + index]!.toNat * 256 ^ index) 0
+          setReg emu ⟨"GS_BASE", .imm 32, 0, false⟩ (bits 32 base)
+          if entry[0]! == 0xff then writeGuest emu (arg 0) (Abi.bytesOf 4 12)
+          pure (.returnValue 0)
+      else
+        setReg emu ⟨"USERLOCAL", .imm wide, 0, false⟩ (bits wide (arg 0))
+        pure (.returnValue 0)
     | .uname => returning emu (arg 0) (Abi.utsname "bap" architecture.name)
     | .getrlimit =>
       let unlimited := 2 ^ wide - 1
@@ -376,14 +386,22 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
 private def serveRest (machine : Machine) : IO HookId :=
   onSyscall machine.emu fun emu _ _ => handOver machine emu (errorOf Errno.enosys)
 
+/-- A register of x86 of its width, from the name of its 16 bits. -/
+private def wordOf (wide : Nat) (name : String) : Bap.Var :=
+  ⟨(if wide == 64 then "R" else "E") ++ name, .imm wide, 0, false⟩
+
 /-- An x86-64 of level 2, which is what the libc of current distributions asks for: SSE4.2 and POPCNT, without AVX, so that
 libc doesn't pick the routines that need it. -/
-private def serveCpu (emu : Emu) (kernel : IO.Ref Kernel) : IO Unit := do
+private def serveCpu (emu : Emu) (kernel : IO.Ref Kernel) (wide : Nat) : IO Unit := do
+  -- The registers, and how many of the vector ones there are.
+  let a := wordOf wide "AX"
+  let (b, c, d) := (wordOf wide "BX", wordOf wide "CX", wordOf wide "DX")
+  let vectors := if wide == 64 then 16 else 8
   let _ ← onIntrinsic emu "cpuid" fun current _ => do
-    let leaf := match Value.asBits (← reg current (word "RAX")) with
+    let leaf := match Value.asBits (← reg current a) with
       | .ok value => value.2.toNat % 2 ^ 32
       | .error _ => 0
-    let (a, b, c, d) : Nat × Nat × Nat × Nat := match leaf with
+    let (eax, ebx, ecx, edx) : Nat × Nat × Nat × Nat := match leaf with
       -- AuthenticAMD: libc reads the caches of an Intel from leaves that this doesn't have.
       | 0 => (1, 0x68747541, 0x444d4163, 0x69746e65)
       -- SSE3, SSSE3, CMPXCHG16B, SSE4.1, SSE4.2, POPCNT
@@ -393,8 +411,8 @@ private def serveCpu (emu : Emu) (kernel : IO.Ref Kernel) : IO Unit := do
       | 0x80000001 => (0, 0, 1, 0x20100800)
       | _ => (0, 0, 0, 0)
     -- In the registers: what follows the intrinsic in its code doesn't run after a hook has served it.
-    for (name, value) in [("RAX", a), ("RBX", b), ("RCX", c), ("RDX", d)] do
-      setReg current (word name) (bits 64 value)
+    for (var, value) in [(a, eax), (b, ebx), (c, ecx), (d, edx)] do
+      setReg current var (bits wide value)
     pure .proceed
   -- What ld.so saves around resolving a function. The layout is that of the manual: the controls, MXCSR, ST and XMM. The rest of
   -- the x87 state, as what instruction faulted, isn't kept.
@@ -402,7 +420,7 @@ private def serveCpu (emu : Emu) (kernel : IO.Ref Kernel) : IO Unit := do
     match Value.asBits (← reg emu var) with
     | .ok bits => pure bits.2.toNat
     | .error _ => pure 0
-  let target (emu : Emu) : IO Nat := value emu (word "intrinsic:x0")
+  let target (emu : Emu) : IO Nat := value emu ⟨"intrinsic:x0", .imm wide, 0, false⟩
   let save (emu : Emu) : IO Unit := do
     let address ← target emu
     let control ← value emu ⟨"FPU_CONTROL", .imm 16, 0, false⟩
@@ -415,7 +433,7 @@ private def serveCpu (emu : Emu) (kernel : IO.Ref Kernel) : IO Unit := do
       Abi.bytesOf 4 mxcsr ++ Abi.bytesOf 4 0xffff
     for index in List.range 8 do
       image := image ++ Abi.bytesOf 16 (← value emu ⟨s!"ST{index}", .imm 80, 0, false⟩)
-    for index in List.range 16 do
+    for index in List.range vectors do
       image := image ++ Abi.bytesOf 16 ((← value emu ⟨s!"ZMM{index}", .imm 512, 0, false⟩) % 2 ^ 128)
     writeGuest emu address (image ++ Abi.bytesOf (512 - image.size) 0)
   let load (emu : Emu) : IO Unit := do
@@ -430,7 +448,7 @@ private def serveCpu (emu : Emu) (kernel : IO.Ref Kernel) : IO Unit := do
     setReg emu ⟨"MXCSR", .imm 32, 0, false⟩ (bits 32 (field 24 4))
     for index in List.range 8 do
       setReg emu ⟨s!"ST{index}", .imm 80, 0, false⟩ (bits 80 (field (32 + 16 * index) 10))
-    for index in List.range 16 do
+    for index in List.range vectors do
       let var : Bap.Var := ⟨s!"ZMM{index}", .imm 512, 0, false⟩
       let high := (← value emu var) / 2 ^ 128
       setReg emu var (bits 512 (high * 2 ^ 128 + field (160 + 16 * index) 16))
@@ -446,8 +464,8 @@ private def serveCpu (emu : Emu) (kernel : IO.Ref Kernel) : IO Unit := do
   let _ ← onIntrinsic emu "rdtsc" fun current _ => do
     let now := (← kernel.get).cycles
     kernel.modify fun kernel => { kernel with cycles := now + 1000 }
-    setReg current (word "RAX") (bits 64 (now % 2 ^ 32))
-    setReg current (word "RDX") (bits 64 (now / 2 ^ 32))
+    setReg current a (bits wide (now % 2 ^ 32))
+    setReg current d (bits wide (now / 2 ^ 32))
     pure .proceed
   pure ()
 
@@ -483,6 +501,14 @@ private def resetRegisters (emu : Emu) : Architecture → IO Unit
       setReg emu ⟨name, .imm wide, 0, false⟩ (bits wide 0)
     for index in List.range 8 do
       setReg emu ⟨s!"FCC{index}", .imm 1, 0, false⟩ (bits 1 0)
+  | .i686 => do
+    for (name, width) in Target.LLVMLift.x8632Registers do
+      setReg emu ⟨name, .imm width, 0, false⟩ (bits width 0)
+    for name in ["CS", "DS", "ES", "FS", "GS", "SS"] do
+      setReg emu ⟨name, .imm 16, 0, false⟩ (bits 16 0)
+    setReg emu ⟨"FPU_CONTROL", .imm 16, 0, false⟩ (bits 16 0x37f)
+    setReg emu ⟨"FPU_TAG", .imm 16, 0, false⟩ (bits 16 0xffff)
+    setReg emu ⟨"MXCSR", .imm 32, 0, false⟩ (bits 32 0x1f80)
   | .x86_64 => do
   for name in ["RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15",
       "FS_BASE", "GS_BASE"] do
@@ -570,6 +596,7 @@ private def emulatorOf (architecture : Architecture) : IO Emu := do
   let page := ByteArray.mk (Array.replicate 16 0)
   let emu ← match architecture with
     | .x86_64 => x86_64 page 0x1000 0 tuned
+    | .i686 => x86_32 page 0x1000 0 tuned
     | .aarch64 => aarch64 page 0x1000 0 tuned
     | .riscv64 => riscv64 page 0x1000 0 tuned
     | .riscv32 => riscv32 page 0x1000 0 tuned
@@ -578,7 +605,7 @@ private def emulatorOf (architecture : Architecture) : IO Emu := do
     | .powerpc wide big => powerpc page 0x1000 0 { bits := wide, endian := if big then .big else .little } tuned
   unmap emu 0x1000 16
   emu.intrinsicServer.set (some (Bap.Float.evaluateWith (match architecture with
-    | .x86_64 => .x86
+    | .x86_64 | .i686 => .x86
     | .aarch64 => .arm
     | .riscv64 | .riscv32 => .riscv
     | .mips _ _ true => .powerpc
@@ -599,7 +626,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   match fallback with
   | some serve => let _ ← onSyscall emu serve
   | none => let _ ← serveRest machine
-  if architecture == .x86_64 then serveCpu emu machine.kernel
+  if architecture == .x86_64 || architecture == .i686 then serveCpu emu machine.kernel architecture.bits
   emu.processHooks.modify ((fun parent child => machine.kernel.modify (·.fork parent child)) :: ·)
   pure machine
 
@@ -632,7 +659,7 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   -- What the processor has: on AArch64, FP and ASIMD, and not CPUID, so that libc doesn't choose routines by the implementer, and
   -- on RISC-V, a bit for each of the letters of IMAFDC.
   let capabilities := match architecture with
-    | .x86_64 => 0x07888f9f
+    | .x86_64 | .i686 => 0x07888f9f
     | .aarch64 => 3
     | .riscv64 | .riscv32 => 0x112d
     | .mips _ _ _ => 0
@@ -743,7 +770,7 @@ the directories that libraries are in, with the links of their paths resolved to
 architecture are, which is the root of the host only if it is of the same one. They get the paths that they have under it. -/
 def Kernel.copyProgramFromHost (kernel : Kernel) (path : String) (root : String := "") : IO Kernel := do
   let directories := ["/lib64", "/usr/lib64", "/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib/aarch64-linux-gnu",
-    "/usr/lib/aarch64-linux-gnu", "/lib/riscv64-linux-gnu", "/usr/lib/riscv64-linux-gnu", "/lib64/lp64d", "/usr/lib64/lp64d", "/lib", "/usr/lib"]
+    "/usr/lib/aarch64-linux-gnu", "/lib/riscv64-linux-gnu", "/usr/lib/riscv64-linux-gnu", "/lib64/lp64d", "/usr/lib64/lp64d", "/lib/i386-linux-gnu", "/usr/lib/i386-linux-gnu", "/lib", "/usr/lib"]
   let copy (kernel : Kernel) (target : String) : IO (Kernel × ByteArray) := do
     let data ← IO.FS.readBinFile (root ++ target)
     pure (kernel.addFile target data, data)

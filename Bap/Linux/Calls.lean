@@ -6,7 +6,7 @@ layout of `struct stat`, and the bits of the flags of `open`. The kernel itself 
 namespace Bap.Linux
 
 inductive Architecture where
-  | x86_64 | aarch64 | riscv64 | riscv32
+  | x86_64 | i686 | aarch64 | riscv64 | riscv32
   /-- Of 32 or 64 bits, big-endian or not, of release 6 or not. -/
   | mips (bits : Nat) (big release6 : Bool)
   /-- Of 32 or 64 bits and big-endian or not. 64 bits means ELFv2. -/
@@ -17,6 +17,7 @@ inductive Architecture where
 def Architecture.ofElf (machine bits : Nat) (big : Bool) (flags : Nat) : Option Architecture :=
   match machine, bits, big with
   | 62, 64, false => some .x86_64
+  | 3, 32, false => some .i686
   | 183, 64, false => some .aarch64
   | 243, 64, false => some .riscv64
   | 243, 32, false => some .riscv32
@@ -30,6 +31,7 @@ def Architecture.ofElf (machine bits : Nat) (big : Bool) (flags : Nat) : Option 
 /-- What `ofElf` takes to give it back, which is what a checkpoint says. -/
 def Architecture.elf : Architecture → Nat × Nat × Bool × Nat
   | .x86_64 => (62, 64, false, 0)
+  | .i686 => (3, 32, false, 0)
   | .aarch64 => (183, 64, false, 0)
   | .riscv64 => (243, 64, false, 0)
   | .riscv32 => (243, 32, false, 0)
@@ -38,7 +40,7 @@ def Architecture.elf : Architecture → Nat × Nat × Bool × Nat
   | .powerpc bits big => (21, bits, big, 2)
 
 def Architecture.bits : Architecture → Nat
-  | .riscv32 => 32
+  | .riscv32 | .i686 => 32
   | .mips bits _ _ | .powerpc bits _ => bits
   | _ => 64
 
@@ -123,6 +125,20 @@ def n64Calls : List (Nat × Call) :=
    (89, .succeeds), (90, .succeeds), (91, .succeeds), (92, .succeeds), (250, .succeeds), (275, .succeeds), (34, .succeeds),
    (224, .succeeds), (100, .succeeds), (102, .succeeds), (105, .succeeds), (106, .succeeds)]
 
+/-- The numbers of i686. -/
+def i686Calls : List (Nat × Call) :=
+  [(3, .read), (4, .write), (5, .open_), (295, .openat), (6, .close), (383, .statx), (19, .lseek), (140, .llseek),
+   (180, .pread), (181, .pwrite), (145, .readv), (146, .writev), (33, .access), (307, .faccessat), (439, .faccessat), (41, .dup),
+   (63, .dup2), (330, .dup3), (55, .fcntl), (221, .fcntl), (54, .ioctl), (220, .getdents), (183, .getcwd), (12, .chdir),
+   (133, .fchdir), (39, .mkdir), (296, .mkdirat), (40, .rmdir), (10, .unlink), (301, .unlinkat), (38, .rename), (302, .renameat),
+   (353, .renameat), (83, .symlink), (304, .symlinkat), (85, .readlink), (305, .readlinkat), (15, .chmod), (306, .fchmodat),
+   (92, .truncate), (93, .ftruncate), (193, .truncate64), (194, .ftruncate64), (60, .umask), (192, .mmap2), (163, .mremap),
+   (45, .brk), (78, .gettimeofday), (265, .clockGettime), (266, .clockGetres), (403, .clockGettime64), (406, .clockGetres64),
+   (122, .uname), (191, .getrlimit), (340, .prlimit), (355, .getrandom), (186, .sigaltstack), (242, .schedGetaffinity),
+   (243, .setThreadArea), (118, .succeeds), (148, .succeeds), (94, .succeeds), (207, .succeeds), (212, .succeeds), (198, .succeeds),
+   (298, .succeeds), (320, .succeeds), (412, .succeeds), (162, .succeeds), (267, .succeeds), (407, .succeeds), (199, .succeeds),
+   (200, .succeeds), (201, .succeeds), (202, .succeeds)]
+
 /-- The numbers of PowerPC, where those of each width that the other doesn't have are left to it not asking for them. -/
 def powerpcCalls : List (Nat × Call) :=
   [(3, .read), (4, .write), (5, .open_), (286, .openat), (6, .close), (106, .stat), (107, .lstat), (108, .fstat), (291, .fstatat),
@@ -139,6 +155,7 @@ def powerpcCalls : List (Nat × Call) :=
 
 def Architecture.calls : Architecture → List (Nat × Call)
   | .x86_64 => x86_64Calls
+  | .i686 => i686Calls
   | .aarch64 | .riscv64 => genericCalls
   | .riscv32 => generic32Calls
   | .mips 32 _ _ => o32Calls.map fun entry => (entry.1 + 4000, entry.2)
@@ -166,7 +183,7 @@ def moveBits (moves : List (Nat × Nat)) (flags : Nat) : Nat :=
 /-- The flags of `open` as the kernel has them, from those of a guest: on AArch64, `O_DIRECTORY` and `O_NOFOLLOW` are
 where x86-64 has `O_DIRECT` and `O_LARGEFILE`, and the other way round. -/
 def Architecture.openFlags : Architecture → Nat → Nat
-  | .x86_64, flags | .riscv64, flags | .riscv32, flags => flags
+  | .x86_64, flags | .i686, flags | .riscv64, flags | .riscv32, flags => flags
   | .mips _ _ _, flags => moveBits mipsOpenBits flags
   | .powerpc _ _, flags => moveBits powerpcOpenBits flags
   | .aarch64, flags =>
@@ -182,7 +199,7 @@ def Architecture.guestFlags : Architecture → Nat → Nat
 
 /-- `struct stat`. 32-bit systems ask for `statx`, whose times are wide enough. -/
 def Architecture.stat : Architecture → Kernel.Stat → ByteArray
-  | .x86_64, value => Abi.stat value
+  | .x86_64, value | .i686, value => Abi.stat value
   | .aarch64, value | .riscv64, value | .riscv32, value => Abi.genericStat value
   | .mips _ big _, value => Abi.mips64Stat value big
   | .powerpc _ big, value => Abi.stat value big
@@ -208,6 +225,7 @@ def Architecture.pairBase : Architecture → Nat
 /-- What `uname` and `AT_PLATFORM` say. -/
 def Architecture.name : Architecture → String
   | .x86_64 => "x86_64"
+  | .i686 => "i686"
   | .aarch64 => "aarch64"
   | .riscv64 => "riscv64"
   | .riscv32 => "riscv32"

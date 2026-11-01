@@ -1,6 +1,7 @@
 import Bap.Target.RISCV
 import Bap.Target.RISCV32
 import Bap.Target.X86
+import Bap.Target.X8632
 import Bap.Target.AArch64
 import Bap.Target.PowerPC
 import Bap.Target.MIPS
@@ -14,7 +15,7 @@ import Std.Data.HashSet
 namespace Bap.Emu
 
 inductive SyscallAbi where
-  | riscv | x86_64 | aarch64 | mips | powerpc | powerpc64
+  | riscv | x86_64 | aarch64 | mips | powerpc | powerpc64 | x86_32
   deriving DecidableEq, Repr
 
 inductive DelayPolicy where
@@ -1025,6 +1026,7 @@ def syscallRegisters : SyscallAbi → String × List String × String
   | .aarch64 => ("X8", ["X0", "X1", "X2", "X3", "X4", "X5"], "X0")
   | .mips => ("R2", ["R4", "R5", "R6", "R7", "R8", "R9"], "R2")
   | .powerpc | .powerpc64 => ("R0", ["R3", "R4", "R5", "R6", "R7", "R8"], "R3")
+  | .x86_32 => ("EAX", ["EBX", "ECX", "EDX", "ESI", "EDI", "EBP"], "EAX")
 
 def wordWidth (emu : Emu) : IO Nat :=
   match memoryWidth emu.config with
@@ -1090,6 +1092,7 @@ def threadRegisters : SyscallAbi → String × String
   | .mips => ("R29", "USERLOCAL")
   | .powerpc => ("R1", "R2")
   | .powerpc64 => ("R1", "R13")
+  | .x86_32 => ("ESP", "GS_BASE")
 
 def cloneProcessMemory (emu : Emu) (child : ThreadId) : IO Unit := do
   let parent ← match ← emu.engine.persistentMemory.get with
@@ -1223,7 +1226,7 @@ def fetchSpan (regions : List Region) (address limit : Nat) : Except String Nat 
 
 private def fetch (emu : Emu) (address : Nat) : IO ByteArray := do
   try
-    let limit := match emu.config.syscallAbi with | .x86_64 => 16 | _ => 4
+    let limit := match emu.config.syscallAbi with | .x86_64 | .x86_32 => 16 | _ => 4
     match fetchSpan (← emu.regions.get) address limit with
     | .error error => throw <| IO.userError error
     | .ok span =>
@@ -1419,7 +1422,7 @@ private def dispatchSpecial (emu : Emu) (name : String) : IO Bool := do
     let some program := (← emu.servedPrograms.get).get? address | throw <| IO.userError s!"no program at {address}"
     runServed emu serve program
     pure true
-  else if name == "syscall" || name == "svc" then
+  else if name == "syscall" || name == "svc" || (name == "interrupt" && emu.config.syscallAbi == .x86_32) then
     match ← dispatchSyscall emu with
     | some _ => pure true
     | none => dispatchIntrinsic emu name
@@ -1717,6 +1720,7 @@ private def callAbi : SyscallAbi → List String × String × String × Bool
   | .aarch64 => (["X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7"], "X30", "X0", false)
   | .mips => (["R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11"], "R31", "R2", false)
   | .powerpc | .powerpc64 => (["R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10"], "LR", "R3", false)
+  | .x86_32 => ([], "", "EAX", true)
   | .x86_64 => (["RDI", "RSI", "RDX", "RCX", "R8", "R9"], "", "RAX", true)
 
 def call (emu : Emu) (address returnTo : Nat) (args : List UInt64) (fuel : Nat := 100000) :
@@ -1808,6 +1812,18 @@ def powerpc (code : ByteArray) (base entry : Nat) (variant : Target.LLVMLift.Pow
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
   create (adjust config) [region] { env := clearMonitor config {} } entry
+
+def x86_32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
+  let disassembler ← Target.X8632.disassembler base
+  let config : Config := {
+    disassembler
+    disassemblerAt := some (fun base => Target.X8632.disassembler base)
+    memory := ⟨"mem", .mem 32 8, 0, false⟩
+    endian := .little
+    syscallAbi := .x86_32
+  }
+  let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
+  create (adjust config) [region] {} entry
 
 def x86_64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
   let disassembler ← Target.X86.disassembler base

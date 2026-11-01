@@ -251,6 +251,11 @@ private def callsOf (abi : SyscallAbi) (width : Nat) : Calls :=
       schedYield := 124, futex := 98, futexTime64 := if width == 32 then some 422 else none, setTidAddress := 96,
       setRobustList := 99, rseq := 293, sigprocmask := 135, sigaction := 134, tgkill := 131, mmap := 222, munmap := 215,
       mprotect := 226, madvise := 233 }
+  | .x86_32 =>
+    { fork := some 2, vfork := some 190, clone := 120, clone3 := 435, wait4 := 114, waitpid := some 7, exit := 1, exitGroup := 252,
+      getpid := 20, getppid := 64, gettid := 224, schedYield := 158, futex := 240, futexTime64 := some 422, setTidAddress := 258,
+      setRobustList := 311, rseq := 386, sigprocmask := 175, sigaction := 174, tgkill := 270, mmap := 192, munmap := 91,
+      mprotect := 125, madvise := 219 }
   | .powerpc | .powerpc64 =>
     { fork := some 2, vfork := some 189, clone := 120, clone3 := 435, wait4 := 114, waitpid := some 7, exit := 1, exitGroup := 234,
       getpid := 20, getppid := 64, gettid := 207, schedYield := 158, futex := 221, futexTime64 := if width == 32 then some 422 else none,
@@ -307,6 +312,8 @@ private def serveClone (emu : Emu) (flags stack parentTid threadPointer childTid
   let known := 0xff ||| cloneVm ||| 0x200 ||| 0x400 ||| 0x800 ||| cloneThreadFlag ||| 0x40000 ||| setTls ||| setParentTid |||
     clearChildTid ||| 0x400000 ||| setChildTid
   let has (flag : Nat) : Bool := flags &&& flag != 0
+  -- On i686 it is a `struct user_desc`, with the base at 4, as for `set_thread_area`.
+  let threadBase ← if emu.config.syscallAbi == .x86_32 && has setTls then readWord32 emu (threadPointer + 4) else pure threadPointer
   if flags ||| known != known then
     syscallReturn emu (.error (enosys emu))
   else if has cloneThreadFlag && !has cloneVm then
@@ -315,7 +322,7 @@ private def serveClone (emu : Emu) (flags stack parentTid threadPointer childTid
     let options : CloneOptions := {
       start := ← emu.nextPc.get
       stack := if stack != 0 then some stack else none
-      threadPointer := if has setTls then some threadPointer else none
+      threadPointer := if has setTls then some threadBase else none
       shareMemory := has cloneVm
       sameGroup := has cloneThreadFlag }
     let id ← if has cloneVm || !has setChildTid then do
@@ -469,10 +476,10 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
         syscallReturn current (.ok (← thread current))
       else if is calls.sigprocmask || is calls.sigaction then
         -- The old mask or action, if it asks for one, has nothing in it. Sizes are those of a mask, which it says, or of an action:
-        -- a handler, flags and a mask, and a restorer on x86-64 and PowerPC.
+        -- a handler, flags and a mask, and a restorer on x86 and PowerPC.
         let old := arg 2
         if old != 0 then
-          let size := if is calls.sigprocmask then arg 3 else (if x86 || isPowerPC current then 3 else 2) * (width / 8) + arg 3
+          let size := if is calls.sigprocmask then arg 3 else (if x86 || isPowerPC current || current.config.syscallAbi == .x86_32 then 3 else 2) * (width / 8) + arg 3
           try write current old (ByteArray.mk (Array.replicate size 0))
           catch _ => return ← syscallReturn current (.error efault)
         syscallReturn current (.ok 0)
