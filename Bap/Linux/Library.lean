@@ -5,8 +5,12 @@ import Bap.Image.Elf
 dynamic linker in the guest, for what wants to call a library in a guest, such as the native code of an Android application. What a
 program loads for itself is another thing, and goes as it does on Linux, by its own `PT_INTERP`.
 
-Everything is bound when it is loaded. A relocation that this doesn't know is an error and not something to leave undone, and so is one
-of thread-local storage: what it comes to is an offset from a thread pointer, in the layout of a libc that isn't here. -/
+Everything is bound when it is loaded. A relocation that this doesn't know is an error and not something to leave undone.
+
+Thread-local storage is laid out as a dynamic linker lays it out for what is there when a program starts: each library that has it has a
+number and an offset, and its relocations say those. Who gives a thread its block and its thread pointer is who runs: a libc, by what
+`LoadedLibrary.tls` says, or `Machine.setupThreadTls` where there is none. Nothing here touches the thread pointer until that is asked for.
+A descriptor of TLS is on x86 and AArch64, as this has the function that it needs only for those. -/
 
 namespace Bap.Linux
 
@@ -37,6 +41,25 @@ private def callReturnPage (machine : Machine) : Nat := machine.signals.returnPa
 private def numberBytes (big : Bool) (size value : Nat) : ByteArray :=
   let little := (List.range size).map fun index => (value >>> (8 * index)).toUInt8
   ByteArray.mk (if big then little.reverse else little).toArray
+
+/-- What code at the page that calls return to does for a descriptor of TLS whose argument is already what is wanted: it gives that back. -/
+private def tlsDescriptorCode : Architecture → Option ByteArray
+  | .x86_64 => some (ByteArray.mk #[0x48, 0x8B, 0x40, 0x08, 0xC3])
+  | .i686 => some (ByteArray.mk #[0x8B, 0x40, 0x04, 0xC3])
+  | .aarch64 => some (ByteArray.mk #[0x00, 0x04, 0x40, 0xF9, 0xC0, 0x03, 0x5F, 0xD6])
+  | _ => none
+
+/-- Where the code of a descriptor of TLS is in that page. -/
+private def tlsDescriptorOffset : Nat := 16
+
+/-- That page, once something wants it. -/
+private def Machine.ensureReturnPage (machine : Machine) : IO Nat := do
+  let page := callReturnPage machine
+  if (lookupRegion (← machine.emu.regions.get) page).isNone then
+    let code := (tlsDescriptorCode machine.architecture).getD ByteArray.empty
+    let bytes := ByteArray.mk (Array.replicate tlsDescriptorOffset 0) ++ code
+    Bap.Emu.map machine.emu ⟨page, bytes ++ ByteArray.mk (Array.replicate (4096 - bytes.size) 0), ⟨true, false, true⟩⟩
+  pure page
 
 /-- Calls a function of the guest with these arguments, on the stack of the thread that runs and in it, and says what it gives back.
 Nothing else runs meanwhile. What it did to memory stays, and its registers go back. What doesn't return, by `fuel` instructions or
@@ -69,9 +92,7 @@ def Machine.call (machine : Machine) (address : Nat) (arguments : List Nat := []
   let savedSkip ← emu.skipCode.get
   let savedStopped ← emu.stopped.get
   let savedFault ← emu.lastFault.get
-  let returnTo := callReturnPage machine
-  if (lookupRegion (← emu.regions.get) returnTo).isNone then
-    Bap.Emu.map emu ⟨returnTo, ByteArray.mk (Array.replicate 4096 0), ⟨true, false, true⟩⟩
+  let returnTo ← machine.ensureReturnPage
   let restore : IO Unit := do
     let current ← emu.state.get
     emu.state.set { env := saved ++ current.env.filter fun binding => binding.1 == memoryVar }
@@ -139,33 +160,86 @@ private inductive RelocationKind where
   | absolute
   /-- A symbol, as a table of them has it. -/
   | slot
-  | threadLocal
+  /-- The number of a module, its offset, what that is from a thread pointer, as x86 has that the other way round, and a descriptor. -/
+  | tlsModule
+  | tlsOffset
+  | tlsPointer
+  | tlsPointerNegated
+  | tlsDescriptor
   | unknown
 
 private def relocationKind (machine typ : Nat) (is64 : Bool) : RelocationKind :=
-  let types (none : List Nat) (relative indirect : List Nat) (absolute slot threadLocal : List Nat) : RelocationKind :=
+  let types (none relative indirect absolute slot : List Nat) (module offset pointer : List Nat) (descriptor : List Nat := [])
+      (negated : List Nat := []) : RelocationKind :=
     if none.contains typ then .none
     else if relative.contains typ then .relative
     else if indirect.contains typ then .indirect
     else if absolute.contains typ then .absolute
     else if slot.contains typ then .slot
-    else if threadLocal.contains typ then .threadLocal
+    else if module.contains typ then .tlsModule
+    else if offset.contains typ then .tlsOffset
+    else if pointer.contains typ then .tlsPointer
+    else if negated.contains typ then .tlsPointerNegated
+    else if descriptor.contains typ then .tlsDescriptor
     else .unknown
   match machine with
-  | 62 => types [0] [8] [37] [1] [6, 7] [16, 17, 18, 36]
-  | 3 => types [0] [8] [42] [1] [6, 7] [14, 15, 35, 36, 37, 38, 39]
-  | 183 => types [0] [1027] [1032] [257] [1025, 1026] [1028, 1029, 1030, 1031]
-  | 40 => types [0] [23] [160] [2] [21, 22] [17, 18, 19, 90, 91, 92, 93]
-  | 243 => types [0] [3] [58] [if is64 then 2 else 1] [5] [6, 7, 8, 9, 10, 11, 12]
-  | 20 => types [0] [22] [248] [1] [20, 21] [67, 68, 69, 70, 71, 72, 73, 74, 75, 78]
-  | 21 => types [0] [22] [248] [38] [20, 21] [67, 68, 73, 78]
+  | 62 => types [0] [8] [37] [1] [6, 7] [16] [17] [18] [36]
+  | 3 => types [0] [8] [42] [1] [6, 7] [35] [36] [14] [41] [37]
+  | 183 => types [0] [1027] [1032] [257] [1025, 1026] [1028] [1029] [1030] [1031]
+  | 40 => types [0] [23] [160] [2] [21, 22] [17] [18] [19]
+  | 243 => types [0] [3] [58] [if is64 then 2 else 1] [5] [if is64 then 7 else 6] [if is64 then 9 else 8] [if is64 then 11 else 10]
+  | 20 | 21 => types [0] [22] [248] [if machine == 20 then 1 else 38] [20, 21] [68] [78] [73]
   -- REL32 has a symbol or doesn't, and with MIPS64 what is stacked on it is only how wide it is.
   | 8 => match typ % 256 with
     | 0 => .none
     | 3 => .absolute
-    | 38 | 39 | 40 | 41 | 47 | 48 => .threadLocal
+    | 38 | 40 => .tlsModule
+    | 39 | 41 => .tlsOffset
+    | 47 | 48 => .tlsPointer
     | _ => .unknown
   | _ => .unknown
+
+/-- Whether thread-local storage is below the thread pointer. -/
+private def tlsBelow : Architecture → Bool
+  | .x86_64 | .i686 => true
+  | _ => false
+
+/-- What is between the thread pointer and the first block, for those where they are above it. -/
+private def tlsGap : Architecture → Nat
+  | .aarch64 => 16
+  | .arm => 8
+  | _ => 0
+
+/-- How far a thread pointer is past where those above it start: it points in the middle, to reach more with what an instruction has. -/
+private def tlsPointerBias : Architecture → Nat
+  | .mips .. | .powerpc .. => 0x7000
+  | _ => 0
+
+/-- What a module's offset is relative to, in what `__tls_get_addr` is given. -/
+private def tlsOffsetBias : Architecture → Nat
+  | .riscv64 | .riscv32 => 0x800
+  | .mips .. | .powerpc .. => 0x8000
+  | _ => 0
+
+private def alignUp (value alignment : Nat) : Nat :=
+  let alignment := max alignment 1
+  (value + alignment - 1) / alignment * alignment
+
+/-- Where the next module goes, after these. -/
+private def nextTlsOffset (architecture : Architecture) (loaded : List LoadedLibrary) (memorySize alignment : Nat) : Nat :=
+  if tlsBelow architecture then
+    let used := loaded.foldl (fun used library => max used ((library.tls.map (·.offset)).getD 0)) 0
+    alignUp (used + memorySize) alignment
+  else
+    let used := loaded.foldl (fun used library =>
+      max used ((library.tls.map fun tls => tls.offset + tls.memorySize).getD 0)) (tlsGap architecture)
+    alignUp used alignment
+
+/-- How far a byte of a module's block is from a thread pointer, as what is added to it. It wraps as a word does, as it can be below it. -/
+private def tlsPointerValue (architecture : Architecture) (tls : LibraryTls) (value : Nat) : Nat :=
+  let modulus := 2 ^ architecture.bits
+  if tlsBelow architecture then (value + modulus - tls.offset) % modulus
+  else (value + tls.offset + modulus - tlsPointerBias architecture) % modulus
 
 private def sameMachine (architecture : Architecture) (program : Elf.Program) : Bool :=
   let (number, bits, big, _) := architecture.elf
@@ -255,7 +329,18 @@ private partial def loadOne (machine : Machine) (path : String) (space : Nat) (s
         if tag.1 == 15 || tag.1 == 29 then Image.Elf.dynamicText image tag.2 else none
       let runPaths := runPaths.flatMap (·.splitOn ":")
       let origin := "/" ++ "/".intercalate ((path.splitOn "/").dropLast.filter (· != ""))
-      let library : LoadedLibrary := { path, name, base, start, span, symbols, needs := [] }
+      -- Its thread-local storage, after what is there.
+      let tlsHeader := Image.Elf.programHeaderOf image 7
+      let loadedNow := spaceHas space (← machine.libraries.get)
+      let nextModule := loadedNow.foldl (fun next other => max next ((other.tls.map fun info => info.module + 1).getD next)) 1
+      let tls : Option LibraryTls := tlsHeader.map fun header =>
+        -- A header has no alignment here, and a block that has more than a word's goes by what its variables say.
+        let alignment := Image.Elf.tlsAlignment image
+        { module := nextModule, offset := nextTlsOffset architecture loadedNow header.memorySize alignment,
+          image := base + header.addr, fileSize := header.fileSize, memorySize := header.memorySize, alignment }
+      let tlsSymbols := dynamic.filterMap fun symbol =>
+        if symbol.sectionIndex != 0 && symbol.typ == 6 && !symbol.name.isEmpty then some (symbol.name, symbol.value) else none
+      let library : LoadedLibrary := { path, name, base, start, span, symbols, needs := [], tls, tlsSymbols }
       -- It is known of before what it needs is loaded, as they may need each other.
       machine.libraries.modify fun table => table.insert space (spaceHas space table ++ [library])
       loading.modify fun state => { state with mapped := library :: state.mapped }
@@ -297,13 +382,63 @@ private partial def loadOne (machine : Machine) (path : String) (space : Nat) (s
           match relocationKind machineNumber relocation.typ is64 with
           | .relative | .absolute | .indirect => readWord place
           | _ => pure 0
-        match relocationKind machineNumber relocation.typ is64 with
+        let kind := relocationKind machineNumber relocation.typ is64
+        match kind with
         | .none => pure ()
         | .unknown => throw <| IO.userError s!"{path} has a relocation of type {relocation.typ}, which this can't do"
-        | .threadLocal => throw <| IO.userError s!"{path} uses thread-local storage, whose offsets are those of a libc that isn't here"
+        | .tlsModule | .tlsOffset | .tlsPointer | .tlsPointerNegated | .tlsDescriptor =>
+          -- Of its own, or of what has that name, first in the order that symbols are looked for. One that is weak and nowhere is at
+          -- nothing, of no module.
+          let owner : Except String (Option (LibraryTls × Nat)) :=
+            match symbolEntry with
+            | none => .ok (tls.map fun info => (info, 0))
+            | some symbol =>
+              let unversioned := (symbol.name.splitOn "@").headD symbol.name
+              let inOther (other : LoadedLibrary) : Option (LibraryTls × Nat) :=
+                match other.tlsSymbols.lookup unversioned, other.tls with
+                | some value, some info => some (info, value)
+                | _, _ => none
+              match scope.findSome? inOther with
+              | some found => .ok (some found)
+              | none =>
+                if symbol.sectionIndex != 0 then .ok (tls.map fun info => (info, symbol.value))
+                else if symbol.binding == 2 then .ok none
+                else .error unversioned
+          match owner with
+          | .error name => unless missing.contains name do missing := name :: missing
+          | .ok found =>
+            let tlsAddend := if relocation.explicitAddend then relocation.addend else 0
+            -- On MIPS these are slots of the GOT, which has nothing to add to a symbol: `ld.lld` leaves the value of that symbol there.
+            let gotSlot := (architecture matches .mips ..) && symbolEntry.isSome
+            let storedAddend ← if relocation.explicitAddend || gotSlot then pure 0 else
+              -- A word of its own holds what is added, but for a module, which has nothing to add.
+              match kind with
+              | .tlsModule => pure 0
+              | .tlsDescriptor => readWord (place + word)
+              | _ => readWord place
+            let plus := tlsAddend + storedAddend
+            match kind, found with
+            | .tlsModule, some (info, _) => writeWord place info.module
+            | .tlsModule, none => writeWord place 0
+            | .tlsOffset, some (_, value) => writeWord place (value + plus + 2 ^ architecture.bits - tlsOffsetBias architecture)
+            | .tlsOffset, none => writeWord place 0
+            | .tlsPointer, some (info, value) => writeWord place (tlsPointerValue architecture info (value + plus))
+            | .tlsPointer, none => writeWord place 0
+            | .tlsPointerNegated, some (info, value) => writeWord place (info.offset + 2 ^ architecture.bits - (value + plus))
+            | .tlsPointerNegated, none => writeWord place 0
+            | .tlsDescriptor, _ =>
+              let some _ := tlsDescriptorCode architecture
+                | throw <| IO.userError s!"{path} has a descriptor of thread-local storage, which this can't do on this target"
+              let page ← machine.ensureReturnPage
+              let value := match found with
+                | some (info, value) => tlsPointerValue architecture info (value + plus)
+                | none => 0
+              writeWord place (page + tlsDescriptorOffset)
+              writeWord (place + word) value
+            | _, _ => pure ()
         | .relative => writeWord place (base + addend)
         | .indirect => indirect := (place, base + addend) :: indirect
-        | kind =>
+        | _ =>
           match symbolEntry, kind with
           | none, _ =>
             -- REL32 of MIPS without a symbol is relative.
@@ -397,6 +532,36 @@ def Machine.loadLibrary (machine : Machine) (path : String) (search : List Strin
   catch error =>
     undo
     throw error
+
+/-- Where a byte of a library's thread-local storage is, for a thread with this thread pointer. -/
+def Machine.threadLocalAddress (machine : Machine) (tls : LibraryTls) (threadPointer : Nat) (value : Nat := 0) : Nat :=
+  (threadPointer + tlsPointerValue machine.architecture tls value) % 2 ^ machine.architecture.bits
+
+/-- Gives the thread that runs a block of thread-local storage for what is loaded, and makes it the thread pointer, and says what that is,
+for when there is no libc to do it. Whatever a thread had of its own is left behind. `reserved` is what is kept free next to it, for a
+libc's use: below a block that is above the thread pointer, and above one that is below. Each thread needs one of its own. -/
+def Machine.setupThreadTls (machine : Machine) (reserved : Nat := 256) : IO Nat := do
+  let architecture := machine.architecture
+  let space := (← currentTask machine.emu).space
+  let loaded : List LoadedLibrary := spaceHas space (← machine.libraries.get)
+  let modules := loaded.filterMap (·.tls)
+  let strictest := modules.foldl (fun strictest tls => max strictest tls.alignment) 64
+  let width := architecture.bits
+  let (_, register) := threadRegisters machine.emu.config.syscallAbi
+  let blockSize := if tlsBelow architecture then
+      modules.foldl (fun size tls => max size tls.offset) 0
+    else
+      modules.foldl (fun size tls => max size (tls.offset + tls.memorySize)) (tlsGap architecture)
+  let total := blockSize + reserved + 2 * strictest + tlsPointerBias architecture
+  let block ← machine.calloc 1 total
+  let threadPointer :=
+    if tlsBelow architecture then alignUp (block + blockSize) strictest
+    else alignUp (block + reserved) strictest + tlsPointerBias architecture
+  for tls in modules do
+    let image ← Bap.Emu.read machine.emu tls.image tls.fileSize
+    machine.write (machine.threadLocalAddress tls threadPointer) image
+  setReg machine.emu ⟨register, .imm width, 0, false⟩ (.bits (BitVec.ofNat width threadPointer))
+  pure threadPointer
 
 /-- Where a symbol is, in that library if one is given, and otherwise in what is loaded in the process that runs, as `dlsym`. -/
 def Machine.findSymbol (machine : Machine) (name : String) (library : Option LoadedLibrary := none) : IO (Option Nat) := do

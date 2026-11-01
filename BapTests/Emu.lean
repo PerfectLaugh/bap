@@ -1863,7 +1863,6 @@ def testLinuxLibraries (triple : String) (ifunc : Bool := false) : IO Unit := do
   check "what is nowhere" (empty.loadLibrary "libnothing.so")
   check "what isn't a library" (empty.loadLibrary "/nothing")
   check "what isn't one that can go anywhere" (empty.loadLibrary "/test")
-  check "what uses thread-local storage" (empty.loadLibrary "libtls.so")
   let messages ← IO.mkRef ""
   match ← (empty.loadLibrary "libmain.so").toBaseIO with
   | .ok _ => throw <| IO.userError s!"{label} an import that isn't there should be refused"
@@ -1906,6 +1905,109 @@ def testLinuxLibraries (triple : String) (ifunc : Bool := false) : IO Unit := do
     assertEqual s!"{label} by its table" 77 (signed32 (← picking.call plt []))
     let some pointer := ← picking.findSymbol "through_pointer" (some loaded) | throw <| IO.userError "no through_pointer"
     assertEqual s!"{label} by a pointer" 77 (signed32 (← picking.call pointer []))
+
+/-- Thread-local storage of libraries, by what code reads through the thread pointer, so that it only comes to what it should where the
+offsets are right, with a block for each of two threads. -/
+def testLinuxLibraryTls (triple : String) (runsByModule : Bool := true) : IO Unit := do
+  let label := s!"Library TLS {triple}"
+  let binary (name : String) : IO ByteArray := IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-{name}"
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" (← binary "libc-files"))
+    |>.addFile "/lib/libtls.so" (← binary "libtls")
+    |>.addFile "/lib/libtlsuser.so" (← binary "libtlsuser")
+    |>.addFile "/lib/libtlsdyn.so" (← binary "libtlsdyn")
+    |>.addFile "/lib/libtlsrt.so" (← binary "libtlsrt")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let tlsLibrary ← machine.loadLibrary "libtls.so"
+  let user ← machine.loadLibrary "libtlsuser.so"
+  let runtime ← machine.loadLibrary "libtlsrt.so"
+  let dynamic ← machine.loadLibrary "libtlsdyn.so"
+  let call (name : String) (arguments : List Nat := []) : IO Nat := do
+    match ← machine.findSymbol name with
+    | some address => pure ((← machine.call address arguments) % 2 ^ 32)
+    | none => throw <| IO.userError s!"{label} has no {name}"
+  assertEqual s!"{label} each has a module of its own" [1, 2, 3]
+    ([tlsLibrary, user, dynamic].filterMap fun library => library.tls.map (·.module))
+  assertEqual s!"{label} one without has none" none (runtime.tls.map (·.module))
+  -- What `__tls_get_addr` looks in, for the blocks of a thread, if it goes that way on this target.
+  let wordBytes := machine.architecture.bits / 8
+  let some blocks := ← machine.findSymbol "rt_blocks" | throw <| IO.userError s!"{label} has no rt_blocks"
+  let number (value : Nat) : ByteArray :=
+    let little := (List.range wordBytes).map fun index => (value >>> (8 * index)).toUInt8
+    ByteArray.mk (if machine.architecture.big then little.reverse else little).toArray
+  let enter : IO Nat := do
+    let threadPointer ← machine.setupThreadTls
+    for library in [tlsLibrary, user, dynamic] do
+      if let some tls := library.tls then
+        machine.write (blocks + tls.module * wordBytes) (number (machine.threadLocalAddress tls threadPointer))
+    pure threadPointer
+  -- Against the ABI of each target, and not only against itself: what is read through a thread pointer here has to be where a libc would
+  -- have put it. The first block starts past what is above a thread pointer, at what it aligns to; or ends at it, below.
+  let (below, gap, bias) : Bool × Nat × Nat := match machine.architecture with
+    | .x86_64 | .i686 => (true, 0, 0)
+    | .aarch64 => (false, 16, 0)
+    | .arm => (false, 8, 0)
+    | .riscv64 | .riscv32 => (false, 0, 0)
+    | .mips .. | .powerpc .. => (false, 0, 0x7000)
+  let some firstBlock := tlsLibrary.tls | throw <| IO.userError s!"{label} has no thread-local storage"
+  let alignedUp (value : Nat) : Nat := (value + 63) / 64 * 64
+  assertEqual s!"{label} a block is aligned as it says" 64 firstBlock.alignment
+  assertEqual s!"{label} the first block is where the ABI has it"
+    (if below then alignedUp firstBlock.memorySize else alignedUp gap) firstBlock.offset
+  let modulus := 2 ^ machine.architecture.bits
+  let fromPointer := (machine.threadLocalAddress firstBlock 0x1000000 + modulus - 0x1000000) % modulus
+  assertEqual s!"{label} and that far from a thread pointer"
+    (if below then modulus - firstBlock.offset else (firstBlock.offset + modulus - bias) % modulus) fromPointer
+  let first ← enter
+  assertEqual s!"{label} what a block starts with" 3 (← call "get")
+  assertEqual s!"{label} what a block has as zeros" 0 (← call "get_zero")
+  assertEqual s!"{label} what is aligned is" 1 (← call "aligned_right")
+  assertEqual s!"{label} what is written is read" 9 (← call "set" [9])
+  assertEqual s!"{label} in another library" 9 (← call "other_get")
+  assertEqual s!"{label} a library's own" 11 (← call "own_get")
+  if runsByModule then
+    assertEqual s!"{label} by a module and an offset, its own" 21 (← call "dynamic_own")
+    assertEqual s!"{label} by a module and an offset, another's" 9 (← call "dynamic_other")
+    assertEqual s!"{label} by a module and an offset, written" 22 (← call "dynamic_set" [22])
+  else
+    -- Clang and ld.lld make no call of `__tls_get_addr` that runs on 32-bit PowerPC, as its stub wants r30, that that code doesn't set.
+    -- What such a call would be given can still be read: a module and an offset, of the one and of the other.
+    let image ← IO.ofExcept (Image.Elf.decode (← binary "libtlsdyn"))
+    let relocations ← IO.ofExcept (Image.Elf.allDynamicRelocations image)
+    let names ← IO.ofExcept (Image.Elf.allDynamicSymbols image)
+    let read32 (address : Nat) : IO Nat := do
+      pure ((← machine.read address 4).toList.foldl (fun value byte => value * 256 + byte.toNat) 0)
+    let slot (typ : Nat) (name : String) : IO Nat := do
+      match relocations.find? fun relocation => relocation.typ == typ && (names[relocation.symbol]?.map (·.name)) == some name with
+      | some relocation => read32 (dynamic.base + relocation.offset)
+      | none => throw <| IO.userError s!"{label} has no relocation {typ} of {name}"
+    assertEqual s!"{label} the module of its own" ((dynamic.tls.map (·.module)).getD 0) (← slot 68 "dynamic_per_thread")
+    assertEqual s!"{label} the module of another's" ((tlsLibrary.tls.map (·.module)).getD 0) (← slot 68 "per_thread")
+    assertEqual s!"{label} the offset of another's, from where those are biased" (2 ^ 32 - 0x8000) (← slot 78 "per_thread")
+  -- Another thread: its own of all of that.
+  let second ← enter
+  assertTrue s!"{label} a block is another's" (first != second)
+  assertEqual s!"{label} a new block has what it starts with" (3, 11)
+    (← call "get", ← call "own_get")
+  if runsByModule then
+    assertEqual s!"{label} a new block by a module" 21 (← call "dynamic_own")
+  assertEqual s!"{label} and doesn't have the other's" 4 (← call "set" [4])
+  -- Back: what the first had is still there.
+  Bap.Emu.setReg machine.emu ⟨(Bap.Emu.threadRegisters machine.emu.config.syscallAbi).2, .imm machine.architecture.bits, 0, false⟩
+    (.bits (BitVec.ofNat machine.architecture.bits first))
+  for library in [tlsLibrary, user, dynamic] do
+    if let some tls := library.tls then
+      machine.write (blocks + tls.module * wordBytes) (number (machine.threadLocalAddress tls first))
+  assertEqual s!"{label} a thread keeps its own" 9 (← call "get")
+  if runsByModule then
+    assertEqual s!"{label} a thread keeps its own by a module" 22 (← call "dynamic_own")
+  -- It goes through a checkpoint, as what is laid out has to stay.
+  let resumed ← Bap.Linux.Machine.ofCheckpoint (← machine.checkpoint)
+  assertEqual s!"{label} a checkpoint knows it" (some 1)
+    (((← resumed.loadedLibraries).find? (·.path == "/lib/libtls.so")).bind fun library => library.tls.map (·.module))
+  let some getAddress := ← resumed.findSymbol "get" | throw <| IO.userError s!"{label} has no get"
+  assertEqual s!"{label} goes on from a checkpoint" 9 ((← resumed.call getAddress []) % 2 ^ 32)
+  -- What is thread-local isn't where it has an address.
+  assertEqual s!"{label} what is thread-local has no address" none (← machine.findSymbol "per_thread")
 
 /-- Another architecture's library isn't one that this can load, and what `fork` and `execve` do to what is loaded. -/
 def testLinuxLibraryProcesses (triple other : String) : IO Unit := do

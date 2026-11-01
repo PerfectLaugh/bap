@@ -31,7 +31,8 @@ The OCaml and Rust implementation it came from is on the
   `Machine.read` and `Machine.write` reach the memory of any of its processes by virtual address, without a program being able to tell, and `Machine.malloc`, `Machine.calloc`,
   `Machine.realloc` and `Machine.free` allocate in it from outside, in mappings of their own.
   `Machine.loadLibrary` loads a shared library into it from outside, as `dlopen` would, with all that it needs, with no libc or linker in the guest; what it imports can come from
-  the host, `Machine.findSymbol` finds what it has and `Machine.call` calls that.
+  the host, `Machine.findSymbol` finds what it has and `Machine.call` calls that. Its thread-local storage is laid out and relocated for a libc to give threads their blocks by `LoadedLibrary.tls`,
+  or `Machine.setupThreadTls` where there is none.
 - **Executes symbolically**, solving path conditions with Z3.
 
 ## Building

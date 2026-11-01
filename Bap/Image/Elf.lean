@@ -936,6 +936,17 @@ def dynamicText (image : Image) (offset : Nat) : Option String := do
 /-- The value of a tag of the dynamic linking of an image. -/
 def tagOf (image : Image) (tag : Nat) : Option Nat := tagValue (dynamicTagsOf image) tag
 
+/-- What the `PT_TLS` of an image aligns to, as `p_align` says. -/
+def tlsAlignment (image : Image) : Nat :=
+  ((do
+    let header ← parseHeader image.data
+    let entries ← programHeaders image.data
+    match entries.findIdx? (·.kind == 7) with
+    | some index =>
+      word image.data image.endian header.is64
+        (header.programOffset + index * header.programEntrySize + if header.is64 then 48 else 28)
+    | none => .ok 1 : Except String Nat).toOption).getD 1
+
 /-- The first program header of a type. -/
 def programHeaderOf (image : Image) (kind : Nat) : Option ProgramHeader :=
   (((programHeaders image.data).toOption).getD []).find? (·.kind = kind)
