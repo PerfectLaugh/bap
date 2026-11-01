@@ -296,6 +296,74 @@ decreasing_by
   all_goals simp only [List.length_cons, Array.size_push]
   all_goals omega
 
+/-- `persistentRegionData` in bytes, without the array that holds a boxed value for each of them. -/
+private def regionBytesFast (cells : List (Nat × UInt8)) (address size : Nat) (output : ByteArray) : ByteArray :=
+  if _h : output.size ≥ size then output else
+    let expected := address + output.size
+    match cells with
+    | [] => output ++ zeroBytes (size - output.size)
+    | (current, value) :: rest =>
+      if current < expected then regionBytesFast rest address size output
+      else if current = expected then regionBytesFast rest address size (output.push value)
+      else regionBytesFast ((current, value) :: rest) address size (output.push 0)
+termination_by cells.length + (size - output.size)
+decreasing_by
+  all_goals simp only [List.length_cons, ByteArray.size_push]
+  all_goals omega
+
+private theorem regionBytesFast_data (cells : List (Nat × UInt8)) (address size : Nat) (output : ByteArray) :
+    (regionBytesFast cells address size output).data = persistentRegionData cells address size output.data := by
+  induction cells, output using regionBytesFast.induct address size with
+  | case1 cells output h =>
+    rw [regionBytesFast, persistentRegionData]
+    simp [h]
+  | case2 output h =>
+    rw [regionBytesFast, persistentRegionData]
+    have h' : ¬ output.data.size ≥ size := h
+    simp only [h, h', ↓reduceDIte, ByteArray.data_append]
+    rfl
+  | case3 output h expected current value rest hless ih =>
+    rw [regionBytesFast, persistentRegionData]
+    have h' : ¬ output.data.size ≥ size := h
+    have hl : current < address + output.size := hless
+    have hl' : current < address + output.data.size := hless
+    simp only [h, h', ↓reduceDIte, hl, hl', ↓reduceIte, ih]
+  | case4 output h expected value rest hless ih =>
+    rw [regionBytesFast, persistentRegionData]
+    have h' : ¬ output.data.size ≥ size := h
+    have hl : ¬ expected < address + output.size := hless
+    have hl' : ¬ expected < address + output.data.size := hless
+    have he : expected = address + output.size := rfl
+    have he' : expected = address + output.data.size := rfl
+    simp only [h, h', ↓reduceDIte]
+    rw [ite_eq_right hl, ite_eq_left he, ite_eq_right hl', ite_eq_left he', ih]
+    rfl
+  | case5 output h expected current value rest hless heq ih =>
+    rw [regionBytesFast, persistentRegionData]
+    have h' : ¬ output.data.size ≥ size := h
+    have hl : ¬ current < address + output.size := hless
+    have hl' : ¬ current < address + output.data.size := hless
+    have he : ¬ current = address + output.size := heq
+    have he' : ¬ current = address + output.data.size := heq
+    simp only [h, h', ↓reduceDIte, hl, hl', he, he', ↓reduceIte, ih]
+    rfl
+
+/-- The bytes of a region of a memory that holds these cells. -/
+private def regionBytes (cells : List (Nat × UInt8)) (address size : Nat) : ByteArray :=
+  ByteArray.mk (persistentRegionData cells address size #[])
+
+private theorem regionBytes_eq (cells : List (Nat × UInt8)) (address size : Nat) :
+    regionBytes cells address size = regionBytesFast cells address size ByteArray.empty :=
+  ByteArray.ext (regionBytesFast_data cells address size ByteArray.empty).symm
+
+/-- The fast path of `regionBytes`, which is what the theorems about `persistentRegionData` speak of. -/
+private def regionBytesRun (cells : List (Nat × UInt8)) (address size : Nat) : ByteArray :=
+  regionBytesFast cells address size ByteArray.empty
+
+@[csimp] private theorem regionBytes_csimp : @regionBytes = @regionBytesRun := by
+  funext cells address size
+  exact regionBytes_eq cells address size
+
 /-- The space of the first task, whose memory has no entry in `processMemory`. -/
 private def firstSpace (table : Tasks.TaskTable) : Nat :=
   match table.tasks.head? with
@@ -306,7 +374,7 @@ private def regionsFromNative (mapped : List Region) (native : Jit.Memory) : IO 
   let (addresses, values) ← Jit.dumpMemory native
   let cells := (addresses.zip values).toList.map fun cell => (cell.1.toNat, cell.2)
   pure (mapped.map fun region =>
-    { region with data := ByteArray.mk (persistentRegionData cells region.address region.data.size #[]) })
+    { region with data := regionBytes cells region.address region.data.size })
 
 def snapshot (emu : Emu) : IO Snapshot := do
   let processes ← emu.processMemory.get
