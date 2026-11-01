@@ -124,7 +124,7 @@ private def linkOfDescriptor (kernel : Kernel) (number : Nat) : String :=
     | none => s!"anon_inode:[{number}]"
 
 /-- `/proc` as it has to be for `group` and its task `thread` to look at it, with `/proc/self` being it, for these processes. -/
-def refresh (kernel : Kernel) (group thread : Nat) (live : List Nat) : Kernel :=
+def refresh (kernel : Kernel) (group thread : Nat) (live : List Nat) (threadsOf : Nat → List Nat) : Kernel :=
   -- What was there for what has gone, and what may have changed.
   let stale := kernel.paths.toList.filterMap fun entry =>
     match (entry.1.splitOn "/") with
@@ -148,6 +148,11 @@ def refresh (kernel : Kernel) (group thread : Nat) (live : List Nat) : Kernel :=
       fun kernel name => kernel.addBuiltin s!"{directory}/{name}" name
     let kernel := kernel.addDirectories s!"{directory}/fd"
     let kernel := kernel.removeUnder s!"{directory}/fd"
+    let kernel := kernel.addDirectories s!"{directory}/task"
+    let kernel := kernel.removeUnder s!"{directory}/task"
+    let kernel := (threadsOf pid).foldl (init := kernel) fun kernel task =>
+      ["comm", "status", "stat"].foldl (init := kernel) fun kernel name =>
+        kernel.addBuiltin s!"{directory}/task/{task}/{name}" name
     let kernel := kernel.setSymlink s!"{directory}/exe" process.program
     let kernel := kernel.setSymlink s!"{directory}/cwd" process.cwd
     let kernel := kernel.setSymlink s!"{directory}/root" "/"

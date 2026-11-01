@@ -478,7 +478,9 @@ private def refreshProc (machine : Machine) (emu : Emu) (call : Call) (args : Li
       if path.startsWith "/proc" || (relative && (index == 1 || cwd.startsWith "/proc")) then
         let self ← thread emu
         let live ← liveProcesses emu
-        machine.kernel.modify (Proc.refresh · group self live)
+        let tasks := (← emu.taskTable.get).tasks.filter (·.status.isNone)
+        machine.kernel.modify (Proc.refresh · group self live fun pid =>
+          (tasks.filter (·.group == pid)).map (·.tid))
 
 /-- What a call gives, as the guest has it. -/
 private def handOver (machine : Machine) (emu : Emu) : SyscallAction → IO SyscallAction

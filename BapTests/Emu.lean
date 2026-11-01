@@ -807,6 +807,10 @@ def testLinuxLayouts : IO Unit := do
     let bytes := Bap.Linux.Abi.statfs wide big mips
     assertEqual s!"statfs of {name} has the type" 0x01021994 (word bytes typeAt big)
     assertEqual s!"statfs of {name} has the longest name" 255 (word bytes nameAt big)
+  let refreshed := Bap.Linux.Proc.refresh Bap.Linux.Kernel.empty 1 2 [1] fun _ => [1, 2]
+  assertTrue "/proc has each task of a process" (refreshed.statPath "/" "/proc/1/task/2/comm" |>.toOption).isSome
+  assertTrue "/proc/thread-self is the task that looks" (refreshed.statPath "/" "/proc/thread-self/status" |>.toOption).isSome
+  assertTrue "/proc has no task that isn't there" (refreshed.statPath "/" "/proc/1/task/3/comm" |>.toOption).isNone
   assertEqual "sysinfo of 32 bits has the unit" 1 (word (Bap.Linux.Abi.sysinfo false false 5 1) 52 false)
   assertEqual "sysinfo of 64 bits has the unit" 1 (word (Bap.Linux.Abi.sysinfo true false 5 1) 104 false)
   assertEqual "sysinfo of 32 bits is its size" 64 (Bap.Linux.Abi.sysinfo false false 5 1).size
