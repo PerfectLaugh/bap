@@ -688,18 +688,18 @@ def testRangeEntries : IO Unit := do
       (adjust := fun config => { config with hotThreshold := 2, cacheLimit := 256, rangeLimit := 8, rangeEntries := entries })
     for (name, value) in [("X10", 0), ("X11", 2000), ("X12", 0), ("X5", 0)] do
       Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 64 value))
-    -- Until the loop has been round enough to have a range, and it is where it reads where to go.
-    let _ ← Bap.Emu.runUntil emu 28 (fuel := 100)
-    let _ ← Bap.Emu.step emu
-    let _ ← Bap.Emu.runUntil emu 28 (fuel := 100)
-    let _ ← Bap.Emu.step emu
-    let _ ← Bap.Emu.runUntil emu 28 (fuel := 100)
-    Bap.Emu.setReg emu (register "X5") (.bits (BitVec.ofNat 64 8))
-    let _ ← Bap.Emu.runUntil emu 32 (fuel := 40000)
     let value (name : String) : IO Nat := do
       match ← Bap.Emu.reg emu (register name) with
       | .bits bits => pure bits.toNat
       | _ => pure 0
+    -- Not by steps: a step may enter no other block, and has no use for a range. Eight times round, of eight instructions, which is
+    -- enough for the loop to have a range. It is at the top, and from the next time round it goes back to the second block.
+    let _ ← Bap.Emu.run emu 64
+    assertEqual "A loop has been round eight times" 0 (← Bap.Emu.pc emu)
+    Bap.Emu.setReg emu (register "X5") (.bits (BitVec.ofNat 64 8))
+    -- Almost to where it ends, which is past the code if it runs over: six instructions each time round, and it has more to come.
+    let _ ← Bap.Emu.run emu (6 * ((← value "X11") - 2))
+    let _ ← Bap.Emu.runUntil emu 32 (fuel := 100)
     let stats ← Primus.Lifted.stats emu.engine
     pure (← value "X10", ← value "X12", stats.entriesReused)
   let (plainFirst, plainSecond, plainReused) ← run false
@@ -923,7 +923,6 @@ def testLinuxRuntimeModels (triple : String) (getcwd : Nat) : IO Unit := do
   let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-files"
   let kernel := Bap.Linux.Kernel.empty.addFile "/test" program
   let seen ← IO.mkRef 0
-  let model := countingModel getcwd 1 seen
   let runOn (machine : Bap.Linux.Machine) : IO (Bap.Tasks.ScheduleOutcome × String) := do
     let console ← IO.mkRef ByteArray.empty
     let outcome ← machine.run fun data => console.modify (· ++ data)
