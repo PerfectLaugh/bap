@@ -55,7 +55,8 @@ lake exe bap run --stop-after 1000000 file program  # the same, saved to a file 
 lake exe bap resume file                # goes on from it, in another process or on another machine
 ```
 
-Run `lake exe bap` for the other commands. Everything is also a library: `Bap.Runtime` has
+The Lisp semantics are read when a program starts, from `BAP_SEMANTICS_DIR`, else `semantics/` here, else the nearest
+`semantics/` above the executable. Run `lake exe bap` for the other commands. Everything is also a library: `Bap.Runtime` has
 the modules without the proofs.
 
 ## Testing

@@ -576,6 +576,16 @@ def testLinuxMusl (triple : String) (floats : Bool := true) (exclusive : Bool :=
     assertEqual s!"Linux {triple} a program of floating point ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
     assertEqual s!"Linux {triple} floating point is what qemu does" (← IO.FS.readBinFile s!"testsuite/data/{triple}-libc-floats.out").toList text.toList
 
+/-- Each condition and shape of an IT block under each of the flags, and `tbb` and `tbh`, as qemu runs them. -/
+def testThumbIt : IO Unit := do
+  let path := "testsuite/bin/thumb-linux-musl-it"
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile path)) "/test" ["/test"]
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual "Thumb IT blocks end" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual "Thumb IT blocks are what qemu does" (String.fromUTF8! (← IO.FS.readBinFile "testsuite/data/thumb-it.out"))
+    (String.fromUTF8! (← written.get))
+
 /-- What a program finds in `/proc`, of itself and its child, and a file that a function makes, across a checkpoint. -/
 def testLinuxProc (triple : String) : IO Unit := do
   let path := s!"testsuite/bin/{triple}-linux-musl-libc-proc"

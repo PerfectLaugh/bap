@@ -1,3 +1,4 @@
+import BapTests.GraphScale
 import BapTests.Core
 import BapTests.Bil
 import BapTests.Graph
@@ -61,6 +62,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testRealPthreads,
     Bap.Tests.Emu.testLinuxPrograms,
     Bap.Tests.Emu.testLinuxLayouts,
+    Bap.Tests.Emu.testThumbIt,
+    Bap.Tests.GraphScale.run,
     -- Floating point is much the longest of each, so only one of each family runs it here: of AArch64, Thumb, x87, RISC-V, MIPS and PowerPC.
     -- The others were compared with qemu by hand.
     Bap.Tests.Emu.testLinuxMusl "aarch64",

@@ -587,12 +587,26 @@ private def arm32Globals : Primus.Semantics.Globals :=
 private def semanticsContext (address nextPc : Nat) : Primus.Semantics.Context :=
   { bits := 64, pc := address, nextPc := nextPc }
 
+/-- Where the semantics are: what `BAP_SEMANTICS_DIR` says, or here, or in the nearest directory above the program that has
+them, which for a program that was built here is this tree, wherever it is run from. -/
+private def semanticsRoot : IO String := do
+  if let some root ← IO.getEnv "BAP_SEMANTICS_DIR" then return root
+  if ← System.FilePath.pathExists "semantics" then return "semantics"
+  let rec above : Nat → System.FilePath → IO String
+    | 0, _ => pure "semantics"
+    | fuel + 1, directory => do
+      let candidate := directory / "semantics"
+      if ← candidate.pathExists then pure candidate.toString
+      else match directory.parent with
+        | some parent => above fuel parent
+        | none => pure "semantics"
+  match (← IO.appPath).parent with
+  | some directory => above 16 directory
+  | none => pure "semantics"
+
 private def pluginDirectories (target : String) : IO (List String) := do
-  let configured ← IO.getEnv "BAP_SEMANTICS_DIR"
-  let roots := match configured with
-    | some root => [root]
-    | none => ["semantics"]
-  pure (roots.flatMap fun root => [s!"{root}/{target}", s!"{root}/core"])
+  let root ← semanticsRoot
+  pure [s!"{root}/{target}", s!"{root}/core"]
 
 private def immediate (opcode : String) (value : Int) : Primus.Semantics.Value :=
   if opcode.endsWith "ri32" || opcode.endsWith "mi32" || opcode.endsWith "i32" then
