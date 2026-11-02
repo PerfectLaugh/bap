@@ -67,6 +67,7 @@ import Bap.Linux.GuestHeap
 import Bap.Linux.LoadedLibrary
 import Bap.Linux.Machine
 import Bap.Linux.Library
+import Bap.Linux.DynamicTaint
 import Bap.Float
 import Bap.Emu.Jni
 import Bap.Emu.Checkpoint

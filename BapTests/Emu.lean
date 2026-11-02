@@ -1457,6 +1457,94 @@ def testLinuxMemoryCheckpoints (triple : String) (step : Nat) : IO Unit := do
   assertEqual s!"Linux {triple} memory says what Linux does, from pieces"
     (String.fromUTF8! (← IO.FS.readBinFile "testsuite/data/libc-memory.out")) (String.fromUTF8! (← written.get))
 
+/-- Where the bytes of a record came from, in a run with a check, flattened control flow, vectors, a thread and a child: the status byte goes back to
+what `/proc` said by way of the branch that chose it, and the bytes beside it to what they came from, with nothing widened to all of memory. -/
+def testLinuxTaint (triple : String) : IO Unit := do
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-taint"
+  let file := ByteArray.mk ((Array.range 16).map fun index => (0x40 + index).toUInt8)
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" program).addFile "/data" file
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let tracker ← machine.track
+  let main ← Bap.Emu.thread machine.emu
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  let text := String.fromUTF8! (← written.get)
+  assertEqual s!"Linux {triple} taint goes as it would have" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  let lines := text.splitOn "\n"
+  assertEqual s!"Linux {triple} taint says the status" "1" (lines.getD 1 "")
+  let untracked ← IO.mkRef ByteArray.empty
+  let plain ← Bap.Linux.start kernel "/test" ["/test"]
+  let _ ← plain.run fun data => untracked.modify (· ++ data)
+  assertEqual s!"Linux {triple} a program that is followed says the same" (String.fromUTF8! (← untracked.get)) text
+  let first := (lines.getD 0 "").drop 1 |>.toString
+  let record := first.foldl (fun value digit => value * 16 + (if digit.isDigit then digit.toNat - 48 else digit.toNat - 87)) 0
+  let space ← Bap.Emu.spaceOf machine.emu main
+  let explain (index : Nat) := tracker.explainMemory (record + index) (some space)
+  let labels (explanation : Bap.Analysis.DynamicTaint.Tracker.Explanation) : List String :=
+    explanation.sources.filterMap fun (node, _, _) => match node.kind with
+      | .source label _ => some label
+      | _ => none
+  let status ← explain 4
+  assertTrue s!"Linux {triple} the status comes from /proc" ((labels status).any (· == "read /proc/self/status"))
+  assertTrue s!"Linux {triple} the status goes by a branch" (status.path.any fun step => step.node.kind matches .branch _)
+  assertTrue s!"Linux {triple} the status is a constant that a branch chose" (status.path.any fun step =>
+    step.node.kind matches .constant && step.node.values.getD step.byte none == some 0x31)
+  assertTrue s!"Linux {triple} the status has no file in it" (!(labels status).any (·.startsWith "pread"))
+  let at_ (explanation : Bap.Analysis.DynamicTaint.Tracker.Explanation) : List (String × Option Nat × Bool) :=
+    explanation.sources.filterMap fun (node, byte, edge) => match node.kind with
+      | .source label offset => some (label, offset.map (· + byte), edge == .data)
+      | _ => none
+  assertEqual s!"Linux {triple} a byte of a file is that byte" [("pread /data", some 7, true)] (at_ (← explain 0))
+  assertEqual s!"Linux {triple} the next byte is the next byte" [("pread /data", some 8, true)] (at_ (← explain 1))
+  let other ← explain 5
+  assertEqual s!"Linux {triple} a constant beside them comes from nothing" [] (at_ other)
+  assertTrue s!"Linux {triple} a constant beside them has its instruction" (other.origin matches .clean _)
+  let fromThread ← explain 6
+  assertEqual s!"Linux {triple} what a thread copied is its byte" [("pread /data", some 3, true)] (at_ fromThread)
+  assertTrue s!"Linux {triple} the way goes through the thread" (fromThread.path.any fun step => step.node.thread != main)
+  let kept ← explain 7
+  assertEqual s!"Linux {triple} what a child did stays in the child" [] (at_ kept)
+  let nodes ← tracker.nodes.get
+  let inChild := nodes.toList.find? fun node => node.space != space && node.place == .memory (record + 7)
+  match inChild with
+  | none => throw <| IO.userError s!"Linux {triple}: the store of the child has no node"
+  | some node =>
+    let there ← tracker.explainMemory (record + 7) (some node.space)
+    assertEqual s!"Linux {triple} the child has what it did" [("pread /data", some 9, true)] (at_ there)
+  assertEqual s!"Linux {triple} taint follows all that this does" [] (← tracker.gapsOf)
+
+/-- What JNI gives a guest is a source, in the register it comes back in and in memory, and so is what someone says is one. -/
+def testTaintSources : IO Unit := do
+  let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile "testsuite/bin/aarch64-linux-musl-libc-taint")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let tracker ← machine.track
+  let model ← Bap.Emu.Jni.create (fun _ => pure "example/Class") (fun _ => pure 0x52040000) (fun _ => pure 0x52050000)
+    (fun _ _ => pure (.value 0))
+  let setRegister (name : String) (value : Nat) : IO Unit :=
+    Bap.Emu.setReg machine.emu ⟨name, .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 value))
+  setRegister "X8" 6
+  setRegister "X1" 0x100
+  Bap.Emu.Jni.serve model machine.emu
+  let labelOf (explanation : Bap.Analysis.DynamicTaint.Tracker.Explanation) : List String :=
+    explanation.sources.filterMap fun (node, _, _) => match node.kind with
+      | .source label _ => some label
+      | _ => none
+  assertEqual "JNI gives a source in its register" ["jni:6 result"] (labelOf (← tracker.explainRegister "X0"))
+  let sp ← Bap.Emu.reg machine.emu ⟨"SP", .imm 64, 0, false⟩
+  let place := match Bap.Value.asBits sp with
+    | .ok bits => bits.2.toNat
+    | .error _ => 0
+  setRegister "X8" 219
+  setRegister "X1" place
+  Bap.Emu.Jni.serve model machine.emu
+  assertEqual "JNI gives a source in memory" ["jni:219"] (labelOf (← tracker.explainMemory place))
+  tracker.markMemory place 2 "mine" (some 100)
+  let marked ← tracker.explainMemory (place + 1)
+  assertEqual "What is marked is a source, by the byte" [some 101] (marked.sources.map fun (node, byte, _) => match node.kind with
+    | .source _ offset => offset.map (· + byte)
+    | _ => none)
+  assertEqual "A byte beside what is marked isn't" ["jni:219"] (labelOf (← tracker.explainMemory (place + 2)))
+
 /-- The allocator alone, on a long run of what it can be asked: blocks are aligned, within what is mapped and apart from each other, and
 when all have gone back so has all that was mapped, in mappings that may touch. -/
 def testGuestHeap : IO Unit := do

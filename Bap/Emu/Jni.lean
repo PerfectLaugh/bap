@@ -554,17 +554,21 @@ private def currentCall (emu : Emu) : IO Call := do
 
 def serve (model : Model) (emu : Emu) : IO Unit := do
   let call ← currentCall emu
+  if let some starts := ← emu.hostStarts.get then starts s!"jni:{call.index}"
   if call.index = 219 then writeWord emu (arg call 1) (← model.vm.get)
   let result ← dispatch model call
   writeReg emu "X0" result
+  if let some ends := ← emu.hostEnds.get then ends "X0"
   Bap.Emu.setPc emu (← readReg emu "X30")
 
 def serveVm (model : Model) (emu : Emu) : IO Unit := do
   let call ← currentCall emu
+  if let some starts := ← emu.hostStarts.get then starts s!"jni-vm:{call.index}"
   let result ← dispatchVm model call
   if call.index = 4 || call.index = 7 || (call.index = 6 && result = 0) then
     writeWord emu (← readReg emu "X1") (← model.env.get)
   writeReg emu "X0" result
+  if let some ends := ← emu.hostEnds.get then ends "X0"
   Bap.Emu.setPc emu (← readReg emu "X30")
 
 /-! What a model holds, for a checkpoint. A method or a field is saved by what it is called, and takes its function or its value from

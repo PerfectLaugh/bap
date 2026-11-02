@@ -201,6 +201,15 @@ structure Emu where
   afterSyscall : IO.Ref (Option (IO Unit))
   /-- What runs when a thread has been switched to and before it goes on. -/
   switchedIn : IO.Ref (Option (IO Unit))
+  /-- What sees a system call before it is served, with its number and arguments, and after, with its result if something served it. -/
+  syscallStarts : IO.Ref (Option (Nat → List Nat → IO Unit))
+  syscallEnds : IO.Ref (Option (Option Nat → IO Unit))
+  /-- What hears of bytes of a guest that no instruction of it changed: where and how many, and whether they became zeros because of nothing. -/
+  memoryChanged : IO.Ref (Option (Nat → Nat → Bool → IO Unit))
+  /-- What hears that the host is serving a call of the guest that isn't a system call, such as one of JNI, by name, and then that it has
+  left what it returns in a register, by name of that. -/
+  hostStarts : IO.Ref (Option (String → IO Unit))
+  hostEnds : IO.Ref (Option (String → IO Unit))
   /-- What runs before a thread of another address space takes over, in the one that it leaves, and after, in the one that it is in. -/
   leavingSpace : IO.Ref (Option (IO Unit))
   enteredSpace : IO.Ref (Option (IO Unit))
@@ -320,6 +329,11 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     serving := ← IO.mkRef false
     afterSyscall := ← IO.mkRef none
     switchedIn := ← IO.mkRef none
+    syscallStarts := ← IO.mkRef none
+    syscallEnds := ← IO.mkRef none
+    memoryChanged := ← IO.mkRef none
+    hostStarts := ← IO.mkRef none
+    hostEnds := ← IO.mkRef none
     leavingSpace := ← IO.mkRef none
     enteredSpace := ← IO.mkRef none
     futexKey := ← IO.mkRef none
@@ -1114,6 +1128,7 @@ def write (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
       if region.protection.executable then
         Primus.Lifted.discardRange emu.engine address (address + data.size - 1)
       synchronizeWrite emu address data
+      if let some changed := ← emu.memoryChanged.get then changed address data.size false
 
 /-- Puts bytes at an address, whatever a program may do with them there, as a kernel does. -/
 def poke (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
@@ -1124,6 +1139,7 @@ def poke (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
     emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
     Primus.Lifted.discardRange emu.engine address (address + data.size - 1)
     synchronizeWrite emu address data
+    if let some changed := ← emu.memoryChanged.get then changed address data.size false
 
 private def synchronizeBatch (emu : Emu) (writes : List (Nat × ByteArray)) : IO Unit := do
   let persistent ← emu.engine.persistentMemory.get
@@ -1160,6 +1176,8 @@ def writeBatch (emu : Emu) (writes : List (Nat × ByteArray)) : IO Unit := do
         Primus.Lifted.discardRange emu.engine address (address + data.size - 1)
     | none => pure ()
   synchronizeBatch emu writes
+  if let some changed := ← emu.memoryChanged.get then
+    for (address, data) in writes do changed address data.size false
   let updatedRegions := writes.foldl (init := mapped) fun regions (address, data) =>
     regions.map fun current =>
       if current.contains address then
@@ -1192,6 +1210,7 @@ def map (emu : Emu) (region : Region) : IO Unit := do
   if region.protection.executable && region.data.size > 0 then
     Primus.Lifted.discardRange emu.engine region.address (region.address + region.data.size - 1)
   if written then synchronizeWrite emu region.address region.data
+  if let some changed := ← emu.memoryChanged.get then changed region.address region.data.size (!written)
   setRegions emu (region :: mapped)
 
 def overlay (emu : Emu) (region : Region) : IO Unit := do
@@ -1206,6 +1225,7 @@ def overlay (emu : Emu) (region : Region) : IO Unit := do
   if region.protection.executable && region.data.size > 0 then
     Primus.Lifted.discardRange emu.engine region.address (region.address + region.data.size - 1)
   synchronizeWrite emu region.address region.data
+  if let some changed := ← emu.memoryChanged.get then changed region.address region.data.size false
   setRegions emu (region :: mapped.filter fun current => current.address != region.address)
 
 private def regionPiece (region : Region) (first last : Nat) (protection : Primus.Protection) : List Region :=
@@ -1245,6 +1265,7 @@ def protect (emu : Emu) (address size : Nat) (protection : Primus.Protection) : 
 def clearMapped (emu : Emu) (address size : Nat) : IO Unit := do
   if size > 0 then
     let upper := address + size
+    if let some changed := ← emu.memoryChanged.get then changed address size true
     Primus.Lifted.discardRange emu.engine address (upper - 1)
     let state ← emu.state.get
     let ⟨_, memory⟩ ← cells emu state
@@ -1441,6 +1462,7 @@ private def dispatchSyscall (emu : Emu) : IO (Option Nat) := serialize emu <| do
           | .error _ => pure 0
         pure (args.take 4 ++ onStack)
       else pure args
+    if let some starts := ← emu.syscallStarts.get then starts number args
     let context := hookContext emu
     let rec go : List SyscallHook → IO (Option Nat)
       | [] => pure none
@@ -1451,6 +1473,7 @@ private def dispatchSyscall (emu : Emu) : IO (Option Nat) := serialize emu <| do
           pure (some value)
         | .default => go rest
     let result ← serve emu (go hooks)
+    if let some ends := ← emu.syscallEnds.get then ends result
     if let some after := ← emu.afterSyscall.get then after
     pure result
 
@@ -1568,6 +1591,31 @@ private def lift (emu : Emu) (thumb : Bool) (address : Nat) (code : ByteArray) :
       pure ⟨insn.address, insn.next, [.special s!"served:{insn.address}"]⟩
     else
       pure ⟨insn.address, insn.next, insn.bil⟩
+
+/-- The program of the instruction at an address, and how many bytes it was made from at most, as it would run now, without running it or
+saying that anything faulted: none if it can't be fetched or decoded. -/
+def programAt (emu : Emu) (address : Nat) : IO (Option Bil.Program) := do
+  let fault ← emu.lastFault.get
+  let fresh ← emu.faultFresh.get
+  try
+    let block ← lift emu (isThumb (← emu.state.get)) address (← fetch emu address)
+    match block.program with
+    | [.special name] =>
+      if name.startsWith "served:" then
+        match (name.drop 7).toString.toNat? with
+        | some served => pure ((← emu.servedPrograms.get).get? served)
+        | none => pure (some block.program)
+      else pure (some block.program)
+    | program => pure (some program)
+  catch _ =>
+    emu.lastFault.set fault
+    emu.faultFresh.set fresh
+    pure none
+
+/-- The bytes that `programAt` makes a program from, as they are now, which is what says whether it still stands. -/
+def codeAt (emu : Emu) (address : Nat) : IO ByteArray := do
+  let limit := match emu.config.syscallAbi with | .x86_64 | .x86_32 => 16 | .arm => 18 | .powerpc | .powerpc64 => 8 | _ => 4
+  peek emu address limit
 
 def refreshRegions (emu : Emu) : IO Unit := do
   let mapped ← emu.regions.get

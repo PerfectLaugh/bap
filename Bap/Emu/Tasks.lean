@@ -286,6 +286,17 @@ private def callsOf (abi : SyscallAbi) (width : Nat) : Calls :=
         setRobustList := 5268, rseq := 5327, sigprocmask := 5014, sigaction := 5013, tgkill := 5225, mmap := 5009,
         munmap := 5011, mprotect := 5010, madvise := 5027 }
 
+/-- Whether a system call is one of those that say nothing about the world a program looks at, such as where memory went and what became of
+a lock, as opposed to what could tell it that it is being watched. -/
+def bookkeepingCall (emu : Emu) (number : Nat) : IO Bool := do
+  let calls := callsOf emu.config.syscallAbi (← wordWidth emu)
+  let is (call : Nat) : Bool := number == call
+  let isSome (call : Option Nat) : Bool := some number == call
+  pure (is calls.clone || is calls.clone3 || isSome calls.fork || isSome calls.vfork || is calls.exit || is calls.exitGroup ||
+    is calls.schedYield || is calls.futex || isSome calls.futexTime64 || is calls.setTidAddress || is calls.setRobustList || is calls.rseq ||
+    is calls.sigprocmask || is calls.sigaction || is calls.tgkill || is calls.mmap || isSome calls.mmap2 || is calls.munmap ||
+    is calls.mprotect || is calls.madvise || isSome calls.archPrctl)
+
 /-- `wait4` without the usage of what it reports, and process groups, which aren't modelled. A thread that has to wait
 stops here, and `runProcesses` gives it its result. -/
 private def serveWait (emu : Emu) (target status options usage : Nat) : IO SyscallAction := do
