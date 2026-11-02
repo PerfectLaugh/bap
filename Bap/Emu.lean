@@ -1563,6 +1563,26 @@ def setPc (emu : Emu) (address : Nat) : IO Unit := do
   emu.pendingRef.set none
   emu.skipCode.set none
 
+/-- Where a thread goes on from: the next instruction that it runs is at `address`, as `setPc` does for the thread that runs. A branch that it
+was in the middle of, whose delay slot it was to run, is forgotten, and the hooks of `address` fire when it runs it, even if they had for where
+it was. On 32-bit ARM, whether that is Thumb is still what `ISET` of the thread says. -/
+def setThreadPc (emu : Emu) (id : ThreadId) (address : Nat) : IO Unit := do
+  if (← thread emu) == id then
+    setPc emu address
+  else
+    unless (← emu.threadsRef.get).any (·.id == id) do
+      throw <| IO.userError s!"unknown Emu thread {id}"
+    emu.threadsRef.modify fun threads => threads.map fun context =>
+      if context.id == id then { context with pc := address, pending := none, skip := none } else context
+
+/-- Where a thread goes on from. -/
+def threadPc (emu : Emu) (id : ThreadId) : IO Nat := do
+  if (← thread emu) == id then emu.pc.get
+  else
+    match (← emu.threadsRef.get).find? (·.id == id) with
+    | some context => pure context.pc
+    | none => throw <| IO.userError s!"unknown Emu thread {id}"
+
 def stop (emu : Emu) : IO Unit := emu.stopped.set true
 
 def resume (emu : Emu) : IO Unit := emu.stopped.set false

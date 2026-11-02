@@ -475,9 +475,26 @@ private partial def loadOne (machine : Machine) (path : String) (space : Nat) (s
               | none => pure ()
       unless missing.isEmpty do
         throw <| IO.userError s!"{path} needs what isn't there: {" ".intercalate missing.reverse}"
+      -- A resolver is called as the kernel's loader calls it: on AArch64 with `AT_HWCAP` and `_IFUNC_ARG_HWCAP`, and what has
+      -- `AT_HWCAP` and `AT_HWCAP2`, which is how one finds out what it may use.
+      let callResolver (resolver : Nat) : IO Nat := do
+        match architecture with
+        | .aarch64 =>
+          let process := (← machine.kernel.get).process (← currentTask emu).group
+          let auxiliaryValue (key : Nat) : Nat :=
+            ((List.range (process.auxiliary.length / 2)).findSome? fun index =>
+              if process.auxiliary[2 * index]! == key then some process.auxiliary[2 * index + 1]! else none).getD 0
+          let hwcap := auxiliaryValue 16
+          let argument ← machine.calloc 1 24
+          writeWord argument 24
+          writeWord (argument + 8) hwcap
+          writeWord (argument + 16) (auxiliaryValue 26)
+          try machine.call resolver [hwcap + 2 ^ 62, argument]
+          finally machine.free argument
+        | _ => machine.call resolver []
       -- What chooses an implementation runs now, with all that it could call relocated, as far as they can be.
       for (place, resolver) in indirect.reverse do
-        writeWord place (← machine.call resolver [])
+        writeWord place (← callResolver resolver)
       protectLibrary machine image base program
       -- Its initializers, and what undoes them.
       let tagged (key : Nat) : Option Nat := (tags.find? (·.1 == key)).map (·.2)
@@ -496,7 +513,7 @@ private partial def loadOne (machine : Machine) (path : String) (space : Nat) (s
       -- What a resolver chooses is what it is to anyone who asks for it.
       let chosen ← dynamic.filterMapM fun symbol => do
         if symbol.typ == 10 && symbol.sectionIndex != 0 && symbol.binding != 0 && !symbol.name.isEmpty then
-          pure (some (symbol.name, ← machine.call (base + symbol.value) []))
+          pure (some (symbol.name, ← callResolver (base + symbol.value)))
         else pure none
       let symbols := symbols.map fun entry => (entry.1, (chosen.lookup entry.1).getD entry.2)
       let finished : LoadedLibrary := { library with needs, finalizers, symbols, initializers }

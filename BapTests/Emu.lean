@@ -4,6 +4,11 @@ namespace Bap.Tests.Emu
 
 open Bap
 
+private def expectThrow (name : String) (action : IO α) : IO Unit := do
+  match ← action.toBaseIO with
+  | .error _ => IO.println s!"ok: {name}"
+  | .ok _ => throw <| IO.userError s!"{name}: unexpectedly succeeded"
+
 private def reg (name : String) : Var := ⟨name, .imm 64, 0, false⟩
 
 /-- The configuration that the tests run under. All that they check of an emulator holds under each. -/
@@ -223,11 +228,24 @@ private def testDelaySlots : IO Unit := do
   Bap.Emu.load emu "native/build/emu-delay-checkpoint.bin"
   let _ ← Bap.Emu.run emu 2
   assertBits "Emu checkpoint restores pending branch" (BitVec.ofNat 64 1) (.ok (← Bap.Emu.reg emu r5))
-
-private def expectThrow (name : String) (action : IO α) : IO Unit := do
-  match ← action.toBaseIO with
-  | .error _ => IO.println s!"ok: {name}"
-  | .ok _ => throw <| IO.userError s!"{name}: unexpectedly succeeded"
+  -- Where another thread goes on from, and where the one that runs does, which forgets the branch that it was in the middle of.
+  Bap.Emu.restore emu pending
+  let other ← Bap.Emu.spawnThread emu 16 7
+  Bap.Emu.setThreadPc emu other 20
+  assertEqual "Emu a thread goes on from where it is set to" 20 (← Bap.Emu.threadPc emu other)
+  assertEqual "Emu and the thread that runs doesn't" 4 (← Bap.Emu.pc emu)
+  Bap.Emu.switchThread emu other
+  assertEqual "Emu switching to it, it is there" 20 (← Bap.Emu.pc emu)
+  Bap.Emu.setThreadPc emu 1 8
+  Bap.Emu.switchThread emu 1
+  assertEqual "Emu a thread in a delay slot goes on from where it is set to" 8 (← Bap.Emu.pc emu)
+  assertTrue "Emu and forgets the branch that it was in the middle of" (← emu.pendingRef.get).isNone
+  Bap.Emu.restore emu pending
+  assertTrue "Emu a thread in a delay slot has a branch to go to" (← emu.pendingRef.get).isSome
+  Bap.Emu.setThreadPc emu 1 0
+  assertEqual "Emu the thread that runs goes on from where it is set to" 0 (← Bap.Emu.pc emu)
+  assertTrue "Emu and forgets its branch" (← emu.pendingRef.get).isNone
+  expectThrow "Emu a thread that isn't there has no pc to set" (Bap.Emu.setThreadPc emu 99 0)
 
 /-- Each thread pushes a value and reads it back after the other has pushed: with one stack it would read the other's. -/
 private def testCloneThread : IO Unit := do
