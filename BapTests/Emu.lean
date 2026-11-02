@@ -1725,6 +1725,24 @@ private def assertThrows (name : String) (action : IO Unit) : IO Unit := do
   let failed ← try action; pure false catch _ => pure true
   assertTrue name failed
 
+/-- A machine that is put back to what was saved steps back from there, and not from where it was before. -/
+def testStepBackAfterRestore : IO Unit := do
+  let program ← IO.FS.readBinFile "testsuite/bin/aarch64-linux-musl-libc-memory"
+  let start : IO Bap.Linux.Machine := Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let at_ (count : Nat) : IO _ := do
+    let machine ← start
+    let _ ← machine.run (fuel := count) fun _ => pure ()
+    stateOf machine
+  let machine ← start
+  machine.keepHistory (every := 997)
+  let _ ← machine.run (fuel := 20000) fun _ => pure ()
+  let failure ← machine.save
+  let _ ← machine.run (fuel := 15000) fun _ => pure ()
+  machine.restore failure
+  assertEqual "a machine put back is where what it was put back to was" 20000 (← machine.position)
+  machine.stepBack 5000
+  assertTrue "a step back from what was put back is where that run was" ((← stateOf machine) == (← at_ 15000))
+
 /-- What the host does between runs is undone by stepping back before it and kept after it; a breakpoint stays and stops it again where it did; and what it doesn't have it says. -/
 def testStepBackHost : IO Unit := do
   let program ← IO.FS.readBinFile "testsuite/bin/aarch64-linux-musl-libc-memory"

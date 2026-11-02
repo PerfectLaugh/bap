@@ -30,8 +30,8 @@ structure AttachedModel where
   version : Nat
   state : ModelState
 
-/-- What is in the kernel, in the emulator and in the models at once, to go back to. -/
-structure Machine.Saved where
+/-- What is in the kernel, in the emulator and in the models at once. -/
+structure Machine.Kept where
   emulator : Snapshot
   run : RunState
   kernel : Kernel
@@ -46,7 +46,11 @@ structure Machine.History where
   /-- Where it is: how many instructions of all threads `Machine.run` has run since it started keeping this. -/
   position : Nat := 0
   /-- Where each was, the quantum of the run that went on from there, and what it was, the latest last. -/
-  saved : Array (Nat × Nat × Machine.Saved) := #[]
+  saved : Array (Nat × Nat × Machine.Kept) := #[]
+
+/-- What a machine is, to go back to, with what it could step back to then: a machine that goes back to it is where that was, and steps back from there. -/
+structure Machine.Saved extends Machine.Kept where
+  history : Option Machine.History := none
 
 structure Machine where
   architecture : Architecture
@@ -1522,7 +1526,7 @@ private def Machine.modelBytes (machine : Machine) : IO (List (AttachedModel × 
   (← machine.models.get).mapM fun model => do pure (model, ← model.state.save)
 
 /-- It is as whole as a checkpoint has to be: not in the middle of an instruction, or from a worker of a parallel round. -/
-def Machine.save (machine : Machine) : IO Machine.Saved := do
+private def Machine.keep (machine : Machine) : IO Machine.Kept := do
   if (← machine.emu.serving.get) || machine.emu.engine.deferMemorySync then
     throw <| IO.userError "a machine can't be saved in the middle of an instruction, or by a worker of a parallel round: stop the thread, and save it once the run returns"
   pure {
@@ -1532,13 +1536,24 @@ def Machine.save (machine : Machine) : IO Machine.Saved := do
     models := (← machine.modelBytes).map fun (model, bytes) => (model.id, bytes)
   }
 
-def Machine.restore (machine : Machine) (saved : Machine.Saved) : IO Unit := do
-  Bap.Emu.restore machine.emu saved.emulator
+private def Machine.restoreKept (machine : Machine) (kept : Machine.Kept) : IO Unit := do
+  Bap.Emu.restore machine.emu kept.emulator
   -- Which breakpoints there are is up to who is debugging it now.
-  setRunState machine.emu { saved.run with breakpoints := [] }
-  machine.kernel.set saved.kernel
+  setRunState machine.emu { kept.run with breakpoints := [] }
+  machine.kernel.set kept.kernel
   for model in ← machine.models.get do
-    if let some bytes := saved.models.lookup model.id then model.state.load bytes
+    if let some bytes := kept.models.lookup model.id then model.state.load bytes
+
+/-- What the machine is, and where it is in what it keeps for `stepBack`, if it keeps that. -/
+def Machine.save (machine : Machine) : IO Machine.Saved := do
+  pure { toKept := ← machine.keep, history := ← machine.history.get }
+
+/-- The machine is what it was saved as. If it keeps a history, that is the history it had then: where it was, and what it could step back to from there, and not what it ran
+after. One that was saved before it kept any has nothing to step back to, as nothing says where it was. -/
+def Machine.restore (machine : Machine) (saved : Machine.Saved) : IO Unit := do
+  machine.restoreKept saved.toKept
+  if let some current := ← machine.history.get then
+    machine.history.set (some (saved.history.getD { every := current.every, limit := current.limit }))
 
 /-- How a machine's instructions run from the next one on: see `ExecutionMode`. It can be changed whenever the machine isn't in the middle of an instruction, and a machine that goes on from a checkpoint
 starts with the JIT, as it is no part of what is saved. -/
@@ -1555,7 +1570,7 @@ def Machine.run (machine : Machine) (output : ByteArray → IO Unit) (quantum : 
   let some history ← machine.history.get
     | machine.runPieces output quantum fuel (64 * quantum) fun _ _ => pure ()
   let keep (history : Machine.History) : IO Machine.History := do
-    let saved := history.saved.push (history.position, quantum, ← machine.save)
+    let saved := history.saved.push (history.position, quantum, ← machine.keep)
     pure { history with saved := if saved.size > history.limit then saved.extract (saved.size - history.limit) saved.size else saved }
   -- Where it already has what it is at this place, that is what the host may have changed.
   let start := match history.saved.back? with
@@ -1601,7 +1616,7 @@ def Machine.stepBack (machine : Machine) (count : Nat := 1) : IO Unit := do
   let some index := (List.range history.saved.size).reverse.find? fun index => (history.saved[index]?.map fun entry => decide (entry.1 ≤ target)).getD false
     | throw <| IO.userError "nothing kept is before that"
   let some (at_, quantum, saved) := history.saved[index]? | throw <| IO.userError "nothing kept is before that"
-  machine.restore saved
+  machine.restoreKept saved
   if target > at_ then
     let muted ← machine.emu.breakpointsMuted.get
     machine.emu.breakpointsMuted.set true
