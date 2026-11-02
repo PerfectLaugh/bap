@@ -47,6 +47,12 @@ structure Config where
 
 abbrev HookId := Nat
 
+/-- How instructions run: by compiling those that get hot, or all of them in the interpreter, which never starts the compiler. The same things happen either way. It is what
+a host wants of a run and not a thing about a guest, so that it isn't in a checkpoint. -/
+inductive ExecutionMode where
+  | jit | interpret
+  deriving DecidableEq, Repr, Inhabited
+
 inductive SyscallAction where
   | default | returnValue (value : Nat)
 
@@ -72,7 +78,8 @@ private structure TraceState where
   pcCapacity : Nat := 0
   accesses : List TraceAccess := []
   accessCount : Nat := 0
-  droppedAccesses : Nat := 0
+  /-- How many there are of `accesses`, which are let go of when they are twice what is kept. -/
+  accessRetained : Nat := 0
   accessCapacity : Nat := 0
   watch : Option (Nat × Nat) := none
 
@@ -178,6 +185,11 @@ structure Emu where
   /-- For a page that instructions came from, the executable region that had them, which saves `fetch` going through the
   regions. All that changes `regions` empties it, by `setRegions`. -/
   fetchPages : IO.Ref (Std.HashMap Nat (Nat × Nat))
+  /-- The regions by where they start, as every access looks for its own, and there may be as many as a program has mapped. It is made from `regions` when it is
+  needed after they are all replaced. -/
+  regionIndex : IO.Ref (Option (Std.TreeMap Nat Region))
+  /-- That all from here up to where mappings start from is mapped, so that the next goes below it. -/
+  mappingTop : IO.Ref (Option Nat)
   /-- What serves intrinsics in the code that names them: the bits of what is computed from the name and the bits of the
   operands, as its width and its bits. Lifted code runs up to an intrinsic, and what comes after it wouldn't run. -/
   intrinsicServer : IO.Ref (Option (String → List Nat → Option (Nat × Nat)))
@@ -202,14 +214,16 @@ structure Emu where
   /-- What runs when a thread has been switched to and before it goes on. -/
   switchedIn : IO.Ref (Option (IO Unit))
   /-- What sees a system call before it is served, with its number and arguments, and after, with its result if something served it. -/
-  syscallStarts : IO.Ref (Option (Nat → List Nat → IO Unit))
-  syscallEnds : IO.Ref (Option (Option Nat → IO Unit))
+  syscallStarts : IO.Ref (List (Nat → List Nat → IO Unit))
+  syscallEnds : IO.Ref (List (Option Nat → IO Unit))
   /-- What hears of bytes of a guest that no instruction of it changed: where and how many, and whether they became zeros because of nothing. -/
-  memoryChanged : IO.Ref (Option (Nat → Nat → Bool → IO Unit))
+  memoryChanged : IO.Ref (List (Nat → Nat → Bool → IO Unit))
+  /-- What hears that the host moved bytes of a guest from one place to another, from, to and how many. -/
+  memoryCopied : IO.Ref (List (Nat → Nat → Nat → IO Unit))
   /-- What hears that the host is serving a call of the guest that isn't a system call, such as one of JNI, by name, and then that it has
-  left what it returns in a register, by name of that. -/
-  hostStarts : IO.Ref (Option (String → IO Unit))
-  hostEnds : IO.Ref (Option (String → IO Unit))
+  left what it returns in a register, by name of that, if it returns something. -/
+  hostStarts : IO.Ref (List (String → IO Unit))
+  hostEnds : IO.Ref (List (Option String → IO Unit))
   /-- What runs before a thread of another address space takes over, in the one that it leaves, and after, in the one that it is in. -/
   leavingSpace : IO.Ref (Option (IO Unit))
   enteredSpace : IO.Ref (Option (IO Unit))
@@ -317,6 +331,8 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     taskTable := ← IO.mkRef (Tasks.TaskTable.initial 1)
     parkedRegions := ← IO.mkRef {}
     fetchPages := ← IO.mkRef {}
+    regionIndex := ← IO.mkRef none
+    mappingTop := ← IO.mkRef none
     intrinsicServer := ← IO.mkRef none
     intrinsicName := ← IO.mkRef fun _ name => name
     intrinsicRaises := ← IO.mkRef fun _ _ _ _ => []
@@ -329,11 +345,12 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     serving := ← IO.mkRef false
     afterSyscall := ← IO.mkRef none
     switchedIn := ← IO.mkRef none
-    syscallStarts := ← IO.mkRef none
-    syscallEnds := ← IO.mkRef none
-    memoryChanged := ← IO.mkRef none
-    hostStarts := ← IO.mkRef none
-    hostEnds := ← IO.mkRef none
+    syscallStarts := ← IO.mkRef []
+    syscallEnds := ← IO.mkRef []
+    memoryChanged := ← IO.mkRef []
+    memoryCopied := ← IO.mkRef []
+    hostStarts := ← IO.mkRef []
+    hostEnds := ← IO.mkRef []
     leavingSpace := ← IO.mkRef none
     enteredSpace := ← IO.mkRef none
     futexKey := ← IO.mkRef none
@@ -515,6 +532,41 @@ private def snapshotBlock (emu : Emu) : IO Snapshot := do
 def setRegions (emu : Emu) (regions : List Region) : IO Unit := do
   emu.regions.set regions
   emu.fetchPages.set {}
+  emu.regionIndex.set none
+  emu.mappingTop.set none
+
+/-- The regions by where they start. -/
+def regionTree (emu : Emu) : IO (Std.TreeMap Nat Region) := do
+  match ← emu.regionIndex.get with
+  | some tree => pure tree
+  | none =>
+    let tree := (← emu.regions.get).foldl (init := ({} : Std.TreeMap Nat Region)) fun tree region =>
+      if region.data.size == 0 then tree else tree.insert region.address region
+    emu.regionIndex.set (some tree)
+    pure tree
+
+/-- The regions that bytes in a row are in, which is all that has to do with an access to them. -/
+def regionsTouching (emu : Emu) (address size : Nat) : IO (List Region) := do
+  let tree ← regionTree emu
+  let upper := address + max size 1
+  let first := match tree.getEntryLE? address with
+    | some (_, region) => if region.address + region.data.size > address then [region] else []
+    | none => []
+  let rec later : Nat → Nat → List Region → List Region
+    | 0, _, out => out
+    | fuel + 1, from_, out =>
+      match tree.getEntryGT? from_ with
+      | some (start, region) => if start < upper then later fuel start (region :: out) else out
+      | none => out
+  pure (later tree.size address first)
+
+/-- All the regions but those in a range are as they were, and those have been replaced by these. -/
+private def replaceRegions (emu : Emu) (regions : List Region) (touched replaced : List Region) : IO Unit := do
+  emu.regions.set regions
+  emu.fetchPages.set {}
+  emu.regionIndex.modify (·.map fun tree =>
+    let tree := touched.foldl (fun tree region => tree.erase region.address) tree
+    replaced.foldl (fun tree region => if region.data.size == 0 then tree else tree.insert region.address region) tree)
 
 private def restoreThreads (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   emu.state.set snapshot.state
@@ -854,7 +906,8 @@ def traceDroppedPcs (emu : Emu) : IO Nat := do
 
 def traceAccesses (emu : Emu) : IO (List TraceAccess) := do
   let current ← emu.trace.get
-  pure (current.getD {}).accesses.reverse
+  let state := current.getD {}
+  pure (state.accesses.take state.accessCapacity).reverse
 
 def traceAccessesCount (emu : Emu) : IO Nat := do
   let current ← emu.trace.get
@@ -862,7 +915,8 @@ def traceAccessesCount (emu : Emu) : IO Nat := do
 
 def traceDroppedAccesses (emu : Emu) : IO Nat := do
   let current ← emu.trace.get
-  pure (current.getD {}).droppedAccesses
+  let state := current.getD {}
+  pure (state.accessCount - min state.accessRetained state.accessCapacity)
 
 /-- Runs a hook that is in the middle of an instruction, as a checkpoint then couldn't be of anything whole. -/
 private def serve (emu : Emu) (action : IO α) : IO α := do
@@ -918,13 +972,11 @@ private def recordAccess (emu : Emu) (write : Bool) (address size value : Nat) :
         value := if write then some value else none
         thread
       }
-      let entries := access :: state.accesses
-      let retained := entries.take state.accessCapacity
-      { state with
-        accesses := retained
-        accessCount := state.accessCount + 1
-        droppedAccesses := state.droppedAccesses + entries.length - retained.length
-      }
+      let (accesses, accessRetained) :=
+        if state.accessRetained + 1 ≥ 2 * state.accessCapacity then
+          ((access :: state.accesses).take state.accessCapacity, state.accessCapacity)
+        else (access :: state.accesses, state.accessRetained + 1)
+      { state with accesses, accessRetained, accessCount := state.accessCount + 1 }
 
 /-- The hooks of the page of an address, in the order they came. -/
 private def hooksNear (emu : Emu) (address : Nat) : IO (List CodeHook) := do
@@ -976,7 +1028,8 @@ private def recordFault (emu : Emu) (operation : MemoryOperation) (address : Nat
   emu.faultFresh.set true
 
 private def notifyMemory (emu : Emu) (write : Bool) (address size value : Nat) : IO Unit := do
-  let mapped ← emu.regions.get
+  -- What an access does depends on the regions that it touches, of which there are few.
+  let mapped ← regionsTouching emu address size
   let fault (offset : Nat) : IO Unit := do
     let operation := if write then MemoryOperation.write else MemoryOperation.read
     recordFault emu operation (address + offset)
@@ -1043,7 +1096,7 @@ def coversRange (regions : List Region) (lower upper : Nat) : Bool :=
   loop regions.length lower
 
 private def readByte (emu : Emu) (address : Nat) : IO UInt8 := do
-  let regions ← emu.regions.get
+  let regions ← regionsTouching emu address 1
   match lookupRegion regions address with
   | none => throw <| IO.userError s!"unmapped Emu address {address}"
   | some region =>
@@ -1053,12 +1106,12 @@ private def readByte (emu : Emu) (address : Nat) : IO UInt8 := do
 
 def read (emu : Emu) (address size : Nat) : IO ByteArray := do
   -- An absurd size fails right here, instead of allocating before it fails.
-  if !coversRange (← emu.regions.get) address (address + size) then
+  let regions ← regionsTouching emu address size
+  if !coversRange regions address (address + size) then
     throw <| IO.userError s!"unmapped Emu address in {size} bytes at {address}"
   match ← emu.engine.persistentMemory.get with
   -- All at once, as what a worker of a parallel round stores is seen whole.
   | some memory =>
-    let regions ← emu.regions.get
     let rec check : Nat → Nat → IO Unit
       | 0, _ => pure ()
       | fuel + 1, position => do
@@ -1113,7 +1166,7 @@ private def writeByte (emu : Emu) (address : Nat) (value : UInt8) : IO Unit := d
 
 def write (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
   if data.size > 0 then
-    let mapped ← emu.regions.get
+    let mapped ← regionsTouching emu address 1
     match lookupRegion mapped address with
     | none => throw <| IO.userError s!"unmapped Emu address {address}"
     | some region =>
@@ -1128,10 +1181,11 @@ def write (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
       if region.protection.executable then
         Primus.Lifted.discardRange emu.engine address (address + data.size - 1)
       synchronizeWrite emu address data
-      if let some changed := ← emu.memoryChanged.get then changed address data.size false
+      for changed in ← emu.memoryChanged.get do changed address data.size false
 
-/-- Puts bytes at an address, whatever a program may do with them there, as a kernel does. -/
-def poke (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
+/-- Puts bytes at an address, whatever a program may do with them there, as a kernel does. `known` is that they are what they were somewhere else that
+what hears of it has been told of, as what a shared mapping has when its file changed. -/
+def poke (emu : Emu) (address : Nat) (data : ByteArray) (known : Bool := false) : IO Unit := do
   if data.size > 0 then
     let state ← emu.state.get
     let ⟨_, memory⟩ ← cells emu state
@@ -1139,7 +1193,8 @@ def poke (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
     emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
     Primus.Lifted.discardRange emu.engine address (address + data.size - 1)
     synchronizeWrite emu address data
-    if let some changed := ← emu.memoryChanged.get then changed address data.size false
+    if !known then
+      for changed in ← emu.memoryChanged.get do changed address data.size false
 
 private def synchronizeBatch (emu : Emu) (writes : List (Nat × ByteArray)) : IO Unit := do
   let persistent ← emu.engine.persistentMemory.get
@@ -1176,7 +1231,7 @@ def writeBatch (emu : Emu) (writes : List (Nat × ByteArray)) : IO Unit := do
         Primus.Lifted.discardRange emu.engine address (address + data.size - 1)
     | none => pure ()
   synchronizeBatch emu writes
-  if let some changed := ← emu.memoryChanged.get then
+  for changed in ← emu.memoryChanged.get do
     for (address, data) in writes do changed address data.size false
   let updatedRegions := writes.foldl (init := mapped) fun regions (address, data) =>
     regions.map fun current =>
@@ -1196,8 +1251,8 @@ private def checkInSpace (emu : Emu) (region : Region) : IO Unit := do
 
 def map (emu : Emu) (region : Region) : IO Unit := do
   checkInSpace emu region
-  let mapped ← emu.regions.get
-  if mapped.any fun current => overlaps current region then
+  let near ← if region.data.size == 0 then emu.regions.get else regionsTouching emu region.address region.data.size
+  if near.any fun current => overlaps current region then
     throw <| IO.userError s!"Emu region overlaps an existing mapping at {region.address}"
   -- Memory holds zeros where nothing was written, and nothing was where nothing was mapped, so a mapping of zeros, such as
   -- the stack of a thread, has nothing to write.
@@ -1210,8 +1265,8 @@ def map (emu : Emu) (region : Region) : IO Unit := do
   if region.protection.executable && region.data.size > 0 then
     Primus.Lifted.discardRange emu.engine region.address (region.address + region.data.size - 1)
   if written then synchronizeWrite emu region.address region.data
-  if let some changed := ← emu.memoryChanged.get then changed region.address region.data.size (!written)
-  setRegions emu (region :: mapped)
+  for changed in ← emu.memoryChanged.get do changed region.address region.data.size (!written)
+  replaceRegions emu (region :: (← emu.regions.get)) [] [region]
 
 def overlay (emu : Emu) (region : Region) : IO Unit := do
   checkInSpace emu region
@@ -1225,7 +1280,7 @@ def overlay (emu : Emu) (region : Region) : IO Unit := do
   if region.protection.executable && region.data.size > 0 then
     Primus.Lifted.discardRange emu.engine region.address (region.address + region.data.size - 1)
   synchronizeWrite emu region.address region.data
-  if let some changed := ← emu.memoryChanged.get then changed region.address region.data.size false
+  for changed in ← emu.memoryChanged.get do changed region.address region.data.size false
   setRegions emu (region :: mapped.filter fun current => current.address != region.address)
 
 private def regionPiece (region : Region) (first last : Nat) (protection : Primus.Protection) : List Region :=
@@ -1256,7 +1311,8 @@ def protect (emu : Emu) (address size : Nat) (protection : Primus.Protection) : 
   else
     match protectRegions (← emu.regions.get) address size protection with
     | some regions =>
-      setRegions emu regions
+      let touched ← regionsTouching emu address size
+      replaceRegions emu regions touched (touched.flatMap (splitRegion address (address + size) protection))
       -- A compiled range would keep running code that lost its execute permission.
       if !protection.executable then Primus.Lifted.discardRange emu.engine address (address + size - 1)
     | none => throw <| IO.userError s!"unmapped Emu protection range at {address}"
@@ -1265,7 +1321,7 @@ def protect (emu : Emu) (address size : Nat) (protection : Primus.Protection) : 
 def clearMapped (emu : Emu) (address size : Nat) : IO Unit := do
   if size > 0 then
     let upper := address + size
-    if let some changed := ← emu.memoryChanged.get then changed address size true
+    for changed in ← emu.memoryChanged.get do changed address size true
     Primus.Lifted.discardRange emu.engine address (upper - 1)
     let state ← emu.state.get
     let ⟨_, memory⟩ ← cells emu state
@@ -1280,11 +1336,15 @@ def clearMapped (emu : Emu) (address size : Nat) : IO Unit := do
 def unmap (emu : Emu) (address size : Nat) : IO Unit := do
   if size > 0 then
     let upper := address + size
-    setRegions emu <| (← emu.regions.get).flatMap (fun region =>
+    let pieces (region : Region) : List Region :=
       let finish := region.address + region.data.size
       if finish ≤ address || upper ≤ region.address then [region]
       else regionPiece region region.address (min address finish) region.protection ++
-        regionPiece region (max upper region.address) finish region.protection)
+        regionPiece region (max upper region.address) finish region.protection
+    let touched ← regionsTouching emu address size
+    replaceRegions emu ((← emu.regions.get).flatMap pieces) touched (touched.flatMap pieces)
+    if let some top := ← emu.mappingTop.get then
+      if upper > top then emu.mappingTop.set none
     clearMapped emu address size
 
 def regions (emu : Emu) : IO (List (Nat × Nat × Primus.Protection)) := do
@@ -1462,7 +1522,7 @@ private def dispatchSyscall (emu : Emu) : IO (Option Nat) := serialize emu <| do
           | .error _ => pure 0
         pure (args.take 4 ++ onStack)
       else pure args
-    if let some starts := ← emu.syscallStarts.get then starts number args
+    for starts in ← emu.syscallStarts.get do starts number args
     let context := hookContext emu
     let rec go : List SyscallHook → IO (Option Nat)
       | [] => pure none
@@ -1473,7 +1533,7 @@ private def dispatchSyscall (emu : Emu) : IO (Option Nat) := serialize emu <| do
           pure (some value)
         | .default => go rest
     let result ← serve emu (go hooks)
-    if let some ends := ← emu.syscallEnds.get then ends result
+    for ends in ← emu.syscallEnds.get do ends result
     if let some after := ← emu.afterSyscall.get then after
     pure result
 
@@ -1526,7 +1586,7 @@ private def fetchSpanOf (emu : Emu) (address limit : Nat) : IO (Except String Na
   let page := address / 4096
   if let some (lower, upper) := (← emu.fetchPages.get)[page]? then
     if lower ≤ address && address + limit ≤ upper then return .ok limit
-  let regions ← emu.regions.get
+  let regions ← regionsTouching emu address limit
   if let some region := lookupRegion regions address then
     if region.protection.executable then
       emu.fetchPages.modify (·.insert page (region.address, region.address + region.data.size))
@@ -1616,6 +1676,13 @@ def programAt (emu : Emu) (address : Nat) : IO (Option Bil.Program) := do
 def codeAt (emu : Emu) (address : Nat) : IO ByteArray := do
   let limit := match emu.config.syscallAbi with | .x86_64 | .x86_32 => 16 | .arm => 18 | .powerpc | .powerpc64 => 8 | _ => 4
   peek emu address limit
+
+/-- How instructions run from the next one on. What was compiled stays, for if it goes back. -/
+def setExecutionMode (emu : Emu) (mode : ExecutionMode) : IO Unit :=
+  emu.engine.interpretOnly.set (mode == .interpret)
+
+def executionMode (emu : Emu) : IO ExecutionMode := do
+  pure (if ← emu.engine.interpretOnly.get then .interpret else .jit)
 
 def refreshRegions (emu : Emu) : IO Unit := do
   let mapped ← emu.regions.get
@@ -1959,6 +2026,8 @@ private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared :
     engine
     regions
     fetchPages
+    regionIndex := ← if space == table.spaceOf (← emu.currentThreadRef.get) then pure emu.regionIndex else IO.mkRef none
+    mappingTop := ← IO.mkRef none
     -- What it loaded exclusively before the round may change in it, as when a thread is switched to.
     state := ← IO.mkRef { env := clearMonitor emu.config context.state.env }
     pc := ← IO.mkRef context.pc

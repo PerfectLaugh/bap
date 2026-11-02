@@ -419,11 +419,24 @@ private def serveFutex (emu : Emu) (address operation value timeout target compa
 /-- Where a mapping goes that doesn't say: below the others, from the top down, as in Linux. -/
 private def mappingBase (width : Nat) : Nat := if width == 32 then 0x70000000 else 0x7f0000000000
 
-private def freeAddress (emu : Emu) (size : Nat) : IO Nat := do
-  let taken := (← emu.regions.get).map (fun region => (region.address, region.data.size))
-  let sorted := taken.toArray.qsort (fun left right => left.1 > right.1)
+/-- The highest address below where mappings start with `size` free up to it, which is `gapBelow` of the regions from the top down. It goes from what is known to be all mapped, as a program that
+maps much has that in one piece, down to where there is room: otherwise each mapping would take longer than the one before. -/
+def freeAddress (emu : Emu) (size : Nat) : IO Nat := do
+  let tree ← regionTree emu
   let base := mappingBase (← wordWidth emu)
-  pure (gapBelow size base (sorted.toList.filter (·.1 < base)))
+  let rec go : Nat → Nat → Nat → Bool → IO Nat
+    | 0, _, top, _ => pure (top - size)
+    | fuel + 1, cursor, top, whole => do
+      match tree.getEntryLT? cursor with
+      | none => pure (top - size)
+      | some (start, region) =>
+        let stop := start + region.data.size
+        let whole := whole && stop ≥ top
+        if whole then emu.mappingTop.set (some (min top start))
+        if stop + size ≤ top then pure (top - size)
+        else go fuel start (min top start) whole
+  let top := (← emu.mappingTop.get).getD base
+  go (tree.size + 1) top top true
 
 private def protectionOf (bits : Nat) : Primus.Protection := ⟨bits &&& 1 != 0, bits &&& 2 != 0, bits &&& 4 != 0⟩
 

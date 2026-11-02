@@ -28,6 +28,8 @@ def einval : Nat := 22
 def emfile : Nat := 24
 def enotty : Nat := 25
 def espipe : Nat := 29
+def eagain : Nat := 11
+def epipe : Nat := 32
 def erange : Nat := 34
 def enosys : Nat := 38
 def enotempty : Nat := 39
@@ -42,6 +44,8 @@ inductive Content where
   | console (input : ByteArray)
   /-- What a generator of this name makes when it is opened, as the files of `/proc` are: see `addGenerated`. -/
   | generated (name : String)
+  /-- What has been written to a pipe, from where it hasn't been read yet, and how much has been read of all that was ever written. It lets go of what is read once that is half of it. -/
+  | pipe (buffer : ByteArray) (head consumed : Nat)
 
 structure Inode where
   number : Nat
@@ -361,6 +365,7 @@ def oAppend : Nat := 0x400
 def oDirectory : Nat := 0x10000
 def oNofollow : Nat := 0x20000
 def oCloexec : Nat := 0x80000
+def oNonblock : Nat := 0x800
 
 private def has (flags flag : Nat) : Bool := flags &&& flag != 0
 
@@ -403,21 +408,29 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
     | .console _ =>
       if has flags oDirectory then .error Errno.enotdir
       .ok kernel
+    -- It has no path.
+    | .pipe .. => .error Errno.einval
   let openFile := kernel.nextOpenFile
   let kernel := { kernel with
     openFiles := kernel.openFiles.insert openFile { inode := number, flags }
     nextOpenFile := openFile + 1 }
   .ok (kernel.addDescriptor group openFile (has flags oCloexec))
 
-/-- `read`, at the offset of the file, which moves. -/
+/-- `read`, at the offset of the file, which moves. Of a pipe, what is first in it, which goes. -/
 def read (kernel : Kernel) (group fd count : Nat) : Result (Kernel × ByteArray) := do
   let (id, file) ← openFileOf kernel group fd
   if file.flags &&& 3 == 1 then .error Errno.ebadf
   let inode ← inodeOf kernel file.inode
+  if let .pipe buffer head consumed := inode.content then
+    let bytes := buffer.extract head (head + count)
+    let next := head + bytes.size
+    let content := if next * 2 ≥ buffer.size then Content.pipe (buffer.extract next buffer.size) 0 (consumed + bytes.size)
+      else .pipe buffer next (consumed + bytes.size)
+    return ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content } }, bytes)
   let data ← match inode.content with
     | .file data | .console data => .ok data
     | .directory => .error Errno.eisdir
-    | .symlink _ | .generated _ => .error Errno.einval
+    | .symlink _ | .generated _ | .pipe .. => .error Errno.einval
   let bytes := readAt data file.offset count
   .ok ({ kernel with openFiles := kernel.openFiles.insert id { file with offset := file.offset + bytes.size } }, bytes)
 
@@ -428,7 +441,7 @@ def readFrom (kernel : Kernel) (group fd count offset : Nat) : Result ByteArray 
   let inode ← inodeOf kernel file.inode
   match inode.content with
   | .file data => .ok (readAt data offset count)
-  | .console _ => .error Errno.espipe
+  | .console _ | .pipe .. => .error Errno.espipe
   | .directory => .error Errno.eisdir
   | .symlink _ | .generated _ => .error Errno.einval
 
@@ -439,6 +452,8 @@ def write (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Result (Kerne
   let inode ← inodeOf kernel file.inode
   match inode.content with
   | .console _ => .ok ({ kernel with output := kernel.output ++ bytes }, bytes.size)
+  | .pipe buffer head consumed =>
+    .ok ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content := .pipe (buffer ++ bytes) head consumed } }, bytes.size)
   | .file data =>
     let offset := if has file.flags oAppend then data.size else file.offset
     .ok ({ kernel with
@@ -446,6 +461,51 @@ def write (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Result (Kerne
       openFiles := kernel.openFiles.insert id { file with offset := offset + bytes.size } }, bytes.size)
   | .directory => .error Errno.eisdir
   | .symlink _ | .generated _ => .error Errno.einval
+
+/-- `writeAt`, in the same bytes if nothing else holds them. -/
+def writeInto (data : ByteArray) (offset : Nat) (bytes : ByteArray) : ByteArray :=
+  let filled := if data.size < offset then data ++ Bap.zeroBytes (offset - data.size) else data
+  bytes.copySlice 0 filled offset bytes.size false
+
+/-- Why `write` can't go ahead, if it can't, for `writeKnown`. -/
+def writeError (kernel : Kernel) (group fd : Nat) : Option Nat :=
+  match kernel.openFileOf group fd with
+  | .error errno => some errno
+  | .ok (_, file) =>
+    if !writable file.flags then some Errno.ebadf
+    else
+      match kernel.inodes.get? file.inode with
+      | none => some Errno.eio
+      | some { content := .directory, .. } => some Errno.eisdir
+      | some { content := .symlink _, .. } | some { content := .generated _, .. } => some Errno.einval
+      | _ => none
+
+/-- `write` for what `writeError` has nothing against, which changes all it can in place: one that takes the kernel as it is the only holder of it makes as many small
+writes as it likes for the size of each, however much is already there. -/
+def writeKnown (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Kernel :=
+  match kernel.openFileOf group fd with
+  | .error _ => kernel
+  | .ok (id, file) =>
+    let number := file.inode
+    let isConsole := match kernel.inodes.get? number with
+      | some { content := .console _, .. } => true
+      | _ => false
+    if isConsole then { kernel with output := kernel.output ++ bytes }
+    else
+      let size := match kernel.inodes.get? number with
+        | some { content := .file data, .. } => data.size
+        | _ => 0
+      let offset := if has file.flags oAppend then size else file.offset
+      let isFile := match kernel.inodes.get? number with
+        | some { content := .file _, .. } => true
+        | _ => false
+      { kernel with
+        openFiles := if isFile then kernel.openFiles.insert id { file with offset := offset + bytes.size } else kernel.openFiles
+        inodes := kernel.inodes.alter number (·.map fun inode =>
+          match inode with
+          | { number, content := .file data, mode } => { number, content := .file (writeInto data offset bytes), mode }
+          | { number, content := .pipe buffer head consumed, mode } => { number, content := .pipe (buffer ++ bytes) head consumed, mode }
+          | other => other) }
 
 /-- `pwrite`, which leaves the offset. -/
 def writeTo (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Nat) : Result (Kernel × Nat) := do
@@ -456,7 +516,7 @@ def writeTo (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Nat
   | .file data =>
     .ok ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content := .file (writeAt data offset bytes) } },
       bytes.size)
-  | .console _ => .error Errno.espipe
+  | .console _ | .pipe .. => .error Errno.espipe
   | .directory => .error Errno.eisdir
   | .symlink _ | .generated _ => .error Errno.einval
 
@@ -467,7 +527,7 @@ def seek (kernel : Kernel) (group fd : Nat) (negative : Bool) (distance whence :
   let size ← match inode.content with
     | .file data => .ok data.size
     | .directory => .ok 0
-    | .console _ => .error Errno.espipe
+    | .console _ | .pipe .. => .error Errno.espipe
     | .symlink _ | .generated _ => .error Errno.einval
   let start ← match whence with
     | 0 => .ok 0
@@ -483,6 +543,50 @@ def close (kernel : Kernel) (group fd : Nat) : Result Kernel := do
   let process := kernel.process group
   if !process.descriptors.contains fd then .error Errno.ebadf
   .ok (kernel.setProcess group { process with descriptors := process.descriptors.erase fd })
+
+/-- `pipe2`: a pipe, and its descriptors, to read and to write. -/
+def pipe (kernel : Kernel) (group flags : Nat) : Kernel × Nat × Nat :=
+  let number := kernel.nextInode
+  let reading := kernel.nextOpenFile
+  let writing := reading + 1
+  let kept := flags &&& oNonblock
+  let kernel := { kernel with
+    inodes := kernel.inodes.insert number { number, content := .pipe ByteArray.empty 0 0, mode := 0o10600 }
+    nextInode := number + 1
+    openFiles := (kernel.openFiles.insert reading { inode := number, flags := kept }).insert writing { inode := number, flags := 1 ||| kept }
+    nextOpenFile := writing + 1 }
+  let (kernel, readFd) := kernel.addDescriptor group reading (flags &&& oCloexec != 0)
+  let (kernel, writeFd) := kernel.addDescriptor group writing (flags &&& oCloexec != 0)
+  (kernel, readFd, writeFd)
+
+/-- The inode of a descriptor, if that is a pipe. -/
+def pipeOf (kernel : Kernel) (group fd : Nat) : Option Nat :=
+  match kernel.openFileOf group fd with
+  | .ok (_, file) =>
+    match kernel.inodes.get? file.inode with
+    | some { content := .pipe .., .. } => some file.inode
+    | _ => none
+  | .error _ => none
+
+/-- Whether a descriptor of one of these processes reads a pipe, or writes it. -/
+def pipeHeld (kernel : Kernel) (number : Nat) (groups : List Nat) (toWrite : Bool) : Bool :=
+  groups.any fun group =>
+    (kernel.process group).descriptors.toList.any fun (_, descriptor) =>
+      match kernel.openFiles.get? descriptor.openFile with
+      | some file => file.inode == number && writable file.flags == toWrite
+      | none => false
+
+/-- Whether a descriptor was opened not to wait. -/
+def nonblocking (kernel : Kernel) (group fd : Nat) : Bool :=
+  match kernel.openFileOf group fd with
+  | .ok (_, file) => file.flags &&& oNonblock != 0
+  | .error _ => false
+
+/-- How much a pipe has to read. -/
+def pipeWaiting (kernel : Kernel) (number : Nat) : Nat :=
+  match kernel.inodes.get? number with
+  | some { content := .pipe buffer head _, .. } => buffer.size - head
+  | _ => 0
 
 /-- `dup`, and `fcntl` with `F_DUPFD`: the lowest free from `from_`, on the same open file. -/
 def dup (kernel : Kernel) (group fd : Nat) (from_ : Nat := 0) (closeOnExec : Bool := false) : Result (Kernel × Nat) := do
@@ -540,7 +644,7 @@ private def statOf (kernel : Kernel) (inode : Inode) : Stat :=
     | .file data => (data.size, 1)
     | .directory => (4096, 2)
     | .symlink target => (target.utf8ByteSize, 1)
-    | .console _ | .generated _ => (0, 1)
+    | .console _ | .generated _ | .pipe .. => (0, 1)
   { inode := inode.number, mode := inode.mode, size, links, time := kernel.clock }
 
 /-- `stat` and `lstat`. -/
@@ -592,6 +696,7 @@ def directoryEntries (kernel : Kernel) (group fd : Nat) : Result (Nat × Nat × 
       | some { content := .symlink _, .. } => 10
       | some { content := .file _, .. } => 8
       | some { content := .console _, .. } => 2
+      | some { content := .pipe .., .. } => 1
       | some { content := .generated _, .. } => 8
       | none => 0
     let parentNumber := (kernel.paths.get? (Path.parent path)).getD inode.number
@@ -600,6 +705,14 @@ def directoryEntries (kernel : Kernel) (group fd : Nat) : Result (Nat × Nat × 
     .ok (id, file.offset, all.drop file.offset)
   | .directory, none => .error Errno.eio
   | _, _ => .error Errno.enotdir
+
+/-- All of the entries of a directory that a descriptor has open, in that order. -/
+def directoryListing (kernel : Kernel) (group fd : Nat) : Result (Array (Nat × Nat × String)) := do
+  let (id, file) ← openFileOf kernel group fd
+  -- From the start, wherever it has been read to.
+  let from_ := { kernel with openFiles := kernel.openFiles.insert id { file with offset := 0 } }
+  let (_, _, entries) ← directoryEntries from_ group fd
+  .ok entries.toArray
 
 /-- The directory has been read this far. -/
 def advance (kernel : Kernel) (id count : Nat) : Kernel :=
@@ -709,6 +822,9 @@ def chmod (kernel : Kernel) (base path : String) (mode : Nat) : Result Kernel :=
     let inode ← inodeOf kernel number
     let kept := inode.mode - (inode.mode &&& 0o7777)
     .ok { kernel with inodes := kernel.inodes.insert number { inode with mode := kept ||| (mode &&& 0o7777) } }
+
+/-- Where a byte of an inode is, to what goes by address spaces, of which there are as many as tasks: this and the inode, and its offset. -/
+def fileSpace : Nat := 2 ^ 62
 
 /-- The bytes of `size` that a mapping of an inode holds, with zeros after the end of the file. -/
 def inodeBytes (kernel : Kernel) (number offset size : Nat) : ByteArray :=

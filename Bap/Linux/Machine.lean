@@ -46,6 +46,8 @@ structure Machine where
   heaps : IO.Ref (Std.HashMap Nat GuestHeap)
   /-- What `Machine.loadLibrary` has loaded, by address space. -/
   libraries : IO.Ref (Std.HashMap Nat (List LoadedLibrary))
+  /-- The directory that was last read, for the next piece of it: all the paths that it is of, which it is good for as long as those are the same object, its inode and what it has. -/
+  listing : IO.Ref (Option (Std.HashMap String Nat × Nat × Array (Nat × Nat × String)))
 
 /-- A model of a runtime that isn't in the kernel or the emulator: pthreads served by hooks, a debugger, a managed language.
 `id` is what a checkpoint knows it by, so that it stays the same, and `version` says what its bytes mean.
@@ -57,6 +59,11 @@ structure RuntimeModel where
   id : String
   version : Nat := 1
   attach : Machine → IO ModelState
+
+private unsafe def sameObjectImpl {α : Type} (left right : α) : Bool := ptrAddrUnsafe left == ptrAddrUnsafe right
+
+/-- Whether two things are one object, by which what was found out about it is still good. It may say no when they are only equal. -/
+@[implemented_by sameObjectImpl] private def sameObject {α : Type} (_ _ : α) : Bool := false
 
 /-- A signed word of `width` bits, as whether it is negative and how far from zero it is. -/
 private def signed (width value : Nat) : Bool × Nat :=
@@ -134,7 +141,7 @@ private def refreshMapping (emu : Emu) (kernel : Kernel) (mapping : FileMapping)
       let first := index * 4096
       let page := wanted.extract first (first + 4096)
       if page != memory.extract first (first + 4096) then
-        poke emu (mapping.start + first) page
+        poke emu (mapping.start + first) page (known := true)
 
 /-- What a process wrote to its shared mappings goes to their files, which is how any other mapping or a `read` sees it. A running
 process is the only one that can have written since it came to run, and whatever else it has mapped of a file is as the file was, so
@@ -174,6 +181,18 @@ private def refreshChanged (machine : Machine) (emu : Emu) (before : Kernel) : I
     if mapping.shared &&
         kernel.inodeBytes mapping.inode mapping.offset mapping.size != before.inodeBytes mapping.inode mapping.offset mapping.size then
       refreshMapping emu kernel mapping
+
+/-- Where a thread that waits on a pipe waits, which is no address space, of which there are as many as tasks. -/
+private def pipeSpace : Nat := 2 ^ 61
+
+/-- Everyone that waits on a pipe tries again, as something has changed, whichever it was. -/
+private def wakePipeReaders (emu : Emu) : IO Unit := do
+  let table ← emu.taskTable.get
+  let waiting := (table.futexes.filter (·.space ≥ pipeSpace)).map (·.space) |>.eraseDups
+  for space in waiting do
+    let (table, woken) := (← emu.taskTable.get).futexWake space 0 (2 ^ 32 - 1) (2 ^ 32)
+    emu.taskTable.set table
+    for thread in woken do resumeThread emu thread
 
 /-- `mmap`: of a file, here, of which a shared one writes back. What is anonymous is for `serveTaskCalls`. -/
 private def serveFileMap (machine : Machine) (group address size bits flags fd offset : Nat) : IO SyscallAction := do
@@ -228,7 +247,7 @@ private def serveAdvice (machine : Machine) (group address size advice : Nat) : 
   for mapping in mappings do
     let first := max mapping.start address
     let stop := min (mapping.start + mapping.size) (address + pages)
-    poke emu first (kernel.inodeBytes mapping.inode (mapping.offset + (first - mapping.start)) (stop - first))
+    poke emu first (kernel.inodeBytes mapping.inode (mapping.offset + (first - mapping.start)) (stop - first)) (known := mapping.shared)
   pure (.returnValue 0)
 
 /-- `mremap`, of one mapping as Linux has it: what is the same protection in one piece, and the same file throughout or none. It shrinks
@@ -436,16 +455,45 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
         pure (match kernel.statPath from_ path with
           | .error errno => errorOf errno
           | .ok _ => .returnValue 0)
+    let liveGroups : IO (List Nat) := do
+      pure (((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups)
+    -- What is to read of a pipe, if the call has to wait for it: then it stops here and runs again when something changes, with its
+    -- registers as they were, and otherwise it goes on.
+    let waitForPipe (fd : Nat) : IO (Option SyscallAction) := do
+      let current ← machine.kernel.get
+      match current.pipeOf group fd with
+      | none => pure none
+      | some number =>
+        if current.pipeWaiting number > 0 || !current.pipeHeld number (← liveGroups) true then pure none
+        else if current.nonblocking group fd then pure (some (errorOf (Errno.eagain)))
+        else
+          let (_, _, register) := syscallRegisters emu.config.syscallAbi
+          let waiter : Bap.Tasks.FutexWaiter := { thread := ← thread emu, space := pipeSpace + number, address := 0, bitset := 2 ^ 32 - 1, timed := false }
+          emu.taskTable.modify (·.futexWait waiter)
+          emu.redirect.set (some (← emu.pc.get))
+          emu.stopped.set true
+          let held ← reg emu ⟨register, .imm wide, 0, false⟩
+          match Value.asBits held with
+          | .ok bits => pure (some (.returnValue bits.2.toNat))
+          | .error _ => pure (some (errorOf Errno.eio))
     let readInto (fd address count : Nat) : IO SyscallAction := do
+      let kernel ← machine.kernel.get
       match kernel.read group fd count with
       | .error errno => pure (errorOf errno)
       | .ok (next, bytes) =>
         machine.kernel.set next
         returning emu address bytes bytes.size
     let writeOut (fd address count : Nat) : IO SyscallAction := do
+      let current ← machine.kernel.get
+      let toPipe := current.pipeOf group fd
+      if let some number := toPipe then
+        if !current.pipeHeld number (← liveGroups) false then return errorOf Errno.epipe
       match ← (read emu address count).toBaseIO with
       | .error _ => pure (errorOf Errno.efault)
-      | .ok bytes => applyNat machine (·.write group fd bytes)
+      | .ok bytes =>
+        let action ← applyNat machine (·.write group fd bytes)
+        if toPipe.isSome then wakePipeReaders emu
+        pure action
     let statAt (directory address out : Nat) (follow : Bool) : IO SyscallAction :=
       at_ directory address fun from_ path =>
         match kernel.statPath from_ path follow with
@@ -485,11 +533,26 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     let inDirectory (directory address : Nat) (action : String → IO SyscallAction) : IO SyscallAction :=
       at_ directory address fun from_ path => action (if path.startsWith "/" then path else from_ ++ "/" ++ path)
     match call with
-    | .read => readInto (arg 0) (arg 1) (arg 2)
+    | .read =>
+      match ← waitForPipe (arg 0) with
+      | some action => pure action
+      | none => readInto (arg 0) (arg 1) (arg 2)
     | .write => writeOut (arg 0) (arg 1) (arg 2)
     | .open_ => openAt here (arg 0) (arg 1) (arg 2)
     | .openat => openAt (arg 0) (arg 1) (arg 2) (arg 3)
-    | .close => apply machine (·.close group (arg 0))
+    | .close =>
+      let action ← apply machine (·.close group (arg 0))
+      wakePipeReaders emu
+      pure action
+    | .pipe | .pipe2 =>
+      let flags := if call == .pipe2 then architecture.openFlags (arg 1) else 0
+      let (next, readFd, writeFd) := (← machine.kernel.get).pipe group flags
+      machine.kernel.set next
+      -- MIPS gives them in registers, for what is called the same.
+      if mips && call == .pipe then
+        setReg emu ⟨"R3", .imm wide, 0, false⟩ (bits wide writeFd)
+        pure (.returnValue readFd)
+      else returning emu (arg 0) (cell 4 readFd ++ cell 4 writeFd)
     | .stat => statAt here (arg 0) (arg 1) true
     | .lstat => statAt here (arg 0) (arg 1) false
     | .fstat =>
@@ -552,12 +615,18 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       match ← (read emu (arg 1) (arg 2)).toBaseIO with
       | .error _ => pure (errorOf Errno.efault)
       | .ok bytes => applyNat machine (·.writeTo group (arg 0) bytes (offset64 3))
-    | .readv => vectors (arg 0) (arg 1) (arg 2) readInto
+    | .readv =>
+      match ← waitForPipe (arg 0) with
+      | some action => pure action
+      | none => vectors (arg 0) (arg 1) (arg 2) readInto
     | .writev => vectors (arg 0) (arg 1) (arg 2) writeOut
     | .access => accessAt here (arg 0)
     | .faccessat => accessAt (arg 0) (arg 1)
     | .dup => applyNat machine (·.dup group (arg 0))
-    | .dup2 => applyNat machine (·.dupTo group (arg 0) (arg 1))
+    | .dup2 =>
+      let action ← applyNat machine (·.dupTo group (arg 0) (arg 1))
+      wakePipeReaders emu
+      pure action
     | .dup3 =>
       if arg 0 == arg 1 then pure (errorOf Errno.einval)
       else applyNat machine (·.dupTo group (arg 0) (arg 1) (arg 2 &&& Kernel.oCloexec != 0))
@@ -580,7 +649,28 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       -- No descriptor is a terminal.
       pure (errorOf (match kernel.statDescriptor group (arg 0) with | .ok _ => Errno.enotty | .error errno => errno))
     | .getdents =>
-      match kernel.directoryEntries group (arg 0) with
+      -- What a directory has takes going through all paths, and a program may read it a little at a time.
+      let found : Result (Nat × Nat × List (Nat × Nat × String)) ← match kernel.openFileOf group (arg 0) with
+        | .error errno => pure (.error errno)
+        | .ok (id, file) =>
+          let cached ← machine.listing.get
+          match cached with
+          | some (paths, number, all) =>
+            if number == file.inode && sameObject paths kernel.paths then
+              -- No entry is shorter than what its header takes.
+              pure (.ok (id, file.offset, ((all.extract file.offset (file.offset + arg 2 / 24 + 1)).toList)))
+            else
+              pure (.error 0)
+          | none => pure (.error 0)
+      let found ← match found with
+        | .error 0 =>
+          match kernel.directoryListing group (arg 0), kernel.openFileOf group (arg 0) with
+          | .ok all, .ok (id, file) =>
+            machine.listing.set (some (kernel.paths, file.inode, all))
+            pure (.ok (id, file.offset, ((all.extract file.offset (file.offset + arg 2 / 24 + 1)).toList)))
+          | .error errno, _ | _, .error errno => pure (.error errno)
+        | other => pure other
+      match found with
       | .error errno => pure (errorOf errno)
       | .ok (id, first, entries) =>
         let (bytes, count) := Abi.dirents entries first (arg 2) big
@@ -709,12 +799,48 @@ private def refreshProc (machine : Machine) (emu : Emu) (call : Call) (args : Li
       let group := (← currentTask emu).group
       let cwd := ((← machine.kernel.get).process group).cwd
       let relative := !path.startsWith "/"
-      if path.startsWith "/proc" || (relative && (index == 1 || cwd.startsWith "/proc")) then
+      -- What the second argument is relative to is the first, which may be in there.
+      if path.startsWith "/proc" || (relative && ((index == 1 && !atCwd (args.getD 0 0)) || cwd.startsWith "/proc")) then
         let self ← thread emu
         let live ← liveProcesses emu
         let tasks := (← emu.taskTable.get).tasks.filter (·.status.isNone)
         machine.kernel.modify (Proc.refresh · group self live fun pid =>
           (tasks.filter (·.group == pid)).map (·.tid))
+
+/-- `write`, on its own: nothing here holds on to the kernel, so that a program that writes a little at a time doesn't have what it wrote before copied each time. -/
+private def writeDirect (machine : Machine) (emu : Emu) (group fd address count : Nat) : IO SyscallAction := do
+  let current ← machine.kernel.get
+  if let some errno := current.writeError group fd then return errorOf errno
+  let toPipe := current.pipeOf group fd
+  if let some number := toPipe then
+    let live := ((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups
+    if !current.pipeHeld number live false then return errorOf Errno.epipe
+  match ← (read emu address count).toBaseIO with
+  | .error _ => pure (errorOf Errno.efault)
+  | .ok bytes =>
+    machine.kernel.modify (·.writeKnown group fd bytes)
+    if toPipe.isSome then wakePipeReaders emu
+    pure (.returnValue bytes.size)
+
+/-- `writev`, by `writeDirect`. -/
+private def writeVectorDirect (machine : Machine) (emu : Emu) (group fd address count : Nat) : IO SyscallAction := do
+  let word := machine.architecture.bits / 8
+  let big := machine.architecture.big
+  let mut total := 0
+  for index in List.range count do
+    let entry ← read emu (address + 2 * word * index) (2 * word)
+    let field (offset : Nat) : Nat :=
+      (List.range word).foldl (fun value at_ =>
+        let byte := if big then word - 1 - at_ else at_
+        value + entry[offset + byte]!.toNat * 256 ^ at_) 0
+    match ← writeDirect machine emu group fd (field 0) (field word) with
+    | .returnValue value =>
+      if value ≥ 2 ^ 63 then
+        return if total > 0 then .returnValue total else .returnValue value
+      total := total + value
+      if value < field word then return .returnValue total
+    | other => return other
+  pure (.returnValue total)
 
 /-- What a call gives, as the guest has it. -/
 private def handOver (machine : Machine) (emu : Emu) : SyscallAction → IO SyscallAction
@@ -730,10 +856,17 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
     | none => pure .default
     | some call =>
       refreshProc machine emu call args
-      let before ← machine.kernel.get
-      let action ← kernelCall machine emu call args
-      refreshChanged machine emu before
-      handOver machine emu action
+      let group := (← currentTask emu).group
+      let shared := ((← machine.kernel.get).process group).mappings.any (·.shared)
+      -- A mapping of what is written has to hear of it. Otherwise a write is the only thing that a program does many of that gets longer with what it has done.
+      match call, shared with
+      | .write, false => handOver machine emu (← writeDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0))
+      | .writev, false => handOver machine emu (← writeVectorDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0))
+      | _, _ =>
+        let before ← machine.kernel.get
+        let action ← kernelCall machine emu call args
+        refreshChanged machine emu before
+        handOver machine emu action
 
 /-- What is left: nothing else serves it, and it isn't there. -/
 private def serveRest (machine : Machine) : IO HookId :=
@@ -1076,6 +1209,7 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
         unmap emu region.address region.data.size
       let (top, auxiliary) ← loadProgram emu architecture name data program interpreter arguments environment
       emu.redirect.set (some (← pc emu))
+      wakePipeReaders emu
       let process := kernel.process group
       machine.kernel.set (kernel.setProcess group { process with
         descriptors := process.descriptors.filter fun _ entry => !entry.closeOnExec
@@ -1226,13 +1360,13 @@ private def heapModelId : String := "bap.heap"
 private def libraryModelId : String := "bap.libraries"
 
 /-- Where a word is to `futex` that is in the file of a shared mapping, which is no address space, of which there are as many as tasks. -/
-private def sharedFutexSpace : Nat := 2 ^ 62
+private def sharedFutexSpace : Nat := Kernel.fileSpace
 
 /-- What makes an emulator a machine: its kernel behind its system calls. None of it is in a checkpoint. -/
 private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel) (watch : Option (Nat → List Nat → IO Unit))
     (handler : Option SyscallHandler) (target : Nat) (models : List RuntimeModel) : IO Machine := do
   let signals : Signals := { architecture, returnPage := stackTop architecture + 4096, table := ← IO.mkRef {} }
-  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome, signals, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {} }
+  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome, signals, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, listing := ← IO.mkRef none }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
@@ -1258,6 +1392,11 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   -- Signals are part of what it is, and it is in a checkpoint like what a model holds.
   machine.models.modify (· ++ [{ id := Signals.modelId, version := 1, state := { save := signals.save, load := signals.load } }])
   signals.serve emu
+  -- A process that is over has closed what it had open.
+  let heard ← emu.processExited.get
+  emu.processExited.set (some fun group status => do
+    if let some heard := heard then heard group status
+    wakePipeReaders emu)
   -- So is what was allocated in it, as what has an address has to go on having it.
   machine.models.modify (· ++ [{
     id := heapModelId, version := 1,
@@ -1335,6 +1474,14 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   let kernel := Proc.install kernel
   machineOf architecture emu kernel watch handler (targetDigest architecture data) models
 
+/-- How a machine's instructions run from the next one on: see `ExecutionMode`. It can be changed whenever the machine isn't in the middle of an instruction, and a machine that goes on from a checkpoint
+starts with the JIT, as it is no part of what is saved. -/
+def Machine.setExecutionMode (machine : Machine) (mode : ExecutionMode) : IO Unit :=
+  Bap.Emu.setExecutionMode machine.emu mode
+
+def Machine.executionMode (machine : Machine) : IO ExecutionMode :=
+  Bap.Emu.executionMode machine.emu
+
 /-- Runs it until nothing can run, with what it writes to the console going to `output` as it comes. -/
 def Machine.run (machine : Machine) (output : ByteArray → IO Unit) (quantum : Nat := 100000) (fuel : Nat := 1000000000) :
     IO ScheduleOutcome := do
@@ -1411,8 +1558,13 @@ def Machine.write (machine : Machine) (address : Nat) (data : ByteArray) (pid : 
           if !region.protection.writable then throw <| IO.userError s!"read-only address {position}"
           let stop := min (region.address + region.data.size) (address + data.size)
           pieces fuel stop ((position, stop) :: done)
-    for (first, stop) in ← pieces (regions.length + 1) address [] do
-      Bap.Emu.write emu first (data.extract (first - address) (stop - address))
+    let parts ← pieces (regions.length + 1) address []
+    for starts in ← emu.hostStarts.get do starts "Machine.write"
+    try
+      for (first, stop) in parts do
+        Bap.Emu.write emu first (data.extract (first - address) (stop - address))
+    finally
+      for ends in ← emu.hostEnds.get do ends none
 
 /-- The most that one block can have: a mapping is held in memory of the host from the start. -/
 def Machine.mallocLimit : Nat := 2 ^ 32
@@ -1480,6 +1632,7 @@ def Machine.realloc (machine : Machine) (address size : Nat) (pid : Option Nat :
     let moved ← machine.malloc size
     try
       machine.write moved (← Bap.Emu.read machine.emu address held)
+      for copied in ← machine.emu.memoryCopied.get do copied address moved held
     catch error =>
       machine.free moved
       throw error
@@ -1518,7 +1671,7 @@ def Machine.restore (machine : Machine) (saved : Machine.Saved) : IO Unit := do
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 
 /-- What the bytes after the magic mean. -/
-def checkpointFormat : Nat := 7
+def checkpointFormat : Nat := 8
 
 /-- What this BAP does with a guest, which goes up when the same state could go on differently. A checkpoint is refused by a BAP
 of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/

@@ -55,7 +55,7 @@ inductive Call where
   | read | write | open_ | openat | close | stat | lstat | fstat | fstatat | statx | lseek | pread | pwrite | readv | writev
   | access | faccessat | dup | dup2 | dup3 | fcntl | ioctl | getdents | getcwd | chdir | fchdir | mkdir | mkdirat | rmdir
   | unlink | unlinkat | rename | renameat | symlink | symlinkat | readlink | readlinkat | chmod | fchmodat | truncate
-  | ftruncate | umask | mmap | munmap | mprotect | madvise | mremap | brk | gettimeofday | time | clockGettime | clockGetres | uname | getrlimit | prlimit
+  | ftruncate | umask | pipe | pipe2 | mmap | munmap | mprotect | madvise | mremap | brk | gettimeofday | time | clockGettime | clockGetres | uname | getrlimit | prlimit
   | getrandom | sigaltstack | schedGetaffinity | statfs | fstatfs | sysinfo | execve
   /-- `statfs` and `fstatfs` with the size of the structure in the middle, as 32-bit systems and PowerPC have them. -/
   | statfs64 | fstatfs64
@@ -69,7 +69,8 @@ inductive Call where
 
 /-- The numbers of x86-64. -/
 def x86_64Calls : List (Nat × Call) :=
-  [(11, .munmap), (10, .mprotect), (28, .madvise), (26, .succeeds),
+  [(22, .pipe), (293, .pipe2),
+   (11, .munmap), (10, .mprotect), (28, .madvise), (26, .succeeds),
    (59, .execve), (137, .statfs), (138, .fstatfs), (99, .sysinfo),
    (0, .read), (1, .write), (2, .open_), (257, .openat), (3, .close), (4, .stat), (6, .lstat), (5, .fstat), (262, .fstatat),
    (332, .statx), (8, .lseek), (17, .pread), (18, .pwrite), (19, .readv), (20, .writev), (21, .access), (269, .faccessat),
@@ -84,7 +85,8 @@ def x86_64Calls : List (Nat × Call) :=
 
 /-- The numbers of the architectures that came after the old calls went: `asm-generic/unistd.h`. -/
 def genericCalls : List (Nat × Call) :=
-  [(215, .munmap), (226, .mprotect), (233, .madvise), (227, .succeeds),
+  [(59, .pipe2),
+   (215, .munmap), (226, .mprotect), (233, .madvise), (227, .succeeds),
    (221, .execve), (43, .statfs), (44, .fstatfs), (179, .sysinfo),
    (63, .read), (64, .write), (56, .openat), (57, .close), (80, .fstat), (79, .fstatat), (291, .statx), (62, .lseek),
    (67, .pread), (68, .pwrite), (65, .readv), (66, .writev), (48, .faccessat), (439, .faccessat), (23, .dup), (24, .dup3),
@@ -97,7 +99,8 @@ def genericCalls : List (Nat × Call) :=
 
 /-- The numbers of `asm-generic` on 32 bits, where whatever has a time or an offset in a word has gone. -/
 def generic32Calls : List (Nat × Call) :=
-  [(215, .munmap), (226, .mprotect), (233, .madvise), (227, .succeeds),
+  [(59, .pipe2),
+   (215, .munmap), (226, .mprotect), (233, .madvise), (227, .succeeds),
    (221, .execve), (43, .statfs64), (44, .fstatfs64), (179, .sysinfo),
    (63, .read), (64, .write), (56, .openat), (57, .close), (291, .statx), (62, .llseek),
    (67, .pread), (68, .pwrite), (65, .readv), (66, .writev), (48, .faccessat), (439, .faccessat), (23, .dup), (24, .dup3),
@@ -110,7 +113,8 @@ def generic32Calls : List (Nat × Call) :=
 
 /-- The numbers of the o32 ABI of MIPS, without their 4000. -/
 def o32Calls : List (Nat × Call) :=
-  [(91, .munmap), (125, .mprotect), (218, .madvise), (144, .succeeds),
+  [(42, .pipe), (328, .pipe2),
+   (91, .munmap), (125, .mprotect), (218, .madvise), (144, .succeeds),
    (11, .execve), (213, .stat), (214, .lstat), (215, .fstat), (293, .fstatat), (255, .statfs64), (256, .fstatfs64), (116, .sysinfo),
    (3, .read), (4, .write), (5, .open_), (288, .openat), (6, .close), (366, .statx), (19, .lseek), (140, .llseek),
    (200, .pread), (201, .pwrite), (145, .readv), (146, .writev), (33, .access), (300, .faccessat), (439, .faccessat),
@@ -126,7 +130,8 @@ def o32Calls : List (Nat × Call) :=
 
 /-- The numbers of the n64 ABI of MIPS, without their 5000. -/
 def n64Calls : List (Nat × Call) :=
-  [(11, .munmap), (10, .mprotect), (27, .madvise), (25, .succeeds),
+  [(21, .pipe), (287, .pipe2),
+   (11, .munmap), (10, .mprotect), (27, .madvise), (25, .succeeds),
    (57, .execve), (134, .statfs), (135, .fstatfs), (97, .sysinfo),
    (0, .read), (1, .write), (2, .open_), (247, .openat), (3, .close), (4, .stat), (6, .lstat), (5, .fstat), (252, .fstatat),
    (326, .statx), (8, .lseek), (16, .pread), (17, .pwrite), (18, .readv), (19, .writev), (20, .access), (259, .faccessat),
@@ -141,7 +146,8 @@ def n64Calls : List (Nat × Call) :=
 
 /-- The numbers of 32-bit ARM, with EABI, and two of its own: `set_tls` and `cacheflush`. -/
 def armCalls : List (Nat × Call) :=
-  [(91, .munmap), (125, .mprotect), (220, .madvise), (144, .succeeds),
+  [(42, .pipe), (359, .pipe2),
+   (91, .munmap), (125, .mprotect), (220, .madvise), (144, .succeeds),
    (11, .execve), (195, .stat), (196, .lstat), (197, .fstat), (327, .fstatat), (266, .statfs64), (267, .fstatfs64), (116, .sysinfo),
    (3, .read), (4, .write), (5, .open_), (322, .openat), (6, .close), (397, .statx), (19, .lseek), (140, .llseek),
    (180, .pread), (181, .pwrite), (145, .readv), (146, .writev), (33, .access), (334, .faccessat), (439, .faccessat), (41, .dup),
@@ -157,7 +163,8 @@ def armCalls : List (Nat × Call) :=
 
 /-- The numbers of i686. -/
 def i686Calls : List (Nat × Call) :=
-  [(91, .munmap), (125, .mprotect), (219, .madvise), (144, .succeeds),
+  [(42, .pipe), (331, .pipe2),
+   (91, .munmap), (125, .mprotect), (219, .madvise), (144, .succeeds),
    (11, .execve), (195, .stat), (196, .lstat), (197, .fstat), (300, .fstatat), (268, .statfs64), (269, .fstatfs64), (116, .sysinfo),
    (3, .read), (4, .write), (5, .open_), (295, .openat), (6, .close), (383, .statx), (19, .lseek), (140, .llseek),
    (180, .pread), (181, .pwrite), (145, .readv), (146, .writev), (33, .access), (307, .faccessat), (439, .faccessat), (41, .dup),
@@ -173,7 +180,8 @@ def i686Calls : List (Nat × Call) :=
 
 /-- The numbers of PowerPC, where those of each width that the other doesn't have are left to it not asking for them. -/
 def powerpcCalls : List (Nat × Call) :=
-  [(91, .munmap), (125, .mprotect), (205, .madvise), (144, .succeeds),
+  [(42, .pipe), (317, .pipe2),
+   (91, .munmap), (125, .mprotect), (205, .madvise), (144, .succeeds),
    (11, .execve), (116, .sysinfo),
    (3, .read), (4, .write), (5, .open_), (286, .openat), (6, .close), (106, .stat), (107, .lstat), (108, .fstat), (291, .fstatat),
    (383, .statx), (19, .lseek), (140, .llseek), (179, .pread), (180, .pwrite), (145, .readv), (146, .writev), (33, .access),

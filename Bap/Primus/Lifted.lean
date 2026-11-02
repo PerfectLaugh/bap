@@ -211,6 +211,8 @@ structure Engine where
   chainFallthrough : Bool
   /-- The blocks that the last run entered after its first. -/
   chained : IO.Ref Nat
+  /-- Whether nothing is compiled or run compiled, for now. -/
+  interpretOnly : IO.Ref Bool
 
 structure Result where
   state : Bil.State
@@ -250,6 +252,7 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimi
     wrapFaults
     chainFallthrough
     chained := ← IO.mkRef 0
+    interpretOnly := ← IO.mkRef false
   }
 
 def stats (engine : Engine) : IO Statistics := engine.statistics.get
@@ -1813,6 +1816,12 @@ def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bi
   engine.nativeCooldown.modify fun cooldown => if cooldown = 0 then 0 else cooldown - 1
   engine.chained.set 0
   let code ← fetch pc
+  if ← engine.interpretOnly.get then
+    -- What was compiled of it has what it was compiled from.
+    let entry ← prepare engine lift pc code false
+    return ← match entry.plan with
+      | .interpreted program => runInterpreted engine entry.next pc program state observer
+      | .native _ _ fallback => runInterpreted engine entry.firstNext pc fallback state observer
   let entry ← prepareGraph engine fetch lift pc code budget
   match entry.plan with
   | .interpreted program => runInterpreted engine entry.next pc program state observer

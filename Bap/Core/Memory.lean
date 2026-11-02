@@ -150,13 +150,24 @@ def writeRegion (memory : Memory addressWidth) (address : Nat) (data : ByteArray
 
 /-- The bytes of the range are zero again. It looks at the pages that are there, and adds none. -/
 def clearRange (memory : Memory addressWidth) (address size : Nat) : Memory addressWidth :=
-  memory.pages.foldl (init := memory) fun current index page =>
+  let clearPage (current : Memory addressWidth) (index : Nat) (page : ByteArray) : Memory addressWidth :=
     let base := index * pageSize
     let first := max base address
     let stop := min (base + page.size) (address + size)
     if first < stop then
       current.writeRegion first (zeroBytes (stop - first))
     else current
+  if size == 0 then memory
+  else
+    -- Those of the range, or all that there are if there are fewer of them: a small range of much memory is what unmapping mostly is.
+    let lowest := address / pageSize
+    let many := (address + size - 1) / pageSize + 1 - lowest
+    if many ≤ memory.pages.size then
+      (List.range many).foldl (init := memory) fun current offset =>
+        match memory.pages.get? (lowest + offset) with
+        | some page => clearPage current (lowest + offset) page
+        | none => current
+    else memory.pages.foldl (init := memory) fun current index page => clearPage current index page
 
 def writeSortedCells (memory : Memory addressWidth) (cells : List (BitVec addressWidth × UInt8)) : Memory addressWidth :=
   let groups := cells.foldl (init := ([] : List (Nat × Array UInt8))) fun groups cell =>

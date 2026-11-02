@@ -129,6 +129,9 @@ def Machine.call (machine : Machine) (address : Nat) (arguments : List Nat := []
     if !(architecture matches .i686) then
       for (argument, name) in arguments.zip convention.arguments do
         set name argument
+        -- What the host gives it, which is as much a source as what a system call gives.
+        for starts in ← emu.hostStarts.get do starts "Machine.call"
+        for ends in ← emu.hostEnds.get do ends (some name)
     if let some link := convention.link then set link returnTo
     if let some self := convention.self then set self address
     if architecture matches .arm then

@@ -1488,7 +1488,7 @@ def testLinuxTaint (triple : String) : IO Unit := do
   assertTrue s!"Linux {triple} the status comes from /proc" ((labels status).any (· == "read /proc/self/status"))
   assertTrue s!"Linux {triple} the status goes by a branch" (status.path.any fun step => step.node.kind matches .branch _)
   assertTrue s!"Linux {triple} the status is a constant that a branch chose" (status.path.any fun step =>
-    step.node.kind matches .constant && step.node.values.getD step.byte none == some 0x31)
+    step.node.kind matches .constant && step.node.valueAt step.byte == some 0x31)
   assertTrue s!"Linux {triple} the status has no file in it" (!(labels status).any (·.startsWith "pread"))
   let at_ (explanation : Bap.Analysis.DynamicTaint.Tracker.Explanation) : List (String × Option Nat × Bool) :=
     explanation.sources.filterMap fun (node, byte, edge) => match node.kind with
@@ -1512,6 +1512,251 @@ def testLinuxTaint (triple : String) : IO Unit := do
     let there ← tracker.explainMemory (record + 7) (some node.space)
     assertEqual s!"Linux {triple} the child has what it did" [("pread /data", some 9, true)] (at_ there)
   assertEqual s!"Linux {triple} taint follows all that this does" [] (← tracker.gapsOf)
+
+private def historyKernel (triple : String) (code : Char) : IO Bap.Linux.Kernel := do
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-history"
+  let bytes := "AB".toUTF8 ++ String.toUTF8 (String.singleton code) ++ "DEFGHIJKLMNOP".toUTF8
+  pure ((Bap.Linux.Kernel.empty.addFile "/test" program).addFile "/data" bytes)
+
+private def hexOfLine (line : String) : Nat :=
+  (line.drop 1).toString.foldl (fun value digit => value * 16 + (if digit.isDigit then digit.toNat - 48 else digit.toNat - 87)) 0
+
+private def sourcesAt (explanation : Bap.Analysis.DynamicTaint.Tracker.Explanation) : List (String × Option Nat) :=
+  explanation.sources.filterMap fun (node, byte, _) => match node.kind with
+    | .source label offset => some (label, offset.map (· + byte))
+    | _ => none
+
+/-- What a run did and what went where, with a dispatcher that comes to a deferred routine by a byte of a file: how it first got there, who called whom in which
+thread, a byte through a pipe from a child and through a file, why it went there, and where it would have gone otherwise. -/
+def testLinuxHistory (triple : String) : IO Unit := do
+  let run (code : Char) : IO (Bap.Linux.Machine × Bap.Analysis.Journal.Journal × Bap.Analysis.DynamicTaint.Tracker × String × Nat) := do
+    let written ← IO.mkRef ByteArray.empty
+    let machine ← Bap.Linux.start (← historyKernel triple code) "/test" ["/test"]
+    let journal ← machine.journal
+    let tracker ← machine.track
+    let main ← Bap.Emu.thread machine.emu
+    let outcome ← machine.run fun data => written.modify (· ++ data)
+    assertEqual s!"Linux {triple} history goes as it should" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+    pure (machine, journal, tracker, String.fromUTF8! (← written.get), main)
+  let (machine, journal, tracker, text, main) ← run 'C'
+  let lines := text.splitOn "\n"
+  assertEqual s!"Linux {triple} a pipe, a file and what ends are as on Linux" ["AB00n11", "ae", ""] (lines.drop 3)
+  let deferred := hexOfLine (lines.getD 0 "") / 2 * 2
+  let leaf := hexOfLine (lines.getD 1 "") / 2 * 2
+  let record := hexOfLine (lines.getD 2 "")
+  let some entry ← journal.firstEntry deferred
+    | throw <| IO.userError s!"Linux {triple}: the deferred routine never ran"
+  assertTrue s!"Linux {triple} the deferred routine was called" entry.call.isSome
+  assertEqual s!"Linux {triple} it is on top of the stack it was called with" (some deferred) (entry.stack.head?.map (·.callee))
+  assertTrue s!"Linux {triple} what called it is under it" (entry.stack.length ≥ 3)
+  assertTrue s!"Linux {triple} what ran before it is there" (!entry.before.isEmpty)
+  -- A direct call on 64-bit PowerPC goes past what sets up the TOC, which is two instructions.
+  let calls := (← journal.callsOf leaf) ++ (← journal.callsOf (leaf + 8))
+  assertTrue s!"Linux {triple} a call is by the thread that made it" ((calls.any (·.1 == main)) && (calls.any (·.1 != main)))
+  let stack ← journal.callStack (some main)
+  assertTrue s!"Linux {triple} what came back isn't on the stack" (!stack.any fun frame => frame.callee == deferred || frame.callee == leaf)
+  let events ← journal.events.get
+  assertTrue s!"Linux {triple} a return says where from and to" (events.any fun event => match event with
+    | .ret _ thread _ _ frames => thread == main && frames == 1
+    | _ => false)
+  let space ← Bap.Emu.spaceOf machine.emu main
+  let piped ← tracker.explainMemory record (some space)
+  assertEqual s!"Linux {triple} a byte from a child has where its parent got it" [("pread data", some 0)] (sourcesAt piped)
+  assertTrue s!"Linux {triple} and went by the pipe" (piped.path.any fun step => match step.node.kind with
+    | .carried label => label.startsWith "write pipe"
+    | _ => false)
+  assertTrue s!"Linux {triple} from the child" (piped.path.any fun step => step.node.thread != main)
+  let filed ← tracker.explainMemory (record + 1) (some space)
+  assertEqual s!"Linux {triple} a byte from a file has where it was before" [("pread data", some 1)] (sourcesAt filed)
+  assertTrue s!"Linux {triple} and went by the file" (filed.path.any fun step => step.node.kind == .carried "write out")
+  let shared ← tracker.explainMemory (record + 2) (some space)
+  assertEqual s!"Linux {triple} a byte from a child by shared memory has where it got it" [("pread data", some 3)] (sourcesAt shared)
+  let some why ← Bap.Linux.whyEntered journal tracker deferred
+    | throw <| IO.userError s!"Linux {triple}: no reason for the deferred routine"
+  assertTrue s!"Linux {triple} a branch led to the deferred routine" why.branch.isSome
+  assertTrue s!"Linux {triple} and that came from the byte that decides it"
+    ((why.explanation.map sourcesAt).getD [] |>.contains ("pread data", some 2))
+  let (other, otherJournal, _, otherText, _) ← run 'D'
+  assertEqual s!"Linux {triple} the other run has no deferred routine" ["AB00n10", "ae", ""] (((otherText.splitOn "\n").drop 3))
+  assertTrue s!"Linux {triple} and the other run never came to it" (← otherJournal.firstEntry deferred).isNone
+  let difference ← Bap.Linux.compareRuns machine other journal otherJournal
+  assertTrue s!"Linux {triple} all of the runs were compared" difference.run.complete
+  assertEqual s!"Linux {triple} the first file that differs is what was given" (some "/data") difference.file
+  match difference.run.branch, difference.run.service with
+  | some branch, some service =>
+    assertTrue s!"Linux {triple} two runs part at a branch" (branch.branch.isSome && branch.left != branch.right)
+    assertTrue s!"Linux {triple} after they were given something else" (service.seq ≤ branch.seq)
+    assertTrue s!"Linux {triple} which was what was read" (match service.left with
+      | some (.service _ _ _ _ label _ _ _) => label == "pread data"
+      | _ => false)
+  | _, _ => throw <| IO.userError s!"Linux {triple}: two runs don't differ"
+  let again ← journal.toRecord
+  let itself := Bap.Analysis.Journal.Journal.compare again again
+  assertEqual s!"Linux {triple} a run doesn't differ from itself" (true, true) (itself.branch.isNone, itself.service.isNone)
+
+/-- All of that from pieces, saved and started again each time, is what it is in one go. -/
+def testLinuxHistoryCheckpoints (triple : String) (step : Nat) : IO Unit := do
+  let kernel ← historyKernel triple 'C'
+  let trackers : IO.Ref (Option Bap.Analysis.DynamicTaint.Tracker) ← IO.mkRef none
+  let journals : IO.Ref (Option Bap.Analysis.Journal.Journal) ← IO.mkRef none
+  let models := [Bap.Linux.taintModel trackers, Bap.Linux.journalModel journals]
+  let written ← IO.mkRef ByteArray.empty
+  let rec go : Nat → Bap.Linux.Machine → IO (Bap.Linux.Machine × Bap.Tasks.ScheduleOutcome)
+    | 0, _ => throw <| IO.userError "more pieces than a run should have"
+    | fuel + 1, machine => do
+      let outcome ← machine.run (fuel := step) fun data => written.modify (· ++ data)
+      if outcome == .outOfFuel then
+        let data ← machine.checkpoint
+        let next ← Bap.Linux.Machine.ofCheckpoint data (models := models)
+        assertTrue s!"Linux {triple} history saves again as it was" (data == (← next.checkpoint))
+        go fuel next
+      else pure (machine, outcome)
+  let first ← Bap.Linux.start kernel "/test" ["/test"] (models := models)
+  let main ← Bap.Emu.thread first.emu
+  let (machine, outcome) ← go 2000 first
+  assertEqual s!"Linux {triple} history ends as it should, from pieces" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  let whole ← Bap.Linux.start kernel "/test" ["/test"]
+  let wholeJournal ← whole.journal
+  let wholeTracker ← whole.track
+  let wholeWritten ← IO.mkRef ByteArray.empty
+  let _ ← whole.run fun data => wholeWritten.modify (· ++ data)
+  assertEqual s!"Linux {triple} history says the same, from pieces" (String.fromUTF8! (← wholeWritten.get)) (String.fromUTF8! (← written.get))
+  let some journal ← journals.get | throw <| IO.userError "no journal"
+  let some tracker ← trackers.get | throw <| IO.userError "no tracker"
+  let left ← journal.toRecord
+  let right ← wholeJournal.toRecord
+  let parts := Bap.Analysis.Journal.Journal.compare left right
+  assertEqual s!"Linux {triple} pieces run the same instructions" none (parts.branch.map (·.index))
+  assertEqual s!"Linux {triple} pieces are given the same" none (parts.service.map (·.index))
+  assertEqual s!"Linux {triple} pieces keep all of what ran" right.history.size left.history.size
+  assertEqual s!"Linux {triple} pieces keep the calls and returns" right.events.size left.events.size
+  let lines := (String.fromUTF8! (← written.get)).splitOn "\n"
+  let record := hexOfLine (lines.getD 2 "")
+  let space ← Bap.Emu.spaceOf machine.emu main
+  assertEqual s!"Linux {triple} a byte goes back the same way, from pieces"
+    (← wholeTracker.explainMemory record (some space)).text (← tracker.explainMemory record (some space)).text
+
+/-- All that a machine is, in an order that doesn't depend on the way it got there: a file has registers in the order that they were last written, which isn't the same for compiled code. -/
+private def stateOf (machine : Bap.Linux.Machine) : IO (List (Nat × ByteArray × Bool × Bool × Bool) × List (Nat × Nat × Bool × List (String × Nat)) × ByteArray) := do
+  -- It brings what regions hold up to date.
+  let _ ← machine.checkpoint
+  let regions := (← machine.emu.regions.get).map fun region =>
+    (region.address, region.data, region.protection.readable, region.protection.writable, region.protection.executable)
+  let registers (env : Bap.Bil.Env) : List (String × Nat) :=
+    let named := env.filterMap fun (var, value) => match value with
+      | .bits bits => if var.name.startsWith "_primus_" || var.name.startsWith "intrinsic:" then none else some (var.name, bits.toNat)
+      | _ => none
+    (named.toArray.qsort fun left right => left.1 < right.1).toList
+  let threads := (← machine.emu.threadsRef.get).map fun context => (context.id, context.pc, context.stopped, registers context.state.env)
+  let sorted := (threads.toArray.qsort fun left right => left.1 < right.1).toList
+  let byAddress := (regions.toArray.qsort fun left right => left.1 < right.1).toList
+  pure (byAddress, sorted, Bap.Linux.Image.encode ByteArray.empty (← machine.kernel.get).image)
+
+/-- The same whichever way it runs: a program says the same and ends with the same memory, registers and kernel in the interpreter, and when it changes from one to the other as it goes, and the
+interpreter compiles nothing. -/
+def testLinuxExecutionModes (triple : String) (name : String) : IO Unit := do
+  let start : IO Bap.Linux.Machine := do
+    let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-{name}")
+    Bap.Linux.start kernel "/test" ["/test", "arg1"]
+  let finish (machine : Bap.Linux.Machine) (step : Nat) (between : Nat → IO Unit) : IO (Bap.Tasks.ScheduleOutcome × String × (List (Nat × ByteArray × Bool × Bool × Bool) × List (Nat × Nat × Bool × List (String × Nat)) × ByteArray)) := do
+    let written ← IO.mkRef ByteArray.empty
+    let rec go : Nat → Nat → IO Bap.Tasks.ScheduleOutcome
+      | 0, _ => pure .outOfFuel
+      | fuel + 1, round => do
+        between round
+        let outcome ← machine.run (fuel := step) fun data => written.modify (· ++ data)
+        if outcome == .outOfFuel then go fuel (round + 1) else pure outcome
+    let outcome ← go 100000 0
+    pure (outcome, String.fromUTF8! (← written.get), ← stateOf machine)
+  let jit ← start
+  assertEqual s!"Linux {triple} {name} starts with the JIT" Bap.Emu.ExecutionMode.jit (← jit.executionMode)
+  let (jitOutcome, jitText, jitState) ← finish jit 1000000000 fun _ => pure ()
+  let interpreted ← start
+  interpreted.setExecutionMode .interpret
+  assertEqual s!"Linux {triple} {name} says how it runs" Bap.Emu.ExecutionMode.interpret (← interpreted.executionMode)
+  let (outcome, text, state) ← finish interpreted 1000000000 fun _ => pure ()
+  assertEqual s!"Linux {triple} {name} ends the same in the interpreter" jitOutcome outcome
+  assertEqual s!"Linux {triple} {name} says the same in the interpreter" jitText text
+  assertTrue s!"Linux {triple} {name} is in the same state after the interpreter" (jitState == state)
+  let stats ← Bap.Primus.Lifted.stats interpreted.emu.engine
+  assertEqual s!"Linux {triple} {name} compiles nothing in the interpreter" (0, 0) (stats.nativeRuns, stats.nativeCompilations)
+  let changing ← start
+  let (outcome, text, state) ← finish changing 701 fun round =>
+    changing.setExecutionMode (if round % 2 == 0 then .interpret else .jit)
+  assertEqual s!"Linux {triple} {name} ends the same when it changes" jitOutcome outcome
+  assertEqual s!"Linux {triple} {name} says the same when it changes" jitText text
+  assertTrue s!"Linux {triple} {name} is in the same state when it changes" (jitState == state)
+
+/-- What takes time in proportion to what it does and not to what it has done before: when the work is four times as much it takes about four times as long, and sixteen if it goes through all that
+went before. Each is run alone, as what a test measures isn't to be what the others are doing. -/
+def scaling : IO Unit := do
+  let program ← IO.FS.readBinFile "testsuite/bin/aarch64-linux-musl-libc-scale"
+  let time (mode : String) (arguments : List String) (prepare : Bap.Linux.Machine → IO Unit := fun _ => pure ()) : IO Nat := do
+    let kernel := Bap.Linux.Kernel.empty.addFile "/test" program
+    let machine ← Bap.Linux.start kernel "/test" (["/test", mode] ++ arguments)
+    prepare machine
+    let started ← IO.monoMsNow
+    let outcome ← machine.run (fuel := 2000000000) fun _ => pure ()
+    assertEqual s!"scaling {mode} ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+    pure ((← IO.monoMsNow) - started)
+  let grows (name mode : String) (small : Nat) (prepare : Bap.Linux.Machine → IO Unit := fun _ => pure ()) : IO Unit := do
+    let first ← time mode [toString small] prepare
+    let second ← time mode [toString (small * 4)] prepare
+    assertTrue s!"{name} takes about 4 times as long for 4 times as much, not 16: {first} ms and {second} ms" (second ≤ 9 * max first 50)
+  grows "mappings" "m" 1000
+  grows "growing the break" "b" 1000
+  grows "making files" "f" 1000
+  grows "reading a directory" "l" 2000
+  grows "calls under a journal" "d" 5000 fun machine => do let _ ← machine.journal
+  grows "calls under taint" "d" 5000 fun machine => do let _ ← machine.track
+  grows "mappings under taint" "m" 300 fun machine => do let _ ← machine.track
+  let holds (name mode : String) (small : Nat) : IO Unit := do
+    let first ← time mode ["2000", toString small]
+    let second ← time mode ["2000", toString (small * 16)]
+    assertTrue s!"{name} takes no longer for what is already there: {first} ms and {second} ms" (second ≤ 3 * max first 100 + 400)
+  holds "writing to a file" "g" 1000000
+  holds "reading a pipe" "q" 1000000
+
+/-- What is done in place is what it was instead of, and a mapping goes where it always went, wherever it starts looking. -/
+def testScalingEquivalents : IO Unit := do
+  let random ← IO.mkRef (0x2545F4914F6CDD1D : UInt64)
+  let next (bound : Nat) : IO Nat := do
+    let value ← random.get
+    let value := value ^^^ (value <<< 13)
+    let value := value ^^^ (value >>> 7)
+    let value := value ^^^ (value <<< 17)
+    random.set value
+    pure (value.toNat % bound)
+  let mut data := ByteArray.empty
+  for _ in List.range 2000 do
+    let offset ← next 300
+    let size ← next 40
+    let bytes := ByteArray.mk ((Array.range size).map fun index => (index + offset).toUInt8)
+    let expected := Bap.Linux.Kernel.writeAt data offset bytes
+    data := Bap.Linux.Kernel.writeInto data offset bytes
+    assertEqual s!"a write in place at {offset} of {size} is a write" expected.toList data.toList
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile "testsuite/bin/aarch64-linux-musl-libc-scale")) "/test" ["/test", "x", "0"]
+  let emu := machine.emu
+  let mut held : List Nat := []
+  for _ in List.range 400 do
+    let size := ((← next 6) + 1) * 4096
+    let regions ← emu.regions.get
+    let width ← Bap.Emu.wordWidth emu
+    let base := if width == 32 then 0x70000000 else 0x7f0000000000
+    let taken := ((regions.map fun region => (region.address, region.data.size)).toArray.qsort fun left right => left.1 > right.1).toList
+    let expected := Bap.Tasks.gapBelow size base (taken.filter (·.1 < base))
+    assertEqual "a mapping goes where it did" expected (← Bap.Emu.freeAddress emu size)
+    if (← next 3) == 0 && !held.isEmpty then
+      let which := (← next held.length)
+      let address := held.getD which 0
+      Bap.Emu.unmap emu address 4096
+      held := held.eraseIdx which
+    else
+      let address ← Bap.Emu.placeMapping emu 0 false (Bap.zeroBytes size) 3
+      assertEqual "it is put there" expected address
+      held := address :: held
+    let tree ← Bap.Emu.regionTree emu
+    assertEqual "what is indexed is what is mapped" (((← emu.regions.get).filter (·.data.size != 0)).map (·.address) |>.toArray.qsort (· < ·)).toList tree.keys
 
 /-- What JNI gives a guest is a source, in the register it comes back in and in memory, and so is what someone says is one. -/
 def testTaintSources : IO Unit := do

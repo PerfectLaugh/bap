@@ -55,6 +55,7 @@ def Kernel.image (kernel : Kernel) : Image where
       | .symlink target => (2, target.toUTF8)
       | .console input => (3, input)
       | .generated name => (4, name.toUTF8)
+      | .pipe buffer head consumed => (5, Wire.putBytes (Wire.putNat ByteArray.empty consumed) (buffer.extract head buffer.size))
     { number, mode := inode.mode, kind, data }
   nextInode := kernel.nextInode
   openFiles := (sorted kernel.openFiles.toList).map fun (id, file) => (id, file.inode, file.offset, file.flags)
@@ -83,6 +84,10 @@ def Image.kernel (image : Image) : Except String Kernel := do
         match String.fromUTF8? entry.data with
         | some name => pure (Content.generated name)
         | none => .error "a Linux checkpoint with a generator that isn't text"
+      | 5 =>
+        let (consumed, at_) ← Wire.getNat entry.data 0
+        let (buffer, _) ← Wire.getBytes entry.data at_
+        pure (Content.pipe buffer 0 consumed)
       | kind => .error s!"a Linux checkpoint with an inode of kind {kind}"
     pure (inodes.insert entry.number { number := entry.number, content, mode := entry.mode })
   pure {

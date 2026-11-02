@@ -157,6 +157,40 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxTaint "powerpc",
     Bap.Tests.Emu.testLinuxTaint "powerpc64",
     Bap.Tests.Emu.testLinuxTaint "powerpc64le",
+    Bap.Tests.Emu.testLinuxHistory "x86_64",
+    Bap.Tests.Emu.testLinuxHistory "aarch64",
+    Bap.Tests.Emu.testLinuxHistory "riscv64",
+    Bap.Tests.Emu.testLinuxHistory "riscv32",
+    Bap.Tests.Emu.testLinuxHistory "arm",
+    Bap.Tests.Emu.testLinuxHistory "thumb",
+    Bap.Tests.Emu.testLinuxHistory "i686",
+    Bap.Tests.Emu.testLinuxHistory "mips",
+    Bap.Tests.Emu.testLinuxHistory "mipsel",
+    Bap.Tests.Emu.testLinuxHistory "mips64",
+    Bap.Tests.Emu.testLinuxHistory "mips64el",
+    Bap.Tests.Emu.testLinuxHistory "powerpc",
+    Bap.Tests.Emu.testLinuxHistory "powerpc64",
+    Bap.Tests.Emu.testLinuxHistory "powerpc64le",
+    Bap.Tests.Emu.testLinuxHistoryCheckpoints "aarch64" 499,
+    Bap.Tests.Emu.testLinuxHistoryCheckpoints "mips" 499,
+    Bap.Tests.Emu.testLinuxExecutionModes "x86_64" "libc-signals",
+    Bap.Tests.Emu.testLinuxExecutionModes "aarch64" "libc-signals",
+    Bap.Tests.Emu.testLinuxExecutionModes "riscv64" "libc-signals",
+    Bap.Tests.Emu.testLinuxExecutionModes "riscv32" "libc-signals",
+    Bap.Tests.Emu.testLinuxExecutionModes "arm" "libc-signals",
+    Bap.Tests.Emu.testLinuxExecutionModes "thumb" "libc-signals",
+    Bap.Tests.Emu.testLinuxExecutionModes "i686" "libc-signals",
+    Bap.Tests.Emu.testLinuxExecutionModes "mips" "libc-signals",
+    Bap.Tests.Emu.testLinuxExecutionModes "mipsel" "libc-signals",
+    Bap.Tests.Emu.testLinuxExecutionModes "mips64" "libc-signals",
+    Bap.Tests.Emu.testLinuxExecutionModes "mips64el" "libc-signals",
+    Bap.Tests.Emu.testLinuxExecutionModes "powerpc" "libc-signals",
+    Bap.Tests.Emu.testLinuxExecutionModes "powerpc64" "libc-signals",
+    Bap.Tests.Emu.testLinuxExecutionModes "powerpc64le" "libc-signals",
+    Bap.Tests.Emu.testLinuxExecutionModes "aarch64" "libc-files",
+    Bap.Tests.Emu.testLinuxExecutionModes "mips" "libc-files",
+    Bap.Tests.Emu.testLinuxExecutionModes "x86_64" "libc-files",
+    Bap.Tests.Emu.testScalingEquivalents,
     Bap.Tests.Emu.testTaintSources,
     Bap.Tests.Emu.testLinuxSignals "x86_64",
     Bap.Tests.Emu.testLinuxSignals "aarch64",
@@ -220,6 +254,7 @@ def main : IO Unit := do
   ]
   Bap.Tests.Optimize.scaling
   Bap.Tests.Lifted.invalidationScales
+  Bap.Tests.Emu.scaling
   -- More tests than the pool has threads would wait for each other, with processors to spare.
   let tasks ← tests.mapM fun test => liftM <| IO.asTask (prio := .dedicated) do
     try test catch error =>
