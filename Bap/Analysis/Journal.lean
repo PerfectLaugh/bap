@@ -377,7 +377,9 @@ structure Difference where
   deriving DecidableEq, Repr
 
 private def threadOrder (record : Record) : Array ThreadId :=
-  record.history.foldl (fun order entry => if order.contains entry.thread then order else order.push entry.thread) #[]
+  (record.history.foldl (fun (order, seen) entry =>
+    if seen.contains entry.thread then (order, seen) else (order.push entry.thread, seen.insert entry.thread))
+    ((#[] : Array ThreadId), ({} : Std.HashSet ThreadId))).1
 
 /-- What a service is to a comparison: what it is and what came of it. Its arguments may only be addresses. -/
 def Event.serviceKey : Event → Option (String × Option Nat × Nat)

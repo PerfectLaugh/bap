@@ -132,37 +132,40 @@ private def edgeRank : Edge → Nat
 or on a machine that went on from its checkpoint. -/
 def explain (tracker : Tracker) (machine : Machine) (checkpoint : Checkpoint) : IO Report := do
   let space ← Bap.Emu.spaceOf machine.emu checkpoint.thread
-  let gaps := (← tracker.gapsOf).map (·.1)
-  let mut bytes : List (Nat × Nat × Tracker.Explanation) := []
-  let mut unresolved : List Unresolved := []
-  let mut sources : List (String × Option Nat × Edge) := []
+  let gaps : Std.HashSet Nat := (← tracker.gapsOf).foldl (fun gaps entry => gaps.insert entry.1) {}
+  let mut bytes : Array (Nat × Nat × Tracker.Explanation) := #[]
+  let mut unresolved : Array Unresolved := #[]
+  -- Each source once, where it was first found, with the strongest edge that any byte reaches it by.
+  let mut sources : Array (String × Option Nat × Edge) := #[]
+  let mut where_ : Std.HashMap (String × Option Nat) Nat := {}
   for ((criterion, value), index) in checkpoint.values.zipIdx do
     for byte in List.range value.size do
       let explanation ← match criterion with
         | .register name _ => tracker.explainRegister name byte (some checkpoint.thread)
         | .memory address _ => tracker.explainMemory (address + byte) (some space)
         | .location _ => pure { origin := .untouched }
-      bytes := bytes ++ [(index, byte, explanation)]
+      bytes := bytes.push (index, byte, explanation)
       match explanation.origin with
-      | .untouched => unresolved := unresolved ++ [{ criterion := index, byte, reason := .untouched explanation.restoredFrom }]
+      | .untouched => unresolved := unresolved.push { criterion := index, byte, reason := .untouched explanation.restoredFrom }
       | .clean _ => pure ()
       | .tainted .. =>
-        if explanation.truncated then unresolved := unresolved ++ [{ criterion := index, byte, reason := .truncated }]
+        if explanation.truncated then unresolved := unresolved.push { criterion := index, byte, reason := .truncated }
         let missed := (explanation.path.map (·.node.pc)).filter gaps.contains
-        unless missed.isEmpty do unresolved := unresolved ++ [{ criterion := index, byte, reason := .gaps missed.eraseDups }]
+        unless missed.isEmpty do unresolved := unresolved.push { criterion := index, byte, reason := .gaps missed.eraseDups }
         let found := explanation.sources.filterMap fun (node, at_, edge) => match node.kind with
           | .source label offset => some (label, offset.map (· + at_), edge)
           | _ => none
         if !found.isEmpty && found.all (fun (_, _, edge) => edgeRank edge ≥ 2) then
           let strongest := found.foldl (fun best (_, _, edge) => if edgeRank edge < edgeRank best then edge else best) .address
-          unresolved := unresolved ++ [{ criterion := index, byte, reason := .likely strongest }]
+          unresolved := unresolved.push { criterion := index, byte, reason := .likely strongest }
         for (label, offset, edge) in found do
-          match sources.find? fun (l, o, _) => l == label && o == offset with
-          | some (_, _, known) =>
-            if edgeRank edge < edgeRank known then
-              sources := sources.map fun entry => if entry.1 == label && entry.2.1 == offset then (label, offset, edge) else entry
-          | none => sources := sources ++ [(label, offset, edge)]
-  pure { bytes, sources, unresolved }
+          match where_[(label, offset)]? with
+          | some at_ =>
+            if edgeRank edge < edgeRank sources[at_]!.2.2 then sources := sources.set! at_ (label, offset, edge)
+          | none =>
+            where_ := where_.insert (label, offset) sources.size
+            sources := sources.push (label, offset, edge)
+  pure { bytes := bytes.toList, sources := sources.toList, unresolved := unresolved.toList }
 
 /-- The criteria of a transition, which is the state that the dispatcher read at the visit after it: where a slice back from a round that
 went the wrong way starts. -/

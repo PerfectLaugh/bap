@@ -75,7 +75,10 @@ def runsOf : List Nat → List (Nat × Nat)
 
 /-- The addresses that changed, by what they were before and are after, as runs of what they are after. -/
 def changes (before after : Nat → Option UInt8) (addresses : List Nat) : List (Nat × ByteArray) :=
-  let changed := ((addresses.toArray.qsort (· < ·)).toList.eraseDups).filter fun address => before address != after address
+  -- In order, each once, which after sorting is each that isn't the one before it.
+  let sorted := (addresses.toArray.qsort (· < ·)).toList
+  let unique := (sorted.zip (none :: sorted.map some)).filterMap fun (address, previous) => if previous == some address then none else some address
+  let changed := unique.filter fun address => before address != after address
   (runsOf changed).map fun (start, count) => (start, ByteArray.mk ((List.range count).map fun offset => (after (start + offset)).getD 0).toArray)
 
 private def byteAt (machine : Machine) (address : Nat) : IO (Option UInt8) := do
@@ -109,11 +112,13 @@ private def observe (recorder : Recorder) (profile : Cff.Profile) (act : IO Nat)
     | .ok bits => pure bits.2.toNat
     | .error _ => pure 0
   let addresses := (← recorder.written.get).toList.filter fun address => !(address < stack && address + 8 * 1024 * 1024 ≥ stack)
-  let after ← addresses.mapM fun address => do pure (address, ← byteAt machine address)
+  let after ← addresses.foldlM (init := ({} : Std.HashMap Nat (Option UInt8))) fun table address => do
+    pure (table.insert address (← byteAt machine address))
   let services := (← recorder.services.get).toList
   machine.restore saved (label := "Contract")
-  let before ← addresses.mapM fun address => do pure (address, ← byteAt machine address)
-  let look (table : List (Nat × Option UInt8)) (address : Nat) : Option UInt8 := (table.lookup address).join
+  let before ← addresses.foldlM (init := ({} : Std.HashMap Nat (Option UInt8))) fun table address => do
+    pure (table.insert address (← byteAt machine address))
+  let look (table : Std.HashMap Nat (Option UInt8)) (address : Nat) : Option UInt8 := (table.get? address).join
   pure { state, next := some next, writes := changes (look before) (look after) addresses, services, instructions }
 
 /-- One round of the handler of the state that the machine is in, which has to be at the dispatcher: what it did by the time its thread came

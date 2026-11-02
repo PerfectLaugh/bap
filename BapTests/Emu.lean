@@ -1963,6 +1963,24 @@ def testStepBackHost : IO Unit := do
   assertTrue "where the breakpoint is" ((← machine.position) ≤ place)
   let _ := before
 
+/-- A record of a flattened machine of `rounds` rounds, of five states that come round in order, each round running the dispatcher, three
+instructions that all do and five of its own, and the third state asking the kernel once. -/
+def cffSynthetic (rounds : Nat) : Array Bap.Analysis.Cff.Visit × Bap.Analysis.Journal.Journal.Record := Id.run do
+  let mut visits : Array Bap.Analysis.Cff.Visit := #[]
+  let mut history : Array Bap.Analysis.Journal.Executed := #[]
+  let mut events : Array Bap.Analysis.Journal.Event := #[]
+  let mut seq := 0
+  for round in List.range rounds do
+    let state := round % 5 + 1
+    visits := visits.push { thread := 1, group := 1, state }
+    let pcs := [0x1000, 0x1004, 0x1008, 0x100c] ++ (List.range 5).map fun offset => 0x2000 + state * 0x100 + offset * 4
+    for pc in pcs do
+      history := history.push { seq, thread := 1, group := 1, index := seq, pc }
+      if state == 3 && pc == 0x2300 then
+        events := events.push (.service seq 1 events.size pc "getpid" [] (some 1) 0)
+      seq := seq + 1
+  pure (visits, { history, droppedHistory := 0, events, droppedEvents := 0 })
+
 /-- What takes time in proportion to what it does and not to what it has done before: when the work is four times as much it takes about four times as long, and sixteen if it goes through all that
 went before. Each is run alone, as what a test measures isn't to be what the others are doing. -/
 def scaling : IO Unit := do
@@ -1992,6 +2010,26 @@ def scaling : IO Unit := do
     assertTrue s!"{name} takes no longer for what is already there: {first} ms and {second} ms" (second ≤ 3 * max first 100 + 400)
   holds "writing to a file" "g" 1000000
   holds "reading a pipe" "q" 1000000
+  -- What analyses a record does: it goes through the rounds, instructions and events of it a few times.
+  let profile : Bap.Analysis.Cff.Profile := { dispatcher := 0x1000, state := .memory 0 4 }
+  let recovering (rounds : Nat) : IO Nat := do
+    let (visits, record) := cffSynthetic rounds
+    let started ← IO.monoMsNow
+    let dispatcher := Bap.Analysis.Cff.recover profile visits (some record)
+    assertEqual s!"recovering {rounds} rounds has them all" rounds dispatcher.transitions.length
+    pure ((← IO.monoMsNow) - started)
+  let first ← recovering 8000
+  let second ← recovering 32000
+  assertTrue s!"recovering a flattened machine takes about 4 times as long for 4 times as much: {first} ms and {second} ms" (second ≤ 9 * max first 50)
+  let grouping (count : Nat) : IO Nat := do
+    let addresses := (List.range count).map (· * 3 % count)
+    let started ← IO.monoMsNow
+    let runs := Bap.Analysis.Contract.changes (fun _ => some 0) (fun address => some (address % 7).toUInt8) addresses
+    assertTrue s!"grouping {count} addresses finds what changed" (!runs.isEmpty)
+    pure ((← IO.monoMsNow) - started)
+  let first ← grouping 64000
+  let second ← grouping 256000
+  assertTrue s!"grouping what a contract changed takes about 4 times as long for 4 times as much: {first} ms and {second} ms" (second ≤ 9 * max first 50)
 
 /-- What is done in place is what it was instead of, and a mapping goes where it always went, wherever it starts looking. -/
 def testScalingEquivalents : IO Unit := do

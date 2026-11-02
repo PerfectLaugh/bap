@@ -1194,6 +1194,32 @@ private partial def walkFrom (tracker : Tracker) (parents : Std.HashMap Tag (Tag
       | some (parent, edgeThere) => walkFrom tracker parents root parent edgeThere out
       | none => pure out
 
+/-- The sources and branches of what a search reached, each source with the weakest edge on the way to it. -/
+private def reached (tracker : Tracker) (root : Tag) (parents : Std.HashMap Tag (Tag × Edge)) (order : Array Tag) :
+    IO (List (Node × Nat × Edge) × List Node) := do
+  let mut weakest : Std.HashMap Tag Nat := ({} : Std.HashMap Tag Nat).insert root 0
+  let mut sources : List (Node × Nat × Edge) := []
+  let mut branches : List Node := []
+  for tag in order do
+    let rank := match parents[tag]? with
+      | some (parent, edge) => max (weakest.getD parent 0) (edgeRank edge)
+      | none => 0
+    weakest := weakest.insert tag rank
+    if let some node := ← node? tracker tag.node then
+      match node.kind with
+      | .source .. =>
+        let edge := match rank with | 0 => Edge.data | 1 => .condition | 2 => .guard | _ => .address
+        sources := (node, tag.byte, edge) :: sources
+      | .branch _ => branches := node :: branches
+      | _ => pure ()
+  pure (sources.reverse, branches)
+
+/-- Every source that a byte depends on, with the weakest edge on the way, which is what `explainTag` says of them without the way to any. -/
+def sourcesOf (tracker : Tracker) (root : Tag) : IO (List (Node × Nat × Edge)) := do
+  if !root.isNode then return []
+  let (parents, order, _) ← search tracker root 3
+  pure (← reached tracker root parents order).1
+
 /-- Where the byte with this tag came from. -/
 def explainTag (tracker : Tracker) (root : Tag) : IO Explanation := do
   if !root.isNode then
@@ -1219,27 +1245,10 @@ def explainTag (tracker : Tracker) (root : Tag) : IO Explanation := do
       match allOrder.back? with
       | some tag => walkFrom tracker allParents root tag .data #[]
       | none => pure #[]
-  -- The weakest edge on the way to each source.
-  let weakest ← IO.mkRef ({} : Std.HashMap Tag Nat)
-  weakest.modify (·.insert root 0)
-  let mut sources : List (Node × Nat × Edge) := []
-  let mut branches : List Node := []
-  for tag in allOrder do
-    let known ← weakest.get
-    let rank := match allParents[tag]? with
-      | some (parent, edge) => max (known.getD parent 0) (edgeRank edge)
-      | none => 0
-    weakest.modify (·.insert tag rank)
-    if let some node := ← node? tracker tag.node then
-      match node.kind with
-      | .source .. =>
-        let edge := match rank with | 0 => Edge.data | 1 => .condition | 2 => .guard | _ => .address
-        sources := (node, tag.byte, edge) :: sources
-      | .branch _ => branches := node :: branches
-      | _ => pure ()
+  let (sources, branches) ← reached tracker root allParents allOrder
   pure {
     origin := .tainted root.node root.byte
-    path := path.toList, sources := sources.reverse, branches := (branches.toArray.qsort fun left right => left.id < right.id).toList
+    path := path.toList, sources, branches := (branches.toArray.qsort fun left right => left.id < right.id).toList
     truncated := truncated }
 
 /-- Where a byte of memory came from, in an address space. -/

@@ -149,7 +149,7 @@ def Cycle.holds (states : Array Nat) (cycle : Cycle) : Bool :=
 
 /-- What the search finds, before what it found is checked. -/
 private def cyclesFound (thread : ThreadId) (states : Array Nat) (longest : Nat) : List Cycle := Id.run do
-  let mut found : List Cycle := []
+  let mut found : Array Cycle := #[]
   let mut at_ := 0
   let mut fuel := states.size + 1
   while at_ < states.size && fuel > 0 do
@@ -167,10 +167,10 @@ private def cyclesFound (thread : ThreadId) (states : Array Nat) (longest : Nat)
         | none => best := some (period, repeats)
     match best with
     | some (period, repeats) =>
-      found := found ++ [{ thread, states := (states.extract at_ (at_ + period)).toList, repeats, first := at_ }]
+      found := found.push { thread, states := (states.extract at_ (at_ + period)).toList, repeats, first := at_ }
       at_ := at_ + period * repeats
     | none => at_ := at_ + 1
-  pure found
+  pure found.toList
 
 /-- Runs of states that repeat, by the shortest period that covers the most: only what `Cycle.holds` of, which is proved. -/
 def cyclesOf (thread : ThreadId) (states : Array Nat) (longest : Nat := 32) : List Cycle :=
@@ -204,45 +204,89 @@ private partial def branches : Bil.Program → Bool
   | .jmp (.ite ..) :: _ => true
   | _ :: rest => branches rest
 
-private def counted (values : List Nat) : List Nat :=
-  values.foldl (fun out value => if out.contains value then out else out ++ [value]) []
+/-- What has been seen, in the order that it was first: a list for that and a set for whether it has. -/
+private structure Seen (α : Type) [BEq α] [Hashable α] where
+  order : Array α := #[]
+  known : Std.HashSet α := {}
+
+private def Seen.add {α : Type} [BEq α] [Hashable α] (seen : Seen α) (value : α) : Seen α :=
+  if seen.known.contains value then seen else { order := seen.order.push value, known := seen.known.insert value }
+
+/-- The first of what is sorted by `key` whose key isn't below `bound`. -/
+private def firstFrom {α : Type} [Inhabited α] (items : Array α) (key : α → Nat) (bound : Nat) : Nat := Id.run do
+  let mut low := 0
+  let mut high := items.size
+  while low < high do
+    let middle := (low + high) / 2
+    if key items[middle]! < bound then low := middle + 1 else high := middle
+  pure low
+
+/-- What is said of all the rounds of a state, as they come. -/
+private structure Gathered where
+  entries : Seen Nat := {}
+  exits : Seen Nat := {}
+  runs : Nat := 0
+  sizes : Array Nat := #[]
+  services : Seen String := {}
+  calls : Seen Nat := {}
+  nexts : Seen Nat := {}
 
 /-- What the visits say of the dispatcher, and with a journal of the same run, what each round was. A journal whose oldest has gone
-can't say which round is which, and then only the states are there. -/
+can't say which round is which, and then only the states are there. It goes through each visit, instruction and event a few times, each
+time looking it up in a table, so that it takes as long as there are of them. -/
 def recover (profile : Profile) (visits : Array Visit) (record : Option Journal.Journal.Record := none)
     (programOf : Nat → Option Bil.Program := fun _ => none) : Dispatcher := Id.run do
-  let threads := visits.foldl (fun order visit => if order.contains visit.thread then order else order.push visit.thread) #[]
+  -- The visits of each thread, and the threads in the order that they first came.
+  let mut threads : Seen ThreadId := {}
+  let mut byThread : Std.HashMap ThreadId (Array Visit) := {}
+  for visit in visits do
+    threads := threads.add visit.thread
+    -- In place: what is in a table and is taken out to be changed would otherwise be copied each time.
+    byThread := byThread.alter visit.thread fun known => some ((known.getD #[]).push visit)
+  let ofThread (thread : ThreadId) : Array Visit := byThread.getD thread #[]
+  -- What each thread ran, and the calls and services of each, in the order that they were, which is that of when.
+  let mut histories : Std.HashMap ThreadId (Array Journal.Executed) := {}
+  let mut happened : Std.HashMap ThreadId (Array Journal.Event) := {}
+  if let some record := record then
+    for entry in record.history do
+      if byThread.contains entry.thread then
+        histories := histories.alter entry.thread fun known => some ((known.getD #[]).push entry)
+    for event in record.events do
+      match event with
+      | .service .. | .call .. => happened := happened.alter event.thread fun known => some ((known.getD #[]).push event)
+      | _ => pure ()
   -- Each thread's rounds, by where in its own instructions each visit is.
-  let ofThread (thread : ThreadId) : Array Visit := visits.filter (·.thread == thread)
-  let segmentsOf (thread : ThreadId) : Option (Array (Array Journal.Executed)) := do
-    let record ← record
-    let mine := record.history.filter (·.thread == thread)
-    let starts := (List.range mine.size).filter fun position => mine[position]!.pc == profile.dispatcher
-    if starts.length != (ofThread thread).size then none
-    else
-      let bounds := starts.toArray.push mine.size
-      some ((List.range starts.length).toArray.map fun k => mine.extract bounds[k]! bounds[k + 1]!)
-  let segments := threads.map fun thread => (thread, segmentsOf thread)
-  let complete := record.isSome && (record.map (·.droppedHistory == 0)).getD false && segments.all (·.2.isSome)
-  -- What every round that was followed by another runs.
-  let rounds := segments.toList.flatMap fun (thread, found) =>
-    match found with
-    | some found => (List.range found.size).filterMap fun k => if k + 1 < (ofThread thread).size then found[k]? else none
-    | none => []
+  let mut segments : Std.HashMap ThreadId (Array (Array Journal.Executed)) := {}
+  let mut aligned := true
+  if record.isSome then
+    for thread in threads.order do
+      let mine := histories.getD thread #[]
+      let mut starts : Array Nat := #[]
+      for position in List.range mine.size do
+        if mine[position]!.pc == profile.dispatcher then starts := starts.push position
+      if starts.size != (ofThread thread).size then aligned := false
+      else
+        let bounds := starts.push mine.size
+        segments := segments.insert thread ((List.range starts.size).toArray.map fun k => mine.extract bounds[k]! bounds[k + 1]!)
+  let complete := record.isSome && (record.map (·.droppedHistory == 0)).getD false && aligned
   -- Which states' rounds run each instruction: what only one does is its handler's, but for the last compare of a chain that finds it, which
-  -- only it gets to, and the branch after that.
-  let stateOfRound (thread : ThreadId) (k : Nat) : Nat := ((ofThread thread)[k]?.map (·.state)).getD 0
-  let owners : Std.HashMap Nat (List Nat) := segments.foldl (init := {}) fun table (thread, found) =>
-    match found with
-    | some found => (List.range found.size).foldl (init := table) fun table k =>
-        if k + 1 < (ofThread thread).size then
-          found[k]!.foldl (init := table) fun table entry =>
-            let states := table.getD entry.pc []
-            let state := stateOfRound thread k
-            table.insert entry.pc (if states.contains state then states else state :: states)
-        else table
-    | none => table
-  let common : List Nat := counted (rounds.flatMap fun round => round.toList.map (·.pc) |>.filter fun pc => (owners.getD pc []).length ≥ 2)
+  -- only it gets to, and the branch after that. Only rounds that another follows count, as the last may not have finished.
+  let mut owners : Std.HashMap Nat (List Nat) := {}
+  for thread in threads.order do
+    let mine := ofThread thread
+    for (round, k) in (segments.getD thread #[]).zipIdx do
+      if k + 1 < mine.size then
+        let state := mine[k]!.state
+        for entry in round do
+          let states := owners.getD entry.pc []
+          unless states.contains state do owners := owners.insert entry.pc (state :: states)
+  let mut dispatch : Seen Nat := {}
+  for thread in threads.order do
+    let mine := ofThread thread
+    for (round, k) in (segments.getD thread #[]).zipIdx do
+      if k + 1 < mine.size then
+        for entry in round do
+          if (owners.getD entry.pc []).length ≥ 2 then dispatch := dispatch.add entry.pc
   let entryOf (state : Nat) (round : Array Journal.Executed) : Option Nat := Id.run do
     let mut previousCompared := false
     for entry in round.toList.drop 1 do
@@ -257,69 +301,77 @@ def recover (profile : Profile) (visits : Array Visit) (record : Option Journal.
       else
         return some pc
     pure none
-  let mut transitions : List Transition := []
-  for thread in threads do
+  -- The rounds, with what happened in each: what a thread's events are in order of when, which a round is a stretch of.
+  let mut transitions : Array Transition := #[]
+  let mut graph : Seen (Nat × Nat) := {}
+  let mut edges : Std.HashMap (Nat × Nat) Nat := {}
+  let mut states : Seen Nat := {}
+  let mut gathered : Std.HashMap Nat Gathered := {}
+  for thread in threads.order do
     let mine := ofThread thread
-    let found := (segments.find? (·.1 == thread)).bind (·.2)
+    let rounds := segments.get? thread
+    let events := happened.getD thread #[]
     for k in List.range mine.size do
       let visit := mine[k]!
       let next := (mine[k + 1]?).map (·.state)
-      let round := found.bind (·[k]?)
-      let services := match record, round with
-        | some record, some round =>
-          match round[0]?, round.back? with
-          | some first, some last => record.events.toList.filterMap fun event => match event with
-              | .service seq t _ _ label _ _ _ => if t == thread && first.seq ≤ seq && seq ≤ last.seq then some label else none
-              | _ => none
-          | _, _ => []
-        | _, _ => []
-      let calls := match record, round with
-        | some record, some round =>
-          match round[0]?, round.back? with
-          | some first, some last => record.events.toList.filterMap fun event => match event with
-              | .call seq t frame => if t == thread && first.seq ≤ seq && seq ≤ last.seq then some frame.callee else none
-              | _ => none
-          | _, _ => []
-        | _, _ => []
-      transitions := transitions ++ [{
+      let round := rounds.bind (·[k]?)
+      let span := round.bind fun round => match round[0]?, round.back? with
+        | some first, some last => some (first.seq, last.seq + 1)
+        | _, _ => none
+      let (services, calls) := match span with
+        | some (first, stop) => Id.run do
+          let mut services : Array String := #[]
+          let mut calls : Array Nat := #[]
+          let mut at_ := firstFrom events Journal.Event.seq first
+          while at_ < events.size && events[at_]!.seq < stop do
+            match events[at_]! with
+            | .service _ _ _ _ label _ _ _ => services := services.push label
+            | .call _ _ frame => calls := calls.push frame.callee
+            | _ => pure ()
+            at_ := at_ + 1
+          pure (services.toList, calls.toList)
+        | none => ([], [])
+      let transition : Transition := {
         thread, group := visit.group, index := k, state := visit.state, next
         handler := round.bind (entryOf visit.state)
         exit := if next.isSome then round.bind (·.back?.map (·.pc)) else none
-        instructions := (if next.isSome then round.map (·.size) else none)
-        span := round.bind fun round => match round[0]?, round.back? with
-          | some first, some last => some (first.seq, last.seq + 1)
-          | _, _ => none
-        services, calls }]
-  let pairs := transitions.filterMap fun transition => transition.next.map (transition.state, ·)
-  let graph := (counted (pairs.map fun (from_, to) => from_ * 2 ^ 64 + to)).map fun key =>
-    (key / 2 ^ 64, key % 2 ^ 64, pairs.countP (· == (key / 2 ^ 64, key % 2 ^ 64)))
-  let states := counted (transitions.map (·.state))
-  let handlers := states.map fun state =>
-    let mine := transitions.filter (·.state == state)
-    let sizes := mine.filterMap (·.instructions)
+        instructions := if next.isSome then round.map (·.size) else none
+        span, services, calls }
+      transitions := transitions.push transition
+      states := states.add visit.state
+      if let some to := next then
+        graph := graph.add (visit.state, to)
+        edges := edges.insert (visit.state, to) (edges.getD (visit.state, to) 0 + 1)
+      gathered := gathered.alter visit.state fun known => some (
+        let known := known.getD {}
+        { entries := (transition.handler.map known.entries.add).getD known.entries
+          exits := (transition.exit.map known.exits.add).getD known.exits
+          runs := known.runs + 1
+          sizes := (transition.instructions.map known.sizes.push).getD known.sizes
+          services := services.foldl Seen.add known.services
+          calls := calls.foldl Seen.add known.calls
+          nexts := (next.map known.nexts.add).getD known.nexts })
+  let handlers := states.order.toList.map fun state =>
+    let known := gathered.getD state {}
     { state, name := profile.names.lookup state
-      entries := counted (mine.filterMap (·.handler))
-      exits := counted (mine.filterMap (·.exit))
-      runs := mine.length
-      fewest := sizes.foldl min (sizes.headD 0), most := sizes.foldl max 0
-      services := counted' (mine.flatMap (·.services))
-      calls := counted (mine.flatMap (·.calls))
-      nexts := counted (mine.filterMap (·.next)) : Handler }
-  let cycles := threads.toList.flatMap fun thread => cyclesOf thread ((ofThread thread).map (·.state))
-  pure { entry := profile.dispatcher, state := profile.state, transitions, graph, handlers, cycles, dispatch := common, complete }
-where
-  counted' (labels : List String) : List String :=
-    labels.foldl (fun out label => if out.contains label then out else out ++ [label]) []
+      entries := known.entries.order.toList, exits := known.exits.order.toList, runs := known.runs
+      fewest := known.sizes.foldl min (known.sizes[0]?.getD 0), most := known.sizes.foldl max 0
+      services := known.services.order.toList, calls := known.calls.order.toList, nexts := known.nexts.order.toList : Handler }
+  let cycles := threads.order.toList.flatMap fun thread => cyclesOf thread ((ofThread thread).map (·.state))
+  pure { entry := profile.dispatcher, state := profile.state, transitions := transitions.toList
+         graph := graph.order.toList.map fun (from_, to) => (from_, to, edges.getD (from_, to) 0)
+         handlers, cycles, dispatch := dispatch.order.toList, complete }
 
 /-- `recover`, with the code of the instructions from the emulator as it is now, to tell the compares of the dispatcher from a handler. -/
 def recoverIn (emu : Emu) (profile : Profile) (visits : Array Visit) (record : Option Journal.Journal.Record := none) : IO Dispatcher := do
-  let pcs : List Nat := match record with
-    | some record => (record.history.toList.map Journal.Executed.pc).eraseDups
-    | none => []
   let mut programs : Std.HashMap Nat Bil.Program := {}
-  for pc in pcs do
-    if let some program := ← Bap.Emu.programAt emu pc then
-      programs := programs.insert pc program
+  let mut looked : Std.HashSet Nat := {}
+  if let some record := record then
+    for entry in record.history do
+      unless looked.contains entry.pc do
+        looked := looked.insert entry.pc
+        if let some program := ← Bap.Emu.programAt emu entry.pc then
+          programs := programs.insert entry.pc program
   pure (recover profile visits record (programs.get? ·))
 
 /-- The binary search of what is sorted by its key, for the last that is below a bound. -/
@@ -335,27 +387,30 @@ private def lastBelow (items : Array (Nat × Node)) (bound : Nat) : Option Nat :
 code, on what depends on something marked, and the sources of that. A round whose handler decided on nothing marked has none. -/
 def withPredicates (dispatcher : Dispatcher) (tracker : Tracker) (journal : Journal.Journal) : IO Dispatcher := do
   let ahead := (← tracker.insn.get) - (← journal.seq.get)
-  let nodes ← tracker.nodes.get
-  -- The branches of each thread, in the order that they were.
-  let branches := nodes.filter fun node => node.kind matches .branch _ && !dispatcher.dispatch.contains node.pc
-  let mut transitions : List Transition := []
+  let dispatch : Std.HashSet Nat := dispatcher.dispatch.foldl (·.insert ·) {}
+  -- The branches of each thread outside the dispatcher, in the order that they were, gathered once.
+  let mut byThread : Std.HashMap ThreadId (Array (Nat × Node)) := {}
+  for node in ← tracker.nodes.get do
+    if node.kind matches .branch _ && !dispatch.contains node.pc then
+      byThread := byThread.alter node.thread fun known => some ((known.getD #[]).push (node.insn, node))
+  let mut transitions : Array Transition := #[]
   for transition in dispatcher.transitions do
     let predicate ← match transition.span with
       | some (first, last) =>
-        let mine := (branches.filter (·.thread == transition.thread)).map fun node => (node.insn, node)
+        let mine := byThread.getD transition.thread #[]
         match lastBelow mine (last + ahead) with
         | some position =>
           let (insn, node) := mine[position]!
           if insn < first + ahead then pure none
           else
-            let explanation ← tracker.explainTag (nodeTag node.id 0)
-            pure (some { pc := node.pc, sources := explanation.sources.filterMap fun (source, byte, _) => match source.kind with
+            let sources ← tracker.sourcesOf (nodeTag node.id 0)
+            pure (some { pc := node.pc, sources := sources.filterMap fun (source, byte, _) => match source.kind with
               | .source label offset => some (label, offset.map (· + byte))
               | _ => none : Predicate })
         | none => pure none
       | none => pure none
-    transitions := transitions ++ [{ transition with predicate }]
-  pure { dispatcher with transitions }
+    transitions := transitions.push { transition with predicate }
+  pure { dispatcher with transitions := transitions.toList }
 
 private def hex (value : Nat) : String := "0x" ++ String.ofList (Nat.toDigits 16 value)
 
