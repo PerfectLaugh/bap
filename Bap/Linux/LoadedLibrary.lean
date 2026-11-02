@@ -38,6 +38,11 @@ structure LoadedLibrary where
   /-- Its thread-local storage, if it has any, and what is in it by name, at an offset in its block. -/
   tls : Option LibraryTls := none
   tlsSymbols : List (String × Nat) := []
+  /-- What its file was, by `targetDigest`, to know it by whatever path it has. -/
+  digest : Nat := 0
+  /-- Its initializers, in the order that they run, and whether they all have. -/
+  initializers : List Nat := []
+  initialized : Bool := false
   deriving DecidableEq, Repr
 
 namespace LoadedLibrary
@@ -60,7 +65,9 @@ private def putLibrary (out : ByteArray) (library : LoadedLibrary) : ByteArray :
   let out := putList putNat out library.finalizers
   let out := putOption (fun out tls =>
     putNat (putNat (putNat (putNat (putNat (putNat out tls.module) tls.offset) tls.image) tls.fileSize) tls.memorySize) tls.alignment) out library.tls
-  putList putSymbol out library.tlsSymbols
+  let out := putList putSymbol out library.tlsSymbols
+  let out := putList putNat (putNat out library.digest) library.initializers
+  putFlag out library.initialized
 
 private def getLibrary : Decoder LoadedLibrary := fun data at_ => do
   let (path, at_) ← getText data at_
@@ -81,7 +88,10 @@ private def getLibrary : Decoder LoadedLibrary := fun data at_ => do
     let (alignment, at_) ← getNat data at_
     .ok ({ module, offset, image, fileSize, memorySize, alignment : LibraryTls }, at_)) data at_
   let (tlsSymbols, at_) ← getList getSymbol data at_
-  .ok ({ path, name, base, start, span, symbols, needs, references, finalizers, tls, tlsSymbols }, at_)
+  let (digest, at_) ← getNat data at_
+  let (initializers, at_) ← getList getNat data at_
+  let (initialized, at_) ← getFlag data at_
+  .ok ({ path, name, base, start, span, symbols, needs, references, finalizers, tls, tlsSymbols, digest, initializers, initialized }, at_)
 
 private def putEntry (out : ByteArray) (entry : Nat × List LoadedLibrary) : ByteArray :=
   putList putLibrary (putNat out entry.1) entry.2

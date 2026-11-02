@@ -70,6 +70,8 @@ structure Machine where
   libraries : IO.Ref (Std.HashMap Nat (List LoadedLibrary))
   /-- What it goes back with, if it is kept. -/
   history : IO.Ref (Option Machine.History)
+  /-- What hears that the machine was put back to what it was, by `restore`, `stepBack` or a checkpoint, with what put it back. -/
+  restored : IO.Ref (List (String → IO Unit))
   /-- The directory that was last read, for the next piece of it: all the paths that it is of, which it is good for as long as those are the same object, its inode and what it has. -/
   listing : IO.Ref (Option (Std.HashMap String Nat × Nat × Array (Nat × Nat × String)))
 
@@ -1390,7 +1392,7 @@ private def sharedFutexSpace : Nat := Kernel.fileSpace
 private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel) (watch : Option (Nat → List Nat → IO Unit))
     (handler : Option SyscallHandler) (target : Nat) (models : List RuntimeModel) : IO Machine := do
   let signals : Signals := { architecture, returnPage := stackTop architecture + 4096, table := ← IO.mkRef {} }
-  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome, signals, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, listing := ← IO.mkRef none }
+  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome, signals, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
@@ -1557,10 +1559,11 @@ def Machine.save (machine : Machine) : IO Machine.Saved := do
 
 /-- The machine is what it was saved as. If it keeps a history, that is the history it had then: where it was, and what it could step back to from there, and not what it ran
 after. One that was saved before it kept any has nothing to step back to, as nothing says where it was. -/
-def Machine.restore (machine : Machine) (saved : Machine.Saved) : IO Unit := do
+def Machine.restore (machine : Machine) (saved : Machine.Saved) (label : String := "Machine.restore") : IO Unit := do
   machine.restoreKept saved.toKept
   if let some current := ← machine.history.get then
     machine.history.set (some (saved.history.getD { every := current.every, limit := current.limit }))
+  for heard in ← machine.restored.get do heard label
 
 /-- How a machine's instructions run from the next one on: see `ExecutionMode`. It can be changed whenever the machine isn't in the middle of an instruction, and a machine that goes on from a checkpoint
 starts with the JIT, as it is no part of what is saved. -/
@@ -1633,6 +1636,7 @@ def Machine.stepBack (machine : Machine) (count : Nat := 1) : IO Unit := do
       machine.emu.breakpointsMuted.set muted
   -- What came after is what may not happen again.
   machine.history.set (some { history with position := target, saved := history.saved.extract 0 (index + 1) })
+  for heard in ← machine.restored.get do heard s!"Machine.stepBack {count}"
 
 /-! Memory of a guest for who runs it. -/
 
@@ -1693,7 +1697,7 @@ def Machine.write (machine : Machine) (address : Nat) (data : ByteArray) (pid : 
           let stop := min (region.address + region.data.size) (address + data.size)
           pieces fuel stop ((position, stop) :: done)
     let parts ← pieces (regions.length + 1) address []
-    for starts in ← emu.hostStarts.get do starts "Machine.write"
+    for starts in ← emu.hostStarts.get do starts s!"Machine.write {address} {data.size}"
     try
       for (first, stop) in parts do
         Bap.Emu.write emu first (data.extract (first - address) (stop - address))
@@ -1776,7 +1780,7 @@ def Machine.realloc (machine : Machine) (address size : Nat) (pid : Option Nat :
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 
 /-- What the bytes after the magic mean. -/
-def checkpointFormat : Nat := 8
+def checkpointFormat : Nat := 9
 
 /-- What this BAP does with a guest, which goes up when the same state could go on differently. A checkpoint is refused by a BAP
 of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/
@@ -1872,10 +1876,10 @@ even to be on the host, but what the bytes hold. `watch` is as in `start`. So is
 in a file: a file without its function gives `EIO` when it is opened. `models` are attached again and given what they held.
 
 A checkpoint that it can't go on from as that one would is refused: a damaged one, or one of another format, BAP or semantics, with a
-model or a handler that isn't given, or of a program other than `expectedTarget`, the `targetDigest` of what is expected. -/
+model or a handler that isn't given, or of a program other than `expectedTarget`, the `targetDigest` of what is expected, or without the libraries of `expectedLibraries`, by the digests of their files. -/
 def Machine.ofCheckpoint (data : ByteArray) (watch : Option (Nat → List Nat → IO Unit) := none)
     (generators : List (String × Generator) := []) (handler : Option SyscallHandler := none)
-    (models : List RuntimeModel := []) (expectedTarget : Option Nat := none) : IO Machine := do
+    (models : List RuntimeModel := []) (expectedTarget : Option Nat := none) (expectedLibraries : List Nat := []) : IO Machine := do
   if data.extract 0 checkpointMagic.size != checkpointMagic || data.size < checkpointMagic.size + 8 then
     throw <| IO.userError "not a checkpoint of a Linux machine"
   let body := data.extract 0 (data.size - 8)
@@ -1913,6 +1917,12 @@ def Machine.ofCheckpoint (data : ByteArray) (watch : Option (Nat → List Nat �
   setRunState emu (← runStateOfBytes emulator)
   for model in ← machine.models.get do
     if let some (_, _, bytes) := savedModels.find? (·.1 == model.id) then model.state.load bytes
+  -- What it had loaded, in any process, by what the files were.
+  let loaded := (← machine.libraries.get).toList.flatMap (·.2) |>.map (·.digest)
+  let missing := expectedLibraries.filter (!loaded.contains ·)
+  unless missing.isEmpty do
+    throw <| IO.userError s!"a checkpoint without libraries of these digests, which were expected: {missing}"
+  for heard in ← machine.restored.get do heard s!"checkpoint {Wire.ofFixedBytes data (data.size - 8)}"
   pure machine
 
 def Machine.saveFile (machine : Machine) (path : System.FilePath) : IO Unit := do
@@ -1920,8 +1930,8 @@ def Machine.saveFile (machine : Machine) (path : System.FilePath) : IO Unit := d
 
 def Machine.loadFile (path : System.FilePath) (watch : Option (Nat → List Nat → IO Unit) := none)
     (generators : List (String × Generator) := []) (handler : Option SyscallHandler := none)
-    (models : List RuntimeModel := []) (expectedTarget : Option Nat := none) : IO Machine := do
-  Machine.ofCheckpoint (← IO.FS.readBinFile path) watch generators handler models expectedTarget
+    (models : List RuntimeModel := []) (expectedTarget : Option Nat := none) (expectedLibraries : List Nat := []) : IO Machine := do
+  Machine.ofCheckpoint (← IO.FS.readBinFile path) watch generators handler models expectedTarget expectedLibraries
 
 /-- A file of the host for a kernel, before a run: this is the only way that anything gets from there to in here. -/
 def Kernel.copyFromHost (kernel : Kernel) (path : String) (into : String := path) : IO Kernel := do

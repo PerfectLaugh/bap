@@ -343,7 +343,7 @@ private partial def loadOne (machine : Machine) (path : String) (space : Nat) (s
           image := base + header.addr, fileSize := header.fileSize, memorySize := header.memorySize, alignment }
       let tlsSymbols := dynamic.filterMap fun symbol =>
         if symbol.sectionIndex != 0 && symbol.typ == 6 && !symbol.name.isEmpty then some (symbol.name, symbol.value) else none
-      let library : LoadedLibrary := { path, name, base, start, span, symbols, needs := [], tls, tlsSymbols }
+      let library : LoadedLibrary := { path, name, base, start, span, symbols, needs := [], tls, tlsSymbols, digest := targetDigest architecture data }
       -- It is known of before what it needs is loaded, as they may need each other.
       machine.libraries.modify fun table => table.insert space (spaceHas space table ++ [library])
       loading.modify fun state => { state with mapped := library :: state.mapped }
@@ -499,7 +499,7 @@ private partial def loadOne (machine : Machine) (path : String) (space : Nat) (s
           pure (some (symbol.name, ← machine.call (base + symbol.value) []))
         else pure none
       let symbols := symbols.map fun entry => (entry.1, (chosen.lookup entry.1).getD entry.2)
-      let finished : LoadedLibrary := { library with needs, finalizers, symbols }
+      let finished : LoadedLibrary := { library with needs, finalizers, symbols, initializers }
       -- What it needs is held by it already, as each was counted when it was found.
       machine.libraries.modify fun table => table.insert space ((spaceHas space table).map fun other =>
         if other.path == path then finished else other)
@@ -531,7 +531,11 @@ def Machine.loadLibrary (machine : Machine) (path : String) (search : List Strin
     if runInitializers then
       for initializer in (← loading.get).initializers do
         let _ ← machine.call initializer []
-    pure library
+      -- They have all run, of what this loaded.
+      let loaded := (← loading.get).mapped.map (·.path)
+      machine.libraries.modify fun table => table.insert space ((spaceHas space table).map fun other =>
+        if loaded.contains other.path then { other with initialized := true } else other)
+    pure ((spaceHas space (← machine.libraries.get)).find? (·.path == library.path) |>.getD library)
   catch error =>
     undo
     throw error
@@ -578,6 +582,12 @@ def Machine.findSymbol (machine : Machine) (name : String) (library : Option Loa
 /-- What is loaded in the process that runs, in the order that a symbol is looked for in them. -/
 def Machine.loadedLibraries (machine : Machine) : IO (List LoadedLibrary) := do
   pure (spaceHas (← currentTask machine.emu).space (← machine.libraries.get))
+
+/-- What every process has loaded with `loadLibrary`: by address space, each library with where it is, what its file was and whether its initializers have run. -/
+def Machine.manifest (machine : Machine) : IO (List (Nat × LoadedLibrary)) := do
+  let table ← machine.libraries.get
+  let spaces := (table.toList.map (·.1)).toArray.qsort (· < ·) |>.toList
+  pure (spaces.flatMap fun space => (spaceHas space table).map (space, ·))
 
 /-- Lets go of a library, as `dlclose`: when nothing holds on to it, its finalizers run, it is unmapped and it lets go of what it needs. -/
 partial def Machine.unloadLibrary (machine : Machine) (library : LoadedLibrary) : IO Unit := do

@@ -158,6 +158,7 @@ private def attachTracker (machine : Machine) (config : Config) : IO (Tracker ×
             tracker.mapped start mapping.size (Kernel.fileSpace + mapping.inode) mapping.offset none
   let tracker ← Tracker.start emu { config with describe, backing, sends := callSends machine opened, called }
   started.set (some tracker)
+  machine.restored.modify (tracker.noteRestored :: ·)
   pure (tracker, opened)
 
 private def putOpened (out : ByteArray) (opened : Std.HashMap Nat String) : ByteArray :=
@@ -204,6 +205,7 @@ private def attachJournal (machine : Machine) (config : Bap.Analysis.Journal.Con
   machine.emu.syscallEnds.modify ((fun result => do
     let (number, given) ← args.get
     noteOpened machine opened number given result) :: ·)
+  machine.restored.modify (journal.noteRestored :: ·)
   pure (journal, opened)
 
 private def journalState (journal : Journal) (opened : Opened) : ModelState where

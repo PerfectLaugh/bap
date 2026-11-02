@@ -203,6 +203,10 @@ structure Tracker where
   /-- Where instructions were that this couldn't follow all of, with how many times. -/
   gaps : IO.Ref (Std.HashMap Nat Nat)
   scratch : Scratch
+  /-- When the machine was put back to what it was, by what, which is where a byte that nothing followed may have come from. -/
+  restores : IO.Ref (List (Nat × String))
+  /-- The checkpoint that this went on from, and how far it was then, which isn't saved, as going on from one changes nothing of what it was. -/
+  loadedFrom : IO.Ref (Option (Nat × String))
 
 abbrev Shade := Array Byte
 
@@ -262,7 +266,7 @@ private def byteAt (shade : Shade) (index : Nat) : Byte := shade.getD index noBy
 
 /-- Each byte has what is at it and below it of both, as a carry goes up. -/
 private def carrying (left right : Shade) (size : Nat) : Shade :=
-  let (_, out) := (List.range size).foldl (init := (noByte, (#[] : Shade))) fun (below, out) index =>
+  let (_, out) := (List.range size).foldl (init := (literalByte, (#[] : Shade))) fun (below, out) index =>
     let byte := combine below (combine (byteAt left index) (byteAt right index))
     (byte, out.push byte)
   out
@@ -356,7 +360,7 @@ private def extractShade (high low : Nat) (value : Shade) : Shade :=
     (Array.range size).map fun index =>
       let first := (low + index * 8) / 8
       let last := min high (low + index * 8 + 7) / 8
-      (List.range (last + 1 - first)).foldl (fun out offset => combine out (byteAt value (first + offset))) noByte
+      (List.range (last + 1 - first)).foldl (fun out offset => combine out (byteAt value (first + offset))) literalByte
 
 /-! ### Tags -/
 
@@ -578,6 +582,10 @@ private def widthOfTyp : Typ → Nat
 
 private def lookupVariable (tracker : Tracker) (frame : Frame) (var : Bap.Var) : IO (Option (Σ width, BitVec width) × Shade) := do
   if let some found := (← frame.scratch.variables.get).lookup var then return found
+  -- The zero register, which every target's lifter calls this: a constant, as `addiu $1, $zero, 3` makes one as `mov w8, #3` does.
+  if var.name == "XZR" then
+    let width := widthOfTyp var.typ
+    return (some ⟨width, BitVec.ofNat width 0⟩, literalShade width)
   let width := widthOfTyp var.typ
   let bits := match Bil.lookup frame.env var with
     | .ok value => (Bap.Value.asBits value).toOption
@@ -1074,6 +1082,8 @@ def start (emu : Emu) (config : Config := {}) : IO Tracker := do
     outer := ← IO.mkRef []
     written := ← IO.mkRef 0
     gaps := ← IO.mkRef {}
+    restores := ← IO.mkRef []
+    loadedFrom := ← IO.mkRef none
     scratch := {
       variables := ← IO.mkRef []
       memory := ← IO.mkRef []
@@ -1127,6 +1137,8 @@ structure Step where
 
 structure Explanation where
   origin : Origin
+  /-- Of a byte that nothing followed wrote, when the machine was put back to what it was before then and by what, the latest last: what it is came from there, or from before tracking started. -/
+  restoredFrom : List (Nat × String) := []
   /-- The way from the nearest source, by the strongest edges that reach one, oldest first, ending at the byte. Without a source, the longest way back. -/
   path : List Step := []
   /-- Every source that it depends on at all, with the weakest edge that it took to get there: `data` if by data alone. -/
@@ -1185,7 +1197,9 @@ private partial def walkFrom (tracker : Tracker) (parents : Std.HashMap Tag (Tag
 /-- Where the byte with this tag came from. -/
 def explainTag (tracker : Tracker) (root : Tag) : IO Explanation := do
   if !root.isNode then
-    return { origin := if root.isClean then .clean (root / 2) else .untouched }
+    let restores := (← tracker.restores.get).reverse ++ (← tracker.loadedFrom.get).toList
+    return { origin := if root.isClean then .clean (root / 2) else .untouched
+             restoredFrom := if root.isClean then [] else restores }
   let isSource (tag : Tag) : IO Bool := do
     match ← node? tracker tag.node with
     | some { kind := .source .., .. } => pure true
@@ -1297,6 +1311,11 @@ def Explanation.text (explanation : Explanation) : String :=
 /-- Where it couldn't follow all of an instruction, and how many times. -/
 def gapsOf (tracker : Tracker) : IO (List (Nat × Nat)) := do
   pure (← tracker.gaps.get).toList
+
+/-- That the machine was put back, as this says. Going on from a checkpoint is noted apart, as what is saved again has to be what was. -/
+def noteRestored (tracker : Tracker) (label : String) : IO Unit := do
+  if label.startsWith "checkpoint" then tracker.loadedFrom.set (some (← tracker.insn.get, label))
+  else tracker.restores.modify ((← tracker.insn.get, label) :: ·)
 
 /-! ### For a checkpoint -/
 
@@ -1433,7 +1452,8 @@ def save (tracker : Tracker) : IO ByteArray := do
     (byKey (← tracker.guards.get).toList)
   let out := putList (fun out entry => putList putNat (putNat out entry.1) entry.2.sites) out (byKey (← tracker.calls.get).toList)
   let out := putList (fun out entry => putNat (putNat out entry.1) entry.2) out (byKey (← tracker.lastOfGroup.get).toList)
-  pure (putList (fun out entry => putNat (putNat out entry.1) entry.2) out (byKey (← tracker.gaps.get).toList))
+  let out := putList (fun out entry => putNat (putNat out entry.1) entry.2) out (byKey (← tracker.gaps.get).toList)
+  pure (putList (fun out entry => putText (putNat out entry.1) entry.2) out (← tracker.restores.get))
 
 private def getNatPair : Decoder (Nat × Nat) := fun data at_ => do
   let (left, at_) ← getNat data at_
@@ -1460,8 +1480,13 @@ def load (tracker : Tracker) (data : ByteArray) (at_ : Nat := 0) : IO Nat := do
       .ok ((thread, sites), at_)) data at_
     let (lastOfGroup, at_) ← getList getNatPair data at_
     let (gaps, at_) ← getList getNatPair data at_
-    .ok (nodes, base, insn, registers, pages, guards, calls, lastOfGroup, gaps, at_)
-  let (nodes, base, insn, registers, pages, guards, calls, lastOfGroup, gaps, at_) ← IO.ofExcept decoded
+    let (restores, at_) ← getList (fun data at_ => do
+      let (insn, at_) ← getNat data at_
+      let (label, at_) ← getText data at_
+      .ok ((insn, label), at_)) data at_
+    .ok (nodes, base, insn, registers, pages, guards, calls, lastOfGroup, gaps, restores, at_)
+  let (nodes, base, insn, registers, pages, guards, calls, lastOfGroup, gaps, restores, at_) ← IO.ofExcept decoded
+  tracker.restores.set restores
   tracker.nodes.set nodes.toArray
   tracker.base.set base
   tracker.insn.set insn

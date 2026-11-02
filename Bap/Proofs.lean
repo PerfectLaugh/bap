@@ -49,6 +49,7 @@ import Bap.Proofs.PrimusBisim
 import Bap.Proofs.PrimusLoad
 import Bap.Proofs.PrimusAddress
 import Bap.Proofs.Project
+import Bap.Proofs.Runtime
 import Bap.Proofs.Symbolic
 import Bap.Proofs.SmtReader
 import Bap.Proofs.Target

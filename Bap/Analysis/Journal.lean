@@ -31,6 +31,8 @@ structure Frame where
 structure Executed where
   seq : Nat
   thread : ThreadId
+  /-- The process that it was of. -/
+  group : Nat
   index : Nat
   pc : Nat
   deriving DecidableEq, Repr, Inhabited
@@ -41,13 +43,15 @@ inductive Event where
   | ret (seq : Nat) (thread : ThreadId) (from_ to frames : Nat)
   /-- Something outside the guest served it: what that was, what it was asked, what it answered and the digest of what it left in memory, and its index among the thread's services. -/
   | service (seq : Nat) (thread : ThreadId) (index : Nat) (pc : Nat) (label : String) (args : List Nat) (result : Option Nat) (written : Nat)
+  /-- The machine was put back to what it was before, by what this says, so that what it holds now has no writer in what was run since. -/
+  | restored (seq : Nat) (thread : ThreadId) (label : String)
   deriving DecidableEq, Repr, Inhabited
 
 def Event.seq : Event → Nat
-  | .call seq .. | .ret seq .. | .service seq .. => seq
+  | .call seq .. | .ret seq .. | .service seq .. | .restored seq .. => seq
 
 def Event.thread : Event → ThreadId
-  | .call _ thread _ | .ret _ thread .. | .service _ thread .. => thread
+  | .call _ thread _ | .ret _ thread .. | .service _ thread .. | .restored _ thread _ => thread
 
 structure Config where
   /-- How many instructions are kept, and how many events, of which the oldest half goes when they run out. -/
@@ -72,6 +76,7 @@ private structure ThreadState where
   sites : CallSites := {}
   pending : Option Pending := none
   last : Nat := 0
+  group : Option Nat := none
   deriving Inhabited
 
 structure Journal where
@@ -87,6 +92,8 @@ structure Journal where
   jumping : IO.Ref (Std.HashMap Nat (ByteArray × Option Bil.Program))
   /-- A service in progress: what it was called, what it was asked, what it has left in memory so far and those that it interrupted. -/
   serving : IO.Ref (List (String × List Nat × Nat))
+  /-- The checkpoint that this machine went on from, if it did, which isn't saved, as going on from one changes nothing of what it was. -/
+  loadedFrom : IO.Ref (Option String)
 
 namespace Journal
 
@@ -158,7 +165,11 @@ private def step (journal : Journal) (pc : Nat) : IO Unit := do
   journal.seq.set (seq + 1)
   let state := (← journal.threads.get).getD thread {}
   let index := state.count
-  journal.history.modify (·.push { seq, thread, index, pc })
+  -- The process of a thread is the one that it started in, as `execve` keeps it.
+  let group ← match state.group with
+    | some group => pure group
+    | none => pure (((← emu.taskTable.get).find? thread).map (·.group) |>.getD thread)
+  journal.history.modify (·.push { seq, thread, group, index, pc })
   if (← journal.history.get).size > journal.config.instructions then
     let half := journal.config.instructions / 2
     journal.history.modify fun history => history.extract half history.size
@@ -189,7 +200,7 @@ private def step (journal : Journal) (pc : Nat) : IO Unit := do
     if jumped then
       if let some returnsTo := link then
         pending := some { site := pc, returnsTo, seq }
-  journal.threads.modify (·.insert thread { state with count := index + 1, stack, sites, pending, last := pc })
+  journal.threads.modify (·.insert thread { state with count := index + 1, stack, sites, pending, last := pc, group := some group })
 
 private def serviceStarts (journal : Journal) (label : String) (args : List Nat) : IO Unit :=
   journal.serving.modify ((label, args, 0xcbf29ce484222325) :: ·)
@@ -228,7 +239,8 @@ def start (emu : Emu) (config : Config := {}) : IO Journal := do
     seq := ← IO.mkRef 0
     threads := ← IO.mkRef {}
     jumping := ← IO.mkRef {}
-    serving := ← IO.mkRef [] }
+    serving := ← IO.mkRef []
+    loadedFrom := ← IO.mkRef none }
   let width ← Emu.wordWidth emu
   let _ ← Emu.onCode emu (0, 2 ^ width - 1) fun _ pc => step journal pc
   emu.syscallStarts.modify ((fun number args => do serviceStarts journal (← config.describe number args) args) :: ·)
@@ -252,6 +264,11 @@ def start (emu : Emu) (config : Config := {}) : IO Journal := do
       | some state => threads.alter child fun known => some { known.getD {} with stack := state.stack, sites := state.sites }
       | none => threads) :: ·)
   pure journal
+
+/-- That the machine was put back, as this says. Going on from a checkpoint is noted apart, as what is saved again has to be what was. -/
+def noteRestored (journal : Journal) (label : String) : IO Unit := do
+  if label.startsWith "checkpoint" then journal.loadedFrom.set (some label)
+  else record journal (.restored (← journal.seq.get) (← Emu.thread journal.emu) label)
 
 /-! ### What it can say -/
 
@@ -294,7 +311,7 @@ def firstEntry (journal : Journal) (address : Nat) (before : Nat := 16) : IO (Op
     else match event with
       | .call _ _ frame => frame :: stack
       | .ret _ _ _ _ frames => stack.drop frames
-      | .service .. => stack
+      | .service .. | .restored .. => stack
   let call := stack.head?.bind fun frame => if frame.callee == address && frame.seq + 2 ≥ instruction.seq then some frame else none
   pure (some {
     instruction, before := kept.map (·.pc), call, stack
@@ -362,57 +379,72 @@ structure Difference where
 private def threadOrder (record : Record) : Array ThreadId :=
   record.history.foldl (fun order entry => if order.contains entry.thread then order else order.push entry.thread) #[]
 
+/-- What a service is to a comparison: what it is and what came of it. Its arguments may only be addresses. -/
+def Event.serviceKey : Event → Option (String × Option Nat × Nat)
+  | .service _ _ _ _ label _ result written => some (label, result, written)
+  | _ => none
+
 /-- The first thing that differs, by when it was on the left. -/
-private def earliest {α : Type} (seqOf : α → Nat) (found : List α) : Option α :=
+def earliest {α : Type} (seqOf : α → Nat) (found : List α) : Option α :=
   found.foldl (fun best item => match best with
     | some current => if seqOf item < seqOf current then some item else best
     | none => some item) none
 
+/-- The threads of two runs, paired by the order in which they first ran. -/
+def threadPairs (left right : Record) : List (Nat × Option ThreadId × Option ThreadId) :=
+  let leftThreads := threadOrder left
+  let rightThreads := threadOrder right
+  (List.range (max leftThreads.size rightThreads.size)).map fun ordinal => (ordinal, leftThreads[ordinal]?, rightThreads[ordinal]?)
+
+/-- What a thread ran, or nothing for one that isn't there. -/
+def ofThread (record : Record) (thread : Option ThreadId) : Array Executed :=
+  match thread with
+  | some thread => record.history.filter (·.thread == thread)
+  | none => #[]
+
+/-- Where a pair of threads first went different ways, from where both still have what they ran, which is the same index of each. -/
+def branchAt (left right : Record) (pair : Nat × Option ThreadId × Option ThreadId) : Option BranchDifference :=
+  let (ordinal, leftThread, rightThread) := pair
+  let ls := ofThread left leftThread
+  let rs := ofThread right rightThread
+  let first := max (ls[0]?.map (·.index) |>.getD 0) (rs[0]?.map (·.index) |>.getD 0)
+  let ls := ls.filter (·.index ≥ first)
+  let rs := rs.filter (·.index ≥ first)
+  let parted := (List.range (max ls.size rs.size)).find? fun position =>
+    (ls[position]?.map (·.pc)) != (rs[position]?.map (·.pc))
+  parted.map fun position =>
+    { ordinal, leftThread := leftThread.getD 0, rightThread := rightThread.getD 0
+      index := first + position
+      seq := (ls[position]?.map (·.seq)).getD ((ls.back?.map (·.seq)).getD 0)
+      branch := if position > 0 then ls[position - 1]?.map (·.pc) else none
+      left := ls[position]?.map (·.pc), right := rs[position]?.map (·.pc) : BranchDifference }
+
+/-- What services a thread had, or none for one that isn't there. -/
+def servicesOf (record : Record) (thread : Option ThreadId) : Array Event :=
+  match thread with
+  | some thread => record.events.filter fun event => event.thread == thread && (event matches .service ..)
+  | none => #[]
+
+/-- Whether two services are the same, by what they were and what came of them, as their arguments may only be addresses. -/
+def sameService (left right : Option Event) : Bool := left.bind Event.serviceKey == right.bind Event.serviceKey
+
+/-- What a pair of threads were first given differently. -/
+def serviceAt (left right : Record) (pair : Nat × Option ThreadId × Option ThreadId) : Option ServiceDifference :=
+  let (ordinal, leftThread, rightThread) := pair
+  let ls := servicesOf left leftThread
+  let rs := servicesOf right rightThread
+  let parted := (List.range (max ls.size rs.size)).find? fun position => !sameService ls[position]? rs[position]?
+  parted.map fun position =>
+    { ordinal, index := position
+      seq := (ls[position]?.map Event.seq).getD ((ls.back?.map Event.seq).getD 0)
+      left := ls[position]?, right := rs[position]? : ServiceDifference }
+
 /-- Where two runs part, and what they were given differently first. Threads are paired by the order in which they first ran, and each is compared on its own, so
 that it doesn't matter how the threads were scheduled. -/
 def compare (left right : Record) : Difference :=
-  let leftThreads := threadOrder left
-  let rightThreads := threadOrder right
-  let pairs := (List.range (max leftThreads.size rightThreads.size)).map fun ordinal => (ordinal, leftThreads[ordinal]?, rightThreads[ordinal]?)
-  let ofThread (record : Record) (thread : Option ThreadId) : Array Executed :=
-    match thread with
-    | some thread => record.history.filter (·.thread == thread)
-    | none => #[]
-  let branches := pairs.filterMap fun (ordinal, leftThread, rightThread) =>
-    let ls := ofThread left leftThread
-    let rs := ofThread right rightThread
-    -- From where both still have it, which is the same index of each.
-    let first := max (ls[0]?.map (·.index) |>.getD 0) (rs[0]?.map (·.index) |>.getD 0)
-    let ls := ls.filter (·.index ≥ first)
-    let rs := rs.filter (·.index ≥ first)
-    let parted := (List.range (max ls.size rs.size)).find? fun position =>
-      (ls[position]?.map (·.pc)) != (rs[position]?.map (·.pc))
-    parted.map fun position =>
-      { ordinal, leftThread := leftThread.getD 0, rightThread := rightThread.getD 0
-        index := first + position
-        seq := (ls[position]?.map (·.seq)).getD ((ls.back?.map (·.seq)).getD 0)
-        branch := if position > 0 then ls[position - 1]?.map (·.pc) else none
-        left := ls[position]?.map (·.pc), right := rs[position]?.map (·.pc) : BranchDifference }
-  let servicesOf (record : Record) (thread : Option ThreadId) : Array Event :=
-    match thread with
-    | some thread => record.events.filter fun event => event.thread == thread && (event matches .service ..)
-    | none => #[]
-  let same (leftEvent rightEvent : Option Event) : Bool :=
-    match leftEvent, rightEvent with
-    -- What it is and what came of it. Its arguments may only be addresses.
-    | some (.service _ _ _ _ l _ r w), some (.service _ _ _ _ l' _ r' w') => l == l' && r == r' && w == w'
-    | none, none => true
-    | _, _ => false
-  let services := pairs.filterMap fun (ordinal, leftThread, rightThread) =>
-    let ls := servicesOf left leftThread
-    let rs := servicesOf right rightThread
-    let parted := (List.range (max ls.size rs.size)).find? fun position => !same ls[position]? rs[position]?
-    parted.map fun position =>
-      { ordinal, index := position
-        seq := (ls[position]?.map Event.seq).getD ((ls.back?.map Event.seq).getD 0)
-        left := ls[position]?, right := rs[position]? : ServiceDifference }
-  { branch := earliest (·.seq) branches
-    service := earliest (·.seq) services
+  let pairs := threadPairs left right
+  { branch := earliest (·.seq) (pairs.filterMap (branchAt left right))
+    service := earliest (·.seq) (pairs.filterMap (serviceAt left right))
     complete := left.droppedHistory == 0 && right.droppedHistory == 0 && left.droppedEvents == 0 && right.droppedEvents == 0 }
 
 def Difference.text (difference : Difference) : String :=
@@ -436,14 +468,15 @@ def Difference.text (difference : Difference) : String :=
 open Bap.Linux.Wire
 
 private def putExecuted (out : ByteArray) (entry : Executed) : ByteArray :=
-  putNat (putNat (putNat (putNat out entry.seq) entry.thread) entry.index) entry.pc
+  putNat (putNat (putNat (putNat (putNat out entry.seq) entry.thread) entry.group) entry.index) entry.pc
 
 private def getExecuted : Decoder Executed := fun data at_ => do
   let (seq, at_) ← getNat data at_
   let (thread, at_) ← getNat data at_
+  let (group, at_) ← getNat data at_
   let (index, at_) ← getNat data at_
   let (pc, at_) ← getNat data at_
-  .ok ({ seq, thread, index, pc }, at_)
+  .ok ({ seq, thread, group, index, pc }, at_)
 
 private def putFrame (out : ByteArray) (frame : Frame) : ByteArray :=
   putNat (putNat (putNat (putNat out frame.site) frame.callee) frame.returnsTo) frame.seq
@@ -465,6 +498,7 @@ private def putEvent (out : ByteArray) : Event → ByteArray
       | some value => putNat out (value + 1)
       | none => putNat out 0
     putNat out written
+  | .restored seq thread label => putText (putNat (putNat (putNat out 3) seq) thread) label
 
 private def getEvent : Decoder Event := fun data at_ => do
   let (which, at_) ← getNat data at_
@@ -487,6 +521,9 @@ private def getEvent : Decoder Event := fun data at_ => do
     let (result, at_) ← getNat data at_
     let (written, at_) ← getNat data at_
     .ok (.service seq thread index pc label args (if result == 0 then none else some (result - 1)) written, at_)
+  | 3 =>
+    let (label, at_) ← getText data at_
+    .ok (.restored seq thread label, at_)
   | _ => .error "a journal with an event that isn't one"
 
 private def byKey {α : Type} (entries : List (Nat × α)) : List (Nat × α) :=
@@ -499,7 +536,10 @@ private def putThread (out : ByteArray) (entry : ThreadId × ThreadState) : Byte
   let out := match state.pending with
     | some call => putNat (putNat (putNat (putNat out 1) call.site) call.returnsTo) call.seq
     | none => putNat out 0
-  putNat out state.last
+  let out := putNat out state.last
+  match state.group with
+  | some group => putNat out (group + 1)
+  | none => putNat out 0
 
 private def getThread : Decoder (ThreadId × ThreadState) := fun data at_ => do
   let (thread, at_) ← getNat data at_
@@ -513,7 +553,9 @@ private def getThread : Decoder (ThreadId × ThreadState) := fun data at_ => do
     let (seq, at_) ← getNat data at_
     Except.ok (some ({ site, returnsTo, seq } : Pending), at_)
   let (last, at_) ← getNat data at_
-  .ok ((thread, { count, services, stack, sites := CallSites.ofSites (stack.map (·.returnsTo)), pending, last }), at_)
+  let (group, at_) ← getNat data at_
+  let group := if group == 0 then none else some (group - 1)
+  .ok ((thread, { count, services, stack, sites := CallSites.ofSites (stack.map (·.returnsTo)), pending, last, group }), at_)
 
 /-- All that it has, in an order that the same run always has. It is only saved between instructions, when no service is in progress. -/
 def save (journal : Journal) : IO ByteArray := do

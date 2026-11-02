@@ -1766,6 +1766,167 @@ def testStepBackAfterRestore : IO Unit := do
   machine.stepBack 5000
   assertTrue "a step back from what was put back is where that run was" ((← stateOf machine) == (← at_ 15000))
 
+private def cffKernel (triple : String) (key : Char) : IO Bap.Linux.Kernel := do
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-cff"
+  let data := "AB".toUTF8 ++ String.toUTF8 (String.singleton key) ++ "DEFGHIJKLMNOP".toUTF8
+  pure ((Bap.Linux.Kernel.empty.addFile "/test" program).addFile "/data" data)
+
+/-- Where the program says its dispatcher, state, record, verdict and sum are. -/
+private def cffAddresses (triple : String) : IO (Nat × Nat × Nat × Nat × Nat) := do
+  let machine ← Bap.Linux.start (← cffKernel triple 'C') "/test" ["/test"]
+  let written ← IO.mkRef ByteArray.empty
+  let _ ← machine.run fun data => written.modify (· ++ data)
+  let lines := (String.fromUTF8! (← written.get)).splitOn "\n"
+  let at_ (index : Nat) := hexOfLine (lines.getD index "")
+  pure (at_ 0, at_ 1, at_ 2, at_ 3, at_ 4)
+
+/-- A flattened machine as it ran: its rounds, what each handler was, what they ask of the kernel, the rounds that come round again, which
+thread and process each instruction was of, and what decided the round that a byte of a file chose. -/
+def testCff (triple : String) : IO Unit := do
+  let (dispatcher, state, _, _, _) ← cffAddresses triple
+  let profile : Bap.Analysis.Cff.Profile := { dispatcher, state := .memory state 4, names := [(3, "asks"), (6, "ends")] }
+  let run (key : Char) : IO (Bap.Analysis.Cff.Dispatcher × Nat × Bap.Analysis.Journal.Journal.Record) := do
+    let machine ← Bap.Linux.start (← cffKernel triple key) "/test" ["/test"]
+    let main ← Bap.Emu.thread machine.emu
+    let journal ← machine.journal
+    let tracker ← machine.track
+    let recorder ← Bap.Analysis.Cff.Recorder.attach machine.emu profile
+    let outcome ← machine.run fun _ => pure ()
+    assertEqual s!"Cff {triple} the program ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+    let record ← journal.toRecord
+    let recovered ← Bap.Analysis.Cff.recoverIn machine.emu profile (← recorder.visits.get) (some record)
+    pure (← Bap.Analysis.Cff.withPredicates recovered tracker journal, main, record)
+  let (taken, main, record) ← run 'C'
+  assertTrue s!"Cff {triple} all the rounds are known" taken.complete
+  let states := taken.transitions.map (·.state)
+  assertEqual s!"Cff {triple} the rounds start as they do" [1, 2, 3, 5] (states.take 4)
+  assertEqual s!"Cff {triple} the last round ends it" (some 6) states.getLast?
+  assertTrue s!"Cff {triple} rounds come round again" (taken.cycles.any fun cycle => cycle.states == [1, 2, 3, 5] && cycle.repeats ≥ 2)
+  assertTrue s!"Cff {triple} a byte of the file chose 3" (taken.graph.any fun (from_, to, _) => from_ == 2 && to == 3)
+  assertTrue s!"Cff {triple} and not 4" (!taken.graph.any fun (from_, to, _) => from_ == 2 && to == 4)
+  let entries := taken.handlers.filterMap fun handler => if handler.state ≤ 5 then handler.entries.head? else none
+  assertEqual s!"Cff {triple} each handler has where it starts" 4 entries.length
+  assertEqual s!"Cff {triple} and they are different places" entries.length entries.eraseDups.length
+  assertTrue s!"Cff {triple} no handler starts in the dispatcher" (!entries.any taken.dispatch.contains)
+  let handlerOf (state : Nat) := taken.handlers.find? (·.state == state)
+  assertTrue s!"Cff {triple} the handler that asks the kernel does" ((handlerOf 3).any fun handler => !handler.services.isEmpty)
+  assertTrue s!"Cff {triple} the one that doesn't, doesn't" ((handlerOf 1).any (·.services.isEmpty))
+  assertEqual s!"Cff {triple} a handler has its name" (some "asks") ((handlerOf 3).bind (·.name))
+  assertTrue s!"Cff {triple} a handler has where its rounds end" ((handlerOf 1).any fun handler => !handler.exits.isEmpty)
+  assertTrue s!"Cff {triple} the rounds are of the thread that runs the machine" (taken.transitions.all (·.thread == main))
+  let others := record.history.filter (·.thread != main)
+  assertTrue s!"Cff {triple} another thread ran" (others.size > 0)
+  let group := (record.history.find? (·.thread == main)).map (·.group)
+  assertTrue s!"Cff {triple} and it is of the same process" (others.all fun entry => some entry.group == group)
+  let chooser := taken.transitions.find? fun transition => transition.state == 2
+  let sources := (chooser.bind (·.predicate)).map (·.sources) |>.getD []
+  assertTrue s!"Cff {triple} what decided a round is the byte of the file: {sources}" (sources.contains ("pread /data", some 2))
+  let (other, _, _) ← run 'D'
+  assertTrue s!"Cff {triple} another byte chooses 4" (other.graph.any fun (from_, to, _) => from_ == 2 && to == 4)
+
+/-- A verdict, and why: what it is, from the byte of the file that decided it; what of it no one wrote, which says that it was there when
+the machine was put back from a checkpoint; and a round that went the wrong way, sliced back from where the dispatcher read its state. -/
+def testVerdict (triple : String) : IO Unit := do
+  let (dispatcher, state, record, verdictPoint, _) ← cffAddresses triple
+  let profile : Bap.Analysis.Cff.Profile := { dispatcher, state := .memory state 4 }
+  let trackers : IO.Ref (Option Bap.Analysis.DynamicTaint.Tracker) ← IO.mkRef none
+  let journals : IO.Ref (Option Bap.Analysis.Journal.Journal) ← IO.mkRef none
+  let models := [Bap.Linux.taintModel trackers, Bap.Linux.journalModel journals]
+  let machine ← Bap.Linux.start (← cffKernel triple 'C') "/test" ["/test"] (models := models)
+  let some tracker ← trackers.get | throw <| IO.userError "no tracker"
+  let criteria : Bap.Analysis.Verdict.Criteria := { pc := verdictPoint, criteria := [.memory record 1, .memory (record + 3) 1] }
+  let verdict ← Bap.Analysis.Verdict.captureVerdict machine criteria
+  assertEqual s!"Verdict {triple} it is at the verdict" verdictPoint (← machine.emu.pc.get)
+  let decided := verdict.values.headD (.memory 0 0, ByteArray.empty)
+  assertTrue s!"Verdict {triple} the verdict is one" (decided.2.toList == ['P'.toNat.toUInt8] || decided.2.toList == ['F'.toNat.toUInt8])
+  let report ← Bap.Analysis.Verdict.explain tracker machine verdict
+  assertTrue s!"Verdict {triple} it comes from the byte that was added: {report.sources.map fun (l, o, _) => (l, o)}"
+    (report.sources.any fun (label, offset, _) => label == "pread /data" && offset == some 5)
+  -- What no one wrote, after going on from the checkpoint.
+  let restored ← Bap.Linux.Machine.ofCheckpoint verdict.data (models := models)
+  let some again ← trackers.get | throw <| IO.userError "no tracker after the checkpoint"
+  let some journal ← journals.get | throw <| IO.userError "no journal after the checkpoint"
+  let report ← Bap.Analysis.Verdict.explain again restored verdict
+  let untouched := report.unresolved.filterMap fun unresolved => match unresolved.reason with
+    | .untouched restoredFrom => if unresolved.criterion == 1 then some restoredFrom else none
+    | _ => none
+  assertTrue s!"Verdict {triple} what no one wrote says it was there when it was put back"
+    (untouched.any fun restoredFrom => restoredFrom.any (·.2.startsWith "checkpoint"))
+  assertTrue s!"Verdict {triple} the journal says what it went on from"
+    ((← journal.loadedFrom.get).any (·.startsWith "checkpoint"))
+  assertTrue s!"Verdict {triple} and where it came from is as it was" (report.sources.any fun (label, offset, _) => label == "pread /data" && offset == some 5)
+  -- A round, sliced back from where its next state was read.
+  let fresh ← Bap.Linux.start (← cffKernel triple 'C') "/test" ["/test"] (models := models)
+  let some freshTracker ← trackers.get | throw <| IO.userError "no tracker"
+  let transition : Bap.Analysis.Cff.Transition := { thread := ← Bap.Emu.thread fresh.emu, group := 0, index := 1, state := 2, next := some 3 }
+  let atNext ← Bap.Analysis.Verdict.captureVerdict fresh (Bap.Analysis.Verdict.ofTransition profile transition)
+  assertEqual s!"Verdict {triple} the next state is what was read" [3, 0, 0, 0]
+    ((atNext.values.headD (.memory 0 0, ByteArray.empty)).2.toList.map (·.toNat) |> fun bytes => if bytes.head? == some 0 then bytes.reverse else bytes)
+  let slice ← Bap.Analysis.Verdict.explain freshTracker fresh atNext
+  assertTrue s!"Verdict {triple} a round comes from the byte that chose it"
+    (slice.sources.any fun (label, offset, _) => label == "pread /data" && offset == some 2)
+
+/-- What a handler does, as a contract, without changing the machine, and a replacement checked against it. -/
+def testContract (triple : String) : IO Unit := do
+  let (dispatcher, state, _, _, sum) ← cffAddresses triple
+  let profile : Bap.Analysis.Cff.Profile := { dispatcher, state := .memory state 4 }
+  let machine ← Bap.Linux.start (← cffKernel triple 'C') "/test" ["/test"]
+  let _ ← Bap.Analysis.Verdict.captureVerdict machine { pc := dispatcher, criteria := [] }
+  let recorder ← Bap.Analysis.Contract.Recorder.attach machine
+  let before ← stateOf machine
+  let first ← Bap.Analysis.Contract.capture recorder profile
+  assertTrue s!"Contract {triple} capturing leaves the machine as it was" ((← stateOf machine) == before)
+  assertEqual s!"Contract {triple} the first round is of state 1 and leaves 2" (1, some 2) (first.state, first.next)
+  assertTrue s!"Contract {triple} it changes the sum and the state: {first.writes.map (·.1)}"
+    (first.writes.any (fun (address, _) => sum ≤ address && address < sum + 8) &&
+      first.writes.any (fun (address, _) => state ≤ address && address < state + 4) &&
+      first.writes.all (fun (address, _) => (sum ≤ address && address < sum + 8) || (state ≤ address && address < state + 4)))
+  assertTrue s!"Contract {triple} it asks nothing" first.services.isEmpty
+  assertTrue s!"Contract {triple} it ran something" (first.instructions > 0)
+  let big := machine.architecture.big
+  let word (value size : Nat) : ByteArray :=
+    let bytes := (List.range size).map fun index => (value >>> (8 * index)).toUInt8
+    ByteArray.mk (if big then bytes.reverse else bytes).toArray
+  let width := machine.architecture.bits / 8
+  let replacement (add : Nat) (machine : Bap.Linux.Machine) : IO Unit := do
+    let current ← machine.read sum width
+    let ordered := if big then current.toList else current.toList.reverse
+    let value := ordered.foldl (fun value byte => value * 256 + byte.toNat) 0
+    machine.write sum (word (value + add) width)
+    machine.write state (word 2 4)
+  let right ← Bap.Analysis.Contract.verify recorder profile (replacement 3)
+  assertEqual s!"Contract {triple} a replacement that does the same is the same" [] right.differences
+  let wrong ← Bap.Analysis.Contract.verify recorder profile (replacement 4)
+  assertTrue s!"Contract {triple} one that doesn't is told apart: {wrong.differences}" (!wrong.differences.isEmpty)
+  assertTrue s!"Contract {triple} verifying leaves the machine as it was" ((← stateOf machine) == before)
+  -- The round that asks the kernel, two visits later.
+  Bap.Emu.resumeThread machine.emu (← Bap.Emu.thread machine.emu)
+  let _ ← Bap.Analysis.Verdict.captureVerdict machine { pc := dispatcher, criteria := [], hit := 2 }
+  let asking ← Bap.Analysis.Contract.capture recorder profile
+  assertEqual s!"Contract {triple} the third round is of state 3" 3 asking.state
+  assertTrue s!"Contract {triple} and it asks the kernel" (!asking.services.isEmpty)
+
+/-- What a machine has loaded, by what the files were and whether their initializers ran, and a checkpoint that hasn't what is expected. -/
+def testManifest : IO Unit := do
+  let binary (name : String) : IO ByteArray := IO.FS.readBinFile s!"testsuite/bin/aarch64-linux-musl-{name}"
+  let dep ← binary "libdep"
+  let other ← binary "libother"
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" (← binary "libc-files")).addFile "/lib/libdep.so" dep |>.addFile "/lib/libother.so" other
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let _ ← machine.loadLibrary "libdep.so"
+  let _ ← machine.loadLibrary "libother.so" (runInitializers := false)
+  let manifest ← machine.manifest
+  let entry (path : String) := (manifest.find? (·.2.path == path)).map (·.2)
+  let digest (data : ByteArray) := Bap.Linux.targetDigest machine.architecture data
+  assertEqual "a library is known by what its file was" (some (digest dep)) ((entry "/lib/libdep.so").map (·.digest))
+  assertEqual "one whose initializers ran says so" (some true) ((entry "/lib/libdep.so").map (·.initialized))
+  assertEqual "one whose initializers didn't says so" (some false) ((entry "/lib/libother.so").map (·.initialized))
+  let data ← machine.checkpoint
+  let again ← Bap.Linux.Machine.ofCheckpoint data (expectedLibraries := [digest dep, digest other])
+  assertEqual "a checkpoint has what was loaded" manifest.length (← again.manifest).length
+  let refused ← try let _ ← Bap.Linux.Machine.ofCheckpoint data (expectedLibraries := [digest dep + 1]); pure false catch _ => pure true
+  assertTrue "a checkpoint without what is expected is refused" refused
+
 /-- What the host does between runs is undone by stepping back before it and kept after it; a breakpoint stays and stops it again where it did; and what it doesn't have it says. -/
 def testStepBackHost : IO Unit := do
   let program ← IO.FS.readBinFile "testsuite/bin/aarch64-linux-musl-libc-memory"

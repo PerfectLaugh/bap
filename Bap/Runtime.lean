@@ -68,6 +68,8 @@ import Bap.Linux.LoadedLibrary
 import Bap.Linux.Machine
 import Bap.Linux.Library
 import Bap.Linux.DynamicTaint
+import Bap.Linux.Verdict
+import Bap.Linux.Contract
 import Bap.Float
 import Bap.Emu.Jni
 import Bap.Emu.Checkpoint

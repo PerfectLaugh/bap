@@ -27,17 +27,20 @@ private def forget (counts : Std.TreeMap Nat Nat) (site : Nat) : Std.TreeMap Nat
   | 0 | 1 => counts.erase site
   | count => counts.insert site (count - 1)
 
+/-- Where a return to `pc` comes back to in what is left of the sites: the innermost of them that is it, with the bit of Thumb, which is how many
+calls end, counting from `gone`, and what is left after. -/
+def popFrom (pc : Nat) : List Nat → Nat → Option (List Nat × Nat)
+  | [], _ => none
+  | site :: rest, gone => if site == pc || site == pc + 1 then some (rest, gone + 1) else popFrom pc rest (gone + 1)
+
 /-- What is left when it has come back to this address, with how many calls that ended: those within it too, which may not have come back. -/
 def pop (calls : CallSites) (pc : Nat) : Option (CallSites × Nat) :=
   if !calls.isSite pc then none
   else
-    let rec go : List Nat → Std.TreeMap Nat Nat → Nat → Option (CallSites × Nat)
-      | [], _, _ => none
-      | site :: rest, counts, gone =>
-        let counts := forget counts site
-        if site == pc || site == pc + 1 then some ({ sites := rest, depth := calls.depth - (gone + 1), counts }, gone + 1)
-        else go rest counts (gone + 1)
-    go calls.sites calls.counts 0
+    match popFrom pc calls.sites 0 with
+    | some (rest, gone) =>
+      some ({ sites := rest, depth := calls.depth - gone, counts := (calls.sites.take gone).foldl forget calls.counts }, gone)
+    | none => none
 
 /-- It again, from the sites alone. -/
 def ofSites (sites : List Nat) : CallSites :=
