@@ -152,6 +152,10 @@ structure Emu where
   lastFault : IO.Ref (Option MemoryFault)
   skipCode : IO.Ref (Option Nat)
   breakpointsRef : IO.Ref (List (HookId × Nat))
+  /-- Whether breakpoints don't stop anything, as when what has run is run again. -/
+  breakpointsMuted : IO.Ref Bool
+  /-- How many instructions `runProcesses` has run, as its fuel counts them. -/
+  executed : IO.Ref Nat
   threadsRef : IO.Ref (List ThreadContext)
   currentThreadRef : IO.Ref ThreadId
   nextThreadRef : IO.Ref ThreadId
@@ -313,6 +317,8 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     lastFault := ← IO.mkRef none
     skipCode := ← IO.mkRef none
     breakpointsRef := ← IO.mkRef []
+    breakpointsMuted := ← IO.mkRef false
+    executed := ← IO.mkRef 0
     threadsRef := ← IO.mkRef [⟨1, initial, entry, false, none, none⟩]
     currentThreadRef := ← IO.mkRef 1
     nextThreadRef := ← IO.mkRef 2
@@ -858,7 +864,8 @@ def clearHooks (emu : Emu) : IO Unit := do
   emu.breakpointsRef.set []
 
 def addBreakpoint (emu : Emu) (address : Nat) : IO HookId := do
-  let id ← onCode emu (address, address) fun current _ => current.stopped.set true
+  let id ← onCode emu (address, address) fun current _ => do
+    unless ← emu.breakpointsMuted.get do current.stopped.set true
   emu.breakpointsRef.modify fun breakpoints => (id, address) :: breakpoints
   pure id
 

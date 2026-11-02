@@ -30,6 +30,24 @@ structure AttachedModel where
   version : Nat
   state : ModelState
 
+/-- What is in the kernel, in the emulator and in the models at once, to go back to. -/
+structure Machine.Saved where
+  emulator : Snapshot
+  run : RunState
+  kernel : Kernel
+  models : List (String × ByteArray)
+
+/-- What `Machine.stepBack` goes back with: where a run is, and what it was at some of the places that it has been. -/
+structure Machine.History where
+  /-- How many instructions apart what is kept is, at most, which is how many a step back may have to run again. -/
+  every : Nat
+  /-- How many of them are kept, of which the oldest go. -/
+  limit : Nat
+  /-- Where it is: how many instructions of all threads `Machine.run` has run since it started keeping this. -/
+  position : Nat := 0
+  /-- Where each was, the quantum of the run that went on from there, and what it was, the latest last. -/
+  saved : Array (Nat × Nat × Machine.Saved) := #[]
+
 structure Machine where
   architecture : Architecture
   emu : Emu
@@ -46,6 +64,8 @@ structure Machine where
   heaps : IO.Ref (Std.HashMap Nat GuestHeap)
   /-- What `Machine.loadLibrary` has loaded, by address space. -/
   libraries : IO.Ref (Std.HashMap Nat (List LoadedLibrary))
+  /-- What it goes back with, if it is kept. -/
+  history : IO.Ref (Option Machine.History)
   /-- The directory that was last read, for the next piece of it: all the paths that it is of, which it is good for as long as those are the same object, its inode and what it has. -/
   listing : IO.Ref (Option (Std.HashMap String Nat × Nat × Array (Nat × Nat × String)))
 
@@ -1366,7 +1386,7 @@ private def sharedFutexSpace : Nat := Kernel.fileSpace
 private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel) (watch : Option (Nat → List Nat → IO Unit))
     (handler : Option SyscallHandler) (target : Nat) (models : List RuntimeModel) : IO Machine := do
   let signals : Signals := { architecture, returnPage := stackTop architecture + 4096, table := ← IO.mkRef {} }
-  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome, signals, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, listing := ← IO.mkRef none }
+  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome, signals, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, listing := ← IO.mkRef none }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
@@ -1474,6 +1494,52 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   let kernel := Proc.install kernel
   machineOf architecture emu kernel watch handler (targetDigest architecture data) models
 
+/-- Runs `fuel` instructions at most in turns of the scheduler, in pieces that end where `every` says from where it starts, which is what it goes by when it runs them again. Each piece ends
+with shared memory in its files and what was written gone to `output`, and then `after` sees how many instructions it ran and whether that was all of them. -/
+private def Machine.runPieces (machine : Machine) (output : ByteArray → IO Unit) (quantum fuel every : Nat)
+    (after : Nat → Bool → IO Unit) : IO ScheduleOutcome := do
+  -- What it writes in a turn goes out when the turn ends, so that a long turn is what holds it up.
+  let rec go : Nat → Nat → Nat → IO ScheduleOutcome
+    | 0, _, _ => pure .outOfFuel
+    | rounds + 1, left, since => do
+      let turn := min left (min (64 * quantum) (every - since))
+      let before ← machine.emu.executed.get
+      let outcome ← runProcesses machine.emu quantum turn
+      flushShared machine machine.emu
+      let (kernel, written) := (← machine.kernel.get).takeOutput
+      machine.kernel.set kernel
+      if written.size > 0 then output written
+      let ran := (← machine.emu.executed.get) - before
+      after ran (outcome == .outOfFuel)
+      match outcome with
+      | .outOfFuel =>
+        let since := if since + turn ≥ every then 0 else since + turn
+        if left ≤ turn then pure .outOfFuel else go rounds (left - turn) since
+      | other => pure other
+  go (fuel + 1) fuel 0
+
+private def Machine.modelBytes (machine : Machine) : IO (List (AttachedModel × ByteArray)) := do
+  (← machine.models.get).mapM fun model => do pure (model, ← model.state.save)
+
+/-- It is as whole as a checkpoint has to be: not in the middle of an instruction, or from a worker of a parallel round. -/
+def Machine.save (machine : Machine) : IO Machine.Saved := do
+  if (← machine.emu.serving.get) || machine.emu.engine.deferMemorySync then
+    throw <| IO.userError "a machine can't be saved in the middle of an instruction, or by a worker of a parallel round: stop the thread, and save it once the run returns"
+  pure {
+    emulator := ← snapshot machine.emu
+    run := ← runState machine.emu
+    kernel := ← machine.kernel.get
+    models := (← machine.modelBytes).map fun (model, bytes) => (model.id, bytes)
+  }
+
+def Machine.restore (machine : Machine) (saved : Machine.Saved) : IO Unit := do
+  Bap.Emu.restore machine.emu saved.emulator
+  -- Which breakpoints there are is up to who is debugging it now.
+  setRunState machine.emu { saved.run with breakpoints := [] }
+  machine.kernel.set saved.kernel
+  for model in ← machine.models.get do
+    if let some bytes := saved.models.lookup model.id then model.state.load bytes
+
 /-- How a machine's instructions run from the next one on: see `ExecutionMode`. It can be changed whenever the machine isn't in the middle of an instruction, and a machine that goes on from a checkpoint
 starts with the JIT, as it is no part of what is saved. -/
 def Machine.setExecutionMode (machine : Machine) (mode : ExecutionMode) : IO Unit :=
@@ -1482,23 +1548,69 @@ def Machine.setExecutionMode (machine : Machine) (mode : ExecutionMode) : IO Uni
 def Machine.executionMode (machine : Machine) : IO ExecutionMode :=
   Bap.Emu.executionMode machine.emu
 
-/-- Runs it until nothing can run, with what it writes to the console going to `output` as it comes. -/
+/-- Runs it until nothing can run, with what it writes to the console going to `output` as it comes. If it keeps a history, what it is when it starts is kept, as the host may have
+changed it since, and so is what it is every so often after. -/
 def Machine.run (machine : Machine) (output : ByteArray → IO Unit) (quantum : Nat := 100000) (fuel : Nat := 1000000000) :
     IO ScheduleOutcome := do
-  -- What it writes in a turn goes out when the turn ends, so that a long turn is what holds it up.
-  let rec go : Nat → Nat → IO ScheduleOutcome
-    | 0, _ => pure .outOfFuel
-    | rounds + 1, left => do
-      let turn := min left (64 * quantum)
-      let outcome ← runProcesses machine.emu quantum turn
-      flushShared machine machine.emu
-      let (kernel, written) := (← machine.kernel.get).takeOutput
-      machine.kernel.set kernel
-      if written.size > 0 then output written
-      match outcome with
-      | .outOfFuel => if left ≤ turn then pure .outOfFuel else go rounds (left - turn)
-      | other => pure other
-  go (fuel + 1) fuel
+  let some history ← machine.history.get
+    | machine.runPieces output quantum fuel (64 * quantum) fun _ _ => pure ()
+  let keep (history : Machine.History) : IO Machine.History := do
+    let saved := history.saved.push (history.position, quantum, ← machine.save)
+    pure { history with saved := if saved.size > history.limit then saved.extract (saved.size - history.limit) saved.size else saved }
+  -- Where it already has what it is at this place, that is what the host may have changed.
+  let start := match history.saved.back? with
+    | some (at_, _, _) => if at_ == history.position then { history with saved := history.saved.pop } else history
+    | none => history
+  machine.history.set (some (← keep start))
+  let since ← IO.mkRef 0
+  machine.runPieces output quantum fuel history.every fun ran whole => do
+    let some current ← machine.history.get | return
+    let current := { current with position := current.position + ran }
+    since.modify (· + ran)
+    if whole && (← since.get) ≥ current.every then
+      since.set 0
+      machine.history.set (some (← keep current))
+    else machine.history.set (some current)
+
+/-- Starts keeping what `Machine.stepBack` needs, from here on: what the machine is each time `Machine.run` starts, and every `every` instructions, of which the latest `limit` stay. A step back runs again
+at most `every` instructions, and each kept state is a copy of all memory. What it had kept before goes. Models that are attached after this aren't in what it keeps, and stay as they are when it steps back. -/
+def Machine.keepHistory (machine : Machine) (every : Nat := 100000) (limit : Nat := 100) : IO Unit :=
+  machine.history.set (some { every := max every 1, limit := max limit 1 })
+
+/-- Where it is, in the instructions of all threads that `Machine.run` has run since it started keeping a history. -/
+def Machine.position (machine : Machine) : IO Nat := do
+  match ← machine.history.get with
+  | some history => pure history.position
+  | none => throw <| IO.userError "a machine that keeps no history has no position: call keepHistory first"
+
+/-- Undoes the last `count` instructions, of whichever threads ran them, as if they had never run: memory, registers, the kernel and the models are what they were, and the next run goes on from there. It goes
+back to what it kept last before that place and runs the rest again, the way the run did, in the interpreter or the JIT and without stopping at breakpoints, which stay. What the program wrote
+to the console has gone out, and isn't written again. Hooks of the host see what runs again, and a handler of system calls is asked again, which has to answer the same.
+
+What the host did in the middle of a run, such as a hook that changed memory, has to be the same when it runs again, or it is what it does then. -/
+def Machine.stepBack (machine : Machine) (count : Nat := 1) : IO Unit := do
+  if count == 0 then return
+  let some history ← machine.history.get
+    | throw <| IO.userError "a machine that keeps no history can't step back: call keepHistory first"
+  if (← machine.emu.serving.get) then
+    throw <| IO.userError "a machine can't step back in the middle of an instruction"
+  let some (oldest, _, _) := history.saved[0]? | throw <| IO.userError "nothing has run since it started keeping a history"
+  if count > history.position || history.position - count < oldest then
+    throw <| IO.userError s!"it can step back {history.position - oldest} instructions at most, of what it keeps"
+  let target := history.position - count
+  let some index := (List.range history.saved.size).reverse.find? fun index => (history.saved[index]?.map fun entry => decide (entry.1 ≤ target)).getD false
+    | throw <| IO.userError "nothing kept is before that"
+  let some (at_, quantum, saved) := history.saved[index]? | throw <| IO.userError "nothing kept is before that"
+  machine.restore saved
+  if target > at_ then
+    let muted ← machine.emu.breakpointsMuted.get
+    machine.emu.breakpointsMuted.set true
+    try
+      let _ ← machine.runPieces (fun _ => pure ()) quantum (target - at_) history.every fun _ _ => pure ()
+    finally
+      machine.emu.breakpointsMuted.set muted
+  -- What came after is what may not happen again.
+  machine.history.set (some { history with position := target, saved := history.saved.extract 0 (index + 1) })
 
 /-! Memory of a guest for who runs it. -/
 
@@ -1638,35 +1750,6 @@ def Machine.realloc (machine : Machine) (address size : Nat) (pid : Option Nat :
       throw error
     machine.free address
     pure moved
-
-/-- What is in the kernel, in the emulator and in the models at once, to go back to. -/
-structure Machine.Saved where
-  emulator : Snapshot
-  run : RunState
-  kernel : Kernel
-  models : List (String × ByteArray)
-
-private def Machine.modelBytes (machine : Machine) : IO (List (AttachedModel × ByteArray)) := do
-  (← machine.models.get).mapM fun model => do pure (model, ← model.state.save)
-
-/-- It is as whole as a checkpoint has to be: not in the middle of an instruction, or from a worker of a parallel round. -/
-def Machine.save (machine : Machine) : IO Machine.Saved := do
-  if (← machine.emu.serving.get) || machine.emu.engine.deferMemorySync then
-    throw <| IO.userError "a machine can't be saved in the middle of an instruction, or by a worker of a parallel round: stop the thread, and save it once the run returns"
-  pure {
-    emulator := ← snapshot machine.emu
-    run := ← runState machine.emu
-    kernel := ← machine.kernel.get
-    models := (← machine.modelBytes).map fun (model, bytes) => (model.id, bytes)
-  }
-
-def Machine.restore (machine : Machine) (saved : Machine.Saved) : IO Unit := do
-  Bap.Emu.restore machine.emu saved.emulator
-  -- Which breakpoints there are is up to who is debugging it now.
-  setRunState machine.emu { saved.run with breakpoints := [] }
-  machine.kernel.set saved.kernel
-  for model in ← machine.models.get do
-    if let some bytes := saved.models.lookup model.id then model.state.load bytes
 
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 

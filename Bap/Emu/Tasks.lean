@@ -603,6 +603,12 @@ private def runGuest (emu : Emu) (quantum fuel : Nat) : IO Nat := do
     else
       throw error
 
+/-- `runGuest`, which `executed` counts. -/
+private def ran (emu : Emu) (quantum fuel : Nat) : IO Nat := do
+  let used ← runGuest emu quantum fuel
+  emu.executed.modify (· + used)
+  pure used
+
 private def scheduleLoop (emu : Emu) (quantum : Nat) : Nat → Nat → IO ScheduleOutcome
   | 0, _ => pure .outOfFuel
   | rounds + 1, fuel => do
@@ -610,7 +616,7 @@ private def scheduleLoop (emu : Emu) (quantum : Nat) : Nat → Nat → IO Schedu
     -- have if the fuel hadn't run out here.
     if (← emu.turnUsed.get) > 0 then
       if fuel = 0 then pure .outOfFuel
-      else scheduleLoop emu quantum rounds (fuel - (← runGuest emu quantum fuel))
+      else scheduleLoop emu quantum rounds (fuel - (← ran emu quantum fuel))
     else
     settleWaiters emu
     saveCurrentThread emu
@@ -636,7 +642,7 @@ private def scheduleLoop (emu : Emu) (quantum : Nat) : Nat → Nat → IO Schedu
         switchThread emu id
         collectGone emu
         scheduleLoop emu quantum rounds fuel
-      | .run => scheduleLoop emu quantum rounds (fuel - (← runGuest emu quantum fuel))
+      | .run => scheduleLoop emu quantum rounds (fuel - (← ran emu quantum fuel))
 
 /-- Runs the tasks in turns of `quantum` instructions, until nothing can run, a thread stops for a reason of its own or `fuel`
 instructions have run. A blocked thread goes on when what it waits for has happened. A process that faults ends with SIGSEGV.

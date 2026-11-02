@@ -1687,6 +1687,80 @@ def testLinuxExecutionModes (triple : String) (name : String) : IO Unit := do
   assertEqual s!"Linux {triple} {name} says the same when it changes" jitText text
   assertTrue s!"Linux {triple} {name} is in the same state when it changes" (jitState == state)
 
+/-- A step back is what the machine was there: the same as one that ran that far and no further, whatever ran in between, such as threads, a child, shared memory and files, and from there it goes on
+as it would have. -/
+def testStepBack (triple name : String) : IO Unit := do
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-{name}"
+  let bytes := "ABCDEFGHIJKLMNOP".toUTF8
+  let start : IO Bap.Linux.Machine := do
+    Bap.Linux.start ((Bap.Linux.Kernel.empty.addFile "/test" program).addFile "/data" bytes) "/test" ["/test", "arg1"]
+  let at_ (count : Nat) : IO _ := do
+    let machine ← start
+    let _ ← machine.run (fuel := count) fun _ => pure ()
+    stateOf machine
+  let whole ← start
+  let wholeOutcome ← whole.run fun _ => pure ()
+  let wholeState ← stateOf whole
+  let machine ← start
+  machine.keepHistory (every := 997) (limit := 100000)
+  let mut position := 0
+  for piece in [3001, 1, 7919, 1000000000] do
+    let _ ← machine.run (fuel := piece) fun _ => pure ()
+    position ← machine.position
+  let last := position
+  assertTrue s!"Linux {triple} {name} ran enough to step back through" (last > 12000)
+  for target in [last - 1, last - 500, 11000, 3002, 3001, 1234, 1, 0] do
+    machine.stepBack (position - target)
+    position ← machine.position
+    assertEqual s!"Linux {triple} {name} is where it stepped back to" target position
+    assertTrue s!"Linux {triple} {name} stepped back to {target} is what ran to {target} is" ((← stateOf machine) == (← at_ target))
+  let outcome ← machine.run fun _ => pure ()
+  assertEqual s!"Linux {triple} {name} goes on from a step back as it would have" wholeOutcome outcome
+  assertTrue s!"Linux {triple} {name} ends the same after stepping back" ((← stateOf machine) == wholeState)
+  -- And it steps back again over what it ran again.
+  machine.stepBack 3
+  assertTrue s!"Linux {triple} {name} steps back again" ((← stateOf machine) == (← at_ ((← machine.position))))
+
+private def assertThrows (name : String) (action : IO Unit) : IO Unit := do
+  let failed ← try action; pure false catch _ => pure true
+  assertTrue name failed
+
+/-- What the host does between runs is undone by stepping back before it and kept after it; a breakpoint stays and stops it again where it did; and what it doesn't have it says. -/
+def testStepBackHost : IO Unit := do
+  let program ← IO.FS.readBinFile "testsuite/bin/aarch64-linux-musl-libc-memory"
+  let start : IO Bap.Linux.Machine := do
+    Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let machine ← start
+  assertThrows "a machine that keeps nothing can't step back" (machine.stepBack 1)
+  machine.keepHistory (every := 1000)
+  let _ ← machine.run (fuel := 5000) fun _ => pure ()
+  let before ← stateOf machine
+  let block ← machine.malloc 16
+  machine.write block "edited".toUTF8
+  let _ ← machine.run (fuel := 2000) fun _ => pure ()
+  machine.stepBack 1000
+  assertEqual "what the host wrote is there after it wrote it" "edited".toUTF8.toList (← machine.read block 6).toList
+  machine.stepBack 1000
+  assertEqual "it is where the host wrote it" 5000 (← machine.position)
+  assertEqual "what the host wrote stays at the place where it wrote it" "edited".toUTF8.toList (← machine.read block 6).toList
+  machine.stepBack 1
+  let undone ← start
+  let _ ← undone.run (fuel := 4999) fun _ => pure ()
+  assertTrue "a step back before what the host did is as if it hadn't" ((← stateOf machine) == (← stateOf undone))
+  assertThrows "it can't step back further than it ran" (machine.stepBack 5000)
+  -- A breakpoint where it went stops it there again, and isn't where it stops when it runs again what it ran.
+  let _ ← machine.run (fuel := 3000) fun _ => pure ()
+  let pc ← machine.emu.pc.get
+  let place ← machine.position
+  machine.stepBack 2500
+  let _ ← Bap.Emu.addBreakpoint machine.emu pc
+  machine.stepBack 100
+  assertEqual "a breakpoint doesn't stop what runs again" (place - 2600) (← machine.position)
+  let outcome ← machine.run fun _ => pure ()
+  assertTrue s!"a breakpoint stops it where it went: {repr outcome}" (outcome matches .stopped _)
+  assertTrue "where the breakpoint is" ((← machine.position) ≤ place)
+  let _ := before
+
 /-- What takes time in proportion to what it does and not to what it has done before: when the work is four times as much it takes about four times as long, and sixteen if it goes through all that
 went before. Each is run alone, as what a test measures isn't to be what the others are doing. -/
 def scaling : IO Unit := do
