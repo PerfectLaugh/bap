@@ -398,14 +398,24 @@ def threadPairs (left right : Record) : List (Nat × Option ThreadId × Option T
   let rightThreads := threadOrder right
   (List.range (max leftThreads.size rightThreads.size)).map fun ordinal => (ordinal, leftThreads[ordinal]?, rightThreads[ordinal]?)
 
+/-- What each thread of a run ran and what it was given, gathered in one pass of each. -/
+structure ByThread where
+  history : Std.HashMap ThreadId (Array Executed) := {}
+  services : Std.HashMap ThreadId (Array Event) := {}
+
+def byThread (record : Record) : ByThread :=
+  { history := record.history.foldl (init := {}) fun table entry => table.alter entry.thread fun known => some ((known.getD #[]).push entry)
+    services := record.events.foldl (init := {}) fun table event =>
+      if event matches .service .. then table.alter event.thread fun known => some ((known.getD #[]).push event) else table }
+
 /-- What a thread ran, or nothing for one that isn't there. -/
-def ofThread (record : Record) (thread : Option ThreadId) : Array Executed :=
+def ofThread (threads : ByThread) (thread : Option ThreadId) : Array Executed :=
   match thread with
-  | some thread => record.history.filter (·.thread == thread)
+  | some thread => threads.history.getD thread #[]
   | none => #[]
 
 /-- Where a pair of threads first went different ways, from where both still have what they ran, which is the same index of each. -/
-def branchAt (left right : Record) (pair : Nat × Option ThreadId × Option ThreadId) : Option BranchDifference :=
+def branchAt (left right : ByThread) (pair : Nat × Option ThreadId × Option ThreadId) : Option BranchDifference :=
   let (ordinal, leftThread, rightThread) := pair
   let ls := ofThread left leftThread
   let rs := ofThread right rightThread
@@ -422,16 +432,16 @@ def branchAt (left right : Record) (pair : Nat × Option ThreadId × Option Thre
       left := ls[position]?.map (·.pc), right := rs[position]?.map (·.pc) : BranchDifference }
 
 /-- What services a thread had, or none for one that isn't there. -/
-def servicesOf (record : Record) (thread : Option ThreadId) : Array Event :=
+def servicesOf (threads : ByThread) (thread : Option ThreadId) : Array Event :=
   match thread with
-  | some thread => record.events.filter fun event => event.thread == thread && (event matches .service ..)
+  | some thread => threads.services.getD thread #[]
   | none => #[]
 
 /-- Whether two services are the same, by what they were and what came of them, as their arguments may only be addresses. -/
 def sameService (left right : Option Event) : Bool := left.bind Event.serviceKey == right.bind Event.serviceKey
 
 /-- What a pair of threads were first given differently. -/
-def serviceAt (left right : Record) (pair : Nat × Option ThreadId × Option ThreadId) : Option ServiceDifference :=
+def serviceAt (left right : ByThread) (pair : Nat × Option ThreadId × Option ThreadId) : Option ServiceDifference :=
   let (ordinal, leftThread, rightThread) := pair
   let ls := servicesOf left leftThread
   let rs := servicesOf right rightThread
@@ -445,8 +455,10 @@ def serviceAt (left right : Record) (pair : Nat × Option ThreadId × Option Thr
 that it doesn't matter how the threads were scheduled. -/
 def compare (left right : Record) : Difference :=
   let pairs := threadPairs left right
-  { branch := earliest (·.seq) (pairs.filterMap (branchAt left right))
-    service := earliest (·.seq) (pairs.filterMap (serviceAt left right))
+  let leftThreads := byThread left
+  let rightThreads := byThread right
+  { branch := earliest (·.seq) (pairs.filterMap (branchAt leftThreads rightThreads))
+    service := earliest (·.seq) (pairs.filterMap (serviceAt leftThreads rightThreads))
     complete := left.droppedHistory == 0 && right.droppedHistory == 0 && left.droppedEvents == 0 && right.droppedEvents == 0 }
 
 def Difference.text (difference : Difference) : String :=

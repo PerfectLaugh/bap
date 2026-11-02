@@ -1161,27 +1161,37 @@ private def edgeRank : Edge → Nat
   | .guard => 2
   | .address => 3
 
-/-- What depends on what from a byte, as far as edges of `limit` go: breadth first, so that a way that it finds is the shortest of those. -/
-private partial def search (tracker : Tracker) (root : Tag) (limit : Nat) :
-    IO (Std.HashMap Tag (Tag × Edge) × Array Tag × Bool) := do
-  let parents ← IO.mkRef ({} : Std.HashMap Tag (Tag × Edge))
-  let order ← IO.mkRef (#[root] : Array Tag)
-  let truncated ← IO.mkRef false
-  let rec loop (index : Nat) : IO Unit := do
-    let found ← order.get
-    if h : index < found.size then
-      let tag := found[index]
+/-- What a byte depends on, each by its strongest way: the weakest edge on a way is what it is, and a byte is reached first by data alone,
+then with what selected it, then by branches and then by pointers, each of those breadth first. That is one search of what it reaches, in
+which a byte goes into the queue of each edge at most once, where there were one for each edge and one of all. It gives each byte's way back
+to the root, the bytes in the order that they were reached, how weak each one's way is, and whether what led to any has gone. -/
+private def search (tracker : Tracker) (root : Tag) :
+    IO (Std.HashMap Tag (Tag × Edge) × Array Tag × Std.HashMap Tag Nat × Bool) := do
+  let mut parents : Std.HashMap Tag (Tag × Edge) := {}
+  let mut levels : Std.HashMap Tag Nat := ({} : Std.HashMap Tag Nat).insert root 0
+  let mut queues : Array (Array Tag) := #[#[root], #[], #[], #[]]
+  let mut order : Array Tag := #[]
+  let mut truncated := false
+  for level in List.range 4 do
+    let mut at_ := 0
+    while at_ < queues[level]!.size do
+      let tag := queues[level]![at_]!
+      at_ := at_ + 1
+      -- What a stronger way reached already, it went on from then.
+      if levels.getD tag 4 < level then continue
+      order := order.push tag
       match ← node? tracker tag.node with
-      | none => truncated.set true
+      | none => truncated := true
       | some node =>
         let next := (inputsOf node tag.byte).toArray.qsort (fun left right => edgeRank left.edge < edgeRank right.edge)
         for input in next do
-          if input.tag.isNode && edgeRank input.edge ≤ limit && input.tag != root && !(← parents.get).contains input.tag then
-            parents.modify (·.insert input.tag (tag, input.edge))
-            order.modify (·.push input.tag)
-      loop (index + 1)
-  loop 0
-  pure (← parents.get, ← order.get, ← truncated.get)
+          if input.tag.isNode then
+            let reached := max level (edgeRank input.edge)
+            if reached < levels.getD input.tag 4 then
+              levels := levels.insert input.tag reached
+              parents := parents.insert input.tag (tag, input.edge)
+              queues := queues.modify reached (·.push input.tag)
+  pure (parents, order, levels, truncated)
 
 private partial def walkFrom (tracker : Tracker) (parents : Std.HashMap Tag (Tag × Edge)) (root tag : Tag) (edge : Edge) (out : Array Step) : IO (Array Step) := do
   match ← node? tracker tag.node with
@@ -1194,31 +1204,26 @@ private partial def walkFrom (tracker : Tracker) (parents : Std.HashMap Tag (Tag
       | some (parent, edgeThere) => walkFrom tracker parents root parent edgeThere out
       | none => pure out
 
-/-- The sources and branches of what a search reached, each source with the weakest edge on the way to it. -/
-private def reached (tracker : Tracker) (root : Tag) (parents : Std.HashMap Tag (Tag × Edge)) (order : Array Tag) :
+/-- The sources and branches of what a search reached, each source with the weakest edge of its strongest way. -/
+private def reached (tracker : Tracker) (order : Array Tag) (levels : Std.HashMap Tag Nat) :
     IO (List (Node × Nat × Edge) × List Node) := do
-  let mut weakest : Std.HashMap Tag Nat := ({} : Std.HashMap Tag Nat).insert root 0
-  let mut sources : List (Node × Nat × Edge) := []
-  let mut branches : List Node := []
+  let mut sources : Array (Node × Nat × Edge) := #[]
+  let mut branches : Array Node := #[]
   for tag in order do
-    let rank := match parents[tag]? with
-      | some (parent, edge) => max (weakest.getD parent 0) (edgeRank edge)
-      | none => 0
-    weakest := weakest.insert tag rank
     if let some node := ← node? tracker tag.node then
       match node.kind with
       | .source .. =>
-        let edge := match rank with | 0 => Edge.data | 1 => .condition | 2 => .guard | _ => .address
-        sources := (node, tag.byte, edge) :: sources
-      | .branch _ => branches := node :: branches
+        let edge := match levels.getD tag 0 with | 0 => Edge.data | 1 => .condition | 2 => .guard | _ => .address
+        sources := sources.push (node, tag.byte, edge)
+      | .branch _ => branches := branches.push node
       | _ => pure ()
-  pure (sources.reverse, branches)
+  pure (sources.toList, branches.toList)
 
-/-- Every source that a byte depends on, with the weakest edge on the way, which is what `explainTag` says of them without the way to any. -/
+/-- Every source that a byte depends on, with the weakest edge of its strongest way, which is what `explainTag` says of them without the way to any. -/
 def sourcesOf (tracker : Tracker) (root : Tag) : IO (List (Node × Nat × Edge)) := do
   if !root.isNode then return []
-  let (parents, order, _) ← search tracker root 3
-  pure (← reached tracker root parents order).1
+  let (_, order, levels, _) ← search tracker root
+  pure (← reached tracker order levels).1
 
 /-- Where the byte with this tag came from. -/
 def explainTag (tracker : Tracker) (root : Tag) : IO Explanation := do
@@ -1226,26 +1231,15 @@ def explainTag (tracker : Tracker) (root : Tag) : IO Explanation := do
     let restores := (← tracker.restores.get).reverse ++ (← tracker.loadedFrom.get).toList
     return { origin := if root.isClean then .clean (root / 2) else .untouched
              restoredFrom := if root.isClean then [] else restores }
-  let isSource (tag : Tag) : IO Bool := do
-    match ← node? tracker tag.node with
-    | some { kind := .source .., .. } => pure true
-    | _ => pure false
-  -- The strongest way that reaches a source: data alone, then with what selected it, then branches, then pointers.
-  let rec attempt : List Nat → IO (Option (Std.HashMap Tag (Tag × Edge) × Tag))
-    | [] => pure none
-    | limit :: rest => do
-      let (parents, order, _) ← search tracker root limit
-      match ← order.findM? isSource with
-      | some tag => pure (some (parents, tag))
-      | none => attempt rest
-  let (allParents, allOrder, truncated) ← search tracker root 3
-  let path ← match ← attempt [0, 1, 2, 3] with
-    | some (parents, tag) => walkFrom tracker parents root tag .data #[]
-    | none =>
-      match allOrder.back? with
-      | some tag => walkFrom tracker allParents root tag .data #[]
-      | none => pure #[]
-  let (sources, branches) ← reached tracker root allParents allOrder
+  let (parents, order, levels, truncated) ← search tracker root
+  let (sources, branches) ← reached tracker order levels
+  -- The strongest way to a source is the first that the search reached; without one, the way to what it reached last.
+  let target := match sources.head? with
+    | some (node, byte, _) => some (nodeTag node.id byte)
+    | none => order.back?
+  let path ← match target with
+    | some tag => walkFrom tracker parents root tag .data #[]
+    | none => pure #[]
   pure {
     origin := .tainted root.node root.byte
     path := path.toList, sources, branches := (branches.toArray.qsort fun left right => left.id < right.id).toList

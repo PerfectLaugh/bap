@@ -90,32 +90,32 @@ theorem threadPairs_self {record : Record} {pair : Nat × Option Emu.ThreadId ×
   obtain ⟨ordinal, _, rfl⟩ := h
   rfl
 
-theorem branchAt_self (record : Record) (ordinal : Nat) (thread : Option Emu.ThreadId) :
-    branchAt record record (ordinal, thread, thread) = none := by
+theorem branchAt_self (threads : ByThread) (ordinal : Nat) (thread : Option Emu.ThreadId) :
+    branchAt threads threads (ordinal, thread, thread) = none := by
   simp [branchAt, List.find?_eq_none]
 
-theorem serviceAt_self (record : Record) (ordinal : Nat) (thread : Option Emu.ThreadId) :
-    serviceAt record record (ordinal, thread, thread) = none := by
+theorem serviceAt_self (threads : ByThread) (ordinal : Nat) (thread : Option Emu.ThreadId) :
+    serviceAt threads threads (ordinal, thread, thread) = none := by
   simp [serviceAt, sameService, List.find?_eq_none]
 
 /-- A run compared with itself parts nowhere, and is given nothing differently. -/
 theorem compare_self (record : Record) : (compare record record).branch = none ∧ (compare record record).service = none := by
-  have hbranches : (threadPairs record record).filterMap (branchAt record record) = [] := by
+  have hbranches : (threadPairs record record).filterMap (branchAt (byThread record) (byThread record)) = [] := by
     rw [List.filterMap_eq_nil_iff]
     intro pair hpair
     obtain ⟨ordinal, thread, other⟩ := pair
     have := threadPairs_self hpair
     simp only at this
     subst this
-    exact branchAt_self record ordinal thread
-  have hservices : (threadPairs record record).filterMap (serviceAt record record) = [] := by
+    exact branchAt_self (byThread record) ordinal thread
+  have hservices : (threadPairs record record).filterMap (serviceAt (byThread record) (byThread record)) = [] := by
     rw [List.filterMap_eq_nil_iff]
     intro pair hpair
     obtain ⟨ordinal, thread, other⟩ := pair
     have := threadPairs_self hpair
     simp only at this
     subst this
-    exact serviceAt_self record ordinal thread
+    exact serviceAt_self (byThread record) ordinal thread
   simp [compare, hbranches, hservices, earliest]
 
 end Journal.Journal

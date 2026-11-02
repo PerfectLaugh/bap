@@ -2030,6 +2030,18 @@ def scaling : IO Unit := do
   let first ← grouping 64000
   let second ← grouping 256000
   assertTrue s!"grouping what a contract changed takes about 4 times as long for 4 times as much: {first} ms and {second} ms" (second ≤ 9 * max first 50)
+  -- Comparing runs goes through what ran once, however many threads ran it.
+  let comparing (threads : Nat) : IO Nat := do
+    let history := (Array.range 400000).map fun seq =>
+      ({ seq, thread := seq % threads, group := 1, index := seq / threads, pc := seq % 97 } : Bap.Analysis.Journal.Executed)
+    let record : Bap.Analysis.Journal.Journal.Record := { history, droppedHistory := 0, events := #[], droppedEvents := 0 }
+    let started ← IO.monoMsNow
+    let difference := Bap.Analysis.Journal.Journal.compare record record
+    assertTrue s!"comparing a run of {threads} threads with itself finds nothing" difference.branch.isNone
+    pure ((← IO.monoMsNow) - started)
+  let few ← comparing 50
+  let many ← comparing 800
+  assertTrue s!"comparing runs takes no longer for more threads: {few} ms and {many} ms" (many ≤ 3 * max few 50)
 
 /-- What is done in place is what it was instead of, and a mapping goes where it always went, wherever it starts looking. -/
 def testScalingEquivalents : IO Unit := do
