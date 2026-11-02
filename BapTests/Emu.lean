@@ -616,6 +616,29 @@ def testLinuxDynamic (triple : String) : IO Unit := do
   assertEqual s!"Linux {triple} a dynamic program has the status of a static one" staticOutcome dynamicOutcome
   assertEqual s!"Linux {triple} a dynamic program does what a static one does" staticText dynamicText
 
+/-- A position-independent program goes where it is asked to, 0 among them, and otherwise where Linux would put it; one that isn't can't be moved. -/
+def testLinuxBase (triple : String) (linked : Nat) : IO Unit := do
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-where"
+  let run (base : Option Nat) : IO String := do
+    let written ← IO.mkRef ByteArray.empty
+    let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"] (base := base)
+    let outcome ← machine.run fun data => written.modify (· ++ data)
+    assertEqual s!"Linux {triple} a program at a base ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+    pure (String.fromUTF8! (← written.get))
+  let hex (value : Nat) : String :=
+    let digits := String.ofList (Nat.toDigits 16 value)
+    String.ofList (List.replicate (16 - digits.length) '0') ++ digits ++ "\n"
+  assertEqual s!"Linux {triple} a program goes where Linux puts it" (hex (0x555555554000 + linked)) (← run none)
+  assertEqual s!"Linux {triple} a program goes where it was linked" (hex linked) (← run (some 0))
+  assertEqual s!"Linux {triple} a program goes at a base" (hex (0x10000000 + linked)) (← run (some 0x10000000))
+  let failed ← try let _ ← run (some 0x1001); pure false catch _ => pure true
+  assertTrue s!"Linux {triple} a base is a page" failed
+  let fixed ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-files"
+  let moved ← try let _ ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" fixed) "/test" ["/test"] (base := some 0x10000000); pure false
+    catch _ => pure true
+  assertTrue s!"Linux {triple} a program that isn't position-independent can't be moved" moved
+  let _ ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" fixed) "/test" ["/test"] (base := some 0)
+
 /-- A program of the older ABI of 64-bit PowerPC, that finds its data by what its function descriptor says. -/
 def testPowerpcElfv1 : IO Unit := do
   let program ← IO.FS.readBinFile "testsuite/bin/powerpc64-linux-elfv1"

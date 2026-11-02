@@ -197,6 +197,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testStepBack "arm" "libc-memory",
     Bap.Tests.Emu.testStepBack "riscv64" "libc-threads",
     Bap.Tests.Emu.testStepBackHost,
+    Bap.Tests.Emu.testLinuxBase "x86_64" 0x1220,
+    Bap.Tests.Emu.testLinuxBase "aarch64" 0x10220,
     Bap.Tests.Emu.testStepBackAfterRestore,
     Bap.Tests.Emu.testScalingEquivalents,
     Bap.Tests.Emu.testTaintSources,

@@ -1116,8 +1116,8 @@ private def mapStack (emu : Emu) (architecture : Architecture) (arguments enviro
 /-- A parsed program and what interprets it in an emulator that has nothing mapped: its registers, its memory, its stack and
 where it starts. It gives where its heap starts and its auxiliary vector, as a type and a value by turns. -/
 private def loadProgram (emu : Emu) (architecture : Architecture) (path : String) (data : ByteArray) (program : Elf.Program)
-    (interpreter : Option (ByteArray × Elf.Program)) (arguments environment : List String) : IO (Nat × List Nat) := do
-  let base := if program.relocatable then programBase architecture else 0
+    (interpreter : Option (ByteArray × Elf.Program)) (arguments environment : List String) (base : Option Nat := none) : IO (Nat × List Nat) := do
+  let base := if program.relocatable then base.getD (programBase architecture) else 0
   resetRegisters emu architecture
   let top ← mapProgram emu data program base
   let lowest := program.segments.foldl (fun lowest segment => min lowest segment.address) (2 ^ 63)
@@ -1473,12 +1473,19 @@ def targetDigest (architecture : Architecture) (program : ByteArray) : Nat :=
   (Wire.digest program (Wire.digest s!"{number} {bits} {big} {flags}".toUTF8)).toNat
 
 /-- A machine at the start of `path`, which is in `kernel`. Its first process has the standard descriptors, on a console, with
-`input` to read. `watch` sees each system call before it is served, and then `handler`, which may serve it in place of the kernel. -/
+`input` to read. `watch` sees each system call before it is served, and then `handler`, which may serve it in place of the kernel. A position-independent program goes at `base` if one is given, such as 0 for where it was linked, and otherwise where Linux would put it. That is the program
+alone: its interpreter, and what it runs with `execve`, go where they always do. At 0, its first page is at address 0, so that a null pointer into it reads it instead of faulting, as on
+Linux it can't. -/
 def start (kernel : Kernel) (path : String) (arguments : List String) (environment : List String := [])
     (input : ByteArray := ByteArray.empty) (watch : Option (Nat → List Nat → IO Unit) := none)
-    (handler : Option SyscallHandler := none) (models : List RuntimeModel := []) : IO Machine := do
+    (handler : Option SyscallHandler := none) (models : List RuntimeModel := []) (base : Option Nat := none) : IO Machine := do
   let data ← IO.ofExcept ((fileOf kernel path).mapError fun errno => s!"{path}: error {errno}")
   let program ← IO.ofExcept (Elf.parse data)
+  if let some at_ := base then
+    if !program.relocatable && at_ != 0 then
+      throw <| IO.userError s!"{path} isn't position-independent: it goes where it was linked, and only a base of 0 says that"
+    if at_ % 4096 != 0 then
+      throw <| IO.userError s!"a base of {at_} isn't at the start of a page"
   let some architecture := Architecture.ofElf program.machine program.bits program.big program.flags
     | throw <| IO.userError s!"{path}: no Linux machine for ELF machine {program.machine} of {program.bits} bits"
   let interpreter ← match program.interpreter with
@@ -1490,7 +1497,7 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   -- would be lifted each time it runs. Most of its code runs at its start, a few times, and compiling that takes longer than
   -- running it, up to about this threshold: at 16 a short program takes half as long again, and a long one no less.
   let emu ← emulatorOf architecture
-  let (top, auxiliary) ← loadProgram emu architecture path data program interpreter arguments environment
+  let (top, auxiliary) ← loadProgram emu architecture path data program interpreter arguments environment base
   let first := (← currentTask emu).group
   let kernel := kernel.withConsole first input
   let kernel := kernel.setProcess first { kernel.process first with
