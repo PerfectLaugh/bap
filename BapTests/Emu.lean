@@ -2255,6 +2255,39 @@ def testScalingEquivalents : IO Unit := do
     let tree ← Bap.Emu.regionTree emu
     assertEqual "what is indexed is what is mapped" (((← emu.regions.get).filter (·.data.size != 0)).map (·.address) |>.toArray.qsort (· < ·)).toList tree.keys
 
+/-- Native code of each architecture calls JNI by its own convention, and what it gets is what the model says: results of each width,
+arguments past the registers, strings, objects and the VM. `floats` is whether this serves floating-point results there. -/
+def testJniNative (triple : String) (floats : Bool := true) : IO Unit := do
+  let label := s!"JNI {triple}"
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-jni-native"
+  let image ← IO.ofExcept (Bap.Image.Elf.decode program)
+  let some run := image.symbols.find? (·.name == "run") | throw <| IO.userError s!"{label} has no run"
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let place (bytes : ByteArray) : IO Nat := do
+    let address ← machine.malloc (bytes.size + 1)
+    machine.write address (bytes.push 0)
+    pure address
+  let arg := Bap.Emu.Jni.arg
+  let method (name signature : String) (answer : Bap.Emu.Jni.Call → Bap.Emu.Jni.Answer) : Bap.Emu.Jni.MethodDecl :=
+    { name, signature, answer := fun call => pure (answer call) }
+  let thing : Bap.Emu.Jni.ClassDecl := {
+    name := "example/Thing"
+    methods := [
+      method "twice" "(I)I" fun call => .value (arg call 3 % 2 ^ 32 * 2),
+      method "wide" "()J" fun _ => .value 0x123456789abcdef0,
+      method "half" "()D" fun _ => .value 0x4004000000000000,
+      method "quarter" "()F" fun _ => .value 0x3FA00000]
+    staticMethods := [method "sum" "(IIIII)I" fun call => .value (((List.range 5).map fun index => arg call (3 + index)).foldl (· + ·) 0)] }
+  let model ← Bap.Emu.Jni.create (Bap.Emu.Jni.readCString machine.emu) (fun text => place text.toUTF8) place
+    (fun _ _ => pure (.value 0)) (classes := [thing]) (big := machine.architecture.big)
+  let layout ← Bap.Emu.Jni.attachAt model machine.emu
+  let self ← Bap.Emu.Jni.intern model 0x9001
+  -- The address of a function of Thumb says so in its lowest bit, which the symbol has apart.
+  let found ← machine.call (run.addr + if run.thumb then 1 else 0) [layout.env, self]
+  let all := 0x1FF
+  let expected := if floats then all else all - 8 - 16
+  assertEqual s!"{label} native code finds what the model says, by its convention" expected found
+
 /-- What JNI gives a guest is a source, in the register it comes back in and in memory, and so is what someone says is one. -/
 def testTaintSources : IO Unit := do
   let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile "testsuite/bin/aarch64-linux-musl-libc-taint")

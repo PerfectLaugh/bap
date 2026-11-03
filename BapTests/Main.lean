@@ -287,6 +287,14 @@ def main : IO Unit := do
     Bap.Tests.Emu.testParallelFences,
     Bap.Tests.Emu.testParallelUnaligned,
     Bap.Tests.Jni.run,
+    Bap.Tests.Emu.testJniNative "aarch64",
+    Bap.Tests.Emu.testJniNative "x86_64",
+    Bap.Tests.Emu.testJniNative "arm",
+    Bap.Tests.Emu.testJniNative "thumb",
+    Bap.Tests.Emu.testJniNative "i686" (floats := false),
+    Bap.Tests.Emu.testJniNative "riscv64",
+    Bap.Tests.Emu.testJniNative "mips" (floats := false),
+    Bap.Tests.Emu.testJniNative "mips64" (floats := false),
     Bap.Tests.Jni.testState
   ]
   Bap.Tests.Optimize.scaling

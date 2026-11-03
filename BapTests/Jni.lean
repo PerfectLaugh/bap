@@ -107,6 +107,13 @@ def run : IO Unit := do
   assertEqual "JNI dynamic method uses fallback once" 0x77
     (← dispatch model (call 34 [0, localHandle, methodFirst]))
   assertEqual "JNI dynamic method fallback count" 1 (← fallbacks.get)
+  let object ← dispatch model (call 27 [0, classFirst])
+  let another ← dispatch model (call 27 [0, classFirst])
+  assertTrue "JNI AllocObject gives an object" (object != 0)
+  assertEqual "JNI each AllocObject is another" 0 (← dispatch model (call 24 [0, object, another]))
+  assertEqual "JNI an allocated object is of its class" 1
+    (← dispatch model (call 24 [0, ← dispatch model (call 31 [0, object]), classFirst]))
+  assertEqual "JNI AllocObject doesn't fall back" 1 (← fallbacks.get)
   let field ← dispatch model (call 94 [0, classFirst, 0x130, 0x140])
   assertEqual "JNI dynamic field name" (some "value") (← dynamicName model field)
   assertEqual "JNI field fallback count remains lazy" 1 (← fallbacks.get)

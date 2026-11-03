@@ -1,5 +1,6 @@
 import Bap.Emu
 import Bap.Linux.Wire
+import Bap.Emu.Tasks
 
 namespace Bap.Emu.Jni
 
@@ -105,6 +106,8 @@ structure Model where
   default : Call → (Nat → IO (Option String)) → IO Answer
   log : Call → String → Nat → IO Unit
   version : Nat := 0x10006
+  /-- Whether the guest has the most significant byte first, for the elements of arrays and the units of strings that it is given. -/
+  big : Bool := false
   exception : IO.Ref (Option Identity)
   env : IO.Ref Nat
   vm : IO.Ref Nat
@@ -119,9 +122,10 @@ def utf16Units (text : String) : List Nat :=
       let offset := char.toNat - 0x10000
       [0xD800 + offset / 0x400, 0xDC00 + offset % 0x400]
 
-/-- The little-endian bytes of UTF-16 code units. -/
-def utf16Bytes (units : List Nat) : ByteArray :=
-  ByteArray.mk (units.flatMap fun unit => [UInt8.ofNat (unit % 256), UInt8.ofNat (unit / 256)]).toArray
+/-- The bytes of UTF-16 code units, the least significant first unless `big`. -/
+def utf16Bytes (units : List Nat) (big : Bool := false) : ByteArray :=
+  ByteArray.mk (units.flatMap fun unit =>
+    if big then [UInt8.ofNat (unit / 256), UInt8.ofNat (unit % 256)] else [UInt8.ofNat (unit % 256), UInt8.ofNat (unit / 256)]).toArray
 
 /-- The size of an element of a primitive array, by the `Get<Type>ArrayElements` of the JNI table:
 boolean, byte, char, short, int, long, float, double. -/
@@ -272,7 +276,7 @@ def create (readString : Nat → IO String) (allocString : String → IO Nat)
     (log : Call → String → Nat → IO Unit := fun _ _ _ => pure ())
     (classes : List ClassDecl := []) (objects : List ObjectDecl := [])
     (classOf : Nat → Option String := fun _ => none)
-    (firstHandle : Nat := 0x52030000) (version : Nat := 0x10006) : IO Model := do
+    (firstHandle : Nat := 0x52030000) (version : Nat := 0x10006) (big : Bool := false) : IO Model := do
   let model : Model := {
     nextHandle := ← IO.mkRef firstHandle
     nextIdentity := ← IO.mkRef 0
@@ -292,7 +296,7 @@ def create (readString : Nat → IO String) (allocString : String → IO Nat)
     dynamicIds := ← IO.mkRef {}
     dynamicNames := ← IO.mkRef {}
     nextDynamic := ← IO.mkRef 0x10000
-    readString, allocString, allocBytes, classOf, default, log, version
+    readString, allocString, allocBytes, classOf, default, log, version, big
     exception := ← IO.mkRef none
     env := ← IO.mkRef 0
     vm := ← IO.mkRef 0
@@ -376,7 +380,7 @@ private def wideStringAddress (model : Model) (id : Identity) : IO Nat := do
     match info.wideAddress with
     | some address => pure address
     | none =>
-      let address ← model.allocBytes (utf16Bytes (utf16Units info.contents))
+      let address ← model.allocBytes (utf16Bytes (utf16Units info.contents) model.big)
       model.strings.modify (·.insert id { info with wideAddress := some address })
       pure address
 
@@ -396,7 +400,9 @@ private def arrayAddress (model : Model) (id : Identity) (width : Nat) : IO Nat 
     | some elements =>
       let bytes := elements.flatMap fun element =>
         match element with
-        | .value value => (List.range width).map fun index => UInt8.ofNat (value / 256 ^ index % 256)
+        | .value value =>
+          let bytes := (List.range width).map fun index => UInt8.ofNat (value / 256 ^ index % 256)
+          if model.big then bytes.reverse else bytes
         | _ => []
       let address ← model.allocBytes (ByteArray.mk bytes.toArray)
       model.arrayAddresses.modify (·.insert id address)
@@ -444,6 +450,11 @@ private def compute (model : Model) (call : Call) : IO (Nat × String) := do
     let same := if arg call 1 = 0 || arg call 2 = 0 then arg call 1 = arg call 2 else left = right
     pure (if same then 1 else 0, "")
   | 25 => pure (← resolve model (arg call 1) >>= internIdentity model .local, "")
+  | 27 =>
+    -- AllocObject(env, class): an object of the class that no constructor has run on.
+    let object ← freshIdentity model
+    model.objectClasses.modify (·.insert object (← resolve model (arg call 1)))
+    pure (← internIdentity model .local object, "alloc")
   | 31 => pure (← getObjectClass model (arg call 1), "")
   | 33 | 113 =>
     let name ← model.readString (arg call 2)
@@ -536,40 +547,187 @@ private def installStubs (emu : Emu) (stubs dispatcher count : Nat) : IO Unit :=
     let movz := 0x52800008 + index * 32
     Bap.Emu.write emu address (word (movz + branch (address + 4) dispatcher * 0x100000000))
 
+/-- A pointer of the guest at an address, as wide as its words and in its order. -/
+private def writePointer (emu : Emu) (address value : Nat) : IO Unit := do
+  let width ← wordWidth emu
+  let bytes := (List.range (width / 8)).map fun index => UInt8.ofNat (value / 256 ^ index % 256)
+  Bap.Emu.write emu address (ByteArray.mk (if emu.config.endian == .big then bytes.reverse else bytes).toArray)
+
+/-- Puts the tables of the VM and of the environment where the layout says, each function at its stub, 8 bytes apart. On AArch64 a stub
+is code that says which it is and goes to the dispatcher, for `serve` and `serveVm`; elsewhere what is there doesn't run, as `attach`
+serves a stub before it would. -/
 def install (model : Model) (emu : Emu) (layout : Layout) : IO Unit := do
+  let word := (← wordWidth emu) / 8
   model.env.set layout.env
   model.vm.set layout.vm
-  writeWord emu layout.vm layout.vmFunctions
-  writeWord emu layout.env layout.envFunctions
-  installStubs emu layout.envStubs layout.envDispatcher 233
-  installStubs emu layout.vmStubs layout.vmDispatcher 8
+  writePointer emu layout.vm layout.vmFunctions
+  writePointer emu layout.env layout.envFunctions
+  if emu.config.syscallAbi == .aarch64 then
+    installStubs emu layout.envStubs layout.envDispatcher 233
+    installStubs emu layout.vmStubs layout.vmDispatcher 8
   (List.range 233).forM fun index =>
-    writeWord emu (layout.envFunctions + index * 8) (layout.envStubs + index * 8)
+    writePointer emu (layout.envFunctions + index * word) (layout.envStubs + index * 8)
   (List.range 8).forM fun index =>
-    writeWord emu (layout.vmFunctions + index * 8) (layout.vmStubs + index * 8)
+    writePointer emu (layout.vmFunctions + index * word) (layout.vmStubs + index * 8)
 
-private def currentCall (emu : Emu) : IO Call := do
-  let args ← (List.range 8).mapM fun index => readReg emu s!"X{index}"
-  pure ⟨← readReg emu "X8", args.toArray⟩
+/-! ### Calls by the convention of each architecture
 
+Native code calls what a table has as a function of C, by the convention of its architecture: the arguments in registers and then on
+the stack, and the result in a register, or in two for a `jlong` on 32 bits, or in a register of floating point for a `jfloat` or a
+`jdouble`. A variadic call, `Call<Type>Method`, has its arguments where a call that isn't has them, on the systems that this serves. -/
+
+private structure Convention where
+  arguments : List String
+  stack : String
+  /-- Where on the stack the first argument that isn't in a register is, at the first instruction. -/
+  stackOffset : Nat
+  /-- What has where it returns to; on x86 the stack has it. -/
+  link : Option String
+  result : String
+  /-- Of a result of 64 bits on 32: the register of the other half, and whether it has the high half or the low. -/
+  pair : Option (String × Bool) := none
+  /-- The registers of a floating-point result, if the host serves those here. -/
+  float : List String := []
+
+private def conventionOf (emu : Emu) (width : Nat) : Convention :=
+  let big := emu.config.endian == .big
+  match emu.config.syscallAbi with
+  | .aarch64 => { arguments := (List.range 8).map (s!"X{·}"), stack := "SP", stackOffset := 0, link := some "X30", result := "X0"
+                  float := ["Q0"] }
+  | .x86_64 => { arguments := ["RDI", "RSI", "RDX", "RCX", "R8", "R9"], stack := "RSP", stackOffset := 8, link := none
+                 result := "RAX", float := ["ZMM0"] }
+  | .x86_32 => { arguments := [], stack := "ESP", stackOffset := 4, link := none, result := "EAX", pair := some ("EDX", true) }
+  -- Android's ARM is soft-float, with what floats in core registers, and the rest of Linux has `D0`: both have it.
+  | .arm => { arguments := ["R0", "R1", "R2", "R3"], stack := "SP", stackOffset := 0, link := some "LR", result := "R0"
+              pair := some ("R1", true), float := ["D0"] }
+  | .riscv => { arguments := (List.range 8).map (s!"X{10 + ·}"), stack := "X2", stackOffset := 0, link := some "X1", result := "X10"
+                pair := if width == 32 then some ("X11", true) else none, float := ["F10"] }
+  | .mips =>
+    if width == 32 then
+      { arguments := ["R4", "R5", "R6", "R7"], stack := "R29", stackOffset := 16, link := some "R31", result := "R2"
+        pair := some ("R3", !big) }
+    else { arguments := (List.range 8).map (s!"R{4 + ·}"), stack := "R29", stackOffset := 0, link := some "R31", result := "R2" }
+  | .powerpc => { arguments := (List.range 8).map (s!"R{3 + ·}"), stack := "R1", stackOffset := 8, link := some "LR", result := "R3"
+                  pair := some ("R4", false) }
+  | .powerpc64 => { arguments := (List.range 8).map (s!"R{3 + ·}"), stack := "R1", stackOffset := 96, link := some "LR", result := "R3" }
+
+/-- What a function of the table gives: of `Call<Type>Method` and `Get<Type>Field`, by their type, as `boolean`, `byte`, `char`, `short`,
+`int`, `long`, `float`, `double` and `void` come after `Object` in each. -/
+inductive ResultKind where
+  | word | long | float | double
+  deriving DecidableEq, Repr
+
+def resultKindOf (index : Nat) : ResultKind :=
+  let ofType (type : Nat) : ResultKind := match type with
+    | 6 => .long
+    | 7 => .float
+    | 8 => .double
+    | _ => .word
+  if index ≥ 34 && index ≤ 63 then ofType ((index - 34) / 3)
+  else if index ≥ 64 && index ≤ 93 then ofType ((index - 64) / 3)
+  else if index ≥ 114 && index ≤ 143 then ofType ((index - 114) / 3)
+  else if index ≥ 95 && index ≤ 103 then ofType (index - 95)
+  else if index ≥ 145 && index ≤ 153 then ofType (index - 145)
+  else .word
+
+private def registerOf (emu : Emu) (name : String) (width : Nat) : IO Nat := do
+  match Value.asBits (← Bap.Emu.reg emu ⟨name, .imm width, 0, false⟩) with
+  | .ok value => pure value.2.toNat
+  | .error error => throw <| IO.userError error
+
+private def setRegister (emu : Emu) (name : String) (width value : Nat) : IO Unit :=
+  Bap.Emu.setReg emu ⟨name, .imm width, 0, false⟩ (.bits (BitVec.ofNat width value))
+
+/-- Reads a word of the guest. -/
+private def readPointer (emu : Emu) (address width : Nat) : IO Nat := do
+  let bytes ← Bap.Emu.read emu address (width / 8)
+  let ordered := if emu.config.endian == .big then bytes.toList else bytes.toList.reverse
+  pure (ordered.foldl (fun value byte => value * 256 + byte.toNat) 0)
+
+/-- Serves the function `index` of the environment, or of the VM, for a call that is at its first instruction now, by the convention
+of the architecture, and returns to where it was called from. -/
+def serveIndex (model : Model) (emu : Emu) (index : Nat) (vm : Bool := false) : IO Unit := do
+  let width ← wordWidth emu
+  let convention := conventionOf emu width
+  let registers ← convention.arguments.mapM fun name => registerOf emu name width
+  let sp ← registerOf emu convention.stack width
+  let stacked ← (List.range (8 - min 8 registers.length)).mapM fun index =>
+    readPointer emu (sp + convention.stackOffset + index * (width / 8)) width
+  let call : Call := ⟨index, (registers ++ stacked).take 8 |>.toArray⟩
+  for starts in ← emu.hostStarts.get do starts s!"{if vm then "jni-vm" else "jni"}:{index}"
+  let result ← if vm then do
+      let result ← dispatchVm model call
+      if index = 4 || index = 7 || (index = 6 && result = 0) then writePointer emu (arg call 1) (← model.env.get)
+      pure result
+    else do
+      if index = 219 then writePointer emu (arg call 1) (← model.vm.get)
+      dispatch model call
+  let kind := if vm then .word else resultKindOf index
+  -- A value that is of a register of floating point is there, and in the core registers as well, as soft-float ARM has it.
+  if kind == .float || kind == .double then
+    for name in convention.float do
+      let floatWidth := if name == "Q0" then 128 else if name == "ZMM0" then 512 else 64
+      -- RISC-V boxes a single in ones above it.
+      let value := if name == "F10" && kind == .float then result % 2 ^ 32 + (2 ^ 64 - 2 ^ 32) else result
+      setRegister emu name floatWidth value
+  match convention.pair, kind with
+  | some (other, high), .long | some (other, high), .double =>
+    let low := result % 2 ^ 32
+    let upper := result / 2 ^ 32 % 2 ^ 32
+    setRegister emu convention.result width (if high then low else upper)
+    setRegister emu other width (if high then upper else low)
+  | _, _ => setRegister emu convention.result width (result % 2 ^ width)
+  for ends in ← emu.hostEnds.get do ends (some convention.result)
+  match convention.link with
+  | some link =>
+    let target ← registerOf emu link width
+    if emu.config.syscallAbi == .arm then
+      Bap.Emu.setReg emu ⟨"ISET", .imm 1, 0, false⟩ (.bits (BitVec.ofNat 1 (target % 2)))
+      Bap.Emu.setPc emu (target - target % 2)
+    else Bap.Emu.setPc emu target
+  | none =>
+    -- x86 has where it returns to on the stack, which a return takes off.
+    let target ← readPointer emu sp width
+    setRegister emu convention.stack width (sp + width / 8)
+    Bap.Emu.setPc emu target
+
+/-- `serveIndex` for the dispatcher of AArch64, whose stubs say which function it is in `X8`. -/
 def serve (model : Model) (emu : Emu) : IO Unit := do
-  let call ← currentCall emu
-  for starts in ← emu.hostStarts.get do starts s!"jni:{call.index}"
-  if call.index = 219 then writeWord emu (arg call 1) (← model.vm.get)
-  let result ← dispatch model call
-  writeReg emu "X0" result
-  for ends in ← emu.hostEnds.get do ends (some "X0")
-  Bap.Emu.setPc emu (← readReg emu "X30")
+  serveIndex model emu (← readReg emu "X8")
 
 def serveVm (model : Model) (emu : Emu) : IO Unit := do
-  let call ← currentCall emu
-  for starts in ← emu.hostStarts.get do starts s!"jni-vm:{call.index}"
-  let result ← dispatchVm model call
-  if call.index = 4 || call.index = 7 || (call.index = 6 && result = 0) then
-    writeWord emu (← readReg emu "X1") (← model.env.get)
-  writeReg emu "X0" result
-  for ends in ← emu.hostEnds.get do ends (some "X0")
-  Bap.Emu.setPc emu (← readReg emu "X30")
+  serveIndex model emu (← readReg emu "X8") (vm := true)
+
+/-- Installs the tables and serves the stubs of each function, on any architecture: a call that comes to a stub is served there,
+whatever is in it, by the convention of the architecture. The stubs have to be where something can be called, and the tables where
+they can be read. -/
+def attach (model : Model) (emu : Emu) (layout : Layout) : IO (List HookId) := do
+  install model emu layout
+  let env ← onCode emu (layout.envStubs, layout.envStubs + 233 * 8 - 1) fun current address => do
+    if (← current.pc.get) == address && (address - layout.envStubs) % 8 == 0 then
+      serveIndex model current ((address - layout.envStubs) / 8)
+  let vm ← onCode emu (layout.vmStubs, layout.vmStubs + 8 * 8 - 1) fun current address => do
+    if (← current.pc.get) == address && (address - layout.vmStubs) % 8 == 0 then
+      serveIndex model current ((address - layout.vmStubs) / 8) (vm := true)
+  pure [env, vm]
+
+/-- The layout of `attachAt`: two pages from `base`, of which the first has the VM, the environment and their tables, and the second
+their stubs. -/
+def Layout.at (base : Nat) : Layout :=
+  { vm := base, env := base + 0x10, vmFunctions := base + 0x40, envFunctions := base + 0x100
+    envStubs := base + 0x1000, vmStubs := base + 0x1800, envDispatcher := base + 0x1c00, vmDispatcher := base + 0x1c00 }
+
+/-- Maps two pages at a free address, for the tables and for the stubs, and `attach`es there. It says where they are: `env` is the
+`JNIEnv *` to give native code, and `vm` the `JavaVM *`. -/
+def attachAt (model : Model) (emu : Emu) : IO Layout := do
+  let base ← Bap.Emu.freeAddress emu 0x2000
+  Bap.Emu.map emu ⟨base, ByteArray.mk (Array.replicate 0x1000 0), ⟨true, true, false⟩⟩
+  -- Written once, with the stubs of AArch64, and then only run.
+  Bap.Emu.map emu ⟨base + 0x1000, ByteArray.mk (Array.replicate 0x1000 0), ⟨true, true, false⟩⟩
+  let layout := Layout.at base
+  let _ ← attach model emu layout
+  Bap.Emu.protect emu (base + 0x1000) 0x1000 ⟨true, false, true⟩
+  pure layout
 
 /-! What a model holds, for a checkpoint. A method or a field is saved by what it is called, and takes its function or its value from
 the declarations that the new model was made with, which have to be the same ones. -/
