@@ -34,7 +34,50 @@ def erange : Nat := 34
 def enosys : Nat := 38
 def enotempty : Nat := 39
 def eloop : Nat := 40
+def enxio : Nat := 6
+def enotsock : Nat := 88
+def emsgsize : Nat := 90
+def eprototype : Nat := 91
+def enoprotoopt : Nat := 92
+def eprotonosupport : Nat := 93
+def esocktnosupport : Nat := 94
+def eopnotsupp : Nat := 95
+def eafnosupport : Nat := 97
+def eaddrinuse : Nat := 98
+def econnreset : Nat := 104
+def eisconn : Nat := 106
+def enotconn : Nat := 107
+def econnrefused : Nat := 111
 end Errno
+
+/-- What came to a socket and hasn't been read: its bytes, the name of the socket that sent it if it had one, and the open files that
+it hands over. -/
+structure Message where
+  data : ByteArray
+  sender : Option String := none
+  rights : List Nat := []
+  deriving Inhabited
+
+/-- A socket of the Unix domain. -/
+structure Socket where
+  /-- `SOCK_STREAM`, `SOCK_DGRAM` or `SOCK_SEQPACKET`, as 1, 2 and 5. -/
+  type : Nat
+  /-- The name that it was bound to, as it was given: a path, or a name of its own that starts with a zero byte. -/
+  name : Option String := none
+  /-- The socket at the other end, by its inode, or where datagrams go when a send doesn't say. -/
+  peer : Option Nat := none
+  listening : Bool := false
+  /-- The connections that `accept` hasn't taken yet, by the inodes of their ends here. -/
+  pending : List Nat := []
+  /-- That it is a connection that nothing has accepted yet, which is there although no descriptor has it. -/
+  waiting : Bool := false
+  incoming : Array Message := #[]
+  /-- What `shutdown` said: that nothing more is to be read of it, or written. -/
+  readShut : Bool := false
+  writeShut : Bool := false
+  /-- The process that made it, or for the end of a connection that a listener accepts, the one that listens: what `SO_PEERCRED` says of
+  it to the other end. -/
+  owner : Nat := 0
 
 inductive Content where
   | file (data : ByteArray)
@@ -46,6 +89,7 @@ inductive Content where
   | generated (name : String)
   /-- What has been written to a pipe, from where it hasn't been read yet, and how much has been read of all that was ever written. It lets go of what is read once that is half of it. -/
   | pipe (buffer : ByteArray) (head consumed : Nat)
+  | socket (socket : Socket)
 
 structure Inode where
   number : Nat
@@ -410,6 +454,8 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
       .ok kernel
     -- It has no path.
     | .pipe .. => .error Errno.einval
+    -- What is bound to a path is connected to, not opened.
+    | .socket _ => .error Errno.enxio
   let openFile := kernel.nextOpenFile
   let kernel := { kernel with
     openFiles := kernel.openFiles.insert openFile { inode := number, flags }
@@ -430,7 +476,7 @@ def read (kernel : Kernel) (group fd count : Nat) : Result (Kernel × ByteArray)
   let data ← match inode.content with
     | .file data | .console data => .ok data
     | .directory => .error Errno.eisdir
-    | .symlink _ | .generated _ | .pipe .. => .error Errno.einval
+    | .symlink _ | .generated _ | .pipe .. | .socket _ => .error Errno.einval
   let bytes := readAt data file.offset count
   .ok ({ kernel with openFiles := kernel.openFiles.insert id { file with offset := file.offset + bytes.size } }, bytes)
 
@@ -441,7 +487,7 @@ def readFrom (kernel : Kernel) (group fd count offset : Nat) : Result ByteArray 
   let inode ← inodeOf kernel file.inode
   match inode.content with
   | .file data => .ok (readAt data offset count)
-  | .console _ | .pipe .. => .error Errno.espipe
+  | .console _ | .pipe .. | .socket _ => .error Errno.espipe
   | .directory => .error Errno.eisdir
   | .symlink _ | .generated _ => .error Errno.einval
 
@@ -460,7 +506,8 @@ def write (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Result (Kerne
       inodes := kernel.inodes.insert file.inode { inode with content := .file (writeAt data offset bytes) }
       openFiles := kernel.openFiles.insert id { file with offset := offset + bytes.size } }, bytes.size)
   | .directory => .error Errno.eisdir
-  | .symlink _ | .generated _ => .error Errno.einval
+  -- `Machine` sends to a socket.
+  | .symlink _ | .generated _ | .socket _ => .error Errno.einval
 
 /-- `writeAt`, in the same bytes if nothing else holds them. -/
 def writeInto (data : ByteArray) (offset : Nat) (bytes : ByteArray) : ByteArray :=
@@ -477,7 +524,7 @@ def writeError (kernel : Kernel) (group fd : Nat) : Option Nat :=
       match kernel.inodes.get? file.inode with
       | none => some Errno.eio
       | some { content := .directory, .. } => some Errno.eisdir
-      | some { content := .symlink _, .. } | some { content := .generated _, .. } => some Errno.einval
+      | some { content := .symlink _, .. } | some { content := .generated _, .. } | some { content := .socket _, .. } => some Errno.einval
       | _ => none
 
 /-- `write` for what `writeError` has nothing against, which changes all it can in place: one that takes the kernel as it is the only holder of it makes as many small
@@ -516,7 +563,7 @@ def writeTo (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Nat
   | .file data =>
     .ok ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content := .file (writeAt data offset bytes) } },
       bytes.size)
-  | .console _ | .pipe .. => .error Errno.espipe
+  | .console _ | .pipe .. | .socket _ => .error Errno.espipe
   | .directory => .error Errno.eisdir
   | .symlink _ | .generated _ => .error Errno.einval
 
@@ -527,7 +574,7 @@ def seek (kernel : Kernel) (group fd : Nat) (negative : Bool) (distance whence :
   let size ← match inode.content with
     | .file data => .ok data.size
     | .directory => .ok 0
-    | .console _ | .pipe .. => .error Errno.espipe
+    | .console _ | .pipe .. | .socket _ => .error Errno.espipe
     | .symlink _ | .generated _ => .error Errno.einval
   let start ← match whence with
     | 0 => .ok 0
@@ -644,7 +691,7 @@ private def statOf (kernel : Kernel) (inode : Inode) : Stat :=
     | .file data => (data.size, 1)
     | .directory => (4096, 2)
     | .symlink target => (target.utf8ByteSize, 1)
-    | .console _ | .generated _ | .pipe .. => (0, 1)
+    | .console _ | .generated _ | .pipe .. | .socket _ => (0, 1)
   { inode := inode.number, mode := inode.mode, size, links, time := kernel.clock }
 
 /-- `stat` and `lstat`. -/
@@ -662,7 +709,7 @@ def statDescriptor (kernel : Kernel) (group fd : Nat) : Result Stat := do
 
 /-- The path of what is open, for a directory. -/
 private def pathOfInode (kernel : Kernel) (number : Nat) : Option String :=
-  (kernel.paths.toList.find? fun entry => entry.2 == number).map (·.1)
+  (kernel.paths.toList.find? fun entry => entry.2 == number && entry.1.startsWith "/").map (·.1)
 
 /-- The base that a path of the `*at` calls is relative to: the working directory for `AT_FDCWD`, or that directory. -/
 def baseOf (kernel : Kernel) (group directory : Nat) (atCwd : Bool) : Result String := do
@@ -678,7 +725,8 @@ def children (kernel : Kernel) (path : String) : List (String × Nat) :=
   let inside := Path.parts "/" path
   let entries := kernel.paths.toList.filterMap fun entry =>
     let parts := Path.parts "/" entry.1
-    if parts.length == inside.length + 1 && parts.take inside.length == inside then
+    -- A name of a socket of its own isn't in a directory.
+    if entry.1.startsWith "/" && parts.length == inside.length + 1 && parts.take inside.length == inside then
       some ((parts.getLast?.getD ""), entry.2)
     else none
   (entries.toArray.qsort fun left right => left.1 < right.1).toList
@@ -698,6 +746,7 @@ def directoryEntries (kernel : Kernel) (group fd : Nat) : Result (Nat × Nat × 
       | some { content := .console _, .. } => 2
       | some { content := .pipe .., .. } => 1
       | some { content := .generated _, .. } => 8
+      | some { content := .socket _, .. } => 12
       | none => 0
     let parentNumber := (kernel.paths.get? (Path.parent path)).getD inode.number
     let all := [(inode.number, 4, "."), (parentNumber, 4, "..")] ++

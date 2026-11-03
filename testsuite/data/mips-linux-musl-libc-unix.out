@@ -1,0 +1,35 @@
+pair 0
+stream pingpong
+part ba
+rest ck
+end 0
+closed peer -32
+pair 0
+again -11
+shutdown 0
+shut end 0
+bind 0
+bind again -125
+refused -146
+listen 0
+options 1 1 4
+accepted hello
+its name bap.sock@
+unnamed peer 0 2
+peer process 1
+child 0
+gone 0
+missing -2
+abstract 0
+datagram one
+from sender.sock@
+truncated 5
+connect 0
+connected four
+packets 0
+packet first
+short 3 1
+handed 1
+child 0
+piped through
+not a socket -95

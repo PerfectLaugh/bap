@@ -46,6 +46,40 @@ structure Image where
 private def sorted (items : List (Nat × α)) : List (Nat × α) :=
   (items.toArray.qsort fun left right => left.1 < right.1).toList
 
+/-- The bytes of a socket, which are those of its inode. -/
+def socketBytes (socket : Socket) : ByteArray :=
+  let putMessage (out : ByteArray) (message : Message) : ByteArray :=
+    Wire.putList Wire.putNat (Wire.putOption Wire.putText (Wire.putBytes out message.data) message.sender) message.rights
+  let out := Wire.putNat ByteArray.empty socket.type
+  let out := Wire.putOption Wire.putText out socket.name
+  let out := Wire.putOption Wire.putNat out socket.peer
+  let out := Wire.putFlag out socket.listening
+  let out := Wire.putList Wire.putNat out socket.pending
+  let out := Wire.putFlag out socket.waiting
+  let out := Wire.putList putMessage out socket.incoming.toList
+  let out := Wire.putFlag (Wire.putFlag out socket.readShut) socket.writeShut
+  Wire.putNat out socket.owner
+
+/-- A socket from the bytes of its inode. -/
+def socketOfBytes (data : ByteArray) : Except String Socket := do
+  let getMessage : Wire.Decoder Message := fun data at_ => do
+    let (bytes, at_) ← Wire.getBytes data at_
+    let (sender, at_) ← Wire.getOption Wire.getText data at_
+    let (rights, at_) ← Wire.getList Wire.getNat data at_
+    .ok ({ data := bytes, sender, rights }, at_)
+  let (type, at_) ← Wire.getNat data 0
+  let (name, at_) ← Wire.getOption Wire.getText data at_
+  let (peer, at_) ← Wire.getOption Wire.getNat data at_
+  let (listening, at_) ← Wire.getFlag data at_
+  let (pending, at_) ← Wire.getList Wire.getNat data at_
+  let (waiting, at_) ← Wire.getFlag data at_
+  let (incoming, at_) ← Wire.getList getMessage data at_
+  let (readShut, at_) ← Wire.getFlag data at_
+  let (writeShut, at_) ← Wire.getFlag data at_
+  let (owner, at_) ← Wire.getNat data at_
+  Wire.expectEnd data at_
+  pure { type, name, peer, listening, pending, waiting, incoming := incoming.toArray, readShut, writeShut, owner }
+
 /-- The image of a kernel. -/
 def Kernel.image (kernel : Kernel) : Image where
   paths := (kernel.paths.toList.toArray.qsort fun left right => left.1 < right.1).toList
@@ -57,6 +91,7 @@ def Kernel.image (kernel : Kernel) : Image where
       | .console input => (3, input)
       | .generated name => (4, name.toUTF8)
       | .pipe buffer head consumed => (5, Wire.putBytes (Wire.putNat ByteArray.empty consumed) (buffer.extract head buffer.size))
+      | .socket socket => (6, socketBytes socket)
     { number, mode := inode.mode, kind, data }
   nextInode := kernel.nextInode
   openFiles := (sorted kernel.openFiles.toList).map fun (id, file) => (id, file.inode, file.offset, file.flags)
@@ -89,6 +124,7 @@ def Image.kernel (image : Image) : Except String Kernel := do
         let (consumed, at_) ← Wire.getNat entry.data 0
         let (buffer, _) ← Wire.getBytes entry.data at_
         pure (Content.pipe buffer 0 consumed)
+      | 6 => pure (Content.socket (← socketOfBytes entry.data))
       | kind => .error s!"a Linux checkpoint with an inode of kind {kind}"
     pure (inodes.insert entry.number { number := entry.number, content, mode := entry.mode })
   pure {

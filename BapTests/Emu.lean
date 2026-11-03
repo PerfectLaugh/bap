@@ -708,6 +708,31 @@ def testArmV8 (name : String) : IO Unit := do
   assertEqual s!"Linux ARM {name} is what qemu does" (String.fromUTF8! (← IO.FS.readBinFile s!"testsuite/data/arm-{name}.out"))
     (String.fromUTF8! (← written.get))
 
+/-- What sockets hold goes into a checkpoint and comes back: a listener with a connection to accept, and a pair with bytes, a name and
+an open file on the way. -/
+def testSocketImage : IO Unit := do
+  let kernel := (Bap.Linux.Kernel.empty.addDirectories "/run").withConsole 1
+  let (kernel, listener) := kernel.socket 1 1 0
+  let some kernel := (kernel.bind 1 listener "/" "/run/listen.sock" fun _ => false).toOption | throw <| IO.userError "bind"
+  let some kernel := (kernel.listen 1 listener).toOption | throw <| IO.userError "listen"
+  let (kernel, client) := kernel.socket 1 1 0
+  let some target := (kernel.socketNamed "/" "/run/listen.sock").toOption | throw <| IO.userError "named"
+  let some kernel := (kernel.connect 1 client target fun _ => true).toOption | throw <| IO.userError "connect"
+  let (kernel, one, _) := kernel.socketPair 1 5 0
+  let some (kernel, _) := (kernel.send 1 one { data := "packet".toUTF8, rights := [0] } none fun _ => true).toOption
+    | throw <| IO.userError "send"
+  let encoded := Bap.Linux.Image.encode ByteArray.empty kernel.image
+  let some (image, _) := (Bap.Linux.Image.decode encoded 0).toOption | throw <| IO.userError "decode"
+  let some back := image.kernel.toOption | throw <| IO.userError "kernel"
+  let sockets (kernel : Bap.Linux.Kernel) : List (Nat × ByteArray) :=
+    ((kernel.inodes.toList.filterMap fun (number, _) => (kernel.socketAt number).map fun socket => (number, Bap.Linux.socketBytes socket)).toArray.qsort
+      (fun left right => left.1 < right.1)).toList
+  assertEqual "sockets of a checkpoint are those that there were" ((sockets kernel).map (·.1)) ((sockets back).map (·.1))
+  assertTrue "and hold what they held" ((sockets kernel).map (·.2) == (sockets back).map (·.2))
+  -- The listener, the client, the end of its connection that waits to be accepted, and the pair.
+  assertEqual "five of them" 5 (sockets back).length
+  assertEqual "the listener is at its path" (some target) (back.paths.get? "/run/listen.sock")
+
 /-- What operations raise, on what their edges are, as qemu has it. -/
 def testLinuxRaises (name : String) : IO Unit := do
   let program ← IO.FS.readBinFile s!"testsuite/bin/{name}"

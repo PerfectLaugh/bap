@@ -63,6 +63,10 @@ inductive Call where
   `ftruncate64` and `_llseek` have them in two words. -/
   | mmap2 | truncate64 | ftruncate64 | llseek | clockGettime64 | clockGetres64
   | setThreadArea
+  /-- Sockets of the Unix domain. `send` and `recv` are `sendto` and `recvfrom` without an address, which some systems have of their
+  own. -/
+  | socket | socketpair | bind | listen | accept | accept4 | connect | getsockname | getpeername | sendto | recvfrom | send | recv
+  | setsockopt | getsockopt | shutdown | sendmsg | recvmsg
   /-- What a process asks of itself, of which only what tagged addresses are on AArch64 is answered. -/
   | prctl
   /-- What has nothing to do here: everyone is root, nothing has to reach a disk and sleeping takes no time. -/
@@ -71,7 +75,8 @@ inductive Call where
 
 /-- The numbers of x86-64. -/
 def x86_64Calls : List (Nat × Call) :=
-  [(22, .pipe), (293, .pipe2),
+  [(41, .socket), (42, .connect), (43, .accept), (44, .sendto), (45, .recvfrom), (46, .sendmsg), (47, .recvmsg), (48, .shutdown), (49, .bind), (50, .listen), (51, .getsockname), (52, .getpeername), (53, .socketpair), (54, .setsockopt), (55, .getsockopt), (288, .accept4),
+   (22, .pipe), (293, .pipe2),
    (11, .munmap), (10, .mprotect), (28, .madvise), (26, .succeeds),
    (59, .execve), (137, .statfs), (138, .fstatfs), (99, .sysinfo),
    (0, .read), (1, .write), (2, .open_), (257, .openat), (3, .close), (4, .stat), (6, .lstat), (5, .fstat), (262, .fstatat),
@@ -87,7 +92,8 @@ def x86_64Calls : List (Nat × Call) :=
 
 /-- The numbers of the architectures that came after the old calls went: `asm-generic/unistd.h`. -/
 def genericCalls : List (Nat × Call) :=
-  [(59, .pipe2), (167, .prctl),
+  [(198, .socket), (199, .socketpair), (200, .bind), (201, .listen), (202, .accept), (203, .connect), (204, .getsockname), (205, .getpeername), (206, .sendto), (207, .recvfrom), (208, .setsockopt), (209, .getsockopt), (210, .shutdown), (211, .sendmsg), (212, .recvmsg), (242, .accept4),
+   (59, .pipe2), (167, .prctl),
    (215, .munmap), (226, .mprotect), (233, .madvise), (227, .succeeds),
    (221, .execve), (43, .statfs), (44, .fstatfs), (179, .sysinfo),
    (63, .read), (64, .write), (56, .openat), (57, .close), (80, .fstat), (79, .fstatat), (291, .statx), (62, .lseek),
@@ -101,7 +107,8 @@ def genericCalls : List (Nat × Call) :=
 
 /-- The numbers of `asm-generic` on 32 bits, where whatever has a time or an offset in a word has gone. -/
 def generic32Calls : List (Nat × Call) :=
-  [(59, .pipe2), (167, .prctl),
+  [(198, .socket), (199, .socketpair), (200, .bind), (201, .listen), (202, .accept), (203, .connect), (204, .getsockname), (205, .getpeername), (206, .sendto), (207, .recvfrom), (208, .setsockopt), (209, .getsockopt), (210, .shutdown), (211, .sendmsg), (212, .recvmsg), (242, .accept4),
+   (59, .pipe2), (167, .prctl),
    (215, .munmap), (226, .mprotect), (233, .madvise), (227, .succeeds),
    (221, .execve), (43, .statfs64), (44, .fstatfs64), (179, .sysinfo),
    (63, .read), (64, .write), (56, .openat), (57, .close), (291, .statx), (62, .llseek),
@@ -115,7 +122,8 @@ def generic32Calls : List (Nat × Call) :=
 
 /-- The numbers of the o32 ABI of MIPS, without their 4000. -/
 def o32Calls : List (Nat × Call) :=
-  [(42, .pipe), (328, .pipe2),
+  [(168, .accept), (169, .bind), (170, .connect), (171, .getpeername), (172, .getsockname), (173, .getsockopt), (174, .listen), (175, .recv), (176, .recvfrom), (177, .recvmsg), (178, .send), (179, .sendmsg), (180, .sendto), (181, .setsockopt), (182, .shutdown), (183, .socket), (184, .socketpair), (334, .accept4),
+   (42, .pipe), (328, .pipe2),
    (91, .munmap), (125, .mprotect), (218, .madvise), (144, .succeeds),
    (11, .execve), (213, .stat), (214, .lstat), (215, .fstat), (293, .fstatat), (255, .statfs64), (256, .fstatfs64), (116, .sysinfo),
    (3, .read), (4, .write), (5, .open_), (288, .openat), (6, .close), (366, .statx), (19, .lseek), (140, .llseek),
@@ -132,7 +140,8 @@ def o32Calls : List (Nat × Call) :=
 
 /-- The numbers of the n64 ABI of MIPS, without their 5000. -/
 def n64Calls : List (Nat × Call) :=
-  [(21, .pipe), (287, .pipe2),
+  [(40, .socket), (41, .connect), (42, .accept), (43, .sendto), (44, .recvfrom), (45, .sendmsg), (46, .recvmsg), (47, .shutdown), (48, .bind), (49, .listen), (50, .getsockname), (51, .getpeername), (52, .socketpair), (53, .setsockopt), (54, .getsockopt), (293, .accept4),
+   (21, .pipe), (287, .pipe2),
    (11, .munmap), (10, .mprotect), (27, .madvise), (25, .succeeds),
    (57, .execve), (134, .statfs), (135, .fstatfs), (97, .sysinfo),
    (0, .read), (1, .write), (2, .open_), (247, .openat), (3, .close), (4, .stat), (6, .lstat), (5, .fstat), (252, .fstatat),
@@ -148,7 +157,8 @@ def n64Calls : List (Nat × Call) :=
 
 /-- The numbers of 32-bit ARM, with EABI, and two of its own: `set_tls` and `cacheflush`. -/
 def armCalls : List (Nat × Call) :=
-  [(42, .pipe), (359, .pipe2),
+  [(281, .socket), (282, .bind), (283, .connect), (284, .listen), (285, .accept), (286, .getsockname), (287, .getpeername), (288, .socketpair), (289, .send), (290, .sendto), (291, .recv), (292, .recvfrom), (293, .shutdown), (294, .setsockopt), (295, .getsockopt), (296, .sendmsg), (297, .recvmsg), (366, .accept4),
+   (42, .pipe), (359, .pipe2),
    (91, .munmap), (125, .mprotect), (220, .madvise), (144, .succeeds),
    (11, .execve), (195, .stat), (196, .lstat), (197, .fstat), (327, .fstatat), (266, .statfs64), (267, .fstatfs64), (116, .sysinfo),
    (3, .read), (4, .write), (5, .open_), (322, .openat), (6, .close), (397, .statx), (19, .lseek), (140, .llseek),
@@ -165,7 +175,8 @@ def armCalls : List (Nat × Call) :=
 
 /-- The numbers of i686. -/
 def i686Calls : List (Nat × Call) :=
-  [(42, .pipe), (331, .pipe2),
+  [(359, .socket), (360, .socketpair), (361, .bind), (362, .connect), (363, .listen), (364, .accept4), (365, .getsockopt), (366, .setsockopt), (367, .getsockname), (368, .getpeername), (369, .sendto), (370, .sendmsg), (371, .recvfrom), (372, .recvmsg), (373, .shutdown),
+   (42, .pipe), (331, .pipe2),
    (91, .munmap), (125, .mprotect), (219, .madvise), (144, .succeeds),
    (11, .execve), (195, .stat), (196, .lstat), (197, .fstat), (300, .fstatat), (268, .statfs64), (269, .fstatfs64), (116, .sysinfo),
    (3, .read), (4, .write), (5, .open_), (295, .openat), (6, .close), (383, .statx), (19, .lseek), (140, .llseek),
@@ -182,7 +193,8 @@ def i686Calls : List (Nat × Call) :=
 
 /-- The numbers of PowerPC, where those of each width that the other doesn't have are left to it not asking for them. -/
 def powerpcCalls : List (Nat × Call) :=
-  [(42, .pipe), (317, .pipe2),
+  [(326, .socket), (327, .bind), (328, .connect), (329, .listen), (330, .accept), (331, .getsockname), (332, .getpeername), (333, .socketpair), (334, .send), (335, .sendto), (336, .recv), (337, .recvfrom), (338, .shutdown), (339, .setsockopt), (340, .getsockopt), (341, .sendmsg), (342, .recvmsg), (344, .accept4),
+   (42, .pipe), (317, .pipe2),
    (91, .munmap), (125, .mprotect), (205, .madvise), (144, .succeeds),
    (11, .execve), (116, .sysinfo),
    (3, .read), (4, .write), (5, .open_), (286, .openat), (6, .close), (106, .stat), (107, .lstat), (108, .fstat), (291, .fstatat),
@@ -263,6 +275,12 @@ def Architecture.errno : Architecture → Nat → Nat
   | .mips _ _ _, 38 => 89
   | .mips _ _ _, 39 => 93
   | .mips _ _ _, 40 => 90
+  | .mips _ _ _, errno =>
+    -- Those of sockets.
+    match [(88, 95), (89, 96), (90, 97), (91, 98), (92, 99), (93, 120), (94, 121), (95, 122), (97, 124), (98, 125), (104, 131),
+        (106, 133), (107, 134), (111, 146)].lookup errno with
+    | some number => number
+    | none => errno
   | _, errno => errno
 
 /-- `MAP_ANONYMOUS`. -/

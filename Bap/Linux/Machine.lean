@@ -5,6 +5,7 @@ import Bap.Linux.Signals
 import Bap.Linux.GuestHeap
 import Bap.Linux.LoadedLibrary
 import Bap.Linux.Image
+import Bap.Linux.Sockets
 import Bap.Linux.Proc
 import Bap.Linux.Elf
 import Bap.Float
@@ -435,6 +436,287 @@ private def viewOf (machine : Machine) (emu : Emu) (group : Nat) : IO ProcessVie
     uptime := kernel.clock - bootClock
     processes := ← liveProcesses emu }
 
+/-- A number of `size` bytes of a structure, in the order of the guest. -/
+private def numberAt (bytes : ByteArray) (offset size : Nat) (big : Bool) : Nat :=
+  (List.range size).foldl (fun value index =>
+    let at_ := if big then offset + size - 1 - index else offset + index
+    value + bytes[at_]!.toNat * 256 ^ index) 0
+
+/-- A call that has to wait for what happens to the inode `number`: it stops here and runs again when something changes, with its
+registers as they were, as a read of a pipe does. -/
+private def waitOn (emu : Emu) (wide number : Nat) : IO SyscallAction := do
+  let (_, _, register) := syscallRegisters emu.config.syscallAbi
+  let waiter : Bap.Tasks.FutexWaiter := { thread := ← thread emu, space := pipeSpace + number, address := 0, bitset := 2 ^ 32 - 1, timed := false }
+  emu.taskTable.modify (·.futexWait waiter)
+  emu.redirect.set (some (← emu.pc.get))
+  emu.stopped.set true
+  match Value.asBits (← reg emu ⟨register, .imm wide, 0, false⟩) with
+  | .ok bits => pure (.returnValue bits.2.toNat)
+  | .error _ => pure (errorOf Errno.eio)
+
+/-- The name in a `struct sockaddr_un` of `size` bytes: a path, to its first zero, or a name of its own, which starts with one. -/
+private def socketName (emu : Emu) (big : Bool) (address size : Nat) : IO (Result String) := do
+  if size < 3 || size > 110 then return .error Errno.einval
+  match ← (read emu address size).toBaseIO with
+  | .error _ => pure (.error Errno.efault)
+  | .ok bytes =>
+    if numberAt bytes 0 2 big != 1 then return .error Errno.eafnosupport
+    let path := bytes.extract 2 size
+    let text := if path[0]! == 0 then path else path.extract 0 ((path.data.findIdx? (· == 0)).getD path.size)
+    match String.fromUTF8? text with
+    | some name => pure (.ok name)
+    | none => pure (.error Errno.einval)
+
+/-- A `struct sockaddr_un` of a name, or of `AF_UNIX` alone for a socket that has none. -/
+private def nameBytes (big : Bool) (name : Option String) : ByteArray :=
+  let family := Abi.field big 2 1
+  match name with
+  | none => family
+  | some name => if Kernel.abstractName name then family ++ name.toUTF8 else family ++ name.toUTF8 ++ ByteArray.mk #[0]
+
+/-- Gives a name where the guest asked for one, as much of it as its length has room for, and how long it is. -/
+private def giveName (emu : Emu) (big : Bool) (address lengthAddress : Nat) (bytes : ByteArray) : IO Bool := do
+  if address == 0 || lengthAddress == 0 then return true
+  match ← (read emu lengthAddress 4).toBaseIO with
+  | .error _ => pure false
+  | .ok length =>
+    try
+      writeGuest emu address (bytes.extract 0 (numberAt length 0 4 big))
+      writeGuest emu lengthAddress (Abi.field big 4 bytes.size)
+      pure true
+    catch _ => pure false
+
+/-- The calls of sockets of the Unix domain, and `read` and `write` of one. -/
+private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : List Nat) : IO SyscallAction := do
+  let architecture := machine.architecture
+  let wide := architecture.bits
+  let wordSize := wide / 8
+  let big := architecture.big
+  let mips := match architecture with | .mips .. => true | _ => false
+  let arg (index : Nat) : Nat := args.getD index 0
+  let group := (← currentTask emu).group
+  let live := ((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups
+  let kernel ← machine.kernel.get
+  let alive (number : Nat) : Bool := kernel.socketAlive number live
+  let cwd := (kernel.process group).cwd
+  -- MIPS has the numbers of streams and datagrams the other way round, and `SOL_SOCKET` and the options elsewhere.
+  let typeOf (type : Nat) : Nat := if mips && (type == 1 || type == 2) then 3 - type else type
+  let solSocket := if mips then 0xffff else 1
+  let option (generic mipsValue : Nat) : Nat := if mips then mipsValue else generic
+  let peerCred := match architecture with
+    | .mips .. => 18
+    | .powerpc .. => 21
+    | _ => 17
+  let word (bytes : ByteArray) (offset : Nat) : Nat := numberAt bytes offset wordSize big
+  let int (bytes : ByteArray) (offset : Nat) : Nat := numberAt bytes offset 4 big
+  -- The address and length of each `struct iovec`.
+  let vectorsAt (address count : Nat) : IO (List (Nat × Nat)) := do
+    let bytes ← read emu address (2 * wordSize * count)
+    pure ((List.range count).map fun index => (word bytes (2 * wordSize * index), word bytes (2 * wordSize * index + wordSize)))
+  let gather (pieces : List (Nat × Nat)) : IO ByteArray :=
+    pieces.foldlM (init := ByteArray.empty) fun out (address, size) => do pure (out ++ (← read emu address size))
+  let scatter (pieces : List (Nat × Nat)) (data : ByteArray) : IO Unit := do
+    let mut done := 0
+    for (address, size) in pieces do
+      if done ≥ data.size then break
+      let piece := data.extract done (done + size)
+      writeGuest emu address piece
+      done := done + piece.size
+  let target (address size : Nat) : IO (Result (Option Nat)) := do
+    if address == 0 then return .ok none
+    match ← socketName emu big address size with
+    | .error errno => pure (.error errno)
+    | .ok name => pure ((kernel.socketNamed cwd name).map some)
+  let sendFrom (fd : Nat) (pieces : List (Nat × Nat)) (rights : List Nat) (to : Option Nat) : IO SyscallAction := do
+    match ← (gather pieces).toBaseIO with
+    | .error _ => pure (errorOf Errno.efault)
+    | .ok data =>
+      match kernel.send group fd { data, rights } to alive with
+      | .error errno => pure (errorOf errno)
+      | .ok (next, count) =>
+        machine.kernel.set next
+        wakePipeReaders emu
+        pure (.returnValue count)
+  -- What is received, for the calls that take it, or that it has to wait.
+  let receiveInto (fd : Nat) (pieces : List (Nat × Nat)) (flags : Nat) (finish : Kernel.Received → IO SyscallAction) :
+      IO SyscallAction := do
+    let total := pieces.foldl (fun total piece => total + piece.2) 0
+    match kernel.receive group fd total (flags &&& 2 != 0) alive with
+    | .error errno => pure (errorOf errno)
+    | .ok (_, none) =>
+      if flags &&& 0x40 != 0 || kernel.nonblocking group fd then pure (errorOf Errno.eagain)
+      else
+        match kernel.socketOf group fd with
+        | .ok (number, _) => waitOn emu wide number
+        | .error errno => pure (errorOf errno)
+    | .ok (next, some received) =>
+      machine.kernel.set next
+      wakePipeReaders emu
+      match ← (scatter pieces received.data).toBaseIO with
+      | .error _ => pure (errorOf Errno.efault)
+      | .ok () => finish received
+  let checkType (type protocol : Nat) (action : Nat → Nat → IO SyscallAction) : IO SyscallAction := do
+    let kind := typeOf (type &&& 0xf)
+    if arg 0 != 1 then pure (errorOf Errno.eafnosupport)
+    else if ![1, 2, 5].contains kind then pure (errorOf Errno.esocktnosupport)
+    else if protocol > 1 then pure (errorOf Errno.eprotonosupport)
+    else action kind (architecture.openFlags (type - (type &&& 0xf)))
+  match call with
+  | .socket => checkType (arg 1) (arg 2) fun kind flags => do
+    let (next, fd) := kernel.socket group kind flags
+    machine.kernel.set next
+    pure (.returnValue fd)
+  | .socketpair => checkType (arg 1) (arg 2) fun kind flags => do
+    let (next, one, other) := kernel.socketPair group kind flags
+    match ← (writeGuest emu (arg 3) (Abi.field big 4 one ++ Abi.field big 4 other)).toBaseIO with
+    | .error _ => pure (errorOf Errno.efault)
+    | .ok () =>
+      machine.kernel.set next
+      pure (.returnValue 0)
+  | .bind =>
+    match ← socketName emu big (arg 1) (arg 2) with
+    | .error errno => pure (errorOf errno)
+    | .ok name => apply machine (·.bind group (arg 0) cwd name alive)
+  | .listen => apply machine (·.listen group (arg 0))
+  | .connect =>
+    match ← target (arg 1) (arg 2) with
+    | .error errno => pure (errorOf errno)
+    | .ok none => pure (errorOf Errno.einval)
+    | .ok (some to) =>
+      let action ← apply machine (·.connect group (arg 0) to alive)
+      wakePipeReaders emu
+      pure action
+  | .accept | .accept4 =>
+    let flags := if call == .accept4 then architecture.openFlags (arg 3) else 0
+    match kernel.accept group (arg 0) flags with
+    | .error errno => pure (errorOf errno)
+    | .ok (_, none) =>
+      if kernel.nonblocking group (arg 0) then pure (errorOf Errno.eagain)
+      else
+        match kernel.socketOf group (arg 0) with
+        | .ok (number, _) => waitOn emu wide number
+        | .error errno => pure (errorOf errno)
+    | .ok (next, some (fd, server)) =>
+      machine.kernel.set next
+      let client := (next.socketAt server).bind (·.peer) |>.bind next.socketAt
+      if ← giveName emu big (arg 1) (arg 2) (nameBytes big (client.bind (·.name))) then pure (.returnValue fd)
+      else pure (errorOf Errno.efault)
+  | .getsockname =>
+    match kernel.socketOf group (arg 0) with
+    | .error errno => pure (errorOf errno)
+    | .ok (_, socket) =>
+      if ← giveName emu big (arg 1) (arg 2) (nameBytes big socket.name) then pure (.returnValue 0) else pure (errorOf Errno.efault)
+  | .getpeername =>
+    match kernel.peerName group (arg 0) with
+    | .error errno => pure (errorOf errno)
+    | .ok name => if ← giveName emu big (arg 1) (arg 2) (nameBytes big name) then pure (.returnValue 0) else pure (errorOf Errno.efault)
+  | .send | .write => sendFrom (arg 0) [(arg 1, arg 2)] [] none
+  | .writev =>
+    match ← (vectorsAt (arg 1) (arg 2)).toBaseIO with
+    | .error _ => pure (errorOf Errno.efault)
+    | .ok pieces => sendFrom (arg 0) pieces [] none
+  | .sendto =>
+    match ← target (arg 4) (arg 5) with
+    | .error errno => pure (errorOf errno)
+    | .ok to => sendFrom (arg 0) [(arg 1, arg 2)] [] to
+  | .sendmsg =>
+    match ← (read emu (arg 1) (7 * wordSize)).toBaseIO with
+    | .error _ => pure (errorOf Errno.efault)
+    | .ok header =>
+      let some pieces ← (vectorsAt (word header (2 * wordSize)) (word header (3 * wordSize))).toBaseIO |>.map (·.toOption)
+        | pure (errorOf Errno.efault)
+      match ← target (word header 0) (int header wordSize) with
+      | .error errno => pure (errorOf errno)
+      | .ok to =>
+        -- The descriptors that `SCM_RIGHTS` hands over.
+        let control := word header (4 * wordSize)
+        let controlSize := word header (5 * wordSize)
+        let headerSize := wordSize + 8
+        let some bytes ← (if control == 0 then pure ByteArray.empty else read emu control controlSize).toBaseIO |>.map (·.toOption)
+          | pure (errorOf Errno.efault)
+        let mut at_ := 0
+        let mut fds : List Nat := []
+        while at_ + headerSize ≤ bytes.size do
+          let length := word bytes at_
+          if length < headerSize then break
+          if int bytes (at_ + wordSize) == solSocket && int bytes (at_ + wordSize + 4) == 1 then
+            fds := fds ++ (List.range ((length - headerSize) / 4)).map fun index => int bytes (at_ + headerSize + 4 * index)
+          at_ := at_ + (length + wordSize - 1) / wordSize * wordSize
+        match kernel.rightsOf group fds with
+        | .error errno => pure (errorOf errno)
+        | .ok rights => sendFrom (arg 0) pieces rights to
+  | .recv | .read => receiveInto (arg 0) [(arg 1, arg 2)] (if call == .recv then arg 3 else 0) fun received => pure (.returnValue received.data.size)
+  | .readv =>
+    match ← (vectorsAt (arg 1) (arg 2)).toBaseIO with
+    | .error _ => pure (errorOf Errno.efault)
+    | .ok pieces => receiveInto (arg 0) pieces 0 fun received => pure (.returnValue received.data.size)
+  | .recvfrom =>
+    receiveInto (arg 0) [(arg 1, arg 2)] (arg 3) fun received => do
+      if arg 4 != 0 && arg 5 != 0 then
+        let given := if received.sender.isSome then nameBytes big received.sender else ByteArray.empty
+        unless ← giveName emu big (arg 4) (arg 5) given do return errorOf Errno.efault
+      pure (.returnValue (if arg 3 &&& 0x20 != 0 then received.size else received.data.size))
+  | .recvmsg =>
+    match ← (read emu (arg 1) (7 * wordSize)).toBaseIO with
+    | .error _ => pure (errorOf Errno.efault)
+    | .ok header =>
+      let some pieces ← (vectorsAt (word header (2 * wordSize)) (word header (3 * wordSize))).toBaseIO |>.map (·.toOption)
+        | pure (errorOf Errno.efault)
+      receiveInto (arg 0) pieces (arg 2) fun received => do
+        let mut flags := if received.size > received.data.size then 0x20 else 0
+        -- Who sent it.
+        let nameAddress := word header 0
+        let given := if received.sender.isSome then nameBytes big received.sender else ByteArray.empty
+        let nameLength := if nameAddress == 0 then 0 else min (int header wordSize) given.size
+        if nameAddress != 0 then writeGuest emu nameAddress (given.extract 0 nameLength)
+        writeGuest emu (arg 1 + wordSize) (Abi.field big 4 (if nameAddress == 0 then 0 else given.size))
+        -- The descriptors that came, as many as there is room for, and the others are closed.
+        let control := word header (4 * wordSize)
+        let room := word header (5 * wordSize)
+        let headerSize := wordSize + 8
+        let fit := if control == 0 || room < headerSize then 0 else min received.rights.length ((room - headerSize) / 4)
+        if fit < received.rights.length then flags := flags ||| 8
+        let (next, fds) := (← machine.kernel.get).receiveRights group (received.rights.take fit) (arg 2 &&& 0x40000000 != 0)
+        machine.kernel.set next
+        let used := if fit == 0 then 0 else (headerSize + 4 * fit + wordSize - 1) / wordSize * wordSize
+        if fit > 0 then
+          let message := Abi.field big wordSize (headerSize + 4 * fit) ++ Abi.field big 4 solSocket ++ Abi.field big 4 1 ++
+            fds.foldl (fun out fd => out ++ Abi.field big 4 fd) ByteArray.empty
+          writeGuest emu control message
+        writeGuest emu (arg 1 + 5 * wordSize) (Abi.field big wordSize used)
+        writeGuest emu (arg 1 + 6 * wordSize) (Abi.field big 4 flags)
+        pure (.returnValue (if arg 2 &&& 0x20 != 0 then received.size else received.data.size))
+  | .shutdown =>
+    let action ← apply machine (·.shutdown group (arg 0) (arg 1))
+    wakePipeReaders emu
+    pure action
+  | .setsockopt =>
+    match kernel.socketOf group (arg 0) with
+    | .error errno => pure (errorOf errno)
+    | .ok _ => pure (.returnValue 0)
+  | .getsockopt =>
+    match kernel.socketOf group (arg 0) with
+    | .error errno => pure (errorOf errno)
+    | .ok (_, socket) =>
+      let name := arg 2
+      let value : Option ByteArray :=
+        if arg 1 != solSocket then none
+        else if name == option 3 0x1008 then some (Abi.field big 4 (typeOf socket.type))
+        else if name == option 4 0x1007 then some (Abi.field big 4 0)
+        else if name == option 7 0x1001 || name == option 8 0x1002 then some (Abi.field big 4 212992)
+        else if name == option 30 0x1009 then some (Abi.field big 4 (if socket.listening then 1 else 0))
+        else if name == option 38 0x1028 then some (Abi.field big 4 0)
+        else if name == option 39 0x1029 then some (Abi.field big 4 1)
+        else if name == peerCred then
+          -- `struct ucred` of the other end: its process, and root.
+          let owner := (socket.peer.bind kernel.socketAt).map (·.owner)
+          some (Abi.field big 4 (owner.getD 0) ++ Abi.field big 4 0 ++ Abi.field big 4 0)
+        else none
+      match value with
+      | none => pure (errorOf Errno.enoprotoopt)
+      | some bytes => if ← giveName emu big (arg 3) (arg 4) bytes then pure (.returnValue 0) else pure (errorOf Errno.efault)
+  | _ => pure (errorOf Errno.enosys)
+
 /-- The system calls of files, memory that files are mapped into, time and what a process asks of itself. -/
 private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : List Nat) : IO SyscallAction := do
     -- The ranges that these change may have a tag, as a program may give what it got from an allocator that tags them.
@@ -562,6 +844,8 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     -- A path in the directory of the second, from another call of `at_`.
     let inDirectory (directory address : Nat) (action : String → IO SyscallAction) : IO SyscallAction :=
       at_ directory address fun from_ path => action (if path.startsWith "/" then path else from_ ++ "/" ++ path)
+    if [Call.read, .write, .readv, .writev].contains call && kernel.isSocket group (arg 0) then
+      return ← socketCall machine emu call args
     match call with
     | .read =>
       match ← waitForPipe (arg 0) with
@@ -820,6 +1104,8 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       else if architecture == .aarch64 && arg 0 == 56 then
         pure (if arg 1 == 0 && arg 2 == 0 && arg 3 == 0 && arg 4 == 0 then .returnValue 1 else errorOf Errno.einval)
       else pure .default
+    | .socket | .socketpair | .bind | .listen | .accept | .accept4 | .connect | .getsockname | .getpeername | .sendto | .recvfrom
+    | .send | .recv | .setsockopt | .getsockopt | .shutdown | .sendmsg | .recvmsg => socketCall machine emu call args
 
 /-- The argument of a call that is a path, if it has one, and whether it is relative to a descriptor. -/
 private def pathArgument : Call → Option Nat
@@ -896,7 +1182,8 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
       let group := (← currentTask emu).group
       let shared := ((← machine.kernel.get).process group).mappings.any (·.shared)
       -- A mapping of what is written has to hear of it. Otherwise a write is the only thing that a program does many of that gets longer with what it has done.
-      match call, shared with
+      let socket := (call == .write || call == .writev) && (← machine.kernel.get).isSocket group (args.getD 0 0)
+      match call, shared || socket with
       | .write, false => handOver machine emu (← writeDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0))
       | .writev, false => handOver machine emu (← writeVectorDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0))
       | _, _ =>
