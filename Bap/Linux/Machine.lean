@@ -1151,10 +1151,10 @@ private def loadProgram (emu : Emu) (architecture : Architecture) (path : String
     | .mips _ _ _ => 0
     -- A 32-bit or a 64-bit machine, with floating point, AltiVec and VSX.
     | .powerpc wide _ => (if wide == 64 then 0xc0000000 else 0x80000000) + 0x18000080
-  -- AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_FLAGS, AT_ENTRY, the ids of root, AT_HWCAP, AT_CLKTCK, AT_SECURE
+  -- AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_FLAGS, AT_ENTRY, the ids of root, AT_HWCAP, AT_CLKTCK, AT_SECURE, AT_HWCAP2
   let auxiliary := [(3, base + lowest + program.headerOffset), (4, program.headerSize), (5, program.headerCount), (6, 4096),
     (7, if interpreter.isSome then interpreterBase architecture else 0), (8, 0), (9, base + program.entry), (11, 0), (12, 0), (13, 0), (14, 0),
-    (16, capabilities), (17, 100), (23, 0)]
+    (16, capabilities), (17, 100), (23, 0), (26, 0)]
   mapStack emu architecture (if arguments.isEmpty then [path] else arguments) environment auxiliary
   -- On ARM, the low bit of where a program starts says that it is in Thumb.
   let entry ← if architecture == .arm then do

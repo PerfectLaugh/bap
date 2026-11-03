@@ -271,7 +271,7 @@ private structure Loading where
   /-- What to run, in order: the first that was loaded and all that it needed last. -/
   initializers : List Nat := []
 
-/-- Maps a library, with everything writable until it has been relocated. -/
+/-- Maps a library, writable and executable until it has been relocated, so that its indirect resolvers can run. -/
 private def mapLibrary (machine : Machine) (path : String) (data : ByteArray) (program : Elf.Program) : IO (Nat × Nat × Nat) := do
   let emu := machine.emu
   if program.segments.isEmpty then throw <| IO.userError s!"{path} has nothing to load"
@@ -279,7 +279,7 @@ private def mapLibrary (machine : Machine) (path : String) (data : ByteArray) (p
   let highest := program.segments.foldl (fun highest segment => max highest (segment.address + segment.memorySize)) 0
   let first := lowest / 4096 * 4096
   let span := (highest + 4095) / 4096 * 4096 - first
-  let start ← placeMapping emu 0 false (zeroBytes span) 3
+  let start ← placeMapping emu 0 false (zeroBytes span) 7
   let base := start - first
   for segment in program.segments do
     Bap.Emu.write emu (base + segment.address) (data.extract segment.offset (segment.offset + segment.fileSize))
