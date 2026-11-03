@@ -2904,6 +2904,28 @@ def testBaseEnvironment (triple : String) : IO Unit := do
   assertEqual s!"{label} pthread_sigmask gives back what is wrong" 22 (← callBase "pthread_sigmask" [7, set, 0])
   assertEqual s!"{label} and sigprocmask -1" (2 ^ 32 - 1) (← callBase "sigprocmask" [7, set, 0])
   assertEqual s!"{label} with errno" [22, 0, 0, 0] (← machine.read (← callBase "__errno_location" [] 64) 4).toList
+  -- It is in a checkpoint, and a machine that goes on from one has it as it was, at the same places.
+  let key ← machine.malloc 8
+  assertEqual s!"{label} a key" 0 (← callBase "pthread_key_create" [key, 0])
+  let keyValue := (← machine.read key 4).toList.foldr (fun byte value => value * 256 + byte.toNat) 0
+  assertEqual s!"{label} with a value" 0 (← callBase "pthread_setspecific" [keyValue, 1234])
+  let errnoAt ← callBase "__errno_location" [] 64
+  let data ← machine.checkpoint
+  let refused ← (Bap.Linux.Machine.ofCheckpoint data *> pure false).catchExceptions fun _ => pure true
+  assertTrue s!"{label} a checkpoint of it needs it to go on" refused
+  let cell ← IO.mkRef none
+  let again ← Bap.Linux.Machine.ofCheckpoint data (models := [Bap.Linux.baseModel cell])
+  let some restored := ← cell.get | throw <| IO.userError s!"{label} has no base environment after a checkpoint"
+  assertEqual s!"{label} at the same places" base.symbols restored.symbols
+  let callAgain (name : String) (arguments : List Nat) (bits : Nat := 32) : IO Nat := do
+    let some address := restored.resolve name | throw <| IO.userError s!"{label} has no {name} of the base"
+    pure ((← again.call address arguments) % 2 ^ bits)
+  assertEqual s!"{label} with the values of its keys" 1234 (← callAgain "pthread_getspecific" [keyValue])
+  assertEqual s!"{label} and the errno of each thread" errnoAt (← callAgain "__errno_location" [] 64)
+  let some run := ← again.findSymbol "run" | throw <| IO.userError s!"{label} has no run after a checkpoint"
+  -- Its counter goes on from what the first run left, in both: `once` ran, and doesn't again.
+  assertEqual s!"{label} and what was linked against it runs as it would have" (← call "run")
+    ((← again.call run (threaded := true)) % 2 ^ 32)
 
 /-- Files and directories put in a kernel, before a run and as a machine runs, through links and over what is there. -/
 def testKernelFiles : IO Unit := do

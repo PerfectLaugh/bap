@@ -94,6 +94,15 @@ structure RuntimeModel where
   version : Nat := 1
   attach : Machine → IO ModelState
 
+/-- Attaches a model, as `start` and `Machine.ofCheckpoint` do those that they are given, or to a machine that runs already: what it
+holds is in a checkpoint from then on, which then needs the model to go on from. Its id can't be one that the machine has. -/
+def Machine.attachModel (machine : Machine) (model : RuntimeModel) : IO ModelState := do
+  if (← machine.models.get).any (·.id == model.id) then
+    throw <| IO.userError s!"two models of a runtime are called {model.id}"
+  let state ← model.attach machine
+  machine.models.modify (· ++ [{ id := model.id, version := model.version, state }])
+  pure state
+
 private unsafe def sameObjectImpl {α : Type} (left right : α) : Bool := ptrAddrUnsafe left == ptrAddrUnsafe right
 
 /-- Whether two things are one object, by which what was found out about it is still good. It may say no when they are only equal. -/
@@ -1777,10 +1786,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
     pure ((mappings.find? fun mapping => mapping.shared && mapping.overlaps address (address + 1)).map fun mapping =>
       (sharedFutexSpace + mapping.inode, mapping.offset + (address - mapping.start))))
   for model in models do
-    if (← machine.models.get).any (·.id == model.id) then
-      throw <| IO.userError s!"two models of a runtime are called {model.id}"
-    let state ← model.attach machine
-    machine.models.modify (· ++ [{ id := model.id, version := model.version, state }])
+    let _ ← machine.attachModel model
   -- Signals are part of what it is, and it is in a checkpoint like what a model holds.
   machine.models.modify (· ++ [{ id := Signals.modelId, version := 1, state := { save := signals.save, load := signals.load } }])
   -- So is what is traced and stopped, which serves the waits, and so is before the signals.

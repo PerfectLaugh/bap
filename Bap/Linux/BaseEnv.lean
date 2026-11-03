@@ -12,8 +12,10 @@ which has it before anything that is loaded: what it has is had from it even whe
 and the libc's for the rest. `Machine.linkBase` does the same to what is loaded already, by its imports.
 
 What blocks, `pthread_join`, `pthread_mutex_lock` and `pthread_cond_wait`, waits as a futex does, on a word of the guest, so that the
-threads of the guest and those that its own libc made wait for each other; a call is asked again when it is woken. What the environment
-keeps of threads, keys and aligned blocks isn't in a checkpoint: a machine that goes on from one gives it again. -/
+threads of the guest and those that its own libc made wait for each other; a call is asked again when it is woken.
+
+The environment is a `RuntimeModel`: what it keeps of threads, keys, aligned blocks and `errno` is in a checkpoint, and a machine goes on
+from one with `baseModel`, which puts its functions at the stubs where they were without writing to the guest. -/
 
 namespace Bap.Linux
 
@@ -436,10 +438,9 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
       else setPc emu routine
       pure .finished) ]
 
-/-- The base environment of a machine, made once: its functions at their stubs, and the data that it has, `__stack_chk_guard`. A machine
-that goes on from a checkpoint makes it again, at the same places. -/
-def Machine.baseEnvironment (machine : Machine) : IO BaseEnvironment := do
-  let state ← IO.mkRef ({} : BaseState)
+/-- The functions of the base environment at their stubs, with what it keeps in `state`, and the data that it has, `__stack_chk_guard`,
+which is written once: the stubs of a machine that goes on from a checkpoint are where they were, and what they have, already. -/
+private def attachBase (machine : Machine) (state : IO.Ref BaseState) : IO BaseEnvironment := do
   let exitStub ← IO.mkRef 0
   let onceStub ← IO.mkRef 0
   let architecture := machine.architecture
@@ -480,7 +481,8 @@ def Machine.baseEnvironment (machine : Machine) : IO BaseEnvironment := do
   serveStubs machine dispatch
   -- What a stack protector compares with.
   let guard ← machine.stubFor "base:__stack_chk_guard"
-  poke machine.emu (guard + 8) (ByteArray.mk #[0x00, 0x5a, 0xa5, 0x3c, 0x00, 0x00, 0x00, 0x00])
+  if (← peek machine.emu (guard + 8) 8).toList.all (· == 0) then
+    poke machine.emu (guard + 8) (ByteArray.mk #[0x00, 0x5a, 0xa5, 0x3c, 0x00, 0x00, 0x00, 0x00])
   pure { symbols := ("__stack_chk_guard", guard + 8) :: symbols.reverse, state }
 where
   /-- The result register of a call. -/
@@ -492,6 +494,70 @@ where
     | .riscv64 | .riscv32 => ("", "", "X10")
     | .mips .. => ("", "", "R2")
     | .powerpc .. => ("", "", "R3")
+
+namespace BaseState
+
+private def putTable (out : ByteArray) (table : Std.HashMap Nat Nat) : ByteArray :=
+  Wire.putSorted (fun out (key, value) => Wire.putNat (Wire.putNat out key) value) out table.toList
+
+private def getTable : Wire.Decoder (Std.HashMap Nat Nat) := fun data at_ => do
+  let (entries, at_) ← Wire.getList (fun data at_ => do
+    let (key, at_) ← Wire.getNat data at_
+    let (value, at_) ← Wire.getNat data at_
+    .ok ((key, value), at_)) data at_
+  .ok (Std.HashMap.ofList entries, at_)
+
+/-- What the environment keeps, as bytes: the same state makes the same bytes. -/
+def encode (state : BaseState) : ByteArray :=
+  let out := putTable (putTable (Wire.putNat ByteArray.empty state.nextKey) state.results) state.joinWords
+  let out := Wire.putSorted (fun out ((key, tid), value) => Wire.putNat (Wire.putNat (Wire.putNat out key) tid) value) out
+    state.specific.toList
+  let out := putTable (putTable (putTable out state.aligned) state.errno) state.onceReturns
+  Wire.putSorted (fun out (tid, (base, size)) => Wire.putNat (Wire.putNat (Wire.putNat out tid) base) size) out state.stacks.toList
+
+def decode (data : ByteArray) : Except String BaseState := do
+  let (nextKey, at_) ← Wire.getNat data 0
+  let (results, at_) ← getTable data at_
+  let (joinWords, at_) ← getTable data at_
+  let (specific, at_) ← Wire.getList (fun data at_ => do
+    let (key, at_) ← Wire.getNat data at_
+    let (tid, at_) ← Wire.getNat data at_
+    let (value, at_) ← Wire.getNat data at_
+    .ok (((key, tid), value), at_)) data at_
+  let (aligned, at_) ← getTable data at_
+  let (errno, at_) ← getTable data at_
+  let (onceReturns, at_) ← getTable data at_
+  let (stacks, at_) ← Wire.getList (fun data at_ => do
+    let (tid, at_) ← Wire.getNat data at_
+    let (base, at_) ← Wire.getNat data at_
+    let (size, at_) ← Wire.getNat data at_
+    .ok ((tid, (base, size)), at_)) data at_
+  Wire.expectEnd data at_
+  pure { nextKey, results, joinWords, specific := Std.HashMap.ofList specific, aligned, errno, onceReturns,
+         stacks := Std.HashMap.ofList stacks }
+
+end BaseState
+
+/-- What a checkpoint knows the base environment by. -/
+def baseModelId : String := "bap.base"
+
+/-- The base environment as a model of the runtime, for `start` or `Machine.ofCheckpoint`, which leaves it in `cell`: what it keeps is
+in a checkpoint, and is put back, all of it or, if the bytes aren't of it, none. -/
+def baseModel (cell : IO.Ref (Option BaseEnvironment)) : RuntimeModel where
+  id := baseModelId
+  attach := fun machine => do
+    let state ← IO.mkRef ({} : BaseState)
+    let base ← attachBase machine state
+    cell.set (some base)
+    pure { save := do pure (← state.get).encode, load := fun data => do state.set (← IO.ofExcept (BaseState.decode data)) }
+
+/-- The base environment of a machine, made once, as the model `baseModel` is attached: its functions at their stubs, and the data
+that it has, `__stack_chk_guard`. A machine that goes on from a checkpoint of it is given `baseModel`. -/
+def Machine.baseEnvironment (machine : Machine) : IO BaseEnvironment := do
+  let cell ← IO.mkRef none
+  let _ ← machine.attachModel (baseModel cell)
+  let some base ← cell.get | throw <| IO.userError "the base environment wasn't attached"
+  pure base
 
 /-- Loads a library linked against the base environment, which it has before anything that is loaded, a libc among them. -/
 def Machine.loadWithBase (machine : Machine) (base : BaseEnvironment) (path : String) (search : List String := [])

@@ -190,8 +190,9 @@ def taintModel (cell : IO.Ref (Option Tracker)) (config : Config := {}) : Runtim
 world such as `mmap` and `futex`, what JNI gives, what `Machine.write` writes, and what the host gives `Machine.call`. What a program sends to a file or a pipe has what it came
 from when it is read there. What was opened from before this was called goes by its path if it has one. It is in a checkpoint from then on, which then needs `taintModel` to go on from. -/
 def Machine.track (machine : Machine) (config : Config := {}) : IO Tracker := do
-  let (tracker, opened) ← attachTracker machine config
-  machine.models.modify (· ++ [{ id := taintModelId, version := 1, state := taintState tracker opened }])
+  let cell ← IO.mkRef none
+  let _ ← machine.attachModel (taintModel cell config)
+  let some tracker ← cell.get | throw <| IO.userError "the tracker wasn't attached"
   pure tracker
 
 /-! ### What a machine did -/
@@ -232,8 +233,9 @@ def journalModel (cell : IO.Ref (Option Journal)) (config : Bap.Analysis.Journal
 /-- Starts keeping what a machine does, from here on: each instruction of each thread, each call and return, and each system call and each call of JNI, with what it
 answered and left. It is in a checkpoint from then on, which then needs `journalModel` to go on from. -/
 def Machine.journal (machine : Machine) (config : Bap.Analysis.Journal.Config := {}) : IO Journal := do
-  let (journal, opened) ← attachJournal machine config
-  machine.models.modify (· ++ [{ id := journalModelId, version := 1, state := journalState journal opened }])
+  let cell ← IO.mkRef none
+  let _ ← machine.attachModel (journalModel cell config)
+  let some journal ← cell.get | throw <| IO.userError "the journal wasn't attached"
   pure journal
 
 /-- Why a run first came to an address, as far as it can be said: how it got there, what had called what, and the last branch before that on anything marked, by way of
