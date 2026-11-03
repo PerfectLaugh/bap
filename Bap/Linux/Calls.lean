@@ -5,6 +5,8 @@ layout of `struct stat`, and the bits of the flags of `open`. The kernel itself 
 
 namespace Bap.Linux
 
+/-- What a Linux machine runs, with what tells its kinds apart where a kernel has to: the calls, their numbers and errors, and the layout
+of what they write. -/
 inductive Architecture where
   | x86_64 | i686 | aarch64 | arm | riscv64 | riscv32
   /-- Of 32 or 64 bits, big-endian or not, of release 6 or not. -/
@@ -41,11 +43,13 @@ def Architecture.elf : Architecture → Nat × Nat × Bool × Nat
   | .powerpc 32 big => (20, 32, big, 0)
   | .powerpc bits big => (21, bits, big, 2)
 
+/-- How wide its words and addresses are. -/
 def Architecture.bits : Architecture → Nat
   | .riscv32 | .i686 | .arm => 32
   | .mips bits _ _ | .powerpc bits _ => bits
   | _ => 64
 
+/-- Whether it has the most significant byte first. -/
 def Architecture.big : Architecture → Bool
   | .mips _ big _ | .powerpc _ big => big
   | _ => false
@@ -209,6 +213,7 @@ def powerpcCalls : List (Nat × Call) :=
    (94, .succeeds), (16, .succeeds), (95, .succeeds), (289, .succeeds), (304, .succeeds), (412, .succeeds), (162, .succeeds),
    (248, .succeeds), (407, .succeeds), (24, .succeeds), (47, .succeeds), (49, .succeeds), (50, .succeeds)]
 
+/-- The calls that the kernel serves, by their numbers on it. What isn't here is for `serveTaskCalls`, or isn't there. -/
 def Architecture.calls : Architecture → List (Nat × Call)
   | .x86_64 => x86_64Calls
   | .i686 => i686Calls

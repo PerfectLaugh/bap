@@ -8,15 +8,20 @@ import Bap.Primus.CodeIndex
 
 namespace Bap.Primus.Lifted
 
+/-- An instruction as it is lifted: where it is, where the one after it is, and its BIL. -/
 structure Block where
   address : Nat
   next : Nat
   program : Bil.Program
   deriving Repr, Inhabited
 
+/-- The bytes at an address, as many as an instruction there may have. -/
 abbrev Fetch := Nat → IO ByteArray
+/-- The block of an instruction, from its address and bytes. -/
 abbrev Lift := Nat → ByteArray → IO Block
 
+/-- What an engine has done, for knowing what it costs: what it found cached, lifted, compiled and ran each way, what it kept as
+versions and found again, and what writes and limits took from it. -/
 structure Statistics where
   cacheHits : Nat := 0
   lifts : Nat := 0
@@ -182,6 +187,8 @@ def atomicProgram (program : Bil.Program) : Bool :=
   let stores := programAny (fun | .store .. => true | _ => false) (fun _ => false) depth program
   programAny (fun | .var var => var.name == monitorName | _ => false) (·.name == monitorName) depth program || (loads && stores)
 
+/-- What runs lifted code: the blocks that it lifted and compiled, by address, the ranges that it compiled from them, versions of both
+for code that comes back as it was, where they are for a write to find them, the native memory that compiled code uses, and its limits. -/
 structure Engine where
   cache : IO.Ref (Std.HashMap Nat CachedBlock)
   ranges : IO.Ref (Std.HashMap Nat CachedBlock)
@@ -227,6 +234,8 @@ structure Engine where
   /-- What runs from each address, while one is kept. -/
   profile : IO.Ref (Option (Std.HashMap Nat Profile))
 
+/-- What a run of a block or a range comes to: the state after it, where it went, where the instruction after the last that it ran
+is, and how it ended. -/
 structure Result where
   state : Bil.State
   pc : Nat
@@ -234,6 +243,8 @@ structure Result where
   effect : Bil.Effect
   deriving Repr
 
+/-- An engine with nothing cached. A block is compiled once it has run `hotThreshold` times, and a range chains up to `rangeLimit`
+blocks; the rest are limits on what is kept and when native memory starts to be used. -/
 def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimit : Nat := 1)
     (rangeCacheLimit : Nat := 16) (writeCooldown : Nat := 0) (deferMemorySync : Bool := false)
     (nativeLimit : Nat := 512) (persistentFrom : Nat := 100000) (wrapFaults : Bool := false)
@@ -269,6 +280,7 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimi
     profile := ← IO.mkRef none
   }
 
+/-- What it has done so far. -/
 def stats (engine : Engine) : IO Statistics := engine.statistics.get
 
 private def rememberVersion (engine : Engine)
@@ -298,6 +310,7 @@ private def indexRange (engine : Engine) (address : Nat) (entry : CachedBlock) :
   engine.rangeIndex.modify fun index =>
     spans.foldl (init := index) fun index (lo, hi) => CodeIndex.add index address (min lo hi) (max lo hi)
 
+/-- Forgets all that was lifted and compiled, and every version of it. -/
 def clearCache (engine : Engine) : IO Unit := do
   engine.cache.set {}
   engine.ranges.set {}
@@ -401,6 +414,7 @@ def markDirtyRange (engine : Engine) (first last : Nat) : IO Unit := do
       | some (first', last') => some (min first first', max last last')
       | none => some (first, last)
 
+/-- Drops what the writes to code that `markDirtyRange` noted change, once the instruction that made them is over. -/
 def flushDirtyRange (engine : Engine) : IO Unit := do
   match ← engine.dirtyCode.get with
   | some (first, last) =>
@@ -408,6 +422,7 @@ def flushDirtyRange (engine : Engine) : IO Unit := do
     discardRange engine first last
   | none => pure ()
 
+/-- Lets go of the native memory, after a run that failed may have written to it: what the state has is what is so. -/
 def discardMemory (engine : Engine) : IO Unit := do
   engine.dirtyCode.set none
   engine.persistentMemory.set none

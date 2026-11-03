@@ -5,6 +5,7 @@ import Std.Data.HashSet
 
 namespace Bap.Disasm
 
+/-- How an instruction passes control on. -/
 inductive Flow where
   | normal
   | jump
@@ -15,6 +16,7 @@ inductive Flow where
   | barrier
   deriving DecidableEq, Repr
 
+/-- A decoded instruction: where it is, how big, its text, how it passes control on and where to if that is known, and its BIL. -/
 structure Insn where
   address : Nat
   size : Nat
@@ -28,6 +30,7 @@ namespace Insn
 
 @[simp] def next (insn : Insn) : Nat := insn.address + insn.size
 
+/-- Where control may go after it, of what is known. -/
 def successors (insn : Insn) : List Nat :=
   match insn.flow with
   | .normal | .call => [insn.next]
@@ -43,6 +46,7 @@ def fallsThrough (insn : Insn) : Bool :=
 
 end Insn
 
+/-- What decodes the instructions of a target, one at a time, with what it says of delay slots. -/
 structure Disassembler where
   name : String
   decode : Nat → ByteArray → IO (Except String Insn)
@@ -55,17 +59,20 @@ structure Disassembler where
   that it can't lift by it. -/
   sizeAt : Nat → ByteArray → IO (Option Nat) := fun _ _ => pure none
 
+/-- What decoding from an entry found: its instructions, the edges between them, and what couldn't be decoded. -/
 structure Disasm where
   entry : Nat
   instructions : List Insn := []
   edges : List (Nat × Nat) := []
   errors : List String := []
 
+/-- Instructions that run one after the other, from one that is a target or follows a branch. -/
 structure Block where
   start : Nat
   instructions : List Insn
   deriving Repr
 
+/-- The instructions, by address. -/
 def sortedInstructions (disasm : Disasm) : List Insn :=
   disasm.instructions.mergeSort fun left right => left.address ≤ right.address
 
@@ -90,11 +97,13 @@ private def buildBlocks (leaders : Std.HashSet Nat) (current : List Insn) (block
     else
       buildBlocks leaders (insn :: current) blocks rest
 
+/-- The instructions as blocks. -/
 def Disasm.blocks (disasm : Disasm) : List Block :=
   let instructions := sortedInstructions disasm
   let leaders := (disasm.leaders instructions).foldl (init := ({} : Std.HashSet Nat)) fun set address => set.insert address
   (buildBlocks leaders [] [] instructions).reverse
 
+/-- The instructions and errors, as text. -/
 def Disasm.render (disasm : Disasm) : String :=
   let lines := (sortedInstructions disasm).map fun insn =>
     s!"{insn.address}: {insn.asm}"

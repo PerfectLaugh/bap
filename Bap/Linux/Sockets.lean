@@ -21,6 +21,7 @@ def socketAt (kernel : Kernel) (number : Nat) : Option Socket :=
   | some { content := .socket socket, .. } => some socket
   | _ => none
 
+/-- What the socket of an inode is now. An inode that isn't there stays not there. -/
 def setSocket (kernel : Kernel) (number : Nat) (socket : Socket) : Kernel :=
   match kernel.inodes.get? number with
   | some inode => { kernel with inodes := kernel.inodes.insert number { inode with content := .socket socket } }
@@ -33,6 +34,7 @@ def socketOf (kernel : Kernel) (group fd : Nat) : Result (Nat × Socket) := do
   | some socket => .ok (file.inode, socket)
   | none => .error Errno.enotsock
 
+/-- Whether a descriptor is of a socket, for `read` and `write` to go to it. -/
 def isSocket (kernel : Kernel) (group fd : Nat) : Bool :=
   match kernel.socketOf group fd with
   | .ok _ => true
@@ -252,6 +254,7 @@ namespace Endpoint
 /-- What a socket has as its name, which is no path and no name of the Unix domain. -/
 def name (endpoint : Endpoint) : String := s!"\x01{endpoint.family}:{endpoint.address}:{endpoint.port}"
 
+/-- The address that a name of a socket is, if it is of the Internet. -/
 def ofName? (name : String) : Option Endpoint :=
   if !name.startsWith "\x01" then none
   else
@@ -259,6 +262,7 @@ def ofName? (name : String) : Option Endpoint :=
     | [some family, some address, some port] => some { family, address, port }
     | _ => none
 
+/-- `127.0.0.1` or `::1`, which is where an address of any of them goes. -/
 def loopback (family : Nat) : Nat := if family == 2 then 0x7f000001 else 1
 
 /-- Whether it is an address of the machine, or any of them. -/
@@ -269,6 +273,7 @@ def isLocal (endpoint : Endpoint) : Bool :=
 def key (type : Nat) (endpoint : Endpoint) : String :=
   s!"\x01{type}/{endpoint.family}:{endpoint.address}:{endpoint.port}"
 
+/-- The type of socket and the address that a key of `key` is, if it is one. -/
 def ofKey? (key : String) : Option (Nat × Endpoint) :=
   if !key.startsWith "\x01" then none
   else

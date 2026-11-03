@@ -12,6 +12,9 @@ Everyone is root, and modes are kept but not enforced. Times come from a clock t
 
 namespace Bap.Linux
 
+/-! The numbers of errors, as Linux has them on x86-64 and on most others: what a call fails with here, and what `Architecture.errno`
+gives MIPS its own numbers of, which differ above 34. -/
+
 namespace Errno
 def eperm : Nat := 1
 def eacces : Nat := 13
@@ -86,6 +89,7 @@ structure Socket where
   /-- Where datagrams of the Internet go when a send doesn't say: the address that it was connected to, whoever has it then. -/
   remote : Option String := none
 
+/-- What an inode is and holds. -/
 inductive Content where
   | file (data : ByteArray)
   | directory
@@ -96,8 +100,10 @@ inductive Content where
   | generated (name : String)
   /-- What has been written to a pipe, from where it hasn't been read yet, and how much has been read of all that was ever written. It lets go of what is read once that is half of it. -/
   | pipe (buffer : ByteArray) (head consumed : Nat)
+  /-- A socket, with all that it holds: see `Bap.Linux.Sockets`. -/
   | socket (socket : Socket)
 
+/-- A file of any kind: its number, what it holds, and its type and permissions as `st_mode` has them. -/
 structure Inode where
   number : Nat
   content : Content
@@ -109,6 +115,7 @@ structure OpenFile where
   offset : Nat := 0
   flags : Nat
 
+/-- A descriptor of a process: which open file it is, and whether `execve` closes it. -/
 structure Descriptor where
   openFile : Nat
   closeOnExec : Bool := false
@@ -135,6 +142,7 @@ def without (mapping : FileMapping) (lower upper : Nat) : List FileMapping :=
     (if mapping.start < lower then [{ mapping with size := lower - mapping.start }] else []) ++
     (if upper < stop then [{ mapping with start := upper, size := stop - upper, offset := mapping.offset + (upper - mapping.start) }] else [])
 
+/-- Whether it has any of `lower`..`upper`, which `upper` isn't in. -/
 def overlaps (mapping : FileMapping) (lower upper : Nat) : Bool :=
   mapping.start < upper && lower < mapping.start + mapping.size
 
@@ -195,6 +203,8 @@ structure ProcessView where
 /-- What makes the bytes of a generated file. -/
 abbrev Generator := ProcessView → ByteArray
 
+/-- All that the kernel is: its files, what is open of them, its processes, what was written to the console and its clock. A socket that
+is bound to a name of its own, or to an address of the Internet, has that name among the paths, which don't start with `/`. -/
 structure Kernel where
   /-- From an absolute path without `.`, `..` or a trailing slash to its inode. -/
   paths : Std.HashMap String Nat := {}
@@ -227,11 +237,13 @@ def parts (base path : String) : List String :=
     else part :: kept
   kept.reverse
 
+/-- The absolute path of these parts. -/
 def ofParts (parts : List String) : String := "/" ++ "/".intercalate parts
 
 /-- Without its last part. -/
 def parent (path : String) : String := ofParts (parts "/" path).dropLast
 
+/-- Its last part, which for the root is `/`. -/
 def name (path : String) : String := (parts "/" path).getLast?.getD "/"
 
 end Path
@@ -339,8 +351,10 @@ def addSymlink (kernel : Kernel) (path target : String) : Kernel :=
   let normal := Path.ofParts (Path.parts "/" path)
   (addInode (addDirectories kernel (Path.parent normal)) normal (.symlink target) 0o120777).1
 
+/-- A process by the id of its thread group, or one with nothing yet. -/
 def process (kernel : Kernel) (group : Nat) : Process := kernel.processes.getD group {}
 
+/-- What a process is now. -/
 def setProcess (kernel : Kernel) (group : Nat) (process : Process) : Kernel :=
   { kernel with processes := kernel.processes.insert group process }
 
@@ -387,6 +401,7 @@ def fork (kernel : Kernel) (parent child : Nat) : Kernel :=
 def exitProcess (kernel : Kernel) (group : Nat) : Kernel :=
   { kernel with processes := kernel.processes.erase group }
 
+/-- The open file of a descriptor of a process, with its id, or `EBADF`. -/
 def openFileOf (kernel : Kernel) (group fd : Nat) : Result (Nat × OpenFile) :=
   match (kernel.process group).descriptors.get? fd with
   | none => .error Errno.ebadf
@@ -395,6 +410,7 @@ def openFileOf (kernel : Kernel) (group fd : Nat) : Result (Nat × OpenFile) :=
     | none => .error Errno.ebadf
     | some file => .ok (descriptor.openFile, file)
 
+/-- An inode by its number. -/
 def inodeOf (kernel : Kernel) (number : Nat) : Result Inode :=
   match kernel.inodes.get? number with
   | some inode => .ok inode
@@ -408,6 +424,8 @@ def readAt (data : ByteArray) (offset count : Nat) : ByteArray :=
 def writeAt (data : ByteArray) (offset : Nat) (bytes : ByteArray) : ByteArray :=
   let filled := if data.size < offset then data ++ Bap.zeroBytes (offset - data.size) else data
   filled.extract 0 offset ++ bytes ++ filled.extract (offset + bytes.size) filled.size
+
+/-! The flags of `open` as the kernel has them, which are those of x86-64: `Architecture.openFlags` gives them from a guest's. -/
 
 def oCreat : Nat := 0x40
 def oExcl : Nat := 0x80
@@ -926,6 +944,7 @@ def dropMappings (kernel : Kernel) (group lower upper : Nat) : Kernel :=
   if process.mappings.isEmpty then kernel
   else kernel.setProcess group { process with mappings := process.mappings.flatMap (·.without lower upper) }
 
+/-- A process has a mapping of a file now. -/
 def addMapping (kernel : Kernel) (group : Nat) (mapping : FileMapping) : Kernel :=
   let process := kernel.process group
   kernel.setProcess group { process with mappings := mapping :: process.mappings }
@@ -954,6 +973,7 @@ end Kernel
 
 namespace Abi
 
+/-- The low `size` bytes of a number, the least significant first. -/
 def bytesOf (size value : Nat) : ByteArray :=
   ByteArray.mk ((List.range size).map fun index => (value >>> (8 * index)).toUInt8).toArray
 

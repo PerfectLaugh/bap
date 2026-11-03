@@ -17,6 +17,8 @@ structure LibraryTls where
   alignment : Nat
   deriving DecidableEq, Repr
 
+/-- A shared library that `Machine.loadLibrary` loaded into a process: where it is, what it exports, what it needs, its thread-local
+storage, what is to run when it goes, and the digest of its file, by which a checkpoint knows it. -/
 structure LoadedLibrary where
   /-- What it is known by: its path in the machine. -/
   path : String
@@ -105,6 +107,7 @@ private def getEntry : Decoder (Nat × List LoadedLibrary) := fun data at_ => do
 def encode (table : Std.HashMap Nat (List LoadedLibrary)) : ByteArray :=
   putSorted putEntry ByteArray.empty table.toList
 
+/-- What `encode` made, or why it isn't. -/
 def decode (data : ByteArray) : Except String (Std.HashMap Nat (List LoadedLibrary)) := do
   let (entries, at_) ← getList getEntry data 0
   expectEnd data at_

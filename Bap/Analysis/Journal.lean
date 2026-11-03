@@ -37,6 +37,8 @@ structure Executed where
   pc : Nat
   deriving DecidableEq, Repr, Inhabited
 
+/-- What happened in a run besides the instructions, in the order that it happened: a call, a return, something served from outside,
+and the machine put back to what it was. -/
 inductive Event where
   | call (seq : Nat) (thread : ThreadId) (frame : Frame)
   /-- How far it went back: more than one if calls within it never came back. -/
@@ -47,12 +49,15 @@ inductive Event where
   | restored (seq : Nat) (thread : ThreadId) (label : String)
   deriving DecidableEq, Repr, Inhabited
 
+/-- Where it is in the order of all events. -/
 def Event.seq : Event → Nat
   | .call seq .. | .ret seq .. | .service seq .. | .restored seq .. => seq
 
+/-- Which thread it happened in. -/
 def Event.thread : Event → ThreadId
   | .call _ thread _ | .ret _ thread .. | .service _ thread .. | .restored _ thread _ => thread
 
+/-- How much a journal keeps, and what it calls the system calls. -/
 structure Config where
   /-- How many instructions are kept, and how many events, of which the oldest half goes when they run out. -/
   instructions : Nat := 4000000
@@ -79,6 +84,8 @@ private structure ThreadState where
   group : Option Nat := none
   deriving Inhabited
 
+/-- What keeps a journal of a run: the instructions that ran, with what they read and wrote, the events, and the calls that each thread is
+in. `Machine.journal` makes one. -/
 structure Journal where
   emu : Emu
   config : Config
@@ -319,9 +326,11 @@ def firstEntry (journal : Journal) (address : Nat) (before : Nat := 16) : IO (Op
 
 private def hex (value : Nat) : String := "0x" ++ String.ofList (Nat.toDigits 16 value)
 
+/-- A call, as text for a person. -/
 def Frame.text (frame : Frame) : String :=
   s!"{hex frame.callee} called at {hex frame.site}, back to {hex frame.returnsTo}"
 
+/-- How a function was come to, as text for a person. -/
 def Entry.text (entry : Entry) : String :=
   let how := match entry.call with
     | some frame => s!"called at {hex frame.site}"
@@ -342,6 +351,7 @@ structure Record where
   droppedEvents : Nat
   deriving Repr, Inhabited
 
+/-- What a journal has kept, as plain data, to compare or to save. -/
 def toRecord (journal : Journal) : IO Record := do
   pure { history := ← journal.history.get, droppedHistory := ← journal.droppedHistory.get
          events := ← journal.events.get, droppedEvents := ← journal.droppedEvents.get }
@@ -369,6 +379,7 @@ structure ServiceDifference where
   right : Option Event
   deriving DecidableEq, Repr
 
+/-- Where two runs first went their own ways: by a branch, by what was served to them, and whether all of both was there to compare. -/
 structure Difference where
   branch : Option BranchDifference
   service : Option ServiceDifference
@@ -403,6 +414,7 @@ structure ByThread where
   history : Std.HashMap ThreadId (Array Executed) := {}
   services : Std.HashMap ThreadId (Array Event) := {}
 
+/-- A record's instructions and services, by thread, in order. -/
 def byThread (record : Record) : ByThread :=
   { history := record.history.foldl (init := {}) fun table entry => table.alter entry.thread fun known => some ((known.getD #[]).push entry)
     services := record.events.foldl (init := {}) fun table event =>
@@ -461,6 +473,7 @@ def compare (left right : Record) : Difference :=
     service := earliest (·.seq) (pairs.filterMap (serviceAt leftThreads rightThreads))
     complete := left.droppedHistory == 0 && right.droppedHistory == 0 && left.droppedEvents == 0 && right.droppedEvents == 0 }
 
+/-- What a difference says, as text for a person. -/
 def Difference.text (difference : Difference) : String :=
   let branch := match difference.branch with
     | some part =>

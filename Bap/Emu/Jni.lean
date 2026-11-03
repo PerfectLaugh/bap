@@ -2,13 +2,26 @@ import Bap.Emu
 import Bap.Linux.Wire
 import Bap.Emu.Tasks
 
+/-! # A model of JNI
+
+What native code of an app gets from the Java runtime through `JNIEnv *` and `JavaVM *`, for running it without a runtime: the standard
+table of 233 functions of the environment, in the numbering of `jni.h`, which Android has too, and the 8 of the VM. There is no Java
+here. Classes, objects, strings and arrays are identities that the model keeps, behind handles that it gives out. What a method or a
+field is comes from the declarations that the model is made with, and what it isn't told of, from `default`, which the host gives.
+
+A guest calls the tables by the convention of its architecture (`attach`, `serveIndex`), or on AArch64 through the dispatcher of the
+stubs that `install` writes (`serve`). What it holds goes into a checkpoint (`state`). -/
+
 namespace Bap.Emu.Jni
 
+/-- A call of a function of a table: its index in the table, and the words of its arguments, from the `JNIEnv *` or `JavaVM *` on. -/
 structure Call where
   index : Nat
   args : Array Nat
   deriving Repr
 
+/-- What a method, a field or `default` says a call gives: a number as it is, an object that the host knows by its number, a string with
+these contents, a handle as it is, or a new object. The model makes a handle of each but the first and the fourth. -/
 inductive Answer where
   | value (value : Nat)
   | object (identity : Nat)
@@ -17,15 +30,18 @@ inductive Answer where
   | fresh
   deriving Repr
 
+/-- What a handle stands for: what the host knows by a number of its own, or what the model made. -/
 inductive Identity where
   | external (value : Nat)
   | internal (value : Nat)
   deriving DecidableEq, Hashable, Repr
 
+/-- The kinds of reference of JNI, each of which has handles of its own for the same identity. -/
 inductive RefKind where
   | local | global | weak
   deriving DecidableEq, Hashable
 
+/-- What `GetMethodID` and its kin look a method or a field up by: its class, name, signature, and whether it is static. -/
 structure BindingKey where
   owner : Identity
   name : String
@@ -33,53 +49,71 @@ structure BindingKey where
   static : Bool
   deriving DecidableEq, Hashable
 
+/-- A method that the model has: what it gives for a call, which has the method's arguments after the object or class and the method ID. -/
 structure MethodDecl where
   name : String
   signature : String
   answer : Call → IO Answer
 
+/-- A field that the model has, and what it holds. -/
 structure FieldDecl where
   name : String
   signature : String
   value : Answer
 
+/-- A class that the model has, by its name as `FindClass` takes it, such as `java/lang/String`, with its methods and fields. -/
 structure ClassDecl where
   name : String
+  /-- What `GetSuperclass` gives for it, by its name: none for an interface, as for `java/lang/Object`. -/
+  superclass : Option String := some "java/lang/Object"
   methods : List MethodDecl := []
   staticMethods : List MethodDecl := []
   fields : List FieldDecl := []
   staticFields : List FieldDecl := []
 
+/-- An object that the host knows by a number, of a class, and the elements of it if it is an array. -/
 structure ObjectDecl where
   identity : Nat
   className : String
   elements : List Answer := []
 
+/-- A method that the model has, as it is known by its ID. -/
 structure MethodInfo where
   decl : MethodDecl
   owner : Identity
   static : Bool
 
+/-- A field that the model has, as it is known by its ID. -/
 structure FieldInfo where
   decl : FieldDecl
   owner : Identity
   static : Bool
 
+/-- A string, with where its bytes are once native code has asked for them, in UTF-8 and in UTF-16. -/
 structure StringInfo where
   contents : String
   address : Option Nat := none
   wideAddress : Option Nat := none
 
+/-- Where the model is in the memory of the guest. -/
 structure Layout where
+  /-- The `JavaVM`, a word that points at its table, which is what a `JavaVM *` is the address of. -/
   vm : Nat
+  /-- The table of the VM, of 8 functions. -/
   vmFunctions : Nat
+  /-- The `JNIEnv`, which is what native code is given the address of. -/
   env : Nat
+  /-- The table of the environment, of 233 functions. -/
   envFunctions : Nat
+  /-- Where the function of each index is, 8 bytes apart. -/
   envStubs : Nat
+  /-- Where the stubs of AArch64 go to, with the index in `X8`: a hook there is to run `serve`. -/
   envDispatcher : Nat
   vmStubs : Nat
   vmDispatcher : Nat
 
+/-- A model, with what it has given out and what it was given: how to read and place strings and bytes in the guest, the class of
+what the host knows by a number, what to give for what it isn't told of, and what hears of each call. -/
 structure Model where
   nextHandle : IO.Ref Nat
   nextIdentity : IO.Ref Nat
@@ -106,12 +140,15 @@ structure Model where
   default : Call → (Nat → IO (Option String)) → IO Answer
   log : Call → String → Nat → IO Unit
   version : Nat := 0x10006
+  /-- The superclass of each class that was declared, by name, which goes by names so that a checkpoint has nothing to say of it. -/
+  superclasses : Std.HashMap String (Option String) := {}
   /-- Whether the guest has the most significant byte first, for the elements of arrays and the units of strings that it is given. -/
   big : Bool := false
   exception : IO.Ref (Option Identity)
   env : IO.Ref Nat
   vm : IO.Ref Nat
 
+/-- The word of an argument of a call, from 0 for the `JNIEnv *`, or 0 if it has none there. -/
 def arg (call : Call) (index : Nat) : Nat := call.args.getD index 0
 
 /-- The UTF-16 code units of a string, as `GetStringChars` and `GetStringLength` see it. -/
@@ -155,6 +192,9 @@ inductive Family where
   | other
   deriving DecidableEq, Repr
 
+/-- Which family a function of the environment is of, with whether it is static and which argument has the method ID: `NewObject`,
+`Call<Type>Method`, `CallNonvirtual<Type>Method` and `CallStatic<Type>Method`, each in its plain, `V` and `A` forms, and
+`Get<Type>Field` and `GetStatic<Type>Field`. -/
 def familyOf (index : Nat) : Family :=
   if index ≥ 28 && index ≤ 30 then .callMethod false 2
   else if index ≥ 34 && index ≤ 63 then .callMethod false 2
@@ -182,9 +222,8 @@ private def writeReg (emu : Emu) (name : String) (value : Nat) : IO Unit :=
 private def word (value : Nat) : ByteArray :=
   ByteArray.mk ((List.range 8).map fun index => UInt8.ofNat (value / 256 ^ index % 256)).toArray
 
-private def writeWord (emu : Emu) (address value : Nat) : IO Unit :=
-  Bap.Emu.write emu address (word value)
-
+/-- The string of C at an address, up to 4096 bytes: what a model is given to read the names that native code passes, which are text.
+What is below 0x10000 isn't a string, and is empty. -/
 def readCString (emu : Emu) (address : Nat) : IO String := do
   if address < 0x10000 then pure "" else
     let rec loop (offset : Nat) (bytes : ByteArray) : IO ByteArray := do
@@ -198,13 +237,16 @@ private def freshIdentity (model : Model) : IO Identity := do
   model.nextIdentity.set (id + 1)
   pure (.internal id)
 
+/-- What a handle stands for. One that the model didn't give out is what the host knows by that number. -/
 def resolve (model : Model) (handle : Nat) : IO Identity := do
   pure ((← model.sources.get).get? handle |>.getD (.external handle))
 
+/-- What a handle of a string has in it, if it is one. -/
 def stringContents (model : Model) (handle : Nat) : IO (Option String) := do
   let id ← resolve model handle
   pure ((← model.strings.get).get? id |>.map fun info => info.contents)
 
+/-- The handle of an identity, of a kind of reference: the same one each time. The null object is 0. -/
 def internIdentity (model : Model) (kind : RefKind) (identity : Identity) : IO Nat := do
   if identity = .external 0 then pure 0 else
     let handles ← model.handles.get
@@ -217,9 +259,11 @@ def internIdentity (model : Model) (kind : RefKind) (identity : Identity) : IO N
       model.sources.modify (·.insert handle identity)
       pure handle
 
+/-- A local handle of what the host knows by a number, to give native code: an object, such as the `this` of a native method. -/
 def intern (model : Model) (identity : Nat) : IO Nat :=
   internIdentity model .local (.external identity)
 
+/-- The number that the host knows what a handle stands for by, if it is one of the host's. -/
 def identity (model : Model) (handle : Nat) : IO (Option Nat) := do
   match (← model.sources.get).get? handle with
   | some (.external id) => pure (some id)
@@ -270,6 +314,10 @@ private def registerClass (model : Model) (decl : ClassDecl) : IO Unit := do
     model.fields.modify (·.insert id ⟨field, owner, true⟩)
     model.fieldIds.modify (·.insert ⟨owner, field.name, field.signature, true⟩ id)
 
+/-- A model. `readString` reads a name that native code passes, `allocString` and `allocBytes` put what it asks for in its memory,
+`default` says what to give for what isn't declared, by the call and the name of a method or field if it was asked for by one, and
+`log` hears of each call with what it gave. `classOf` says the class of an object of the host. `big` is that the guest has the most
+significant byte first. -/
 def create (readString : Nat → IO String) (allocString : String → IO Nat)
     (allocBytes : ByteArray → IO Nat)
     (default : Call → (Nat → IO (Option String)) → IO Answer)
@@ -297,6 +345,7 @@ def create (readString : Nat → IO String) (allocString : String → IO Nat)
     dynamicNames := ← IO.mkRef {}
     nextDynamic := ← IO.mkRef 0x10000
     readString, allocString, allocBytes, classOf, default, log, version, big
+    superclasses := classes.foldl (init := {}) fun table decl => table.insert decl.name decl.superclass
     exception := ← IO.mkRef none
     env := ← IO.mkRef 0
     vm := ← IO.mkRef 0
@@ -308,6 +357,7 @@ def create (readString : Nat → IO String) (allocString : String → IO Nat)
     model.arrays.modify (·.insert (.external object.identity) object.elements)
   pure model
 
+/-- The name of a method or field that wasn't declared, by the ID that `GetMethodID` or `GetFieldID` gave for it. -/
 def dynamicName (model : Model) (handle : Nat) : IO (Option String) := do
   let id ← resolve model handle
   pure ((← model.dynamicNames.get).get? id)
@@ -425,6 +475,17 @@ private def compute (model : Model) (call : Call) : IO (Nat × String) := do
   | 6 =>
     let name ← model.readString (arg call 1)
     pure (← classIdentity model name >>= internIdentity model .local, name)
+  | 10 =>
+    -- GetSuperclass(env, class): as it was declared, or `java/lang/Object` for what wasn't, and null for that and for an interface.
+    if arg call 1 = 0 then pure (0, "superclass-null") else
+      let name := (← model.classNames.get).get? (← resolve model (arg call 1))
+      let parent := match name with
+        | some "java/lang/Object" => none
+        | some name => (model.superclasses.get? name).getD (some "java/lang/Object")
+        | none => some "java/lang/Object"
+      match parent with
+      | some parent => pure (← classIdentity model parent >>= internIdentity model .local, s!"superclass {parent}")
+      | none => pure (0, "superclass-none")
   | 13 =>
     model.exception.set (some (← resolve model (arg call 1)))
     pure (0, "throw")
@@ -527,11 +588,13 @@ private def compute (model : Model) (call : Call) : IO (Nat × String) := do
       | .getField static => pure (← getField model call static (arg call 2), "")
       | .other => pure (← fallback (), "")
 
+/-- What a function of the environment gives for a call, which it logs. -/
 def dispatch (model : Model) (call : Call) : IO Nat := do
   let (result, detail) ← compute model call
   model.log call detail result
   pure result
 
+/-- What a function of the VM gives: `GetEnv` says whether it has the version asked for, and the rest succeed. -/
 def dispatchVm (model : Model) (call : Call) : IO Nat := do
   let result := if call.index = 6 then getEnvResult (arg call 2) model.version else 0
   model.log call "JavaVM" result
@@ -617,6 +680,7 @@ inductive ResultKind where
   | word | long | float | double
   deriving DecidableEq, Repr
 
+/-- What the function of an index gives, of those that give a `jlong`, a `jfloat` or a `jdouble`, and otherwise a word. -/
 def resultKindOf (index : Nat) : ResultKind :=
   let ofType (type : Nat) : ResultKind := match type with
     | 6 => .long
@@ -695,6 +759,7 @@ def serveIndex (model : Model) (emu : Emu) (index : Nat) (vm : Bool := false) : 
 def serve (model : Model) (emu : Emu) : IO Unit := do
   serveIndex model emu (← readReg emu "X8")
 
+/-- `serve` for the stubs of the VM. -/
 def serveVm (model : Model) (emu : Emu) : IO Unit := do
   serveIndex model emu (← readReg emu "X8") (vm := true)
 

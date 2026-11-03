@@ -44,6 +44,7 @@ The whole list for the project, of which this is the part about the emulator, is
 
 namespace Bap.Emu
 
+/-- Memory that is mapped: where it starts, its bytes as of when they were last refreshed, and what may be done with it. -/
 structure Region where
   address : Nat
   data : ByteArray
@@ -52,20 +53,25 @@ structure Region where
 
 namespace Region
 
+/-- Whether an address is in it. -/
 def contains (region : Region) (address : Nat) : Bool :=
   region.address ≤ address && address < region.address + region.data.size
 
 end Region
 
+/-- The region that has an address. -/
 def lookupRegion (regions : List Region) (address : Nat) : Option Region :=
   regions.find? fun region => region.contains address
 
+/-- What an access that faulted was. -/
 inductive MemoryOperation where
   | read | write | fetch
   deriving DecidableEq, Repr
 
+/-- A thread, by the id that Linux would give it. -/
 abbrev ThreadId := Nat
 
+/-- An access that wasn't allowed: by which instruction, where, of what kind, and in which thread. -/
 structure MemoryFault where
   pc : Nat
   address : Nat
@@ -73,15 +79,20 @@ structure MemoryFault where
   thread : ThreadId := 1
   deriving DecidableEq, Repr
 
+/-- What a branch of MIPS does with the instruction after it: nothing, runs it, runs it only if it is taken, or has none, as a compact
+branch of release 6 has. -/
 inductive DelayKind where
   | none | delayed | likely | forbidden
   deriving DecidableEq, Repr
 
+/-- A branch whose delay slot is still to run: the branch, and where it goes after that. -/
 structure PendingBranch where
   branch : Nat
   target : Nat
   deriving DecidableEq, Repr
 
+/-- What a thread that isn't running is: its registers and memory, where it is, whether it is stopped, a branch it was in the middle of,
+and where its hooks have fired already. -/
 structure ThreadContext where
   id : Nat
   state : Bil.State
@@ -92,6 +103,7 @@ structure ThreadContext where
   skip : Option Nat := none
   deriving Repr
 
+/-- What `Emu.threads` says of a thread. -/
 structure ThreadInfo where
   id : Nat
   pc : Nat
@@ -165,6 +177,7 @@ inductive AfterHook where
   | proceed
   deriving DecidableEq, Repr
 
+/-- What a step does after the hooks of `address`, by where they left the pc and whether they stopped the thread. -/
 def afterHook (address current : Nat) (stopped : Bool) : AfterHook :=
   if stopped then .halt (if current == address then some address else none)
   else if current == address then .proceed
@@ -449,6 +462,7 @@ def hooksOnPage {β : Type} (first last : β → Nat) (hooks : List β) (page : 
 def saveContext (threads : List ThreadContext) (context : ThreadContext) : List ThreadContext :=
   context :: threads.filter fun thread => thread.id != context.id
 
+/-- The table with a thread stopped, or let go. -/
 def setThreadStopped (threads : List ThreadContext) (id : Nat) (stopped : Bool) : List ThreadContext :=
   threads.map fun context => if context.id == id then { context with stopped } else context
 
@@ -463,6 +477,7 @@ def forkContext (id : Nat) (state : Bil.State) (result : Bap.Var) (value : Value
     ThreadContext :=
   ⟨id, { env := Bil.bind state.env result value }, childPc, true, none, none⟩
 
+/-- The lower of an id and the lowest so far. -/
 def lowerId (best : Option Nat) (id : Nat) : Option Nat :=
   match best with
   | some other => if other ≤ id then some other else some id

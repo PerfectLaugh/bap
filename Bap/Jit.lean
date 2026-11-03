@@ -49,6 +49,11 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
     since, once each, by ascending address, also for a program that failed: `some`, or `none` when it was too many or
     no step began. It may hold addresses that were written the same as they were. `endMemoryStep` stops it.
 
+**Byte arrays** (`zeros`, `regionBytes`, `sliceNative`, `piecesNative`, `fillNative`)
+15. `zeros size` is `size` bytes of zeros, and `regionBytes memory address size` is `readMemoryRange memory address size`: they differ
+    only in how much memory of the host they take. `sliceNative`, `piecesNative` and `fillNative` give what `slice`, `pieces` and `fill`
+    define in Lean, which they are `implemented_by`: what is proved of those (`fill_pieces`) holds of the C++ by this obligation.
+
 Everything else in `Bap.Emu`, from what the code hooks see to what a rollback restores, is proved against
 these. No theorem assumes anything of LLVM beyond them, and nothing depends on `memorySize`, which has no obligation.
 
@@ -63,12 +68,16 @@ is that same bound: on the fuel the interpreter runs with, a loop out of iterati
 
 namespace Bap.Jit
 
+/-- The operations of two slots that `Op.bin` has: arithmetic of 64 bits that wraps, shifts, comparisons that give 1 or 0, unsigned
+unless `s` says signed, and division, which a divisor of 0 doesn't reach, as lowering guards it. -/
 inductive BinOp where
   | add | sub | mul | and | or | xor | lshift | rshift
   | eq | neq | lt | le | gt | ge
   | udiv | urem | sdiv | srem | slt | sle | sgt | sge
   deriving Repr
 
+/-- An operation of a compiled program, on its slots of 64 bits: what lowering makes of BIL and `compile` makes native code of, with the
+meaning that obligation 1 says. -/
 inductive Op where
   | set (dst : Nat) (immediate : UInt64)
   | move (dst src : Nat)
@@ -90,14 +99,18 @@ inductive Op where
   | code (effectSlot : Nat) (pc : UInt64)
   deriving Repr
 
+/-- Native code that `compile` made, which holds on to it until it is freed. -/
 opaque Program : Type
 
-/-! The native functions read their arguments and don't release them, so that they all borrow: an owned argument would never be freed. -/
+/-! The native functions read their arguments and don't release them, so that they all borrow: an owned argument would never be freed.
+`sliceNative`, `piecesNative` and `fillNative` are the exceptions: what `implemented_by` stands in for has to have the type of what it
+stands in for, which owns them, and they release them. -/
 
 /-- Compiled quickly, into code that is less quick than `compileOptimized` makes of the same. -/
 @[extern "bap_jit_compile"]
 opaque compile (ops : @& List Op) : IO Program
 
+/-- Compiled with the optimizations of LLVM, which takes longer and is worth it for what runs a lot. -/
 @[extern "bap_jit_compile_optimized"]
 opaque compileOptimized (ops : @& List Op) : IO Program
 
@@ -106,73 +119,98 @@ opaque compileOptimized (ops : @& List Op) : IO Program
 @[extern "bap_jit_compile_entries"]
 opaque compileEntries (ops : @& List Op) (entries : @& List Nat) (entrySlot : @& Nat) (optimized : Bool) : IO Program
 
+/-- What hears of each load and store before it happens, as obligation 2 says: whether it is a store, the address, the size and what is
+stored. It throws to stop the program, as for a fault. -/
 abbrev MemoryObserver := Bool → Nat → Nat → Nat → IO Unit
+/-- What hears of each code site, as obligation 3 says, with its pc: `true` stops the program there. -/
 abbrev CodeObserver := Nat → IO Bool
 
+/-- Runs a program on a state and on a memory image given as its cells, and gives back where it went, its state, and the cells of the
+image after it (obligation 6). -/
 @[extern "bap_jit_run_memory_code"]
 opaque runWithMemoryObservedCode (program : @& Program) (state addresses : @& Array UInt64) (values : @& Array UInt8)
     (observer : @& Option MemoryObserver) (codeObserver : @& Option CodeObserver) :
     IO (Nat × Array UInt64 × Array UInt64 × Array UInt8)
 
+/-- `runWithMemoryObservedCode` without a code observer. -/
 def runWithMemoryObserved (program : Program) (state addresses : Array UInt64) (values : Array UInt8)
     (observer : Option MemoryObserver) : IO (Nat × Array UInt64 × Array UInt64 × Array UInt8) :=
   runWithMemoryObservedCode program state addresses values observer none
 
+/-- A run with a memory image and nothing that hears of it. -/
 def runWithMemory (program : Program) (state addresses : Array UInt64) (values : Array UInt8) :
     IO (Nat × Array UInt64 × Array UInt64 × Array UInt8) :=
   runWithMemoryObserved program state addresses values none
 
+/-- A run of a program that has no memory, on its slots alone. -/
 def run (program : Program) (state : Array UInt64) : IO (Nat × Array UInt64) := do
   let (next, state, _, _) ← runWithMemory program state #[] #[]
   pure (next, state)
 
+/-- Memory that lives on the host between runs, which programs read and write in place: obligations 7 to 14. -/
 opaque Memory : Type
 
+/-- A memory with these bytes at these addresses, and zero elsewhere. -/
 @[extern "bap_jit_memory_create"]
 opaque createMemory (addresses : @& Array UInt64) (values : @& Array UInt8) : IO Memory
 
+/-- Writes each byte at its address, in order. -/
 @[extern "bap_jit_memory_write"]
 opaque writeMemory (memory : @& Memory) (addresses : @& Array UInt64) (values : @& Array UInt8) : IO Unit
 
+/-- Runs a program on a state and on a `Memory`, which it changes, and gives back where it went, its state, and the cells that its
+stores changed (obligation 6). -/
 @[extern "bap_jit_run_memory_object_code"]
 opaque runWithPersistentMemoryObservedCode (program : @& Program) (state : @& Array UInt64) (memory : @& Memory)
     (observer : @& Option MemoryObserver) (codeObserver : @& Option CodeObserver) :
     IO (Nat × Array UInt64 × Array UInt64 × Array UInt8)
 
+/-- `runWithPersistentMemoryObservedCode` without a code observer. -/
 def runWithPersistentMemory (program : Program) (state : Array UInt64) (memory : Memory)
     (observer : Option MemoryObserver) : IO (Nat × Array UInt64 × Array UInt64 × Array UInt8) :=
   runWithPersistentMemoryObservedCode program state memory observer none
 
+/-- What isn't zero of a memory, as its cells by address (obligation 8). -/
 @[extern "bap_jit_memory_dump"]
 opaque dumpMemory (memory : @& Memory) : IO (Array UInt64 × Array UInt8)
 
+/-- A memory of its own with what this one has (obligation 9). -/
 @[extern "bap_jit_memory_clone"]
 opaque cloneMemory (memory : @& Memory) : IO Memory
 
+/-- The byte at an address. -/
 @[extern "bap_jit_memory_read"]
 opaque readMemory (memory : @& Memory) (address : UInt64) : IO UInt8
 
+/-- `size` bytes from an address (obligation 11). -/
 @[extern "bap_jit_memory_read_range"]
 opaque readMemoryRange (memory : @& Memory) (address : UInt64) (size : @& Nat) : IO ByteArray
 
+/-- A memory with each chunk at its base, which takes the host only the pages of them that aren't zeros (obligation 14). -/
 @[extern "bap_jit_memory_create_chunks"]
 opaque createMemoryChunks (bases : @& Array UInt64) (chunks : @& Array ByteArray) : IO Memory
 
+/-- Zeros from `first` to `last` (obligation 14). -/
 @[extern "bap_jit_memory_zero"]
 opaque zeroMemory (memory : @& Memory) (first last : UInt64) : IO Unit
 
+/-- Starts noting what is written, for a step that may have to be taken back (obligation 13). -/
 @[extern "bap_jit_memory_step_begin"]
 opaque beginMemoryStep (memory : @& Memory) : IO Unit
 
+/-- Stops noting what is written. -/
 @[extern "bap_jit_memory_step_end"]
 opaque endMemoryStep (memory : @& Memory) : IO Unit
 
+/-- What was written since `beginMemoryStep`, or `none` if that was too much to note (obligation 13). -/
 @[extern "bap_jit_memory_step_writes"]
 opaque memoryStepWrites (memory : @& Memory) : IO (Option (Array UInt64))
 
+/-- Lets the host have back the pages from `first` to `last` that hold only zeros (obligation 12). -/
 @[extern "bap_jit_memory_trim"]
 opaque trimMemory (memory : @& Memory) (first last : UInt64) : IO Unit
 
+/-- How many bytes of the host a memory takes, which nothing depends on. -/
 @[extern "bap_jit_memory_size"]
 opaque memorySize (memory : @& Memory) : IO Nat
 
@@ -184,6 +222,7 @@ opaque regionBytes (memory : @& Memory) (address : UInt64) (size : @& Nat) : IO 
 @[extern "bap_zero_bytes"]
 opaque zeros (size : @& Nat) : ByteArray
 
+/-- What `slice` is, in native code (obligation 15). -/
 @[extern "bap_bytes_slice"]
 opaque sliceNative (data : ByteArray) (start stop : Nat) : ByteArray
 
@@ -199,6 +238,7 @@ def fillLimit : Nat := 2 ^ 48
 /-- How many bytes a piece of `pieces` has, but for the last, which has what is left. -/
 def pieceSize : Nat := 4096
 
+/-- What `pieces` is, in native code (obligation 15). -/
 @[extern "bap_bytes_pieces"]
 opaque piecesNative (data : ByteArray) : List (Nat × ByteArray)
 
@@ -215,6 +255,7 @@ def byteOf (pieces : List (Nat × ByteArray)) (index : Nat) : UInt8 :=
   | some (start, bytes) => bytes[index - start]!
   | none => 0
 
+/-- What `fill` is, in native code (obligation 15). -/
 @[extern "bap_bytes_fill"]
 opaque fillNative (size : Nat) (pieces : List (Nat × ByteArray)) : ByteArray
 
@@ -238,6 +279,7 @@ theorem mem_pieces {data : ByteArray} {piece : Nat × ByteArray} (h : piece ∈ 
     have : 0 < pieceSize := by decide
     omega
 
+/-- There are no more pieces than bytes, which a checkpoint's count of them needs to fit its field. -/
 theorem length_pieces (data : ByteArray) : (pieces data).length ≤ data.size := by
   simp only [pieces]
   refine Nat.le_trans (List.length_filterMap_le _ _) ?_

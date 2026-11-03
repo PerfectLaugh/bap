@@ -287,6 +287,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testParallelFences,
     Bap.Tests.Emu.testParallelUnaligned,
     Bap.Tests.Jni.run,
+    Bap.Tests.Jni.testSuperclass,
     Bap.Tests.Emu.testJniNative "aarch64",
     Bap.Tests.Emu.testJniNative "x86_64",
     Bap.Tests.Emu.testJniNative "arm",

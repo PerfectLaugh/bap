@@ -70,6 +70,26 @@ def testState : IO Unit := do
   expectThrow "JNI cut bytes are refused" ((state other).load (saved.extract 0 (saved.size - 1)))
   assertEqual "JNI cut bytes change nothing" before.toList (← (state other).save).toList
 
+/-- `GetSuperclass` gives what a class was declared to extend, `java/lang/Object` for what wasn't declared, and null for that and for
+an interface. -/
+def testSuperclass : IO Unit := do
+  let names : List (Nat × String) :=
+    [(0x100, "example/Base"), (0x110, "example/Derived"), (0x120, "example/Runnable"), (0x130, "java/lang/Object"), (0x140, "example/Unknown")]
+  let model ← create (fun address => pure ((names.lookup address).getD "")) (fun _ => pure 0x52040000) (fun _ => pure 0x52050000)
+    (fun _ _ => pure (.value 0))
+    (classes := [{ name := "example/Base" }, { name := "example/Derived", superclass := some "example/Base" },
+      { name := "example/Runnable", superclass := none }])
+  let find (address : Nat) : IO Nat := dispatch model (call 6 [0, address])
+  let same (left right : Nat) : IO Bool := do pure ((← dispatch model (call 24 [0, left, right])) == 1)
+  let superclass (handle : Nat) : IO Nat := dispatch model (call 10 [0, handle])
+  assertTrue "JNI a class's superclass is what it was declared to extend"
+    (← same (← superclass (← find 0x110)) (← find 0x100))
+  assertTrue "JNI and of what extends nothing it is Object" (← same (← superclass (← find 0x100)) (← find 0x130))
+  assertTrue "JNI as of what wasn't declared" (← same (← superclass (← find 0x140)) (← find 0x130))
+  assertEqual "JNI Object has none" 0 (← superclass (← find 0x130))
+  assertEqual "JNI nor has an interface" 0 (← superclass (← find 0x120))
+  assertEqual "JNI nor has nothing" 0 (← superclass 0)
+
 def run : IO Unit := do
   let fallbacks ← IO.mkRef 0
   let allocated ← IO.mkRef ([] : List Nat)

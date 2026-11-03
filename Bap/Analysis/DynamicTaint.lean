@@ -29,6 +29,7 @@ namespace Bap.Analysis.DynamicTaint
 
 open Bap.Emu (Emu ThreadId)
 
+/-- How a byte depends on what it came from: as its value, through an address, by what a selection chose, or by a branch that guards it. -/
 inductive Edge where
   | data | address | condition | guard
   deriving DecidableEq, Repr, Inhabited
@@ -36,18 +37,26 @@ inductive Edge where
 /-- What produced a byte. 0 is that nothing here has, an odd number is a clean byte of the instruction at half of it, and an even one is a byte of a node. -/
 abbrev Tag := Nat
 
+/-- The tag of a clean byte that the instruction at `pc` computed. -/
 def cleanTag (pc : Nat) : Tag := 2 * pc + 1
+/-- The tag of a byte of a node. -/
 def nodeTag (id byte : Nat) : Tag := 2 * ((id + 1) * 4096 + byte)
+/-- Whether it is the tag of a byte of a node. -/
 def Tag.isNode (tag : Tag) : Bool := tag != 0 && tag % 2 == 0
+/-- Whether it is the tag of a clean byte. -/
 def Tag.isClean (tag : Tag) : Bool := tag % 2 == 1
+/-- The node of the tag of a byte of one. -/
 def Tag.node (tag : Tag) : Nat := tag / 2 / 4096 - 1
+/-- Which byte of its node the tag of a byte of one is. -/
 def Tag.byte (tag : Tag) : Nat := tag / 2 % 4096
 
+/-- What a byte of a node came from, and how. -/
 structure Input where
   tag : Tag
   edge : Edge
   deriving DecidableEq, Repr, Inhabited
 
+/-- What a node is. -/
 inductive NodeKind where
   /-- What came in from outside, as it was called, and where in what it came from each byte of the node starts. -/
   | source (label : String) (offset : Option Nat)
@@ -60,6 +69,7 @@ inductive NodeKind where
   | carried (label : String)
   deriving DecidableEq, Repr, Inhabited
 
+/-- Where a node is: in a register, at an address, in the control of a thread, as a branch is, or in a file or a pipe. -/
 inductive Place where
   | register (name : String)
   | memory (address : Nat)
@@ -70,6 +80,7 @@ inductive Place where
 
 private instance : Repr ByteArray := ⟨fun bytes _ => repr bytes.toList⟩
 
+/-- An assignment or a store that depends on something marked, with what each of its bytes came from, where and when it was, and what it was. -/
 structure Node where
   id : Nat
   /-- How many instructions it is since tracking started, of all threads. -/
@@ -97,6 +108,7 @@ structure Send where
 def Node.valueAt (node : Node) (byte : Nat) : Option UInt8 :=
   if h : byte < node.values.size then some node.values[byte] else none
 
+/-- What a tracker follows and keeps, and what the host says of the system calls that move bytes. -/
 structure Config where
   /-- How many instructions of a thread a branch on a tainted condition guards what comes after it. -/
   guardWindow : Nat := 64
@@ -125,24 +137,29 @@ inductive Byte where
 
 namespace Byte
 
+/-- What a byte came from, of what is followed. -/
 def inputs : Byte → List Input
   | .clean .. => []
   | .same tag => [{ tag, edge := .data }]
   | .mixed inputs => inputs
 
+/-- Whether nothing marked reached it. -/
 def isClean : Byte → Bool
   | .clean .. => true
   | _ => false
 
+/-- The tag of a clean byte that hasn't changed, or 0. -/
 def origin : Byte → Tag
   | .clean origin .. => origin
   | _ => 0
 
+/-- Whether it is a byte of something else, unchanged. -/
 def copied : Byte → Bool
   | .clean _ copied _ => copied
   | .same _ => true
   | .mixed _ => false
 
+/-- Whether it depends on nothing at all. -/
 def literal : Byte → Bool
   | .clean _ _ literal => literal
   | _ => false
@@ -176,6 +193,8 @@ structure Scratch where
   link : IO.Ref (Option Nat)
   jumped : IO.Ref Bool
 
+/-- What follows a run: the nodes that it has made, the tag of every byte of every register and address space, the guards that last, and
+the hooks that it put on the machine. `Machine.track` makes one. -/
 structure Tracker where
   emu : Emu
   config : Config
@@ -208,6 +227,7 @@ structure Tracker where
   /-- The checkpoint that this went on from, and how far it was then, which isn't saved, as going on from one changes nothing of what it was. -/
   loadedFrom : IO.Ref (Option (Nat × String))
 
+/-- What each byte of a value being computed came from, the least significant first. -/
 abbrev Shade := Array Byte
 
 private def bytesOf (width : Nat) : Nat := (width + 7) / 8
@@ -458,6 +478,7 @@ private def nextId (tracker : Tracker) : IO Nat := do
 private def gap (tracker : Tracker) (pc : Nat) : IO Unit :=
   tracker.gaps.modify fun gaps => gaps.insert pc (gaps.getD pc 0 + 1)
 
+/-- A node, if it is still kept. -/
 def node? (tracker : Tracker) (id : Nat) : IO (Option Node) := do
   let base ← tracker.base.get
   if id < base then return none
@@ -1135,6 +1156,7 @@ structure Step where
   edge : Edge
   deriving Repr
 
+/-- Where a byte came from: what it is, the way it took from a source, the sources it reached, and what can't be said of it. -/
 structure Explanation where
   origin : Origin
   /-- Of a byte that nothing followed wrote, when the machine was put back to what it was before then and by what, the latest last: what it is came from there, or from before tracking started. -/
@@ -1302,6 +1324,7 @@ def Explanation.summary (explanation : Explanation) : List Step :=
     | some final => if final.node.id == last.node.id then middle else middle ++ [last]
     | none => [last]
 
+/-- What an explanation says, as text for a person. -/
 def Explanation.text (explanation : Explanation) : String :=
   match explanation.origin with
   | .untouched => "nothing that was followed wrote it"

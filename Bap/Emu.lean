@@ -16,19 +16,24 @@ import Std.Data.HashSet
 
 namespace Bap.Emu
 
+/-- Which registers a system call and a call of C use, by the family of the target. -/
 inductive SyscallAbi where
   | riscv | x86_64 | aarch64 | mips | powerpc | powerpc64 | x86_32 | arm
   deriving DecidableEq, Repr
 
+/-- Whether branches have delay slots, as those of MIPS do but for the compact ones of release 6. -/
 inductive DelayPolicy where
   | none | mips (release6 : Bool)
   deriving DecidableEq, Repr
 
+/-- How an emulator decodes, where its memory is, and the limits of what it compiles. -/
 structure Config where
   disassembler : Disasm.Disassembler
+  /-- The decoder of code that starts at another base, such as a library's, if the target needs to know it. -/
   disassemblerAt : Option (Nat → IO Disasm.Disassembler) := none
   /-- The decoder of Thumb, if the target has it as well as the other: `ISET` says which of them comes next. -/
   thumbAt : Option (Nat → IO Disasm.Disassembler) := none
+  /-- The variable of memory that the lifted code loads and stores in. -/
   memory : Bap.Var
   endian : Endian := .little
   syscallAbi : SyscallAbi := .riscv
@@ -36,6 +41,7 @@ structure Config where
   /-- How many times an instruction runs in the interpreter, which takes microseconds, before it is compiled, which takes
   hundreds of them: most of a program runs a few times at most. -/
   hotThreshold : Nat := 16
+  /-- How many instructions what is lifted and compiled is kept of, of which the least used go. -/
   cacheLimit : Nat := 4096
   /-- Whether a block that gets hot may run a range that has it from the middle, see `Lifted.Engine.rangeEntries`. The variable
   `BAP_RANGE_ENTRIES` of the environment says so too. -/
@@ -43,11 +49,13 @@ structure Config where
   /-- How many blocks a compiled range holds. 16 runs tight loops whole, and the cost of compiling a range grows faster than its
   size. A step of 1 has no ranges. -/
   rangeLimit : Nat := 16
+  /-- How many steps after a write to code nothing is compiled, for code that writes itself all the time. -/
   jitCooldown : Nat := 0
   /-- Where an address that the guest gives is in memory, which on AArch64 ignores its top byte, as a kernel does of what a program
   gives it once the program asks with `PR_SET_TAGGED_ADDR_CTRL`. -/
   untag : Nat → Nat := id
 
+/-- What `removeHook` takes to take a hook off. -/
 abbrev HookId := Nat
 
 /-- How instructions run: by compiling those that get hot, or all of them in the interpreter, which never starts the compiler. The same things happen either way. It is what
@@ -56,12 +64,15 @@ inductive ExecutionMode where
   | jit | interpret
   deriving DecidableEq, Repr, Inhabited
 
+/-- What a hook of a system call does with it: leaves it to the next one, or gives it this result. -/
 inductive SyscallAction where
   | default | returnValue (value : Nat)
 
+/-- What a hook of an intrinsic does with it: leaves it to the next one, or has the instruction go on as served. -/
 inductive IntrinsicAction where
   | default | proceed
 
+/-- An access to memory that a trace kept: of which instruction of the run, where, how much, and what was written. -/
 structure TraceAccess where
   insn : Nat
   pc : Nat
@@ -97,29 +108,34 @@ private structure CodeHookContext where
   skipCode : IO.Ref (Option Nat)
   pendingRef : IO.Ref (Option PendingBranch)
 
+/-- A hook of loads in a range of addresses. -/
 structure ReadHook where
   id : HookId
   first : Nat
   last : Nat
   action : CodeHookContext → Nat → Nat → IO Unit
 
+/-- A hook of stores in a range of addresses. -/
 structure WriteHook where
   id : HookId
   first : Nat
   last : Nat
   action : CodeHookContext → Nat → Nat → Nat → IO Unit
 
+/-- A hook of an intrinsic, by its name. -/
 structure IntrinsicHook where
   id : HookId
   name : String
   action : CodeHookContext → Nat → IO IntrinsicAction
 
+/-- A hook of each instruction in a range of addresses, before it runs. -/
 structure CodeHook where
   id : HookId
   first : Nat
   last : Nat
   action : CodeHookContext → Nat → IO Unit
 
+/-- A hook of system calls, which has the number and the arguments. -/
 structure SyscallHook where
   id : HookId
   action : CodeHookContext → Nat → List Nat → IO SyscallAction
@@ -136,6 +152,8 @@ structure RollbackStats where
   bytesRestored : Nat := 0
   deriving Repr, Inhabited
 
+/-- An emulator: its configuration, the engine that runs lifted code, the thread that runs and the others, memory, hooks, traces, and
+the tasks of Linux that a kernel needs. Everything in it is a reference, so that a copy of it is the same emulator. -/
 structure Emu where
   config : Config
   engine : Primus.Lifted.Engine
@@ -301,6 +319,7 @@ private def createEngine (config : Config) (deferMemorySync : Bool) : IO Primus.
     deferMemorySync (nativeLimit := 4 * config.cacheLimit) (persistentFrom := 0) (wrapFaults := true) (chainFallthrough := true)
     (rangeEntries := config.rangeEntries || asked)
 
+/-- An emulator with these regions mapped and these registers, that starts at `entry` in one thread. -/
 def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry : Nat) : IO Emu := do
   let initial ← match initializeMemory config mapped with
     | .ok memory => pure { env := memory.env ++ initial.env }
@@ -381,6 +400,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
 /-- The address space of a thread. -/
 def spaceOf (emu : Emu) (id : ThreadId) : IO Nat := do pure ((← emu.taskTable.get).spaceOf id)
 
+/-- Puts what the thread that runs is now in its context, for when another runs. -/
 def saveCurrentThread (emu : Emu) : IO Unit := do
   let context : ThreadContext := {
     id := ← emu.currentThreadRef.get
@@ -501,6 +521,7 @@ mapped and hasn't written. -/
 private def regionsFromNative (mapped : List Region) (native : Jit.Memory) : IO (List Region) :=
   mapped.mapM fun region => do pure { region with data := ← Jit.regionBytes native (UInt64.ofNat region.address) region.data.size }
 
+/-- All that the emulator is, of every thread and address space, as plain data: what `restore` and a checkpoint take. -/
 def snapshot (emu : Emu) : IO Snapshot := do
   let processes ← emu.processMemory.get
   let table ← emu.taskTable.get
@@ -672,6 +693,8 @@ private def rollbackBlock (emu : Emu) (snapshot : Snapshot) : IO Unit := do
 /-- How steps have been taken back so far. -/
 def rollbackStats (emu : Emu) : IO RollbackStats := emu.rollbacks.get
 
+/-- Puts the emulator back to a snapshot, with the memory of each address space. What was compiled stays, but for ranges, which are
+compiled again as they get hot. -/
 def restore (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   restoreThreads emu snapshot
   emu.memorySwitched.set true
@@ -695,8 +718,10 @@ def restore (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   | some native => attachMemory emu native
   | none => pure ()
 
+/-- The thread that runs. -/
 def thread (emu : Emu) : IO ThreadId := emu.currentThreadRef.get
 
+/-- All threads, by id. -/
 def threads (emu : Emu) : IO (List ThreadInfo) := do
   let contexts ← captureThreads emu
   pure ((contexts.map fun context => ⟨context.id, context.pc, context.stopped⟩).mergeSort
@@ -735,6 +760,7 @@ private def clearMonitor (config : Config) (env : Bil.Env) : Bil.Env :=
   | .aarch64, .ok width | .riscv, .ok width | .mips, .ok width | .powerpc, .ok width | .powerpc64, .ok width | .arm, .ok width => Bil.bind env (exclusiveMonitor width) (.bits (BitVec.ofNat width 0))
   | _, _ => env
 
+/-- Makes another thread the one that runs, with the memory of its address space. -/
 def switchThread (emu : Emu) (id : ThreadId) : IO Unit := do
   emu.turnUsed.set 0
   saveCurrentThread emu
@@ -774,6 +800,7 @@ def resumeThread (emu : Emu) (id : ThreadId) : IO Unit := do
   if (← thread emu) == id then
     emu.stopped.set false
 
+/-- Stops a thread until `resumeThread`. -/
 def stopThread (emu : Emu) (id : ThreadId) : IO Unit := do
   emu.threadControl.modify (·.insert id true)
   if (← thread emu) == id then
@@ -873,6 +900,7 @@ def onIntrinsic (emu : Emu) (name : String) (action : Emu → Nat → IO Intrins
   emu.intrinsicHooks.modify (· ++ [⟨id, name, fun context => action (withContext emu context)⟩])
   pure id
 
+/-- Takes a hook off, of whatever kind. -/
 def removeHook (emu : Emu) (id : HookId) : IO Unit := do
   emu.hooks.modify fun hooks => hooks.filter fun hook => hook.id != id
   emu.hooksByPage.set {}
@@ -883,6 +911,7 @@ def removeHook (emu : Emu) (id : HookId) : IO Unit := do
   emu.intrinsicHooks.modify fun hooks => hooks.filter fun hook => hook.id != id
   emu.breakpointsRef.modify fun breakpoints => breakpoints.filter fun breakpoint => breakpoint.1 != id
 
+/-- Takes every hook off. -/
 def clearHooks (emu : Emu) : IO Unit := do
   emu.hooks.set []
   emu.hooksByPage.set {}
@@ -893,6 +922,7 @@ def clearHooks (emu : Emu) : IO Unit := do
   emu.intrinsicHooks.set []
   emu.breakpointsRef.set []
 
+/-- Stops the thread that comes to `address`, before it runs it. Going on from there doesn't stop it there again. -/
 def addBreakpoint (emu : Emu) (address : Nat) : IO HookId := do
   -- A thread that stopped here has stopped here: it goes on, and a breakpoint stops it when it comes back.
   let id ← onCode emu (address, address) (late := false) fun current _ => do
@@ -900,11 +930,13 @@ def addBreakpoint (emu : Emu) (address : Nat) : IO HookId := do
   emu.breakpointsRef.modify fun breakpoints => (id, address) :: breakpoints
   pure id
 
+/-- Takes the breakpoints at an address off. -/
 def removeBreakpoint (emu : Emu) (address : Nat) : IO Unit := do
   let breakpoints ← emu.breakpointsRef.get
   (breakpoints.filter fun breakpoint => breakpoint.2 == address).forM fun breakpoint =>
     removeHook emu breakpoint.1
 
+/-- Where there are breakpoints. -/
 def breakpoints (emu : Emu) : IO (List Nat) := do
   let current ← emu.breakpointsRef.get
   pure (current.map Prod.snd).reverse
@@ -915,12 +947,16 @@ private def traceBeginPc (emu : Emu) (pcCapacity accessCapacity : Nat) (watch : 
 private def traceBegin (emu : Emu) (capacity : Nat) (watch : Option (Nat × Nat)) : IO Unit :=
   traceBeginPc emu 0 capacity watch
 
+/-- Starts keeping each pc that runs, all of them. -/
 def traceStart (emu : Emu) : IO Unit := traceBegin emu 0 none
 
+/-- Starts keeping the last `capacity` pcs that run. -/
 def traceStartCapacity (emu : Emu) (capacity : Nat) : IO Unit := traceBeginPc emu capacity 0 none
 
+/-- Starts keeping the pcs and the last `capacity` accesses to memory. -/
 def traceStartAccesses (emu : Emu) (capacity : Nat) : IO Unit := traceBegin emu capacity none
 
+/-- Starts keeping the last `capacity` accesses to a range, and the pcs. -/
 def traceStartWatch (emu : Emu) (range : Nat × Nat) (capacity : Nat) : IO Unit := do
   if range.1 > range.2 then
     throw <| IO.userError "invalid Emu trace watch range"
@@ -929,28 +965,34 @@ def traceStartWatch (emu : Emu) (range : Nat × Nat) (capacity : Nat) : IO Unit 
 private def pcList (state : TraceState) : List Nat :=
   state.pcsFront ++ state.pcsBack.reverse
 
+/-- Stops the trace, and gives the pcs that it kept. -/
 def traceStop (emu : Emu) : IO (List Nat) := do
   let current ← emu.trace.get
   emu.trace.set none
   pure (pcList (current.getD {}))
 
+/-- The pcs that the trace kept so far. -/
 def tracePcs (emu : Emu) : IO (List Nat) := do
   let current ← emu.trace.get
   pure (pcList (current.getD {}))
 
+/-- How many pcs the trace let go of for its capacity. -/
 def traceDroppedPcs (emu : Emu) : IO Nat := do
   let current ← emu.trace.get
   pure (current.getD {}).droppedPcs
 
+/-- The accesses that the trace kept. -/
 def traceAccesses (emu : Emu) : IO (List TraceAccess) := do
   let current ← emu.trace.get
   let state := current.getD {}
   pure (state.accesses.take state.accessCapacity).reverse
 
+/-- How many accesses the trace saw, kept or not. -/
 def traceAccessesCount (emu : Emu) : IO Nat := do
   let current ← emu.trace.get
   pure (current.getD {}).accessCount
 
+/-- How many accesses the trace let go of for its capacity. -/
 def traceDroppedAccesses (emu : Emu) : IO Nat := do
   let current ← emu.trace.get
   let state := current.getD {}
@@ -1062,6 +1104,7 @@ private def observeRangeCode (emu : Emu) (address : Nat) : IO Bool := do
   recordTrace emu address
   pure false
 
+/-- The last access that faulted. -/
 def failure (emu : Emu) : IO (Option MemoryFault) := emu.lastFault.get
 
 private def recordFault (emu : Emu) (operation : MemoryOperation) (address : Nat) : IO Unit := do
@@ -1103,6 +1146,7 @@ private def cells (emu : Emu) (state : Bil.State) : IO (Σ width, Bap.Memory wid
   | .ok _ => throw <| IO.userError "Emu memory is not a memory value"
   | .error error => throw <| IO.userError error
 
+/-- Copies the native memory into the memory of the state and of every thread, for what reads those rather than through `read`. -/
 def synchronizePersistentMemory (emu : Emu) : IO Unit := do
   match ← emu.engine.persistentMemory.get with
   | none => pure ()
@@ -1167,6 +1211,7 @@ def profile (emu : Emu) : IO (List (Nat × Primus.Lifted.Profile)) := do
   let total (entry : Primus.Lifted.Profile) : Nat := entry.nativeNanos + entry.interpretedNanos
   pure (table.toList.toArray.qsort (fun left right => total left.2 > total right.2 || (total left.2 == total right.2 && left.1 < right.1))).toList
 
+/-- Stops keeping the profile, which is gone. -/
 def stopProfile (emu : Emu) : IO Unit := do
   emu.engine.profile.set none
   for (_, worker) in ← emu.parallelWorkers.get do worker.profile.set none
@@ -1181,6 +1226,7 @@ def invalidateCode (emu : Emu) (first last : Nat) : IO Unit := do
   for (_, worker) in ← emu.parallelWorkers.get do
     Primus.Lifted.invalidateCode worker first last
 
+/-- Bytes of memory as a program may read them: what isn't mapped or readable is an error. -/
 def read (emu : Emu) (address size : Nat) : IO ByteArray := do
   let address := emu.config.untag address
   -- An absurd size fails right here, instead of allocating before it fails.
@@ -1242,6 +1288,8 @@ private def writeByte (emu : Emu) (address : Nat) (value : UInt8) : IO Unit := d
         { current with data := current.data.set! (address - current.address) value }
       else current)
 
+/-- Writes bytes as a program may, within one writable region, and drops what was compiled of code there. What hears of changes
+hears of it. -/
 def write (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
   let address := emu.config.untag address
   if data.size > 0 then
@@ -1288,6 +1336,7 @@ private def synchronizeBatch (emu : Emu) (writes : List (Nat × ByteArray)) : IO
     else Primus.Lifted.discardMemory emu.engine
   | _, _ => pure ()
 
+/-- `write` of each, at once. -/
 def writeBatch (emu : Emu) (writes : List (Nat × ByteArray)) : IO Unit := do
   let mapped ← emu.regions.get
   writes.forM fun (address, data) => do
@@ -1328,6 +1377,7 @@ private def checkInSpace (emu : Emu) (region : Region) : IO Unit := do
       throw <| IO.userError s!"Emu region at {region.address} exceeds the address space"
   | .error error => throw <| IO.userError error
 
+/-- Maps a region where nothing is. `zeros` says that its bytes are all zeros, which then take no memory of the host. -/
 def map (emu : Emu) (region : Region) (zeros : Bool := false) : IO Unit := do
   checkInSpace emu region
   let near ← if region.data.size == 0 then emu.regions.get else regionsTouching emu region.address region.data.size
@@ -1351,6 +1401,7 @@ def map (emu : Emu) (region : Region) (zeros : Bool := false) : IO Unit := do
 def mapZeros (emu : Emu) (address size : Nat) (protection : Primus.Protection) : IO Unit :=
   map emu ⟨address, Jit.zeros size, protection⟩ (zeros := true)
 
+/-- Puts bytes over a region that is mapped already, of the same size, with its protection. -/
 def overlay (emu : Emu) (region : Region) : IO Unit := do
   checkInSpace emu region
   let mapped ← emu.regions.get
@@ -1389,6 +1440,7 @@ def protectRegions (regions : List Region) (address size : Nat) (protection : Pr
     some (regions.flatMap (splitRegion address (address + size) protection))
   else none
 
+/-- Changes what may be done with mapped memory, as `mprotect`, splitting regions where it has to. -/
 def protect (emu : Emu) (address size : Nat) (protection : Primus.Protection) : IO Unit := do
   if size = 0 then pure ()
   else
@@ -1430,16 +1482,19 @@ def unmap (emu : Emu) (address size : Nat) : IO Unit := do
       if upper > top then emu.mappingTop.set none
     clearMapped emu address size
 
+/-- What is mapped: where, how much, and what may be done with it. -/
 def regions (emu : Emu) : IO (List (Nat × Nat × Primus.Protection)) := do
   let mapped ← emu.regions.get
   pure (mapped.map fun region => (region.address, region.data.size, region.protection))
 
+/-- A register of the thread that runs. -/
 def reg (emu : Emu) (var : Bap.Var) : IO Bap.Value := do
   let state ← emu.state.get
   match Bil.lookup state.env var with
   | .ok value => pure value
   | .error error => throw <| IO.userError error
 
+/-- Sets a register of the thread that runs. -/
 def setReg (emu : Emu) (var : Bap.Var) (value : Bap.Value) : IO Unit := do
   if var.typ != value.type then
     throw <| IO.userError s!"register {var.name} has the wrong value type"
@@ -1454,6 +1509,7 @@ def setReg (emu : Emu) (var : Bap.Var) (value : Bap.Value) : IO Unit := do
       emu.processMemory.modify (·.insert space native)
       attachMemory emu native
 
+/-- The register of the number of a system call, those of its arguments, and that of its result. -/
 def syscallRegisters : SyscallAbi → String × List String × String
   | .riscv => ("X17", ["X10", "X11", "X12", "X13", "X14", "X15"], "X10")
   | .x86_64 => ("RAX", ["RDI", "RSI", "RDX", "R10", "R8", "R9"], "RAX")
@@ -1463,6 +1519,7 @@ def syscallRegisters : SyscallAbi → String × List String × String
   | .x86_32 => ("EAX", ["EBX", "ECX", "EDX", "ESI", "EDI", "EBP"], "EAX")
   | .arm => ("R7", ["R0", "R1", "R2", "R3", "R4", "R5"], "R0")
 
+/-- How wide addresses are. -/
 def wordWidth (emu : Emu) : IO Nat :=
   match memoryWidth emu.config with
   | .ok width => pure width
@@ -1491,6 +1548,8 @@ private def newThread (emu : Emu) : IO ThreadId := do
   emu.taskTable.modify (·.addTask { task with tid := id, status := none })
   pure id
 
+/-- A new thread in the address space of the one that runs, with its registers but for `arg` in the first argument register, that starts at
+`start`. It has no stack or thread pointer of its own: they are for the host to give it. -/
 def spawnThread (emu : Emu) (start : Nat) (arg : Nat) : IO ThreadId := do
   let id ← newThread emu
   let width ← wordWidth emu
@@ -1504,6 +1563,8 @@ def spawnThread (emu : Emu) (start : Nat) (arg : Nat) : IO ThreadId := do
     emu.threadsRef.modify (context :: ·)
     pure id
 
+/-- A new process, as `fork` makes, that starts at `childPc` with 0 in the result register, stopped until it is let go, in its parent's
+address space until `cloneProcessMemory`. -/
 def forkThread (emu : Emu) (childPc : Nat) : IO ThreadId := do
   let task ← currentTask emu
   saveCurrentThread emu
@@ -1530,6 +1591,7 @@ def threadRegisters : SyscallAbi → String × String
   | .x86_32 => ("ESP", "GS_BASE")
   | .arm => ("SP", "TPIDRURO")
 
+/-- Gives a process that `forkThread` made a copy of its parent's memory, of its own. -/
 def cloneProcessMemory (emu : Emu) (child : ThreadId) : IO Unit := do
   let parent ← match ← emu.engine.persistentMemory.get with
     | some parent => pure parent
@@ -1565,6 +1627,7 @@ def cloneProcessMemory (emu : Emu) (child : ThreadId) : IO Unit := do
     emu.sharedMemory.set (some parent)
     attachMemory emu childMemory
 
+/-- A register of any thread. -/
 def threadReg (emu : Emu) (id : ThreadId) (var : Bap.Var) : IO Bap.Value := do
   let contexts ← captureThreads emu
   match contexts.find? fun context => context.id == id with
@@ -1574,6 +1637,7 @@ def threadReg (emu : Emu) (id : ThreadId) (var : Bap.Var) : IO Bap.Value := do
     | .ok value => pure value
     | .error error => throw <| IO.userError error
 
+/-- Sets a register of any thread. -/
 def setThreadReg (emu : Emu) (id : ThreadId) (var : Bap.Var) (value : Bap.Value) : IO Unit := do
   if (← thread emu) == id then
     setReg emu var value
@@ -1632,8 +1696,10 @@ private def dispatchIntrinsic (emu : Emu) (name : String) : IO Bool := serialize
       | .default => serve rest
   serve selected
 
+/-- Where the thread that runs is. -/
 def pc (emu : Emu) : IO Nat := emu.pc.get
 
+/-- Where the thread that runs goes on from: a branch that it was in the middle of is forgotten, and the hooks there fire. -/
 def setPc (emu : Emu) (address : Nat) : IO Unit := do
   emu.pc.set address
   emu.pendingRef.set none
@@ -1659,10 +1725,13 @@ def threadPc (emu : Emu) (id : ThreadId) : IO Nat := do
     | some context => pure context.pc
     | none => throw <| IO.userError s!"unknown Emu thread {id}"
 
+/-- Stops the thread that runs. -/
 def stop (emu : Emu) : IO Unit := emu.stopped.set true
 
+/-- Lets the thread that runs go on. -/
 def resume (emu : Emu) : IO Unit := emu.stopped.set false
 
+/-- Whether the thread that runs is stopped. -/
 def stopped (emu : Emu) : IO Bool := emu.stopped.get
 
 /-- How many bytes from `address` may be fetched, up to `limit`, through adjacent executable regions.
@@ -1784,9 +1853,11 @@ def codeAt (emu : Emu) (address : Nat) : IO ByteArray := do
 def setExecutionMode (emu : Emu) (mode : ExecutionMode) : IO Unit :=
   emu.engine.interpretOnly.set (mode == .interpret)
 
+/-- How it runs instructions now. -/
 def executionMode (emu : Emu) : IO ExecutionMode := do
   pure (if ← emu.engine.interpretOnly.get then .interpret else .jit)
 
+/-- Gives the regions the bytes of the memory of the state. -/
 def refreshRegions (emu : Emu) : IO Unit := do
   let mapped ← emu.regions.get
   let state ← emu.state.get
@@ -1794,6 +1865,7 @@ def refreshRegions (emu : Emu) : IO Unit := do
   setRegions emu (mapped.map fun region =>
     { region with data := Bap.Memory.readRegion memory region.address region.data.size })
 
+/-- Gives the regions the bytes of the native memory, or of the state if there is none. -/
 def refreshPersistentRegions (emu : Emu) : IO Unit := do
   match ← emu.engine.persistentMemory.get with
   | none => refreshRegions emu
@@ -2220,6 +2292,9 @@ private def synchronizeRound (emu : Emu) (merged : List ThreadContext)
       | some value => pure { context with state := { env := Bil.bind context.state.env memoryVar value } }
       | none => pure context
 
+/-- A round of `quantum` instructions of each thread that can run, each on a thread of the host, which stops at what has to be atomic
+and runs it alone, and is taken back as a whole if a thread of it fails. With one thread that can run, it is `runPreemptive`. It says
+how many instructions ran. -/
 def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
   if quantum = 0 then
     throw <| IO.userError "Emu thread quantum must be positive"
@@ -2334,6 +2409,7 @@ def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
         let _ ← switchNextThread emu
         pure ())
 
+/-- Steps until the pc is `address`, or the thread stops, up to `fuel` steps, and says how many it took. -/
 def runUntil (emu : Emu) (address : Nat) (fuel : Nat := 100000) : IO Nat := do
   let rec loop (remaining : Nat) (total : Nat) : IO Nat :=
     match remaining with
@@ -2366,6 +2442,8 @@ private def callAbi : SyscallAbi → List String × String × String × Bool
   | .arm => (["R0", "R1", "R2", "R3"], "LR", "R0", false)
   | .x86_64 => (["RDI", "RSI", "RDX", "RCX", "R8", "R9"], "", "RAX", true)
 
+/-- Calls a function with these arguments, by the convention of the target, until it returns to `returnTo`, and gives its result. Its
+registers go back after; what it did to memory stays. -/
 def call (emu : Emu) (address returnTo : Nat) (args : List UInt64) (fuel : Nat := 100000) :
     IO Bap.Value := do
   let (arguments, link, result, stackReturn) := callAbi emu.config.syscallAbi
@@ -2398,6 +2476,7 @@ def call (emu : Emu) (address returnTo : Nat) (args : List UInt64) (fuel : Nat :
     emu.skipCode.set skipped
     throw error
 
+/-- `call`. -/
 def stub (emu : Emu) (address returnTo : Nat) (args : List UInt64) (fuel : Nat := 100000) :
     IO Bap.Value :=
   call emu address returnTo args fuel
@@ -2417,6 +2496,7 @@ def riscv64Decoders : IO (Nat → IO Disasm.Disassembler) := do
   pure fun base => pure
     { name := "riscv64-llvm-primus", decode := decodeAt (Target.LLVMLift.decodeRISCVWith environment) base }
 
+/-- An emulator of RISC-V 64 with `code` at `base`, that starts at `entry`. `adjust` changes its configuration. -/
 def riscv64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
   let decoders ← riscv64Decoders
   let disassembler ← decoders base
@@ -2429,6 +2509,7 @@ def riscv64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config :=
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
   create (adjust config) [region] { env := clearMonitor config {} } entry
 
+/-- An emulator of RISC-V 32, as `riscv64`. -/
 def riscv32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
   let environment ← Target.LLVMLift.riscv32Environment
   let decoders (base : Nat) : IO Disasm.Disassembler := pure
@@ -2443,6 +2524,7 @@ def riscv32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config :=
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
   create (adjust config) [region] { env := clearMonitor config {} } entry
 
+/-- An emulator of a variant of PowerPC, as `riscv64`. -/
 def powerpc (code : ByteArray) (base entry : Nat) (variant : Target.LLVMLift.PowerPCVariant) (adjust : Config → Config := id) : IO Emu := do
   let decoders (base : Nat) : IO Disasm.Disassembler := Target.PowerPC.disassembler base variant
   let disassembler ← decoders base
@@ -2471,6 +2553,7 @@ def arm32 (code : ByteArray) (base entry : Nat) (thumb : Bool := false) (adjust 
   let env := Bil.bind (clearMonitor config {}) ⟨"ISET", .imm 1, 0, false⟩ (.bits (BitVec.ofNat 1 (if thumb then 1 else 0)))
   create (adjust config) [region] { env } entry
 
+/-- An emulator of i686, as `riscv64`. -/
 def x86_32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
   let disassembler ← Target.X8632.disassembler base
   let config : Config := {
@@ -2483,6 +2566,7 @@ def x86_32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := 
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
   create (adjust config) [region] {} entry
 
+/-- An emulator of x86-64, as `riscv64`. -/
 def x86_64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
   let disassembler ← Target.X86.disassembler base
   let config : Config := {
@@ -2495,6 +2579,7 @@ def x86_64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := 
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
   create (adjust config) [region] {} entry
 
+/-- An emulator of AArch64, as `riscv64`, with the top byte of an address ignored, as Linux has it. -/
 def aarch64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
   let disassembler ← Target.AArch64.emulatorDisassembler base
   let config : Config := {
@@ -2527,9 +2612,11 @@ private def mipsOf (variant : Target.LLVMLift.MipsVariant) (code : ByteArray) (b
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
   create (adjust config) [region] { env := clearMonitor config {} } entry
 
+/-- An emulator of MIPS64, of release 6 or not and big-endian or not, as `riscv64`. -/
 def mips64 (code : ByteArray) (base entry : Nat) (release6 : Bool := false) (endian : Endian := .big) (adjust : Config → Config := id) : IO Emu :=
   mipsOf { bits := 64, endian, release6 } code base entry adjust
 
+/-- An emulator of MIPS32, as `mips64`. -/
 def mips32 (code : ByteArray) (base entry : Nat) (release6 : Bool := false) (endian : Endian := .big) (adjust : Config → Config := id) : IO Emu :=
   mipsOf { bits := 32, endian, release6 } code base entry adjust
 

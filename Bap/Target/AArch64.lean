@@ -9,9 +9,12 @@ private def decodeWith (globals : Primus.Semantics.Environment) (base : Nat)
   catch error =>
     pure (.error (toString error))
 
+/-- The instruction at an address of bytes that start at `base`, lifted by the semantics of AArch64. -/
 def decodeAt (base address : Nat) (data : ByteArray) : IO (Except String Disasm.Insn) := do
   decodeWith (← LLVMLift.aarch64Environment) base address data
 
+/-- The decoder of AArch64, with its semantics loaded once, for a project: what it lifts is what the instructions say, with no top byte
+ignored, as that is what Linux sets up and not the architecture. See `emulatorDisassembler`. -/
 def disassembler (base : Nat := 0) : IO Disasm.Disassembler := do
   let globals ← LLVMLift.aarch64Environment
   pure { name := "aarch64-llvm-primus", decode := decodeWith globals base }
@@ -59,6 +62,7 @@ def ignoreTopByteStmt : Bil.Stmt → Bil.Stmt
   | .ifElse condition yes no => .ifElse (ignoreTopByteExp condition) (ignoreTopByteProgram yes) (ignoreTopByteProgram no)
   | other => other
 
+/-- `ignoreTopByteStmt` of each statement. -/
 def ignoreTopByteProgram : List Bil.Stmt → List Bil.Stmt
   | [] => []
   | stmt :: rest => ignoreTopByteStmt stmt :: ignoreTopByteProgram rest

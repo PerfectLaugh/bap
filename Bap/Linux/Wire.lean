@@ -12,16 +12,20 @@ def putNat (out : ByteArray) (value : Nat) : ByteArray :=
 termination_by value
 decreasing_by omega
 
+/-- Bytes, after how many there are. -/
 def putBytes (out data : ByteArray) : ByteArray := putNat out data.size ++ data
 
+/-- Text, as its bytes of UTF-8. -/
 def putText (out : ByteArray) (text : String) : ByteArray := putBytes out text.toUTF8
 
+/-- A list, after how many there are. -/
 def putList (put : ByteArray → α → ByteArray) (out : ByteArray) (items : List α) : ByteArray :=
   items.foldl put (putNat out items.length)
 
 /-- What a decoder gives, and the offset after it. -/
 abbrev Decoder (α : Type) := ByteArray → Nat → Except String (α × Nat)
 
+/-- What `putNat` wrote, from `at_`, with what was read of it so far: `fuel` bytes at most. -/
 def getNatFrom (data : ByteArray) : Nat → Nat → Nat → Nat → Except String (Nat × Nat)
   | 0, _, _, _ => .error "truncated Linux checkpoint"
   | fuel + 1, at_, scale, value =>
@@ -31,13 +35,16 @@ def getNatFrom (data : ByteArray) : Nat → Nat → Nat → Nat → Except Strin
       else getNatFrom data fuel (at_ + 1) (scale * 128) (value + (byte - 128) * scale)
     else .error "truncated Linux checkpoint"
 
+/-- A number that `putNat` wrote. -/
 def getNat : Decoder Nat := fun data at_ => getNatFrom data (data.size - at_) at_ 1 0
 
+/-- What `putBytes` wrote. -/
 def getBytes : Decoder ByteArray := fun data at_ => do
   let (size, at_) ← getNat data at_
   if at_ + size ≤ data.size then .ok (data.extract at_ (at_ + size), at_ + size)
   else .error "truncated Linux checkpoint"
 
+/-- What `putText` wrote. -/
 def getText : Decoder String := fun data at_ => do
   let (bytes, at_) ← getBytes data at_
   match String.fromUTF8? bytes with
@@ -51,6 +58,7 @@ def getItems (get : Decoder α) (data : ByteArray) : Nat → Nat → List α →
     let (item, at_) ← get data at_
     getItems get data count at_ (item :: items)
 
+/-- What `putList` wrote. -/
 def getList (get : Decoder α) : Decoder (List α) := fun data at_ => do
   let (count, at_) ← getNat data at_
   getItems get data count at_ []
@@ -58,6 +66,7 @@ def getList (get : Decoder α) : Decoder (List α) := fun data at_ => do
 /-- A truth value. -/
 def putFlag (out : ByteArray) (value : Bool) : ByteArray := putNat out (if value then 1 else 0)
 
+/-- What `putFlag` wrote. -/
 def getFlag : Decoder Bool := fun data at_ => do
   let (value, at_) ← getNat data at_
   match value with
@@ -65,10 +74,12 @@ def getFlag : Decoder Bool := fun data at_ => do
   | 1 => .ok (true, at_)
   | _ => .error "a checkpoint with a truth value that isn't"
 
+/-- Whether there is something, and then it. -/
 def putOption (put : ByteArray → α → ByteArray) (out : ByteArray) : Option α → ByteArray
   | none => putNat out 0
   | some value => put (putNat out 1) value
 
+/-- What `putOption` wrote. -/
 def getOption (get : Decoder α) : Decoder (Option α) := fun data at_ => do
   let (tag, at_) ← getNat data at_
   match tag with
@@ -108,6 +119,7 @@ def digest (data : ByteArray) (seed : UInt64 := 0xcbf29ce484222325) : UInt64 :=
 def fixedBytes (value : UInt64) : ByteArray :=
   ByteArray.mk ((List.range 8).map fun index => (value >>> (8 * index).toUInt64).toUInt8).toArray
 
+/-- What `fixedBytes` wrote, at `at_`. -/
 def ofFixedBytes (data : ByteArray) (at_ : Nat) : UInt64 :=
   (List.range 8).foldr (init := 0) fun index value => value <<< 8 ||| (data[at_ + index]!).toUInt64
 

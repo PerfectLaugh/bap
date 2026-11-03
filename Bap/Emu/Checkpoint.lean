@@ -359,6 +359,7 @@ def encodeBinarySnapshot (snapshot : Snapshot) : Except String ByteArray :=
   if binaryFits snapshot then .ok (encodeBinaryUnchecked snapshot)
   else .error "snapshot has a value too wide for the binary checkpoint format"
 
+/-- The snapshot that `encodeBinarySnapshot` made, of either format that it has made, with its memory variable left out as it was. -/
 def decodeBinarySnapshot (data : ByteArray) : Except String Snapshot := do
   let getRegion ← if data.extract 0 binaryMagic.size == binaryMagic then pure getRegionBin
     else if data.extract 0 binaryMagicV5.size == binaryMagicV5 then pure getRegionV5
@@ -406,6 +407,7 @@ def materializeState (memoryVar : Bap.Var) (width : Nat) (snapshot : Snapshot) :
       { thread with state := { env := Bil.bind thread.state.env memoryVar (memoryOf thread.id) } }
   }
 
+/-- A decoded snapshot with the memory that `withoutMemory` left out, for an emulator to restore: see `materializeState`. -/
 def materializeSnapshot (emu : Emu) (snapshot : Snapshot) : IO Snapshot := do
   if snapshot.state.env.any fun binding => binding.1 == emu.config.memory then
     pure snapshot
@@ -457,11 +459,13 @@ private def getFault : Bap.Linux.Wire.Decoder MemoryFault := fun data at_ => do
   let (thread, at_) ← Bap.Linux.Wire.getNat data at_
   .ok (⟨pc, address, operation, thread⟩, at_)
 
+/-- The bytes of a run state, after `out`. -/
 def encode (out : ByteArray) (state : RunState) : ByteArray :=
   let out := Bap.Linux.Wire.putNat out state.turnUsed
   let out := Bap.Linux.Wire.putOption putFault out state.fault
   Bap.Linux.Wire.putList Bap.Linux.Wire.putNat out state.breakpoints
 
+/-- A run state from its bytes, and where they end. -/
 def decode : Bap.Linux.Wire.Decoder RunState := fun data at_ => do
   let (turnUsed, at_) ← Bap.Linux.Wire.getNat data at_
   let (fault, at_) ← Bap.Linux.Wire.getOption getFault data at_
@@ -519,6 +523,7 @@ def writeAtomically (path : System.FilePath) (data : ByteArray) : IO Unit := do
     try IO.FS.removeFile unfinished catch _ => pure ()
     throw error
 
+/-- Writes the checkpoint of an emulator to a file, all of it or none. -/
 def save (emu : Emu) (path : String) : IO Unit := do
   writeAtomically path (← checkpointBytes emu)
 
@@ -531,9 +536,11 @@ def snapshotOfBytes (emu : Emu) (data : ByteArray) : IO Snapshot := do
 def runStateOfBytes (data : ByteArray) : IO RunState := do
   pure (← IO.ofExcept (splitFrame data)).1
 
+/-- The snapshot in a checkpoint file, for this emulator, without restoring it. -/
 def loadSnapshot (emu : Emu) (path : String) : IO Snapshot := do
   snapshotOfBytes emu (← IO.FS.readBinFile path)
 
+/-- Puts an emulator where a checkpoint file has it, with its run state and breakpoints. -/
 def load (emu : Emu) (path : String) : IO Unit := do
   let data ← IO.FS.readBinFile path
   restore emu (← snapshotOfBytes emu data)
