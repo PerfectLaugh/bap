@@ -44,6 +44,9 @@ structure Config where
   size. A step of 1 has no ranges. -/
   rangeLimit : Nat := 16
   jitCooldown : Nat := 0
+  /-- Where an address that the guest gives is in memory, which on AArch64 ignores its top byte, as a kernel does of what a program
+  gives it once the program asks with `PR_SET_TAGGED_ADDR_CTRL`. -/
+  untag : Nat → Nat := id
 
 abbrev HookId := Nat
 
@@ -1111,6 +1114,7 @@ private def readByte (emu : Emu) (address : Nat) : IO UInt8 := do
     rawByte emu address
 
 def read (emu : Emu) (address size : Nat) : IO ByteArray := do
+  let address := emu.config.untag address
   -- An absurd size fails right here, instead of allocating before it fails.
   let regions ← regionsTouching emu address size
   if !coversRange regions address (address + size) then
@@ -1171,6 +1175,7 @@ private def writeByte (emu : Emu) (address : Nat) (value : UInt8) : IO Unit := d
       else current)
 
 def write (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
+  let address := emu.config.untag address
   if data.size > 0 then
     let mapped ← regionsTouching emu address 1
     match lookupRegion mapped address with
@@ -2419,13 +2424,14 @@ def x86_64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := 
   create (adjust config) [region] {} entry
 
 def aarch64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
-  let disassembler ← Target.AArch64.disassembler base
+  let disassembler ← Target.AArch64.emulatorDisassembler base
   let config : Config := {
     disassembler
-    disassemblerAt := some (fun base => Target.AArch64.disassembler base)
+    disassemblerAt := some (fun base => Target.AArch64.emulatorDisassembler base)
     memory := ⟨"mem", .mem 64 8, 0, false⟩
     endian := .little
     syscallAbi := .aarch64
+    untag := Target.AArch64.untag
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
   create (adjust config) [region] { env := clearMonitor config {} } entry

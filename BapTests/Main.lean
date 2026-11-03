@@ -66,6 +66,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testRangeEntries,
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-raises",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-controls",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-tbi",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-controls",
     Bap.Tests.Emu.testArmV8 "vrint",
     Bap.Tests.Emu.testArmV8 "v8fp",

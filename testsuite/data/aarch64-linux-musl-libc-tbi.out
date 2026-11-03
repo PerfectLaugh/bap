@@ -1,0 +1,7 @@
+prctl 0 1
+data 1 1
+bytes 1 1
+loop 2855360 7760
+call 42
+kernel
+ranges 0 0 1

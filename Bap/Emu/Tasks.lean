@@ -560,12 +560,12 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
       else if is calls.mmap || isSome calls.mmap2 then
         serveMmap current (arg 0) (arg 1) (arg 2) (arg 3)
       else if is calls.munmap then
-        unmap current (arg 0) ((arg 1 + 4095) / 4096 * 4096)
+        unmap current (current.config.untag (arg 0)) ((arg 1 + 4095) / 4096 * 4096)
         syscallReturn current (.ok 0)
       else if is calls.mprotect then
-        serveProtect current (arg 0) (arg 1) (arg 2)
+        serveProtect current (current.config.untag (arg 0)) (arg 1) (arg 2)
       else if is calls.madvise then
-        serveAdvice current (arg 0) (arg 1) (arg 2)
+        serveAdvice current (current.config.untag (arg 0)) (arg 1) (arg 2)
       else if isSome calls.archPrctl then
         let fsBase := wordVar width "FS_BASE"
         match arg 0 with

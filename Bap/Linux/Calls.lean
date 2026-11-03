@@ -63,6 +63,8 @@ inductive Call where
   `ftruncate64` and `_llseek` have them in two words. -/
   | mmap2 | truncate64 | ftruncate64 | llseek | clockGettime64 | clockGetres64
   | setThreadArea
+  /-- What a process asks of itself, of which only what tagged addresses are on AArch64 is answered. -/
+  | prctl
   /-- What has nothing to do here: everyone is root, nothing has to reach a disk and sleeping takes no time. -/
   | succeeds
   deriving DecidableEq, Repr
@@ -85,7 +87,7 @@ def x86_64Calls : List (Nat × Call) :=
 
 /-- The numbers of the architectures that came after the old calls went: `asm-generic/unistd.h`. -/
 def genericCalls : List (Nat × Call) :=
-  [(59, .pipe2),
+  [(59, .pipe2), (167, .prctl),
    (215, .munmap), (226, .mprotect), (233, .madvise), (227, .succeeds),
    (221, .execve), (43, .statfs), (44, .fstatfs), (179, .sysinfo),
    (63, .read), (64, .write), (56, .openat), (57, .close), (80, .fstat), (79, .fstatat), (291, .statx), (62, .lseek),
@@ -99,7 +101,7 @@ def genericCalls : List (Nat × Call) :=
 
 /-- The numbers of `asm-generic` on 32 bits, where whatever has a time or an offset in a word has gone. -/
 def generic32Calls : List (Nat × Call) :=
-  [(59, .pipe2),
+  [(59, .pipe2), (167, .prctl),
    (215, .munmap), (226, .mprotect), (233, .madvise), (227, .succeeds),
    (221, .execve), (43, .statfs64), (44, .fstatfs64), (179, .sysinfo),
    (63, .read), (64, .write), (56, .openat), (57, .close), (291, .statx), (62, .llseek),

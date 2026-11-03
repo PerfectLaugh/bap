@@ -437,6 +437,10 @@ private def viewOf (machine : Machine) (emu : Emu) (group : Nat) : IO ProcessVie
 
 /-- The system calls of files, memory that files are mapped into, time and what a process asks of itself. -/
 private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : List Nat) : IO SyscallAction := do
+    -- The ranges that these change may have a tag, as a program may give what it got from an allocator that tags them.
+    let args := match call, args with
+      | .munmap, address :: rest | .mprotect, address :: rest | .madvise, address :: rest => emu.config.untag address :: rest
+      | _, _ => args
     let machine : Machine := { machine with emu }
     let architecture := machine.architecture
     let wide := architecture.bits
@@ -809,6 +813,13 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     | .sigaltstack => returning emu (arg 1) (ByteArray.mk (Array.replicate (3 * wordSize) 0))
     | .schedGetaffinity => returning emu (arg 2) (cell wordSize 1) wordSize
     | .succeeds => pure (.returnValue 0)
+    | .prctl =>
+      -- What a program asks of tagged addresses, on AArch64: they are always taken here, where only a tag in the top byte is.
+      if architecture == .aarch64 && arg 0 == 55 then
+        pure (if arg 1 ≤ 1 && arg 2 == 0 && arg 3 == 0 && arg 4 == 0 then .returnValue 0 else errorOf Errno.einval)
+      else if architecture == .aarch64 && arg 0 == 56 then
+        pure (if arg 1 == 0 && arg 2 == 0 && arg 3 == 0 && arg 4 == 0 then .returnValue 1 else errorOf Errno.einval)
+      else pure .default
 
 /-- The argument of a call that is a path, if it has one, and whether it is relative to a descriptor. -/
 private def pathArgument : Call → Option Nat
