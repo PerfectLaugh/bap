@@ -1162,7 +1162,7 @@ theorem evalExpr_symbol (fuel : Nat) (locals : Locals) (globals : Globals) (atom
 /-- An atom that starts like a number but is not one is an error, not a symbol, as `Bad_word_literal`
 upstream, even if a variable of that name exists. -/
 theorem evalExpr_malformed (fuel : Nat) (locals : Locals) (globals : Globals) {atom error : String}
-    (_ht : atom ≠ "true") (_hf : atom ≠ "false") (hi : readLiteral atom = .error error) :
+    (hi : readLiteral atom = .error error) :
     evalExpr (fuel + 1) locals globals (.atom atom) = .error error := by
   rw [evalExpr]
   simp [hi, bind, Except.bind]
@@ -6720,19 +6720,19 @@ theorem narrow_not (hw : w ≤ 64) (hv : Holds l a) : narrowed w (~~~l) = (~~~a)
     omega
   rw [this, Nat.add_mul_mod_self_left, Nat.mod_eq_of_lt (by omega)]
 
-theorem narrow_and (_hw : w ≤ 64) (hl : Holds l a) (hr : Holds r b) : narrowed w (l &&& r) = (a &&& b).toNat := by
+theorem narrow_and (hl : Holds l a) (hr : Holds r b) : narrowed w (l &&& r) = (a &&& b).toNat := by
   simp only [Holds] at hl hr
   have := (a &&& b).isLt
   simp only [narrowed, BitVec.toNat_and, hl, hr]
   simpa using Nat.mod_eq_of_lt this
 
-theorem narrow_or (_hw : w ≤ 64) (hl : Holds l a) (hr : Holds r b) : narrowed w (l ||| r) = (a ||| b).toNat := by
+theorem narrow_or (hl : Holds l a) (hr : Holds r b) : narrowed w (l ||| r) = (a ||| b).toNat := by
   simp only [Holds] at hl hr
   have := (a ||| b).isLt
   simp only [narrowed, BitVec.toNat_or, hl, hr]
   simpa using Nat.mod_eq_of_lt this
 
-theorem narrow_xor (_hw : w ≤ 64) (hl : Holds l a) (hr : Holds r b) : narrowed w (l ^^^ r) = (a ^^^ b).toNat := by
+theorem narrow_xor (hl : Holds l a) (hr : Holds r b) : narrowed w (l ^^^ r) = (a ^^^ b).toNat := by
   simp only [Holds] at hl hr
   have := (a ^^^ b).isLt
   simp only [narrowed, BitVec.toNat_xor, hl, hr]
@@ -6796,7 +6796,7 @@ theorem narrow_udiv (hw : w ≤ 64) (hl : Holds l a) (hr : Holds r b) :
   · simp only [BitVec.toNat_udiv, hl, hr]
     exact Nat.mod_eq_of_lt (Nat.lt_of_le_of_lt (Nat.div_le_self _ _) ha)
 
-theorem narrow_urem (_hw : w ≤ 64) (hl : Holds l a) (hr : Holds r b) :
+theorem narrow_urem (hl : Holds l a) (hr : Holds r b) :
     narrowed w (denoteBin .urem l r) = (Word.urem a b).toNat := by
   simp only [Holds] at hl hr
   have ha := a.isLt
@@ -7242,7 +7242,7 @@ theorem Extends.tail {first second : Lowering} {new : List Jit.Op} (count : Nat)
   stable := hstable
 
 theorem Extends.trans {first second third : Lowering} {left right : List Jit.Op}
-    (hl : Extends first second left) (hr : Extends second third right) (_wf : LayoutWF first) :
+    (hl : Extends first second left) (hr : Extends second third right) :
     Extends first third (left ++ right) where
   ops := by rw [hr.ops, hl.ops, List.append_assoc]
   next := Nat.le_trans hl.next hr.next
@@ -7338,8 +7338,8 @@ theorem SlotsAgree.after {env : Bil.Env} {machine : Machine} {first second : Low
   rw [Holds, this]
   exact h3
 
-theorem Extends.laterLayout {first second third : Lowering} {new : List Jit.Op}
-    (_h1 : Extends first second new) (h2 : Extends second third new') :
+theorem Extends.laterLayout {second third : Lowering}
+    (h2 : Extends second third new') :
     ∀ b ∈ Lowering.layout third, b ∈ Lowering.layout second ∨ Lowering.nextSlot second ≤ b.2 := by
   obtain ⟨e, he, hx⟩ := h2.extra
   intro b hb
@@ -7684,8 +7684,8 @@ private theorem operand_after {second third : Lowering} {new later : List Jit.Op
   exact hv
 
 /-- A sub-expression reads the machine in the state where its operations start. -/
-private theorem agree_first {env : Bil.Env} {machine : Machine} {first second third : Lowering} {new later : List Jit.Op}
-    (_h1 : Extends first second new) (h2 : Extends second third later) (hs : SlotsAgree env machine (Lowering.layout third)) :
+private theorem agree_first {env : Bil.Env} {machine : Machine} {second third : Lowering} {later : List Jit.Op}
+    (h2 : Extends second third later) (hs : SlotsAgree env machine (Lowering.layout third)) :
     SlotsAgree env machine (Lowering.layout second) := by
   obtain ⟨e, he, _⟩ := h2.extra
   exact SlotsAgree.mono hs fun b hb => by rw [he]; exact List.mem_append_left _ hb
@@ -7698,7 +7698,7 @@ private theorem memory_first {env : Bil.Env} {machine : Machine} {second third :
 private theorem agree_next {env : Bil.Env} {machine : Machine} {first second third : Lowering} {new later : List Jit.Op}
     (h1 : Extends first second new) (h2 : Extends second third later) (hs : SlotsAgree env machine (Lowering.layout third)) :
     SlotsAgree env (runOps machine new) (Lowering.layout third) :=
-  hs.after h1 (h1.laterLayout h2)
+  hs.after h1 h2.laterLayout
 
 theorem extends_narrow {first second : Lowering} {pre : List Jit.Op} {count width dst : Nat} (wf : LayoutWF first)
     (hops : Lowering.ops second = Lowering.ops first ++ pre)
@@ -7740,17 +7740,17 @@ theorem value_narrow {pre : List Jit.Op} {width dst : Nat} {bits : BitVec width}
   rw [Holds, runOps_append, narrowOps_value hw, h]
 
 theorem lowered_tail {first mid second : Lowering} {new tail : List Jit.Op} {operand : Operand} {exp : Bil.Exp}
-    (wf : LayoutWF first) (he : Extends first mid new) (htail : Extends mid second tail)
+    (he : Extends first mid new) (htail : Extends mid second tail)
     (hslot : Operand.slot operand < Lowering.nextSlot second) (h0 : 0 < Operand.width operand)
     (h64 : Operand.width operand ≤ 64)
     (hv : ∀ (env : Bil.Env) (machine : Machine), SlotsAgree env machine (Lowering.layout mid) →
       MemoryAgrees env machine mid → ∀ (width : Nat) (bits : BitVec width), Bil.evalExp env exp = .ok (.bits bits) →
         Operand.width operand = width ∧ Holds ((runOps (runOps machine new) tail).slots (Operand.slot operand)) bits) :
     Lowered first second operand exp := by
-  refine ⟨new ++ tail, he.trans htail wf, hslot, h0, h64, ?_⟩
+  refine ⟨new ++ tail, he.trans htail, hslot, h0, h64, ?_⟩
   intro env machine hs hm width bits hev
   rw [runOps_append]
-  exact hv env machine (agree_first he htail hs) (memory_first htail hm) width bits hev
+  exact hv env machine (agree_first htail hs) (memory_first htail hm) width bits hev
 
 /-- The operands of a binary operator are in their slots after both their operations. -/
 private theorem operands_hold {l0 l1 l2 : Lowering} {newL newR : List Jit.Op} {o1 o2 : Operand} {left right : Bil.Exp}
@@ -7767,7 +7767,7 @@ private theorem operands_hold {l0 l1 l2 : Lowering} {newL newR : List Jit.Op} {o
     Operand.width o1 = w₁ ∧ Operand.width o2 = w₂ ∧
       Holds ((runOps machine (newL ++ newR)).slots (Operand.slot o1)) x ∧
       Holds ((runOps machine (newL ++ newR)).slots (Operand.slot o2)) y := by
-  obtain ⟨h1, h2⟩ := vL env machine (agree_first hL hR hs) (memory_first hR hm) _ x hx
+  obtain ⟨h1, h2⟩ := vL env machine (agree_first hR hs) (memory_first hR hm) _ x hx
   obtain ⟨h3, h4⟩ := vR env (runOps machine newL) (agree_next hL hR hs)
     (MemoryAgrees.after hm hL.pure) _ y hy
   rw [runOps_append]
@@ -7793,7 +7793,7 @@ theorem lowered_un {op : Bil.UnOp} {value : Bil.Exp} {first second : Lowering} {
   cases op <;> simp only [temporary, bind, Option.bind, Option.some.injEq, Prod.mk.injEq] at h <;>
     obtain ⟨rfl, rfl⟩ := h
   case neg =>
-    refine lowered_tail wf he (extends_narrow (pre := [.neg (Lowering.nextSlot l1) (Operand.slot o1)]) (count := 1)
+    refine lowered_tail he (extends_narrow (pre := [.neg (Lowering.nextSlot l1) (Operand.slot o1)]) (count := 1)
       wf1 (Lowering.ops_push _ _) rfl rfl rfl rfl rfl rfl rfl rfl (by simp [isExpressionOp]) (hw _ rfl) (by omega))
       (by rw [narrow_nextSlot]; exact Nat.lt_succ_self _) h0 h64 ?_
     intro env machine hs hm w bits hev
@@ -7806,7 +7806,7 @@ theorem lowered_un {op : Bil.UnOp} {value : Bil.Exp} {first second : Lowering} {
     simp only [runOps_cons, runOps_nil, step, Machine.write_slots, ite_true]
     exact narrow_neg h64 hx'
   case not =>
-    refine lowered_tail wf he (extends_narrow (pre := [.not (Lowering.nextSlot l1) (Operand.slot o1)]) (count := 1)
+    refine lowered_tail he (extends_narrow (pre := [.not (Lowering.nextSlot l1) (Operand.slot o1)]) (count := 1)
       wf1 (Lowering.ops_push _ _) rfl rfl rfl rfl rfl rfl rfl rfl (by simp [isExpressionOp]) (hw _ rfl) (by omega))
       (by rw [narrow_nextSlot]; exact Nat.lt_succ_self _) h0 h64 ?_
     intro env machine hs hm w bits hev
@@ -7842,13 +7842,13 @@ theorem binary_correct {op : Bil.BinOp} {native : Jit.BinOp} {w : Nat} {a b : Bi
   case mul => exact ⟨a * b, by simp [Bil.evalBin], narrow_mul hw hl hr⟩
   case div => exact ⟨Word.udiv a b, by simp [Bil.evalBin], narrow_udiv hw hl hr⟩
   case sdiv => exact ⟨Word.sdiv a b, by simp [Bil.evalBin], narrow_sdiv hw⟩
-  case rem => exact ⟨Word.urem a b, by simp [Bil.evalBin], narrow_urem hw hl hr⟩
+  case rem => exact ⟨Word.urem a b, by simp [Bil.evalBin], narrow_urem hl hr⟩
   case srem => exact ⟨Word.srem a b, by simp [Bil.evalBin], narrow_srem hw⟩
   case lshift => exact ⟨Word.shl a b, by simp [Bil.evalBin], narrow_lshift hw hl hr⟩
   case rshift => exact ⟨Word.lshr a b, by simp [Bil.evalBin], narrow_rshift hw hl hr⟩
-  case and => exact ⟨a &&& b, by simp [Bil.evalBin], narrow_and hw hl hr⟩
-  case or => exact ⟨a ||| b, by simp [Bil.evalBin], narrow_or hw hl hr⟩
-  case xor => exact ⟨a ^^^ b, by simp [Bil.evalBin], narrow_xor hw hl hr⟩
+  case and => exact ⟨a &&& b, by simp [Bil.evalBin], narrow_and hl hr⟩
+  case or => exact ⟨a ||| b, by simp [Bil.evalBin], narrow_or hl hr⟩
+  case xor => exact ⟨a ^^^ b, by simp [Bil.evalBin], narrow_xor hl hr⟩
   case eq => exact ⟨Word.eq a b, by simp [Bil.evalBin], narrowed_one (compare_eq hl hr)⟩
   case neq => exact ⟨Word.neq a b, by simp [Bil.evalBin], narrowed_one (compare_neq hl hr)⟩
   case lt => exact ⟨Word.lt a b, by simp [Bil.evalBin], narrowed_one (compare_lt hl hr)⟩
@@ -7889,7 +7889,7 @@ theorem lowered_binary {op : Bil.BinOp} {left right : Bil.Exp} {first second : L
     simp only [hwidth, bne_self_eq_false, Bool.false_eq_true, ite_false, signExtend, temporary, bind,
       Option.bind, Option.some.injEq, Prod.mk.injEq] at h
     have hsL2 : Operand.slot o1 < Lowering.nextSlot l2 := Nat.lt_of_lt_of_le hsL heR.next
-    have hheL := heL.trans heR wf
+    have hheL := heL.trans heR
     cases hsigned : isSigned native
     · simp only [hsigned, Bool.false_eq_true, ite_false] at h
       obtain ⟨rfl, rfl⟩ := h
@@ -7900,7 +7900,7 @@ theorem lowered_binary {op : Bil.BinOp} {left right : Bil.Exp} {first second : L
         subst ho
         simp only [opDst, Option.some.injEq] at hd
         omega
-      refine lowered_tail wf hheL (extends_narrow (count := 1) wf2 (Lowering.ops_push _ _) rfl rfl rfl rfl rfl rfl rfl rfl
+      refine lowered_tail hheL (extends_narrow (count := 1) wf2 (Lowering.ops_push _ _) rfl rfl rfl rfl rfl rfl rfl rfl
         (by simp [isExpressionOp]) hcount (by omega)) (by rw [narrow_nextSlot]; exact Nat.lt_succ_self _)
         (by simp only; split <;> omega) (by simp only; split <;> omega) ?_
       intro env machine hs hm w bits hev
@@ -7929,7 +7929,7 @@ theorem lowered_binary {op : Bil.BinOp} {left right : Bil.Exp} {first second : L
         intro o ho d hd
         simp only [List.mem_cons, List.not_mem_nil, or_false] at ho
         rcases ho with rfl | rfl | rfl <;> simp only [opDst, Option.some.injEq] at hd <;> omega
-      refine lowered_tail wf hheL (extends_narrow (count := 3) wf2 ?_ rfl rfl rfl rfl rfl rfl rfl rfl
+      refine lowered_tail hheL (extends_narrow (count := 3) wf2 ?_ rfl rfl rfl rfl rfl rfl rfl rfl
         ?_ hcount (by omega)) (by rw [narrow_nextSlot]; simp) (by simp only; split <;> omega)
         (by simp only; split <;> omega) ?_
       · simp [Lowering.ops, List.reverseAux_eq, List.append_assoc]
@@ -7988,7 +7988,7 @@ theorem lowered_ashift {left right : Bil.Exp} {first second : Lowering} {operand
     intro o ho d hd
     simp only [List.mem_cons, List.not_mem_nil, or_false] at ho
     rcases ho with rfl | rfl <;> simp only [opDst, Option.some.injEq] at hd <;> omega
-  refine lowered_tail wf (heL.trans heR wf) (extends_narrow (count := 2) wf2 ?_ rfl rfl rfl rfl rfl rfl rfl rfl
+  refine lowered_tail (heL.trans heR) (extends_narrow (count := 2) wf2 ?_ rfl rfl rfl rfl rfl rfl rfl rfl
     ?_ hcount (by omega)) (by rw [narrow_nextSlot]; simp) h0R h64R ?_
   · simp [Lowering.ops, List.reverseAux_eq, List.append_assoc]
   · simp [isExpressionOp]
@@ -8044,7 +8044,7 @@ theorem lowered_ite {condition yes no : Bil.Exp} {first second : Lowering} {oper
   simp only [hc1, hwidth, bne_self_eq_false, Bool.or_self, Bool.false_eq_true, ite_false, temporary, bind,
     Option.bind, Option.some.injEq, Prod.mk.injEq] at h
   obtain ⟨rfl, rfl⟩ := h
-  have heYN := heY.trans heN wf1
+  have heYN := heY.trans heN
   have hcount : ∀ o ∈ [Jit.Op.select (Lowering.nextSlot l3) (Operand.slot o1) (Operand.slot o2) (Operand.slot o3)],
       ∀ d, opDst o = some d → Lowering.nextSlot l3 ≤ d ∧ d < Lowering.nextSlot l3 + 1 := by
     intro o ho d hd
@@ -8054,11 +8054,11 @@ theorem lowered_ite {condition yes no : Bil.Exp} {first second : Lowering} {oper
     omega
   have hC3 : Operand.slot o1 < Lowering.nextSlot l3 := Nat.lt_of_lt_of_le hsC (Nat.le_trans heY.next heN.next)
   have hY3 : Operand.slot o2 < Lowering.nextSlot l3 := Nat.lt_of_lt_of_le hsY heN.next
-  refine lowered_tail wf (heC.trans heYN wf) (Extends.tail 1 wf3 (Lowering.ops_push _ _) rfl rfl rfl rfl rfl rfl rfl rfl
+  refine lowered_tail (heC.trans heYN) (Extends.tail 1 wf3 (Lowering.ops_push _ _) rfl rfl rfl rfl rfl rfl rfl rfl
     (by simp [isExpressionOp]) hcount) (Nat.lt_succ_self _) h0N h64N ?_
   intro env machine hs hm w bits hev
   obtain ⟨bit, hbit, hb⟩ := evalExp_ite_inv hev
-  obtain ⟨_, hcv⟩ := vC env machine (agree_first heC heYN hs) (memory_first heYN hm) 1 bit hbit
+  obtain ⟨_, hcv⟩ := vC env machine (agree_first heYN hs) (memory_first heYN hm) 1 bit hbit
   have hs1 := agree_next heC heYN hs
   have hm1 := MemoryAgrees.after hm heC.pure
   have hs2 := agree_next heY heN hs1
@@ -8085,7 +8085,7 @@ theorem lowered_ite {condition yes no : Bil.Exp} {first second : Lowering} {oper
       simp at hc3
   split at hb
   · next ht =>
-    obtain ⟨hw, hy⟩ := vY env (runOps machine newC) (agree_first heY heN hs1) (memory_first heN hm1) w bits hb
+    obtain ⟨hw, hy⟩ := vY env (runOps machine newC) (agree_first heN hs1) (memory_first heN hm1) w bits hb
     subst hw
     refine ⟨hwidth.symm, ?_⟩
     simp only [hcond, ht, ite_true]
@@ -8133,7 +8133,7 @@ theorem lowered_extract {high low : Nat} {value : Bil.Exp} {first second : Lower
     intro o ho d hd
     simp only [List.mem_cons, List.not_mem_nil, or_false] at ho
     rcases ho with rfl | rfl | rfl <;> simp only [opDst, Option.some.injEq] at hd <;> omega
-  refine lowered_tail wf he (Extends.tail 3 wf1 ?_ rfl rfl rfl rfl rfl rfl rfl rfl ?_ hcount)
+  refine lowered_tail he (Extends.tail 3 wf1 ?_ rfl rfl rfl rfl rfl rfl rfl rfl ?_ hcount)
     (by simp) (by simp) (by simp; omega) ?_
   · simp [Lowering.ops, List.reverseAux_eq, List.append_assoc]
   · simp [isExpressionOp]
@@ -8180,7 +8180,7 @@ theorem lowered_cast_high {target : Nat} {value : Bil.Exp} {first second : Lower
     intro o ho d hd
     simp only [List.mem_cons, List.not_mem_nil, or_false] at ho
     rcases ho with rfl | rfl | rfl <;> simp only [opDst, Option.some.injEq] at hd <;> omega
-  refine lowered_tail wf he (Extends.tail 3 wf1 ?_ rfl rfl rfl rfl rfl rfl rfl rfl ?_ hcount)
+  refine lowered_tail he (Extends.tail 3 wf1 ?_ rfl rfl rfl rfl rfl rfl rfl rfl ?_ hcount)
     (by simp) (by simp; omega) (by simp; omega) ?_
   · simp [Lowering.ops, List.reverseAux_eq, List.append_assoc]
   · simp [isExpressionOp]
@@ -8229,7 +8229,7 @@ theorem lowered_cast_signed {target : Nat} {value : Bil.Exp} {first second : Low
       subst ho
       simp only [opDst, Option.some.injEq] at hd
       omega
-    refine lowered_tail wf he (extends_narrow (count := 1) wf1 (Lowering.ops_push _ _) rfl rfl rfl rfl rfl rfl rfl rfl
+    refine lowered_tail he (extends_narrow (count := 1) wf1 (Lowering.ops_push _ _) rfl rfl rfl rfl rfl rfl rfl rfl
       (by simp [isExpressionOp]) hcount (by omega)) (by rw [narrow_nextSlot]; exact Nat.lt_succ_self _)
       (by simp only; omega) (by simp only; omega) ?_
     intro env machine hs hm w bits hev
@@ -8250,7 +8250,7 @@ theorem lowered_cast_signed {target : Nat} {value : Bil.Exp} {first second : Low
       subst ho
       simp only [opDst, Option.some.injEq] at hd
       omega
-    refine lowered_tail wf he (Extends.tail 1 wf1 (Lowering.ops_push _ _) rfl rfl rfl rfl rfl rfl rfl rfl
+    refine lowered_tail he (Extends.tail 1 wf1 (Lowering.ops_push _ _) rfl rfl rfl rfl rfl rfl rfl rfl
       (by simp [isExpressionOp]) hcount) (Nat.lt_succ_self _) (by simp only; omega) (by simp only; omega) ?_
     intro env machine hs hm w bits hev
     obtain ⟨w₀, x, hx, hv⟩ := evalExp_cast_inv hev
@@ -8301,7 +8301,7 @@ theorem lowered_cast_zero {kind : Bil.Cast} {target : Nat} {value : Bil.Exp} {fi
     by_cases hge : target ≥ Operand.width o1
     · simp only [hge, ite_true, Option.some.injEq, Prod.mk.injEq] at h
       obtain ⟨rfl, rfl⟩ := h
-      refine lowered_tail wf he (Extends.refl l1) hslot (by simp only; omega) (by simp only; omega) ?_
+      refine lowered_tail he (Extends.refl l1) hslot (by simp only; omega) (by simp only; omega) ?_
       intro env machine hs hm w bits hev
       obtain ⟨w₀, x, hx, hw, hbits⟩ := cast_zero_value hk hev
       obtain ⟨rfl, hxv⟩ := hval env machine hs hm _ x hx
@@ -8318,7 +8318,7 @@ theorem lowered_cast_zero {kind : Bil.Cast} {target : Nat} {value : Bil.Exp} {fi
         subst ho
         simp only [opDst, Option.some.injEq] at hd
         omega
-      refine lowered_tail wf he (Extends.tail 1 wf1 (Lowering.ops_push _ _) rfl rfl rfl rfl rfl rfl rfl rfl
+      refine lowered_tail he (Extends.tail 1 wf1 (Lowering.ops_push _ _) rfl rfl rfl rfl rfl rfl rfl rfl
         (by simp [isExpressionOp]) hcount) (Nat.lt_succ_self _) (by simp only; omega) (by simp only; omega) ?_
       intro env machine hs hm w bits hev
       obtain ⟨w₀, x, hx, hw, hbits⟩ := cast_zero_value hk hev
@@ -8471,7 +8471,7 @@ private theorem read_little (g : Nat → UInt8) (k init : Nat) :
 
 /-- The native load of at most 8 bytes reads what the interpreter reads, in either byte order. -/
 theorem denoteLoad_read {width size : Nat} {cells : Bap.Memory width} {address : BitVec width} {memory : Word64 → UInt8}
-    (endian : Endian) (hs : size ≤ 8) (_hw : width ≤ 64)
+    (endian : Endian) (hs : size ≤ 8)
     (hagree : ∀ offset, offset < 8 → memory (address.setWidth 64 + BitVec.ofNat 64 offset) =
       Bap.Memory.readByte cells (address + BitVec.ofNat width offset)) :
     (denoteLoad memory (address.setWidth 64) size (endian == .big)).toNat =
@@ -8564,8 +8564,8 @@ theorem lowered_load {var : Bap.Var} {address : Bil.Exp} {endian : Endian} {size
     subst ho
     simp only [opDst, Option.some.injEq] at hd
     omega
-  have hwf := he0.trans he wf
-  refine lowered_tail wf hwf (Extends.tail 1 wf1 (Lowering.ops_push _ _) rfl rfl rfl rfl rfl rfl rfl rfl
+  have hwf := he0.trans he
+  refine lowered_tail hwf (Extends.tail 1 wf1 (Lowering.ops_push _ _) rfl rfl rfl rfl rfl rfl rfl rfl
     (by simp [isExpressionOp]) hcount) (Nat.lt_succ_self _) (by simp only; omega) (by simp only; omega) ?_
   intro env machine hs hm w bits hev
   obtain ⟨wa, cells, addressBits, hcells, haddr, hv⟩ := evalExp_load_inv hev
@@ -8589,7 +8589,7 @@ theorem lowered_load {var : Bap.Var} {address : Bil.Exp} {endian : Endian} {size
     apply hm var (he.memory var (useMemory_some h0)) _ cells _ _ _ ho
     simpa [Bil.evalExp] using hcells
   rw [hbase]
-  exact denoteLoad_read endian hsize h64 hagree
+  exact denoteLoad_read endian hsize hagree
 
 /-! `smod`: the sign of a nonzero result follows the divisor, `smod x 0 = x`. -/
 
@@ -8743,7 +8743,7 @@ theorem lowered_smod {left right : Bil.Exp} {first second : Lowering} {operand :
     Option.bind, Option.some.injEq, Prod.mk.injEq, Lowering.push] at h
   obtain ⟨rfl, rfl⟩ := h
   have hsL2 : Operand.slot o1 < Lowering.nextSlot l2 := Nat.lt_of_lt_of_le hsL heR.next
-  have hheL := heL.trans heR wf
+  have hheL := heL.trans heR
   generalize hw : Operand.width o2 = w at *
   generalize hn : Lowering.nextSlot l2 = n at *
   have hcount : ∀ o ∈ ([.set n 0, .signExtend w (n + 1) (Operand.slot o1), .signExtend w (n + 2) (Operand.slot o2),
@@ -8786,7 +8786,7 @@ theorem lowered_smod {left right : Bil.Exp} {first second : Lowering} {operand :
   subst hn
   simp only [narrow_nextSlot, narrow_layout, narrow_memory, narrow_written, narrow_outputs, narrow_nextLabel,
     narrow_effectSlot, narrow_next, Nat.add_assoc, Nat.reduceAdd]
-  refine lowered_tail wf hheL (extends_narrow (count := 18) wf2 ?_ rfl rfl rfl rfl rfl rfl rfl rfl hpure hcount (by omega))
+  refine lowered_tail hheL (extends_narrow (count := 18) wf2 ?_ rfl rfl rfl rfl rfl rfl rfl rfl hpure hcount (by omega))
     (by rw [narrow_nextSlot]; simp) (by simp only; omega) (by simp only; omega) ?_
   · have hr : ∀ l, (Lowering.reversed l).reverse = Lowering.ops l := fun _ => rfl
     simp [Lowering.ops, List.reverseAux_eq, List.append_assoc]

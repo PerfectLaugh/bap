@@ -62,13 +62,13 @@ theorem handler_says {env : Env} {apply : Site → Outcome} (hh : handler env = 
     simpa only [abi, view, placeLo, placeHi, hm] using this
   · have := mips_says (env := env) (site := site) (st := st) hl hs
     simpa only [abi, view, placeLo, placeHi, hm] using this
-  · have := riscv_says (env := env) (site := site) (st := st) hl hs
+  · have := riscv_says (env := env) (site := site) (st := st)
     simpa only [abi, view, placeLo, placeHi, hm] using this
   · have := powerpc_says (env := env) (site := site) (st := st) hl hs
     simpa only [abi, view, placeLo, placeHi, hm] using this
   · have := powerpc_says (env := env) (site := site) (st := st) hl hs
     simpa only [abi, view, placeLo, placeHi, hm] using this
-  · have := systemz_says (env := env) (site := site) (st := st) hl hs
+  · have := systemz_says (env := env) (site := site) (st := st)
     simpa only [abi, view, placeLo, placeHi, hm] using this
 
 /-! ### The stores of a link -/

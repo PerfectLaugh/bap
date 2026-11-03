@@ -502,7 +502,7 @@ def run : IO Unit := do
   match modified.loadByte 0x1001 with
   | .ok value => assertEqual "Primus store/read" 9 value
   | .error error => throw <| IO.userError s!"store read failed: {repr error}"
-  match Primus.Memory.restore (Primus.Memory.snapshot memory) modified |>.loadByte 0x1001 with
+  match Primus.Memory.restore (Primus.Memory.snapshot memory) |>.loadByte 0x1001 with
   | .ok value => assertEqual "Primus snapshot restore" 2 value
   | .error error => throw <| IO.userError s!"restore failed: {repr error}"
   match memory.loadByte 0x2000 with

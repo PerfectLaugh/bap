@@ -138,7 +138,7 @@ private def release (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Unit := do
 
 /-- Something has happened that a wait may be waiting for, which it is given between turns, when what made it happen is over: a
 process that exited has left all that it wrote where others see it. -/
-private def wakeWaits (ptrace : Ptrace) (_emu : Emu) : IO Unit := ptrace.changed.set true
+private def wakeWaits (ptrace : Ptrace) : IO Unit := ptrace.changed.set true
 
 /-- A thread stops, which its tracer hears of, or its parent of a process that stopped. -/
 private def stopThread (ptrace : Ptrace) (emu : Emu) (tid : Nat) (stop : Stop) : IO Unit := do
@@ -151,7 +151,7 @@ private def stopThread (ptrace : Ptrace) (emu : Emu) (tid : Nat) (stop : Stop) :
   if let some to := notified then
     if to != 0 then
       ptrace.signals.send emu none to ⟨numbers.chld, if stop.traced then 4 else 5, .child group 0 stop.signal⟩
-  wakeWaits ptrace emu
+  wakeWaits ptrace
 
 /-- The process tracing a thread, if it is traced. -/
 def tracerOf (ptrace : Ptrace) (tid : Nat) : IO (Option Nat) := do
@@ -183,7 +183,7 @@ def jobControl (ptrace : Ptrace) (emu : Emu) (group signal : Nat) : IO Unit := d
     ptrace.table.modify fun table => { table with continued := group :: table.continued.erase group }
     let parent := (((← emu.taskTable.get).find? group).map (·.parent)).getD 0
     if parent != 0 then ptrace.signals.send emu none parent ⟨numbers.chld, 6, .child group 0 numbers.cont⟩
-    wakeWaits ptrace emu
+    wakeWaits ptrace
   else
     let stopped := (← ptrace.table.get).stops
     for tid in threads do
@@ -194,7 +194,7 @@ def jobControl (ptrace : Ptrace) (emu : Emu) (group signal : Nat) : IO Unit := d
     ptrace.table.modify fun table => { table with continued := table.continued.erase group }
     let parent := (((← emu.taskTable.get).find? group).map (·.parent)).getD 0
     if parent != 0 then ptrace.signals.send emu none parent ⟨numbers.chld, 5, .child group 0 signal⟩
-    wakeWaits ptrace emu
+    wakeWaits ptrace
 
 /-- A tracee that `execve` went to a new program stops, as `PTRACE_TRACEME` and `PTRACE_O_TRACEEXEC` have it. -/
 def executed (ptrace : Ptrace) (emu : Emu) : IO Unit := do
@@ -224,7 +224,7 @@ def processExited (ptrace : Ptrace) (emu : Emu) (group : Nat) : IO Unit := do
       tracees := table.tracees.filter fun tid _ => !gone.contains tid
       stops := table.stops.filter fun tid _ => !gone.contains tid
       injected := table.injected.filter fun tid _ => !gone.contains tid }
-  wakeWaits ptrace emu
+  wakeWaits ptrace
 
 /-! ### Waiting -/
 

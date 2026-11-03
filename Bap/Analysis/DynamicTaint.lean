@@ -757,7 +757,7 @@ private partial def perform (tracker : Tracker) (frame : Frame) : Nat → Bil.Pr
     | .jmp target =>
       let (bits, shade) ← evaluate tracker frame target
       let inputs := allInputs shade
-      if !inputs.isEmpty then branchNode tracker frame inputs (bitsValue bits)
+      if !inputs.isEmpty then branchNode frame inputs (bitsValue bits)
       frame.scratch.jumped.set true
       pure false
     | .special name =>
@@ -773,7 +773,7 @@ private partial def perform (tracker : Tracker) (frame : Frame) : Nat → Bil.Pr
     | .ifElse condition yes no =>
       let (bits, shade) ← evaluate tracker frame condition
       let inputs := allInputs shade
-      if !inputs.isEmpty then branchNode tracker frame inputs none
+      if !inputs.isEmpty then branchNode frame inputs none
       match bitsValue bits with
       | some value =>
         let go ← perform tracker frame fuel (if value != 0 then yes else no)
@@ -786,7 +786,7 @@ private partial def perform (tracker : Tracker) (frame : Frame) : Nat → Bil.Pr
     | .while condition body =>
       let (bits, shade) ← evaluate tracker frame condition
       let inputs := allInputs shade
-      if !inputs.isEmpty then branchNode tracker frame inputs none
+      if !inputs.isEmpty then branchNode frame inputs none
       match bitsValue bits with
       | some 0 => perform tracker frame fuel rest
       | some _ =>
@@ -796,7 +796,7 @@ private partial def perform (tracker : Tracker) (frame : Frame) : Nat → Bil.Pr
         frame.scratch.incomplete.set true
         perform tracker frame fuel rest
 
-private partial def branchNode (_tracker : Tracker) (frame : Frame) (inputs : List Input) (target : Option Nat) : IO Unit := do
+private partial def branchNode (frame : Frame) (inputs : List Input) (target : Option Nat) : IO Unit := do
   let id ← nodeIdOf frame
   frame.scratch.newNodes.modify (·.push {
     id, insn := frame.insn, pc := frame.pc, thread := frame.thread, space := frame.space, kind := .branch target

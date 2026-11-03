@@ -683,7 +683,7 @@ theorem arm_says {env : Env} {site : Site} {st : LinkState} (hl : site.limit ≤
   all_goals simp_all
 
 set_option maxHeartbeats 2000000 in
-theorem systemz_says {env : Env} {site : Site} {st : LinkState} (_hl : site.limit ≤ env.gotOff) (_hs : env.gotOff ≤ st.memory.size) :
+theorem systemz_says {env : Env} {site : Site} {st : LinkState} :
     wp (systemz env site) (Says fun after => systemzSpec env site
       (cut site.off (site.off + systemzPlace site.rel.typ) site.limit (fun l o n => readNat st.memory l o n)) (slotOf after)) st := by
   unfold systemz
@@ -850,7 +850,7 @@ theorem wp_mono {m : LinkM α} {Q Q' : α → LinkState → Prop} {st : LinkStat
   | error e s => trivial
 
 set_option maxHeartbeats 2000000 in
-theorem riscv_says {env : Env} {site : Site} {st : LinkState} (_hl : site.limit ≤ env.gotOff) (_hs : env.gotOff ≤ st.memory.size) :
+theorem riscv_says {env : Env} {site : Site} {st : LinkState} :
     wp (riscv env site) (Says fun after => riscvSpec env site
       (cut site.off (site.off + riscvPlace site.rel.typ) site.limit (fun l o n => readNat st.memory l o n)) (slotOf after)
         (fun key => st.riscvHi[key]?)) st := by

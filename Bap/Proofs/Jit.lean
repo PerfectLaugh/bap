@@ -1122,7 +1122,7 @@ theorem Agrees.after {env : Bil.Env} {machine : Machine} {global first second : 
       · exact absurd hl (hfree binding.1)
       · omega
 
-theorem _root_.Bap.Proofs.Primus.Extends.frames {first second global : Lowering} {new : List Op} (he : Extends first second new) (_hs : Sub second global)
+theorem _root_.Bap.Proofs.Primus.Extends.frames {first second global : Lowering} {new : List Op} (he : Extends first second new)
     (machine : Machine) : Frames (Lowering.nextSlot first) (Lowering.nextSlot second) global machine (runOps machine new) := by
   refine ⟨runOps_view _ _, ?_⟩
   intro slot hslot _
@@ -1420,7 +1420,7 @@ theorem lowerMove_register_ok {first second : Lowering} {dst : Bap.Var} {value :
           rcases hmoved with he' | hmoved
           · exact absurd (congrArg Prod.fst (pairwise_same ctx.wfGlobal.slotsDistinct hb hdstG he')) hbd
           · exact hafter.bound binding hb hmoved
-    · have hf := he.frames hsubMid machine
+    · have hf := he.frames (global := global) machine
       rw [runOps_append]
       simp only [runOps_cons, runOps_nil, Bap.Proofs.Primus.step]
       refine ⟨hf.1, ?_⟩
@@ -1611,8 +1611,8 @@ theorem lowerMove_store_ok {first second : Lowering} {dst : Bap.Var} {memory add
         simp at hbits
       rw [lookup_bind_other hne]
       exact hag2.bound binding hb hmoved
-  · have f1 := heA.frames hsub1 machine
-    have f2 := heS.frames hsub2 (runOps machine newA)
+  · have f1 := heA.frames (global := global) machine
+    have f2 := heS.frames (global := global) (runOps machine newA)
     rw [List.nil_append, runOps_append, runOps_append]
     simp only [runOps_cons, runOps_nil]
     have hlow1 := he0.next
@@ -1875,7 +1875,7 @@ private theorem jmp_slot_ok (target : Bil.Exp) (hnot : ∀ (width : Nat) (value 
     · simp only [Machine.write_slots, ↓reduceIte]
       rfl
     · exact hafter.write_free ctx.effectFree _
-    · have hfm := he.frames hsub machine
+    · have hfm := he.frames (global := global) machine
       have hg2 : Lowering.nextSlot mid ≤ Lowering.nextSlot (jumpSlot mid (Operand.slot operand)) := a2.next
       refine ⟨hfm.1, fun slot hne hs hfree => ?_⟩
       simp only [Machine.write_slots, hne, ↓reduceIte]
@@ -1994,7 +1994,7 @@ private theorem program_cons_ok {stmt : Bil.Stmt} {rest : Bil.Program} (hs : Stm
 private theorem ifElse_core {first mid l0 yesEnd l1 noEnd second : Lowering} {condition : Bil.Exp} {yes no : Bil.Program}
     {operand : Operand} {yesDone noDone : Bool} {effect : Nat} (hyesOK : ProgramOK yes) (hnoOK : ProgramOK no)
     (wf : LayoutWF first) (heff : Lowering.effectSlot first = some effect) (hlow : effect < Lowering.nextSlot first)
-    (h1 : lowerExp first condition = some (mid, operand)) (_hw : Operand.width operand = 1)
+    (h1 : lowerExp first condition = some (mid, operand))
     (p0 : Pushed mid l0 [.branch (Operand.slot operand) (Lowering.nextLabel mid) (Lowering.nextLabel mid + 1),
       .label (Lowering.nextLabel mid)] 3)
     (hyes : lowerStatements l0 yes = some (yesEnd, yesDone))
@@ -2113,7 +2113,7 @@ private theorem ifElse_core {first mid l0 yesEnd l1 noEnd second : Lowering} {co
   have hsm : SlotsAgree state.env machine (Lowering.layout mid) := hag.slots.mono subMid.mono
   obtain ⟨_, hvalue⟩ := hval state.env machine hsm (hag.memoryAgrees subMid) 1 bit hev
   have hag1 := hag.after he subMid
-  have hf0 := he.frames subMid machine
+  have hf0 := he.frames (global := global) machine
   let m1 := runOps machine newC
   let rest : List Op := newY ++ (gotoY ++ [.label (Lowering.nextLabel mid + 1)]) ++ (newN ++ (gotoN ++ labelD)) ++ tail
   have hnew : new ++ tail = newC ++ (.branch (Operand.slot operand) (Lowering.nextLabel mid) (Lowering.nextLabel mid + 1) ::
@@ -2272,7 +2272,7 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
         .bin .ge (Lowering.nextSlot first + 2) (Lowering.nextSlot first) (Lowering.nextSlot first + 1),
         .branch (Lowering.nextSlot first + 2) (Lowering.nextLabel first + 4) (Lowering.nextLabel first + 1),
         .label (Lowering.nextLabel first + 1)] 5 3)
-    (h1 : lowerExp l3 condition = some (mid, operand)) (_hw : Operand.width operand = 1)
+    (h1 : lowerExp l3 condition = some (mid, operand))
     (p1 : Pushed mid l4 [.branch (Operand.slot operand) (Lowering.nextLabel first + 2) (Lowering.nextLabel first + 3),
       .label (Lowering.nextLabel first + 2)] 0)
     (hbody : lowerStatements l4 body = some (bodyEnd, bodyDone))
@@ -2481,7 +2481,7 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
         have hsm : SlotsAgree state.env m0 (Lowering.layout mid) := hag0.slots.mono subMid.mono
         obtain ⟨_, hvalue⟩ := hval state.env m0 hsm (hag0.memoryAgrees subMid) 1 bit hev
         have hag1 := hag0.after he subMid
-        have hf1 := he.frames subMid m0
+        have hf1 := he.frames (global := global) m0
         let m1 := runOps m0 newC
         have hrun2 : Run program (loop, machine) (.branch (Operand.slot operand) (l + 2) (l + 3) :: .label (l + 2) :: (newB ++ afterBody), m1) := by
           refine hrun1.trans ?_
@@ -2617,7 +2617,7 @@ private theorem ifElse_ok {condition : Bil.Exp} {yes no : Bil.Program} (hy : Pro
   · simp at h
   · simp only [Option.some.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
-    refine ifElse_core hy hn wf heff hlow h1 hw ?_ hyes ?_ hno ?_
+    refine ifElse_core hy hn wf heff hlow h1 ?_ hyes ?_ hno ?_
     · exact ⟨by simp [Lowering.ops, Lowering.push, List.reverseAux_eq, List.append_assoc], rfl, rfl, rfl, rfl, rfl⟩
     · exact ⟨by simp [Lowering.ops, Lowering.push, List.reverseAux_eq, List.append_assoc], rfl, rfl, rfl, rfl, rfl⟩
     · exact ⟨by simp [Lowering.ops, Lowering.push, List.reverseAux_eq, List.append_assoc], rfl, rfl, rfl, rfl, rfl⟩
@@ -2637,7 +2637,7 @@ private theorem while_ok {condition : Bil.Exp} {body : Bil.Program} (hb : Progra
   · simp at h
   · simp only [Option.some.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
-    refine while_core hb wf heff hlow ?_ h1 hw ?_ hbody ?_ (fun he => (setEffect_pushed he 2).2) ⟨Lowering.ops_push _ _, rfl, rfl, rfl, rfl, rfl⟩
+    refine while_core hb wf heff hlow ?_ h1 ?_ hbody ?_ (fun he => (setEffect_pushed he 2).2) ⟨Lowering.ops_push _ _, rfl, rfl, rfl, rfl, rfl⟩
     · exact ⟨by simp [Lowering.ops, Lowering.push, List.reverseAux_eq, List.append_assoc], rfl, rfl, rfl, rfl, rfl⟩
     · exact ⟨Lowering.ops_push _ _, rfl, rfl, rfl, rfl, rfl⟩
     · exact ⟨by simp [Lowering.ops, Lowering.push, List.reverseAux_eq, List.append_assoc], rfl, rfl, rfl, rfl, rfl⟩
@@ -3491,7 +3491,7 @@ private theorem lowerExit_branch {plan : GraphPlan} {first second : Lowering} {b
     have hsm : SlotsAgree s1.env m1 (Lowering.layout mid) := hag1.slots.mono subMid.mono
     obtain ⟨_, hvalue⟩ := hval s1.env m1 hsm (hag1.memoryAgrees subMid) 1 bit hev
     have hag2 := hag1.after heC subMid
-    have hf2 := heC.frames subMid m1
+    have hf2 := heC.frames (global := global) m1
     have hfA : Frames (Lowering.nextSlot first) (Lowering.nextSlot second) global machine (runOps m1 newC) :=
       (hf1.weaken (Nat.le_refl _) (by omega)).trans (hf2.weaken aS.next (by omega))
     have hz2 : (runOps m1 newC).slots effect = 0 := by

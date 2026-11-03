@@ -6619,7 +6619,7 @@ private theorem entry_scope {en ex : Tid → RenameState} (hwf : SubWf sub) (F :
     exact hin (dom_antisymm hir hda hd)
 
 /-- Names of the output are not variables of the input. -/
-private theorem output_name_ne {en ex : Tid → RenameState} (_hwf : SubWf sub) (F : SsaTables sub en ex) {n : Tid} (hn : Reach sub n)
+private theorem output_name_ne {en ex : Tid → RenameState} (F : SsaTables sub en ex) {n : Tid} (hn : Reach sub n)
     {sb : Blk} (hS : (ssaCfg sub).block n = some sb) {y w : Var} (hy : y ∈ defNames sb) (hw : Tracked (mentionedOf sub) w) :
     y ≠ w := by
   obtain ⟨b, hb⟩ := phi_block_exists (Bap.Proofs.Graph.reachableFrom_subset_nodes _ _ hn)
@@ -6735,11 +6735,11 @@ def DefReaches (out : Sub) (blk : Blk) (earlier : List Def) (x : Var) : Prop :=
     ∃ a ∈ out.blks, a.tid ≠ blk.tid ∧ x ∈ defNames a ∧
       Bap.Proofs.Graph.Dom (Cfg.fromSub out).graph (Cfg.fromSub out).start blk.tid a.tid
 
-private theorem real_name_cases {en ex : Tid → RenameState} (hwf : SubWf sub) (F : SsaTables sub en ex) {w x : Var}
+private theorem real_name_cases {en ex : Tid → RenameState} (F : SsaTables sub en ex) {w x : Var}
     (hw : Tracked (mentionedOf sub) w) (hx : x = w) : ∀ b ∈ (toSsa sub).blks, x ∉ defNames b := by
   intro b hb hm
   obtain ⟨o, ho, ht, hS⟩ := toSsa_blocks_cases hb
-  exact output_name_ne hwf F (connected_all_reachable sub (List.mem_map.2 ⟨o, ho, ht⟩)) hS hm hw hx
+  exact output_name_ne F (connected_all_reachable sub (List.mem_map.2 ⟨o, ho, ht⟩)) hS hm hw hx
 
 private theorem no_names_at_start {en ex : Tid → RenameState} (hwf : SubWf sub) (F : SsaTables sub en ex) {sb : Blk} {y : Var}
     (hS : (ssaCfg sub).block pseudoStart = some sb) (hm : y ∈ defNames sb) : False := by
@@ -6790,7 +6790,7 @@ private theorem exit_reaches {en ex : Tid → RenameState} (hwf : SubWf sub) (F 
     DefReaches (toSsa sub) blk blk.defs x := by
   obtain ⟨o, _, ins, _, hb, _, hform, hr⟩ := toSsa_block_form hwf F hblk
   rcases topName_cases w (ex blk.tid) with h | h
-  · exact Or.inl (real_name_cases hwf F hw (hx.trans h))
+  · exact Or.inl (real_name_cases F hw (hx.trans h))
   · rw [← hx] at h
     rw [F.spec.exits _ _ hb hr] at h
     obtain ⟨ys, hys, _, hsy⟩ := stackOf_renameDefs { o with phis := o.phis ++ ins }.defs
@@ -6885,7 +6885,7 @@ theorem toSsa_uses_dominated (sub : Sub) (hwf : SubWf sub) (blk : Blk) (hblk : b
     obtain ⟨w, hw, hxw⟩ := freeVars_renameExp hwf'.keys hx
     have htrack : Tracked (mentionedOf sub) w := Or.inr (def_read_mentioned hom hc hw)
     rcases topName_cases w st' with h | h
-    · exact Or.inl (real_name_cases hwf F htrack (hxw.trans h))
+    · exact Or.inl (real_name_cases F htrack (hxw.trans h))
     · rw [← hxw] at h
       rcases hstack w x h with h | h
       · obtain ⟨xs, hxs, _, hsx⟩ := stackOf_renamePhis { o with phis := o.phis ++ ins }.phis (en blk.tid) w

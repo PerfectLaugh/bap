@@ -122,9 +122,9 @@ def protect (memory : Memory) (lower upper : Nat) (protection : Protection) : Me
 abbrev Snapshot := Memory
 
 def snapshot (memory : Memory) : Snapshot := memory
-def restore (snapshot : Snapshot) (_memory : Memory) : Snapshot := snapshot
+def restore (snapshot : Snapshot) : Memory := snapshot
 
-@[simp] theorem restore_snapshot (memory : Memory) : restore (snapshot memory) memory = memory := by
+@[simp] theorem restore_snapshot (memory : Memory) : restore (snapshot memory) = memory := by
   rfl
 
 end Memory

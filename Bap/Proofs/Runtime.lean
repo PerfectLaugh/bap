@@ -20,12 +20,12 @@ namespace Bap.Analysis
 namespace CallSites
 
 /-- Coming back to `pc` ends the first site that is it, counting from `gone`, and leaves what is after it, and no site before that is it. -/
-theorem popFrom_spec {pc : Nat} : ∀ {sites : List Nat} {gone _rest n : Nat} {left : List Nat},
+theorem popFrom_spec {pc : Nat} : ∀ {sites : List Nat} {gone n : Nat} {left : List Nat},
     popFrom pc sites gone = some (left, n) →
     ∃ k, n = gone + k + 1 ∧ left = sites.drop (k + 1) ∧ (sites[k]? = some pc ∨ sites[k]? = some (pc + 1)) ∧
       ∀ j < k, sites[j]? ≠ some pc ∧ sites[j]? ≠ some (pc + 1)
-  | [], _, _, _, _, h => by simp [popFrom] at h
-  | site :: rest, gone, _, n, left, h => by
+  | [], _, _, _, h => by simp [popFrom] at h
+  | site :: rest, gone, n, left, h => by
     simp only [popFrom] at h
     by_cases hit : (site == pc || site == pc + 1) = true
     · simp only [hit, ↓reduceIte] at h
@@ -36,7 +36,7 @@ theorem popFrom_spec {pc : Nat} : ∀ {sites : List Nat} {gone _rest n : Nat} {l
       simpa using hit
     · have hmiss : (site == pc || site == pc + 1) = false := by simpa using hit
       simp only [hmiss, Bool.false_eq_true, ↓reduceIte] at h
-      obtain ⟨k, hn, hl, hk, hbefore⟩ := popFrom_spec (gone := gone + 1) (_rest := 0) h
+      obtain ⟨k, hn, hl, hk, hbefore⟩ := popFrom_spec (gone := gone + 1) h
       refine ⟨k + 1, by omega, by simpa using hl, by simpa using hk, ?_⟩
       intro j hj
       cases j with
@@ -56,7 +56,7 @@ theorem pop_spec {calls rest : CallSites} {pc gone : Nat} (h : calls.pop pc = so
     · next left n hfrom =>
       simp only [Option.some.injEq, Prod.mk.injEq] at h
       obtain ⟨hrest, hgone⟩ := h
-      obtain ⟨k, hn, hl, hk, _⟩ := popFrom_spec (gone := 0) (_rest := 0) hfrom
+      obtain ⟨k, hn, hl, hk, _⟩ := popFrom_spec (gone := 0) hfrom
       subst hgone hrest
       refine ⟨by simp [hl, hn], by simp, by omega, ?_⟩
       have : n - 1 = k := by omega
