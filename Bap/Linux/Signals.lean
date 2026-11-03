@@ -703,6 +703,30 @@ private partial def deliver (signals : Signals) (emu : Emu) (inCall : Bool) : IO
         signals.failures.modify (·.push (.handlerEntry tid info.signal (toString error)))
         kill emu task.group (signals.numbers).segv
 
+/-- What `rt_sigprocmask` does to the mask of a thread, of the numbers of the architecture for `how`: `set`, if it isn't 0, changes the
+mask, and the mask that was before goes to `old`, if it isn't 0. The error number of the call if it fails. -/
+def changeMask (signals : Signals) (emu : Emu) (tid how set old : Nat) : IO (Option Nat) := do
+  let numbers := signals.numbers
+  let size := maskBytes signals.architecture
+  let previous := (← threadOf signals tid).mask
+  try
+    if set != 0 then
+      let given ← readMask signals emu set size
+      let mask ←
+        if how == numbers.howBlock then pure (previous ||| given)
+        else if how == numbers.howUnblock then pure (previous &&& (given ^^^ (2 ^ 128 - 1)))
+        else if how == numbers.howSet then pure given
+        else return some numbers.einval
+      modifyThread signals tid fun state => { state with mask := blockable signals mask }
+    if old != 0 then write emu old (encodeMask signals emu previous size)
+    pure none
+  catch _ => pure (some numbers.efault)
+
+/-- The thread that runs takes what it may have now, from where it is, as after a function of the host, which it called, that
+unblocked a signal returns. -/
+def deliverPending (signals : Signals) (emu : Emu) : IO Unit :=
+  deliver signals emu false
+
 /-- A thread that has to wake for a signal: it isn't waiting any longer, and what it was doing says so, or starts again if it may. -/
 private def interrupt (signals : Signals) (emu : Emu) (tid : Nat) (restart : Bool) : IO Unit := do
   let table ← emu.taskTable.get
@@ -1061,21 +1085,10 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
         syscallReturn current (.ok 0)
       catch _ => fail current numbers.efault
     else if number == calls.sigprocmask then
-      let (how, set, old, size) := (arg 0, arg 1, arg 2, arg 3)
-      if size != maskBytes architecture then return ← fail current numbers.einval
-      let state ← threadOf signals tid
-      try
-        if old != 0 then write current old (encodeMask signals current state.mask size)
-        if set != 0 then
-          let given ← readMask signals current set size
-          let mask ←
-            if how == numbers.howBlock then pure (state.mask ||| given)
-            else if how == numbers.howUnblock then pure (state.mask &&& (given ^^^ (2 ^ 128 - 1)))
-            else if how == numbers.howSet then pure given
-            else return ← fail current numbers.einval
-          modifyThread signals tid fun state => { state with mask := blockable signals mask }
-        syscallReturn current (.ok 0)
-      catch _ => fail current numbers.efault
+      if arg 3 != maskBytes architecture then return ← fail current numbers.einval
+      match ← signals.changeMask current tid (arg 0) (arg 1) (arg 2) with
+      | none => syscallReturn current (.ok 0)
+      | some error => fail current error
     else if calls.returns.contains number then
       sigreturn signals current
     else if number == calls.kill then

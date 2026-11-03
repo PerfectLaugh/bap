@@ -118,3 +118,8 @@ int run(void) {
 
 /* What another library that a libc has the same names of as the base environment calls. */
 size_t length_of(const char *text) { return strlen(text); }
+
+/* A handler of a signal, which says what came. */
+static volatile int caught;
+void on_signal(int signal) { caught = signal; }
+int caught_signal(void) { return caught; }

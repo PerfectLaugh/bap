@@ -2884,6 +2884,26 @@ def testBaseEnvironment (triple : String) : IO Unit := do
   let slots ← machine.linkBase base
   assertTrue s!"{label} until it is linked against it ({slots})" (slots ≥ 1)
   assertEqual s!"{label} and then it has it" 6 (← call "plain_length" [text])
+  -- The mask of signals: what is blocked waits, and comes as the call that unblocks it returns.
+  let callBase (name : String) (arguments : List Nat) (bits : Nat := 32) : IO Nat := do
+    let some address := base.resolve name | throw <| IO.userError s!"{label} has no {name} of the base"
+    pure ((← machine.call address arguments) % 2 ^ bits)
+  let some onSignal := ← machine.findSymbol "on_signal" | throw <| IO.userError s!"{label} has no on_signal"
+  let tid ← Bap.Emu.thread machine.emu
+  let group := (← Bap.Emu.currentTask machine.emu).group
+  machine.signals.table.modify fun table => { table with actions := table.actions.insert (group, 10) { handler := onSignal } }
+  let set ← machine.malloc 16
+  let old ← machine.malloc 16
+  machine.write set (ByteArray.mk #[0, 2, 0, 0, 0, 0, 0, 0])
+  assertEqual s!"{label} pthread_sigmask blocks" 0 (← callBase "pthread_sigmask" [0, set, 0])
+  machine.signals.send machine.emu (some tid) group ⟨10, 0, .sent group 0 0⟩
+  assertEqual s!"{label} and what it blocks waits" 0 (← call "caught_signal")
+  assertEqual s!"{label} pthread_sigmask unblocks" 0 (← callBase "pthread_sigmask" [1, set, old])
+  assertEqual s!"{label} and says what was blocked" (ByteArray.mk #[0, 2, 0, 0, 0, 0, 0, 0]).toList (← machine.read old 8).toList
+  assertEqual s!"{label} and what was pending comes as it returns" 10 (← call "caught_signal")
+  assertEqual s!"{label} pthread_sigmask gives back what is wrong" 22 (← callBase "pthread_sigmask" [7, set, 0])
+  assertEqual s!"{label} and sigprocmask -1" (2 ^ 32 - 1) (← callBase "sigprocmask" [7, set, 0])
+  assertEqual s!"{label} with errno" [22, 0, 0, 0] (← machine.read (← callBase "__errno_location" [] 64) 4).toList
 
 /-- Shared libraries from outside a program, as `dlopen` has them, on a machine with no libc or linker to do it. -/
 def testLinuxLibraries (triple : String) (ifunc : Bool := false) : IO Unit := do

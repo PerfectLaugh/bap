@@ -5,7 +5,7 @@ import Bap.Linux.Library
 What a library needs of a libc, served by the host, for a machine that has none, as one that runs the native code of an Android
 application from outside it has: the allocator of the machine (`malloc`, `calloc`, `realloc`, `free`, `posix_memalign` and the like),
 pthreads (threads with a stack and thread-local storage of their own, `join`, `detach`, `exit`, mutexes, condition variables, `once`,
-keys, `self`), the routines of memory and strings, `errno`, what a stack protector and `atexit` need, and `abort` and `exit`.
+keys, `self`, `pthread_sigmask`), the routines of memory and strings, `errno`, what a stack protector and `atexit` need, and `abort` and `exit`.
 
 `Machine.baseEnvironment` makes the stubs, once, and says where each name is. A library is linked against it by `Machine.loadWithBase`,
 which has it before anything that is loaded: what it has is had from it even when a libc that is loaded, such as glibc, has the same name,
@@ -178,6 +178,17 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
       let address ← machine.calloc 1 8
       state.modify fun state => { state with errno := state.errno.insert me address }
       pure address
+  -- `pthread_sigmask`, or `sigprocmask` with `failed` for what it gives back of an error. It returns to where it was called from
+  -- itself, so that what it unblocks and is pending is delivered there, as Linux does where the system call ends.
+  let changeMask (machine : Machine) (arguments : List Nat) (failed : Nat → IO Nat) : IO BaseResult := do
+    let emu := machine.emu
+    let result ← match ← machine.signals.changeMask emu (← tidOf machine) (arguments.headD 0) (arguments.getD 1 0) (arguments.getD 2 0) with
+      | none => pure 0
+      | some error => failed error
+    returnFromCall machine emu result
+    for ends in ← emu.hostEnds.get do ends none
+    machine.signals.deliverPending emu
+    pure .finished
   let (stack, _) := threadRegisters machine.emu.config.syscallAbi
   let register (name : String) : Bap.Var := ⟨name, .imm width, 0, false⟩
   [ -- The allocator of the machine.
@@ -263,6 +274,12 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
     ("__stack_chk_fail", show BaseFunction from fun machine _ _ => do kill machine.emu (← tidOf machine) 6; pure .finished),
     ("exit", show BaseFunction from fun machine arguments _ => do exitProcess machine.emu (arguments.headD 0); pure .finished),
     ("_exit", show BaseFunction from fun machine arguments _ => do exitProcess machine.emu (arguments.headD 0); pure .finished),
+    -- The mask of signals of the thread, as the kernel has it.
+    ("pthread_sigmask", show BaseFunction from fun machine arguments _ => changeMask machine arguments pure),
+    ("sigprocmask", show BaseFunction from fun machine arguments _ =>
+      changeMask machine arguments fun error => do
+        write32 machine (← errnoOf machine) error
+        pure (2 ^ width - 1)),
     ("getpid", show BaseFunction from fun machine _ _ => do value (← currentTask machine.emu).group),
     ("gettid", show BaseFunction from fun machine _ _ => do value (← tidOf machine)),
     ("sched_yield", show BaseFunction from fun _ _ _ => value 0),
@@ -345,7 +362,6 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
     ("pthread_mutexattr_destroy", show BaseFunction from fun _ _ _ => value 0),
     ("pthread_condattr_init", show BaseFunction from fun _ _ _ => value 0),
     ("pthread_condattr_destroy", show BaseFunction from fun _ _ _ => value 0),
-    ("pthread_sigmask", show BaseFunction from fun _ _ _ => value 0),
     ("pthread_mutex_init", show BaseFunction from fun machine arguments _ => do writeBytes machine (arguments.headD 0) (ByteArray.mk (Array.replicate 8 0)); value 0),
     ("pthread_mutex_destroy", show BaseFunction from fun _ _ _ => value 0),
     ("pthread_mutex_lock", show BaseFunction from fun machine arguments _ => mutexLock machine (arguments.headD 0) false),
