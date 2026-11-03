@@ -650,7 +650,7 @@ theorem persistentRegionData_bytes (cells : List (Nat × UInt8)) (address size :
 private theorem piece_mem {region piece : Bap.Emu.Region} {first last : Nat} {p : Primus.Protection}
     (h : piece ∈ regionPiece region first last p) :
     first < last ∧ piece = ⟨first, region.data.extract (first - region.address) (last - region.address), p⟩ := by
-  simp only [regionPiece] at h
+  simp only [regionPiece, Jit.slice_eq] at h
   split at h
   · exact ⟨by assumption, by simpa using h⟩
   · simp at h

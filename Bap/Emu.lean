@@ -489,11 +489,10 @@ private def firstSpace (table : Tasks.TaskTable) : Nat :=
   | some first => first.space
   | none => 1
 
-private def regionsFromNative (mapped : List Region) (native : Jit.Memory) : IO (List Region) := do
-  let (addresses, values) ← Jit.dumpMemory native
-  let cells := (addresses.zip values).toList.map fun cell => (cell.1.toNat, cell.2)
-  pure (mapped.map fun region =>
-    { region with data := regionBytes cells region.address region.data.size })
+/-- The regions with what the memory has in them, which take memory of the host for the pages that it has, and not for those that a program
+mapped and hasn't written. -/
+private def regionsFromNative (mapped : List Region) (native : Jit.Memory) : IO (List Region) :=
+  mapped.mapM fun region => do pure { region with data := ← Jit.regionBytes native (UInt64.ofNat region.address) region.data.size }
 
 def snapshot (emu : Emu) : IO Snapshot := do
   let processes ← emu.processMemory.get
@@ -1256,14 +1255,14 @@ private def checkInSpace (emu : Emu) (region : Region) : IO Unit := do
       throw <| IO.userError s!"Emu region at {region.address} exceeds the address space"
   | .error error => throw <| IO.userError error
 
-def map (emu : Emu) (region : Region) : IO Unit := do
+def map (emu : Emu) (region : Region) (zeros : Bool := false) : IO Unit := do
   checkInSpace emu region
   let near ← if region.data.size == 0 then emu.regions.get else regionsTouching emu region.address region.data.size
   if near.any fun current => overlaps current region then
     throw <| IO.userError s!"Emu region overlaps an existing mapping at {region.address}"
   -- Memory holds zeros where nothing was written, and nothing was where nothing was mapped, so a mapping of zeros, such as
   -- the stack of a thread, has nothing to write.
-  let written := region.data.data.any (· != 0)
+  let written := !zeros && region.data.data.any (· != 0)
   if written then
     let state ← emu.state.get
     let ⟨_, memory⟩ ← cells emu state
@@ -1274,6 +1273,10 @@ def map (emu : Emu) (region : Region) : IO Unit := do
   if written then synchronizeWrite emu region.address region.data
   for changed in ← emu.memoryChanged.get do changed region.address region.data.size (!written)
   replaceRegions emu (region :: (← emu.regions.get)) [] [region]
+
+/-- A mapping of zeros, which takes nothing of the host until it is written, and isn't looked through: what a program maps of memory is. -/
+def mapZeros (emu : Emu) (address size : Nat) (protection : Primus.Protection) : IO Unit :=
+  map emu ⟨address, Jit.zeros size, protection⟩ (zeros := true)
 
 def overlay (emu : Emu) (region : Region) : IO Unit := do
   checkInSpace emu region
@@ -1292,7 +1295,7 @@ def overlay (emu : Emu) (region : Region) : IO Unit := do
 
 private def regionPiece (region : Region) (first last : Nat) (protection : Primus.Protection) : List Region :=
   if first < last then
-    [⟨first, region.data.extract (first - region.address) (last - region.address), protection⟩]
+    [⟨first, Jit.slice region.data (first - region.address) (last - region.address), protection⟩]
   else []
 
 /-- Replace the protection of the bytes of `region` within `lower`..`upper`, keeping the rest. -/

@@ -447,6 +447,13 @@ def placeMapping (emu : Emu) (address : Nat) (fixed : Bool) (data : ByteArray) (
   map emu ⟨start, data, protectionOf bits⟩
   pure start
 
+/-- `placeMapping` of zeros, which takes nothing of the host until it is written. -/
+def placeZeros (emu : Emu) (address : Nat) (fixed : Bool) (size bits : Nat) : IO Nat := do
+  let start ← if fixed then pure address else freeAddress emu size
+  if fixed then unmap emu start size
+  mapZeros emu start size (protectionOf bits)
+  pure start
+
 /-- `mmap` of anonymous memory, which is what the stacks of threads are. -/
 private def serveMmap (emu : Emu) (address size bits flags : Nat) : IO SyscallAction := do
   let fixed := flags &&& 0x10 != 0
@@ -458,7 +465,7 @@ private def serveMmap (emu : Emu) (address size bits flags : Nat) : IO SyscallAc
   else
     let pages := (size + 4095) / 4096 * 4096
     try
-      syscallReturn emu (.ok (← placeMapping emu address fixed (zeroBytes pages) bits))
+      syscallReturn emu (.ok (← placeZeros emu address fixed pages bits))
     catch _ => syscallReturn emu (.error enomem)
 
 /-- `mprotect`. -/

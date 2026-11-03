@@ -852,11 +852,11 @@ def writeChanges (kernel : Kernel) (number offset : Nat) (before memory : ByteAr
     | _ => kernel
   | none => kernel
 
-/-- An inode of zeros that no path leads to, which is what memory that processes share is. -/
-def anonymousInode (kernel : Kernel) (size : Nat) : Kernel × Nat :=
+/-- An inode of what is given, zeros, that no path leads to, which is what memory that processes share is. -/
+def anonymousInode (kernel : Kernel) (data : ByteArray) : Kernel × Nat :=
   let number := kernel.nextInode
   ({ kernel with
-    inodes := kernel.inodes.insert number { number, content := .file (Bap.zeroBytes size), mode := 0o100600 }
+    inodes := kernel.inodes.insert number { number, content := .file data, mode := 0o100600 }
     nextInode := number + 1 }, number)
 
 /-- The inode of a descriptor and how it was opened: whether it can be read, and whether written. -/

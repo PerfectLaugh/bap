@@ -28,6 +28,11 @@
 #include <string>
 #include <vector>
 
+#if defined(__linux__)
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
 #include "paged_memory.h"
 
 class CellMap {
@@ -1026,6 +1031,91 @@ extern "C" lean_obj_res bap_jit_memory_create_chunks(lean_obj_arg basesObject, l
   } catch (const std::exception &error) {
     return ioError(std::string("JIT memory creation failed: ") + error.what());
   }
+}
+
+// Bytes of zeros that take memory of the host only where they are written: those from where a page of the host starts to where the last
+// one ends are given back to it, which gives pages of zeros again as they are touched. Few are, of what a program maps and never uses.
+static const size_t lazyFrom = 65536;
+
+static lean_obj_res lazyZeros(size_t size) {
+  lean_obj_res result = lean_alloc_sarray(1, size, size);
+  uint8_t *data = lean_sarray_cptr(result);
+#if defined(__linux__)
+  if (size >= lazyFrom) {
+    const uintptr_t page = static_cast<uintptr_t>(sysconf(_SC_PAGESIZE));
+    const uintptr_t start = reinterpret_cast<uintptr_t>(data);
+    const uintptr_t end = start + size;
+    const uintptr_t first = (start + page - 1) / page * page;
+    const uintptr_t last = end / page * page;
+    if (first < last) {
+      std::memset(data, 0, first - start);
+      std::memset(reinterpret_cast<void *>(last), 0, end - last);
+      if (madvise(reinterpret_cast<void *>(first), last - first, MADV_DONTNEED) != 0)
+        std::memset(reinterpret_cast<void *>(first), 0, last - first);
+      return result;
+    }
+  }
+#endif
+  std::memset(data, 0, size);
+  return result;
+}
+
+static bool allZero(const uint8_t *bytes, size_t count) {
+  return count == 0 || (bytes[0] == 0 && std::memcmp(bytes, bytes + 1, count - 1) == 0);
+}
+
+extern "C" lean_obj_res bap_zero_bytes(b_lean_obj_arg sizeObject) {
+  return lazyZeros(lean_usize_of_nat(sizeObject));
+}
+
+// `ByteArray.extract`, which for what is big copies only what isn't zeros into zeros that take no memory yet.
+static lean_obj_res sliceBytes(b_lean_obj_arg dataObject, b_lean_obj_arg startObject, b_lean_obj_arg stopObject) {
+  const size_t total = lean_sarray_size(dataObject);
+  const size_t stop = lean_is_scalar(stopObject) ? std::min(lean_usize_of_nat(stopObject), total) : total;
+  const size_t start = lean_is_scalar(startObject) ? lean_usize_of_nat(startObject) : total;
+  const size_t size = start < stop ? stop - start : 0;
+  const uint8_t *from = lean_sarray_cptr(dataObject) + (size == 0 ? 0 : start);
+  if (size < lazyFrom) {
+    lean_obj_res result = lean_alloc_sarray(1, size, size);
+    if (size != 0)
+      std::memcpy(lean_sarray_cptr(result), from, size);
+    return result;
+  }
+  lean_obj_res result = lazyZeros(size);
+  uint8_t *to = lean_sarray_cptr(result);
+  for (size_t done = 0; done < size; done += 4096) {
+    const size_t count = std::min<size_t>(4096, size - done);
+    if (!allZero(from + done, count))
+      std::memcpy(to + done, from + done, count);
+  }
+  return result;
+}
+
+extern "C" lean_obj_res bap_bytes_slice(lean_obj_arg dataObject, lean_obj_arg startObject, lean_obj_arg stopObject) {
+  lean_obj_res result = sliceBytes(dataObject, startObject, stopObject);
+  lean_dec(dataObject);
+  lean_dec(startObject);
+  lean_dec(stopObject);
+  return result;
+}
+
+// The bytes of a range of a memory, which takes memory of the host for the pages that it has and not for the rest.
+extern "C" lean_obj_res bap_jit_memory_region_bytes(lean_obj_arg memoryObject, uint64_t address, b_lean_obj_arg sizeObject, lean_obj_arg) {
+  auto *memory = static_cast<PagedMemory *>(lean_get_external_data(memoryObject));
+  const size_t size = lean_usize_of_nat(sizeObject);
+  lean_obj_res result = lazyZeros(size);
+  uint8_t *to = lean_sarray_cptr(result);
+  size_t done = 0;
+  while (done < size) {
+    const uint64_t at = address + done;
+    const size_t offset = at & (PagedMemory::pageSize - 1);
+    const size_t count = std::min<size_t>(PagedMemory::pageSize - offset, size - done);
+    if (const uint8_t *page = memory->find(at))
+      if (!allZero(page + offset, count))
+        std::memcpy(to + done, page + offset, count);
+    done += count;
+  }
+  return lean_io_result_mk_ok(result);
 }
 
 extern "C" lean_obj_res bap_jit_memory_zero(lean_obj_arg memoryObject, uint64_t first, uint64_t last, lean_obj_arg) {

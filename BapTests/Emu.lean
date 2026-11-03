@@ -2008,6 +2008,40 @@ def cffSynthetic (rounds : Nat) : Array Bap.Analysis.Cff.Visit × Bap.Analysis.J
       seq := seq + 1
   pure (visits, { history, droppedHistory := 0, events, droppedEvents := 0 })
 
+/-- What the host holds of its memory now, in bytes. -/
+private def residentBytes : IO Nat := do
+  let fields := (← IO.FS.readFile "/proc/self/statm").splitOn " "
+  pure ((fields.getD 1 "0").toNat?.getD 0 * 4096)
+
+/-- A mapping much bigger than what a program uses takes memory of the host for what it uses: when it is mapped, cut up, kept by `save`
+and put back. And the program finds what it wrote and zeros elsewhere. -/
+def testSparseMapping (triple : String) : IO Unit := do
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-sparse"
+  -- Where it stops to be looked at, by its symbol, as running it to find out would leave what it held to the next run.
+  let image ← IO.ofExcept (Bap.Image.Elf.decode program)
+  let some symbol := image.symbols.find? (·.name == "pause_point") | throw <| IO.userError "no pause_point"
+  let pausePoint := symbol.addr
+  let before ← residentBytes
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let written ← IO.mkRef ByteArray.empty
+  let breakpoint ← Bap.Emu.addBreakpoint machine.emu pausePoint
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertTrue s!"Sparse {triple} it comes to where it is looked at: {repr outcome}" (outcome matches .stopped _)
+  let mapped ← residentBytes
+  assertTrue s!"Sparse {triple} a big mapping takes little of the host: {(mapped - before) / 1048576} MB" (mapped < before + 128 * 1048576)
+  let saved ← machine.save
+  let kept ← residentBytes
+  assertTrue s!"Sparse {triple} keeping it takes little of the host: {(kept - mapped) / 1048576} MB" (kept < mapped + 128 * 1048576)
+  machine.restore saved
+  let restored ← residentBytes
+  assertTrue s!"Sparse {triple} putting it back takes little of the host: {(restored - kept) / 1048576} MB" (restored < kept + 128 * 1048576)
+  Bap.Emu.removeHook machine.emu breakpoint
+  Bap.Emu.resumeThread machine.emu (← Bap.Emu.thread machine.emu)
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual s!"Sparse {triple} it ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual s!"Sparse {triple} it finds what it wrote and zeros elsewhere" (some "y")
+    (((String.fromUTF8! (← written.get)).splitOn "\n")[1]?)
+
 /-- What takes time in proportion to what it does and not to what it has done before: when the work is four times as much it takes about four times as long, and sixteen if it goes through all that
 went before. Each is run alone, as what a test measures isn't to be what the others are doing. -/
 def scaling : IO Unit := do
@@ -2024,6 +2058,8 @@ def scaling : IO Unit := do
     let first ← time mode [toString small] prepare
     let second ← time mode [toString (small * 4)] prepare
     assertTrue s!"{name} takes about 4 times as long for 4 times as much, not 16: {first} ms and {second} ms" (second ≤ 9 * max first 50)
+  -- Mappings much bigger than what is used, measured by what the host holds, which is why they are here, run alone.
+  for triple in ["aarch64", "x86_64", "mips"] do testSparseMapping triple
   grows "mappings" "m" 1000
   grows "growing the break" "b" 1000
   grows "making files" "f" 1000

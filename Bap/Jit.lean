@@ -176,4 +176,21 @@ opaque trimMemory (memory : @& Memory) (first last : UInt64) : IO Unit
 @[extern "bap_jit_memory_size"]
 opaque memorySize (memory : @& Memory) : IO Nat
 
+/-- The bytes of a range of a memory, which take memory of the host only for the pages of it that the memory has. -/
+@[extern "bap_jit_memory_region_bytes"]
+opaque regionBytes (memory : @& Memory) (address : UInt64) (size : @& Nat) : IO ByteArray
+
+/-- `size` zeros, of which the host gives the pages as they are written, so that what a program maps and doesn't use takes nothing. -/
+@[extern "bap_zero_bytes"]
+opaque zeros (size : @& Nat) : ByteArray
+
+@[extern "bap_bytes_slice"]
+opaque sliceNative (data : ByteArray) (start stop : Nat) : ByteArray
+
+/-- `ByteArray.extract`, which of what is big copies only what isn't zeros, into zeros that take nothing yet. -/
+@[implemented_by sliceNative]
+def slice (data : ByteArray) (start stop : Nat) : ByteArray := data.extract start stop
+
+@[simp] theorem slice_eq (data : ByteArray) (start stop : Nat) : slice data start stop = data.extract start stop := rfl
+
 end Bap.Jit

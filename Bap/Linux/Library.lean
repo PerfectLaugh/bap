@@ -279,7 +279,7 @@ private def mapLibrary (machine : Machine) (path : String) (data : ByteArray) (p
   let highest := program.segments.foldl (fun highest segment => max highest (segment.address + segment.memorySize)) 0
   let first := lowest / 4096 * 4096
   let span := (highest + 4095) / 4096 * 4096 - first
-  let start ← placeMapping emu 0 false (zeroBytes span) 7
+  let start ← placeZeros emu 0 false span 7
   let base := start - first
   for segment in program.segments do
     Bap.Emu.write emu (base + segment.address) (data.extract segment.offset (segment.offset + segment.fileSize))

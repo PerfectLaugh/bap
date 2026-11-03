@@ -251,9 +251,9 @@ private def serveSharedMemory (machine : Machine) (group address size bits flags
     return errorOf Errno.einval
   let pages := pageUp size
   try
-    let start ← placeMapping machine.emu address fixed (Bap.zeroBytes pages) bits
+    let start ← placeZeros machine.emu address fixed pages bits
     machine.kernel.modify fun kernel =>
-      let (kernel, inode) := kernel.anonymousInode pages
+      let (kernel, inode) := kernel.anonymousInode (Jit.zeros pages)
       (kernel.dropMappings group start (start + pages)).addMapping group
         { start, size := pages, inode, offset := 0, shared := true, mayWrite := true }
     pure (.returnValue start)
@@ -330,7 +330,7 @@ private def serveRemap (machine : Machine) (group old oldSize newSize flags targ
   let tail : ByteArray := if newPages ≤ oldPages then ByteArray.empty else
     match mapping with
     | some mapping => kernel.inodeBytes mapping.inode (offset + oldPages) (newPages - oldPages)
-    | none => Bap.zeroBytes (newPages - oldPages)
+    | none => Jit.zeros (newPages - oldPages)
   let note (start : Nat) : IO Unit :=
     machine.kernel.modify fun kernel =>
       let kernel := (kernel.dropMappings group old (old + oldPages)).dropMappings group start (start + newPages)
@@ -363,7 +363,7 @@ private def serveBreak (machine : Machine) (group wanted : Nat) : IO SyscallActi
     let needed := pageUp wanted
     try
       if needed > mappedTo then
-        map machine.emu ⟨mappedTo, Bap.zeroBytes (needed - mappedTo), ⟨true, true, false⟩⟩
+        mapZeros machine.emu mappedTo (needed - mappedTo) ⟨true, true, false⟩
       else if needed < mappedTo then
         unmap machine.emu needed (mappedTo - needed)
       machine.kernel.set (kernel.setProcess group { process with breakEnd := wanted })
@@ -1086,7 +1086,7 @@ private def mapHelpers (emu : Emu) : IO Unit := do
 
 /-- The stack that the kernel hands over: where the arguments, the environment and the auxiliary vector are. -/
 private def mapStack (emu : Emu) (architecture : Architecture) (arguments environment : List String) (auxiliary : List (Nat × Nat)) : IO Unit := do
-  map emu ⟨stackTop architecture - stackSize, Bap.zeroBytes stackSize, ⟨true, true, false⟩⟩
+  mapZeros emu (stackTop architecture - stackSize) stackSize ⟨true, true, false⟩
   let mut cursor := stackTop architecture - 16
   let wordSize := architecture.bits / 8
   let place (cursor : Nat) (text : ByteArray) : IO Nat := do
@@ -1725,7 +1725,7 @@ def Machine.malloc (machine : Machine) (size : Nat) (pid : Option Nat := none) :
       | some _ => pure heap
       | none =>
         let mapping := GuestHeap.mappingFor size
-        pure (heap.addChunk (← placeMapping machine.emu 0 false (zeroBytes mapping) 3) mapping)
+        pure (heap.addChunk (← placeZeros machine.emu 0 false mapping 3) mapping)
     match heap.alloc size with
     | some (address, heap) =>
       machine.heaps.modify (·.insert space heap)
