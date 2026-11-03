@@ -153,9 +153,9 @@ private def stopThread (ptrace : Ptrace) (emu : Emu) (tid : Nat) (stop : Stop) :
       ptrace.signals.send emu none to ⟨numbers.chld, if stop.traced then 4 else 5, .child group 0 stop.signal⟩
   wakeWaits ptrace emu
 
-/-- Whether a thread is traced. -/
-def traced (ptrace : Ptrace) (tid : Nat) : IO Bool := do
-  pure ((← ptrace.table.get).tracees.contains tid)
+/-- The process tracing a thread, if it is traced. -/
+def tracerOf (ptrace : Ptrace) (tid : Nat) : IO (Option Nat) := do
+  pure (((← ptrace.table.get).tracees.get? tid).map (·.tracer))
 
 /-- A signal that is to be delivered to a tracee, or a fault of one, stops it instead, unless its tracer let it have it. -/
 def intercept (ptrace : Ptrace) (emu : Emu) (tid : Nat) (info : SignalInfo) : IO Bool := do
@@ -828,7 +828,7 @@ def attach (architecture : Architecture) (signals : Signals) (emu : Emu) : IO Pt
   ptrace.settle.set (settleWaits ptrace)
   emu.betweenTurns.modify (· ++ [settleWaits ptrace emu])
   signals.intercept.set (intercept ptrace)
-  signals.traced.set (traced ptrace)
+  signals.tracer.set (tracerOf ptrace)
   signals.jobControl.set (jobControl ptrace)
   ptrace.serve emu
   pure ptrace

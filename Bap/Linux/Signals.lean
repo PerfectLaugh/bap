@@ -419,8 +419,9 @@ structure Signals where
   /-- What a signal that is to be delivered to a thread, or a fault of one, comes to first: whether it stopped the thread instead, as
   `Bap.Linux.Ptrace` has a tracee stop. -/
   intercept : IO.Ref (Emu → Nat → SignalInfo → IO Bool)
-  /-- Whether a thread is traced, of which a signal is kept to be delivered, and stops it, even if it is ignored. -/
-  traced : IO.Ref (Nat → IO Bool)
+  /-- The process tracing a thread, if it is traced: a signal of a traced thread is kept to be delivered, and stops it, even if it
+  is ignored. -/
+  tracer : IO.Ref (Nat → IO (Option Nat))
   /-- A process that a signal stops, by what does that by default, or that SIGCONT lets go on: the process and the signal. -/
   jobControl : IO.Ref (Emu → Nat → Nat → IO Unit)
 
@@ -726,7 +727,7 @@ private def sendToThread (signals : Signals) (emu : Emu) (tid group : Nat) (info
   let state ← threadOf signals tid
   let bit := bitOf info.signal
   -- What is sent to a tracee waits to be delivered, as that stops it, whatever it would have come to.
-  if info.signal != (signals.numbers).kill && (← (← signals.traced.get) tid) then
+  if info.signal != (signals.numbers).kill && ((← (← signals.tracer.get) tid).isSome) then
     modifyThread signals tid fun state => { state with pending := state.pending ++ [info] }
     if (← thread emu) != tid then interrupt signals emu tid true
     return

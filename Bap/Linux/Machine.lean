@@ -1756,7 +1756,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
     (handler : Option SyscallHandler) (target : Nat) (models : List RuntimeModel) : IO Machine := do
   let signals : Signals := { architecture, returnPage := stackTop architecture + 4096, table := ← IO.mkRef {}
                              failures := ← IO.mkRef #[], skipIgnoredFaults := ← IO.mkRef false
-                             intercept := ← IO.mkRef fun _ _ _ => pure false, traced := ← IO.mkRef fun _ => pure false
+                             intercept := ← IO.mkRef fun _ _ _ => pure false, tracer := ← IO.mkRef fun _ => pure none
                              jobControl := ← IO.mkRef fun _ _ _ => pure () }
   let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome, signals, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {} }
   if let some watch := watch then
@@ -2382,6 +2382,10 @@ def Machine.checkCheckpoint (data : ByteArray) (generators : List String := []) 
   for digest in expectedLibraries do
     if !loaded.contains digest then problems := problems ++ [s!"no library of digest {digest} is loaded"]
   pure problems
+
+/-- The process tracing a thread, if one traces it with `ptrace`. -/
+def Machine.tracerOf (machine : Machine) (tid : Nat) : IO (Option Nat) := do
+  (← machine.signals.tracer.get) tid
 
 /-- What ended a process by a signal, or would have, as it happened: faults that nothing handled, handlers that couldn't be entered and
 `sigreturn`s with nothing to go back to, apart. -/
