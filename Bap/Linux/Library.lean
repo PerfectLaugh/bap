@@ -642,4 +642,157 @@ partial def Machine.unloadLibrary (machine : Machine) (library : LoadedLibrary) 
       if let some other := (spaceHas space (← machine.libraries.get)).find? (·.path == needed) then
         machine.unloadLibrary other
 
+/-! ### Functions that the host serves
+
+What a guest calls of a library can be served by the host instead: at the function that it calls, or at a stub that what imports a
+name is given. When a call comes there, the host has its arguments, as the convention of the system passes them, and what it gives is
+what the call gives back, to where it came from, and none of the guest's own code runs. It doesn't depend on where a target has its
+functions: a name is found where it is, and an import is given what the host serves. -/
+
+/-- A function of the host that a guest calls: it has the machine, as it is at the call, and the arguments, from the registers that the
+convention has for them or from the stack on i686, and gives what the call returns. -/
+abbrev HostFunction := Machine → List Nat → IO Nat
+
+/-- The arguments of the call that is at its first instruction now, as many as the convention has registers for, or six on i686. -/
+private def callArguments (machine : Machine) (emu : Emu) : IO (List Nat) := do
+  let architecture := machine.architecture
+  let width := architecture.bits
+  let value (name : String) : IO Nat := do
+    match Value.asBits (← reg emu ⟨name, .imm width, 0, false⟩) with
+    | .ok bits => pure bits.2.toNat
+    | .error _ => pure 0
+  if architecture matches .i686 then
+    let sp ← value "ESP"
+    (List.range 6).mapM fun index => do
+      let bytes ← Bap.Emu.read emu (sp + 4 + 4 * index) 4
+      pure (bytes.toList.reverse.foldl (fun value byte => value * 256 + byte.toNat) 0)
+  else (conventionOf architecture).arguments.mapM value
+
+/-- Makes the call that is at its first instruction now give back `result`, to where it was called from. -/
+private def returnFromCall (machine : Machine) (emu : Emu) (result : Nat) : IO Unit := do
+  let architecture := machine.architecture
+  let width := architecture.bits
+  let word := width / 8
+  let convention := conventionOf architecture
+  let register (name : String) : Bap.Var := ⟨name, .imm width, 0, false⟩
+  let value (name : String) : IO Nat := do
+    match Value.asBits (← reg emu (register name)) with
+    | .ok bits => pure bits.2.toNat
+    | .error _ => pure 0
+  setReg emu (register convention.result) (.bits (BitVec.ofNat width result))
+  match convention.link with
+  | some link =>
+    let target ← value link
+    if architecture matches .arm then
+      setReg emu ⟨"ISET", .imm 1, 0, false⟩ (.bits (BitVec.ofNat 1 (target % 2)))
+      setPc emu (target - target % 2)
+    else setPc emu target
+  | none =>
+    -- x86 has where it returns to on the stack, which a return takes off.
+    let stack := if width == 64 then "RSP" else "ESP"
+    let sp ← value stack
+    let bytes ← Bap.Emu.read emu sp word
+    let target := bytes.toList.reverse.foldl (fun value byte => value * 256 + byte.toNat) 0
+    setReg emu (register stack) (.bits (BitVec.ofNat width (sp + word)))
+    setPc emu target
+
+/-- Serves the function at `address` by `handler`: a call that comes there gives back what the host gives, and nothing of the function
+runs. It is a code hook, so that it is there until it is removed, whoever calls, and it has to be put there again on a machine that goes
+on from a checkpoint. -/
+def Machine.replaceFunction (machine : Machine) (address : Nat) (handler : HostFunction) (label : String := "host function") :
+    IO HookId := do
+  let at_ := if machine.architecture matches .arm then address - address % 2 else address
+  onCode machine.emu (at_, at_) fun emu _ => do
+    -- Another hook there may have returned already.
+    if (← emu.pc.get) != at_ then return
+    let here := { machine with emu }
+    let arguments ← callArguments here emu
+    for starts in ← emu.hostStarts.get do starts label
+    let result ← handler here arguments
+    returnFromCall here emu result
+    for ends in ← emu.hostEnds.get do ends (some (conventionOf machine.architecture).result)
+
+/-- Serves a function that a library that is loaded exports, by its name, as `replaceFunction` does. -/
+def Machine.hookSymbol (machine : Machine) (name : String) (handler : HostFunction) (library : Option LoadedLibrary := none) :
+    IO HookId := do
+  let some address ← machine.findSymbol name library | throw <| IO.userError s!"{name} isn't exported by what is loaded"
+  machine.replaceFunction address handler s!"host function {name}"
+
+/-- Where the stubs of host functions are: pages after the one that calls return to, at the same place each time, so that a machine that
+goes on from a checkpoint has them where its code was given them. Each is 16 bytes, of which the first 8 say whose it is, and the first of
+all says how many there are. Their bytes don't run: a stub's hook returns before they do. -/
+private def stubPages (machine : Machine) : Nat := callReturnPage machine + 4096
+
+private def stubsPerPage : Nat := 256
+
+/-- Where a stub for `name` is, the same one each time that it is asked for, and a hook there that serves it by `handler`. A machine
+that goes on from a checkpoint gives each name its handler again. -/
+def Machine.hostFunction (machine : Machine) (name : String) (handler : HostFunction) : IO Nat := do
+  let emu := machine.emu
+  let first := stubPages machine
+  let digest := (Wire.digest name.toUTF8).toNat
+  let readNumber (address : Nat) : IO Nat := do
+    let bytes ← peek emu address 8
+    pure (bytes.toList.reverse.foldl (fun value byte => value * 256 + byte.toNat) 0)
+  let mapPage (page : Nat) : IO Unit := do
+    if (lookupRegion (← emu.regions.get) page).isNone then
+      Bap.Emu.map emu ⟨page, ByteArray.mk (Array.replicate 4096 0), ⟨true, false, true⟩⟩
+  mapPage first
+  let count ← readNumber first
+  let slot (index : Nat) : Nat := first + (index + 1) / stubsPerPage * 4096 + (index + 1) % stubsPerPage * 16
+  let existing ← (List.range count).findM? fun index => do pure ((← readNumber (slot index)) == digest)
+  let address ← match existing with
+    | some index => pure (slot index)
+    | none =>
+      let address := slot count
+      mapPage (address / 4096 * 4096)
+      poke emu address (numberBytes false 8 digest)
+      poke emu first (numberBytes false 8 (count + 1))
+      pure address
+  let _ ← machine.replaceFunction address handler s!"host function {name}"
+  pure address
+
+/-- Stubs of host functions for what a library imports, as `loadLibrary` takes them in `resolve`: what isn't one of them is found as it
+would be. -/
+def Machine.importStubs (machine : Machine) (handlers : List (String × HostFunction)) : IO (String → Option Nat) := do
+  let stubs ← handlers.mapM fun (name, handler) => do pure (name, ← machine.hostFunction name handler)
+  pure fun name => stubs.lookup name
+
+/-- Makes what a loaded library imports of `name` be `target`: each slot of its tables that a relocation fills with that symbol, as
+`loadLibrary` filled it, has `target` now, so that its calls go there and what it reads of the address is that. It says how many there
+were. -/
+def Machine.redirectImport (machine : Machine) (library : LoadedLibrary) (name : String) (target : Nat) : IO Nat := do
+  let architecture := machine.architecture
+  let data ← match fileOf (← machine.kernel.get) library.path with
+    | .ok data => pure data
+    | .error errno => throw <| IO.userError s!"{library.path}: error {errno}"
+  let program ← IO.ofExcept (Elf.parse data)
+  let image ← IO.ofExcept (Image.Elf.decode data)
+  let symbols := (← IO.ofExcept (Image.Elf.allDynamicSymbols image)).toArray
+  let relocations ← IO.ofExcept (Image.Elf.allDynamicRelocations image)
+  let word := architecture.bits / 8
+  let mut count := 0
+  for relocation in relocations do
+    let some symbol := symbols[relocation.symbol]? | continue
+    if relocation.symbol == 0 || (symbol.name.splitOn "@").headD symbol.name != name then continue
+    match relocationKind program.machine relocation.typ (architecture.bits == 64) with
+    | .slot | .absolute =>
+      let addend := if relocation.explicitAddend && (relocationKind program.machine relocation.typ (architecture.bits == 64) matches .absolute)
+        then relocation.addend else 0
+      -- What relocating made read-only is written as a kernel would.
+      poke machine.emu (library.base + relocation.offset) (numberBytes architecture.big word ((target + addend) % 2 ^ architecture.bits))
+      count := count + 1
+    | _ => pure ()
+  -- The GOT of MIPS has the symbols of its global entries without relocations.
+  if architecture matches .mips .. then
+    let tags := Image.Elf.dynamicTagsOf image
+    let tag (key : Nat) : Option Nat := (tags.find? (·.1 == key)).map (·.2)
+    if let (some got, some locals, some first, some total) := (tag 3, tag 0x7000000a, tag 0x70000013, tag 0x70000011) then
+      for index in [first:total] do
+        if let some symbol := symbols[index]? then
+          if (symbol.name.splitOn "@").headD symbol.name == name then
+            poke machine.emu (library.base + got + (locals + index - first) * word) (numberBytes architecture.big word target)
+            count := count + 1
+  pure count
+
 end Bap.Linux

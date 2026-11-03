@@ -775,6 +775,73 @@ def testRangeEntries : IO Unit := do
   assertEqual "A range from its middle comes to the same" (plainFirst, plainSecond) (first, second)
   assertTrue s!"A loop that ran ends with what it counted ({first})" (first > 1000)
 
+/-- What changes what was compiled without changing its bytes, hooks that come to a thread where it stopped, and a profile of what ran. -/
+def testCodeControl : IO Unit := do
+  let code ← LLVM.assemble "riscv64" "addi a0, a0, 1\naddi a1, a1, -1\nbnez a1, -8\nnop\nnop"
+  let emu ← Bap.Emu.riscv64 code 0 0 (adjust := fun config => { config with hotThreshold := 2, rangeLimit := 8 })
+  let register (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
+  let set (name : String) (value : Nat) : IO Unit := Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 64 value))
+  let value (name : String) : IO Nat := do
+    match ← Bap.Emu.reg emu (register name) with
+    | .bits bits => pure bits.toNat
+    | _ => pure 0
+  -- A hundred times round, of three instructions.
+  let loop : IO Unit := do
+    set "X10" 0
+    set "X11" 100
+    Bap.Emu.setPc emu 0
+    let _ ← Bap.Emu.run emu 300
+  Bap.Emu.startProfile emu
+  loop
+  let profile ← Bap.Emu.profile emu
+  Bap.Emu.stopProfile emu
+  assertEqual "A loop counts" (100, 12) (← value "X10", ← Bap.Emu.pc emu)
+  assertEqual "A profile has all that ran" 300 (profile.foldl (fun total entry => total + entry.2.instructions) 0)
+  assertTrue "of which some was compiled" (profile.any (·.2.nativeRuns > 0))
+  assertTrue "and some wasn't, before it was" (profile.any (·.2.interpretedRuns > 0))
+  assertTrue "and it took some time" (profile.any (·.2.nativeNanos > 0))
+  -- What a write would drop comes back as it was, for the same bytes; what is invalidated is made again.
+  let stats := Primus.Lifted.stats emu.engine
+  Primus.Lifted.discardRange emu.engine 0 11
+  let before ← stats
+  loop
+  assertTrue "What is discarded comes back as it was" ((← stats).versionHits > before.versionHits)
+  Bap.Emu.invalidateCode emu 0 11
+  let before ← stats
+  loop
+  let after ← stats
+  assertEqual "What is invalidated doesn't" before.versionHits after.versionHits
+  assertTrue "it is compiled again" (after.nativeCompilations > before.nativeCompilations)
+  assertEqual "and does what it did" 100 (← value "X10")
+  -- A thread that stopped where a hook comes afterwards: the hook fires when it goes on, and what stopped it doesn't again.
+  set "X11" 100
+  Bap.Emu.setPc emu 0
+  let breakpoint ← Bap.Emu.addBreakpoint emu 4
+  let _ ← Bap.Emu.run emu 10
+  assertEqual "A breakpoint stops it" 4 (← Bap.Emu.pc emu)
+  let fired ← IO.mkRef 0
+  let hook ← Bap.Emu.onCode emu (4, 4) fun _ _ => fired.modify (· + 1)
+  let another ← Bap.Emu.addBreakpoint emu 4
+  Bap.Emu.resumeThread emu (← Bap.Emu.thread emu)
+  let _ ← Bap.Emu.run emu 1
+  assertEqual "A hook that came after it stopped fires when it goes on" 1 (← fired.get)
+  assertEqual "and a breakpoint that came then stops it when it comes back" 8 (← Bap.Emu.pc emu)
+  for id in [hook, another] do Bap.Emu.removeHook emu id
+  -- And where it stopped, put back.
+  set "X11" 100
+  Bap.Emu.setPc emu 0
+  let _ ← Bap.Emu.run emu 10
+  let saved ← Bap.Emu.snapshot emu
+  Bap.Emu.resumeThread emu (← Bap.Emu.thread emu)
+  let _ ← Bap.Emu.run emu 5
+  Bap.Emu.restore emu saved
+  fired.set 0
+  let _ ← Bap.Emu.onCode emu (4, 4) fun _ _ => fired.modify (· + 1)
+  Bap.Emu.resumeThread emu (← Bap.Emu.thread emu)
+  let _ ← Bap.Emu.run emu 1
+  assertEqual "A hook that came after it was put back fires when it goes on" (1, 8) (← fired.get, ← Bap.Emu.pc emu)
+  Bap.Emu.removeHook emu breakpoint
+
 /-- What the rounding modes of a machine do, as qemu has it. -/
 def testLinuxRound (triple : String) : IO Unit := do
   let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-round"
@@ -2529,6 +2596,57 @@ def testMachineHeapExec (triple : String) : IO Unit := do
   assertTrue s!"Machine {triple} a child has a copy" (!copied.isEmpty)
   assertTrue s!"Machine {triple} the first still has what it was given" (← has first)
   assertTrue s!"Machine {triple} what was allocated goes on execve" executed
+
+/-- Functions that the host serves for what a library imports, for what it exports and for what a slot of its tables has, by each
+convention; and what a checkpoint says of what was loaded, without making a machine of it. -/
+def testHostFunctions (triple : String) : IO Unit := do
+  let label := s!"Host functions {triple}"
+  let binary (name : String) : IO ByteArray := IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-{name}"
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" (← binary "libc-files"))
+    |>.addFile "/lib/libmain.so" (← binary "libmain")
+    |>.addFile "/lib/libdep.so" (← binary "libdep")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let seen ← IO.mkRef ([] : List (List Nat))
+  let tripled : Bap.Linux.HostFunction := fun _ arguments => do
+    seen.modify (· ++ [arguments.take 2])
+    pure (arguments.headD 0 * 3)
+  let stubs ← machine.importStubs [("host_given", tripled)]
+  let dep ← machine.loadLibrary "libdep.so"
+  let library ← machine.loadLibrary "libmain.so" (resolve := stubs)
+  let signed32 (value : Nat) : Nat := value % 2 ^ 32
+  let call (name : String) (arguments : List Nat := []) : IO Nat := do
+    match ← machine.findSymbol name (some library) with
+    | some address => pure (signed32 (← machine.call address arguments))
+    | none => throw <| IO.userError s!"{label} has no {name}"
+  assertEqual s!"{label} what is imported is served by the host" 15 (← call "from_host" [5])
+  assertEqual s!"{label} with the arguments of the call" [5] ((← seen.get).map (·.headD 0))
+  assertEqual s!"{label} a stub of a name is where it was" (stubs "host_given")
+    (some (← machine.hostFunction "host_given" tripled))
+  -- A slot that relocating filled, for what another library has.
+  assertEqual s!"{label} what another has, before" 108 (← call "dep_call" [1, 2])
+  let product ← machine.hostFunction "product" fun _ arguments => pure (arguments.headD 0 * arguments.getD 1 0)
+  let slots ← machine.redirectImport library "dep_add" product
+  assertTrue s!"{label} its slots of a name ({slots})" (slots ≥ 1)
+  assertEqual s!"{label} go where they are sent" 12 (← call "dep_call" [3, 4])
+  -- What a library exports, by its name.
+  let _ ← machine.hookSymbol "either_one" (library := some dep) fun _ _ => pure 7
+  assertEqual s!"{label} what is exported is served by the host" 7 (← call "which_one")
+  -- What a checkpoint says of it, before anything is made of it.
+  let saved ← machine.checkpoint
+  let info ← Bap.Linux.Machine.checkpointInfo saved
+  assertEqual s!"{label} a checkpoint says what was loaded, where and of which file"
+    [("/lib/libdep.so", dep.base, dep.digest), ("/lib/libmain.so", library.base, library.digest)]
+    (info.libraries.map (·.2))
+  assertEqual s!"{label} and of what" machine.architecture.name info.architecture.name
+  assertTrue s!"{label} and the models that it has" (info.models.any (·.1 == "bap.libraries"))
+  expectThrow s!"{label} a checkpoint without a library that was expected"
+    (Bap.Linux.Machine.ofCheckpoint saved (expectedLibraries := [dep.digest + 1]))
+  -- Going on from it, a stub is where it was, and served again.
+  let resumed ← Bap.Linux.Machine.ofCheckpoint saved (expectedLibraries := [dep.digest, library.digest])
+  assertEqual s!"{label} a stub is where it was after a checkpoint" (stubs "host_given")
+    (some (← resumed.hostFunction "host_given" tripled))
+  let some fromHost := ← resumed.findSymbol "from_host" | throw <| IO.userError s!"{label} has no from_host"
+  assertEqual s!"{label} and is served again" 21 (signed32 (← resumed.call fromHost [7]))
 
 /-- Shared libraries from outside a program, as `dlopen` has them, on a machine with no libc or linker to do it. -/
 def testLinuxLibraries (triple : String) (ifunc : Bool := false) : IO Unit := do

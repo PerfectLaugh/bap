@@ -2212,6 +2212,59 @@ def Machine.checkpoint (machine : Machine) : IO ByteArray := do
   let out := Wire.putSorted putModel out models
   pure (out ++ Wire.fixedBytes (Wire.digest out))
 
+/-- What a checkpoint says of itself, read without making a machine of it: what it belongs to, its architecture, whether it had a handler
+of system calls, the models that it has the state of with their versions, and what each process had loaded, where and of which file. It
+is for finding out early whether a checkpoint is one that can go on here, before anything is restored. -/
+structure Machine.CheckpointInfo where
+  identity : Machine.Identity
+  architecture : Architecture
+  handled : Bool
+  models : List (String × Nat)
+  /-- By address space: the path of each library, where it was loaded, and the digest of its file. -/
+  libraries : List (Nat × String × Nat × Nat)
+
+/-- The parts of a checkpoint: what `CheckpointInfo` says, with the image of its kernel, its emulator and the bytes of its models. -/
+private def readCheckpoint (data : ByteArray) : IO (Machine.CheckpointInfo × Image × ByteArray × List (String × Nat × ByteArray)) := do
+  if data.extract 0 checkpointMagic.size != checkpointMagic || data.size < checkpointMagic.size + 8 then
+    throw <| IO.userError "not a checkpoint of a Linux machine"
+  let body := data.extract 0 (data.size - 8)
+  if Wire.digest body != Wire.ofFixedBytes data (data.size - 8) then
+    throw <| IO.userError "a checkpoint that is damaged, or of another format"
+  let (format, at_) ← IO.ofExcept (Wire.getNat body checkpointMagic.size)
+  let (bap, at_) ← IO.ofExcept (Wire.getText body at_)
+  -- Of another format or BAP, the rest may not be what this reads.
+  if format != checkpointFormat then
+    throw <| IO.userError s!"a checkpoint of format {format}, and this BAP reads {checkpointFormat}"
+  if bap != bapRevision then
+    throw <| IO.userError s!"a checkpoint of {bap}, and this is {bapRevision}"
+  let (semantics, at_) ← IO.ofExcept (Wire.getNat body at_)
+  let (target, at_) ← IO.ofExcept (Wire.getNat body at_)
+  let (number, at_) ← IO.ofExcept (Wire.getNat body at_)
+  let (bits, at_) ← IO.ofExcept (Wire.getNat body at_)
+  let (big, at_) ← IO.ofExcept (Wire.getNat body at_)
+  let (flags, at_) ← IO.ofExcept (Wire.getNat body at_)
+  let some architecture := Architecture.ofElf number bits (big == 1) flags
+    | throw <| IO.userError s!"a checkpoint of ELF machine {number}, which isn't one here"
+  let (handled, at_) ← IO.ofExcept (Wire.getFlag body at_)
+  let (image, at_) ← IO.ofExcept (Image.decode body at_)
+  let (emulator, at_) ← IO.ofExcept (Wire.getBytes body at_)
+  let (savedModels, at_) ← IO.ofExcept (Wire.getList getModel body at_)
+  IO.ofExcept (Wire.expectEnd body at_)
+  let libraries ← match savedModels.find? (·.1 == libraryModelId) with
+    | some (_, _, bytes) =>
+      let table ← IO.ofExcept (LoadedLibrary.decode bytes)
+      let spaces := (table.toList.map (·.1)).toArray.qsort (· < ·) |>.toList
+      pure (spaces.flatMap fun space => (table.getD space []).map fun library => (space, library.path, library.base, library.digest))
+    | none => pure []
+  let info : Machine.CheckpointInfo := {
+    identity := { format, bap, semantics, target }, architecture, handled
+    models := savedModels.map fun (id, version, _) => (id, version), libraries }
+  pure (info, image, emulator, savedModels)
+
+/-- What a checkpoint says of itself, without restoring anything of it. -/
+def Machine.checkpointInfo (data : ByteArray) : IO Machine.CheckpointInfo := do
+  pure (← readCheckpoint data).1
+
 /-- Says what can't be restored of the models of a checkpoint, as going on without one or with another isn't going on as it would have. -/
 private def modelConflict (saved : List (String × Nat × ByteArray)) (models : List RuntimeModel) : Option String :=
   -- Those that every machine has are no one's to give.
@@ -2236,36 +2289,24 @@ model or a handler that isn't given, or of a program other than `expectedTarget`
 def Machine.ofCheckpoint (data : ByteArray) (watch : Option (Nat → List Nat → IO Unit) := none)
     (generators : List (String × Generator) := []) (handler : Option SyscallHandler := none)
     (models : List RuntimeModel := []) (expectedTarget : Option Nat := none) (expectedLibraries : List Nat := []) : IO Machine := do
-  if data.extract 0 checkpointMagic.size != checkpointMagic || data.size < checkpointMagic.size + 8 then
-    throw <| IO.userError "not a checkpoint of a Linux machine"
-  let body := data.extract 0 (data.size - 8)
-  if Wire.digest body != Wire.ofFixedBytes data (data.size - 8) then
-    throw <| IO.userError "a checkpoint that is damaged, or of another format"
-  let (format, at_) ← IO.ofExcept (Wire.getNat body checkpointMagic.size)
-  let (bap, at_) ← IO.ofExcept (Wire.getText body at_)
-  let (semantics, at_) ← IO.ofExcept (Wire.getNat body at_)
-  let (target, at_) ← IO.ofExcept (Wire.getNat body at_)
-  let saved : Machine.Identity := { format, bap, semantics, target }
-  let here : Machine.Identity := { semantics := ← semanticsDigest, target }
+  let (info, image, emulator, savedModels) ← readCheckpoint data
+  let saved := info.identity
+  let here : Machine.Identity := { semantics := ← semanticsDigest, target := saved.target }
   if let some conflict := saved.conflict here expectedTarget then
     throw <| IO.userError conflict
-  let (number, at_) ← IO.ofExcept (Wire.getNat body at_)
-  let (bits, at_) ← IO.ofExcept (Wire.getNat body at_)
-  let (big, at_) ← IO.ofExcept (Wire.getNat body at_)
-  let (flags, at_) ← IO.ofExcept (Wire.getNat body at_)
-  let some architecture := Architecture.ofElf number bits (big == 1) flags
-    | throw <| IO.userError s!"a checkpoint of ELF machine {number}, which isn't one here"
-  let (handled, at_) ← IO.ofExcept (Wire.getFlag body at_)
-  if handled && handler.isNone then
+  let architecture := info.architecture
+  let target := saved.target
+  if info.handled && handler.isNone then
     throw <| IO.userError "a checkpoint of a machine with a handler of system calls, which wasn't given"
-  let (image, at_) ← IO.ofExcept (Image.decode body at_)
-  let kernel ← IO.ofExcept image.kernel
-  let kernel := { kernel with generators := generators.foldl (fun table entry => table.insert entry.1 entry.2) {} }
-  let (emulator, at_) ← IO.ofExcept (Wire.getBytes body at_)
-  let (savedModels, at_) ← IO.ofExcept (Wire.getList getModel body at_)
-  IO.ofExcept (Wire.expectEnd body at_)
   if let some conflict := modelConflict savedModels models then
     throw <| IO.userError conflict
+  -- What it had loaded, in any process, by what the files were, before anything is made of it.
+  let loaded := info.libraries.map (·.2.2.2)
+  let missing := expectedLibraries.filter (!loaded.contains ·)
+  unless missing.isEmpty do
+    throw <| IO.userError s!"a checkpoint without libraries of these digests, which were expected: {missing}"
+  let kernel ← IO.ofExcept image.kernel
+  let kernel := { kernel with generators := generators.foldl (fun table entry => table.insert entry.1 entry.2) {} }
   let emu ← emulatorOf architecture
   Bap.Emu.restore emu (← snapshotOfBytes emu emulator)
   let machine ← machineOf architecture emu kernel watch handler target models
@@ -2273,11 +2314,6 @@ def Machine.ofCheckpoint (data : ByteArray) (watch : Option (Nat → List Nat �
   setRunState emu (← runStateOfBytes emulator)
   for model in ← machine.models.get do
     if let some (_, _, bytes) := savedModels.find? (·.1 == model.id) then model.state.load bytes
-  -- What it had loaded, in any process, by what the files were.
-  let loaded := (← machine.libraries.get).toList.flatMap (·.2) |>.map (·.digest)
-  let missing := expectedLibraries.filter (!loaded.contains ·)
-  unless missing.isEmpty do
-    throw <| IO.userError s!"a checkpoint without libraries of these digests, which were expected: {missing}"
   for heard in ← machine.restored.get do heard s!"checkpoint {Wire.ofFixedBytes data (data.size - 8)}"
   pure machine
 

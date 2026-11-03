@@ -154,6 +154,9 @@ structure Emu where
   trace : IO.Ref (Option TraceState)
   lastFault : IO.Ref (Option MemoryFault)
   skipCode : IO.Ref (Option Nat)
+  /-- Of a thread that stopped where hooks fired, and that a hook came to afterwards: where, and the hooks that fired there, which don't
+  fire again when it goes on, as the one that came after does. -/
+  suppressed : IO.Ref (List (ThreadId × Nat × List HookId))
   breakpointsRef : IO.Ref (List (HookId × Nat))
   /-- Whether breakpoints don't stop anything, as when what has run is run again. -/
   breakpointsMuted : IO.Ref Bool
@@ -319,6 +322,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     trace := ← IO.mkRef none
     lastFault := ← IO.mkRef none
     skipCode := ← IO.mkRef none
+    suppressed := ← IO.mkRef []
     breakpointsRef := ← IO.mkRef []
     breakpointsMuted := ← IO.mkRef false
     executed := ← IO.mkRef 0
@@ -586,6 +590,8 @@ private def restoreThreads (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   emu.nextThreadRef.set snapshot.nextThread
   emu.pendingRef.set snapshot.pending
   emu.skipCode.set snapshot.skip
+  -- What is there already fired before the stop that this was saved at; what comes after it hasn't.
+  emu.suppressed.set []
   emu.taskTable.set snapshot.table
 
 /-- A native memory with the bytes of the memory variable of `state`. -/
@@ -806,13 +812,35 @@ private def nextHookId (emu : Emu) : IO HookId := do
   emu.nextHook.set (id + 1)
   pure id
 
-/-- Calls `action emu address` before each instruction of the range. -/
-def onCode (emu : Emu) (range : Nat × Nat) (action : Emu → Nat → IO Unit) : IO HookId := do
+/-- Calls `action emu address` before each instruction of the range. A thread that has stopped in it, where the hooks that were there
+fired, has this one fire when it goes on, and not those, unless `late` is false, as for a breakpoint, which stops it when it comes back. -/
+def onCode (emu : Emu) (range : Nat × Nat) (action : Emu → Nat → IO Unit) (late : Bool := true) : IO HookId := do
   if range.1 > range.2 then
     throw <| IO.userError "invalid Emu code-hook range"
   let id ← nextHookId emu
+  let before ← emu.hooks.get
   emu.hooks.modify (· ++ [⟨id, range.1, range.2, fun context => action (withContext emu context)⟩])
   emu.hooksByPage.set {}
+  let inside (address : Nat) : Bool := range.1 ≤ address && address ≤ range.2
+  if !late then
+    emu.suppressed.modify (·.map fun (thread, address, ids) => (thread, address, if inside address then id :: ids else ids))
+    return id
+  -- What fired at an address before a thread stopped there.
+  let fired (address : Nat) : List HookId := (before.filter fun hook => hook.first ≤ address && address ≤ hook.last).map (·.id)
+  let current ← emu.currentThreadRef.get
+  if let some address := ← emu.skipCode.get then
+    if inside address then
+      emu.skipCode.set none
+      emu.suppressed.modify ((current, address, fired address) :: ·)
+  let threads ← emu.threadsRef.get
+  for context in threads do
+    if let some address := context.skip then
+      if context.id != current && inside address then
+        emu.suppressed.modify ((context.id, address, fired address) :: ·)
+  emu.threadsRef.set (threads.map fun context =>
+    match context.skip with
+    | some address => if context.id != current && inside address then { context with skip := none } else context
+    | none => context)
   pure id
 
 /-- Calls `action emu address size` before each load of the range. -/
@@ -866,7 +894,8 @@ def clearHooks (emu : Emu) : IO Unit := do
   emu.breakpointsRef.set []
 
 def addBreakpoint (emu : Emu) (address : Nat) : IO HookId := do
-  let id ← onCode emu (address, address) fun current _ => do
+  -- A thread that stopped here has stopped here: it goes on, and a breakpoint stops it when it comes back.
+  let id ← onCode emu (address, address) (late := false) fun current _ => do
     unless ← emu.breakpointsMuted.get do current.stopped.set true
   emu.breakpointsRef.modify fun breakpoints => (id, address) :: breakpoints
   pure id
@@ -1000,7 +1029,12 @@ private def hooksNear (emu : Emu) (address : Nat) : IO (List CodeHook) := do
 private def notifyCode (emu : Emu) (address : Nat) : IO Unit := do
   if (← emu.hooks.get).isEmpty then return
   let near ← hooksNear emu address
-  let fires (hook : CodeHook) : Bool := hook.first ≤ address && address ≤ hook.last
+  -- What fired before the thread stopped here doesn't again, the first time that it goes on.
+  let thread ← emu.currentThreadRef.get
+  let suppressed := (← emu.suppressed.get).find? fun (owner, at_, _) => owner == thread && at_ == address
+  if suppressed.isSome then emu.suppressed.modify (·.filter fun (owner, _, _) => owner != thread)
+  let fires (hook : CodeHook) : Bool := hook.first ≤ address && address ≤ hook.last &&
+    !(suppressed.any fun (_, _, ids) => ids.contains hook.id)
   if !near.any fires then return
   serialize emu <| do
   let context := hookContext emu
@@ -1112,6 +1146,40 @@ private def readByte (emu : Emu) (address : Nat) : IO UInt8 := do
     if !region.protection.readable then
       throw <| IO.userError s!"unreadable Emu address {address}"
     rawByte emu address
+
+/-- Starts keeping a profile of what runs, from nothing: by each address that a step starts at, how often it ran compiled and in the
+interpreter, the instructions that came to, and the time of each. A range is counted at the address that it was entered at, with all
+that it ran. It costs a little on each step until `stopProfile`. -/
+def startProfile (emu : Emu) : IO Unit := do
+  emu.engine.profile.set (some {})
+  for (_, worker) in ← emu.parallelWorkers.get do worker.profile.set (some {})
+
+/-- What the profile has, the addresses where most time went first, with those of the workers of parallel rounds added in. -/
+def profile (emu : Emu) : IO (List (Nat × Primus.Lifted.Profile)) := do
+  let mut table := (← emu.engine.profile.get).getD {}
+  for (_, worker) in ← emu.parallelWorkers.get do
+    for (address, entry) in ((← worker.profile.get).getD {}).toList do
+      let mine := table.getD address {}
+      table := table.insert address { mine with
+        nativeRuns := mine.nativeRuns + entry.nativeRuns, interpretedRuns := mine.interpretedRuns + entry.interpretedRuns
+        instructions := mine.instructions + entry.instructions, nativeNanos := mine.nativeNanos + entry.nativeNanos
+        interpretedNanos := mine.interpretedNanos + entry.interpretedNanos, compileMs := mine.compileMs + entry.compileMs }
+  let total (entry : Primus.Lifted.Profile) : Nat := entry.nativeNanos + entry.interpretedNanos
+  pure (table.toList.toArray.qsort (fun left right => total left.2 > total right.2 || (total left.2 == total right.2 && left.1 < right.1))).toList
+
+def stopProfile (emu : Emu) : IO Unit := do
+  emu.engine.profile.set none
+  for (_, worker) in ← emu.parallelWorkers.get do worker.profile.set none
+
+/-- Forgets what was lifted and compiled of the code that has a byte from `first` to `last`, of every version of it, so that it is lifted
+and compiled again when it next runs, without its bytes or protections changing: see `Primus.Lifted.invalidateCode`. -/
+def invalidateCode (emu : Emu) (first last : Nat) : IO Unit := do
+  let first := emu.config.untag first
+  let last := emu.config.untag last
+  Primus.Lifted.invalidateCode emu.engine first last
+  -- A worker of a parallel round has an engine of its own.
+  for (_, worker) in ← emu.parallelWorkers.get do
+    Primus.Lifted.invalidateCode worker first last
 
 def read (emu : Emu) (address size : Nat) : IO ByteArray := do
   let address := emu.config.untag address
@@ -2043,7 +2111,10 @@ private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared :
   let engine ← match existing.find? fun worker => worker.1 = context.id with
     | some (_, engine) => pure engine
     | none =>
-      createEngine emu.config true
+      let engine ← createEngine emu.config true
+      -- It is counted in the profile that is kept, if one is.
+      if (← emu.engine.profile.get).isSome then engine.profile.set (some {})
+      pure engine
   let memory ← workerMemory emu context shared
   -- It writes for a round, which isn't a step, and a round takes itself back.
   Jit.endMemoryStep memory
@@ -2071,6 +2142,7 @@ private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared :
     trace := ← IO.mkRef none
     lastFault := ← IO.mkRef none
     skipCode := ← IO.mkRef context.skip
+    suppressed := ← IO.mkRef []
     pendingRef := ← IO.mkRef context.pending
     journal := some (← IO.mkRef [])
     lastBudget := ← IO.mkRef 0

@@ -35,6 +35,17 @@ structure Statistics where
   optimized : Nat := 0
   deriving Repr
 
+/-- What runs from one address, while a profile is kept: how many times it ran compiled and in the interpreter, how many instructions
+that came to with those that a range ran after it, and how long each took, with what compiling took on the way, which `compileMs` says. -/
+structure Profile where
+  nativeRuns : Nat := 0
+  interpretedRuns : Nat := 0
+  instructions : Nat := 0
+  nativeNanos : Nat := 0
+  interpretedNanos : Nat := 0
+  compileMs : Nat := 0
+  deriving Repr, Inhabited
+
 private structure Lowering where
   /-- The operations so far, the last one first, as most of what lowering does is to add one, and adding to the end of a list costs all
   that is in it: `Lowering.ops` is them in order. -/
@@ -213,6 +224,8 @@ structure Engine where
   chained : IO.Ref Nat
   /-- Whether nothing is compiled or run compiled, for now. -/
   interpretOnly : IO.Ref Bool
+  /-- What runs from each address, while one is kept. -/
+  profile : IO.Ref (Option (Std.HashMap Nat Profile))
 
 structure Result where
   state : Bil.State
@@ -253,6 +266,7 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimi
     chainFallthrough
     chained := ← IO.mkRef 0
     interpretOnly := ← IO.mkRef false
+    profile := ← IO.mkRef none
   }
 
 def stats (engine : Engine) : IO Statistics := engine.statistics.get
@@ -325,6 +339,39 @@ def discardRange (engine : Engine) (first last : Nat) : IO Unit := do
         else entry.coverage.all fun (lo, hi) => hi < first || last < lo
       if !kept then engine.ranges.modify (·.erase address)
   if engine.writeCooldown > 0 then engine.nativeCooldown.set (engine.writeCooldown + 1)
+
+/-- Forgets all that was made of the code that has a byte from `first` to `last`: the blocks of its instructions, the ranges compiled from
+any of it, the versions of both that `discardRange` keeps, what graphs gathered of it and which range a block there is entered by. What
+runs there next is lifted and compiled again, as if it had never run, and the bytes and what may be done with them stay as they are. It
+is for what changes what code does without writing it, such as a hook that is to see what was compiled past it, or semantics that
+changed. It looks at all that is cached, as it isn't what a program does all the time. -/
+def invalidateCode (engine : Engine) (first last : Nat) : IO Unit := do
+  engine.statistics.modify fun stats => { stats with invalidations := stats.invalidations + 1 }
+  let (lo, hi) := (min first last, max first last)
+  let touches (entry : CachedBlock) : Bool :=
+    if entry.coverage.isEmpty then entry.address ≤ hi && lo < max (entry.last + 1) (entry.address + entry.code.size)
+    else entry.coverage.any fun (low, high) => low ≤ hi && lo ≤ high
+  let native (entry : CachedBlock) : Nat := match entry.plan with | .native .. => 1 | .interpreted _ => 0
+  let mut freed := 0
+  let mut droppedRanges : Std.HashSet Nat := {}
+  for (address, entry) in (← engine.cache.get).toList do
+    if touches entry then
+      engine.cache.modify (·.erase address)
+      freed := freed + native entry
+  for (address, entry) in (← engine.ranges.get).toList do
+    if touches entry then
+      engine.ranges.modify (·.erase address)
+      droppedRanges := droppedRanges.insert address
+      freed := freed + native entry
+  for versions in [engine.cacheVersions, engine.rangeVersions] do
+    for (address, entries) in (← versions.get).toList do
+      let kept := entries.filter fun entry => !touches entry
+      freed := freed + (entries.filter touches).foldl (fun count entry => count + native entry) 0
+      versions.modify fun all => if kept.isEmpty then all.erase address else all.insert address kept
+  engine.gathered.modify fun gathered => gathered.filter fun address (code, _, _) => !(address ≤ hi && lo < address + max 1 code.size)
+  engine.entryRanges.modify fun holders => holders.filter fun address holder =>
+    !droppedRanges.contains holder && !(lo ≤ address && address ≤ hi)
+  engine.nativeLive.modify fun count => count - min count freed
 
 /-- Whether a write changes anything that is cached: what `discardRange` would drop. A block that it doesn't start in goes by its bytes
 when it is next entered. A cooldown goes by each write, whatever it hits. -/
@@ -1808,7 +1855,7 @@ private def runPersistent (engine : Engine) (executions : IO.Ref Nat) (lowering 
     else syncMemoryDelta completed (syncState completed state slots) addresses values
   nativeResult lowering following next state slots
 
-def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bil.State) (pc : Nat)
+private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bil.State) (pc : Nat)
     (observer : Option Jit.MemoryObserver) (codeObserver : Option Jit.CodeObserver := none)
     (observed : Bool := true) (budget : Nat := engine.rangeLimit) : IO Result := do
   -- A run cannot chain more than the slot that counts them holds.
@@ -1885,6 +1932,31 @@ def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bi
             let completed := atCodeStop lowering next
             let state := syncMemory completed (syncState completed state slots) addresses values
             nativeResult lowering entry.next next state slots
+
+/-- A run of the block at `pc`, or of the range that starts there, which a profile counts if one is kept. -/
+def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bil.State) (pc : Nat)
+    (observer : Option Jit.MemoryObserver) (codeObserver : Option Jit.CodeObserver := none)
+    (observed : Bool := true) (budget : Nat := engine.rangeLimit) : IO Result := do
+  if (← engine.profile.get).isNone then
+    return ← runBlockUnprofiled engine fetch lift state pc observer codeObserver observed budget
+  let before ← engine.statistics.get
+  let started ← IO.monoNanosNow
+  let result ← runBlockUnprofiled engine fetch lift state pc observer codeObserver observed budget
+  let took := (← IO.monoNanosNow) - started
+  let after ← engine.statistics.get
+  let compiled := after.compileMs - before.compileMs
+  let native := after.nativeRuns > before.nativeRuns
+  let instructions := 1 + (← engine.chained.get)
+  engine.profile.modify fun profile => profile.map fun table =>
+    let entry := table.getD pc {}
+    table.insert pc { entry with
+      nativeRuns := entry.nativeRuns + (if native then 1 else 0)
+      interpretedRuns := entry.interpretedRuns + (if native then 0 else 1)
+      instructions := entry.instructions + instructions
+      nativeNanos := entry.nativeNanos + (if native then took else 0)
+      interpretedNanos := entry.interpretedNanos + (if native then 0 else took)
+      compileMs := entry.compileMs + compiled }
+  pure result
 
 /-- A run of a block, or of the range that starts there, up to `rangeLimit` blocks after the first. -/
 def runBlock (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bil.State) (pc : Nat) :
