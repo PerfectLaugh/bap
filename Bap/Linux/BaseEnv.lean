@@ -44,6 +44,10 @@ structure BaseState where
   onceReturns : Std.HashMap Nat Nat := {}
   /-- The stack of each thread that it made, which goes when the thread is joined. -/
   stacks : Std.HashMap Nat (Nat × Nat) := {}
+  /-- What else was allocated for each thread that it made, its thread-local storage, which goes with its stack. -/
+  blocks : Std.HashMap Nat Nat := {}
+  /-- The threads that it made that nothing joins, which go once they are over. -/
+  detached : Std.HashSet Nat := {}
 
 /-- The base environment of a machine: where each of its names is. -/
 structure BaseEnvironment where
@@ -101,6 +105,24 @@ private def serveStubs (machine : Machine) (table : IO.Ref Dispatch) : IO Unit :
       setPc emu (if at_ == entry + 8 then entry + 4 else entry + 8)
       emu.stopped.set true
     | .finished => pure ()
+
+/-- All that a thread that the environment made had, once it is over and nothing is to join it: its stack, its thread-local storage,
+the word that `pthread_join` waits on and its `errno`. -/
+private def reapThread (machine : Machine) (state : IO.Ref BaseState) (tid : Nat) : IO Unit := do
+  let current ← state.get
+  if let some (base, size) := current.stacks.get? tid then unmap machine.emu base size
+  for block in [current.blocks.get? tid, current.joinWords.get? tid, current.errno.get? tid] do
+    if let some block := block then machine.free block
+  state.set { current with
+    results := current.results.erase tid, joinWords := current.joinWords.erase tid, stacks := current.stacks.erase tid
+    blocks := current.blocks.erase tid, errno := current.errno.erase tid, detached := current.detached.erase tid }
+
+/-- A thread that the environment made is over, with what it gives: one that is detached goes at once. -/
+private def finishThread (machine : Machine) (state : IO.Ref BaseState) (tid result : Nat) : IO BaseResult := do
+  state.modify fun state => { state with results := state.results.insert tid result }
+  exitThread machine.emu 0
+  if (← state.get).detached.contains tid then reapThread machine state tid
+  pure .finished
 
 /-- The functions of the environment, by name, of a machine and what the environment keeps. -/
 private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub : IO.Ref Nat) (onceStub : IO.Ref Nat) :
@@ -180,6 +202,8 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
       let address ← machine.calloc 1 8
       state.modify fun state => { state with errno := state.errno.insert me address }
       pure address
+  let reap (machine : Machine) (tid : Nat) : IO Unit := reapThread machine state tid
+  let finish (machine : Machine) (tid result : Nat) : IO BaseResult := finishThread machine state tid result
   -- `pthread_sigmask`, or `sigprocmask` with `failed` for what it gives back of an error. It returns to where it was called from
   -- itself, so that what it unblocks and is pending is delivered there, as Linux does where the system call ends.
   let changeMask (machine : Machine) (arguments : List Nat) (failed : Nat → IO Nat) : IO BaseResult := do
@@ -323,7 +347,8 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
         setThreadReg emu tid ⟨"ISET", .imm 1, 0, false⟩ (.bits (BitVec.ofNat 1 (start % 2)))
         emu.threadsRef.modify fun contexts => contexts.map fun context =>
           if context.id == tid then { context with pc := start - start % 2 } else context
-      let _ ← machine.setupThreadTls (thread := some tid)
+      let (block, _) ← machine.threadTlsBlock (thread := some tid)
+      state.modify fun state => { state with blocks := state.blocks.insert tid block }
       -- What is cleared and woken when it is over, which `pthread_join` waits on.
       let joinWord ← machine.calloc 1 8
       write32 machine joinWord tid
@@ -342,17 +367,19 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
         | some joinWord => return .wait joinWord
         | none => return .value 3
       if out != 0 then writeWord machine out ((← state.get).results.getD tid 0)
-      -- Its stack goes with it, as nothing of it runs any more.
-      if let some (base, size) := (← state.get).stacks.get? tid then unmap machine.emu base size
-      state.modify fun state =>
-        { state with results := state.results.erase tid, joinWords := state.joinWords.erase tid, stacks := state.stacks.erase tid }
+      -- What it had goes with it, as nothing of it runs any more.
+      reap machine tid
       value 0),
-    ("pthread_detach", show BaseFunction from fun _ _ _ => value 0),
-    ("pthread_exit", show BaseFunction from fun machine arguments _ => do
-      let tid ← tidOf machine
-      state.modify fun state => { state with results := state.results.insert tid (arguments.headD 0) }
-      exitThread machine.emu 0
-      pure .finished),
+    ("pthread_detach", show BaseFunction from fun machine arguments _ => do
+      let tid := arguments.headD 0
+      if !(← state.get).joinWords.contains tid then return ← value 3
+      let over := match (← machine.emu.taskTable.get).find? tid with
+        | some task => task.status.isSome
+        | none => true
+      if over then reap machine tid
+      else state.modify fun state => { state with detached := state.detached.insert tid }
+      value 0),
+    ("pthread_exit", show BaseFunction from fun machine arguments _ => do finish machine (← tidOf machine) (arguments.headD 0)),
     ("pthread_self", show BaseFunction from fun machine _ _ => do value (← tidOf machine)),
     ("pthread_equal", show BaseFunction from fun _ arguments _ => value (if arguments.headD 0 == arguments.getD 1 0 then 1 else 0)),
     ("pthread_attr_init", show BaseFunction from fun _ _ _ => value 0),
@@ -454,9 +481,7 @@ private def attachBase (machine : Machine) (state : IO.Ref BaseState) : IO BaseE
     let given ← match Value.asBits (← reg emu ⟨result, .imm width, 0, false⟩) with
       | .ok bits => pure bits.2.toNat
       | .error _ => pure 0
-    state.modify fun state => { state with results := state.results.insert tid given }
-    exitThread emu 0
-    pure .finished
+    finishThread machine state tid given
   exitStub.set exitAt
   -- Where the routine of `pthread_once` comes back to: `pthread_once` gives 0, to where it was called from.
   let onceAt ← install machine dispatch "base:once-return" fun machine _ _ => do
@@ -513,7 +538,9 @@ def encode (state : BaseState) : ByteArray :=
   let out := Wire.putSorted (fun out ((key, tid), value) => Wire.putNat (Wire.putNat (Wire.putNat out key) tid) value) out
     state.specific.toList
   let out := putTable (putTable (putTable out state.aligned) state.errno) state.onceReturns
-  Wire.putSorted (fun out (tid, (base, size)) => Wire.putNat (Wire.putNat (Wire.putNat out tid) base) size) out state.stacks.toList
+  let out := Wire.putSorted (fun out (tid, (base, size)) => Wire.putNat (Wire.putNat (Wire.putNat out tid) base) size) out
+    state.stacks.toList
+  Wire.putSorted Wire.putNat (putTable out state.blocks) state.detached.toList
 
 def decode (data : ByteArray) : Except String BaseState := do
   let (nextKey, at_) ← Wire.getNat data 0
@@ -532,9 +559,11 @@ def decode (data : ByteArray) : Except String BaseState := do
     let (base, at_) ← Wire.getNat data at_
     let (size, at_) ← Wire.getNat data at_
     .ok ((tid, (base, size)), at_)) data at_
+  let (blocks, at_) ← getTable data at_
+  let (detached, at_) ← Wire.getList Wire.getNat data at_
   Wire.expectEnd data at_
   pure { nextKey, results, joinWords, specific := Std.HashMap.ofList specific, aligned, errno, onceReturns,
-         stacks := Std.HashMap.ofList stacks }
+         stacks := Std.HashMap.ofList stacks, blocks, detached := Std.HashSet.ofList detached }
 
 end BaseState
 
@@ -545,6 +574,8 @@ def baseModelId : String := "bap.base"
 in a checkpoint, and is put back, all of it or, if the bytes aren't of it, none. -/
 def baseModel (cell : IO.Ref (Option BaseEnvironment)) : RuntimeModel where
   id := baseModelId
+  -- 2: with the thread-local storage of threads, and those that are detached.
+  version := 2
   attach := fun machine => do
     let state ← IO.mkRef ({} : BaseState)
     let base ← attachBase machine state

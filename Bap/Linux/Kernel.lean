@@ -354,6 +354,13 @@ def addSymlink (kernel : Kernel) (path target : String) : Kernel :=
 /-- The directory at a path, as the kernel finds it, through the links of its parts: made, with each part before it that isn't there,
 with `mode`. That a part is something other than a directory is `ENOTDIR`. -/
 private def directoryAt (kernel : Kernel) (path : String) (mode : Nat) : Result (Kernel × String) :=
+  -- It is mostly there, which one walk finds; a part at a time otherwise.
+  match kernel.resolve "/" path with
+  | .ok (found, some number) =>
+    match kernel.inodes.get? number with
+    | some { content := .directory, .. } => .ok (kernel, found)
+    | _ => .error Errno.enotdir
+  | _ =>
   (Path.parts "/" path).foldlM (init := (kernel, "/")) fun (kernel, at_) part => do
     match ← kernel.resolve at_ part with
     | (found, some number) =>

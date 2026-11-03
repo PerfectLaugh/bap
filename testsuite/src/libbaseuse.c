@@ -123,3 +123,15 @@ size_t length_of(const char *text) { return strlen(text); }
 static volatile int caught;
 void on_signal(int signal) { caught = signal; }
 int caught_signal(void) { return caught; }
+
+/* A thread that nothing joins, which goes once it is over. */
+extern int pthread_detach(pthread_t);
+static volatile int detachedRan;
+static void *quick(void *argument) { detachedRan = 1; return argument; }
+int spawn_detached(void) {
+  pthread_t thread;
+  if (pthread_create(&thread, 0, quick, 0) != 0 || pthread_detach(thread) != 0) return 0;
+  while (!detachedRan) {}
+  for (volatile int spin = 0; spin < 200000; spin++) {}
+  return detachedRan;
+}

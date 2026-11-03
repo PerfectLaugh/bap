@@ -2884,6 +2884,11 @@ def testBaseEnvironment (triple : String) : IO Unit := do
   let slots ← machine.linkBase base
   assertTrue s!"{label} until it is linked against it ({slots})" (slots ≥ 1)
   assertEqual s!"{label} and then it has it" 6 (← call "plain_length" [text])
+  -- What threads had goes once they are over: joined, by `run`, or detached.
+  assertEqual s!"{label} a detached thread runs" 1 (← call "spawn_detached")
+  let left ← base.state.get
+  assertTrue s!"{label} and nothing is left of the threads ({left.stacks.size}, {left.blocks.size}, {left.joinWords.size})"
+    (left.stacks.isEmpty && left.blocks.isEmpty && left.joinWords.isEmpty && left.detached.isEmpty && left.results.isEmpty)
   -- The mask of signals: what is blocked waits, and comes as the call that unblocks it returns.
   let callBase (name : String) (arguments : List Nat) (bits : Nat := 32) : IO Nat := do
     let some address := base.resolve name | throw <| IO.userError s!"{label} has no {name} of the base"

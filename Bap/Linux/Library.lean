@@ -580,10 +580,9 @@ def Machine.loadLibrary (machine : Machine) (path : String) (search : List Strin
 def Machine.threadLocalAddress (machine : Machine) (tls : LibraryTls) (threadPointer : Nat) (value : Nat := 0) : Nat :=
   (threadPointer + tlsPointerValue machine.architecture tls value) % 2 ^ machine.architecture.bits
 
-/-- Gives the thread that runs a block of thread-local storage for what is loaded, and makes it the thread pointer, and says what that is,
-for when there is no libc to do it. Whatever a thread had of its own is left behind. `reserved` is what is kept free next to it, for a
-libc's use: below a block that is above the thread pointer, and above one that is below. Each thread needs one of its own. -/
-def Machine.setupThreadTls (machine : Machine) (reserved : Nat := 256) (thread : Option ThreadId := none) : IO Nat := do
+/-- Gives a thread a block of thread-local storage, as `setupThreadTls` does, and says where the block that it allocated is, for
+`Machine.free` once the thread is over, with the thread pointer. -/
+def Machine.threadTlsBlock (machine : Machine) (reserved : Nat := 256) (thread : Option ThreadId := none) : IO (Nat × Nat) := do
   let architecture := machine.architecture
   let space := (← currentTask machine.emu).space
   let loaded : List LoadedLibrary := spaceHas space (← machine.libraries.get)
@@ -605,7 +604,13 @@ def Machine.setupThreadTls (machine : Machine) (reserved : Nat := 256) (thread :
     machine.write (machine.threadLocalAddress tls threadPointer) image
   setThreadReg machine.emu ((← thread.getDM (Bap.Emu.thread machine.emu))) ⟨register, .imm width, 0, false⟩
     (.bits (BitVec.ofNat width threadPointer))
-  pure threadPointer
+  pure (block, threadPointer)
+
+/-- Gives the thread that runs a block of thread-local storage for what is loaded, and makes it the thread pointer, and says what that is,
+for when there is no libc to do it. Whatever a thread had of its own is left behind. `reserved` is what is kept free next to it, for a
+libc's use: below a block that is above the thread pointer, and above one that is below. Each thread needs one of its own. -/
+def Machine.setupThreadTls (machine : Machine) (reserved : Nat := 256) (thread : Option ThreadId := none) : IO Nat := do
+  pure (← machine.threadTlsBlock reserved thread).2
 
 /-- Where a symbol is, in that library if one is given, and otherwise in what is loaded in the process that runs, as `dlsym`. -/
 def Machine.findSymbol (machine : Machine) (name : String) (library : Option LoadedLibrary := none) : IO (Option Nat) := do
