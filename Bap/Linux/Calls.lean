@@ -278,7 +278,7 @@ def Architecture.errno : Architecture → Nat → Nat
   | .mips _ _ _, errno =>
     -- Those of sockets.
     match [(88, 95), (89, 96), (90, 97), (91, 98), (92, 99), (93, 120), (94, 121), (95, 122), (97, 124), (98, 125), (104, 131),
-        (106, 133), (107, 134), (111, 146)].lookup errno with
+        (106, 133), (107, 134), (111, 146), (99, 126), (101, 128)].lookup errno with
     | some number => number
     | none => errno
   | _, errno => errno

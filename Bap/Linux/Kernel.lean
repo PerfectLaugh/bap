@@ -48,6 +48,9 @@ def econnreset : Nat := 104
 def eisconn : Nat := 106
 def enotconn : Nat := 107
 def econnrefused : Nat := 111
+def edestaddrreq : Nat := 89
+def eaddrnotavail : Nat := 99
+def enetunreach : Nat := 101
 end Errno
 
 /-- What came to a socket and hasn't been read: its bytes, the name of the socket that sent it if it had one, and the open files that
@@ -78,6 +81,10 @@ structure Socket where
   /-- The process that made it, or for the end of a connection that a listener accepts, the one that listens: what `SO_PEERCRED` says of
   it to the other end. -/
   owner : Nat := 0
+  /-- `AF_UNIX`, `AF_INET` or `AF_INET6`, as 1, 2 and 10. -/
+  family : Nat := 1
+  /-- Where datagrams of the Internet go when a send doesn't say: the address that it was connected to, whoever has it then. -/
+  remote : Option String := none
 
 inductive Content where
   | file (data : ByteArray)

@@ -1,6 +1,10 @@
 import Bap.Linux.Kernel
 
-/-! # Sockets of the Unix domain
+/-! # Sockets of the Unix domain, and of the Internet in here
+
+Sockets of `AF_INET` and `AF_INET6` are TCP and UDP between the processes of the machine, on its loopback, as nothing here reaches
+the machine that this runs on: an address of the Internet is one of 127.0.0.0/8 or `::1`, or any of them. TCP is a stream and UDP
+datagrams, as they are of the Unix domain, but for a datagram to a port that nobody has, which is gone, as Linux has it.
 
 What a program does with sockets of `AF_UNIX`: streams, datagrams and sequenced packets, bound to a path or to a name of their own,
 connected in pairs or by `listen`, `connect` and `accept`, with open files handed over. A socket is an inode, and what it holds is in
@@ -53,8 +57,8 @@ private def openSocket (kernel : Kernel) (group number flags : Nat) : Kernel × 
   kernel.addDescriptor group openFile (flags &&& oCloexec != 0)
 
 /-- `socket`, of a type as 1, 2 or 5, with flags as `open` has them. -/
-def socket (kernel : Kernel) (group type flags : Nat) : Kernel × Nat :=
-  let (kernel, number) := newSocket kernel { type, owner := group }
+def socket (kernel : Kernel) (group type flags : Nat) (family : Nat := 1) : Kernel × Nat :=
+  let (kernel, number) := newSocket kernel { type, owner := group, family }
   openSocket kernel group number flags
 
 /-- `socketpair`: two sockets, each the other's peer. -/
@@ -72,6 +76,7 @@ def abstractName (name : String) : Bool := name.startsWith "\x00"
 /-- `bind`. A path mustn't be there yet, and its directory must. A name of its own that a socket nobody has any more had is free. -/
 def bind (kernel : Kernel) (group fd : Nat) (base name : String) (alive : Nat → Bool) : Result Kernel := do
   let (number, socket) ← socketOf kernel group fd
+  if socket.family != 1 then .error Errno.eafnosupport
   if socket.name.isSome then .error Errno.einval
   let key ← if abstractName name then
       match kernel.paths.get? name with
@@ -110,7 +115,7 @@ def listen (kernel : Kernel) (group fd : Nat) : Result Kernel := do
 
 /-- `connect` to the socket `target`. Of datagrams, it is where they go when a send doesn't say. Otherwise the listener has a new
 connection to accept, whose end there is connected already, as Linux has it when the backlog has room, which here it always has. -/
-def connect (kernel : Kernel) (group fd target : Nat) (alive : Nat → Bool) : Result Kernel := do
+def connect (kernel : Kernel) (group fd target : Nat) (alive : Nat → Bool) (serverName : Option String := none) : Result Kernel := do
   let (number, socket) ← socketOf kernel group fd
   let some listener := kernel.socketAt target | .error Errno.econnrefused
   if listener.type != socket.type then .error Errno.eprototype
@@ -121,7 +126,8 @@ def connect (kernel : Kernel) (group fd target : Nat) (alive : Nat → Bool) : R
     if socket.listening then .error Errno.einval
     if !listener.listening || !alive target then .error Errno.econnrefused
     let (kernel, server) := newSocket kernel
-      { type := socket.type, name := listener.name, peer := some number, waiting := true, owner := listener.owner }
+      { type := socket.type, name := serverName <|> listener.name, peer := some number, waiting := true, owner := listener.owner
+        family := socket.family }
     let kernel := kernel.setSocket number { socket with peer := some server, owner := group }
     .ok (kernel.setSocket target { listener with pending := listener.pending ++ [server] })
 
@@ -217,8 +223,10 @@ def shutdown (kernel : Kernel) (group fd how : Nat) : Result Kernel := do
 /-- The name of the socket at the other end, for `getpeername`. -/
 def peerName (kernel : Kernel) (group fd : Nat) : Result (Option String) := do
   let (_, socket) ← socketOf kernel group fd
-  let some peer := socket.peer | .error Errno.enotconn
-  .ok ((kernel.socketAt peer).bind (·.name))
+  match socket.peer, socket.remote with
+  | some peer, _ => .ok ((kernel.socketAt peer).bind (·.name))
+  | none, some remote => .ok (some remote)
+  | none, none => .error Errno.enotconn
 
 /-- Open files handed over, as descriptors of `group`. -/
 def receiveRights (kernel : Kernel) (group : Nat) (rights : List Nat) (closeOnExec : Bool) : Kernel × List Nat :=
@@ -229,6 +237,139 @@ def receiveRights (kernel : Kernel) (group : Nat) (rights : List Nat) (closeOnEx
 /-- The open files of descriptors, to hand over. -/
 def rightsOf (kernel : Kernel) (group : Nat) (fds : List Nat) : Result (List Nat) :=
   fds.mapM fun fd => do pure (← openFileOf kernel group fd).1
+
+/-! ### The Internet in here -/
+
+/-- An address of the Internet: its family, 2 or 10, the number of the address and a port. -/
+structure Endpoint where
+  family : Nat
+  address : Nat
+  port : Nat
+  deriving DecidableEq, Repr
+
+namespace Endpoint
+
+/-- What a socket has as its name, which is no path and no name of the Unix domain. -/
+def name (endpoint : Endpoint) : String := s!"\x01{endpoint.family}:{endpoint.address}:{endpoint.port}"
+
+def ofName? (name : String) : Option Endpoint :=
+  if !name.startsWith "\x01" then none
+  else
+    match ((name.drop 1).toString.splitOn ":").map String.toNat? with
+    | [some family, some address, some port] => some { family, address, port }
+    | _ => none
+
+def loopback (family : Nat) : Nat := if family == 2 then 0x7f000001 else 1
+
+/-- Whether it is an address of the machine, or any of them. -/
+def isLocal (endpoint : Endpoint) : Bool :=
+  endpoint.address == 0 || (if endpoint.family == 2 then endpoint.address >>> 24 == 127 else endpoint.address == 1)
+
+/-- Where a socket of a type is bound to it, among the names of the kernel. -/
+def key (type : Nat) (endpoint : Endpoint) : String :=
+  s!"\x01{type}/{endpoint.family}:{endpoint.address}:{endpoint.port}"
+
+def ofKey? (key : String) : Option (Nat × Endpoint) :=
+  if !key.startsWith "\x01" then none
+  else
+    match (key.drop 1).toString.splitOn "/" with
+    | [type, rest] =>
+      match type.toNat?, ofName? ("\x01" ++ rest) with
+      | some type, some endpoint => some (type, endpoint)
+      | _, _ => none
+    | _ => none
+
+end Endpoint
+
+/-- The ports of a type and family that sockets that are still there have. -/
+private def usedPorts (kernel : Kernel) (type family : Nat) (alive : Nat → Bool) : Std.HashSet Nat :=
+  kernel.paths.fold (init := {}) fun used key number =>
+    match Endpoint.ofKey? key with
+    | some (kind, endpoint) => if kind == type && endpoint.family == family && alive number then used.insert endpoint.port else used
+    | none => used
+
+/-- A port that none has, from those that Linux gives out, 32768 to 60999. -/
+def freePort (kernel : Kernel) (type family : Nat) (alive : Nat → Bool) : Nat :=
+  let used := kernel.usedPorts type family alive
+  ((List.range 28232).find? fun index => !used.contains (32768 + index)).map (32768 + ·) |>.getD 0
+
+/-- A socket of the Internet without a name gets a port of its own on the loopback, as one does that connects or sends first. -/
+def autobind (kernel : Kernel) (number : Nat) (socket : Socket) (alive : Nat → Bool) : Kernel × Socket :=
+  if socket.name.isSome || socket.family == 1 then (kernel, socket)
+  else
+    let endpoint : Endpoint := { family := socket.family, address := Endpoint.loopback socket.family
+                                 port := kernel.freePort socket.type socket.family alive }
+    let socket := { socket with name := some endpoint.name }
+    ({ kernel with paths := kernel.paths.insert (endpoint.key socket.type) number }.setSocket number socket, socket)
+
+/-- `bind` of a socket of the Internet: to an address of the machine or to all of them, and to a port that no other has there, or to
+one that none has of port 0. -/
+def bindInet (kernel : Kernel) (group fd : Nat) (endpoint : Endpoint) (alive : Nat → Bool) : Result Kernel := do
+  let (number, socket) ← socketOf kernel group fd
+  if socket.family != endpoint.family then .error Errno.eafnosupport
+  if socket.name.isSome then .error Errno.einval
+  if !endpoint.isLocal then .error Errno.eaddrnotavail
+  let endpoint := { endpoint with port := if endpoint.port == 0 then kernel.freePort socket.type endpoint.family alive else endpoint.port }
+  let clash := kernel.paths.toList.any fun (key, other) =>
+    match Endpoint.ofKey? key with
+    | some (type, bound) =>
+      type == socket.type && bound.family == endpoint.family && bound.port == endpoint.port && alive other &&
+        (bound.address == endpoint.address || bound.address == 0 || endpoint.address == 0)
+    | none => false
+  if clash then .error Errno.eaddrinuse
+  .ok ({ kernel with paths := kernel.paths.insert (endpoint.key socket.type) number }.setSocket number
+    { socket with name := some endpoint.name })
+
+/-- The socket of a type that has an address: one bound to it, or else to all addresses of its port. Any address is the loopback. -/
+def socketAtEndpoint (kernel : Kernel) (type : Nat) (endpoint : Endpoint) (alive : Nat → Bool) : Option Nat :=
+  let address := if endpoint.address == 0 then Endpoint.loopback endpoint.family else endpoint.address
+  match (kernel.paths.get? ({ endpoint with address }.key type)).filter alive with
+  | some number => some number
+  | none => (kernel.paths.get? ({ endpoint with address := 0 }.key type)).filter alive
+
+/-- Where a connection or a datagram goes: the address, with any address as the loopback, which has to be of the machine. -/
+private def destination (endpoint : Endpoint) : Result Endpoint :=
+  if !endpoint.isLocal then .error Errno.enetunreach
+  else .ok { endpoint with address := if endpoint.address == 0 then Endpoint.loopback endpoint.family else endpoint.address }
+
+/-- `connect` of a socket of the Internet. A stream connects to what listens there, which has a connection to accept whose end there
+has the address that was asked for. Datagrams go there from then, to whoever has it. -/
+def connectInet (kernel : Kernel) (group fd : Nat) (endpoint : Endpoint) (alive : Nat → Bool) : Result Kernel := do
+  let (number, socket) ← socketOf kernel group fd
+  if socket.family != endpoint.family then .error Errno.eafnosupport
+  let target ← destination endpoint
+  let (kernel, socket) := kernel.autobind number socket alive
+  if socket.type == 2 then .ok (kernel.setSocket number { socket with remote := some target.name })
+  else
+    match kernel.socketAtEndpoint socket.type target alive with
+    | none => .error Errno.econnrefused
+    | some listener => kernel.connect group fd listener alive (serverName := some target.name)
+
+/-- `listen` of a socket of the Internet, which has a port of its own if it had none. -/
+def listenInet (kernel : Kernel) (group fd : Nat) (alive : Nat → Bool) : Result Kernel := do
+  let (number, socket) ← socketOf kernel group fd
+  let (kernel, _) := kernel.autobind number socket alive
+  kernel.listen group fd
+
+/-- A datagram of the Internet, to `endpoint` or to where the socket was connected. If nobody has that address, it is gone, and it
+went. -/
+def sendDatagram (kernel : Kernel) (group fd : Nat) (data : ByteArray) (endpoint : Option Endpoint) (alive : Nat → Bool) :
+    Result (Kernel × Nat) := do
+  let (number, socket) ← socketOf kernel group fd
+  if socket.writeShut then .error Errno.epipe
+  let wanted ← match endpoint, socket.remote.bind Endpoint.ofName? with
+    | some endpoint, _ => .ok endpoint
+    | none, some remote => .ok remote
+    | none, none => .error Errno.edestaddrreq
+  if wanted.family != socket.family then .error Errno.eafnosupport
+  let target ← destination wanted
+  let (kernel, socket) := kernel.autobind number socket alive
+  match kernel.socketAtEndpoint 2 target alive with
+  | none => .ok (kernel, data.size)
+  | some receiver =>
+    match kernel.socketAt receiver with
+    | some other => .ok (kernel.setSocket receiver { other with incoming := other.incoming.push { data, sender := socket.name } }, data.size)
+    | none => .ok (kernel, data.size)
 
 end Kernel
 

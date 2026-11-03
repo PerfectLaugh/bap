@@ -454,25 +454,44 @@ private def waitOn (emu : Emu) (wide number : Nat) : IO SyscallAction := do
   | .ok bits => pure (.returnValue bits.2.toNat)
   | .error _ => pure (errorOf Errno.eio)
 
-/-- The name in a `struct sockaddr_un` of `size` bytes: a path, to its first zero, or a name of its own, which starts with one. -/
+/-- The name in a `struct sockaddr` of `size` bytes. Of `sockaddr_un`, a path, to its first zero, or a name of its own, which starts with
+one, and of `sockaddr_in` and `sockaddr_in6`, an address of the Internet as a socket has it as its name. -/
 private def socketName (emu : Emu) (big : Bool) (address size : Nat) : IO (Result String) := do
-  if size < 3 || size > 110 then return .error Errno.einval
+  if size < 3 || size > 128 then return .error Errno.einval
   match ← (read emu address size).toBaseIO with
   | .error _ => pure (.error Errno.efault)
   | .ok bytes =>
-    if numberAt bytes 0 2 big != 1 then return .error Errno.eafnosupport
+    let family := numberAt bytes 0 2 big
+    -- The port and the address are in the order of the network.
+    if family == 2 then
+      if size < 16 then return .error Errno.einval
+      return .ok ({ family, address := numberAt bytes 4 4 true, port := numberAt bytes 2 2 true } : Kernel.Endpoint).name
+    if family == 10 then
+      if size < 24 then return .error Errno.einval
+      return .ok ({ family, address := numberAt bytes 8 16 true, port := numberAt bytes 2 2 true } : Kernel.Endpoint).name
+    if family != 1 then return .error Errno.eafnosupport
+    if size > 110 then return .error Errno.einval
     let path := bytes.extract 2 size
     let text := if path[0]! == 0 then path else path.extract 0 ((path.data.findIdx? (· == 0)).getD path.size)
     match String.fromUTF8? text with
     | some name => pure (.ok name)
     | none => pure (.error Errno.einval)
 
-/-- A `struct sockaddr_un` of a name, or of `AF_UNIX` alone for a socket that has none. -/
-private def nameBytes (big : Bool) (name : Option String) : ByteArray :=
-  let family := Abi.field big 2 1
-  match name with
-  | none => family
-  | some name => if Kernel.abstractName name then family ++ name.toUTF8 else family ++ name.toUTF8 ++ ByteArray.mk #[0]
+/-- A `struct sockaddr_in` or `sockaddr_in6`. -/
+private def endpointBytes (big : Bool) (endpoint : Kernel.Endpoint) : ByteArray :=
+  let head := Abi.field big 2 endpoint.family ++ Abi.field true 2 endpoint.port
+  if endpoint.family == 2 then head ++ Abi.field true 4 endpoint.address ++ Abi.bytesOf 8 0
+  else head ++ Abi.bytesOf 4 0 ++ Abi.field true 16 endpoint.address ++ Abi.bytesOf 4 0
+
+/-- A `struct sockaddr` of a name of a socket of `family`. One of the Unix domain without a name is `AF_UNIX` alone, and one of the
+Internet is at any address and port 0. -/
+private def nameBytes (big : Bool) (family : Nat) (name : Option String) : ByteArray :=
+  match name.bind Kernel.Endpoint.ofName?, name with
+  | some endpoint, _ => endpointBytes big endpoint
+  | none, some name =>
+    let head := Abi.field big 2 1
+    if Kernel.abstractName name then head ++ name.toUTF8 else head ++ name.toUTF8 ++ ByteArray.mk #[0]
+  | none, none => if family == 1 then Abi.field big 2 1 else endpointBytes big { family, address := 0, port := 0 }
 
 /-- Gives a name where the guest asked for one, as much of it as its length has room for, and how long it is. -/
 private def giveName (emu : Emu) (big : Bool) (address lengthAddress : Nat) (bytes : ByteArray) : IO Bool := do
@@ -486,7 +505,7 @@ private def giveName (emu : Emu) (big : Bool) (address lengthAddress : Nat) (byt
       pure true
     catch _ => pure false
 
-/-- The calls of sockets of the Unix domain, and `read` and `write` of one. -/
+/-- The calls of sockets, and `read` and `write` of one. -/
 private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : List Nat) : IO SyscallAction := do
   let architecture := machine.architecture
   let wide := architecture.bits
@@ -522,21 +541,41 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       let piece := data.extract done (done + size)
       writeGuest emu address piece
       done := done + piece.size
-  let target (address size : Nat) : IO (Result (Option Nat)) := do
+  let target (address size : Nat) : IO (Result (Option String)) := do
     if address == 0 then return .ok none
-    match ← socketName emu big address size with
-    | .error errno => pure (.error errno)
-    | .ok name => pure ((kernel.socketNamed cwd name).map some)
-  let sendFrom (fd : Nat) (pieces : List (Nat × Nat)) (rights : List Nat) (to : Option Nat) : IO SyscallAction := do
+    pure ((← socketName emu big address size).map some)
+  let socket : Option Socket := (kernel.socketOf group (arg 0)).toOption.map (·.2)
+  let family := (socket.map (·.family)).getD 1
+  let sendFrom (fd : Nat) (pieces : List (Nat × Nat)) (rights : List Nat) (to : Option String) : IO SyscallAction := do
     match ← (gather pieces).toBaseIO with
     | .error _ => pure (errorOf Errno.efault)
     | .ok data =>
-      match kernel.send group fd { data, rights } to alive with
+      let sent : Result (Kernel × Nat) := do
+        if family == 1 then
+          let to ← match to with
+            | some name => if (Kernel.Endpoint.ofName? name).isSome then .error Errno.eafnosupport else (kernel.socketNamed cwd name).map some
+            | none => .ok none
+          kernel.send group fd { data, rights } to alive
+        else if !rights.isEmpty then .error Errno.einval
+        -- A stream of the Internet goes where it is connected, whatever a send says.
+        else if (socket.map (·.type)) == some 1 then kernel.send group fd { data } none alive
+        else
+          let endpoint ← match to with
+            | some name => match Kernel.Endpoint.ofName? name with
+              | some endpoint => .ok (some endpoint)
+              | none => .error Errno.eafnosupport
+            | none => .ok none
+          kernel.sendDatagram group fd data endpoint alive
+      match sent with
       | .error errno => pure (errorOf errno)
       | .ok (next, count) =>
         machine.kernel.set next
         wakePipeReaders emu
         pure (.returnValue count)
+  -- Who sent what was received, which a stream of the Internet doesn't say.
+  let senderBytes (received : Kernel.Received) : ByteArray :=
+    if received.sender.isNone || (family != 1 && (socket.map (·.type)) == some 1) then ByteArray.empty
+    else nameBytes big family received.sender
   -- What is received, for the calls that take it, or that it has to wait.
   let receiveInto (fd : Nat) (pieces : List (Nat × Nat)) (flags : Nat) (finish : Kernel.Received → IO SyscallAction) :
       IO SyscallAction := do
@@ -555,18 +594,24 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       match ← (scatter pieces received.data).toBaseIO with
       | .error _ => pure (errorOf Errno.efault)
       | .ok () => finish received
+  -- Of the Unix domain, any of its types. Of the Internet, TCP as a stream and UDP as datagrams.
   let checkType (type protocol : Nat) (action : Nat → Nat → IO SyscallAction) : IO SyscallAction := do
     let kind := typeOf (type &&& 0xf)
-    if arg 0 != 1 then pure (errorOf Errno.eafnosupport)
-    else if ![1, 2, 5].contains kind then pure (errorOf Errno.esocktnosupport)
-    else if protocol > 1 then pure (errorOf Errno.eprotonosupport)
+    let domain := arg 0
+    if ![1, 2, 10].contains domain then pure (errorOf Errno.eafnosupport)
+    else if domain == 1 && ![1, 2, 5].contains kind then pure (errorOf Errno.esocktnosupport)
+    else if domain == 1 && protocol > 1 then pure (errorOf Errno.eprotonosupport)
+    else if domain != 1 && kind != 1 && kind != 2 then pure (errorOf Errno.esocktnosupport)
+    else if domain != 1 && protocol != 0 && protocol != (if kind == 1 then 6 else 17) then pure (errorOf Errno.eprotonosupport)
     else action kind (architecture.openFlags (type - (type &&& 0xf)))
   match call with
   | .socket => checkType (arg 1) (arg 2) fun kind flags => do
-    let (next, fd) := kernel.socket group kind flags
+    let (next, fd) := kernel.socket group kind flags (arg 0)
     machine.kernel.set next
     pure (.returnValue fd)
-  | .socketpair => checkType (arg 1) (arg 2) fun kind flags => do
+  | .socketpair =>
+    if arg 0 != 1 && [2, 10].contains (arg 0) then pure (errorOf Errno.eopnotsupp) else
+    checkType (arg 1) (arg 2) fun kind flags => do
     let (next, one, other) := kernel.socketPair group kind flags
     match ← (writeGuest emu (arg 3) (Abi.field big 4 one ++ Abi.field big 4 other)).toBaseIO with
     | .error _ => pure (errorOf Errno.efault)
@@ -576,14 +621,23 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
   | .bind =>
     match ← socketName emu big (arg 1) (arg 2) with
     | .error errno => pure (errorOf errno)
-    | .ok name => apply machine (·.bind group (arg 0) cwd name alive)
-  | .listen => apply machine (·.listen group (arg 0))
+    | .ok name =>
+      match Kernel.Endpoint.ofName? name with
+      | some endpoint => apply machine (·.bindInet group (arg 0) endpoint alive)
+      | none => if family != 1 then pure (errorOf Errno.eafnosupport) else apply machine (·.bind group (arg 0) cwd name alive)
+  | .listen => if family == 1 then apply machine (·.listen group (arg 0)) else apply machine (·.listenInet group (arg 0) alive)
   | .connect =>
     match ← target (arg 1) (arg 2) with
     | .error errno => pure (errorOf errno)
     | .ok none => pure (errorOf Errno.einval)
-    | .ok (some to) =>
-      let action ← apply machine (·.connect group (arg 0) to alive)
+    | .ok (some name) =>
+      let action ← match Kernel.Endpoint.ofName? name with
+        | some endpoint => apply machine (·.connectInet group (arg 0) endpoint alive)
+        | none =>
+          if family != 1 then pure (errorOf Errno.eafnosupport)
+          else match kernel.socketNamed cwd name with
+            | .error errno => pure (errorOf errno)
+            | .ok to => apply machine (·.connect group (arg 0) to alive)
       wakePipeReaders emu
       pure action
   | .accept | .accept4 =>
@@ -599,17 +653,17 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     | .ok (next, some (fd, server)) =>
       machine.kernel.set next
       let client := (next.socketAt server).bind (·.peer) |>.bind next.socketAt
-      if ← giveName emu big (arg 1) (arg 2) (nameBytes big (client.bind (·.name))) then pure (.returnValue fd)
+      if ← giveName emu big (arg 1) (arg 2) (nameBytes big family (client.bind (·.name))) then pure (.returnValue fd)
       else pure (errorOf Errno.efault)
   | .getsockname =>
     match kernel.socketOf group (arg 0) with
     | .error errno => pure (errorOf errno)
     | .ok (_, socket) =>
-      if ← giveName emu big (arg 1) (arg 2) (nameBytes big socket.name) then pure (.returnValue 0) else pure (errorOf Errno.efault)
+      if ← giveName emu big (arg 1) (arg 2) (nameBytes big socket.family socket.name) then pure (.returnValue 0) else pure (errorOf Errno.efault)
   | .getpeername =>
     match kernel.peerName group (arg 0) with
     | .error errno => pure (errorOf errno)
-    | .ok name => if ← giveName emu big (arg 1) (arg 2) (nameBytes big name) then pure (.returnValue 0) else pure (errorOf Errno.efault)
+    | .ok name => if ← giveName emu big (arg 1) (arg 2) (nameBytes big family name) then pure (.returnValue 0) else pure (errorOf Errno.efault)
   | .send | .write => sendFrom (arg 0) [(arg 1, arg 2)] [] none
   | .writev =>
     match ← (vectorsAt (arg 1) (arg 2)).toBaseIO with
@@ -653,7 +707,7 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
   | .recvfrom =>
     receiveInto (arg 0) [(arg 1, arg 2)] (arg 3) fun received => do
       if arg 4 != 0 && arg 5 != 0 then
-        let given := if received.sender.isSome then nameBytes big received.sender else ByteArray.empty
+        let given := senderBytes received
         unless ← giveName emu big (arg 4) (arg 5) given do return errorOf Errno.efault
       pure (.returnValue (if arg 3 &&& 0x20 != 0 then received.size else received.data.size))
   | .recvmsg =>
@@ -666,7 +720,7 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
         let mut flags := if received.size > received.data.size then 0x20 else 0
         -- Who sent it.
         let nameAddress := word header 0
-        let given := if received.sender.isSome then nameBytes big received.sender else ByteArray.empty
+        let given := senderBytes received
         let nameLength := if nameAddress == 0 then 0 else min (int header wordSize) given.size
         if nameAddress != 0 then writeGuest emu nameAddress (given.extract 0 nameLength)
         writeGuest emu (arg 1 + wordSize) (Abi.field big 4 (if nameAddress == 0 then 0 else given.size))
@@ -700,18 +754,22 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     | .ok (_, socket) =>
       let name := arg 2
       let value : Option ByteArray :=
-        if arg 1 != solSocket then none
+        -- What TCP and IP are asked of they have nothing to say of.
+        if arg 1 == 6 || arg 1 == 0 || arg 1 == 41 then (if socket.family != 1 then some (Abi.field big 4 0) else none)
+        else if arg 1 != solSocket then none
         else if name == option 3 0x1008 then some (Abi.field big 4 (typeOf socket.type))
         else if name == option 4 0x1007 then some (Abi.field big 4 0)
         else if name == option 7 0x1001 || name == option 8 0x1002 then some (Abi.field big 4 212992)
         else if name == option 30 0x1009 then some (Abi.field big 4 (if socket.listening then 1 else 0))
-        else if name == option 38 0x1028 then some (Abi.field big 4 0)
-        else if name == option 39 0x1029 then some (Abi.field big 4 1)
+        else if name == option 38 0x1028 then
+          some (Abi.field big 4 (if socket.family == 1 then 0 else if socket.type == 1 then 6 else 17))
+        else if name == option 39 0x1029 then some (Abi.field big 4 socket.family)
         else if name == peerCred then
           -- `struct ucred` of the other end: its process, and root.
           let owner := (socket.peer.bind kernel.socketAt).map (·.owner)
           some (Abi.field big 4 (owner.getD 0) ++ Abi.field big 4 0 ++ Abi.field big 4 0)
-        else none
+        -- The others that it can be asked, such as `SO_REUSEADDR` and `SO_KEEPALIVE`, are off.
+        else some (Abi.field big 4 0)
       match value with
       | none => pure (errorOf Errno.enoprotoopt)
       | some bytes => if ← giveName emu big (arg 3) (arg 4) bytes then pure (.returnValue 0) else pure (errorOf Errno.efault)

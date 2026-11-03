@@ -58,7 +58,7 @@ def socketBytes (socket : Socket) : ByteArray :=
   let out := Wire.putFlag out socket.waiting
   let out := Wire.putList putMessage out socket.incoming.toList
   let out := Wire.putFlag (Wire.putFlag out socket.readShut) socket.writeShut
-  Wire.putNat out socket.owner
+  Wire.putOption Wire.putText (Wire.putNat (Wire.putNat out socket.owner) socket.family) socket.remote
 
 /-- A socket from the bytes of its inode. -/
 def socketOfBytes (data : ByteArray) : Except String Socket := do
@@ -77,8 +77,13 @@ def socketOfBytes (data : ByteArray) : Except String Socket := do
   let (readShut, at_) ← Wire.getFlag data at_
   let (writeShut, at_) ← Wire.getFlag data at_
   let (owner, at_) ← Wire.getNat data at_
+  -- What a socket of the Unix domain had before there were others.
+  let (family, remote, at_) ← if at_ == data.size then pure (1, none, at_) else do
+    let (family, at_) ← Wire.getNat data at_
+    let (remote, at_) ← Wire.getOption Wire.getText data at_
+    pure (family, remote, at_)
   Wire.expectEnd data at_
-  pure { type, name, peer, listening, pending, waiting, incoming := incoming.toArray, readShut, writeShut, owner }
+  pure { type, name, peer, listening, pending, waiting, incoming := incoming.toArray, readShut, writeShut, owner, family, remote }
 
 /-- The image of a kernel. -/
 def Kernel.image (kernel : Kernel) : Image where

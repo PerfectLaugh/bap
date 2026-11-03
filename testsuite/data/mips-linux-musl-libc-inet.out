@@ -1,0 +1,28 @@
+reuse 0
+bind 0
+port 1
+in use -125
+listen 0
+options 1 6 2
+nothing to accept -11
+peer 16 1 1
+its end 1 1
+same peer 1
+tcp hello over tcp
+end 0
+child 0
+refused -146
+not here -126
+sent 5
+udp first
+from 16 1 1
+truncated 10
+connect 0
+udp connected
+to nobody 4
+nothing yet -11
+no address -96
+bind6 0
+connect6 0
+peer6 28 1
+tcp6 six
