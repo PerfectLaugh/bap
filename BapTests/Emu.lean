@@ -2035,6 +2035,22 @@ def testSparseMapping (triple : String) : IO Unit := do
   machine.restore saved
   let restored ← residentBytes
   assertTrue s!"Sparse {triple} putting it back takes little of the host: {(restored - kept) / 1048576} MB" (restored < kept + 128 * 1048576)
+  -- A checkpoint has what isn't zeros of it, and a machine of the checkpoint takes as little of the host and goes on as the program would.
+  let data ← machine.checkpoint
+  assertTrue s!"Sparse {triple} a checkpoint of it is small: {data.size / 1048576} MB" (data.size < 16 * 1048576)
+  let loading ← residentBytes
+  let copy ← Bap.Linux.Machine.ofCheckpoint data
+  let loaded ← residentBytes
+  assertTrue s!"Sparse {triple} a machine of the checkpoint takes little of the host: {(loaded - loading) / 1048576} MB"
+    (loaded < loading + 128 * 1048576)
+  Bap.Emu.removeBreakpoint copy.emu pausePoint
+  Bap.Emu.resumeThread copy.emu (← Bap.Emu.thread copy.emu)
+  let copied ← IO.mkRef ByteArray.empty
+  let outcome ← copy.run fun data => copied.modify (· ++ data)
+  assertEqual s!"Sparse {triple} the machine of the checkpoint ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  let lines := (String.fromUTF8! (← copied.get)).splitOn "\n"
+  assertTrue s!"Sparse {triple} the machine of the checkpoint finds what was written and zeros elsewhere: {lines}"
+    (lines.contains "y" && !lines.contains "n")
   Bap.Emu.removeHook machine.emu breakpoint
   Bap.Emu.resumeThread machine.emu (← Bap.Emu.thread machine.emu)
   let outcome ← machine.run fun data => written.modify (· ++ data)

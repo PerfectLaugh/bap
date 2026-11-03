@@ -1537,6 +1537,7 @@ open_private Bap.Emu.Checkpoint Bap.Emu encodeBinaryUnchecked fitsWord pendingFi
   putBytes putByte natBytes putNat putBool putText putPendingBin putSkipBin putTypBin putCellsBin putValueBin putBindingBin
   putRegionBin putThreadBin putProcessBin takeBytes getByte getNat getBool getText getList getList.loop getPendingBin getSkipBin
   getTypBin getValueBin getBindingBin getRegionBin getThreadBin getProcessBin binaryMagic
+  putPieceBin getPieceBin
   putTask putWaiter putFutex getTask getWaiter getFutex taskFits waiterFits futexFits
 
 /-- `encoded` sits in `data` at `offset`. -/
@@ -1939,23 +1940,50 @@ theorem getBinding_decodes (binding : Bap.Var × Value) (h : BindingSafe binding
   simp only [getBindingBin, bind, Except.bind, d1, d2, d3, d4, d5, encBinding, ByteArray.size_append, Nat.add_assoc,
     normalizeBinding]
 
+private def encPiece (piece : Nat × ByteArray) : ByteArray :=
+  natBytes piece.1 ++ natBytes piece.2.size ++ piece.2
+
+private theorem data_putPiece (writer : Writer) (piece : Nat × ByteArray) :
+    Writer.data (putPieceBin writer piece) = Writer.data writer ++ encPiece piece := by
+  simp only [putPieceBin, data_putBytes, data_putNat, encPiece, ByteArray.append_assoc]
+
+theorem getPiece_decodes (piece : Nat × ByteArray) (h : piece.1 < 2 ^ 64 ∧ piece.2.size < 2 ^ 64) :
+    Decodes getPieceBin (encPiece piece) piece := by
+  intro data offset hat
+  obtain ⟨start, bytes⟩ := piece
+  obtain ⟨hs, hb⟩ := h
+  simp only [encPiece] at hat
+  obtain ⟨h2, h3⟩ := At.split hat
+  obtain ⟨h1, h12⟩ := At.split h2
+  have d1 := natBytes_decodes start hs data offset h1
+  have d2 := natBytes_decodes _ hb data _ h12
+  have d3 := takeBytes_at h3
+  simp only [ByteArray.size_append, Nat.add_assoc] at d1 d2 d3
+  simp only [getPieceBin, bind, Except.bind, d1, d2, d3, encPiece, ByteArray.size_append, Nat.add_assoc]
+
 private def encRegion (region : Bap.Emu.Region) : ByteArray :=
   natBytes region.address ++ byteEnc (if region.protection.readable then 1 else 0) ++
     byteEnc (if region.protection.writable then 1 else 0) ++ byteEnc (if region.protection.executable then 1 else 0) ++
-    natBytes region.data.size ++ region.data
+    natBytes region.data.size ++
+    (natBytes (Jit.pieces region.data).length ++ body encPiece (Jit.pieces region.data))
 
 /-- A region representable in the binary format. -/
-def RegionSafe (region : Bap.Emu.Region) : Prop := region.address < 2 ^ 64 ∧ region.data.size < 2 ^ 64
+def RegionSafe (region : Bap.Emu.Region) : Prop := region.address < 2 ^ 64 ∧ region.data.size < Jit.fillLimit
 
 private theorem data_putRegion (writer : Writer) (region : Bap.Emu.Region) :
     Writer.data (putRegionBin writer region) = Writer.data writer ++ encRegion region := by
-  simp only [putRegionBin, data_putBytes, data_putBool, data_putNat, encRegion, ByteArray.append_assoc]
+  simp only [putRegionBin, encRegion]
+  rw [foldl_writer _ encPiece data_putPiece]
+  simp only [data_putBool, data_putNat, ByteArray.append_assoc]
 
 theorem getRegion_decodes (region : Bap.Emu.Region) (h : RegionSafe region) :
     Decodes getRegionBin (encRegion region) region := by
   intro data offset hat
   obtain ⟨address, bytes, ⟨r, w, x⟩⟩ := region
   obtain ⟨ha, hs⟩ := h
+  have ha : address < 2 ^ 64 := ha
+  have hs : bytes.size < Jit.fillLimit := hs
+  have hlimit : Jit.fillLimit < 2 ^ 64 := by decide
   simp only [encRegion] at hat
   obtain ⟨h5, h6⟩ := At.split hat
   obtain ⟨h4, h45⟩ := At.split h5
@@ -1966,10 +1994,17 @@ theorem getRegion_decodes (region : Bap.Emu.Region) (h : RegionSafe region) :
   have d2 := getBool_decodes r data _ h12
   have d3 := getBool_decodes w data _ h23
   have d4 := getBool_decodes x data _ h34
-  have d5 := natBytes_decodes _ hs data _ h45
-  have d6 := takeBytes_at h6
-  simp only [ByteArray.size_append, Nat.add_assoc] at d1 d2 d3 d4 d5 d6
-  simp only [getRegionBin, bind, Except.bind, d1, d2, d3, d4, d5, d6, encRegion, ByteArray.size_append, Nat.add_assoc]
+  have d5 := natBytes_decodes _ (by omega) data _ h45
+  have d6 := getList_decodes (decode := getPieceBin) encPiece id (Jit.pieces bytes)
+    (by have := Jit.length_pieces bytes; omega) h6 fun piece hpiece => by
+      obtain ⟨index, hindex, rfl⟩ := Jit.mem_pieces hpiece
+      refine getPiece_decodes _ ⟨by omega, ?_⟩
+      simp only [ByteArray.size_extract]
+      omega
+  have hbig : ¬ bytes.size ≥ Jit.fillLimit := by omega
+  simp only [ByteArray.size_append, Nat.add_assoc, List.map_id] at d1 d2 d3 d4 d5 d6
+  simp only [getRegionBin, bind, Except.bind, d1, d2, d3, d4, d5, d6, hbig, ↓reduceIte, Jit.fill_pieces, encRegion,
+    ByteArray.size_append, Nat.add_assoc]
 
 private def encThread (context : ThreadContext) : ByteArray :=
   natBytes context.id ++ natBytes context.pc ++ byteEnc (if context.stopped then 1 else 0) ++
@@ -2023,7 +2058,7 @@ private theorem data_putProcess (writer : Writer) (process : ThreadId × List Ba
   simp only [data_putNat, ByteArray.append_assoc]
 
 theorem getProcess_decodes (process : ThreadId × List Bap.Emu.Region) (h : ProcessSafe process) :
-    Decodes getProcessBin (encProcess process) process := by
+    Decodes (getProcessBin getRegionBin) (encProcess process) process := by
   intro data offset hat
   obtain ⟨pid, regions⟩ := process
   obtain ⟨hi, hl, hr⟩ := h
@@ -2184,9 +2219,10 @@ private theorem unchecked_roundtrip (snapshot : Snapshot) (h : SnapshotSafe snap
     exact ByteArray.extract_append_eq_right rfl rfl
   have hsize : data.size = binaryMagic.size + (encBody snapshot).size := by
     rw [← hdata, ByteArray.size_append]
-  have hne : (binaryMagic != binaryMagic) = false := by decide +kernel
-  simp only [decodeBinarySnapshot, hmagic, hne, Bool.false_eq_true, ↓reduceIte]
-  clear hmagic hdata hne
+  have hsame : (binaryMagic == binaryMagic) = true := by decide +kernel
+  simp only [decodeBinarySnapshot, hmagic, hsame, ↓reduceIte]
+  rw [bind_ok_eq (rfl : (pure getRegionBin : Except String _) = .ok getRegionBin)]
+  clear hmagic hdata hsame
   generalize binaryMagic.size = start at hat hsize ⊢
   obtain ⟨⟨env⟩, pc, regions, stopped, threads, current, next, pending, processes, skip, ⟨table, waiters, futexes⟩⟩ := snapshot
   simp only [encBody] at hat hsize
@@ -2213,7 +2249,7 @@ private theorem unchecked_roundtrip (snapshot : Snapshot) (h : SnapshotSafe snap
   have d6 := natBytes_decodes current h.current data _ h56
   have d7 := natBytes_decodes next h.next data _ h67
   have d8 := getPending_decodes pending h.pending data _ h78
-  have d9 := getList_decodes (decode := getProcessBin) encProcess id processes h.processesLength h9
+  have d9 := getList_decodes (decode := getProcessBin getRegionBin) encProcess id processes h.processesLength h9
     fun p hp => getProcess_decodes p (h.processes p hp)
   have d10 := getSkip_decodes skip h.skip data _ h10
   have d11 := getList_decodes (decode := getTask) encTask id table h.tableLength h11
@@ -2275,7 +2311,7 @@ private theorem fits_binding {binding : Bap.Var × Value} (h : bindingFits bindi
 
 private theorem fits_region {region : Bap.Emu.Region} (h : regionFits region = true) : RegionSafe region := by
   simp only [regionFits, Bool.and_eq_true] at h
-  exact ⟨by simpa [fitsWord] using h.1, by simpa [fitsWord] using h.2⟩
+  exact ⟨by simpa [fitsWord] using h.1, by simpa using h.2⟩
 
 private theorem fits_thread {context : ThreadContext} (h : threadFits context = true) : ThreadSafe context := by
   simp only [threadFits, Bool.and_eq_true, List.all_eq_true] at h
@@ -2790,27 +2826,141 @@ section RegionMemory
 
 open Proofs.Core.MemoryLaws
 
-private theorem foldl_pagesSized {width : Nat} (regions : List Bap.Emu.Region) (memory : Bap.Memory width)
+/-- Two bytes of a range no bigger than the address space are at two addresses. -/
+private theorem wrap_ne {width address a b : Nat} (ha : a < 2 ^ width) (hb : b < 2 ^ width) (hne : a ≠ b) :
+    (address + a) % 2 ^ width ≠ (address + b) % 2 ^ width := by
+  intro heq
+  rcases Nat.lt_or_gt_of_ne hne with hlt | hlt
+  · have := Nat.sub_mod_eq_zero_of_mod_eq heq.symm
+    rw [show address + b - (address + a) = b - a by omega] at this
+    have := Nat.le_of_dvd (by omega) (Nat.dvd_of_mod_eq_zero this)
+    omega
+  · have := Nat.sub_mod_eq_zero_of_mod_eq heq
+    rw [show address + a - (address + b) = a - b by omega] at this
+    have := Nat.le_of_dvd (by omega) (Nat.dvd_of_mod_eq_zero this)
+    omega
+
+private theorem piecesFold_pagesSized {width : Nat} (address : Nat) (pieces : List (Nat × ByteArray)) (memory : Bap.Memory width)
     (h : PagesSized memory) :
-    PagesSized (regions.foldl (init := memory) fun memory region =>
-      Bap.Memory.writeRegion memory region.address region.data) := by
-  induction regions generalizing memory with
+    PagesSized (pieces.foldl (init := memory) fun memory piece => memory.writeRegion (address + piece.1) piece.2) := by
+  induction pieces generalizing memory with
   | nil => exact h
   | cons head tail ih => exact ih _ (writeRegion_pagesSized h _ _)
+
+theorem writeSparse_pagesSized {width : Nat} {memory : Bap.Memory width} (h : PagesSized memory) (address : Nat) (data : ByteArray) :
+    PagesSized (writeSparse memory address data) :=
+  piecesFold_pagesSized address _ memory h
+
+/-- Each piece of `pieces data` is within `data`, and is what `data` has there. -/
+private theorem piece_within {data : ByteArray} {piece : Nat × ByteArray} (h : piece ∈ Jit.pieces data) :
+    piece.1 + piece.2.size ≤ data.size ∧ ∀ j < piece.2.size, piece.2[j]! = data[piece.1 + j]! := by
+  obtain ⟨index, hindex, rfl⟩ := Jit.mem_pieces h
+  dsimp only
+  refine ⟨by simp only [ByteArray.size_extract]; omega, fun j hj => ?_⟩
+  simp only [ByteArray.size_extract] at hj
+  rw [getElem!_pos _ j (by simp only [ByteArray.size_extract]; omega), ByteArray.getElem_extract,
+    getElem!_pos data _ (by omega)]
+
+private theorem piecesFold_outside {width : Nat} {data : ByteArray} (address : Nat) (pieces : List (Nat × ByteArray))
+    (memory : Bap.Memory width) (h : PagesSized memory) (target : BitVec width)
+    (hwithin : ∀ piece ∈ pieces, piece.1 + piece.2.size ≤ data.size)
+    (hne : ∀ j, j < data.size → (address + j) % 2 ^ width ≠ target.toNat) :
+    Bap.Memory.readByte (pieces.foldl (init := memory) fun memory piece => memory.writeRegion (address + piece.1) piece.2) target =
+      Bap.Memory.readByte memory target := by
+  induction pieces generalizing memory with
+  | nil => rfl
+  | cons head tail ih =>
+    simp only [List.foldl_cons]
+    rw [ih _ (writeRegion_pagesSized h _ _) (fun piece hp => hwithin piece (List.mem_cons_of_mem _ hp))]
+    apply readByte_writeRegion_outside h
+    intro j hj
+    have := hwithin head (List.mem_cons_self ..)
+    rw [Nat.add_assoc]
+    exact hne _ (by omega)
+
+/-- Addresses outside what `writeSparse` writes keep what they had. -/
+theorem readByte_writeSparse_outside {width : Nat} {memory : Bap.Memory width} (h : PagesSized memory) (address : Nat)
+    (data : ByteArray) (target : BitVec width) (hne : ∀ j, j < data.size → (address + j) % 2 ^ width ≠ target.toNat) :
+    Bap.Memory.readByte (writeSparse memory address data) target = Bap.Memory.readByte memory target :=
+  piecesFold_outside address _ memory h target (fun _ hp => (piece_within hp).1) hne
+
+/-- After pieces of `data`, a byte of it is what the pieces have of it, or what was there if none has it. -/
+private theorem piecesFold_inside {width : Nat} {data : ByteArray} (address : Nat) (pieces : List (Nat × ByteArray))
+    (memory : Bap.Memory width) (h : PagesSized memory) (hsize : data.size ≤ 2 ^ width)
+    (hpieces : ∀ piece ∈ pieces, piece.1 + piece.2.size ≤ data.size ∧ ∀ j < piece.2.size, piece.2[j]! = data[piece.1 + j]!)
+    {offset : Nat} (ho : offset < data.size) (target : BitVec width) (ht : target.toNat = (address + offset) % 2 ^ width) :
+    Bap.Memory.readByte (pieces.foldl (init := memory) fun memory piece => memory.writeRegion (address + piece.1) piece.2) target =
+      if pieces.any (fun piece => piece.1 ≤ offset && offset < piece.1 + piece.2.size) then data[offset]!
+      else Bap.Memory.readByte memory target := by
+  induction pieces generalizing memory with
+  | nil => simp
+  | cons head tail ih =>
+    simp only [List.foldl_cons]
+    rw [ih _ (writeRegion_pagesSized h _ _) (fun piece hp => hpieces piece (List.mem_cons_of_mem _ hp))]
+    obtain ⟨hwithin, hagree⟩ := hpieces head (List.mem_cons_self ..)
+    by_cases hcover : head.1 ≤ offset ∧ offset < head.1 + head.2.size
+    · have hany : (head :: tail).any (fun piece => piece.1 ≤ offset && offset < piece.1 + piece.2.size) = true := by
+        simp only [List.any_cons, hcover, decide_true, Bool.and_self, Bool.true_or]
+      rw [hany]
+      split
+      · rfl
+      · rw [readByte_writeRegion_inside h _ _ (by omega) (j := offset - head.1) (by omega) target
+          (by rw [ht]; congr 1; omega)]
+        rw [hagree _ (by omega)]
+        congr 1
+        omega
+    · have hhead : (head.1 ≤ offset && offset < head.1 + head.2.size) = false := by
+        simp only [Bool.and_eq_false_iff, decide_eq_false_iff_not]
+        omega
+      simp only [List.any_cons, hhead, Bool.false_or]
+      split
+      · rfl
+      · apply readByte_writeRegion_outside h
+        intro j hj
+        rw [ht, Nat.add_assoc]
+        exact wrap_ne (by omega) (by omega) (by omega)
+
+/-- What `writeSparse` writes reads as its bytes, where what was there was zeros. -/
+theorem readByte_writeSparse_inside {width : Nat} {memory : Bap.Memory width} (h : PagesSized memory) (address : Nat)
+    (data : ByteArray) (hsize : data.size ≤ 2 ^ width) {offset : Nat} (ho : offset < data.size) (target : BitVec width)
+    (ht : target.toNat = (address + offset) % 2 ^ width) (hzero : Bap.Memory.readByte memory target = 0) :
+    Bap.Memory.readByte (writeSparse memory address data) target = data[offset]! := by
+  simp only [writeSparse]
+  rw [piecesFold_inside address _ memory h hsize (fun _ hp => piece_within hp) ho target ht]
+  split
+  · rfl
+  · next hnone =>
+    rw [hzero]
+    -- None of the pieces has it, so it is zero, as zeros with the pieces in them are `data`.
+    have hfind : (Jit.pieces data).find? (fun piece => piece.1 ≤ offset && offset < piece.1 + piece.2.size) = none := by
+      rw [List.find?_eq_none]
+      intro piece hp hcover
+      exact hnone (List.any_eq_true.2 ⟨piece, hp, hcover⟩)
+    have hdata : data.data = Array.ofFn (n := data.size) fun index => Jit.byteOf (Jit.pieces data) index := by
+      exact (congrArg ByteArray.data (Jit.fill_pieces data)).symm
+    rw [getElem!_pos data offset ho, ByteArray.getElem_eq_getElem_data]
+    simp only [hdata, Array.getElem_ofFn, Jit.byteOf, hfind]
+
+private theorem foldl_pagesSized {width : Nat} (regions : List Bap.Emu.Region) (memory : Bap.Memory width)
+    (h : PagesSized memory) :
+    PagesSized (regions.foldl (init := memory) fun memory region => writeSparse memory region.address region.data) := by
+  induction regions generalizing memory with
+  | nil => exact h
+  | cons head tail ih => exact ih _ (writeSparse_pagesSized h _ _)
 
 private theorem foldl_outside {width : Nat} (regions : List Bap.Emu.Region) (memory : Bap.Memory width)
     (h : PagesSized memory) (target : BitVec width)
     (hspace : ∀ region ∈ regions, regionInSpace width region = true)
     (hout : ∀ region ∈ regions, region.contains target.toNat = false) :
-    Bap.Memory.readByte (regions.foldl (init := memory) fun memory region =>
-      Bap.Memory.writeRegion memory region.address region.data) target = Bap.Memory.readByte memory target := by
+    Bap.Memory.readByte (regions.foldl (init := memory) fun memory region => writeSparse memory region.address region.data) target =
+      Bap.Memory.readByte memory target := by
   induction regions generalizing memory with
   | nil => rfl
   | cons head tail ih =>
     simp only [List.foldl_cons]
-    rw [ih _ (writeRegion_pagesSized h _ _) (fun r hr => hspace r (List.mem_cons_of_mem _ hr))
+    rw [ih _ (writeSparse_pagesSized h _ _) (fun r hr => hspace r (List.mem_cons_of_mem _ hr))
       (fun r hr => hout r (List.mem_cons_of_mem _ hr))]
-    apply readByte_writeRegion_outside h
+    apply readByte_writeSparse_outside h
     intro j hj he
     have hin : head.address + head.data.size ≤ 2 ^ width := by
       simpa [regionInSpace] using hspace head (List.mem_cons_self ..)
@@ -2839,14 +2989,17 @@ theorem regionsMemory_byte {width : Nat} (regions : List Bap.Emu.Region)
   have hsized : PagesSized memory := by
     rw [← hmem]
     exact empty_pagesSized
+  have hzero : Bap.Memory.readByte memory (BitVec.ofNat width (region.address + offset)) = 0 := by
+    rw [← hmem]
+    exact readByte_empty_memory _
   clear hmem
   induction regions generalizing memory with
   | nil => cases hm
   | cons head tail ih =>
     simp only [List.foldl_cons]
     rcases List.mem_cons.1 hm with rfl | hm'
-    · rw [foldl_outside tail _ (writeRegion_pagesSized hsized _ _) _ (fun r hr => hspace r (List.mem_cons_of_mem _ hr))]
-      · apply readByte_writeRegion_inside hsized _ _ (by omega) ho
+    · rw [foldl_outside tail _ (writeSparse_pagesSized hsized _ _) _ (fun r hr => hspace r (List.mem_cons_of_mem _ hr))]
+      · apply readByte_writeSparse_inside hsized _ _ (by omega) ho _ _ hzero
         rw [htarget, Nat.mod_eq_of_lt hlt]
       · intro other ho'
         have hnot := (List.pairwise_cons.1 hdisjoint).1 other ho' (region.address + offset)
@@ -2854,8 +3007,18 @@ theorem regionsMemory_byte {width : Nat} (regions : List Bap.Emu.Region)
         cases hc : other.contains (region.address + offset) with
         | false => rfl
         | true => exact absurd ⟨hcontains, hc⟩ hnot
-    · exact ih (fun r hr => hspace r (List.mem_cons_of_mem _ hr)) (List.pairwise_cons.1 hdisjoint).2 hm' _
-        (writeRegion_pagesSized hsized _ _)
+    · refine ih (fun r hr => hspace r (List.mem_cons_of_mem _ hr)) (List.pairwise_cons.1 hdisjoint).2 hm' _
+        (writeSparse_pagesSized hsized _ _) ?_
+      rw [readByte_writeSparse_outside hsized _ _ _, hzero]
+      intro j hj he
+      have hhead : head.address + head.data.size ≤ 2 ^ width := by
+        simpa [regionInSpace] using hspace head (List.mem_cons_self ..)
+      rw [htarget, Nat.mod_eq_of_lt (by omega)] at he
+      have hnot := (List.pairwise_cons.1 hdisjoint).1 region hm' (region.address + offset)
+      apply hnot
+      refine ⟨?_, hcontains⟩
+      simp [Bap.Emu.Region.contains]
+      omega
 
 /-- A forked process finds its own bytes in a restored checkpoint, not its parent's. -/
 theorem spaceRegions_process (snapshot : Snapshot) {id : ThreadId} {regions : List Bap.Emu.Region}

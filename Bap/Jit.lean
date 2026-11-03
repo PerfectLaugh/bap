@@ -193,4 +193,114 @@ def slice (data : ByteArray) (start stop : Nat) : ByteArray := data.extract star
 
 @[simp] theorem slice_eq (data : ByteArray) (start stop : Nat) : slice data start stop = data.extract start stop := rfl
 
+/-- What a checkpoint can ask `fill` for, which is more than any host could give. -/
+def fillLimit : Nat := 2 ^ 48
+
+/-- How many bytes a piece of `pieces` has, but for the last, which has what is left. -/
+def pieceSize : Nat := 4096
+
+@[extern "bap_bytes_pieces"]
+opaque piecesNative (data : ByteArray) : List (Nat × ByteArray)
+
+/-- What of `data` isn't zeros, as each piece of `pieceSize` bytes from the start that isn't all zeros, with where it starts. -/
+@[implemented_by piecesNative]
+def pieces (data : ByteArray) : List (Nat × ByteArray) :=
+  (List.range ((data.size + pieceSize - 1) / pieceSize)).filterMap fun index =>
+    let piece := data.extract (index * pieceSize) (index * pieceSize + pieceSize)
+    if piece.data.all (· == 0) then none else some (index * pieceSize, piece)
+
+/-- What `fill` has at `index`: from the first piece that has it, or else zero. -/
+def byteOf (pieces : List (Nat × ByteArray)) (index : Nat) : UInt8 :=
+  match pieces.find? fun (start, bytes) => start ≤ index && index < start + bytes.size with
+  | some (start, bytes) => bytes[index - start]!
+  | none => 0
+
+@[extern "bap_bytes_fill"]
+opaque fillNative (size : Nat) (pieces : List (Nat × ByteArray)) : ByteArray
+
+/-- `size` bytes of zeros with `pieces` in them, which take memory of the host only for the pieces, as `zeros` does. -/
+@[implemented_by fillNative]
+def fill (size : Nat) (pieces : List (Nat × ByteArray)) : ByteArray :=
+  ⟨Array.ofFn (n := size) fun index => byteOf pieces index⟩
+
+/-- Each piece of `pieces` is of `data`, from where it starts, which is in `data`. -/
+theorem mem_pieces {data : ByteArray} {piece : Nat × ByteArray} (h : piece ∈ pieces data) :
+    ∃ index, index * pieceSize < data.size ∧
+      piece = (index * pieceSize, data.extract (index * pieceSize) (index * pieceSize + pieceSize)) := by
+  simp only [pieces, List.mem_filterMap, List.mem_range] at h
+  obtain ⟨index, hindex, hpiece⟩ := h
+  split at hpiece
+  · cases hpiece
+  · refine ⟨index, ?_, (Option.some.inj hpiece).symm⟩
+    have hdiv := Nat.div_mul_le_self (data.size + pieceSize - 1) pieceSize
+    have hmul := Nat.mul_le_mul_right pieceSize (Nat.succ_le_of_lt hindex)
+    simp only [Nat.succ_mul] at hmul
+    have : 0 < pieceSize := by decide
+    omega
+
+theorem length_pieces (data : ByteArray) : (pieces data).length ≤ data.size := by
+  simp only [pieces]
+  refine Nat.le_trans (List.length_filterMap_le _ _) ?_
+  rw [List.length_range]
+  rcases Nat.eq_zero_or_pos data.size with hzero | hpos
+  · simp [hzero, pieceSize]
+  · exact Nat.div_le_of_le_mul (by simp only [pieceSize]; omega)
+
+/-- Zeros with the pieces of `data` in them are `data`. -/
+theorem fill_pieces (data : ByteArray) : fill data.size (pieces data) = data := by
+  apply ByteArray.ext
+  apply Array.ext
+  · exact Array.size_ofFn
+  intro index hfill hdata
+  have hindex : index < data.size := hdata
+  have hget : (fill data.size (pieces data)).data[index]'hfill = byteOf (pieces data) index := Array.getElem_ofFn ..
+  rw [hget]
+  unfold byteOf
+  split
+  · next start bytes hfind =>
+    have hin := List.find?_some hfind
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hin
+    obtain ⟨k, _, hk⟩ := mem_pieces (List.mem_of_find?_eq_some hfind)
+    simp only [Prod.mk.injEq] at hk
+    obtain ⟨rfl, rfl⟩ := hk
+    have hlt : index - k * pieceSize < (data.extract (k * pieceSize) (k * pieceSize + pieceSize)).size := by omega
+    rw [getElem!_pos (data.extract (k * pieceSize) (k * pieceSize + pieceSize)) (index - k * pieceSize) hlt,
+      ByteArray.getElem_extract]
+    simp only [ByteArray.getElem_eq_getElem_data]
+    congr 1
+    omega
+  · next hfind =>
+    rw [List.find?_eq_none] at hfind
+    have hP : 0 < pieceSize := by decide
+    let k := index / pieceSize
+    have hk1 : k * pieceSize ≤ index := Nat.div_mul_le_self index pieceSize
+    have hk2 : index < k * pieceSize + pieceSize := by
+      have := Nat.lt_div_mul_add (a := index) hP
+      simpa [k, Nat.mul_comm] using this
+    have hsize : index - k * pieceSize < (data.extract (k * pieceSize) (k * pieceSize + pieceSize)).size := by
+      simp only [ByteArray.size_extract]
+      omega
+    by_cases hz : (data.extract (k * pieceSize) (k * pieceSize + pieceSize)).data.all (· == 0) = true
+    · rw [Array.all_eq_true] at hz
+      have := hz (index - k * pieceSize) hsize
+      simp only [ByteArray.data_extract, Array.getElem_extract, beq_iff_eq] at this
+      have heq : k * pieceSize + (index - k * pieceSize) = index := by omega
+      simp only [heq] at this
+      exact this.symm
+    · exfalso
+      have hmem : (k * pieceSize, data.extract (k * pieceSize) (k * pieceSize + pieceSize)) ∈ pieces data := by
+        simp only [pieces, List.mem_filterMap, List.mem_range]
+        refine ⟨k, ?_, ?_⟩
+        · apply Nat.lt_of_lt_of_le (m := (index + pieceSize) / pieceSize)
+          · rw [Nat.add_div_right _ hP]
+            exact Nat.lt_succ_self _
+          · exact Nat.div_le_div_right (by omega)
+        · have hz' := Bool.eq_false_iff.mpr hz
+          simp only [hz', Bool.false_eq_true, ↓reduceIte]
+      have := hfind _ hmem
+      simp only [Bool.and_eq_true, decide_eq_true_eq, not_and, Nat.not_lt] at this
+      have := this hk1
+      simp only [ByteArray.size_extract] at this hsize
+      omega
+
 end Bap.Jit

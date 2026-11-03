@@ -63,12 +63,17 @@ private def putBindingBin (writer : Writer) (binding : Bap.Var × Value) : Write
   let (var, value) := binding
   putValueBin (putBool (putNat (putTypBin (putText writer var.name) var.typ) var.index) var.isVirtual) value
 
+private def putPieceBin (writer : Writer) (piece : Nat × ByteArray) : Writer :=
+  putBytes (putNat (putNat writer piece.1) piece.2.size) piece.2
+
+/-- A region as its size and what of it isn't zeros, which is all that a region that a program mapped and hardly used has. -/
 private def putRegionBin (writer : Writer) (region : Region) : Writer :=
   let writer := putNat writer region.address
   let writer := putBool writer region.protection.readable
   let writer := putBool writer region.protection.writable
   let writer := putBool writer region.protection.executable
-  putBytes (putNat writer region.data.size) region.data
+  let pieces := Jit.pieces region.data
+  pieces.foldl putPieceBin (putNat (putNat writer region.data.size) pieces.length)
 
 private def putThreadBin (writer : Writer) (context : ThreadContext) : Writer :=
   let writer := putNat writer context.id
@@ -204,7 +209,24 @@ private def getBindingBin (reader : Reader) : Except String ((Bap.Var × Value) 
   let (value, reader) ← getValueBin reader
   .ok ((⟨name, typ, index, isVirtual⟩, value), reader)
 
+private def getPieceBin (reader : Reader) : Except String ((Nat × ByteArray) × Reader) := do
+  let (start, reader) ← getNat reader
+  let (size, reader) ← getNat reader
+  let (bytes, reader) ← takeBytes reader size
+  .ok ((start, bytes), reader)
+
 private def getRegionBin (reader : Reader) : Except String (Region × Reader) := do
+  let (address, reader) ← getNat reader
+  let (readable, reader) ← getBool reader
+  let (writable, reader) ← getBool reader
+  let (executable, reader) ← getBool reader
+  let (size, reader) ← getNat reader
+  if size ≥ Jit.fillLimit then .error "a region of the binary checkpoint is too big" else
+  let (pieces, reader) ← getList reader getPieceBin
+  .ok (⟨address, Jit.fill size pieces, ⟨readable, writable, executable⟩⟩, reader)
+
+/-- A region as `BAPCKPT5` has it, with all its bytes. -/
+private def getRegionV5 (reader : Reader) : Except String (Region × Reader) := do
   let (address, reader) ← getNat reader
   let (readable, reader) ← getBool reader
   let (writable, reader) ← getBool reader
@@ -222,9 +244,10 @@ private def getThreadBin (reader : Reader) : Except String (ThreadContext × Rea
   let (skip, reader) ← getSkipBin reader
   .ok (⟨id, { env := env }, pc, stopped, pending, skip⟩, reader)
 
-private def getProcessBin (reader : Reader) : Except String ((ThreadId × List Region) × Reader) := do
+private def getProcessBin (getRegion : Reader → Except String (Region × Reader)) (reader : Reader) :
+    Except String ((ThreadId × List Region) × Reader) := do
   let (id, reader) ← getNat reader
-  let (regions, reader) ← getList reader getRegionBin
+  let (regions, reader) ← getList reader getRegion
   .ok ((id, regions), reader)
 
 private def getTask (reader : Reader) : Except String (Tasks.Entry × Reader) := do
@@ -250,7 +273,10 @@ private def getWaiter (reader : Reader) : Except String (Tasks.Waiter × Reader)
   let (statusAddress, reader) ← getSkipBin reader
   .ok (⟨thread, target, statusAddress⟩, reader)
 
-private def binaryMagic : ByteArray := "BAPCKPT5".toUTF8
+private def binaryMagic : ByteArray := "BAPCKPT6".toUTF8
+
+/-- What checkpoints were before regions had only what isn't zeros, which are still read. -/
+private def binaryMagicV5 : ByteArray := "BAPCKPT5".toUTF8
 
 private def encodeBinaryUnchecked (snapshot : Snapshot) : ByteArray :=
   let writer := putBytes ⟨binaryMagic⟩ (natBytes snapshot.pc)
@@ -297,7 +323,7 @@ private def bindingFits (binding : Bap.Var × Value) : Bool :=
   fitsWord binding.1.name.utf8ByteSize && typFits binding.1.typ && fitsWord binding.1.index && valueFits binding.2
 
 private def regionFits (region : Region) : Bool :=
-  fitsWord region.address && fitsWord region.data.size
+  fitsWord region.address && decide (region.data.size < Jit.fillLimit)
 
 private def threadFits (context : ThreadContext) : Bool :=
   fitsWord context.id && fitsWord context.pc && fitsWord context.state.env.length &&
@@ -334,19 +360,20 @@ def encodeBinarySnapshot (snapshot : Snapshot) : Except String ByteArray :=
   else .error "snapshot has a value too wide for the binary checkpoint format"
 
 def decodeBinarySnapshot (data : ByteArray) : Except String Snapshot := do
-  if data.extract 0 binaryMagic.size != binaryMagic then
-    .error "not a binary checkpoint"
-  else
+  let getRegion ← if data.extract 0 binaryMagic.size == binaryMagic then pure getRegionBin
+    else if data.extract 0 binaryMagicV5.size == binaryMagicV5 then pure getRegionV5
+    else .error "not a binary checkpoint"
+  do
     let reader : Reader := { data, offset := binaryMagic.size }
     let (pc, reader) ← getNat reader
     let (stopped, reader) ← getBool reader
-    let (regions, reader) ← getList reader getRegionBin
+    let (regions, reader) ← getList reader getRegion
     let (env, reader) ← getList reader getBindingBin
     let (threads, reader) ← getList reader getThreadBin
     let (currentThread, reader) ← getNat reader
     let (nextThread, reader) ← getNat reader
     let (pending, reader) ← getPendingBin reader
-    let (processMemory, reader) ← getList reader getProcessBin
+    let (processMemory, reader) ← getList reader (getProcessBin getRegion)
     let (skip, reader) ← getSkipBin reader
     let (tasks, reader) ← getList reader getTask
     let (waiters, reader) ← getList reader getWaiter
@@ -356,10 +383,14 @@ def decodeBinarySnapshot (data : ByteArray) : Except String Snapshot := do
     else
       .ok ⟨{ env := env }, pc, regions, stopped, threads, currentThread, nextThread, pending, processMemory, skip, ⟨tasks, waiters, futexes⟩⟩
 
+/-- `memory` with what isn't zeros of `data` at `address`, which is `data` there where `memory` has zeros, and takes no more of the host
+than what isn't zeros. -/
+def writeSparse (memory : Bap.Memory width) (address : Nat) (data : ByteArray) : Bap.Memory width :=
+  (Jit.pieces data).foldl (init := memory) fun memory piece => memory.writeRegion (address + piece.1) piece.2
+
 /-- The memory holding the bytes of `regions`. -/
 def regionsMemory (width : Nat) (regions : List Region) : Bap.Memory width :=
-  regions.foldl (init := Bap.Memory.empty width) fun memory region =>
-    Bap.Memory.writeRegion memory region.address region.data
+  regions.foldl (init := Bap.Memory.empty width) fun memory region => writeSparse memory region.address region.data
 
 /-- The bytes of the address space of thread `id`: its own, or else the shared ones. -/
 def spaceRegions (snapshot : Snapshot) (id : ThreadId) : List Region :=

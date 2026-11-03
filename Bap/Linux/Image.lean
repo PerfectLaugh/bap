@@ -1,3 +1,4 @@
+import Bap.Jit
 import Bap.Linux.Kernel
 import Bap.Linux.Wire
 
@@ -169,14 +170,38 @@ def getProcess : Decoder ProcessImage := fun data at_ => do
   let (mappings, at_) ← getList getMapping data at_
   .ok ({ group, descriptors, cwd, umask, breakStart, breakEnd, command, environment, program, auxiliary, mappings }, at_)
 
+def putPiece (out : ByteArray) (piece : Nat × ByteArray) : ByteArray := putBytes (putNat out piece.1) piece.2
+
+def getPiece : Decoder (Nat × ByteArray) := fun data at_ => do
+  let (start, at_) ← getNat data at_
+  let (bytes, at_) ← getBytes data at_
+  .ok ((start, bytes), at_)
+
+/-- Bytes as their size and what of them isn't zeros, which is all that memory that is shared and hardly used has, or as they are when
+they are too many for `Jit.fill`. -/
+def putSparse (out data : ByteArray) : ByteArray :=
+  if data.size < Bap.Jit.fillLimit then putList putPiece (putNat (putNat out 1) data.size) (Bap.Jit.pieces data)
+  else putBytes (putNat out 0) data
+
+def getSparse : Decoder ByteArray := fun data at_ => do
+  let (tag, at_) ← getNat data at_
+  match tag with
+  | 0 => getBytes data at_
+  | 1 =>
+    let (size, at_) ← getNat data at_
+    if size ≥ Bap.Jit.fillLimit then .error "a Linux checkpoint with bytes too many to be" else
+    let (pieces, at_) ← getList getPiece data at_
+    .ok (Bap.Jit.fill size pieces, at_)
+  | _ => .error "a Linux checkpoint with bytes of an unknown kind"
+
 def putInode (out : ByteArray) (inode : InodeImage) : ByteArray :=
-  putBytes (putNat (putNat (putNat out inode.number) inode.mode) inode.kind) inode.data
+  putSparse (putNat (putNat (putNat out inode.number) inode.mode) inode.kind) inode.data
 
 def getInode : Decoder InodeImage := fun data at_ => do
   let (number, at_) ← getNat data at_
   let (mode, at_) ← getNat data at_
   let (kind, at_) ← getNat data at_
-  let (bytes, at_) ← getBytes data at_
+  let (bytes, at_) ← getSparse data at_
   .ok ({ number, mode, kind, data := bytes }, at_)
 
 def putPath (out : ByteArray) (entry : String × Nat) : ByteArray := putNat (putText out entry.1) entry.2

@@ -1099,6 +1099,56 @@ extern "C" lean_obj_res bap_bytes_slice(lean_obj_arg dataObject, lean_obj_arg st
   return result;
 }
 
+// `Jit.pieces`: each piece of 4096 bytes from the start that isn't all zeros, with where it starts, in order.
+extern "C" lean_obj_res bap_bytes_pieces(lean_obj_arg dataObject) {
+  const size_t size = lean_sarray_size(dataObject);
+  const uint8_t *data = lean_sarray_cptr(dataObject);
+  std::vector<size_t> starts;
+  for (size_t start = 0; start < size; start += 4096)
+    if (!allZero(data + start, std::min<size_t>(4096, size - start)))
+      starts.push_back(start);
+  lean_obj_res list = lean_box(0);
+  for (auto at = starts.rbegin(); at != starts.rend(); ++at) {
+    const size_t count = std::min<size_t>(4096, size - *at);
+    lean_obj_res bytes = lean_alloc_sarray(1, count, count);
+    std::memcpy(lean_sarray_cptr(bytes), data + *at, count);
+    lean_obj_res piece = lean_alloc_ctor(0, 2, 0);
+    lean_ctor_set(piece, 0, lean_usize_to_nat(*at));
+    lean_ctor_set(piece, 1, bytes);
+    lean_obj_res cell = lean_alloc_ctor(1, 2, 0);
+    lean_ctor_set(cell, 0, piece);
+    lean_ctor_set(cell, 1, list);
+    list = cell;
+  }
+  lean_dec(dataObject);
+  return list;
+}
+
+// `Jit.fill`: zeros that take no memory yet, with each piece in them where it starts, the first of those that have a byte giving it.
+extern "C" lean_obj_res bap_bytes_fill(lean_obj_arg sizeObject, lean_obj_arg piecesObject) {
+  const size_t size = lean_usize_of_nat(sizeObject);
+  lean_obj_res result = lazyZeros(size);
+  uint8_t *to = lean_sarray_cptr(result);
+  std::vector<b_lean_obj_arg> pieces;
+  for (b_lean_obj_arg cell = piecesObject; !lean_is_scalar(cell); cell = lean_ctor_get(cell, 1))
+    pieces.push_back(lean_ctor_get(cell, 0));
+  for (auto at = pieces.rbegin(); at != pieces.rend(); ++at) {
+    b_lean_obj_arg startObject = lean_ctor_get(*at, 0);
+    b_lean_obj_arg bytes = lean_ctor_get(*at, 1);
+    if (!lean_is_scalar(startObject))
+      continue;
+    const size_t start = lean_unbox(startObject);
+    if (start >= size)
+      continue;
+    const size_t count = std::min(lean_sarray_size(bytes), size - start);
+    if (count != 0)
+      std::memcpy(to + start, lean_sarray_cptr(bytes), count);
+  }
+  lean_dec(sizeObject);
+  lean_dec(piecesObject);
+  return result;
+}
+
 // The bytes of a range of a memory, which takes memory of the host for the pages that it has and not for the rest.
 extern "C" lean_obj_res bap_jit_memory_region_bytes(lean_obj_arg memoryObject, uint64_t address, b_lean_obj_arg sizeObject, lean_obj_arg) {
   auto *memory = static_cast<PagedMemory *>(lean_get_external_data(memoryObject));

@@ -335,13 +335,46 @@ theorem putOpenFile_inverts : Inverts putOpenFile getOpenFile := by
   have h1 := putNat_inverts data out id ((putNat_extends _ inode).trans p2)
   simp [getOpenFile, putOpenFile, h1, h2, h3, h4, bind, Except.bind]
 
+theorem putPiece_extends : Extends putPiece := fun out _ => (putNat_extends out _).trans (putBytes_extends _ _)
+
+theorem putPiece_inverts : Inverts putPiece getPiece := by
+  rintro data out ⟨start, bytes⟩ hp
+  have h2 := putBytes_inverts data _ bytes hp
+  have h1 := putNat_inverts data out start ((putBytes_extends _ bytes).trans hp)
+  simp [getPiece, putPiece, h1, h2, bind, Except.bind]
+
+theorem putSparse_extends : Extends putSparse := by
+  intro out bytes
+  unfold putSparse
+  split
+  · exact (putNat_extends out 1).trans ((putNat_extends _ _).trans (putList_extends putPiece_extends _ _))
+  · exact (putNat_extends out 0).trans (putBytes_extends _ _)
+
+/-- What isn't zeros of bytes, put in zeros, is the bytes, and so is what is too many for that. -/
+theorem putSparse_inverts : Inverts putSparse getSparse := by
+  intro data out bytes hp
+  unfold putSparse at hp ⊢
+  split at hp
+  · next hsmall =>
+    rw [ite_eq_left hsmall]
+    have h3 := putList_inverts putPiece_extends putPiece_inverts data _ (Bap.Jit.pieces bytes) hp
+    have p2 := (putList_extends putPiece_extends _ (Bap.Jit.pieces bytes)).trans hp
+    have h2 := putNat_inverts data _ bytes.size p2
+    have h1 := putNat_inverts data out 1 ((putNat_extends _ bytes.size).trans p2)
+    have hlimit : ¬ bytes.size ≥ Bap.Jit.fillLimit := by omega
+    simp [getSparse, h1, h2, h3, hlimit, Bap.Jit.fill_pieces, bind, Except.bind]
+  · rw [ite_eq_right (by assumption)]
+    have h2 := putBytes_inverts data _ bytes hp
+    have h1 := putNat_inverts data out 0 ((putBytes_extends _ bytes).trans hp)
+    simp [getSparse, h1, h2, bind, Except.bind]
+
 theorem putInode_extends : Extends putInode := fun out _ =>
-  (putNat_extends out _).trans ((putNat_extends _ _).trans ((putNat_extends _ _).trans (putBytes_extends _ _)))
+  (putNat_extends out _).trans ((putNat_extends _ _).trans ((putNat_extends _ _).trans (putSparse_extends _ _)))
 
 theorem putInode_inverts : Inverts putInode getInode := by
   rintro data out ⟨number, mode, kind, bytes⟩ hp
-  have h4 := putBytes_inverts data _ bytes hp
-  have p3 := (putBytes_extends _ bytes).trans hp
+  have h4 := putSparse_inverts data _ bytes hp
+  have p3 := (putSparse_extends _ bytes).trans hp
   have h3 := putNat_inverts data _ kind p3
   have p2 := (putNat_extends _ kind).trans p3
   have h2 := putNat_inverts data _ mode p2
