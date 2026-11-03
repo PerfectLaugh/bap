@@ -1939,6 +1939,15 @@ def testManifest : IO Unit := do
   assertEqual "a library is known by what its file was" (some (digest dep)) ((entry "/lib/libdep.so").map (·.digest))
   assertEqual "one whose initializers ran says so" (some true) ((entry "/lib/libdep.so").map (·.initialized))
   assertEqual "one whose initializers didn't says so" (some false) ((entry "/lib/libother.so").map (·.initialized))
+  -- A symbol that the library doesn't export is found in its file, and one that it does is where `findSymbol` says.
+  let some depLibrary := entry "/lib/libdep.so" | throw <| IO.userError "no libdep"
+  let some otherLibrary := entry "/lib/libother.so" | throw <| IO.userError "no libother"
+  assertEqual "a symbol that isn't exported is found" (some (depLibrary.base + 0x1040c)) (← machine.findStaticSymbol "dep_stop")
+  assertEqual "and isn't by what exports have" none (← machine.findSymbol "dep_stop")
+  assertEqual "an exported one is where it is exported" (← machine.findSymbol "dep_add") (← machine.findStaticSymbol "dep_add")
+  assertEqual "it is found in the library asked for" (some (depLibrary.base + 0x1040c)) (← machine.findStaticSymbol "dep_stop" (some depLibrary))
+  assertEqual "and not in another" none (← machine.findStaticSymbol "dep_stop" (some otherLibrary))
+  assertEqual "a symbol that is nowhere isn't found" none (← machine.findStaticSymbol "no_such_symbol")
   let data ← machine.checkpoint
   let again ← Bap.Linux.Machine.ofCheckpoint data (expectedLibraries := [digest dep, digest other])
   assertEqual "a checkpoint has what was loaded" manifest.length (← again.manifest).length

@@ -596,6 +596,25 @@ def Machine.findSymbol (machine : Machine) (name : String) (library : Option Loa
     | none => loaded
   pure (scope.findSome? fun other => other.symbols.lookup name)
 
+/-- Where a symbol is in a loaded file, including one that isn't exported for dynamic linking. -/
+def Machine.findStaticSymbol (machine : Machine) (name : String) (library : Option LoadedLibrary := none) : IO (Option Nat) := do
+  let space := (← currentTask machine.emu).space
+  let loaded : List LoadedLibrary := spaceHas space (← machine.libraries.get)
+  let scope : List LoadedLibrary := match library with
+    | some wanted => loaded.filter fun other => other.path == wanted.path
+    | none => loaded
+  for other in scope do
+    match fileOf (← machine.kernel.get) other.path with
+    | .error _ => pure ()
+    | .ok data =>
+      match Image.Elf.decode data with
+      | .error _ => pure ()
+      | .ok image =>
+        match image.symbols.find? fun symbol => symbol.name == name && symbol.addr != 0 with
+        | some symbol => return some (other.base + symbol.addr)
+        | none => pure ()
+  return none
+
 /-- What is loaded in the process that runs, in the order that a symbol is looked for in them. -/
 def Machine.loadedLibraries (machine : Machine) : IO (List LoadedLibrary) := do
   pure (spaceHas (← currentTask machine.emu).space (← machine.libraries.get))
