@@ -97,6 +97,7 @@ import Bap.Crypto.KeyWrap
 import Bap.Crypto.Sha512
 import Bap.Linux.Accelerate
 import Bap.Linux.JniFiles
+import Bap.Linux.BaseEnv
 import Bap.ABI
 import Bap.API
 import Bap.Decompile

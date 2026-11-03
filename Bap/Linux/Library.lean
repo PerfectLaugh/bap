@@ -62,9 +62,11 @@ private def Machine.ensureReturnPage (machine : Machine) : IO Nat := do
   pure page
 
 /-- Calls a function of the guest with these arguments, on the stack of the thread that runs and in it, and says what it gives back.
-Nothing else runs meanwhile. What it did to memory stays, and its registers go back. What doesn't return, by `fuel` instructions or
+Nothing else runs meanwhile, unless `threaded`: then the other threads run by turns until it comes back, as one that starts threads and
+waits for them needs. What it did to memory stays, and its registers go back. What doesn't return, by `fuel` instructions or
 because it faults or stops, is an error. It can't be done in the middle of an instruction. -/
-def Machine.call (machine : Machine) (address : Nat) (arguments : List Nat := []) (fuel : Nat := 100000000) : IO Nat := do
+def Machine.call (machine : Machine) (address : Nat) (arguments : List Nat := []) (fuel : Nat := 100000000) (threaded : Bool := false) :
+    IO Nat := do
   let emu := machine.emu
   if ← emu.serving.get then
     throw <| IO.userError "a function can't be called in the middle of an instruction: stop the thread, and call it once the run returns"
@@ -139,7 +141,21 @@ def Machine.call (machine : Machine) (address : Nat) (arguments : List Nat := []
       setPc emu (address - address % 2)
     else setPc emu address
     emu.stopped.set false
-    let _ ← Bap.Emu.run emu fuel
+    if threaded then
+      -- The others run as well, by turns, until this one comes back.
+      let caller ← thread emu
+      let mut left := fuel
+      let mut done := false
+      while left > 0 && !done do
+        match ← machine.run (fun _ => pure ()) (fuel := left) with
+        | .stopped id =>
+          if id == caller && (← emu.pc.get) == returnTo then done := true
+          else
+            resumeThread emu id
+            left := left - 1
+        | other => throw <| IO.userError s!"a call of {address} didn't return, and the run ended as {repr other}"
+    else
+      let _ ← Bap.Emu.run emu fuel
     let reached ← emu.pc.get
     if reached != returnTo then
       throw <| IO.userError s!"a call of {address} didn't return: it is at {reached}"
@@ -305,6 +321,7 @@ private def protectLibrary (machine : Machine) (image : Image.Image) (base : Nat
 
 /-- A library and all that it needs: mapped, known of, relocated and with its initializers noted, those of what it needs before its own. -/
 private partial def loadOne (machine : Machine) (path : String) (space : Nat) (search : List String) (resolve : String → Option Nat)
+    (prefer : String → Option Nat)
     (ignoreMissing : Bool) (loading : IO.Ref Loading) : IO LoadedLibrary := do
   let architecture := machine.architecture
   let emu := machine.emu
@@ -349,7 +366,7 @@ private partial def loadOne (machine : Machine) (path : String) (space : Nat) (s
       loading.modify fun state => { state with mapped := library :: state.mapped }
       let needs ← (Elf.needed data).filterMapM fun needed => do
         match ← findLibrary machine needed origin runPaths search with
-        | some found => pure (some (← loadOne machine found space search resolve ignoreMissing loading).path)
+        | some found => pure (some (← loadOne machine found space search resolve prefer ignoreMissing loading).path)
         | none =>
           if ignoreMissing then pure none
           else throw <| IO.userError s!"{path} needs {needed}, which isn't in this machine"
@@ -362,10 +379,12 @@ private partial def loadOne (machine : Machine) (path : String) (space : Nat) (s
       let machineNumber := program.machine
       let lookup (symbol : Image.Elf.DynamicSymbol) : Except String Nat :=
         let unversioned := (symbol.name.splitOn "@").headD symbol.name
-        match scope.findSome? (fun library => library.symbols.lookup unversioned), resolve unversioned with
-        | some address, _ => .ok address
-        | none, some address => .ok address
-        | none, none =>
+        -- What is to be had first, whoever else has it, as the base environment's is of a libc that is loaded.
+        match prefer unversioned, scope.findSome? (fun library => library.symbols.lookup unversioned), resolve unversioned with
+        | some address, _, _ => .ok address
+        | none, some address, _ => .ok address
+        | none, none, some address => .ok address
+        | none, none, none =>
           -- Not found and it has its own, which is local, or it may go without.
           if symbol.sectionIndex != 0 then .ok (base + symbol.value)
           else if symbol.binding == 2 then .ok 0
@@ -531,7 +550,7 @@ to give it, such as a stub. A weak one that nowhere has is 0, and one that isn't
 that is here already just has one more hold on it. `ignoreMissing` goes on without a library that it needs, which only works if `resolve`
 has what that would have given. Libraries that are named look in `search`, then its own `DT_RUNPATH`, then where libraries are. -/
 def Machine.loadLibrary (machine : Machine) (path : String) (search : List String := []) (resolve : String → Option Nat := fun _ => none)
-    (ignoreMissing : Bool := false) (runInitializers : Bool := true) : IO LoadedLibrary := do
+    (ignoreMissing : Bool := false) (runInitializers : Bool := true) (prefer : String → Option Nat := fun _ => none) : IO LoadedLibrary := do
   if ← machine.emu.serving.get then
     throw <| IO.userError "a library can't be loaded in the middle of an instruction: stop the thread, and load it once the run returns"
   let some found ← findLibrary machine path "/" [] search
@@ -544,7 +563,7 @@ def Machine.loadLibrary (machine : Machine) (path : String) (search : List Strin
       unmap machine.emu library.start library.span
     machine.libraries.set before
   try
-    let library ← loadOne machine found space search resolve ignoreMissing loading
+    let library ← loadOne machine found space search resolve prefer ignoreMissing loading
     if runInitializers then
       for initializer in (← loading.get).initializers do
         let _ ← machine.call initializer []
@@ -564,7 +583,7 @@ def Machine.threadLocalAddress (machine : Machine) (tls : LibraryTls) (threadPoi
 /-- Gives the thread that runs a block of thread-local storage for what is loaded, and makes it the thread pointer, and says what that is,
 for when there is no libc to do it. Whatever a thread had of its own is left behind. `reserved` is what is kept free next to it, for a
 libc's use: below a block that is above the thread pointer, and above one that is below. Each thread needs one of its own. -/
-def Machine.setupThreadTls (machine : Machine) (reserved : Nat := 256) : IO Nat := do
+def Machine.setupThreadTls (machine : Machine) (reserved : Nat := 256) (thread : Option ThreadId := none) : IO Nat := do
   let architecture := machine.architecture
   let space := (← currentTask machine.emu).space
   let loaded : List LoadedLibrary := spaceHas space (← machine.libraries.get)
@@ -584,7 +603,8 @@ def Machine.setupThreadTls (machine : Machine) (reserved : Nat := 256) : IO Nat 
   for tls in modules do
     let image ← Bap.Emu.read machine.emu tls.image tls.fileSize
     machine.write (machine.threadLocalAddress tls threadPointer) image
-  setReg machine.emu ⟨register, .imm width, 0, false⟩ (.bits (BitVec.ofNat width threadPointer))
+  setThreadReg machine.emu ((← thread.getDM (Bap.Emu.thread machine.emu))) ⟨register, .imm width, 0, false⟩
+    (.bits (BitVec.ofNat width threadPointer))
   pure threadPointer
 
 /-- Where a symbol is, in that library if one is given, and otherwise in what is loaded in the process that runs, as `dlsym`. -/
@@ -654,7 +674,7 @@ convention has for them or from the stack on i686, and gives what the call retur
 abbrev HostFunction := Machine → List Nat → IO Nat
 
 /-- The arguments of the call that is at its first instruction now, as many as the convention has registers for, or six on i686. -/
-private def callArguments (machine : Machine) (emu : Emu) : IO (List Nat) := do
+def callArguments (machine : Machine) (emu : Emu) : IO (List Nat) := do
   let architecture := machine.architecture
   let width := architecture.bits
   let value (name : String) : IO Nat := do
@@ -669,7 +689,7 @@ private def callArguments (machine : Machine) (emu : Emu) : IO (List Nat) := do
   else (conventionOf architecture).arguments.mapM value
 
 /-- Makes the call that is at its first instruction now give back `result`, to where it was called from. -/
-private def returnFromCall (machine : Machine) (emu : Emu) (result : Nat) : IO Unit := do
+def returnFromCall (machine : Machine) (emu : Emu) (result : Nat) : IO Unit := do
   let architecture := machine.architecture
   let width := architecture.bits
   let word := width / 8
@@ -727,9 +747,9 @@ private def stubPages (machine : Machine) : Nat := callReturnPage machine + 4096
 
 private def stubsPerPage : Nat := 256
 
-/-- Where a stub for `name` is, the same one each time that it is asked for, and a hook there that serves it by `handler`. A machine
-that goes on from a checkpoint gives each name its handler again. -/
-def Machine.hostFunction (machine : Machine) (name : String) (handler : HostFunction) : IO Nat := do
+/-- Where a stub for `name` is, the same one each time that it is asked for: 16 bytes that nothing runs, as what serves a stub returns
+before they would. -/
+def Machine.stubFor (machine : Machine) (name : String) : IO Nat := do
   let emu := machine.emu
   let first := stubPages machine
   let digest := (Wire.digest name.toUTF8).toNat
@@ -751,6 +771,13 @@ def Machine.hostFunction (machine : Machine) (name : String) (handler : HostFunc
       poke emu address (numberBytes false 8 digest)
       poke emu first (numberBytes false 8 (count + 1))
       pure address
+  pure address
+
+/-- Where a stub for `name` is, the same one each time that it is asked for, and a hook there that serves it by `handler`. A machine
+that goes on from a checkpoint gives each name its handler again. -/
+def Machine.hostFunction (machine : Machine) (name : String) (handler : HostFunction) : IO Nat := do
+  let emu := machine.emu
+  let address ← machine.stubFor name
   -- A handler given again for a name takes the place of the one that it had.
   if let some previous := (← machine.hostHooks.get).get? address then removeHook emu previous
   let hook ← machine.replaceFunction address handler s!"host function {name}"

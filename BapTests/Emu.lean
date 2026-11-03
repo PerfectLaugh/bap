@@ -2857,6 +2857,34 @@ def testAliasDispatch (triple : String) : IO Unit := do
   let some callOne := ← resumed.findSymbol "call_one" | throw <| IO.userError s!"{label} has no call_one"
   assertEqual s!"{label} and is served again" 6 (signed32 (← resumed.call callOne [5]))
 
+/-- A library linked against the base environment, with no libc in the guest: memory and strings, threads that count under a lock and
+give back what they did, a condition, `once`, keys and `errno`; and what the environment has, had from it before a libc that is loaded
+and has the same names, by what is loaded with it and by what is linked against it after. -/
+def testBaseEnvironment (triple : String) : IO Unit := do
+  let label := s!"Base {triple}"
+  let binary (name : String) : IO ByteArray := IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-{name}"
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" (← binary "libc-files"))
+    |>.addFile "/lib/libbaseuse.so" (← binary "libbaseuse")
+    |>.addFile "/lib/libfakec.so" (← binary "libfakec")
+    |>.addFile "/lib/libplain.so" (← binary "libplain")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let base ← machine.baseEnvironment
+  let _ ← machine.loadLibrary "libfakec.so"
+  let _ ← machine.loadLibrary "libplain.so"
+  let _ ← machine.loadWithBase base "libbaseuse.so"
+  let call (name : String) (arguments : List Nat := []) : IO Nat := do
+    match ← machine.findSymbol name with
+    | some address => pure ((← machine.call address arguments (threaded := true)) % 2 ^ 32)
+    | none => throw <| IO.userError s!"{label} has no {name}"
+  assertEqual s!"{label} a library has what it needs of a libc from it" 0xff (← call "run")
+  let text ← machine.malloc 16
+  machine.write text "abcdef\x00".toUTF8
+  assertEqual s!"{label} before a libc that is loaded with the same names" 6 (← call "length_of" [text])
+  assertEqual s!"{label} which what isn't linked against it has" 999 (← call "plain_length" [text])
+  let slots ← machine.linkBase base
+  assertTrue s!"{label} until it is linked against it ({slots})" (slots ≥ 1)
+  assertEqual s!"{label} and then it has it" 6 (← call "plain_length" [text])
+
 /-- Shared libraries from outside a program, as `dlopen` has them, on a machine with no libc or linker to do it. -/
 def testLinuxLibraries (triple : String) (ifunc : Bool := false) : IO Unit := do
   let label := s!"Library {triple}"
