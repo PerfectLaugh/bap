@@ -2404,6 +2404,20 @@ def Machine.loadFile (path : System.FilePath) (watch : Option (Nat → List Nat 
     (models : List RuntimeModel := []) (expectedTarget : Option Nat := none) (expectedLibraries : List Nat := []) : IO Machine := do
   Machine.ofCheckpoint (← IO.FS.readBinFile path) watch generators handler models expectedTarget expectedLibraries
 
+/-- Changes the kernel of a machine, which may run, or says why it can't, as an error number of Linux. -/
+private def Machine.changeKernel (machine : Machine) (what : String) (change : Kernel → Result Kernel) : IO Unit := do
+  match change (← machine.kernel.get) with
+  | .ok kernel => machine.kernel.set kernel
+  | .error errno => throw <| IO.userError s!"{what}: error {errno} of Linux"
+
+/-- Puts a file in the kernel of a machine, which may run, with the directories it needs: see `Kernel.putFile`. -/
+def Machine.addFile (machine : Machine) (path : String) (data : ByteArray) (mode : Nat := 0o100644) : IO Unit :=
+  machine.changeKernel s!"a file can't be put at {path}" (·.putFile path data mode)
+
+/-- Makes a directory in the kernel of a machine, which may run, with the directories before it: see `Kernel.putDirectory`. -/
+def Machine.addDirectory (machine : Machine) (path : String) (mode : Nat := 0o40755) : IO Unit :=
+  machine.changeKernel s!"a directory can't be made at {path}" (·.putDirectory path mode)
+
 /-- A file of the host for a kernel, before a run: this is the only way that anything gets from there to in here. -/
 def Kernel.copyFromHost (kernel : Kernel) (path : String) (into : String := path) : IO Kernel := do
   let rec walk : Nat → Kernel → System.FilePath → String → IO Kernel
@@ -2428,6 +2442,10 @@ def Kernel.copyFromHost (kernel : Kernel) (path : String) (into : String := path
         | .error _ => pure kernel
       | _ => pure kernel
   walk 16 kernel path into
+
+/-- A file or a directory of the host, with all that is in it, for the kernel of a machine, which may run: see `Kernel.copyFromHost`. -/
+def Machine.copyFromHost (machine : Machine) (path : String) (into : String := path) : IO Unit := do
+  machine.kernel.set (← (← machine.kernel.get).copyFromHost path into)
 
 /-- What a dynamic program needs, for a kernel, before a run: the program, its interpreter and each library that it needs, from
 the directories that libraries are in, with the links of their paths resolved to files. `root` is where the libraries of its

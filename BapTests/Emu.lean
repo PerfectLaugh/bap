@@ -2905,6 +2905,47 @@ def testBaseEnvironment (triple : String) : IO Unit := do
   assertEqual s!"{label} and sigprocmask -1" (2 ^ 32 - 1) (← callBase "sigprocmask" [7, set, 0])
   assertEqual s!"{label} with errno" [22, 0, 0, 0] (← machine.read (← callBase "__errno_location" [] 64) 4).toList
 
+/-- Files and directories put in a kernel, before a run and as a machine runs, through links and over what is there. -/
+def testKernelFiles : IO Unit := do
+  let label := "Kernel files"
+  let found (kernel : Bap.Linux.Kernel) (path : String) : Option Bap.Linux.Content :=
+    match kernel.resolve "/" path with
+    | .ok (_, some number) => (kernel.inodes.get? number).map (·.content)
+    | _ => none
+  let isFile (kernel : Bap.Linux.Kernel) (path : String) (data : String) : Bool :=
+    match found kernel path with
+    | some (.file bytes) => bytes == data.toUTF8
+    | _ => false
+  let isDirectory (kernel : Bap.Linux.Kernel) (path : String) : Bool :=
+    match found kernel path with
+    | some .directory => true
+    | _ => false
+  let error (result : Bap.Linux.Result Bap.Linux.Kernel) : Nat := match result with | .ok _ => 0 | .error errno => errno
+  let some kernel := (Bap.Linux.Kernel.empty.putDirectory "/data/app" 0o700).toOption
+    | throw <| IO.userError s!"{label}: no directory"
+  assertTrue s!"{label} a directory with those before it" (isDirectory kernel "/data" && isDirectory kernel "/data/app")
+  assertEqual s!"{label} of its mode" (some 0o40700) ((kernel.paths.get? "/data/app").bind (kernel.inodes.get? ·) |>.map (·.mode))
+  let kernel := kernel.addSymlink "/app" "/data/app"
+  let some kernel := (kernel.putFile "/app/lib/one.so" "one".toUTF8).toOption | throw <| IO.userError s!"{label}: no file"
+  assertTrue s!"{label} a file through a link, where the link goes" (isFile kernel "/data/app/lib/one.so" "one")
+  assertTrue s!"{label} and not beside it" (!kernel.paths.contains "/app/lib/one.so")
+  let some kernel := (kernel.putFile "/app/lib/one.so" "two".toUTF8).toOption | throw <| IO.userError s!"{label}: not replaced"
+  assertTrue s!"{label} a file over one" (isFile kernel "/data/app/lib/one.so" "two")
+  assertEqual s!"{label} a directory is there again" 0 (error (kernel.putDirectory "/app/lib"))
+  assertEqual s!"{label} not a file over a directory" Bap.Linux.Errno.eisdir (error (kernel.putFile "/app/lib" ByteArray.empty))
+  assertEqual s!"{label} not a directory over a file" Bap.Linux.Errno.eexist (error (kernel.putDirectory "/app/lib/one.so"))
+  assertEqual s!"{label} not under a file" Bap.Linux.Errno.enotdir (error (kernel.putFile "/app/lib/one.so/x" ByteArray.empty))
+  -- On a machine that runs: what a library is loaded from is there as it is put there.
+  let triple := "x86_64"
+  let binary (name : String) : IO ByteArray := IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-{name}"
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" (← binary "libc-files")) "/test" ["/test"]
+  machine.addDirectory "/vendor/lib"
+  machine.addFile "/vendor/lib/libfakec.so" (← binary "libfakec")
+  let _ ← machine.loadLibrary "/vendor/lib/libfakec.so"
+  assertTrue s!"{label} a library put in as the machine runs is loaded" (← machine.findSymbol "strlen").isSome
+  let refused ← (machine.addFile "/vendor/lib" ByteArray.empty *> pure false).catchExceptions fun _ => pure true
+  assertTrue s!"{label} and a machine says what it can't put" refused
+
 /-- Shared libraries from outside a program, as `dlopen` has them, on a machine with no libc or linker to do it. -/
 def testLinuxLibraries (triple : String) (ifunc : Bool := false) : IO Unit := do
   let label := s!"Library {triple}"

@@ -351,6 +351,48 @@ def addSymlink (kernel : Kernel) (path target : String) : Kernel :=
   let normal := Path.ofParts (Path.parts "/" path)
   (addInode (addDirectories kernel (Path.parent normal)) normal (.symlink target) 0o120777).1
 
+/-- The directory at a path, as the kernel finds it, through the links of its parts: made, with each part before it that isn't there,
+with `mode`. That a part is something other than a directory is `ENOTDIR`. -/
+private def directoryAt (kernel : Kernel) (path : String) (mode : Nat) : Result (Kernel × String) :=
+  (Path.parts "/" path).foldlM (init := (kernel, "/")) fun (kernel, at_) part => do
+    match ← kernel.resolve at_ part with
+    | (found, some number) =>
+      match kernel.inodes.get? number with
+      | some { content := .directory, .. } => pure (kernel, found)
+      | _ => throw Errno.enotdir
+    | (found, none) => pure ((addInode kernel found .directory mode).1, found)
+
+/-- Makes a directory, with each one before it that isn't there, whose parts may be links, as `mkdir -p` does: one that is there
+already is kept as it is, and something else there is `EEXIST`, or `ENOTDIR` before the last part. It can be called on the kernel of a
+machine that runs, by `Machine.addDirectory`. -/
+def putDirectory (kernel : Kernel) (path : String) (mode : Nat := 0o40755) : Result Kernel := do
+  let parts := Path.parts "/" path
+  let some name := parts.getLast? | pure kernel
+  let (kernel, parent) ← directoryAt kernel (Path.ofParts parts.dropLast) 0o40755
+  match ← kernel.resolve parent name with
+  | (_, some number) =>
+    match kernel.inodes.get? number with
+    | some { content := .directory, .. } => pure kernel
+    | _ => throw Errno.eexist
+  | (found, none) => pure (addInode kernel found .directory (0o40000 ||| mode % 0o10000)).1
+
+/-- Puts a file in, with each directory before it that isn't there, whose parts may be links: a file that is there, or the file
+that a link there points to, has these bytes now and this mode, and keeps its number, so that what has it open reads them; a
+directory there is `EISDIR`, and anything but a directory before it `ENOTDIR`. It can be called on the kernel of a machine that runs,
+by `Machine.addFile`; what is mapped of the file keeps what it had. -/
+def putFile (kernel : Kernel) (path : String) (data : ByteArray) (mode : Nat := 0o100644) : Result Kernel := do
+  let parts := Path.parts "/" path
+  let some name := parts.getLast? | throw Errno.eisdir
+  let (kernel, parent) ← directoryAt kernel (Path.ofParts parts.dropLast) 0o40755
+  let mode := 0o100000 ||| mode % 0o10000
+  match ← kernel.resolve parent name with
+  | (_, some number) =>
+    match kernel.inodes.get? number with
+    | some { content := .file _, .. } => pure { kernel with inodes := kernel.inodes.insert number { number, content := .file data, mode } }
+    | some { content := .directory, .. } => throw Errno.eisdir
+    | _ => throw Errno.eexist
+  | (found, none) => pure (addInode kernel found (.file data) mode).1
+
 /-- A process by the id of its thread group, or one with nothing yet. -/
 def process (kernel : Kernel) (group : Nat) : Process := kernel.processes.getD group {}
 
