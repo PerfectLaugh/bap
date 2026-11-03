@@ -115,6 +115,12 @@ def exitThread (emu : Emu) (code : Nat) : IO Unit := do
   let table ← emu.taskTable.get
   emu.taskTable.set (table.exitTask (← thread emu) (exitedStatus code) (initTask table 0))
   emu.stopped.set true
+  -- The last of its process ends the process, which what hears of that hears of as of `exit_group`.
+  let left ← emu.taskTable.get
+  if let some leader := left.find? task.group then
+    if let some status := leader.status then
+      if left.alone leader then
+        if let some heard := ← emu.processExited.get then heard task.group status
 
 /-- A signal ends the process. Nothing else of signals is modelled. -/
 def kill (emu : Emu) (target signal : Nat) : IO Unit := do
@@ -124,7 +130,7 @@ def kill (emu : Emu) (target signal : Nat) : IO Unit := do
 
 /-- Forgets the threads and the memory of what is no longer in the table. What runs stays until it switches away, since
 switching keeps the memory it leaves. -/
-private def collectGone (emu : Emu) : IO Unit := do
+def collectGone (emu : Emu) : IO Unit := do
   let current ← thread emu
   emu.taskTable.modify (·.sweep current)
   let table ← emu.taskTable.get
@@ -491,10 +497,13 @@ private def serveAdvice (emu : Emu) (address size advice : Nat) : IO SyscallActi
 /-- The system calls of processes and of pthreads, as Linux has them, for programs that `runProcesses` runs: `fork`, `vfork`,
 which is `fork` as the standard allows, `clone`, `wait4`, `waitpid`, `exit`, `exit_group`, `getpid`, `getppid`, `gettid`,
 `sched_yield`, which goes on until the quantum ends, `futex`, `set_tid_address`, `set_robust_list`, which keeps nothing, so a
-mutex isn't released for a thread that dies with it, `rt_sigprocmask` and `rt_sigaction`, which change nothing, as no signal
-is delivered, `tgkill`, which ends the process, `mmap`, `munmap`, `mprotect`, `madvise` and `arch_prctl`. `clone3` and `rseq` say they aren't there, which libc falls back from.
+mutex isn't released for a thread that dies with it, `rt_sigprocmask` and `rt_sigaction`, which change nothing here, as no signal
+is delivered by an emulator alone, `tgkill`, which ends the process, `mmap`, `munmap`, `mprotect`, `madvise` and `arch_prctl`. `clone3` and `rseq` say they aren't there, which libc falls back from.
 
-Parallel rounds can't serve them, since a worker has no table of threads to block in, and a call from one fails. -/
+Parallel rounds can't serve them, since a worker has no table of threads to block in, and a call from one fails.
+
+A Linux machine has `Bap.Linux.Signals` serve the calls of signals before these, as it is attached first, so that there they are delivered,
+with handlers, masks and `sigreturn`, and these are only what an emulator without a machine has. -/
 def serveTaskCalls (emu : Emu) : IO HookId := do
   let width ← wordWidth emu
   let calls := callsOf emu.config.syscallAbi width
@@ -626,6 +635,7 @@ private def scheduleLoop (emu : Emu) (quantum : Nat) : Nat → Nat → IO Schedu
       else scheduleLoop emu quantum rounds (fuel - (← ran emu quantum fuel))
     else
     settleWaiters emu
+    for hook in ← emu.betweenTurns.get do hook
     saveCurrentThread emu
     let current ← thread emu
     let table ← emu.taskTable.get

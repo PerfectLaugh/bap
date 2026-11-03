@@ -49,10 +49,10 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
     since, once each, by ascending address, also for a program that failed: `some`, or `none` when it was too many or
     no step began. It may hold addresses that were written the same as they were. `endMemoryStep` stops it.
 
-**Byte arrays** (`zeros`, `regionBytes`, `sliceNative`, `piecesNative`, `fillNative`)
+**Byte arrays** (`zeros`, `regionBytes`, `sliceNative`, `piecesNative`, `fillNative`, `residentNative`)
 15. `zeros size` is `size` bytes of zeros, and `regionBytes memory address size` is `readMemoryRange memory address size`: they differ
-    only in how much memory of the host they take. `sliceNative`, `piecesNative` and `fillNative` give what `slice`, `pieces` and `fill`
-    define in Lean, which they are `implemented_by`: what is proved of those (`fill_pieces`) holds of the C++ by this obligation.
+    only in how much memory of the host they take. `sliceNative`, `piecesNative`, `fillNative` and `residentNative` give what `slice`,
+    `pieces`, `fill` and `resident` define in Lean, which they are `implemented_by`: what is proved of those (`fill_pieces`) holds of the C++ by this obligation.
 
 Everything else in `Bap.Emu`, from what the code hooks see to what a rollback restores, is proved against
 these. No theorem assumes anything of LLVM beyond them, and nothing depends on `memorySize`, which has no obligation.
@@ -248,6 +248,14 @@ def pieces (data : ByteArray) : List (Nat × ByteArray) :=
   (List.range ((data.size + pieceSize - 1) / pieceSize)).filterMap fun index =>
     let piece := data.extract (index * pieceSize) (index * pieceSize + pieceSize)
     if piece.data.all (· == 0) then none else some (index * pieceSize, piece)
+
+@[extern "bap_bytes_resident"]
+opaque residentNative (data : ByteArray) : Nat
+
+/-- How many bytes the pieces of `data` have, which is how much of it isn't zeros, by pieces: what it takes of the host as `fill` makes
+it. It is counted without making the pieces. -/
+@[implemented_by residentNative]
+def resident (data : ByteArray) : Nat := (pieces data).foldl (fun total piece => total + piece.2.size) 0
 
 /-- What `fill` has at `index`: from the first piece that has it, or else zero. -/
 def byteOf (pieces : List (Nat × ByteArray)) (index : Nat) : UInt8 :=

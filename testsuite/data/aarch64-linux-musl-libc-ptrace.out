@@ -1,0 +1,20 @@
+stopped 1 1 1
+not again 0
+continued 1 1
+killed 1 1 1
+trapped 1 1 1
+peek 0 1234
+poke 0
+siginfo 0 1
+cont 0
+exited 1 1 7
+attach 0
+attached 1 1 1
+regs 0 1
+step 0
+stepped 1 1 1
+moved 1
+detach 0
+gone 1 1
+no child 1
+not traced -3

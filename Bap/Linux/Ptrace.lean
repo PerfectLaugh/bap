@@ -1,0 +1,838 @@
+import Bap.Linux.Signals
+
+/-! # ptrace, stopped processes, and waiting for them
+
+What a process can see of another and do to it: `ptrace`, which makes one the tracer of another, the tracee, that stops for each
+signal that is to be delivered to it, for a fault, after `execve`, at `PTRACE_INTERRUPT`, after a step and at system calls, until its
+tracer lets it go on, with a signal or without; and in a stop, the tracer reads and writes its memory and its registers. Stops that
+aren't of a tracee are those of a process that SIGSTOP or SIGTSTP stops, as a shell's job control has them, until SIGCONT.
+
+`wait4`, `waitpid` and `waitid` are served here, as they say what a process stopped for as well as how it ended: a stop of a tracee
+to its tracer, a stop or a continue of a child to its parent when asked for, and an exit, of a child or of a tracee. A wait that has to
+wait waits until something happens to what it waits for, and asks again.
+
+A stopped thread is blocked as a futex has it, so that the others go on. What is traced, stopped or not yet reported is in a checkpoint,
+as the model `bap.ptrace`. -/
+
+namespace Bap.Linux
+
+open Bap.Emu Bap.Tasks
+
+/-- A traced thread, of what its tracer said of it. -/
+structure Tracee where
+  /-- The process that traces it. -/
+  tracer : Nat
+  options : Nat := 0
+  seized : Bool := false
+  /-- Whether it stops at the start and the end of each system call, as `PTRACE_SYSCALL` has it, and whether it is in one. -/
+  syscalls : Bool := false
+  inSyscall : Bool := false
+  deriving DecidableEq, Repr
+
+/-- A thread that is stopped: what `wait` says of it, whether that is of a tracee, whether it was said, and the `siginfo_t` of what stopped
+it, as its signal, code and the address or the process that it is of. A stop of a fault is gone on from by the fault coming again. -/
+structure Stop where
+  status : Nat
+  traced : Bool
+  reported : Bool := false
+  signal : Nat
+  code : Nat := 0
+  detail : Nat := 0
+  fault : Bool := false
+  deriving DecidableEq, Repr
+
+/-- A wait that waits: of what, for what, and where what it finds goes, as `wait4` (its status and usage) or `waitid` has it. -/
+structure WaitRequest where
+  target : Option Nat
+  exited : Bool
+  stopped : Bool
+  continued : Bool
+  keep : Bool
+  waitid : Bool
+  status : Nat
+  usage : Nat
+  deriving DecidableEq, Repr
+
+structure PtraceTable where
+  /-- The waits that wait, by thread. -/
+  waiting : Std.HashMap Nat WaitRequest := {}
+  tracees : Std.HashMap Nat Tracee := {}
+  stops : Std.HashMap Nat Stop := {}
+  /-- Processes that SIGCONT let go on and that no wait said so of. -/
+  continued : List Nat := []
+  /-- The signal that a tracer let a thread have, which goes through to it rather than stopping it. -/
+  injected : Std.HashMap Nat Nat := {}
+  /-- What `PTRACE_GETEVENTMSG` says of a thread. -/
+  messages : Std.HashMap Nat Nat := {}
+  /-- Exits of tracees that a tracer that isn't their parent was told of, by tracer and tracee. -/
+  toldExits : List (Nat × Nat) := []
+  /-- Where a thread that steps went on from, which it stops after running. -/
+  stepping : Std.HashMap Nat Nat := {}
+
+/-- The ptrace and the stops of a machine. -/
+structure Ptrace where
+  architecture : Architecture
+  signals : Signals
+  table : IO.Ref PtraceTable
+  /-- The hooks of threads that step, by thread. -/
+  stepHooks : IO.Ref (Std.HashMap Nat HookId)
+  /-- What gives each wait that waits what it waits for, if it is there now. -/
+  settle : IO.Ref (Emu → IO Unit)
+  /-- Whether anything happened since the waits were last given what they wait for: a wait has nothing new to find otherwise, and isn't
+  asked again, as asking takes as long as there are tasks. -/
+  changed : IO.Ref Bool
+
+namespace Ptrace
+
+private structure Numbers where
+  ptrace : Nat
+  wait4 : Nat
+  waitpid : Option Nat
+  waitid : Nat
+  stop : Nat
+  cont : Nat
+  chld : Nat
+  trap : Nat := 5
+  kill : Nat := 9
+
+private def numbersOf : Architecture → Numbers
+  | .x86_64 => { ptrace := 101, wait4 := 61, waitpid := none, waitid := 247, stop := 19, cont := 18, chld := 17 }
+  | .aarch64 | .riscv64 | .riscv32 => { ptrace := 117, wait4 := 260, waitpid := none, waitid := 95, stop := 19, cont := 18, chld := 17 }
+  | .arm => { ptrace := 26, wait4 := 114, waitpid := none, waitid := 280, stop := 19, cont := 18, chld := 17 }
+  | .i686 => { ptrace := 26, wait4 := 114, waitpid := some 7, waitid := 284, stop := 19, cont := 18, chld := 17 }
+  | .mips 32 _ _ => { ptrace := 4026, wait4 := 4114, waitpid := some 4007, waitid := 4278, stop := 23, cont := 25, chld := 18 }
+  | .mips _ _ _ => { ptrace := 5099, wait4 := 5059, waitpid := none, waitid := 5237, stop := 23, cont := 25, chld := 18 }
+  | .powerpc _ _ => { ptrace := 26, wait4 := 114, waitpid := some 7, waitid := 272, stop := 19, cont := 18, chld := 17 }
+
+private def esrch : Nat := 3
+private def eio : Nat := 5
+private def echild : Nat := 10
+private def efault : Nat := 14
+private def einval : Nat := 22
+private def eperm : Nat := 1
+
+/-- Where stopped threads wait, by thread, and where waits wait, by process: no guest can wake them, as this isn't memory that it has. -/
+private def stopSpace : Nat := 2 ^ 58
+private def waitSpace : Nat := 2 ^ 58 + 2 ^ 48
+
+private def stoppedStatus (signal : Nat) (event : Nat := 0) : Nat := 0x7f ||| (signal <<< 8) ||| (event <<< 16)
+
+private def numbers (ptrace : Ptrace) : Numbers := numbersOf ptrace.architecture
+
+private def groupOf (emu : Emu) (tid : Nat) : IO Nat := do
+  pure (((← emu.taskTable.get).find? tid).map (·.group) |>.getD tid)
+
+/-- Blocks a thread where nothing but its tracer or SIGCONT lets it go. -/
+private def block (emu : Emu) (tid : Nat) : IO Unit := do
+  emu.taskTable.modify fun table =>
+    if table.futexes.any fun waiter => waiter.thread == tid && waiter.space == stopSpace then table
+    else table.futexWait { thread := tid, space := stopSpace, address := tid, bitset := 2 ^ 32 - 1 }
+  if (← thread emu) == tid then emu.stopped.set true
+
+/-- Lets a stopped thread go on. -/
+private def release (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Unit := do
+  ptrace.table.modify fun table => { table with stops := table.stops.erase tid }
+  emu.taskTable.modify fun table =>
+    { table with futexes := table.futexes.filter fun waiter => !(waiter.thread == tid && waiter.space == stopSpace) }
+  resumeThread emu tid
+
+/-- Something has happened that a wait may be waiting for, which it is given between turns, when what made it happen is over: a
+process that exited has left all that it wrote where others see it. -/
+private def wakeWaits (ptrace : Ptrace) (_emu : Emu) : IO Unit := ptrace.changed.set true
+
+/-- A thread stops, which its tracer hears of, or its parent of a process that stopped. -/
+private def stopThread (ptrace : Ptrace) (emu : Emu) (tid : Nat) (stop : Stop) : IO Unit := do
+  ptrace.table.modify fun table => { table with stops := table.stops.insert tid stop }
+  block emu tid
+  let numbers := ptrace.numbers
+  let group ← groupOf emu tid
+  let notified ← if stop.traced then pure (((← ptrace.table.get).tracees.get? tid).map (·.tracer))
+    else pure (((← emu.taskTable.get).find? group).map (·.parent))
+  if let some to := notified then
+    if to != 0 then
+      ptrace.signals.send emu none to ⟨numbers.chld, if stop.traced then 4 else 5, .child group 0 stop.signal⟩
+  wakeWaits ptrace emu
+
+/-- Whether a thread is traced. -/
+def traced (ptrace : Ptrace) (tid : Nat) : IO Bool := do
+  pure ((← ptrace.table.get).tracees.contains tid)
+
+/-- A signal that is to be delivered to a tracee, or a fault of one, stops it instead, unless its tracer let it have it. -/
+def intercept (ptrace : Ptrace) (emu : Emu) (tid : Nat) (info : SignalInfo) : IO Bool := do
+  let table ← ptrace.table.get
+  if !table.tracees.contains tid || info.signal == ptrace.numbers.kill then return false
+  if table.injected.get? tid == some info.signal then
+    ptrace.table.modify fun table => { table with injected := table.injected.erase tid }
+    return false
+  let (detail, fault) := match info.detail with
+    | .fault address => (address, true)
+    | .sent pid _ _ => (pid, false)
+    | .child pid _ _ => (pid, false)
+  stopThread ptrace emu tid { status := stoppedStatus info.signal, traced := true, signal := info.signal, code := info.code, detail, fault }
+  pure true
+
+/-- SIGSTOP or the like stops a process, as its threads are, and SIGCONT lets one go on. -/
+def jobControl (ptrace : Ptrace) (emu : Emu) (group signal : Nat) : IO Unit := do
+  let numbers := ptrace.numbers
+  let threads := ((← emu.taskTable.get).tasks.filter fun task => task.group == group && task.status.isNone).map (·.tid)
+  if signal == numbers.cont then
+    let stopped := (← ptrace.table.get).stops
+    let held := threads.filter fun tid => (stopped.get? tid).any (!·.traced)
+    if held.isEmpty then return
+    for tid in held do release ptrace emu tid
+    ptrace.table.modify fun table => { table with continued := group :: table.continued.erase group }
+    let parent := (((← emu.taskTable.get).find? group).map (·.parent)).getD 0
+    if parent != 0 then ptrace.signals.send emu none parent ⟨numbers.chld, 6, .child group 0 numbers.cont⟩
+    wakeWaits ptrace emu
+  else
+    let stopped := (← ptrace.table.get).stops
+    for tid in threads do
+      unless stopped.contains tid do
+        ptrace.table.modify fun table =>
+          { table with stops := table.stops.insert tid { status := stoppedStatus signal, traced := false, signal, reported := tid != group } }
+        block emu tid
+    ptrace.table.modify fun table => { table with continued := table.continued.erase group }
+    let parent := (((← emu.taskTable.get).find? group).map (·.parent)).getD 0
+    if parent != 0 then ptrace.signals.send emu none parent ⟨numbers.chld, 5, .child group 0 signal⟩
+    wakeWaits ptrace emu
+
+/-- A tracee that `execve` went to a new program stops, as `PTRACE_TRACEME` and `PTRACE_O_TRACEEXEC` have it. -/
+def executed (ptrace : Ptrace) (emu : Emu) : IO Unit := do
+  let tid ← thread emu
+  let some tracee := (← ptrace.table.get).tracees.get? tid | return
+  let numbers := ptrace.numbers
+  if tracee.options &&& 0x10 != 0 then
+    ptrace.table.modify fun table => { table with messages := table.messages.insert tid tid }
+    stopThread ptrace emu tid { status := stoppedStatus numbers.trap 4, traced := true, signal := numbers.trap }
+  else if !tracee.seized then
+    stopThread ptrace emu tid { status := stoppedStatus numbers.trap, traced := true, signal := numbers.trap }
+
+/-- A process is over: what it traced goes on, or is killed if it asked for that, and what waits asks again. -/
+def processExited (ptrace : Ptrace) (emu : Emu) (group : Nat) : IO Unit := do
+  let table ← ptrace.table.get
+  let gone := ((← emu.taskTable.get).tasks.filter (·.group == group)).map (·.tid)
+  for (tid, tracee) in table.tracees.toList do
+    if tracee.tracer == group then
+      ptrace.table.modify fun table => { table with tracees := table.tracees.erase tid }
+      if tracee.options &&& 0x100000 != 0 then
+        match (← emu.taskTable.get).find? tid with
+        | some { status := none, .. } => kill emu tid ptrace.numbers.kill
+        | _ => pure ()
+      else if (table.stops.get? tid).any (·.traced) then release ptrace emu tid
+  ptrace.table.modify fun table =>
+    { table with
+      tracees := table.tracees.filter fun tid _ => !gone.contains tid
+      stops := table.stops.filter fun tid _ => !gone.contains tid
+      injected := table.injected.filter fun tid _ => !gone.contains tid }
+  wakeWaits ptrace emu
+
+/-! ### Waiting -/
+
+/-- What a wait says: of which, its status as `wait4` has it, and as `waitid` has it, its code and status. -/
+private structure Report where
+  pid : Nat
+  status : Nat
+  code : Nat
+  value : Nat
+
+/-- What a wait in the process that runs finds, of `target` or of any, with these options of `waitid`: `WEXITED`, `WSTOPPED`,
+`WCONTINUED`, `WNOWAIT`. `none` is that there is nothing that it could ever find. -/
+private def find (ptrace : Ptrace) (emu : Emu) (group : Nat) (target : Option Nat) (exited stopped continued keep : Bool) :
+    IO (Option (Option Report)) := do
+  let tasks ← emu.taskTable.get
+  let table ← ptrace.table.get
+  let wanted (tid : Nat) : Bool := target.all (· == tid)
+  let children := tasks.tasks.filter fun task => task.tid == task.group && task.parent == group && wanted task.tid
+  let tracees := table.tracees.toList.filter fun (tid, tracee) => tracee.tracer == group && wanted tid
+  if children.isEmpty && tracees.isEmpty then return none
+  -- A tracee that stopped, to its tracer.
+  for (tid, _) in tracees do
+    if let some stop := table.stops.get? tid then
+      if stop.traced && !stop.reported then
+        unless keep do ptrace.table.modify fun table => { table with stops := table.stops.insert tid { stop with reported := true } }
+        return some (some { pid := tid, status := stop.status, code := 4, value := stop.signal })
+  -- A child that stopped or went on, to its parent that asked.
+  for child in children do
+    if stopped then
+      if let some stop := table.stops.get? child.tid then
+        if !stop.traced && !stop.reported then
+          unless keep do ptrace.table.modify fun table => { table with stops := table.stops.insert child.tid { stop with reported := true } }
+          return some (some { pid := child.tid, status := stop.status, code := 5, value := stop.signal })
+    if continued && table.continued.contains child.tid then
+      unless keep do ptrace.table.modify fun table => { table with continued := table.continued.erase child.tid }
+      return some (some { pid := child.tid, status := 0xffff, code := 6, value := ptrace.numbers.cont })
+  if exited then
+    let ofStatus (pid status : Nat) : Report :=
+      if status % 128 != 0 then { pid, status, code := 2, value := status % 128 } else { pid, status, code := 1, value := status / 256 % 256 }
+    match tasks.poll group target with
+    | .exited child status =>
+      unless keep do
+        emu.taskTable.set (tasks.reap child)
+        collectGone emu
+      return some (some (ofStatus child status))
+    | _ => pure ()
+    -- A tracee that isn't a child is told of to its tracer once.
+    for (tid, _) in tracees do
+      if let some task := tasks.find? tid then
+        if let some status := task.status then
+          if task.parent != group && !table.toldExits.contains (group, tid) then
+            unless keep do ptrace.table.modify fun table => { table with toldExits := (group, tid) :: table.toldExits }
+            return some (some (ofStatus tid status))
+  pure (some none)
+
+private def numberBytes (big : Bool) (size value : Nat) : ByteArray :=
+  let little := (List.range size).map fun index => (value >>> (8 * index)).toUInt8
+  ByteArray.mk (if big then little.reverse else little).toArray
+
+/-- What a wait asks for of its first argument, a signed word: any, or one. A process group is any, as there is one. -/
+private def targetOf (width value : Nat) : Option Nat :=
+  if 0 < value && value < 2 ^ (width - 1) then some value else none
+
+/-! ### Registers -/
+
+/-- What is in the registers of a target as `user_regs_struct` has them, which `PTRACE_GETREGS` and `PTRACE_GETREGSET` give. -/
+private inductive Slot where
+  | register (name : String)
+  | pc
+  | flags
+  | constant (value : Nat)
+  /-- What `orig_rax` and the like are: a register as the system call that the thread is in found it. -/
+  | copy (name : String)
+
+private def slotsOf : Architecture → Option (List Slot)
+  | .x86_64 => some ((["R15", "R14", "R13", "R12", "RBP", "RBX", "R11", "R10", "R9", "R8", "RAX", "RCX", "RDX", "RSI", "RDI"].map .register) ++
+      [.copy "RAX", .pc, .constant 0x33, .flags, .register "RSP", .constant 0x2b, .register "FS_BASE", .register "GS_BASE",
+       .constant 0, .constant 0, .constant 0, .constant 0])
+  | .i686 => some ((["EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "EAX"].map .register) ++
+      [.constant 0x2b, .constant 0x2b, .constant 0, .constant 0x63, .copy "EAX", .pc, .constant 0x23, .flags, .register "ESP", .constant 0x2b])
+  | .aarch64 => some (((List.range 31).map fun index => .register s!"X{index}") ++ [.register "SP", .pc, .flags])
+  | .riscv64 | .riscv32 => some (.pc :: (List.range 31).map fun index => .register s!"X{index + 1}")
+  | .arm => some (((List.range 13).map fun index => .register s!"R{index}") ++ [.register "SP", .register "LR", .pc, .flags, .copy "R0"])
+  | _ => none
+
+/-- The flags of a target, as its status word has them, by where each is. -/
+private def flagBits : Architecture → List (String × Nat)
+  | .x86_64 | .i686 => [("CF", 0), ("PF", 2), ("AF", 4), ("ZF", 6), ("SF", 7), ("DF", 10), ("OF", 11)]
+  | .aarch64 | .arm => [("NF", 31), ("ZF", 30), ("CF", 29), ("VF", 28)]
+  | _ => []
+
+private def threadValue (emu : Emu) (tid : Nat) (name : String) (width : Nat) : IO Nat := do
+  match ← (threadReg emu tid ⟨name, .imm width, 0, false⟩).toBaseIO with
+  | .ok value => match Value.asBits value with
+    | .ok bits => pure bits.2.toNat
+    | .error _ => pure 0
+  | .error _ => pure 0
+
+private def pcOf (emu : Emu) (tid : Nat) : IO Nat := do
+  if (← thread emu) == tid then emu.pc.get
+  else pure (((← threads emu).find? (·.id == tid)).map (·.pc) |>.getD 0)
+
+/-- The registers of a thread, by slot. -/
+private def readSlots (ptrace : Ptrace) (emu : Emu) (tid : Nat) (slots : List Slot) : IO (List Nat) := do
+  let width ← wordWidth emu
+  slots.mapM fun slot => match slot with
+    | .register name | .copy name => threadValue emu tid name width
+    | .pc => pcOf emu tid
+    | .constant value => pure value
+    | .flags => do
+      let mut word := if ptrace.architecture matches .x86_64 | .i686 then 0x202 else if ptrace.architecture matches .arm then 0x10 else 0
+      for (name, bit) in flagBits ptrace.architecture do
+        if (← threadValue emu tid name 1) != 0 then word := word ||| (1 <<< bit)
+      if ptrace.architecture matches .arm then
+        if (← threadValue emu tid "ISET" 1) != 0 then word := word ||| 0x20
+      pure word
+
+/-- Sets the registers of a thread from what its slots have, but those that are what they are. -/
+private def writeSlots (ptrace : Ptrace) (emu : Emu) (tid : Nat) (slots : List Slot) (values : List Nat) : IO Unit := do
+  let width ← wordWidth emu
+  for (slot, value) in slots.zip values do
+    match slot with
+    | .register name => setThreadReg emu tid ⟨name, .imm width, 0, false⟩ (.bits (BitVec.ofNat width value))
+    | .pc =>
+      if (← thread emu) == tid then setPc emu value
+      else emu.threadsRef.modify fun contexts => contexts.map fun context =>
+        if context.id == tid then { context with pc := value, pending := none, skip := none } else context
+    | .flags =>
+      for (name, bit) in flagBits ptrace.architecture do
+        setThreadReg emu tid ⟨name, .imm 1, 0, false⟩ (.bits (BitVec.ofNat 1 ((value >>> bit) &&& 1)))
+    | _ => pure ()
+
+/-! ### Memory of a tracee -/
+
+/-- The native memory of a thread's address space, if it isn't that of the thread that runs, with what is mapped there. -/
+private def spaceMemory (emu : Emu) (tid : Nat) : IO (Option (Option Jit.Memory × List Region)) := do
+  let table ← emu.taskTable.get
+  let space := table.spaceOf tid
+  if space == table.spaceOf (← thread emu) then return none
+  let native := (← emu.processMemory.get).get? space
+  let native := native.or (← emu.sharedMemory.get)
+  pure (some (native, (← emu.parkedRegions.get).getD space []))
+
+private def readTracee (emu : Emu) (tid address size : Nat) : IO ByteArray := do
+  match ← spaceMemory emu tid with
+  | none => read emu address size
+  | some (native, regions) =>
+    if !(regions.any fun region => region.contains address && region.contains (address + size - 1)) then
+      throw <| IO.userError s!"unmapped address {address} of thread {tid}"
+    match native with
+    | some memory => Jit.readMemoryRange memory (UInt64.ofNat address) size
+    | none => throw <| IO.userError s!"no memory of thread {tid}"
+
+/-- Writes to a tracee as a debugger does, whatever it may do with its memory there, as a breakpoint is written to its code. -/
+private def writeTracee (emu : Emu) (tid address : Nat) (data : ByteArray) (asProgram : Bool := false) : IO Unit := do
+  match ← spaceMemory emu tid with
+  | none => if asProgram then write emu address data else poke emu address data
+  | some (native, regions) =>
+    if !(regions.any fun region => region.contains address && region.contains (address + data.size - 1)) then
+      throw <| IO.userError s!"unmapped address {address} of thread {tid}"
+    match native with
+    | some memory =>
+      Jit.writeMemory memory ((Array.range data.size).map fun offset => UInt64.ofNat (address + offset)) data.data
+      invalidateCode emu address (address + data.size - 1)
+    | none => throw <| IO.userError s!"no memory of thread {tid}"
+    -- And the memory of the state of each thread there, which is what it has when it runs in the interpreter.
+    let table ← emu.taskTable.get
+    let space := table.spaceOf tid
+    let memoryVar := emu.config.memory
+    emu.threadsRef.modify fun contexts => contexts.map fun context =>
+      if table.spaceOf context.id != space then context
+      else match Bil.lookup context.state.env memoryVar with
+        | .ok (@Value.memory _ memory) =>
+          { context with state := { env := Bil.bind context.state.env memoryVar (.memory (Bap.Memory.writeRegion memory address data)) } }
+        | _ => context
+
+/-! ### Waits -/
+
+/-- What a wait of a thread finds now, written where it asked: none if there is nothing yet, or what the call gives. -/
+private def complete (ptrace : Ptrace) (emu : Emu) (tid : Nat) (request : WaitRequest) : IO (Option (Except Nat Nat)) := do
+  let width ← wordWidth emu
+  let big := emu.config.endian == .big
+  let mips := ptrace.architecture matches .mips ..
+  let group ← groupOf emu tid
+  let put (address : Nat) (data : ByteArray) : IO Unit := writeTracee emu tid address data (asProgram := true)
+  let siginfo (report : Option Report) : ByteArray := Id.run do
+    let field (bytes : ByteArray) (offset value : Nat) : ByteArray := (numberBytes big 4 value).copySlice 0 bytes offset 4
+    let union := if width == 64 then 16 else 12
+    let mut bytes := ByteArray.mk (Array.replicate 128 0)
+    if let some report := report then
+      bytes := field bytes 0 ptrace.numbers.chld
+      bytes := field bytes (if mips then 4 else 8) report.code
+      bytes := field bytes union report.pid
+      bytes := field bytes (union + 8) report.value
+    pure bytes
+  match ← find ptrace emu group request.target request.exited request.stopped request.continued request.keep with
+  | none => pure (some (.error echild))
+  | some none => pure none
+  | some (some report) =>
+    try
+      if request.waitid then
+        if request.status != 0 then put request.status (siginfo (some report))
+        pure (some (.ok 0))
+      else
+        if request.status != 0 then put request.status (numberBytes big 4 report.status)
+        if request.usage != 0 then put request.usage (ByteArray.mk (Array.replicate (if width == 64 then 144 else 72) 0))
+        pure (some (.ok report.pid))
+    catch _ => pure (some (.error efault))
+
+/-- Gives each wait that waits what it waits for, of those that have it now, and lets it go on. One that a signal took is gone. -/
+private def settleWaits (ptrace : Ptrace) (emu : Emu) : IO Unit := do
+  if !(← ptrace.changed.get) then return
+  ptrace.changed.set false
+  let blocked := ((← emu.taskTable.get).futexes.filter (·.space == waitSpace)).map (·.thread)
+  if blocked.isEmpty then return
+  -- What runs may be what exited, which leaves what it wrote to shared memory where others see it when it is left, as it is still
+  -- in the table: before a wait reaps it.
+  if let some first := blocked.head? then
+    match (← emu.taskTable.get).find? (← thread emu) with
+    | some { status := some _, .. } | none => switchThread emu first
+    | _ => pure ()
+  let table ← ptrace.table.get
+  ptrace.table.modify fun table => { table with waiting := table.waiting.filter fun tid _ => blocked.contains tid }
+  for tid in blocked do
+    if let some request := table.waiting.get? tid then
+      if let some result := ← complete ptrace emu tid request then
+        ptrace.table.modify fun table => { table with waiting := table.waiting.erase tid }
+        emu.taskTable.modify fun table =>
+          { table with futexes := table.futexes.filter fun waiter => !(waiter.thread == tid && waiter.space == waitSpace) }
+        setSyscallResult emu tid result
+        resumeThread emu tid
+
+/-- A wait of the thread that runs: what it finds now, or, unless it may not wait, it waits, and a signal may interrupt it. -/
+private def serveRequest (ptrace : Ptrace) (emu : Emu) (request : WaitRequest) (noHang : Bool) : IO SyscallAction := do
+  let tid ← thread emu
+  match ← complete ptrace emu tid request with
+  | some result => syscallReturn emu result
+  | none =>
+    if noHang then
+      if request.waitid && request.status != 0 then
+        match ← (write emu request.status (ByteArray.mk (Array.replicate 128 0))).toBaseIO with
+        | .ok () => syscallReturn emu (.ok 0)
+        | .error _ => syscallReturn emu (.error efault)
+      else syscallReturn emu (.ok 0)
+    else
+      ptrace.table.modify fun table => { table with waiting := table.waiting.insert tid request }
+      emu.taskTable.modify (·.futexWait { thread := tid, space := waitSpace, address := tid, bitset := 2 ^ 32 - 1 })
+      emu.stopped.set true
+      syscallReturn emu (.ok 0)
+
+/-- `wait4` and `waitpid`, which always say how a process ended, and how it stopped or went on if asked. -/
+private def serveWait (ptrace : Ptrace) (emu : Emu) (target status options usage : Nat) : IO SyscallAction := do
+  let width ← wordWidth emu
+  serveRequest ptrace emu { target := targetOf width target, exited := true, stopped := options &&& 2 != 0, continued := options &&& 8 != 0
+                            keep := false, waitid := false, status, usage } (options &&& 1 != 0)
+
+/-- `waitid`, of all (0), a process (1) or a group (2), which is all, as there is one. -/
+private def serveWaitid (ptrace : Ptrace) (emu : Emu) (kind id info options : Nat) : IO SyscallAction := do
+  if kind > 2 || options &&& (4 ||| 2 ||| 8) == 0 then return ← syscallReturn emu (.error einval)
+  serveRequest ptrace emu { target := if kind == 1 then some id else none, exited := options &&& 4 != 0, stopped := options &&& 2 != 0
+                            continued := options &&& 8 != 0, keep := options &&& 0x1000000 != 0, waitid := true, status := info, usage := 0 }
+    (options &&& 1 != 0)
+
+/-! ### ptrace -/
+
+/-- Stops a thread after it runs one instruction from where it is. -/
+private def armStep (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Unit := do
+  let from_ ← pcOf emu tid
+  ptrace.table.modify fun table => { table with stepping := table.stepping.insert tid from_ }
+  let width ← wordWidth emu
+  let hook ← onCode emu (0, 2 ^ width - 1) fun current address => do
+    if (← thread current) != tid then return
+    let table ← ptrace.table.get
+    match table.stepping.get? tid with
+    | some start =>
+      -- The first is where it goes on from, and the next is after it ran that.
+      if address == start then
+        ptrace.table.modify fun table => { table with stepping := table.stepping.insert tid (2 ^ width) }
+      else
+        ptrace.table.modify fun table => { table with stepping := table.stepping.erase tid }
+        if let some hook := (← ptrace.stepHooks.get).get? tid then
+          ptrace.stepHooks.modify (·.erase tid)
+          removeHook current hook
+        stopThread ptrace current tid { status := stoppedStatus ptrace.numbers.trap, traced := true, signal := ptrace.numbers.trap, code := 2 }
+    | none => pure ()
+  ptrace.stepHooks.modify (·.insert tid hook)
+
+/-- `ptrace`. -/
+private def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) : IO SyscallAction := do
+  let numbers := ptrace.numbers
+  let width ← wordWidth emu
+  let word := width / 8
+  let big := emu.config.endian == .big
+  let me ← thread emu
+  let group := (← currentTask emu).group
+  let table ← ptrace.table.get
+  let fail (errno : Nat) : IO SyscallAction := syscallReturn emu (.error errno)
+  let ok (value : Nat := 0) : IO SyscallAction := syscallReturn emu (.ok value)
+  let tasks ← emu.taskTable.get
+  -- A tracee of this process, and whether it is stopped for its tracer.
+  let mine : Option Tracee := (table.tracees.get? pid).filter (·.tracer == group)
+  let stoppedHere := (table.stops.get? pid).any (·.traced)
+  let goOn (syscalls : Bool) (step : Bool) : IO SyscallAction := do
+    let some tracee := mine | return ← fail esrch
+    if !stoppedHere then return ← fail esrch
+    let stop := table.stops.get? pid
+    ptrace.table.modify fun table => { table with tracees := table.tracees.insert pid { tracee with syscalls } }
+    if data != 0 then
+      ptrace.table.modify fun table => { table with injected := table.injected.insert pid data }
+      -- A fault comes again by itself, and anything else is sent again, to go through.
+      unless stop.any (·.fault) do ptrace.signals.send emu (some pid) (← groupOf emu pid) ⟨data, 0, .sent group 0 0⟩
+    release ptrace emu pid
+    if step then armStep ptrace emu pid
+    ok
+  let withRegisters (action : List Slot → IO SyscallAction) : IO SyscallAction := do
+    if mine.isNone then return ← fail esrch
+    match slotsOf ptrace.architecture with
+    | some slots => action slots
+    | none => fail eio
+  match request with
+  | 0 =>
+    -- PTRACE_TRACEME: by the parent.
+    if table.tracees.contains me then return ← fail eperm
+    let parent := ((tasks.find? group).map (·.parent)).getD 0
+    if parent == 0 then return ← fail eperm
+    ptrace.table.modify fun table => { table with tracees := table.tracees.insert me { tracer := parent } }
+    ok
+  | 16 | 0x4206 =>
+    -- PTRACE_ATTACH, which stops it, and PTRACE_SEIZE, which doesn't.
+    match tasks.find? pid with
+    | some { status := none, group := target, .. } =>
+      if target == group || table.tracees.contains pid then return ← fail eperm
+      ptrace.table.modify fun table =>
+        { table with tracees := table.tracees.insert pid { tracer := group, seized := request != 16, options := if request != 16 then data else 0 } }
+      if request == 16 then ptrace.signals.send emu (some pid) target ⟨numbers.stop, 0, .sent group 0 0⟩
+      ok
+    | _ => fail esrch
+  | 0x4207 =>
+    -- PTRACE_INTERRUPT
+    let some tracee := mine | return ← fail esrch
+    if !tracee.seized then return ← fail eio
+    unless table.stops.contains pid do
+      stopThread ptrace emu pid { status := stoppedStatus numbers.trap 128, traced := true, signal := numbers.trap }
+    ok
+  | 0x4208 => if mine.isSome then ok else fail esrch
+  | 17 =>
+    -- PTRACE_DETACH, with a signal to go on with.
+    if mine.isNone then return ← fail esrch
+    ptrace.table.modify fun table => { table with tracees := table.tracees.erase pid }
+    if stoppedHere then
+      if data != 0 then ptrace.signals.send emu (some pid) (← groupOf emu pid) ⟨data, 0, .sent group 0 0⟩
+      release ptrace emu pid
+    ok
+  | 7 => goOn false false
+  | 24 => goOn true false
+  | 9 => goOn false true
+  | 8 =>
+    -- PTRACE_KILL
+    if mine.isNone then return ← fail esrch
+    kill emu pid numbers.kill
+    ok
+  | 1 | 2 =>
+    -- PTRACE_PEEKTEXT and PTRACE_PEEKDATA: the word goes where `data` says.
+    if mine.isNone then return ← fail esrch
+    match ← (readTracee emu pid address word).toBaseIO with
+    | .ok bytes =>
+      match ← (write emu data bytes).toBaseIO with
+      | .ok () => ok
+      | .error _ => fail efault
+    | .error _ => fail eio
+  | 4 | 5 =>
+    -- PTRACE_POKETEXT and PTRACE_POKEDATA
+    if mine.isNone then return ← fail esrch
+    match ← (writeTracee emu pid address (numberBytes big word data)).toBaseIO with
+    | .ok () => ok
+    | .error _ => fail eio
+  | 3 | 6 =>
+    -- PTRACE_PEEKUSER and PTRACE_POKEUSER, of the registers at the start of the user area, and nothing after.
+    withRegisters fun slots => do
+      let index := address / word
+      let values ← readSlots ptrace emu pid slots
+      if request == 3 then
+        match ← (write emu data (numberBytes big word (values.getD index 0))).toBaseIO with
+        | .ok () => ok
+        | .error _ => fail efault
+      else
+        if index < slots.length then writeSlots ptrace emu pid slots (values.set index data)
+        ok
+  | 12 | 13 =>
+    -- PTRACE_GETREGS and PTRACE_SETREGS, of the targets that have them.
+    if ptrace.architecture matches .aarch64 | .riscv64 | .riscv32 then return ← fail eio
+    withRegisters fun slots => do
+      if request == 12 then
+        let values ← readSlots ptrace emu pid slots
+        match ← (write emu data (values.foldl (fun out value => out ++ numberBytes big word value) ByteArray.empty)).toBaseIO with
+        | .ok () => ok
+        | .error _ => fail efault
+      else
+        match ← (read emu data (slots.length * word)).toBaseIO with
+        | .ok bytes =>
+          let values := (List.range slots.length).map fun index =>
+            let piece := bytes.extract (index * word) (index * word + word)
+            (if big then piece.toList else piece.toList.reverse).foldl (fun value byte => value * 256 + byte.toNat) 0
+          writeSlots ptrace emu pid slots values
+          ok
+        | .error _ => fail efault
+  | 0x4204 | 0x4205 =>
+    -- PTRACE_GETREGSET and PTRACE_SETREGSET of NT_PRSTATUS, by a `struct iovec`.
+    if address != 1 then return ← fail einval
+    withRegisters fun slots => do
+      match ← (read emu data (2 * word)).toBaseIO with
+      | .error _ => fail efault
+      | .ok vector =>
+        let number (bytes : ByteArray) : Nat := (if big then bytes.toList else bytes.toList.reverse).foldl (fun value byte => value * 256 + byte.toNat) 0
+        let base := number (vector.extract 0 word)
+        let length := number (vector.extract word (2 * word))
+        let size := min length (slots.length * word)
+        if request == 0x4204 then
+          let values ← readSlots ptrace emu pid slots
+          let bytes := values.foldl (fun out value => out ++ numberBytes big word value) ByteArray.empty
+          match ← (do write emu base (bytes.extract 0 size); write emu (data + word) (numberBytes big word size)).toBaseIO with
+          | .ok () => ok
+          | .error _ => fail efault
+        else
+          match ← (read emu base size).toBaseIO with
+          | .ok bytes =>
+            let current ← readSlots ptrace emu pid slots
+            let values := (List.range slots.length).map fun index =>
+              if (index + 1) * word ≤ size then
+                let piece := bytes.extract (index * word) (index * word + word)
+                (if big then piece.toList else piece.toList.reverse).foldl (fun value byte => value * 256 + byte.toNat) 0
+              else current.getD index 0
+            writeSlots ptrace emu pid slots values
+            ok
+          | .error _ => fail efault
+  | 0x4200 =>
+    -- PTRACE_SETOPTIONS
+    let some tracee := mine | return ← fail esrch
+    ptrace.table.modify fun table => { table with tracees := table.tracees.insert pid { tracee with options := data } }
+    ok
+  | 0x4201 =>
+    -- PTRACE_GETEVENTMSG
+    if mine.isNone then return ← fail esrch
+    match ← (write emu data (numberBytes big word (table.messages.getD pid 0))).toBaseIO with
+    | .ok () => ok
+    | .error _ => fail efault
+  | 0x4202 =>
+    -- PTRACE_GETSIGINFO: of what it stopped for.
+    if mine.isNone then return ← fail esrch
+    let some stop := table.stops.get? pid | return ← fail einval
+    let mips := ptrace.architecture matches .mips ..
+    let union := if width == 64 then 16 else 12
+    let put (bytes : ByteArray) (offset size value : Nat) : ByteArray := (numberBytes big size value).copySlice 0 bytes offset size
+    let bytes := ByteArray.mk (Array.replicate 128 0)
+    let bytes := put bytes 0 4 stop.signal
+    let bytes := put bytes (if mips then 4 else 8) 4 stop.code
+    let bytes := if stop.fault then put bytes union word stop.detail else put bytes union 4 stop.detail
+    match ← (write emu data bytes).toBaseIO with
+    | .ok () => ok
+    | .error _ => fail efault
+  | 0x4203 => if mine.isSome then ok else fail esrch
+  | _ => fail eio
+
+/-- Serves `ptrace` and the waits, and has a tracee that traces its system calls stop at their start; `syscallEnds` has it stop at
+their end. -/
+def serve (ptrace : Ptrace) (emu : Emu) : IO Unit := do
+  let numbers := ptrace.numbers
+  let _ ← onSyscall emu fun current number args => do
+    let arg (index : Nat) : Nat := args.getD index 0
+    let tid ← thread current
+    -- Where a wait that a signal interrupts starts again from, which the signals would have noted had they served it.
+    ptrace.signals.noteCall current number
+    -- The start of a system call of a tracee that is traced at them: it stops, and makes the call when it goes on.
+    if let some tracee := (← ptrace.table.get).tracees.get? tid then
+      if tracee.syscalls && !tracee.inSyscall then
+        ptrace.table.modify fun table => { table with tracees := table.tracees.insert tid { tracee with inSyscall := true } }
+        let signal := numbers.trap ||| (if tracee.options &&& 1 != 0 then 0x80 else 0)
+        stopThread ptrace current tid { status := stoppedStatus signal, traced := true, signal := numbers.trap }
+        return ← waitAgainFor current
+    if number == numbers.ptrace then servePtrace ptrace current (arg 0) (arg 1) (arg 2) (arg 3)
+    else if number == numbers.wait4 then serveWait ptrace current (arg 0) (arg 1) (arg 2) (arg 3)
+    else if some number == numbers.waitpid then serveWait ptrace current (arg 0) (arg 1) (arg 2) 0
+    else if number == numbers.waitid then serveWaitid ptrace current (arg 0) (arg 1) (arg 2) (arg 3)
+    else pure .default
+  emu.syscallEnds.modify ((fun _ => do
+    let tid ← thread emu
+    if let some tracee := (← ptrace.table.get).tracees.get? tid then
+      if tracee.syscalls && tracee.inSyscall then
+        ptrace.table.modify fun table => { table with tracees := table.tracees.insert tid { tracee with inSyscall := false } }
+        let signal := numbers.trap ||| (if tracee.options &&& 1 != 0 then 0x80 else 0)
+        stopThread ptrace emu tid { status := stoppedStatus signal, traced := true, signal := numbers.trap }) :: ·)
+where
+  /-- A call that runs again when the thread goes on, with its registers as they were. -/
+  waitAgainFor (emu : Emu) : IO SyscallAction := do
+    let width ← wordWidth emu
+    let (_, _, register) := syscallRegisters emu.config.syscallAbi
+    emu.redirect.set (some (← emu.pc.get))
+    match Value.asBits (← reg emu ⟨register, .imm width, 0, false⟩) with
+    | .ok bits => pure (.returnValue bits.2.toNat)
+    | .error _ => pure .default
+
+/-! ### Checkpoints -/
+
+def modelId : String := "bap.ptrace"
+
+open Wire in
+private def putTracee (out : ByteArray) (entry : Nat × Tracee) : ByteArray :=
+  let (tid, tracee) := entry
+  putFlag (putFlag (putFlag (putNat (putNat (putNat out tid) tracee.tracer) tracee.options) tracee.seized) tracee.syscalls) tracee.inSyscall
+
+open Wire in
+private def getTracee : Decoder (Nat × Tracee) := fun data at_ => do
+  let (tid, at_) ← getNat data at_
+  let (tracer, at_) ← getNat data at_
+  let (options, at_) ← getNat data at_
+  let (seized, at_) ← getFlag data at_
+  let (syscalls, at_) ← getFlag data at_
+  let (inSyscall, at_) ← getFlag data at_
+  .ok ((tid, { tracer, options, seized, syscalls, inSyscall }), at_)
+
+open Wire in
+private def putStop (out : ByteArray) (entry : Nat × Stop) : ByteArray :=
+  let (tid, stop) := entry
+  let out := putNat (putNat (putNat out tid) stop.status) stop.signal
+  putFlag (putNat (putNat (putFlag (putFlag out stop.traced) stop.reported) stop.code) stop.detail) stop.fault
+
+open Wire in
+private def getStop : Decoder (Nat × Stop) := fun data at_ => do
+  let (tid, at_) ← getNat data at_
+  let (status, at_) ← getNat data at_
+  let (signal, at_) ← getNat data at_
+  let (traced, at_) ← getFlag data at_
+  let (reported, at_) ← getFlag data at_
+  let (code, at_) ← getNat data at_
+  let (detail, at_) ← getNat data at_
+  let (fault, at_) ← getFlag data at_
+  .ok ((tid, { status, signal, traced, reported, code, detail, fault }), at_)
+
+open Wire in
+private def putPair (out : ByteArray) (entry : Nat × Nat) : ByteArray := putNat (putNat out entry.1) entry.2
+
+open Wire in
+private def getPair : Decoder (Nat × Nat) := fun data at_ => do
+  let (first, at_) ← getNat data at_
+  let (second, at_) ← getNat data at_
+  .ok ((first, second), at_)
+
+open Wire in
+private def putWait (out : ByteArray) (entry : Nat × WaitRequest) : ByteArray :=
+  let (tid, request) := entry
+  let out := putOption putNat (putNat out tid) request.target
+  let out := putFlag (putFlag (putFlag (putFlag (putFlag out request.exited) request.stopped) request.continued) request.keep) request.waitid
+  putNat (putNat out request.status) request.usage
+
+open Wire in
+private def getWait : Decoder (Nat × WaitRequest) := fun data at_ => do
+  let (tid, at_) ← getNat data at_
+  let (target, at_) ← getOption getNat data at_
+  let (exited, at_) ← getFlag data at_
+  let (stopped, at_) ← getFlag data at_
+  let (continued, at_) ← getFlag data at_
+  let (keep, at_) ← getFlag data at_
+  let (waitid, at_) ← getFlag data at_
+  let (status, at_) ← getNat data at_
+  let (usage, at_) ← getNat data at_
+  .ok ((tid, { target, exited, stopped, continued, keep, waitid, status, usage }), at_)
+
+open Wire in
+def save (ptrace : Ptrace) : IO ByteArray := do
+  let table ← ptrace.table.get
+  let out := putSorted putWait ByteArray.empty table.waiting.toList
+  let out := putSorted putTracee out table.tracees.toList
+  let out := putSorted putStop out table.stops.toList
+  let out := putList putNat out table.continued
+  let out := putSorted putPair out table.injected.toList
+  let out := putSorted putPair out table.messages.toList
+  pure (putList putPair out table.toldExits)
+
+open Wire in
+def load (ptrace : Ptrace) (data : ByteArray) : IO Unit := do
+  let decoded : Except String PtraceTable := do
+    let (waiting, at_) ← getList getWait data 0
+    let (tracees, at_) ← getList getTracee data at_
+    let (stops, at_) ← getList getStop data at_
+    let (continued, at_) ← getList getNat data at_
+    let (injected, at_) ← getList getPair data at_
+    let (messages, at_) ← getList getPair data at_
+    let (toldExits, at_) ← getList getPair data at_
+    expectEnd data at_
+    .ok { waiting := Std.HashMap.ofList waiting, tracees := Std.HashMap.ofList tracees, stops := Std.HashMap.ofList stops, continued, injected := Std.HashMap.ofList injected
+          messages := Std.HashMap.ofList messages, toldExits }
+  ptrace.table.set (← IO.ofExcept decoded)
+  -- What waits may have what it waits for already.
+  ptrace.changed.set true
+
+/-- A machine's ptrace, put in its signals and its system calls: before the signals, as it serves `waitid`, and what it stops. -/
+def attach (architecture : Architecture) (signals : Signals) (emu : Emu) : IO Ptrace := do
+  let ptrace : Ptrace := {
+    architecture, signals, table := ← IO.mkRef {}, stepHooks := ← IO.mkRef {}, settle := ← IO.mkRef (fun _ => pure ())
+    changed := ← IO.mkRef true }
+  ptrace.settle.set (settleWaits ptrace)
+  emu.betweenTurns.modify (· ++ [settleWaits ptrace emu])
+  signals.intercept.set (intercept ptrace)
+  signals.traced.set (traced ptrace)
+  signals.jobControl.set (jobControl ptrace)
+  ptrace.serve emu
+  pure ptrace
+
+end Ptrace
+
+end Bap.Linux

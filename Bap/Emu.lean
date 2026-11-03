@@ -244,6 +244,8 @@ structure Emu where
   /-- What sees a system call before it is served, with its number and arguments, and after, with its result if something served it. -/
   syscallStarts : IO.Ref (List (Nat → List Nat → IO Unit))
   syscallEnds : IO.Ref (List (Option Nat → IO Unit))
+  /-- What runs between turns of `runProcesses`, where nothing is in the middle of anything: as a wait is given what it waits for. -/
+  betweenTurns : IO.Ref (List (IO Unit))
   /-- What hears of bytes of a guest that no instruction of it changed: where and how many, and whether they became zeros because of nothing. -/
   memoryChanged : IO.Ref (List (Nat → Nat → Bool → IO Unit))
   /-- What hears that the host moved bytes of a guest from one place to another, from, to and how many. -/
@@ -379,6 +381,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     switchedIn := ← IO.mkRef none
     syscallStarts := ← IO.mkRef []
     syscallEnds := ← IO.mkRef []
+    betweenTurns := ← IO.mkRef []
     memoryChanged := ← IO.mkRef []
     memoryCopied := ← IO.mkRef []
     hostStarts := ← IO.mkRef []
@@ -1839,6 +1842,18 @@ def programAt (emu : Emu) (address : Nat) : IO (Option Bil.Program) := do
         | none => pure (some block.program)
       else pure (some block.program)
     | program => pure (some program)
+  catch _ =>
+    emu.lastFault.set fault
+    emu.faultFresh.set fresh
+    pure none
+
+/-- Where the instruction after the one at an address is, as it would be decoded now, without running it or saying that anything faulted:
+none if it can't be fetched or decoded. -/
+def nextInstruction (emu : Emu) (address : Nat) : IO (Option Nat) := do
+  let fault ← emu.lastFault.get
+  let fresh ← emu.faultFresh.get
+  try
+    pure (some (← lift emu (isThumb (← emu.state.get)) address (← fetch emu address)).next)
   catch _ =>
     emu.lastFault.set fault
     emu.faultFresh.set fresh

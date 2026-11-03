@@ -2,6 +2,7 @@ import Bap.Emu.Tasks
 import Bap.Emu.Checkpoint
 import Bap.Linux.Calls
 import Bap.Linux.Signals
+import Bap.Linux.Ptrace
 import Bap.Linux.GuestHeap
 import Bap.Linux.LoadedLibrary
 import Bap.Linux.Image
@@ -75,6 +76,12 @@ structure Machine where
   restored : IO.Ref (List (String → IO Unit))
   /-- The directory that was last read, for the next piece of it: all the paths that it is of, which it is good for as long as those are the same object, its inode and what it has. -/
   listing : IO.Ref (Option (Std.HashMap String Nat × Nat × Array (Nat × Nat × String)))
+  /-- The hook that serves each stub of a host function, by its address, so that a handler given again takes the place of the one
+  before. -/
+  hostHooks : IO.Ref (Std.HashMap Nat HookId)
+  /-- Of each library that an import of was redirected, by where it is and its path: the slots of each name that it imports, as where
+  each is from its base and what is added to what goes there, which reading its file once says. -/
+  importSlots : IO.Ref (Std.HashMap (Nat × String) (Std.HashMap String (List (Nat × Nat))))
 
 /-- A model of a runtime that isn't in the kernel or the emulator: pthreads served by hooks, a debugger, a managed language.
 `id` is what a checkpoint knows it by, so that it stays the same, and `version` says what its bytes mean.
@@ -1747,8 +1754,11 @@ private def sharedFutexSpace : Nat := Kernel.fileSpace
 /-- What makes an emulator a machine: its kernel behind its system calls. None of it is in a checkpoint. -/
 private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel) (watch : Option (Nat → List Nat → IO Unit))
     (handler : Option SyscallHandler) (target : Nat) (models : List RuntimeModel) : IO Machine := do
-  let signals : Signals := { architecture, returnPage := stackTop architecture + 4096, table := ← IO.mkRef {} }
-  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome, signals, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none }
+  let signals : Signals := { architecture, returnPage := stackTop architecture + 4096, table := ← IO.mkRef {}
+                             failures := ← IO.mkRef #[], skipIgnoredFaults := ← IO.mkRef false
+                             intercept := ← IO.mkRef fun _ _ _ => pure false, traced := ← IO.mkRef fun _ => pure false
+                             jobControl := ← IO.mkRef fun _ _ _ => pure () }
+  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome, signals, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {} }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
@@ -1773,12 +1783,16 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
     machine.models.modify (· ++ [{ id := model.id, version := model.version, state }])
   -- Signals are part of what it is, and it is in a checkpoint like what a model holds.
   machine.models.modify (· ++ [{ id := Signals.modelId, version := 1, state := { save := signals.save, load := signals.load } }])
+  -- So is what is traced and stopped, which serves the waits, and so is before the signals.
+  let ptrace ← Ptrace.attach architecture signals emu
+  machine.models.modify (· ++ [{ id := Ptrace.modelId, version := 1, state := { save := ptrace.save, load := ptrace.load } }])
   signals.serve emu
   -- A process that is over has closed what it had open.
   let heard ← emu.processExited.get
   emu.processExited.set (some fun group status => do
     if let some heard := heard then heard group status
-    wakePipeReaders emu)
+    wakePipeReaders emu
+    ptrace.processExited emu group)
   -- So is what was allocated in it, as what has an address has to go on having it.
   machine.models.modify (· ++ [{
     id := heapModelId, version := 1,
@@ -1801,6 +1815,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
       -- It is a new program if it is going there, and nothing else sends it anywhere in the middle of a system call.
       if (← emu.redirect.get).isSome then
         signals.executed (← currentTask emu).group (← thread emu)
+        ptrace.executed emu
         -- What it had is gone with its memory.
         let space := (← currentTask emu).space
         machine.heaps.modify (·.erase space)
@@ -2220,8 +2235,21 @@ structure Machine.CheckpointInfo where
   architecture : Architecture
   handled : Bool
   models : List (String × Nat)
-  /-- By address space: the path of each library, where it was loaded, and the digest of its file. -/
-  libraries : List (Nat × String × Nat × Nat)
+  /-- By address space, each library that was loaded, with where, the digest of its file and whether its initializers ran. -/
+  libraries : List (Nat × LoadedLibrary)
+  /-- The files of the kernel, by path: how big each is, and its digest. -/
+  files : List (String × Nat × Nat)
+  /-- The files that a generator makes, by path, with its name: one that isn't built in has to be given to go on. -/
+  generated : List (String × String)
+  /-- The tasks, and those that wait for a child, as the scheduler has them. -/
+  tasks : List Bap.Tasks.Entry
+  waiters : List Bap.Tasks.Waiter
+  /-- Of each process, each signal that it handles or ignores, with its handler, 1 for ignored. -/
+  signals : List (Nat × Nat × Nat)
+  /-- How much memory is mapped, of all address spaces, and how much of that isn't zeros, by pieces of 4096 bytes: about what going on
+  from it takes of the host, which restoring takes as long as the first. -/
+  mapped : Nat
+  resident : Nat
 
 /-- The parts of a checkpoint: what `CheckpointInfo` says, with the image of its kernel, its emulator and the bytes of its models. -/
 private def readCheckpoint (data : ByteArray) : IO (Machine.CheckpointInfo × Image × ByteArray × List (String × Nat × ByteArray)) := do
@@ -2254,11 +2282,29 @@ private def readCheckpoint (data : ByteArray) : IO (Machine.CheckpointInfo × Im
     | some (_, _, bytes) =>
       let table ← IO.ofExcept (LoadedLibrary.decode bytes)
       let spaces := (table.toList.map (·.1)).toArray.qsort (· < ·) |>.toList
-      pure (spaces.flatMap fun space => (table.getD space []).map fun library => (space, library.path, library.base, library.digest))
+      pure (spaces.flatMap fun space => (table.getD space []).map (space, ·))
     | none => pure []
+  let signals ← match savedModels.find? (·.1 == Signals.modelId) with
+    | some (_, _, bytes) =>
+      let table ← IO.ofExcept (Encoding.decode bytes)
+      pure ((table.actions.toList.map fun ((group, signal), action) => (group, signal, action.handler)).toArray.qsort
+        (fun left right => left.1 < right.1 || (left.1 == right.1 && left.2.1 < right.2.1))).toList
+    | none => pure []
+  let kinds : Std.HashMap Nat InodeImage := image.inodes.foldl (init := {}) fun table inode => table.insert inode.number inode
+  let files := image.paths.filterMap fun (path, number) => match kinds.get? number with
+    | some inode => if inode.kind == 0 then some (path, inode.data.size, (Wire.digest inode.data).toNat) else none
+    | none => none
+  let generated := image.paths.filterMap fun (path, number) => match kinds.get? number with
+    | some inode => if inode.kind == 4 then (String.fromUTF8? inode.data).map (path, ·) else none
+    | none => none
+  let snapshot ← IO.ofExcept (snapshotOfFrame emulator)
+  let spaces := snapshot.regions :: snapshot.processMemory.map (·.2)
+  let mapped := spaces.foldl (fun total regions => regions.foldl (fun total region => total + region.data.size) total) 0
+  let resident := spaces.foldl (fun total regions => regions.foldl (fun total region => total + Bap.Jit.resident region.data) total) 0
   let info : Machine.CheckpointInfo := {
     identity := { format, bap, semantics, target }, architecture, handled
-    models := savedModels.map fun (id, version, _) => (id, version), libraries }
+    models := savedModels.map fun (id, version, _) => (id, version), libraries, files, generated
+    tasks := snapshot.table.tasks, waiters := snapshot.table.waiters, signals, mapped, resident }
   pure (info, image, emulator, savedModels)
 
 /-- What a checkpoint says of itself, without restoring anything of it. -/
@@ -2268,7 +2314,8 @@ def Machine.checkpointInfo (data : ByteArray) : IO Machine.CheckpointInfo := do
 /-- Says what can't be restored of the models of a checkpoint, as going on without one or with another isn't going on as it would have. -/
 private def modelConflict (saved : List (String × Nat × ByteArray)) (models : List RuntimeModel) : Option String :=
   -- Those that every machine has are no one's to give.
-  let saved := saved.filter fun entry => entry.1 != Signals.modelId && entry.1 != heapModelId && entry.1 != libraryModelId
+  let saved := saved.filter fun entry =>
+    entry.1 != Signals.modelId && entry.1 != Ptrace.modelId && entry.1 != heapModelId && entry.1 != libraryModelId
   match saved.find? (fun entry => !(models.any (·.id == entry.1))) with
   | some entry => some s!"a checkpoint with the state of model {entry.1}, which wasn't given"
   | none =>
@@ -2301,7 +2348,7 @@ def Machine.ofCheckpoint (data : ByteArray) (watch : Option (Nat → List Nat �
   if let some conflict := modelConflict savedModels models then
     throw <| IO.userError conflict
   -- What it had loaded, in any process, by what the files were, before anything is made of it.
-  let loaded := info.libraries.map (·.2.2.2)
+  let loaded := info.libraries.map (·.2.digest)
   let missing := expectedLibraries.filter (!loaded.contains ·)
   unless missing.isEmpty do
     throw <| IO.userError s!"a checkpoint without libraries of these digests, which were expected: {missing}"
@@ -2316,6 +2363,34 @@ def Machine.ofCheckpoint (data : ByteArray) (watch : Option (Nat → List Nat �
     if let some (_, _, bytes) := savedModels.find? (·.1 == model.id) then model.state.load bytes
   for heard in ← machine.restored.get do heard s!"checkpoint {Wire.ofFixedBytes data (data.size - 8)}"
   pure machine
+
+/-- What would keep a checkpoint from going on here with these, without restoring anything: a model of another version or that isn't
+given, a handler of system calls that isn't, a generated file whose generator isn't given or built in, a library of an expected digest
+that isn't loaded, or another program than expected. Nothing is what `ofCheckpoint` would go on with. -/
+def Machine.checkCheckpoint (data : ByteArray) (generators : List String := []) (handled : Bool := false)
+    (models : List RuntimeModel := []) (expectedTarget : Option Nat := none) (expectedLibraries : List Nat := []) : IO (List String) := do
+  let (info, _, _, savedModels) ← readCheckpoint data
+  let here : Machine.Identity := { semantics := ← semanticsDigest, target := info.identity.target }
+  let mut problems : List String := []
+  if let some conflict := info.identity.conflict here expectedTarget then problems := problems ++ [conflict]
+  if info.handled && !handled then problems := problems ++ ["a checkpoint of a machine with a handler of system calls, which isn't given"]
+  if let some conflict := modelConflict savedModels models then problems := problems ++ [conflict]
+  for (path, name) in info.generated do
+    if !generators.contains path && (Proc.builtin name).isNone then
+      problems := problems ++ [s!"{path} is made by {name}, which isn't given"]
+  let loaded := info.libraries.map (·.2.digest)
+  for digest in expectedLibraries do
+    if !loaded.contains digest then problems := problems ++ [s!"no library of digest {digest} is loaded"]
+  pure problems
+
+/-- What ended a process by a signal, or would have, as it happened: faults that nothing handled, handlers that couldn't be entered and
+`sigreturn`s with nothing to go back to, apart. -/
+def Machine.signalFailures (machine : Machine) : IO (List SignalFailure) := do
+  pure (← machine.signals.failures.get).toList
+
+/-- Whether a fault that a process ignores goes on past the instruction that faulted, rather than ending it as Linux does. -/
+def Machine.setSkipIgnoredFaults (machine : Machine) (skip : Bool) : IO Unit :=
+  machine.signals.skipIgnoredFaults.set skip
 
 def Machine.saveFile (machine : Machine) (path : System.FilePath) : IO Unit := do
   writeAtomically path (← machine.checkpoint)

@@ -1124,6 +1124,19 @@ extern "C" lean_obj_res bap_bytes_pieces(lean_obj_arg dataObject) {
   return list;
 }
 
+// `Jit.resident`: the bytes of the pieces of `Jit.pieces`, counted without making them.
+extern "C" lean_obj_res bap_bytes_resident(lean_obj_arg dataObject) {
+  const size_t size = lean_sarray_size(dataObject);
+  const uint8_t *data = lean_sarray_cptr(dataObject);
+  size_t total = 0;
+  for (size_t start = 0; start < size; start += 4096) {
+    const size_t count = std::min<size_t>(4096, size - start);
+    if (!allZero(data + start, count)) total += count;
+  }
+  lean_dec(dataObject);
+  return lean_usize_to_nat(total);
+}
+
 // `Jit.fill`: zeros that take no memory yet, with each piece in them where it starts, the first of those that have a byte giving it.
 extern "C" lean_obj_res bap_bytes_fill(lean_obj_arg sizeObject, lean_obj_arg piecesObject) {
   const size_t size = lean_usize_of_nat(sizeObject);

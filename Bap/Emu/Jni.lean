@@ -147,6 +147,8 @@ structure Model where
   exception : IO.Ref (Option Identity)
   env : IO.Ref Nat
   vm : IO.Ref Nat
+  /-- What an object that the model made holds as text, such as the path of a `java/io/File`. -/
+  texts : IO.Ref (Std.HashMap Identity String)
 
 /-- The word of an argument of a call, from 0 for the `JNIEnv *`, or 0 if it has none there. -/
 def arg (call : Call) (index : Nat) : Nat := call.args.getD index 0
@@ -314,17 +316,93 @@ private def registerClass (model : Model) (decl : ClassDecl) : IO Unit := do
     model.fields.modify (·.insert id ⟨field, owner, true⟩)
     model.fieldIds.modify (·.insert ⟨owner, field.name, field.signature, true⟩ id)
 
+/-- What `java/io/File` finds of paths, which a host gives from the files that it has, such as those of a machine's kernel. -/
+structure FileSystem where
+  present : String → IO Bool
+  isDirectory : String → IO Bool
+  /-- The names in a directory. -/
+  list : String → IO (List String)
+  size : String → IO Nat
+
+/-- A path in a directory, as `new File(parent, child)` makes it. -/
+def childPath (parent child : String) : String :=
+  if parent.isEmpty then child else if parent.endsWith "/" then parent ++ child else parent ++ "/" ++ child
+
+/-- `java/io/File` of a model, by what `files` has: its constructors of a path and of a parent and a name, `getPath`, `getAbsolutePath`,
+`toString`, `getName`, `getParent`, `exists`, `isDirectory`, `isFile`, `length`, `list`, and `listFiles`, which gives a `File[]` of
+the paths of what is in it. An object of it holds its path as its text, which a checkpoint has. `model` is the model, once it is made. -/
+private def fileClass (files : FileSystem) (model : IO.Ref (Option Model)) : ClassDecl :=
+  let withModel {α : Type} (action : Model → IO α) : IO α := do
+    match ← model.get with
+    | some model => action model
+    | none => throw <| IO.userError "java/io/File of a JNI model that isn't made yet"
+  let pathOf (model : Model) (handle : Nat) : IO String := do
+    pure ((← model.texts.get).getD (← resolve model handle) "")
+  let newFile (model : Model) (path : String) : IO Nat := do
+    let id ← freshIdentity model
+    model.objectClasses.modify (·.insert id (← classIdentity model "java/io/File"))
+    model.texts.modify (·.insert id path)
+    internIdentity model .local id
+  let truth (value : Bool) : Answer := .value (if value then 1 else 0)
+  let method (name signature : String) (answer : Model → Call → IO Answer) : MethodDecl :=
+    { name, signature, answer := fun call => withModel fun model => answer model call }
+  let ofPath (name signature : String) (answer : String → IO Answer) : MethodDecl :=
+    method name signature fun model call => do answer (← pathOf model (arg call 1))
+  { name := "java/io/File"
+    methods := [
+      method "<init>" "(Ljava/lang/String;)V" fun model call => do
+        pure (.handle (← newFile model ((← stringContents model (arg call 3)).getD ""))),
+      method "<init>" "(Ljava/io/File;Ljava/lang/String;)V" fun model call => do
+        let child := (← stringContents model (arg call 4)).getD ""
+        pure (.handle (← newFile model (childPath (← pathOf model (arg call 3)) child))),
+      method "<init>" "(Ljava/lang/String;Ljava/lang/String;)V" fun model call => do
+        let parent := (← stringContents model (arg call 3)).getD ""
+        let child := (← stringContents model (arg call 4)).getD ""
+        pure (.handle (← newFile model (childPath parent child))),
+      ofPath "getPath" "()Ljava/lang/String;" fun path => pure (.string path),
+      ofPath "getAbsolutePath" "()Ljava/lang/String;" fun path => pure (.string path),
+      ofPath "toString" "()Ljava/lang/String;" fun path => pure (.string path),
+      ofPath "getName" "()Ljava/lang/String;" fun path => pure (.string ((path.splitOn "/").getLast?.getD path)),
+      ofPath "getParent" "()Ljava/lang/String;" fun path =>
+        let parts := path.splitOn "/"
+        pure (if parts.length ≤ 1 then .value 0 else .string ("/".intercalate parts.dropLast)),
+      ofPath "exists" "()Z" fun path => do pure (truth (← files.present path)),
+      ofPath "isDirectory" "()Z" fun path => do pure (truth (← files.isDirectory path)),
+      ofPath "isFile" "()Z" fun path => do pure (truth ((← files.present path) && !(← files.isDirectory path))),
+      ofPath "length" "()J" fun path => do
+        if ← files.present path then pure (.value (← files.size path)) else pure (.value 0),
+      method "list" "()[Ljava/lang/String;" fun model call => do
+        let path ← pathOf model (arg call 1)
+        if !(← files.isDirectory path) then return .value 0
+        let id ← freshIdentity model
+        model.objectClasses.modify (·.insert id (← classIdentity model "[Ljava/lang/String;"))
+        model.arrays.modify (·.insert id ((← files.list path).map Answer.string))
+        pure (.handle (← internIdentity model .local id)),
+      method "listFiles" "()[Ljava/io/File;" fun model call => do
+        let path ← pathOf model (arg call 1)
+        if !(← files.isDirectory path) then return .value 0
+        let children ← (← files.list path).mapM fun name => newFile model (childPath path name)
+        let id ← freshIdentity model
+        model.objectClasses.modify (·.insert id (← classIdentity model "[Ljava/io/File;"))
+        model.arrays.modify (·.insert id (children.map Answer.handle))
+        pure (.handle (← internIdentity model .local id))] }
+
 /-- A model. `readString` reads a name that native code passes, `allocString` and `allocBytes` put what it asks for in its memory,
 `default` says what to give for what isn't declared, by the call and the name of a method or field if it was asked for by one, and
 `log` hears of each call with what it gave. `classOf` says the class of an object of the host. `big` is that the guest has the most
-significant byte first. -/
+significant byte first. With `files`, the model has `java/io/File` of what they have, as `fileClass` says. -/
 def create (readString : Nat → IO String) (allocString : String → IO Nat)
     (allocBytes : ByteArray → IO Nat)
     (default : Call → (Nat → IO (Option String)) → IO Answer)
     (log : Call → String → Nat → IO Unit := fun _ _ _ => pure ())
     (classes : List ClassDecl := []) (objects : List ObjectDecl := [])
     (classOf : Nat → Option String := fun _ => none)
-    (firstHandle : Nat := 0x52030000) (version : Nat := 0x10006) (big : Bool := false) : IO Model := do
+    (firstHandle : Nat := 0x52030000) (version : Nat := 0x10006) (big : Bool := false)
+    (files : Option FileSystem := none) : IO Model := do
+  let made ← IO.mkRef (none : Option Model)
+  let classes := match files with
+    | some files => classes ++ [fileClass files made]
+    | none => classes
   let model : Model := {
     nextHandle := ← IO.mkRef firstHandle
     nextIdentity := ← IO.mkRef 0
@@ -349,7 +427,9 @@ def create (readString : Nat → IO String) (allocString : String → IO Nat)
     exception := ← IO.mkRef none
     env := ← IO.mkRef 0
     vm := ← IO.mkRef 0
+    texts := ← IO.mkRef {}
   }
+  made.set (some model)
   classes.forM (registerClass model)
   for object in objects do
     let classId ← classIdentity model object.className
@@ -928,7 +1008,8 @@ private def putBytesOf (model : Model) : IO ByteArray := do
   let out := putTable putDynamicKey putNat out (← model.dynamicIds.get)
   let out := putTable putIdentity putText out (← model.dynamicNames.get)
   let out := putOption putIdentity out (← model.exception.get)
-  pure (putNat (putNat out (← model.env.get)) (← model.vm.get))
+  let out := putNat (putNat out (← model.env.get)) (← model.vm.get)
+  pure (putTable putIdentity putText out (← model.texts.get))
 
 /-- The declarations of a saved table of methods or fields, from those that the model was made with. -/
 private def rebind {δ : Type} (kind : String) (saved : Std.HashMap Identity String)
@@ -967,6 +1048,8 @@ private def loadBytes (model : Model) (data : ByteArray) : IO Unit := do
     let (exception, at_) ← getOption getIdentity data at_
     let (env, at_) ← getNat data at_
     let (vm, at_) ← getNat data at_
+    -- What a model saved before its objects held text has none.
+    let (texts, at_) ← if at_ == data.size then .ok ({}, at_) else getTable getIdentity getText data at_
     expectEnd data at_
     .ok do
       let names ← model.classNames.get
@@ -997,6 +1080,7 @@ private def loadBytes (model : Model) (data : ByteArray) : IO Unit := do
       model.exception.set exception
       model.env.set env
       model.vm.set vm
+      model.texts.set texts
   (← IO.ofExcept decode)
 
 end State

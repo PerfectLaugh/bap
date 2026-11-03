@@ -733,6 +733,70 @@ def testSocketImage : IO Unit := do
   assertEqual "five of them" 5 (sockets back).length
   assertEqual "the listener is at its path" (some target) (back.paths.get? "/run/listen.sock")
 
+/-- A fault that a program ignores ends it, as Linux has it, or goes on past it when asked; and a handler that can't be entered is told
+apart from a fault that nothing handles. -/
+def testSignalFailures (triple : String) : IO Unit := do
+  let label := s!"Signals {triple}"
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-fault"
+  let runWith (mode : String) (skip : Bool) : IO (Bap.Tasks.ScheduleOutcome × String × List Bap.Linux.SignalFailure) := do
+    let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test", mode]
+    machine.setSkipIgnoredFaults skip
+    let written ← IO.mkRef ByteArray.empty
+    let outcome ← machine.run fun data => written.modify (· ++ data)
+    pure (outcome, String.fromUTF8! (← written.get), ← machine.signalFailures)
+  let (outcome, _, failures) ← runWith "ignore" false
+  assertEqual s!"{label} an ignored fault ends the process, as Linux has it" (Bap.Tasks.ScheduleOutcome.finished 11) outcome
+  assertTrue s!"{label} as a fault that nothing handles: {repr failures}"
+    (failures.any fun | .unhandled _ _ 16 "SIGSEGV is ignored" => true | _ => false)
+  let (outcome, text, failures) ← runWith "ignore" true
+  assertEqual s!"{label} or goes on past it when asked" (Bap.Tasks.ScheduleOutcome.finished 0, "went on\n") (outcome, text)
+  assertTrue s!"{label} which is said" (failures.any fun | .skipped _ _ 16 => true | _ => false)
+  let (outcome, _, failures) ← runWith "nostack" false
+  assertEqual s!"{label} a handler with no stack ends the process" (Bap.Tasks.ScheduleOutcome.finished 11) outcome
+  assertTrue s!"{label} as a handler that couldn't be entered, and not as a fault that nothing handles: {repr failures}"
+    ((failures.any fun | .handlerEntry _ 11 _ => true | _ => false) && !(failures.any fun | .unhandled .. => true | _ => false))
+
+/-- A routine that the host does instead, once it is found to do the same: SHA-512 checked against the program's own and put in place,
+not checked again for the same code, and one that does something else refused. -/
+def testAcceleration (triple : String) : IO Unit := do
+  let label := s!"Acceleration {triple}"
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-sha"
+  let image ← IO.ofExcept (Bap.Image.Elf.decode program)
+  let symbol (name : String) : IO Bap.Image.Symbol := do
+    match image.symbols.find? (·.name == name) with
+    | some found => pure found
+    | none => throw <| IO.userError s!"{label} has no {name}"
+  let routine ← symbol "sha512"
+  let broken ← symbol "broken_sha512"
+  let expected := String.fromUTF8! (← IO.FS.readBinFile "testsuite/data/libc-sha.out")
+  let calls ← IO.mkRef 0
+  let base := Bap.Linux.Accelerate.sha512
+  let counted : Bap.Linux.Accelerate.Accelerator := { base with host := fun machine arguments => do
+    calls.modify (· + 1)
+    base.host machine arguments }
+  let start : IO Bap.Linux.Machine := Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let runOn (machine : Bap.Linux.Machine) : IO String := do
+    let written ← IO.mkRef ByteArray.empty
+    let outcome ← machine.run (fuel := 2000000000) fun data => written.modify (· ++ data)
+    assertEqual s!"{label} it ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+    pure (String.fromUTF8! (← written.get))
+  let refusing ← start
+  match ← refusing.accelerate counted broken.addr broken.size with
+  | .rejected _ why => assertTrue s!"{label} what does something else is refused: {why}" true
+  | other => throw <| IO.userError s!"{label} accepted what does something else: {repr other}"
+  let first ← start
+  let outcome ← first.accelerate counted routine.addr routine.size
+  assertTrue s!"{label} what does the same is checked and put in place: {repr outcome}" (outcome matches .validated _)
+  calls.set 0
+  assertEqual s!"{label} and the program does what it did" expected (← runOn first)
+  assertEqual s!"{label} by the host each time" 20 (← calls.get)
+  let second ← start
+  let outcome ← second.accelerate counted routine.addr routine.size
+  assertTrue s!"{label} the same code isn't checked again: {repr outcome}" (outcome matches .reused _)
+  assertEqual s!"{label} and it does what it did there too" expected (← runOn second)
+  assertTrue s!"{label} what was checked can be carried on"
+    ((← Bap.Linux.Accelerate.trusted).any fun (name, _) => name == "sha512")
+
 /-- What operations raise, on what their edges are, as qemu has it. -/
 def testLinuxRaises (name : String) : IO Unit := do
   let program ← IO.FS.readBinFile s!"testsuite/bin/{name}"
@@ -1931,6 +1995,14 @@ def testCff (triple : String) : IO Unit := do
   let chooser := taken.transitions.find? fun transition => transition.state == 2
   let sources := (chooser.bind (·.predicate)).map (·.sources) |>.getD []
   assertTrue s!"Cff {triple} what decided a round is the byte of the file: {sources}" (sources.contains ("pread /data", some 2))
+  -- What assigned each next state, which is the store to it, and of the round of 5, which chooses 6 or 1 without a branch on AArch64.
+  assertTrue s!"Cff {triple} each round that went on knows what assigned its next state"
+    (taken.transitions.all fun transition => transition.next.isNone || transition.assignment.isSome)
+  if triple == "aarch64" then
+    let chose := taken.transitions.filter fun transition => transition.state == 5 && transition.next.isSome
+    assertTrue s!"Cff {triple} a state chosen by a condition is known to be: {repr (chose.head?.bind (·.assignment))}"
+      (!chose.isEmpty && chose.all fun transition => transition.assignment.any fun assignment =>
+        assignment.conditional && !assignment.condition.isEmpty)
   let (other, _, _) ← run 'D'
   assertTrue s!"Cff {triple} another byte chooses 4" (other.graph.any fun (from_, to, _) => from_ == 2 && to == 4)
 
@@ -2287,6 +2359,51 @@ def testJniNative (triple : String) (floats : Bool := true) : IO Unit := do
   let all := 0x1FF
   let expected := if floats then all else all - 8 - 16
   assertEqual s!"{label} native code finds what the model says, by its convention" expected found
+
+/-- `java/io/File` of a JNI model, from the files of a machine: paths, what is in a directory as a `File[]`, a child of a directory, what
+isn't there, a file's length, and the path of a file after a checkpoint of the model. -/
+def testJniFiles : IO Unit := do
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile "testsuite/bin/aarch64-linux-musl-libc-files"))
+    |>.addFile "/data/app/one.txt" "hello".toUTF8
+    |>.addFile "/data/app/two.txt" "hi".toUTF8
+    |>.addDirectories "/data/app/sub"
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let texts : List (Nat × String) := [(0x100, "java/io/File"), (0x110, "<init>"), (0x120, "(Ljava/lang/String;)V"),
+    (0x130, "(Ljava/io/File;Ljava/lang/String;)V"), (0x140, "/data/app"), (0x150, "missing"), (0x160, "isDirectory"), (0x170, "()Z"),
+    (0x180, "listFiles"), (0x190, "()[Ljava/io/File;"), (0x1a0, "getPath"), (0x1b0, "()Ljava/lang/String;"), (0x1c0, "exists"),
+    (0x1d0, "length"), (0x1e0, "()J"), (0x1f0, "/data/app/one.txt")]
+  let make : IO Bap.Emu.Jni.Model := Bap.Emu.Jni.create (fun address => pure ((texts.lookup address).getD ""))
+    (fun _ => pure 0x52040000) (fun _ => pure 0x52050000) (fun _ _ => pure (.value 0)) (files := some machine.jniFiles)
+  let model ← make
+  let call (index : Nat) (args : List Nat) : IO Nat := Bap.Emu.Jni.dispatch model ⟨index, (0 :: args).toArray⟩
+  let file ← call 6 [0x100]
+  let method (name signature : Nat) : IO Nat := call 33 [file, name, signature]
+  let ofPath ← method 0x110 0x120
+  let ofParent ← method 0x110 0x130
+  let directory ← call 28 [file, ofPath, ← call 167 [0x140]]
+  let pathOf (handle : Nat) : IO (Option String) := do
+    Bap.Emu.Jni.stringContents model (← call 34 [handle, ← method 0x1a0 0x1b0])
+  assertEqual "JNI a File has its path" (some "/data/app") (← pathOf directory)
+  assertEqual "JNI a directory is one" 1 (← call 37 [directory, ← method 0x160 0x170])
+  let listed ← call 34 [directory, ← method 0x180 0x190]
+  let count ← call 171 [listed]
+  assertEqual "JNI what is in it, as a File[]" 3 count
+  let children ← (List.range count).mapM fun index => do pathOf (← call 173 [listed, index])
+  assertEqual "JNI each with its whole path"
+    [some "/data/app/one.txt", some "/data/app/sub", some "/data/app/two.txt"] children
+  assertEqual "JNI and each a File" 1 (← call 24 [← call 31 [← call 173 [listed, 0]], file])
+  let missing ← call 28 [file, ofParent, directory, ← call 167 [0x150]]
+  assertEqual "JNI a child of a directory has its whole path" (some "/data/app/missing") (← pathOf missing)
+  assertEqual "JNI what isn't there isn't" 0 (← call 37 [missing, ← method 0x1c0 0x170])
+  let one ← call 28 [file, ofPath, ← call 167 [0x1f0]]
+  assertEqual "JNI a file has its length" 5 (← call 52 [one, ← method 0x1d0 0x1e0])
+  -- Into a checkpoint of the model and out, with the path of each.
+  let saved ← (Bap.Emu.Jni.state model).save
+  let again ← make
+  (Bap.Emu.Jni.state again).load saved
+  let getPath ← Bap.Emu.Jni.dispatch again ⟨33, #[0, file, 0x1a0, 0x1b0]⟩
+  assertEqual "JNI a File has its path after a checkpoint" (some "/data/app")
+    (← Bap.Emu.Jni.stringContents again (← Bap.Emu.Jni.dispatch again ⟨34, #[0, directory, getPath]⟩))
 
 /-- What JNI gives a guest is a source, in the register it comes back in and in memory, and so is what someone says is one. -/
 def testTaintSources : IO Unit := do
@@ -2669,7 +2786,7 @@ def testHostFunctions (triple : String) : IO Unit := do
   let info ← Bap.Linux.Machine.checkpointInfo saved
   assertEqual s!"{label} a checkpoint says what was loaded, where and of which file"
     [("/lib/libdep.so", dep.base, dep.digest), ("/lib/libmain.so", library.base, library.digest)]
-    (info.libraries.map (·.2))
+    (info.libraries.map fun (_, loaded) => (loaded.path, loaded.base, loaded.digest))
   assertEqual s!"{label} and of what" machine.architecture.name info.architecture.name
   assertTrue s!"{label} and the models that it has" (info.models.any (·.1 == "bap.libraries"))
   expectThrow s!"{label} a checkpoint without a library that was expected"
@@ -2680,6 +2797,65 @@ def testHostFunctions (triple : String) : IO Unit := do
     (some (← resumed.hostFunction "host_given" tripled))
   let some fromHost := ← resumed.findSymbol "from_host" | throw <| IO.userError s!"{label} has no from_host"
   assertEqual s!"{label} and is served again" 21 (signed32 (← resumed.call fromHost [7]))
+
+/-- Names of one function, each served as it is imported; initializers run after what they import is served, what is needed first, and
+once, also after a checkpoint; and what a checkpoint says of what it has. -/
+def testAliasDispatch (triple : String) : IO Unit := do
+  let label := s!"Aliases {triple}"
+  let binary (name : String) : IO ByteArray := IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-{name}"
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" (← binary "libc-files"))
+    |>.addFile "/lib/libalias.so" (← binary "libalias")
+    |>.addFile "/lib/libuser.so" (← binary "libuser")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let notes ← IO.mkRef ([] : List Nat)
+  let note : Bap.Linux.HostFunction := fun _ arguments => do
+    notes.modify (· ++ [arguments.headD 0 % 2 ^ 32])
+    pure 0
+  let stubs ← machine.importStubs [("host_note", note)]
+  let user ← machine.loadLibrary "libuser.so" (resolve := stubs) (runInitializers := false)
+  assertEqual s!"{label} nothing is initialized yet" [] (← notes.get)
+  machine.runInitializers user
+  assertEqual s!"{label} what is needed is initialized first, with its imports served" [1, 2] (← notes.get)
+  machine.runInitializers
+  assertEqual s!"{label} and once" [1, 2] (← notes.get)
+  let signed32 (value : Nat) : Nat := value % 2 ^ 32
+  let call (name : String) (arguments : List Nat) : IO Nat := do
+    match ← machine.findSymbol name with
+    | some address => pure (signed32 (← machine.call address arguments))
+    | none => throw <| IO.userError s!"{label} has no {name}"
+  assertEqual s!"{label} both names are one function" (1005, 1005) (← call "call_one" [5], ← call "call_two" [5])
+  let some one := ← machine.findSymbol "alias_one" | throw <| IO.userError s!"{label} has no alias_one"
+  let some two := ← machine.findSymbol "alias_two" | throw <| IO.userError s!"{label} has no alias_two"
+  assertEqual s!"{label} at one address" one two
+  let served (plus : Nat) : Bap.Linux.HostFunction := fun _ arguments => pure (arguments.headD 0 % 2 ^ 32 + plus)
+  let slots ← machine.serveImport user "alias_one" (served 1)
+  let _ ← machine.serveImport user "alias_two" (served 2)
+  assertTrue s!"{label} a name has its slots ({slots})" (slots ≥ 1)
+  assertEqual s!"{label} each name has what was given for it" (6, 7) (← call "call_one" [5], ← call "call_two" [5])
+  assertEqual s!"{label} and the function is as it was" 1005 (← call "impl_value" [5])
+  let _ ← machine.serveImport user "alias_two" (served 20)
+  assertEqual s!"{label} a handler given again is the one" (6, 25) (← call "call_one" [5], ← call "call_two" [5])
+  -- What a checkpoint says, and going on from it.
+  let saved ← machine.checkpoint
+  let info ← Bap.Linux.Machine.checkpointInfo saved
+  assertEqual s!"{label} a checkpoint says what was initialized" [("/lib/libalias.so", true), ("/lib/libuser.so", true)]
+    ((info.libraries.map fun (_, library) => (library.path, library.initialized)).toArray.qsort (fun left right => left.1 < right.1)).toList
+  assertTrue s!"{label} and the files" (info.files.any fun (path, size, _) => path == "/lib/libuser.so" && size > 0)
+  assertTrue s!"{label} and the tasks" (!info.tasks.isEmpty)
+  assertTrue s!"{label} and what is mapped, of which some is not zeros ({info.resident} of {info.mapped})"
+    (0 < info.resident && info.resident ≤ info.mapped)
+  assertEqual s!"{label} and nothing keeps it from going on" ([] : List String) (← Bap.Linux.Machine.checkCheckpoint saved)
+  let resumed ← Bap.Linux.Machine.ofCheckpoint saved
+  let again ← IO.mkRef ([] : List Nat)
+  let _ ← resumed.importStubs [("host_note", fun _ arguments => do again.modify (· ++ [arguments.headD 0]); pure 0)]
+  resumed.runInitializers
+  assertEqual s!"{label} what was initialized isn't again after a checkpoint" [] (← again.get)
+  let some resumedUser := (← resumed.loadedLibraries).find? (·.path == "/lib/libuser.so")
+    | throw <| IO.userError s!"{label} a checkpoint without libuser"
+  let _ ← resumed.serveImport resumedUser "alias_one" (served 1)
+  let _ ← resumed.serveImport resumedUser "alias_two" (served 2)
+  let some callOne := ← resumed.findSymbol "call_one" | throw <| IO.userError s!"{label} has no call_one"
+  assertEqual s!"{label} and is served again" 6 (signed32 (← resumed.call callOne [5]))
 
 /-- Shared libraries from outside a program, as `dlopen` has them, on a machine with no libc or linker to do it. -/
 def testLinuxLibraries (triple : String) (ifunc : Bool := false) : IO Unit := do

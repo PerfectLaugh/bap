@@ -94,6 +94,9 @@ import Bap.Analysis.Validate
 import Bap.Analysis.Protobuf
 import Bap.Crypto.AES
 import Bap.Crypto.KeyWrap
+import Bap.Crypto.Sha512
+import Bap.Linux.Accelerate
+import Bap.Linux.JniFiles
 import Bap.ABI
 import Bap.API
 import Bap.Decompile

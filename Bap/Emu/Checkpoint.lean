@@ -532,6 +532,12 @@ def snapshotOfBytes (emu : Emu) (data : ByteArray) : IO Snapshot := do
   let (_, snapshot) ← IO.ofExcept (splitFrame data)
   materializeSnapshot emu (← IO.ofExcept (decodeBinarySnapshot snapshot))
 
+/-- The snapshot in the bytes of `checkpointBytes` as it was saved, without the memory that `materializeSnapshot` gives it, for
+looking at what it has without an emulator. -/
+def snapshotOfFrame (data : ByteArray) : Except String Snapshot := do
+  let (_, snapshot) ← splitFrame data
+  decodeBinarySnapshot snapshot
+
 /-- The run state from the bytes of `checkpointBytes`. -/
 def runStateOfBytes (data : ByteArray) : IO RunState := do
   pure (← IO.ofExcept (splitFrame data)).1

@@ -171,14 +171,19 @@ private structure SignalNumbers where
   efault : Nat
   eperm : Nat
   count : Nat
+  /-- What stops a process by default, and what lets it go on. -/
+  stops : List Nat
+  cont : Nat
 
 private def numbersOf (architecture : Architecture) : SignalNumbers :=
   if isMipsArchitecture architecture then
     { kill := 9, stop := 23, segv := 11, chld := 18, ignored := [18, 20, 21, 23, 24, 25, 26, 27], saInfo := 8, howBlock := 1, howUnblock := 2,
-      howSet := 3, eintr := 4, eagain := 11, einval := 22, esrch := 3, efault := 14, eperm := 1, count := 128 }
+      howSet := 3, eintr := 4, eagain := 11, einval := 22, esrch := 3, efault := 14, eperm := 1, count := 128, stops := [23, 24, 26, 27],
+      cont := 25 }
   else
     { kill := 9, stop := 19, segv := 11, chld := 17, ignored := [17, 18, 19, 20, 21, 22, 23, 28], saInfo := 4, howBlock := 0, howUnblock := 1,
-      howSet := 2, eintr := 4, eagain := 11, einval := 22, esrch := 3, efault := 14, eperm := 1, count := 64 }
+      howSet := 2, eintr := 4, eagain := 11, einval := 22, esrch := 3, efault := 14, eperm := 1, count := 64, stops := [19, 20, 21, 22],
+      cont := 18 }
 
 private def saOnStack : Nat := 0x08000000
 private def saRestart : Nat := 0x10000000
@@ -389,12 +394,35 @@ def decode (data : ByteArray) : Except String SignalTable := do
 
 end Encoding
 
+/-- Why a signal ended a process, or would have: a fault that nothing handles, with where it was, a handler that couldn't be entered,
+as for no stack to run it on, and a `sigreturn` that had nothing to go back to. They are apart, as the first is the program's and the
+others are of how it was run. -/
+inductive SignalFailure where
+  | unhandled (thread pc address : Nat) (why : String)
+  | handlerEntry (thread signal : Nat) (error : String)
+  | sigreturn (thread : Nat) (why : String)
+  /-- An ignored fault that was gone on from, past the instruction, as `skipIgnoredFaults` has it. -/
+  | skipped (thread pc address : Nat)
+  deriving DecidableEq, Repr
+
 /-- The signals of a machine. -/
 structure Signals where
   architecture : Architecture
   /-- Where the page of `returnCode` goes. -/
   returnPage : Nat
   table : IO.Ref SignalTable
+  /-- What ended a process, or would have, as it happened. -/
+  failures : IO.Ref (Array SignalFailure)
+  /-- Whether a fault that a process ignores goes on past the instruction that faulted. Linux ends the process for it, as an
+  instruction that faults again each time it runs can't be ignored, which is what this does unless it is asked not to. -/
+  skipIgnoredFaults : IO.Ref Bool
+  /-- What a signal that is to be delivered to a thread, or a fault of one, comes to first: whether it stopped the thread instead, as
+  `Bap.Linux.Ptrace` has a tracee stop. -/
+  intercept : IO.Ref (Emu → Nat → SignalInfo → IO Bool)
+  /-- Whether a thread is traced, of which a signal is kept to be delivered, and stops it, even if it is ignored. -/
+  traced : IO.Ref (Nat → IO Bool)
+  /-- A process that a signal stops, by what does that by default, or that SIGCONT lets go on: the process and the signal. -/
+  jobControl : IO.Ref (Emu → Nat → Nat → IO Unit)
 
 namespace Signals
 
@@ -420,14 +448,16 @@ private def blockable (signals : Signals) (mask : Nat) : Nat :=
 /-- What a signal comes to in a process where it isn't blocked. -/
 private inductive Disposition where
   | ignore | handle (action : SignalAction) | terminate
+  /-- It stops the process, which SIGCONT lets go on. -/
+  | stop
 
 private def dispositionOf (signals : Signals) (group signal : Nat) : IO Disposition := do
   let numbers := signals.numbers
   if signal == numbers.kill then return .terminate
-  if signal == numbers.stop then return .ignore
+  if signal == numbers.stop then return .stop
   let action ← actionOf signals group signal
   match action.handler with
-  | 0 => pure (if numbers.ignored.contains signal then .ignore else .terminate)
+  | 0 => pure (if numbers.stops.contains signal then .stop else if numbers.ignored.contains signal then .ignore else .terminate)
   | 1 => pure .ignore
   | _ => pure (.handle action)
 
@@ -647,8 +677,11 @@ private partial def deliver (signals : Signals) (emu : Emu) (inCall : Bool) : IO
   match ← nextSignal signals tid task.group with
   | none => pure ()
   | some info =>
+    -- A tracee stops for it instead, and its tracer says what becomes of it.
+    if ← (← signals.intercept.get) emu tid info then return
     match ← dispositionOf signals task.group info.signal with
     | .ignore => deliver signals emu inCall
+    | .stop => (← signals.jobControl.get) emu task.group info.signal
     | .terminate => kill emu task.group info.signal
     | .handle action =>
       let resume ← if inCall then
@@ -664,8 +697,9 @@ private partial def deliver (signals : Signals) (emu : Emu) (inCall : Bool) : IO
           emu.pc.set handler
           emu.skipCode.set none
         deliver signals emu inCall
-      | .error _ =>
+      | .error error =>
         -- No stack to run it on: Linux has a process end for that.
+        signals.failures.modify (·.push (.handlerEntry tid info.signal (toString error)))
         kill emu task.group (signals.numbers).segv
 
 /-- A thread that has to wake for a signal: it isn't waiting any longer, and what it was doing says so, or starts again if it may. -/
@@ -687,8 +721,15 @@ private def interrupt (signals : Signals) (emu : Emu) (tid : Nat) (restart : Boo
 
 /-- A signal is sent to a thread. -/
 private def sendToThread (signals : Signals) (emu : Emu) (tid group : Nat) (info : SignalInfo) : IO Unit := do
+  -- SIGCONT lets a stopped process go on as it is sent, whatever becomes of it after.
+  if info.signal == (signals.numbers).cont then (← signals.jobControl.get) emu group info.signal
   let state ← threadOf signals tid
   let bit := bitOf info.signal
+  -- What is sent to a tracee waits to be delivered, as that stops it, whatever it would have come to.
+  if info.signal != (signals.numbers).kill && (← (← signals.traced.get) tid) then
+    modifyThread signals tid fun state => { state with pending := state.pending ++ [info] }
+    if (← thread emu) != tid then interrupt signals emu tid true
+    return
   let realTime := info.signal ≥ 32
   -- Of one that isn't of real time one at most is pending.
   let already := !realTime && state.pending.any (·.signal == info.signal)
@@ -704,6 +745,7 @@ private def sendToThread (signals : Signals) (emu : Emu) (tid group : Nat) (info
     return
   match ← dispositionOf signals group info.signal with
   | .ignore => pure ()
+  | .stop => (← signals.jobControl.get) emu group info.signal
   | .terminate => kill emu group info.signal
   | .handle action =>
     unless already do modifyThread signals tid fun state => { state with pending := state.pending ++ [info] }
@@ -723,10 +765,17 @@ private def sendToGroup (signals : Signals) (emu : Emu) (group : Nat) (info : Si
   match leaderFirst.find? (fun task => takes task.tid) with
   | some task => sendToThread signals emu task.tid group info
   | none =>
+    if info.signal == (signals.numbers).cont then (← signals.jobControl.get) emu group info.signal
     let realTime := info.signal ≥ 32
     let shared := table.groupPending.getD group []
     unless !realTime && shared.any (·.signal == info.signal) do
       signals.table.modify fun table => { table with groupPending := table.groupPending.insert group (shared ++ [info]) }
+
+/-- Sends a signal to a thread of a process, or to the process, as `tgkill` and `kill` do. -/
+def send (signals : Signals) (emu : Emu) (tid : Option Nat) (group : Nat) (info : SignalInfo) : IO Unit :=
+  match tid with
+  | some tid => sendToThread signals emu tid group info
+  | none => sendToGroup signals emu group info
 
 /-- Where a thread blocks that waits for no address: no guest can wake it, as this isn't memory that it has. -/
 private def waitAddress (tid : Nat) : Nat := 2 ^ 64 - 8 * (tid + 1)
@@ -822,7 +871,12 @@ def faulted (signals : Signals) (emu : Emu) (fault : MemoryFault) : IO Bool := d
   let state ← threadOf signals tid
   let code := if (lookupRegion (← emu.regions.get) fault.address).isSome then 2 else 1
   let info : SignalInfo := ⟨numbers.segv, code, .fault fault.address⟩
-  if bitOf numbers.segv &&& state.mask != 0 then return false
+  let fail (why : String) : IO Bool := do
+    signals.failures.modify (·.push (.unhandled tid fault.pc fault.address why))
+    pure false
+  -- A tracee stops for it, before anything is made of it.
+  if ← (← signals.intercept.get) emu tid info then return true
+  if bitOf numbers.segv &&& state.mask != 0 then return ← fail "SIGSEGV is blocked"
   match ← dispositionOf signals task.group numbers.segv with
   | .handle action =>
     let resume ← emu.pc.get
@@ -833,8 +887,23 @@ def faulted (signals : Signals) (emu : Emu) (fault : MemoryFault) : IO Bool := d
       emu.pendingRef.set none
       emu.skipCode.set none
       pure true
-    | .error _ => pure false
-  | _ => pure false
+    | .error error =>
+      signals.failures.modify (·.push (.handlerEntry tid numbers.segv (toString error)))
+      pure false
+  | .ignore =>
+    if ← signals.skipIgnoredFaults.get then
+      match ← nextInstruction emu fault.pc with
+      | some next =>
+        signals.failures.modify (·.push (.skipped tid fault.pc fault.address))
+        emu.pc.set next
+        emu.pendingRef.set none
+        emu.skipCode.set none
+        emu.stopped.set false
+        pure true
+      | none => fail "SIGSEGV is ignored, and what faulted can't be decoded to go past it"
+    else fail "SIGSEGV is ignored"
+  -- SIGSEGV doesn't stop by default.
+  | .terminate | .stop => fail "nothing handles SIGSEGV"
 
 /-- A process is over, which its parent hears of. -/
 def processExited (signals : Signals) (emu : Emu) (group status : Nat) : IO Unit := do
@@ -900,7 +969,10 @@ private def sigreturn (signals : Signals) (emu : Emu) : IO SyscallAction := do
   -- A handler that left by `longjmp` left its frame, which is further down this stack.
   let live := state.frames.dropWhile fun frame => frame.onAlternate == inAlternate && frame.entry + 64 < sp
   match live with
-  | [] => kill emu (← currentTask emu).group (signals.numbers).segv; pure (.returnValue 0)
+  | [] =>
+    signals.failures.modify (·.push (.sigreturn tid "no frame of a handler to go back to"))
+    kill emu (← currentTask emu).group (signals.numbers).segv
+    pure (.returnValue 0)
   | frame :: rest =>
     let memoryVar := emu.config.memory
     let current ← emu.state.get
@@ -920,7 +992,9 @@ private def sigreturn (signals : Signals) (emu : Emu) : IO SyscallAction := do
       modifyThread signals tid fun state => { state with mask := blockable signals mask, frames := rest }
       emu.redirect.set (some (match architecture with | .arm => pc - pc % 2 | _ => pc))
       emu.skipCode.set frame.skip
-    catch _ => failed := true
+    catch error =>
+      signals.failures.modify (·.push (.sigreturn tid s!"its context can't be read: {error}"))
+      failed := true
     if failed then
       kill emu (← currentTask emu).group (signals.numbers).segv
       return .returnValue 0
@@ -929,6 +1003,15 @@ private def sigreturn (signals : Signals) (emu : Emu) : IO SyscallAction := do
       setReg emu (exclusiveMonitor width) (wordOfWidth width 0)
     let (_, _, result) := syscallRegisters emu.config.syscallAbi
     pure (.returnValue (← registerValue emu width result))
+
+/-- A system call starts, which a signal that interrupts it starts again from, of one that may be: what serves a call before `serve` does
+says so. -/
+def noteCall (signals : Signals) (emu : Emu) (number : Nat) : IO Unit := do
+  if (callsOf signals.architecture).restartable.contains number then
+    let (_, _, resultRegister) := syscallRegisters emu.config.syscallAbi
+    let result ← registerValue emu signals.architecture.bits resultRegister
+    let pc ← emu.pc.get
+    modifyThread signals (← thread emu) fun state => { state with last := some { pc, result, restartable := true } }
 
 /-- What serves the system calls of signals, before those of the kernel and of tasks. -/
 def serve (signals : Signals) (emu : Emu) : IO Unit := do

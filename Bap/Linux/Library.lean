@@ -268,7 +268,7 @@ private def findLibrary (machine : Machine) (name origin : String) (runPaths sea
 private structure Loading where
   /-- What it found to be new, by path. -/
   mapped : List LoadedLibrary := []
-  /-- What to run, in order: the first that was loaded and all that it needed last. -/
+  /-- What to run, in order: those of what a library needs before its own. -/
   initializers : List Nat := []
 
 /-- Maps a library, writable and executable until it has been relocated, so that its indirect resolvers can run. -/
@@ -712,7 +712,9 @@ def Machine.replaceFunction (machine : Machine) (address : Nat) (handler : HostF
     returnFromCall here emu result
     for ends in ← emu.hostEnds.get do ends (some (conventionOf machine.architecture).result)
 
-/-- Serves a function that a library that is loaded exports, by its name, as `replaceFunction` does. -/
+/-- Serves a function that a library that is loaded exports, by its name, as `replaceFunction` does. It goes by where the function is,
+so that all the names of one function, as an alias has, are served alike, and by the first handler that was given there: to serve
+each name of its own, serve what imports it, by `serveImport`. -/
 def Machine.hookSymbol (machine : Machine) (name : String) (handler : HostFunction) (library : Option LoadedLibrary := none) :
     IO HookId := do
   let some address ← machine.findSymbol name library | throw <| IO.userError s!"{name} isn't exported by what is loaded"
@@ -749,7 +751,10 @@ def Machine.hostFunction (machine : Machine) (name : String) (handler : HostFunc
       poke emu address (numberBytes false 8 digest)
       poke emu first (numberBytes false 8 (count + 1))
       pure address
-  let _ ← machine.replaceFunction address handler s!"host function {name}"
+  -- A handler given again for a name takes the place of the one that it had.
+  if let some previous := (← machine.hostHooks.get).get? address then removeHook emu previous
+  let hook ← machine.replaceFunction address handler s!"host function {name}"
+  machine.hostHooks.modify (·.insert address hook)
   pure address
 
 /-- Stubs of host functions for what a library imports, as `loadLibrary` takes them in `resolve`: what isn't one of them is found as it
@@ -758,10 +763,11 @@ def Machine.importStubs (machine : Machine) (handlers : List (String × HostFunc
   let stubs ← handlers.mapM fun (name, handler) => do pure (name, ← machine.hostFunction name handler)
   pure fun name => stubs.lookup name
 
-/-- Makes what a loaded library imports of `name` be `target`: each slot of its tables that a relocation fills with that symbol, as
-`loadLibrary` filled it, has `target` now, so that its calls go there and what it reads of the address is that. It says how many there
-were. -/
-def Machine.redirectImport (machine : Machine) (library : LoadedLibrary) (name : String) (target : Nat) : IO Nat := do
+/-- The slots of each name that a loaded library imports, from its file: where each is from its base, and what is added there. -/
+private def importSlotsOf (machine : Machine) (library : LoadedLibrary) : IO (Std.HashMap String (List (Nat × Nat))) := do
+  -- Of that file, as another may be loaded there later.
+  let key := (library.base, s!"{library.path}#{library.digest}")
+  if let some slots := (← machine.importSlots.get).get? key then return slots
   let architecture := machine.architecture
   let data ← match fileOf (← machine.kernel.get) library.path with
     | .ok data => pure data
@@ -771,17 +777,16 @@ def Machine.redirectImport (machine : Machine) (library : LoadedLibrary) (name :
   let symbols := (← IO.ofExcept (Image.Elf.allDynamicSymbols image)).toArray
   let relocations ← IO.ofExcept (Image.Elf.allDynamicRelocations image)
   let word := architecture.bits / 8
-  let mut count := 0
+  let unversioned (name : String) : String := (name.splitOn "@").headD name
+  let mut slots : Std.HashMap String (List (Nat × Nat)) := {}
   for relocation in relocations do
     let some symbol := symbols[relocation.symbol]? | continue
-    if relocation.symbol == 0 || (symbol.name.splitOn "@").headD symbol.name != name then continue
+    if relocation.symbol == 0 then continue
     match relocationKind program.machine relocation.typ (architecture.bits == 64) with
     | .slot | .absolute =>
       let addend := if relocation.explicitAddend && (relocationKind program.machine relocation.typ (architecture.bits == 64) matches .absolute)
         then relocation.addend else 0
-      -- What relocating made read-only is written as a kernel would.
-      poke machine.emu (library.base + relocation.offset) (numberBytes architecture.big word ((target + addend) % 2 ^ architecture.bits))
-      count := count + 1
+      slots := slots.alter (unversioned symbol.name) fun known => some ((known.getD []) ++ [(relocation.offset, addend)])
     | _ => pure ()
   -- The GOT of MIPS has the symbols of its global entries without relocations.
   if architecture matches .mips .. then
@@ -790,9 +795,62 @@ def Machine.redirectImport (machine : Machine) (library : LoadedLibrary) (name :
     if let (some got, some locals, some first, some total) := (tag 3, tag 0x7000000a, tag 0x70000013, tag 0x70000011) then
       for index in [first:total] do
         if let some symbol := symbols[index]? then
-          if (symbol.name.splitOn "@").headD symbol.name == name then
-            poke machine.emu (library.base + got + (locals + index - first) * word) (numberBytes architecture.big word target)
-            count := count + 1
+          slots := slots.alter (unversioned symbol.name) fun known => some ((known.getD []) ++ [(got + (locals + index - first) * word, 0)])
+  machine.importSlots.modify (·.insert key slots)
+  pure slots
+
+/-- Makes what a loaded library imports of `name` be `target`: each slot of its tables that a relocation fills with that symbol, as
+`loadLibrary` filled it, has `target` now, so that its calls go there and what it reads of the address is that. It says how many there
+were. The file of a library is read once for all its names. -/
+def Machine.redirectImport (machine : Machine) (library : LoadedLibrary) (name : String) (target : Nat) : IO Nat := do
+  let architecture := machine.architecture
+  let word := architecture.bits / 8
+  let slots := (← importSlotsOf machine library).getD name []
+  for (offset, addend) in slots do
+    -- What relocating made read-only is written as a kernel would.
+    poke machine.emu (library.base + offset) (numberBytes architecture.big word ((target + addend) % 2 ^ architecture.bits))
+  pure slots.length
+
+/-- Serves what a library imports of `name` by `handler`, at a stub of that library and name: each slot of its tables that relocating
+filled with that symbol goes there, so that its calls and what it reads of the address are the host's. It goes by the name that is
+imported and not by where that is, so that names of one function, as aliases are, each have what is given for them, and so that a library
+that imports it has it served and another that doesn't, doesn't. Given again, the handler is the new one. It says how many slots there
+were. -/
+def Machine.serveImport (machine : Machine) (library : LoadedLibrary) (name : String) (handler : HostFunction) : IO Nat := do
+  let stub ← machine.hostFunction s!"{library.path}:{name}" handler
+  machine.redirectImport library name stub
+
+/-- `serveImport` of a name for every library loaded in the process that runs. It says how many slots there were, of all of them. -/
+def Machine.serveImports (machine : Machine) (name : String) (handler : HostFunction) : IO Nat := do
+  let mut count := 0
+  for library in ← machine.loadedLibraries do
+    count := count + (← machine.serveImport library name handler)
   pure count
+
+/-- Runs the initializers of a library that is loaded, and of what it needs before its own, as `loadLibrary` does, of those that haven't
+run: for a library that was loaded with `runInitializers := false`, after its imports are served, which they then are from the first
+instruction of what initializes it. Of no library, those of all that are loaded. A library whose initializers ran is so in a checkpoint,
+so that they don't run again. -/
+partial def Machine.runInitializers (machine : Machine) (library : Option LoadedLibrary := none) : IO Unit := do
+  let space := (← currentTask machine.emu).space
+  let loaded := spaceHas space (← machine.libraries.get)
+  let roots : List LoadedLibrary := match library with
+    | some wanted => loaded.filter fun other => other.path == wanted.path
+    | none => loaded
+  if let some wanted := library then
+    if roots.isEmpty then throw <| IO.userError s!"{wanted.path} isn't loaded"
+  -- What needs what, depth first: what is needed has run when what needs it does.
+  let visited ← IO.mkRef ([] : List String)
+  let rec visit (path : String) : IO Unit := do
+    if (← visited.get).contains path then return
+    visited.modify (path :: ·)
+    let some current := (spaceHas space (← machine.libraries.get)).find? (·.path == path) | return
+    for needed in current.needs do visit needed
+    unless current.initialized do
+      for initializer in current.initializers do
+        let _ ← machine.call initializer []
+      machine.libraries.modify fun table => table.insert space ((spaceHas space table).map fun other =>
+        if other.path == path then { other with initialized := true } else other)
+  for root in roots do visit root.path
 
 end Bap.Linux

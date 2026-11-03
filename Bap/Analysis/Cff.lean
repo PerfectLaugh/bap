@@ -1,5 +1,6 @@
 import Bap.Analysis.Journal
 import Bap.Analysis.DynamicTaint
+import Bap.Bil.Transform
 
 /-! Flattened control flow as it ran: a dispatcher that each round of the machine goes through, with a state that says which handler
 comes next. What is particular to a target, where its dispatcher is and where its state is kept, is a `Profile`, and the rest is the
@@ -58,24 +59,121 @@ structure Visit where
   thread : ThreadId
   group : Nat
   state : Nat
+  /-- The last instruction of the thread that wrote the state since its last visit, of a state in memory: what assigned the state that
+  this visit has. -/
+  writer : Option Nat := none
   deriving DecidableEq, Repr, Inhabited
 
 structure Recorder where
   profile : Profile
   visits : IO.Ref (Array Visit)
   hook : Bap.Emu.HookId
+  /-- The hook of writes to a state in memory, and where it watches. -/
+  watch : IO.Ref (Option (Bap.Emu.HookId × Nat))
 
-/-- Notes the state each time a thread comes to the dispatcher, from here on. -/
+/-- Where a state in memory is now, in the thread that runs, and how big it is. -/
+private def stateAddress (emu : Emu) : StateLocation → IO (Option (Nat × Nat))
+  | .register .. => pure none
+  | .memory address size => pure (some (address, size))
+  | .relative name offset size => do
+    let width ← Bap.Emu.wordWidth emu
+    match Value.asBits (← Bap.Emu.reg emu ⟨name, .imm width, 0, false⟩) with
+    | .ok bits => pure (some (((Int.ofNat bits.2.toNat + offset) % (2 ^ width : Int)).toNat, size))
+    | .error _ => pure none
+
+/-- Notes the state each time a thread comes to the dispatcher, from here on, and of a state in memory, what last wrote it before. -/
 def Recorder.attach (emu : Emu) (profile : Profile) : IO Recorder := do
   let visits ← IO.mkRef #[]
+  let writers ← IO.mkRef ({} : Std.HashMap ThreadId Nat)
+  let watch ← IO.mkRef (none : Option (Bap.Emu.HookId × Nat))
+  let watchAt (address size : Nat) : IO Unit := do
+    match ← watch.get with
+    | some (_, at_) => if at_ == address then return
+    | none => pure ()
+    if let some (hook, _) := ← watch.get then Bap.Emu.removeHook emu hook
+    let hook ← Bap.Emu.onWrite emu (address, address + size - 1) fun current _ _ _ => do
+      writers.modify (·.insert (← Bap.Emu.thread current) (← current.pc.get))
+    watch.set (some (hook, address))
+  if let some (address, size) := ← stateAddress emu profile.state then
+    if size > 0 && !(profile.state matches .relative ..) then watchAt address size
   let hook ← Bap.Emu.onCode emu (profile.dispatcher, profile.dispatcher) fun current _ => do
     let thread ← Bap.Emu.thread current
     let group := (((← current.taskTable.get).find? thread).map (·.group)).getD thread
-    visits.modify (·.push { thread, group, state := profile.decode (← readState current profile.state) })
-  pure { profile, visits, hook }
+    let writer := (← writers.get).get? thread
+    writers.modify (·.erase thread)
+    visits.modify (·.push { thread, group, state := profile.decode (← readState current profile.state), writer })
+    -- A state on the stack is watched where it is, which is where the next round writes it.
+    if profile.state matches .relative .. then
+      if let some (address, size) := ← stateAddress current profile.state then
+        if size > 0 then watchAt address size
+  pure { profile, visits, hook, watch }
 
 /-- Stops noting. -/
-def Recorder.detach (emu : Emu) (recorder : Recorder) : IO Unit := Bap.Emu.removeHook emu recorder.hook
+def Recorder.detach (emu : Emu) (recorder : Recorder) : IO Unit := do
+  Bap.Emu.removeHook emu recorder.hook
+  if let some (hook, _) := ← recorder.watch.get then Bap.Emu.removeHook emu hook
+
+/-- What assigned the next state in a round: the instruction, whether it did so on a condition, as a `csel`, a `cmov` or a store that
+only happens on one, and what that condition read. -/
+structure Assignment where
+  pc : Nat
+  conditional : Bool
+  condition : List String
+  deriving DecidableEq, Repr
+
+/-- Of a program that writes a register, or of one that stores when the state is in memory, how it does: whether on a condition, and the
+variables that the condition reads. None if it doesn't write it. -/
+partial def assignmentIn (program : Bil.Program) (register : Option String) : Option (Bool × List String) :=
+  let names (exp : Bil.Exp) : List String := ((Bil.freeVars exp).map (·.name)).eraseDups
+  let rec iteCondition : Bil.Exp → Option Bil.Exp
+    | .ite condition _ _ => some condition
+    | .letIn _ value body => (iteCondition body).or (iteCondition value)
+    | .cast _ _ value | .extract _ _ value | .un _ value => iteCondition value
+    | .store _ _ value _ _ => iteCondition value
+    | _ => none
+  let rec stores : Bil.Exp → Bool
+    | .store .. => true
+    | .letIn _ value body => stores value || stores body
+    | _ => false
+  let rec find (statements : List Bil.Stmt) (guard : Option Bil.Exp) : Option (Bool × List String) :=
+    statements.foldr (init := none) fun statement found =>
+      let here : Option (Bool × List String) := match statement with
+        | .move var value =>
+          let writes := match register with
+            | some name => var.name == name
+            | none => stores value
+          if !writes then none
+          else match guard, iteCondition value with
+            | some condition, _ => some (true, names condition)
+            | none, some condition => some (true, names condition)
+            | none, none => some (false, [])
+        | .ifElse condition yes no => (find yes (some condition)).or (find no (some condition))
+        | .while _ body => find body guard
+        | _ => none
+      -- The last that writes it is what the round leaves.
+      found.or here
+  find program none
+
+/-- The register that a program stores, of one that stores what a register holds, as a store of a state that a `csel` chose does. -/
+partial def storedRegister (program : Bil.Program) : Option String :=
+  let rec ofValue : Bil.Exp → Option String
+    | .var var => some var.name
+    | .cast _ _ value | .extract _ _ value => ofValue value
+    | _ => none
+  let rec inStore : Bil.Exp → Option String
+    | .store _ _ value _ _ => ofValue value
+    | .letIn _ value body => (inStore body).or (inStore value)
+    | _ => none
+  program.findSome? fun statement => match statement with
+    | .move _ value => inStore value
+    | _ => none
+
+/-- The instruction of a round that last wrote a state in a register, from the end of the round, by the code of what it ran. -/
+private def lastWriter (round : Array Journal.Executed) (register : String) (programOf : Nat → Option Bil.Program) : Option Nat := Id.run do
+  for entry in round.reverse do
+    if let some program := programOf entry.pc then
+      if (assignmentIn program (some register)).isSome then return some entry.pc
+  pure none
 
 /-- What chose where a round went: the last branch of its handler on what depends on something marked, and what that came from. -/
 structure Predicate where
@@ -98,7 +196,12 @@ structure Transition where
   instructions : Option Nat := none
   span : Option (Nat × Nat) := none
   services : List String := []
+  /-- What each service was asked, in order: the inputs of what the host or the kernel did for the round. -/
+  serviceInputs : List (String × List Nat) := []
   calls : List Nat := []
+  /-- What assigned the next state, if that is known: by a write that was seen, of a state in memory, or by the code of the round's
+  instructions, of one in a register. -/
+  assignment : Option Assignment := none
   predicate : Option Predicate := none
   deriving Repr
 
@@ -318,25 +421,53 @@ def recover (profile : Profile) (visits : Array Visit) (record : Option Journal.
       let span := round.bind fun round => match round[0]?, round.back? with
         | some first, some last => some (first.seq, last.seq + 1)
         | _, _ => none
-      let (services, calls) := match span with
+      let (services, serviceInputs, calls) := match span with
         | some (first, stop) => Id.run do
           let mut services : Array String := #[]
+          let mut inputs : Array (String × List Nat) := #[]
           let mut calls : Array Nat := #[]
           let mut at_ := firstFrom events Journal.Event.seq first
           while at_ < events.size && events[at_]!.seq < stop do
             match events[at_]! with
-            | .service _ _ _ _ label _ _ _ => services := services.push label
+            | .service _ _ _ _ label args _ _ =>
+              services := services.push label
+              inputs := inputs.push (label, args)
             | .call _ _ frame => calls := calls.push frame.callee
             | _ => pure ()
             at_ := at_ + 1
-          pure (services.toList, calls.toList)
-        | none => ([], [])
+          pure (services.toList, inputs.toList, calls.toList)
+        | none => ([], [], [])
+      -- What assigned the state that the next visit has.
+      let register := match profile.state with
+        | .register name _ => some name
+        | _ => none
+      let writer := match register with
+        | some name => if next.isSome then round.bind (lastWriter · name programOf) else none
+        | none => (mine[k + 1]?).bind (·.writer)
+      let assignment := writer.map fun pc =>
+        match (programOf pc).bind (assignmentIn · register) with
+        | some (true, condition) => { pc, conditional := true, condition : Assignment }
+        | _ =>
+          -- A store of what a register holds: what chose that, earlier in the round, as a `csel` before a `str` does.
+          let chosen : Option (List String) := match register, (programOf pc).bind storedRegister, round with
+            | none, some source, some round => Id.run do
+              let entries := round.toList
+              let before := (entries.reverse.dropWhile (·.pc != pc)).drop 1
+              for entry in before do
+                if let some program := programOf entry.pc then
+                  if let some (conditional, condition) := assignmentIn program (some source) then
+                    return if conditional then some condition else none
+              pure none
+            | _, _, _ => none
+          match chosen with
+          | some condition => { pc, conditional := true, condition }
+          | none => { pc, conditional := false, condition := [] }
       let transition : Transition := {
         thread, group := visit.group, index := k, state := visit.state, next
         handler := round.bind (entryOf visit.state)
         exit := if next.isSome then round.bind (·.back?.map (·.pc)) else none
         instructions := if next.isSome then round.map (·.size) else none
-        span, services, calls }
+        span, services, serviceInputs, calls, assignment }
       transitions := transitions.push transition
       states := states.add visit.state
       if let some to := next then
@@ -372,6 +503,13 @@ def recoverIn (emu : Emu) (profile : Profile) (visits : Array Visit) (record : O
         looked := looked.insert entry.pc
         if let some program := ← Bap.Emu.programAt emu entry.pc then
           programs := programs.insert entry.pc program
+  -- And what wrote a state in memory, which a journal needn't have been there for.
+  for visit in visits do
+    if let some pc := visit.writer then
+      unless looked.contains pc do
+        looked := looked.insert pc
+        if let some program := ← Bap.Emu.programAt emu pc then
+          programs := programs.insert pc program
   pure (recover profile visits record (programs.get? ·))
 
 /-- The binary search of what is sorted by its key, for the last that is below a bound. -/
@@ -384,15 +522,24 @@ private def lastBelow (items : Array (Nat × Node)) (bound : Nat) : Option Nat :
   pure (if low == 0 then none else some (low - 1))
 
 /-- Each round with what decided it, by a tracker that started with the journal: the last branch of its handler, outside the dispatcher's
-code, on what depends on something marked, and the sources of that. A round whose handler decided on nothing marked has none. -/
+code, on what depends on something marked, and the sources of that, or else, of a round that chose its next state without a branch, as a
+`csel` does, what that chose by. A round whose handler decided on nothing marked has none. -/
 def withPredicates (dispatcher : Dispatcher) (tracker : Tracker) (journal : Journal.Journal) : IO Dispatcher := do
   let ahead := (← tracker.insn.get) - (← journal.seq.get)
   let dispatch : Std.HashSet Nat := dispatcher.dispatch.foldl (·.insert ·) {}
   -- The branches of each thread outside the dispatcher, in the order that they were, gathered once.
   let mut byThread : Std.HashMap ThreadId (Array (Nat × Node)) := {}
+  -- And the nodes of what assigned a state on a condition, by thread and where.
+  let conditional : Std.HashSet Nat := dispatcher.transitions.foldl (init := {}) fun set transition =>
+    match transition.assignment with
+    | some assignment => if assignment.conditional then set.insert assignment.pc else set
+    | none => set
+  let mut assigning : Std.HashMap (ThreadId × Nat) (Array (Nat × Node)) := {}
   for node in ← tracker.nodes.get do
     if node.kind matches .branch _ && !dispatch.contains node.pc then
       byThread := byThread.alter node.thread fun known => some ((known.getD #[]).push (node.insn, node))
+    if conditional.contains node.pc then
+      assigning := assigning.alter (node.thread, node.pc) fun known => some ((known.getD #[]).push (node.insn, node))
   let mut transitions : Array Transition := #[]
   for transition in dispatcher.transitions do
     let predicate ← match transition.span with
@@ -409,6 +556,21 @@ def withPredicates (dispatcher : Dispatcher) (tracker : Tracker) (journal : Jour
               | _ => none : Predicate })
         | none => pure none
       | none => pure none
+    let sourcesOf (node : Node) : IO Predicate := do
+      let sources ← tracker.sourcesOf (nodeTag node.id 0)
+      pure { pc := node.pc, sources := sources.filterMap fun (source, byte, _) => match source.kind with
+        | .source label offset => some (label, offset.map (· + byte))
+        | _ => none }
+    -- What chose the next state without a branch, in the same round.
+    let predicate ← match predicate, transition.assignment, transition.span with
+      | none, some assignment, some (first, last) =>
+        if !assignment.conditional then pure none else
+        match lastBelow (assigning.getD (transition.thread, assignment.pc) #[]) (last + ahead) with
+        | some position =>
+          let (insn, node) := (assigning.getD (transition.thread, assignment.pc) #[])[position]!
+          if insn < first + ahead then pure none else pure (some (← sourcesOf node))
+        | none => pure none
+      | found, _, _ => pure found
     transitions := transitions.push { transition with predicate }
   pure { dispatcher with transitions := transitions.toList }
 
