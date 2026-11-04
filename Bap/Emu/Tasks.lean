@@ -287,7 +287,7 @@ private def callsOf (abi : SyscallAbi) (width : Nat) : Calls :=
         setTidAddress := 4252, setRobustList := 4309, rseq := 4367, sigprocmask := 4195, sigaction := 4194, tgkill := 4266,
         mmap := 4090, mmap2 := some 4210, munmap := 4091, mprotect := 4125, madvise := 4218 }
     else
-      { fork := some 5056, vfork := some 5057, clone := 5055, clone3 := 5435, wait4 := 5059, exit := 5058, exitGroup := 5205,
+      { fork := some 5056, clone := 5055, clone3 := 5435, wait4 := 5059, exit := 5058, exitGroup := 5205,
         getpid := 5038, getppid := 5108, gettid := 5178, schedYield := 5023, futex := 5194, setTidAddress := 5212,
         setRobustList := 5268, rseq := 5327, sigprocmask := 5014, sigaction := 5013, tgkill := 5225, mmap := 5009,
         munmap := 5011, mprotect := 5010, madvise := 5027 }
