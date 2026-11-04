@@ -813,7 +813,8 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
     | .socket _ => .error Errno.enxio
   let openFile := kernel.nextOpenFile
   let kernel := { kernel with
-    openFiles := kernel.openFiles.insert openFile { inode := number, flags }
+    -- What only opening had isn't kept: `O_CREAT`, `O_EXCL`, `O_NOCTTY`, `O_TRUNC` and `O_CLOEXEC`.
+    openFiles := kernel.openFiles.insert openFile { inode := number, flags := flags - (flags &&& (oCreat ||| oExcl ||| 0x100 ||| oTrunc ||| oCloexec)) }
     nextOpenFile := openFile + 1 }
   .ok (kernel.addDescriptor group openFile (has flags oCloexec))
 
@@ -1063,8 +1064,14 @@ def dupTo (kernel : Kernel) (group fd target : Nat) (closeOnExec : Bool := false
   match process.descriptors.get? fd with
   | none => .error Errno.ebadf
   | some descriptor =>
-    .ok (kernel.setProcess group
-      { process with descriptors := process.descriptors.insert target { openFile := descriptor.openFile, closeOnExec } }, target)
+    -- Of itself, it is as it was.
+    if fd == target then return (kernel, target)
+    let next := kernel.setProcess group
+      { process with descriptors := process.descriptors.insert target { openFile := descriptor.openFile, closeOnExec } }
+    -- What was there is closed, with what the process had locked of its file.
+    match process.descriptors.get? target with
+    | some replaced => .ok (next.releaseLocks group replaced.openFile, target)
+    | none => .ok (next, target)
 
 /-- `fcntl` with `F_GETFD`. -/
 def getCloseOnExec (kernel : Kernel) (group fd : Nat) : Result Bool :=
