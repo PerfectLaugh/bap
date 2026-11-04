@@ -66,6 +66,8 @@ structure Machine where
   handled : Bool := false
   /-- What its processes do with signals, and what is pending. -/
   signals : Signals
+  /-- What is traced and stopped, and what serves `ptrace` and the waits: see `Machine.servePtrace`. -/
+  ptrace : Ptrace
   /-- What `Machine.malloc` has given out, by address space. -/
   heaps : IO.Ref (Std.HashMap Nat GuestHeap)
   /-- What `Machine.loadLibrary` has loaded, by address space. -/
@@ -1767,7 +1769,8 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
                              failures := ← IO.mkRef #[], skipIgnoredFaults := ← IO.mkRef false
                              intercept := ← IO.mkRef fun _ _ _ => pure false, tracer := ← IO.mkRef fun _ => pure none
                              jobControl := ← IO.mkRef fun _ _ _ => pure () }
-  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome, signals, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {} }
+  let ptrace ← Ptrace.make architecture signals
+  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome, signals, ptrace, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {} }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
@@ -1790,7 +1793,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   -- Signals are part of what it is, and it is in a checkpoint like what a model holds.
   machine.models.modify (· ++ [{ id := Signals.modelId, version := 1, state := { save := signals.save, load := signals.load } }])
   -- So is what is traced and stopped, which serves the waits, and so is before the signals.
-  let ptrace ← Ptrace.attach architecture signals emu
+  ptrace.install emu
   machine.models.modify (· ++ [{ id := Ptrace.modelId, version := 1, state := { save := ptrace.save, load := ptrace.load } }])
   signals.serve emu
   -- A process that is over has closed what it had open.
@@ -2389,9 +2392,25 @@ def Machine.checkCheckpoint (data : ByteArray) (generators : List String := []) 
     if !loaded.contains digest then problems := problems ++ [s!"no library of digest {digest} is loaded"]
   pure problems
 
+/-- `ptrace` of the machine, for a hook or a handler that serves the system call of the thread that runs: what it gives is what that
+gives back. It serves what the machine's own hook would, with the tracees and stops that the machine has. -/
+def Machine.servePtrace (machine : Machine) (request pid address data : Nat) : IO SyscallAction :=
+  machine.ptrace.servePtrace machine.emu request pid address data
+
+/-- `wait4` of the machine, for what serves the system call of the thread that runs, as `Machine.servePtrace` is: a wait that has to
+wait stops the thread, and is given its result when it goes on. -/
+def Machine.serveWait (machine : Machine) (target status options usage : Nat) : IO SyscallAction :=
+  machine.ptrace.serveWait machine.emu target status options usage
+
+/-- What a wait says of the process that it reports, from its id here, which is the same until this is given: for a host that gives
+the guest ids of its own. A wait that is answered at once and one that waited both say it, in what they return and in `si_pid`. It
+isn't in a checkpoint: a machine that goes on from one is given it again. -/
+def Machine.setWaitResultMapping (machine : Machine) (mapping : Nat → Nat) : IO Unit :=
+  machine.ptrace.resultOf.set mapping
+
 /-- The process tracing a thread, if one traces it with `ptrace`. -/
-def Machine.tracerOf (machine : Machine) (tid : Nat) : IO (Option Nat) := do
-  (← machine.signals.tracer.get) tid
+def Machine.tracerOf (machine : Machine) (tid : Nat) : IO (Option Nat) :=
+  machine.ptrace.tracerOf tid
 
 /-- What ended a process by a signal, or would have, as it happened: faults that nothing handled, handlers that couldn't be entered and
 `sigreturn`s with nothing to go back to, apart. -/

@@ -221,11 +221,12 @@ def syscallWord (mips : Bool) (width : Nat) : Except Nat Nat → Nat × Option N
   | .ok value => (value, if mips then some 0 else none)
   | .error errno => if mips then (errno, some 1) else (2 ^ width - errno, none)
 
-/-- What `wait4` is asked for by its first argument, a signed word: any child, one of them, or a process group, which isn't
-modelled. -/
-def waitTarget (width target : Nat) : Option (Option Nat) :=
-  if target == 2 ^ width - 1 then some none
-  else if 0 < target && target < 2 ^ (width - 1) then some (some target)
+/-- What `wait4` is asked for by its first argument, a `pid_t`, of which the kernel takes the low 32 bits: a 64-bit register has -1
+with all its bits or only the low 32 of them. Any child, one of them, or a process group, which isn't modelled. -/
+def waitTarget (target : Nat) : Option (Option Nat) :=
+  let pid := target % 2 ^ 32
+  if pid == 2 ^ 32 - 1 then some none
+  else if 0 < pid && pid < 2 ^ 31 then some (some pid)
   else none
 
 /-- How a run of tasks ended. -/

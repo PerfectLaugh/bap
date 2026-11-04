@@ -2932,6 +2932,28 @@ def testBaseEnvironment (triple : String) : IO Unit := do
   assertEqual s!"{label} and what was linked against it runs as it would have" (← call "run")
     ((← again.call run (threaded := true)) % 2 ^ 32)
 
+/-- What a wait says of the process that it found, for a host that gives the guest ids of its own: the machine's own until it is told,
+and what the host says once it is, both of a wait that is answered at once and of one that waited. A checkpoint doesn't have it: a
+machine that goes on from one is told again. -/
+def testWaitResultMapping (triple : String) : IO Unit := do
+  let label := s!"Wait pids {triple}"
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-waitpids"
+  let outputOf (machine : Bap.Linux.Machine) : IO String := do
+    let written ← IO.mkRef ByteArray.empty
+    let outcome ← machine.run fun data => written.modify (· ++ data)
+    assertEqual s!"{label} it ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+    pure (String.fromUTF8! (← written.get))
+  let start : IO Bap.Linux.Machine := Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  assertEqual s!"{label} are the machine's own until it is told" "0 0\n" (← outputOf (← start))
+  let machine ← start
+  let data ← machine.checkpoint
+  machine.setWaitResultMapping (· + 1000)
+  assertEqual s!"{label} are what the host says, at once and after waiting" "1000 1000\n" (← outputOf machine)
+  assertEqual s!"{label} aren't in a checkpoint" "0 0\n" (← outputOf (← Bap.Linux.Machine.ofCheckpoint data))
+  let again ← Bap.Linux.Machine.ofCheckpoint data
+  again.setWaitResultMapping (· + 1000)
+  assertEqual s!"{label} and are what the host says once it is told again" "1000 1000\n" (← outputOf again)
+
 /-- Files and directories put in a kernel, before a run and as a machine runs, through links and over what is there. -/
 def testKernelFiles : IO Unit := do
   let label := "Kernel files"

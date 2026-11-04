@@ -306,8 +306,7 @@ def bookkeepingCall (emu : Emu) (number : Nat) : IO Bool := do
 /-- `wait4` without the usage of what it reports, and process groups, which aren't modelled. A thread that has to wait
 stops here, and `runProcesses` gives it its result. -/
 private def serveWait (emu : Emu) (target status options usage : Nat) : IO SyscallAction := do
-  let width ← wordWidth emu
-  match waitTarget width target with
+  match waitTarget target with
   | none => syscallReturn emu (.error einval)
   | some wanted =>
     if usage != 0 then syscallReturn emu (.error einval) else

@@ -114,6 +114,10 @@ private def writeByteFastPath : IO Unit := do
     (fast.pages.toList.map fun entry => (entry.1, entry.2.toList))
 
 def run : IO Unit := do
+  assertEqual "wait4 takes -1 of the low 32 bits of a 64-bit word" (some none) (Tasks.waitTarget 0xffffffff)
+  assertEqual "wait4 takes -1 of all the bits of a 64-bit word" (some none) (Tasks.waitTarget 0xffffffffffffffff)
+  assertEqual "wait4 keeps a positive pid" (some (some 1000)) (Tasks.waitTarget 1000)
+  assertEqual "wait4 takes a pid of the low 32 bits" (some (some 1000)) (Tasks.waitTarget (2 ^ 32 + 1000))
   sexpFastPaths
   writeByteFastPath
   memoryAccesses

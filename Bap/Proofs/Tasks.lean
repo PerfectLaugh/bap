@@ -424,13 +424,16 @@ theorem signaledStatus_signal {signal : Nat} (h : signal % 128 ≠ 0) :
   simp only [signaledStatus]
   omega
 
-/-- The word of -1 asks for any child. -/
-theorem waitTarget_any (width : Nat) : waitTarget width (2 ^ width - 1) = some none := by
-  simp [waitTarget]
+/-- -1 asks for any child, in the low 32 bits of a word whatever is above them. -/
+theorem waitTarget_any {target : Nat} (h : target % 2 ^ 32 = 2 ^ 32 - 1) : waitTarget target = some none := by
+  simp [waitTarget, h]
 
-/-- Only a positive word asks for one process, and it asks for that one. -/
-theorem waitTarget_one {width target pid : Nat} (h : waitTarget width target = some (some pid)) :
-    pid = target ∧ 0 < target ∧ target < 2 ^ (width - 1) := by
+/-- -1 of a 32-bit word and of a 64-bit one. -/
+example : waitTarget (2 ^ 32 - 1) = some none ∧ waitTarget (2 ^ 64 - 1) = some none := by decide
+
+/-- Only what is positive in the low 32 bits asks for one process, and it asks for that one. -/
+theorem waitTarget_one {target pid : Nat} (h : waitTarget target = some (some pid)) :
+    pid = target % 2 ^ 32 ∧ 0 < pid ∧ pid < 2 ^ 31 := by
   simp only [waitTarget] at h
   split at h
   · cases h
@@ -438,7 +441,8 @@ theorem waitTarget_one {width target pid : Nat} (h : waitTarget width target = s
     · next hrange =>
       simp only [Option.some.injEq] at h
       simp only [Bool.and_eq_true, decide_eq_true_eq] at hrange
-      exact ⟨h.symm, hrange⟩
+      subst h
+      exact ⟨rfl, hrange⟩
     · cases h
 
 /-- Nothing runs but a thread that isn't stopped, with fuel left. -/

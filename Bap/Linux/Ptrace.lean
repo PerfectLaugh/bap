@@ -81,6 +81,9 @@ structure Ptrace where
   /-- Whether anything happened since the waits were last given what they wait for: a wait has nothing new to find otherwise, and isn't
   asked again, as asking takes as long as there are tasks. -/
   changed : IO.Ref Bool
+  /-- What a wait says of the process that it reports, from its id here: the same, unless the host gives the guest ids of its own.
+  It is a function, which isn't in a checkpoint: the host gives it again to a machine that goes on from one. -/
+  resultOf : IO.Ref (Nat → Nat)
 
 namespace Ptrace
 
@@ -284,9 +287,11 @@ private def numberBytes (big : Bool) (size value : Nat) : ByteArray :=
   let little := (List.range size).map fun index => (value >>> (8 * index)).toUInt8
   ByteArray.mk (if big then little.reverse else little).toArray
 
-/-- What a wait asks for of its first argument, a signed word: any, or one. A process group is any, as there is one. -/
-private def targetOf (width value : Nat) : Option Nat :=
-  if 0 < value && value < 2 ^ (width - 1) then some value else none
+/-- What a wait asks for of its first argument, a `pid_t`, of which the kernel takes the low 32 bits: any, or one. A process group
+is any, as there is one. -/
+private def targetOf (value : Nat) : Option Nat :=
+  let pid := value % 2 ^ 32
+  if 0 < pid && pid < 2 ^ 31 then some pid else none
 
 /-! ### Registers -/
 
@@ -424,6 +429,8 @@ private def complete (ptrace : Ptrace) (emu : Emu) (tid : Nat) (request : WaitRe
   | none => pure (some (.error echild))
   | some none => pure none
   | some (some report) =>
+    -- As the guest knows it, whether it is reported at once or to a wait that waited.
+    let report := { report with pid := (← ptrace.resultOf.get) report.pid }
     try
       if request.waitid then
         if request.status != 0 then put request.status (siginfo (some report))
@@ -475,10 +482,11 @@ private def serveRequest (ptrace : Ptrace) (emu : Emu) (request : WaitRequest) (
       emu.stopped.set true
       syscallReturn emu (.ok 0)
 
-/-- `wait4` and `waitpid`, which always say how a process ended, and how it stopped or went on if asked. -/
-private def serveWait (ptrace : Ptrace) (emu : Emu) (target status options usage : Nat) : IO SyscallAction := do
-  let width ← wordWidth emu
-  serveRequest ptrace emu { target := targetOf width target, exited := true, stopped := options &&& 2 != 0, continued := options &&& 8 != 0
+/-- `wait4` and `waitpid`, which always say how a process ended, and how it stopped or went on if asked. Like each `serve` here, it is
+for what serves a system call of the thread that runs, and what it gives is what that gives back: one that waits stops the thread,
+which the call is made again for, or given its result, when it goes on. -/
+def serveWait (ptrace : Ptrace) (emu : Emu) (target status options usage : Nat) : IO SyscallAction := do
+  serveRequest ptrace emu { target := targetOf target, exited := true, stopped := options &&& 2 != 0, continued := options &&& 8 != 0
                             keep := false, waitid := false, status, usage } (options &&& 1 != 0)
 
 /-- `waitid`, of all (0), a process (1) or a group (2), which is all, as there is one. -/
@@ -512,8 +520,8 @@ private def armStep (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Unit := do
     | none => pure ()
   ptrace.stepHooks.modify (·.insert tid hook)
 
-/-- `ptrace`. -/
-private def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) : IO SyscallAction := do
+/-- `ptrace`, for what serves the system call of the thread that runs, as `serveWait` is. -/
+def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) : IO SyscallAction := do
   let numbers := ptrace.numbers
   let width ← wordWidth emu
   let word := width / 8
@@ -821,17 +829,21 @@ def load (ptrace : Ptrace) (data : ByteArray) : IO Unit := do
   ptrace.changed.set true
 
 /-- A machine's ptrace, put in its signals and its system calls: before the signals, as it serves `waitid`, and what it stops. -/
-def attach (architecture : Architecture) (signals : Signals) (emu : Emu) : IO Ptrace := do
+def make (architecture : Architecture) (signals : Signals) : IO Ptrace := do
   let ptrace : Ptrace := {
     architecture, signals, table := ← IO.mkRef {}, stepHooks := ← IO.mkRef {}, settle := ← IO.mkRef (fun _ => pure ())
-    changed := ← IO.mkRef true }
+    changed := ← IO.mkRef true, resultOf := ← IO.mkRef id }
   ptrace.settle.set (settleWaits ptrace)
+  pure ptrace
+
+/-- Puts what `make` made on the emulator: the hooks of its system calls, its waits between turns, and what the signals ask of it. -/
+def install (ptrace : Ptrace) (emu : Emu) : IO Unit := do
+  let signals := ptrace.signals
   emu.betweenTurns.modify (· ++ [settleWaits ptrace emu])
   signals.intercept.set (intercept ptrace)
   signals.tracer.set (tracerOf ptrace)
   signals.jobControl.set (jobControl ptrace)
   ptrace.serve emu
-  pure ptrace
 
 end Ptrace
 

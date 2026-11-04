@@ -246,6 +246,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testMachineHeapExec "aarch64",
     Bap.Tests.Emu.testCodeControl,
     Bap.Tests.Emu.testKernelFiles,
+    Bap.Tests.Emu.testWaitResultMapping "x86_64",
+    Bap.Tests.Emu.testWaitResultMapping "aarch64",
     Bap.Tests.Emu.testBaseEnvironment "x86_64",
     Bap.Tests.Emu.testBaseEnvironment "aarch64",
     Bap.Tests.Emu.testBaseEnvironment "arm",
