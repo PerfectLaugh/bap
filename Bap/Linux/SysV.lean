@@ -98,6 +98,11 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
     pure (some (← poller.timers.deadlineOf tid (pure (now + seconds * 1000000000 + nanoseconds))))
   let wait (due : Option Nat) : IO (Option SyscallAction) := do
     pure (some (← poller.timers.waitUntil emu readySpace 0 due false))
+  -- What isn't there any more, to a call that waited for it, was taken away: `EIDRM`.
+  let gone : IO (Option SyscallAction) := do
+    let removed ← poller.timers.again emu
+    poller.timers.finish tid
+    fail (if removed then 43 else Errno.einval)
   let shmget (key size flags : Nat) : IO (Option SyscallAction) := do
     match keyed key flags (ipc.segments.filter (!·.removed) |>.map fun segment => (segment.perm.key, segment.id)) with
     | .error errno => fail errno
@@ -174,7 +179,7 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
                       made := (ipc.made.1, id + 1, ipc.made.2.2) }
       succeed id
   let semop (id address count : Nat) (due : Option Nat) : IO (Option SyscallAction) := do
-    let some set := ipc.sets.find? (·.id == id) | fail Errno.einval
+    let some set := ipc.sets.find? (·.id == id) | gone
     if count == 0 then return ← fail Errno.einval
     if count > 500 then return ← fail 7
     let bytes ← read emu address (6 * count)
@@ -273,7 +278,7 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
       save { ipc with queues := ipc.queues ++ [{ id, perm := permOf key flags, ctime := seconds }], made := (ipc.made.1, ipc.made.2.1, id + 1) }
       succeed id
   let msgsnd (id address size flags : Nat) : IO (Option SyscallAction) := do
-    let some queue := ipc.queues.find? (·.id == id) | fail Errno.einval
+    let some queue := ipc.queues.find? (·.id == id) | gone
     if size > 8192 then return ← fail Errno.einval
     let type ← number address word
     if type == 0 || type ≥ 2 ^ (8 * word - 1) then return ← fail Errno.einval
@@ -287,7 +292,7 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
     poller.wake emu
     succeed
   let msgrcv (id address size type flags : Nat) : IO (Option SyscallAction) := do
-    let some queue := ipc.queues.find? (·.id == id) | fail Errno.einval
+    let some queue := ipc.queues.find? (·.id == id) | gone
     if size ≥ 2 ^ (8 * word - 1) then return ← fail Errno.einval
     let signed : Int := if type ≥ 2 ^ (8 * word - 1) then (type : Int) - 2 ^ (8 * word) else type
     let except := flags &&& 0o20000 != 0
@@ -331,6 +336,8 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
       let qbytes ← number (address + permSize + (if wide then 40 else 32)) word
       if qbytes > 16384 && credentials.euid != 0 then return ← fail Errno.eperm
       save { ipc with queues := ipc.queues.map fun other => if other.id == id then { other with perm, qbytes, ctime := seconds } else other }
+      -- What waits for room may have it now.
+      poller.wake emu
       succeed
     | 2 =>
       let held := queue.messages.foldl (fun total (_, text) => total + text.size) 0

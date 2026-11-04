@@ -162,6 +162,11 @@ def entered (timers : Timers) (emu : Emu) : IO Unit := do
   let next ← emu.nextPc.get
   if !(state.sites.get? tid).any (·.next == next) then timers.finish tid
 
+/-- Whether the call that runs is one that waited and runs again where it waited. -/
+def again (timers : Timers) (emu : Emu) : IO Bool := do
+  let next ← emu.nextPc.get
+  pure (((← timers.state.get).sites.get? (← thread emu)).any (·.next == next))
+
 /-- The thread that runs waits in `space`, for `address`, until something wakes it there or its deadline comes, if it has one, and
 then runs its call again, with its registers as they were. A signal that comes first has it run again or give `EINTR`, as
 `restartable` says of a handler of `SA_RESTART`: see `interrupted`. -/
