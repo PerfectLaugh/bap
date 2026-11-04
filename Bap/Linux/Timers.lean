@@ -42,6 +42,8 @@ structure Site where
   next : Nat
   result : Nat
   restartable : Bool
+  /-- Of MIPS, what `a3` had, which is an argument of the call and where an error is said, as the call runs again. -/
+  flag : Nat := 0
   deriving Repr
 
 /-- The timers, by the process and which they are: 0 to 2 of `setitimer` and `3 + id` of `timer_create`, the next id of
@@ -170,7 +172,12 @@ def waitUntil (timers : Timers) (emu : Emu) (space address : Nat) (deadline : Op
     | .returnValue value => value
     | .default => 0
   let next ← emu.nextPc.get
-  timers.state.modify fun state => { state with sites := state.sites.insert tid { next, result, restartable } }
+  let flag ← if timers.mips then do
+      match Value.asBits (← reg emu ⟨"R7", .imm timers.architecture.bits, 0, false⟩) with
+      | .ok bits => pure bits.2.toNat
+      | .error _ => pure 0
+    else pure 0
+  timers.state.modify fun state => { state with sites := state.sites.insert tid { next, result, restartable, flag } }
   emu.taskTable.modify (·.futexWait { thread := tid, space, address, bitset := 2 ^ 32 - 1, deadline })
   emu.stopped.set true
   pure action
@@ -186,6 +193,7 @@ def interrupted (timers : Timers) (emu : Emu) (tid : Nat) (restart : Bool) (spac
     let width := timers.architecture.bits
     let (_, _, register) := syscallRegisters emu.config.syscallAbi
     setThreadReg emu tid ⟨register, .imm width, 0, false⟩ (.bits (BitVec.ofNat width site.result))
+    if timers.mips then setThreadReg emu tid ⟨"R7", .imm width, 0, false⟩ (.bits (BitVec.ofNat width site.flag))
   else setThreadPc emu tid site.next
 
 /-- A process that `fork` made has no timers of its parent, and `execve` ends those of `timer_create` of a process. -/
@@ -210,8 +218,8 @@ def serve (timers : Timers) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
   let group := (← currentTask emu).group
   let number (address size : Nat) : IO Nat := do pure (numberOf big (← read emu address size))
   let einval : Nat := 22
-  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.error errno)))
-  let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.ok value)))
+  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (.returnValue (2 ^ 64 - errno)))
+  let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (.returnValue value))
   -- A `timespec` or a `timeval`, of fields of `field` bytes, in nanoseconds, of which the second field has `scale` of them each.
   let span (address field scale : Nat) : IO Nat := do pure ((← number address field) * 1000000000 + (← number (address + field) field) * scale)
   let spanBytes (nanoseconds field scale : Nat) : ByteArray :=
@@ -328,7 +336,7 @@ def save (timers : Timers) : IO ByteArray := do
   let pair (out : ByteArray) (entry : Nat × Nat) : ByteArray := putNat (putNat out entry.1) entry.2
   let out := putSorted pair out state.nextTimer.toList
   let out := putSorted pair out state.deadlines.toList
-  pure (putSorted (fun out (tid, site) => putFlag (putNat (putNat (putNat out tid) site.next) site.result) site.restartable) out
+  pure (putSorted (fun out (tid, site) => putNat (putFlag (putNat (putNat (putNat out tid) site.next) site.result) site.restartable) site.flag) out
     state.sites.toList)
 
 open Wire in
@@ -346,7 +354,8 @@ def load (timers : Timers) (data : ByteArray) : IO Unit := do
       let (next, at_) ← getNat data at_
       let (result, at_) ← getNat data at_
       let (restartable, at_) ← getFlag data at_
-      .ok ((tid, { next, result, restartable }), at_)) data at_
+      let (flag, at_) ← getNat data at_
+      .ok ((tid, { next, result, restartable, flag }), at_)) data at_
     expectEnd data at_
     pure { timers := Std.HashMap.ofList entries, nextTimer := Std.HashMap.ofList nextTimer, deadlines := Std.HashMap.ofList deadlines
            sites := Std.HashMap.ofList sites }

@@ -31,8 +31,8 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
   let group := (← currentTask emu).group
   let kernel ← poller.kernel.get
   let now := kernel.clock
-  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.error (architecture.errno errno))))
-  let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.ok value)))
+  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (.returnValue (2 ^ 64 - errno)))
+  let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (.returnValue value))
   let number (address size : Nat) : IO Nat := do pure (numberOf big (← read emu address size))
   let (emsgsize, etimedout) := (90, 110)
   -- A queue of a name, which comes without its `/`, or why it can't be one.

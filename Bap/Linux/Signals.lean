@@ -783,7 +783,7 @@ private def interrupt (signals : Signals) (emu : Emu) (tid : Nat) (restart : Boo
   | some last, true =>
     let width := signals.architecture.bits
     let (_, _, result) := syscallRegisters emu.config.syscallAbi
-    setSyscallResult emu tid (.ok 0)
+    -- It runs again with its arguments as they were, of which `a3` is one on MIPS, rather than what a result would make of it.
     setThreadReg emu tid ⟨result, .imm width, 0, false⟩ (wordOfWidth width last.result)
     emu.threadsRef.modify fun threads => threads.map fun context =>
       if context.id == tid then { context with pc := last.pc, pending := none, skip := none } else context

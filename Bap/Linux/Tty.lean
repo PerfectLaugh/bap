@@ -136,7 +136,7 @@ def terminalOf (kernel : Kernel) (number : Nat) : Option (Nat × Terminal) :=
 def openDevice (poller : Poller) (emu : Emu) (path : String) (flags : Nat) : IO (Option SyscallAction) := do
   let group := (← currentTask emu).group
   let kernel ← poller.kernel.get
-  let succeed (value : Nat) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.ok value)))
+  let succeed (value : Nat) : IO (Option SyscallAction) := do pure (some (.returnValue value))
   if path == "/dev/ptmx" then
     let used := kernel.inodes.toList.filterMap fun (_, inode) => match inode.content with
       | .ptyMaster terminal => some terminal.index
@@ -149,7 +149,7 @@ def openDevice (poller : Poller) (emu : Emu) (path : String) (flags : Nat) : IO 
     succeed fd
   else if path == "/dev/tty" then
     match (kernel.process group).terminal with
-    | none => pure (some (← syscallReturn emu (.error 6)))
+    | none => pure (some (.returnValue (2 ^ 64 - 6)))
     | some number =>
       let openFile := kernel.nextOpenFile
       let kernel := { kernel with
@@ -169,7 +169,7 @@ def opened (poller : Poller) (emu : Emu) (fd flags : Nat) : IO (Option SyscallAc
   let some (_, terminal) := terminalOf kernel number | return none
   if terminal.locked then
     if let .ok closed := kernel.close group fd then poller.kernel.set closed
-    return some (← syscallReturn emu (.error 5))
+    return some (.returnValue (2 ^ 64 - 5))
   let leader := kernel.sidOf group == group
   let takes := flags &&& 0x100 == 0 && leader && (kernel.process group).terminal.isNone && terminal.session == 0
   let terminal := { terminal with opened := true, session := if takes then group else terminal.session
@@ -185,7 +185,7 @@ private def background (poller : Poller) (emu : Emu) (number : Nat) (terminal : 
   let kernel ← poller.kernel.get
   if (kernel.process group).terminal != some number || terminal.foreground == kernel.pgidOf group || terminal.foreground == 0 then
     return none
-  if !(← poller.signals.comesTo (← thread emu) group signal) then return some (← syscallReturn emu (.error 5))
+  if !(← poller.signals.comesTo (← thread emu) group signal) then return some (.returnValue (2 ^ 64 - 5))
   for member in Identity.members kernel (← poller.live) (kernel.pgidOf group) do
     poller.signals.send emu none member ⟨signal, 0x80, .sent 0 0 0⟩
   pure (some (← Ptrace.again emu))
@@ -204,8 +204,8 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     | .ptyMaster _ => true
     | _ => false
   let live ← poller.live
-  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.error errno)))
-  let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.ok value)))
+  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (.returnValue (2 ^ 64 - errno)))
+  let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (.returnValue value))
   let save (terminal : Terminal) : IO Unit := poller.kernel.modify (·.setContent master (.ptyMaster terminal))
   let wait : IO (Option SyscallAction) := do
     if opened_.flags &&& Kernel.oNonblock != 0 then fail 11

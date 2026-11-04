@@ -57,8 +57,8 @@ def serve (identity : Identity) (emu : Emu) (call : Call) (args : List Nat) : IO
   let id32 (index : Nat) : Nat := arg index % 2 ^ 32
   let unset := 2 ^ 32 - 1
   let group := (← currentTask emu).group
-  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.error errno)))
-  let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.ok value)))
+  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (.returnValue (2 ^ 64 - errno)))
+  let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (.returnValue value))
   let (esrch, eperm, einval, eacces) := (3, 1, 22, 13)
   let tasks := (← emu.taskTable.get).tasks
   let live := ((tasks.filter (·.status.isNone)).map (·.group)).eraseDups

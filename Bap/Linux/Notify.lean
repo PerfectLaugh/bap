@@ -266,8 +266,8 @@ def serve (notifier : Notifier) (poller : Poller) (emu : Emu) (call : Call) (arg
   let arg (index : Nat) : Nat := args.getD index 0
   let group := (← currentTask emu).group
   let kernel ← poller.kernel.get
-  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.error (architecture.errno errno))))
-  let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.ok value)))
+  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (.returnValue (2 ^ 64 - errno)))
+  let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (.returnValue value))
   let listener (fd : Nat) : Except Nat (Nat × List Watch × Array Notice × Nat × Nat) :=
     match kernel.objectOf group fd with
     | .ok (number, _, { content := .inotify watches notices next cookies, .. }) => .ok (number, watches, notices, next, cookies)

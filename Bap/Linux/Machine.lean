@@ -1457,7 +1457,9 @@ private def writeVectorDirect (machine : Machine) (emu : Emu) (group fd address 
 
 /-- What a call gives, as the guest has it. -/
 private def handOver (machine : Machine) (emu : Emu) : SyscallAction → IO SyscallAction
-  | .returnValue value =>
+  | .returnValue value => do
+    -- A call that runs again has its registers as they were, with its flag of an error, which is `a3` on MIPS, among them.
+    if (← emu.redirect.get).isSome then return .returnValue value
     if value ≥ 2 ^ 64 - 4096 then syscallReturn emu (.error (machine.architecture.errno (2 ^ 64 - value)))
     else syscallReturn emu (.ok value)
   | action => pure action

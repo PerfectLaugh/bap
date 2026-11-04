@@ -168,11 +168,11 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
   let arg (index : Nat) : Nat := args.getD index 0
   let tid ← thread emu
   let group := (← currentTask emu).group
-  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.error (architecture.errno errno))))
-  let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.ok value)))
+  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (.returnValue (2 ^ 64 - errno)))
+  let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (.returnValue value))
   let number (address size : Nat) : IO Nat := do pure (numberOf big (← read emu address size))
   let field := Abi.field big
-  let negative (errno : Nat) : Nat := 2 ^ 64 - architecture.errno errno
+  let negative (errno : Nat) : Nat := 2 ^ 64 - errno
   let now := (← poller.kernel.get).clock
   -- What a read or a write at an offset of a file gives, of `iovecs` or of a buffer, as a result of 64 bits.
   let atOffset (fd : Nat) (pieces : List (Nat × Nat)) (offset : Nat) (writing : Bool) : IO Nat := do
@@ -259,6 +259,8 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
         | 7 => atOffset fd (← iovecs buffer length) offset false
         | 8 => atOffset fd (← iovecs buffer length) offset true
         | _ => if done == 0 then return ← fail Errno.einval else break
+      -- An error is the guest's own number of it, negative.
+      let result := if result ≥ 2 ^ 63 then 2 ^ 64 - architecture.errno (2 ^ 64 - result) else result
       events := events ++ [(data, at_, result)]
       done := done + 1
       -- `IOCB_FLAG_RESFD`: what an `eventfd` counts.
@@ -357,7 +359,8 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
     let mut ring := ring
     -- What it did and gives: by the number of the entry, its result as 32 bits, which a completion has.
     let complete (ring : Uring) (data result : Nat) : Uring :=
-      let result := if result ≥ 2 ^ 63 then 2 ^ 32 - (2 ^ 64 - result) % 2 ^ 32 else result % 2 ^ 32
+      -- An error is the guest's own number of it, negative.
+      let result := if result ≥ 2 ^ 63 then 2 ^ 32 - architecture.errno (2 ^ 64 - result) % 2 ^ 32 else result % 2 ^ 32
       { ring with overflow := ring.overflow ++ [(data, result)], posted := ring.posted + 1 }
     -- One entry: its result, or none if it would wait.
     let perform (ring : Uring) (entry : ByteArray) : IO (Option Nat) := do

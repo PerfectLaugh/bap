@@ -1,0 +1,39 @@
+open 1
+attributes 3 16 0
+attributes 0
+again -17 -2
+opened 1
+bad name -13
+bad attributes -22
+send 0 0 0
+full 3 16 3
+full 0
+nonblocking 3 16 3
+nonblocking 1
+no room -11
+too big -97 -22
+not to read -9
+first 4 5
+first high
+second 3 3
+second mid
+small -97
+third 3 1
+third low
+empty -11
+past -145
+wrong deadline -22
+notify 0 -16
+heard 1 -3 42
+once 0
+ping 4 0
+ping ping
+not any more 0
+child sends
+waited 4 2
+waited late
+unlink 0 -2
+still open 0
+kept 4 0
+kept kept
+gone -2

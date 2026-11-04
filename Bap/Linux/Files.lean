@@ -73,8 +73,8 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
   let group := (← currentTask emu).group
   let kernel ← poller.kernel.get
   let now := kernel.clock
-  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.error (architecture.errno errno))))
-  let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.ok value)))
+  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (.returnValue (2 ^ 64 - errno)))
+  let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (.returnValue value))
   let fromResult (result : Result Kernel) : IO (Option SyscallAction) := do
     match result with
     | .ok next => poller.kernel.set next; succeed
@@ -346,8 +346,8 @@ def serveLock (poller : Poller) (emu : Emu) (args : List Nat) : IO (Option Sysca
   if !ofd && ![get, set, wait].contains command then return none
   let group := (← currentTask emu).group
   let kernel ← poller.kernel.get
-  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.error errno)))
-  let succeed : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.ok 0)))
+  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (.returnValue (2 ^ 64 - errno)))
+  let succeed : IO (Option SyscallAction) := do pure (some (.returnValue 0))
   -- `struct flock`: its type and whence, of two bytes, then where it starts and how long it is, which i386 doesn't align, and the
   -- process.
   let startAt := if architecture matches .i686 then 4 else 8
