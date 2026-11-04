@@ -1275,6 +1275,9 @@ def rename (kernel : Kernel) (base source target : String) : Result Kernel := do
     | true, true => if !(children kernel to_).isEmpty then .error Errno.enotempty
     | false, false => pure ()
   if kernel.readOnly from_ || kernel.readOnly to_ then .error erofs
+  -- What isn't a directory has nothing under it: its own path is all that moves.
+  if !((← inodeOf kernel number).content matches .directory) then
+    return { kernel with paths := (kernel.paths.erase from_).insert to_ number }
   let moved := kernel.paths.toList.foldl (init := kernel.paths.erase to_) fun paths entry =>
     if entry.1 == from_ then (paths.erase entry.1).insert to_ entry.2
     else if entry.1.startsWith (from_ ++ "/") then
