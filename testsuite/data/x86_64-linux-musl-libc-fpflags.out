@@ -1,0 +1,9 @@
+max+q rne .....P
+max+q up ...O.P
+max+q zero .....P
+max*e rne ...O.P
+max*e zero ...O.P
+max*e down ...O.P
+tiny rne .....P
+tiny zero ....UP
+sub .D..UP

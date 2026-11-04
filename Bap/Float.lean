@@ -317,12 +317,15 @@ structure NaNRules where
   /-- The NaNs of MIPS before NaN2008, as qemu has them: any NaN that goes in makes the default, whose top bit of the fraction
   is clear. An implementation may do otherwise. -/
   legacyMips : Bool := false
+  /-- Whether what is too small to be normal is told of what an operation would give before it is rounded, as Arm does, rather than
+  after. -/
+  tininessBefore : Bool := false
   deriving DecidableEq, Repr
 
 /-- The first NaN operand, made quiet, and a default that is negative. -/
 def NaNRules.x86 : NaNRules := { negativeDefault := true }
 /-- A signaling NaN first, and a default that is positive: Arm, unless `FPCR.DN` is set. -/
-def NaNRules.arm : NaNRules := { signalingFirst := true }
+def NaNRules.arm : NaNRules := { signalingFirst := true, tininessBefore := true }
 /-- The first NaN operand, and a default that is positive. -/
 def NaNRules.powerpc : NaNRules := {}
 /-- Always the default, which is positive. -/
@@ -481,6 +484,36 @@ def defaultFor (rules : NaNRules) (name : String) (bits : Nat) : Nat :=
 private def withMode (name mode : String) : String :=
   "_".intercalate ((name.splitOn "_").map fun part => if (Mode.ofName part).isSome then mode else part)
 
+/-- A format of the same precision with four more bits of exponent, in which an operation of the other is rounded as if there were no
+end to its exponents, as IEEE 754 says overflow and underflow of. -/
+private def widened (format : Format) : Format := { format with exponentBits := format.exponentBits + 4, explicit := false }
+
+/-- What an arithmetic operation of `source` that gives `target` comes to with the precision of `target` and as many exponents as it
+takes, in a mode. -/
+private def unboundedResult (operation : String) (source target : Format) (mode : Mode) (inputs : List Nat) : Option Number :=
+  let wide := widened source
+  -- The operands, which a format of more exponents has as they are.
+  match operation, inputs.map (convert source wide .rne) with
+  | "fadd", [x, y] => some (unpack wide (add wide mode x y))
+  | "fsub", [x, y] => some (unpack wide (sub wide mode x y))
+  | "fmul", [x, y] => some (unpack wide (mul wide mode x y))
+  | "fdiv", [x, y] => some (unpack wide (div wide mode x y))
+  | "fsqrt", [x] => some (unpack wide (sqrt wide mode x))
+  | "fmad", [x, y, z] => some (unpack wide (fma wide mode x y z))
+  | "fmadh", [x, y, z] => some (unpack wide (fmaHalved wide mode x y z))
+  | "fconvert", [_] => inputs.head?.map fun x => unpack (widened target) (convert source (widened target) mode x)
+  | _, _ => none
+
+/-- Whether a number is past the largest finite one of a format, or below its smallest normal one, by its highest bit. -/
+private def beyond (format : Format) : Number → Bool
+  | .finite _ mantissa exponent => exponent + Nat.log2 mantissa ≥ ((format.maxExponent - 1 - format.bias : Nat) : Int) + 1
+  | .infinity _ => true
+  | _ => false
+
+private def tiny (format : Format) : Number → Bool
+  | .finite _ mantissa exponent => exponent + Nat.log2 mantissa < 1 - (format.bias : Int)
+  | _ => false
+
 /-- What an operation that gave `result` raises. Whether a result was rounded is whether rounding up and down come to
 something else, which takes evaluating it twice, so that `known` says not to when `inexact` won't change anything. -/
 def raisedBy (rules : NaNRules) (name : String) (inputs : List Nat) (result : Nat) (known : Bool := false) : Raised := Id.run do
@@ -545,13 +578,16 @@ def raisedBy (rules : NaNRules) (name : String) (inputs : List Nat) (result : Na
     if infiniteInput then return { denormal }
     -- What is at an end of the format has to be told from what fits there, whatever is known.
     let field := (result >>> target.fieldBits) % 2 ^ target.exponentBits
-    let edge := field == 0 || field ≥ target.maxExponent - 1
+    -- What rounds up to the smallest normal number may be tiny too.
+    let edge := field ≤ 1 || field ≥ target.maxExponent - 1
     if known && !edge then return { denormal }
-    let inexact := differs
-    let huge := match evaluateWith rules (withMode name "rne") inputs with
-      | some nearest => (match unpack target nearest.2 with | .infinity _ => true | _ => false)
-      | none => false
-    return { inexact, overflow := inexact && huge, underflow := inexact && field == 0, denormal }
+    -- Overflow is of the result in its mode with no end to its exponents, and underflow is of what is tiny and not exact: tiny after
+    -- rounding as that, or before, which rounding toward zero says, as it is past no power of two that it isn't past.
+    let mode := (before.getLast?.bind Mode.ofName).getD .rne
+    let overflow := (unboundedResult operation source target mode inputs).any (beyond target)
+    let tinyResult := unboundedResult operation source target (if rules.tininessBefore then .rtz else mode) inputs
+    let inexact := differs || overflow
+    return { inexact, overflow, underflow := inexact && tinyResult.any (tiny target), denormal }
   | _ => return {}
 
 /-- Whether `evaluate` knows an operation of this name. -/

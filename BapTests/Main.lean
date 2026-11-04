@@ -195,6 +195,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-nofile",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-nofile",
     Bap.Tests.Emu.testLinuxRaises "riscv64-linux-musl-libc-nofile",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-fpflags",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-fpflags-arm",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-unix",
     Bap.Tests.Emu.testLinuxRaises "mips-linux-musl-libc-unix",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-inet",
