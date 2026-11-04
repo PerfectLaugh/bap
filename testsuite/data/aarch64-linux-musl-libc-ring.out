@@ -1,0 +1,35 @@
+io_setup 0 1
+io_setup again -22
+io_submit 2
+io_getevents 2
+event 77 4 1
+event 78 2 1
+read 3456
+nothing 0
+io_destroy 0 -22
+io_uring_setup 1 4 8
+mapped 1 1 1
+rings 3 4 7
+enter 3
+done 1 0
+done 2 6
+done 3 2
+uring read AB2345
+file AB234567yz
+chain 3
+chain 4 -9
+chain 5 -125
+chain 6 -125
+pending 1
+written 0
+piped 7 4
+piped pipe
+timeout 1
+timed 8 -62
+cancel 1
+cancelled 10 0
+cancelled 9 -125
+probe 0
+supported 1 1 1
+bad register -22
+no entries -22

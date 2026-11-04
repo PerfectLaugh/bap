@@ -86,13 +86,15 @@ inductive Call where
   | shmget | shmat | shmdt | shmctl | semget | semop | semtimedop | semtimedop64 | semctl | msgget | msgsnd | msgrcv | msgctl | ipc
   | mqOpen | mqUnlink | mqTimedsend | mqTimedsend64 | mqTimedreceive | mqTimedreceive64 | mqNotify | mqGetsetattr
   | msync | mlock | munlock | mlock2 | mlockall | munlockall | mincore | membarrier
+  | ioSetup | ioDestroy | ioSubmit | ioCancel | ioGetevents | ioPgetevents | ioPgetevents64 | ioUringSetup | ioUringEnter | ioUringRegister
   /-- What has nothing to do here: everyone is root and nothing has to reach a disk. -/
   | succeeds
   deriving DecidableEq, Repr
 
 /-- The numbers of x86-64. -/
 def x86_64Calls : List (Nat × Call) :=
-  [(26, .msync), (149, .mlock), (150, .munlock), (325, .mlock2), (151, .mlockall), (152, .munlockall), (27, .mincore), (324, .membarrier),
+  [(206, .ioSetup), (207, .ioDestroy), (209, .ioSubmit), (210, .ioCancel), (208, .ioGetevents), (333, .ioPgetevents), (425, .ioUringSetup), (426, .ioUringEnter), (427, .ioUringRegister),
+   (26, .msync), (149, .mlock), (150, .munlock), (325, .mlock2), (151, .mlockall), (152, .munlockall), (27, .mincore), (324, .membarrier),
    (240, .mqOpen), (241, .mqUnlink), (242, .mqTimedsend), (243, .mqTimedreceive), (244, .mqNotify), (245, .mqGetsetattr),
    (29, .shmget), (30, .shmat), (67, .shmdt), (31, .shmctl), (64, .semget), (65, .semop), (220, .semtimedop), (66, .semctl), (68, .msgget), (69, .msgsnd), (70, .msgrcv), (71, .msgctl),
    (165, .mount), (166, .umount2), (161, .chroot), (155, .pivotRoot),
@@ -118,7 +120,8 @@ def x86_64Calls : List (Nat × Call) :=
 
 /-- The numbers of the architectures that came after the old calls went: `asm-generic/unistd.h`. -/
 def genericCalls : List (Nat × Call) :=
-  [(227, .msync), (228, .mlock), (229, .munlock), (284, .mlock2), (230, .mlockall), (231, .munlockall), (232, .mincore), (283, .membarrier),
+  [(0, .ioSetup), (1, .ioDestroy), (2, .ioSubmit), (3, .ioCancel), (4, .ioGetevents), (292, .ioPgetevents), (425, .ioUringSetup), (426, .ioUringEnter), (427, .ioUringRegister),
+   (227, .msync), (228, .mlock), (229, .munlock), (284, .mlock2), (230, .mlockall), (231, .munlockall), (232, .mincore), (283, .membarrier),
    (180, .mqOpen), (181, .mqUnlink), (182, .mqTimedsend), (183, .mqTimedreceive), (184, .mqNotify), (185, .mqGetsetattr),
    (194, .shmget), (196, .shmat), (197, .shmdt), (195, .shmctl), (190, .semget), (193, .semop), (192, .semtimedop), (191, .semctl), (186, .msgget), (189, .msgsnd), (188, .msgrcv), (187, .msgctl),
    (40, .mount), (39, .umount2), (51, .chroot), (41, .pivotRoot),
@@ -142,7 +145,8 @@ def genericCalls : List (Nat × Call) :=
 
 /-- The numbers of `asm-generic` on 32 bits, where whatever has a time or an offset in a word has gone. -/
 def generic32Calls : List (Nat × Call) :=
-  [(227, .msync), (228, .mlock), (229, .munlock), (284, .mlock2), (230, .mlockall), (231, .munlockall), (232, .mincore), (283, .membarrier),
+  [(0, .ioSetup), (1, .ioDestroy), (2, .ioSubmit), (3, .ioCancel), (416, .ioPgetevents64), (425, .ioUringSetup), (426, .ioUringEnter), (427, .ioUringRegister),
+   (227, .msync), (228, .mlock), (229, .munlock), (284, .mlock2), (230, .mlockall), (231, .munlockall), (232, .mincore), (283, .membarrier),
    (180, .mqOpen), (181, .mqUnlink), (418, .mqTimedsend64), (419, .mqTimedreceive64), (184, .mqNotify), (185, .mqGetsetattr),
    (194, .shmget), (196, .shmat), (197, .shmdt), (195, .shmctl), (190, .semget), (193, .semop), (420, .semtimedop64), (191, .semctl), (186, .msgget), (189, .msgsnd), (188, .msgrcv), (187, .msgctl),
    (40, .mount), (39, .umount2), (51, .chroot), (41, .pivotRoot),
@@ -166,7 +170,8 @@ def generic32Calls : List (Nat × Call) :=
 
 /-- The numbers of the o32 ABI of MIPS, without their 4000. -/
 def o32Calls : List (Nat × Call) :=
-  [(144, .msync), (154, .mlock), (155, .munlock), (359, .mlock2), (156, .mlockall), (157, .munlockall), (217, .mincore), (358, .membarrier),
+  [(241, .ioSetup), (242, .ioDestroy), (244, .ioSubmit), (245, .ioCancel), (243, .ioGetevents), (368, .ioPgetevents), (416, .ioPgetevents64), (425, .ioUringSetup), (426, .ioUringEnter), (427, .ioUringRegister),
+   (144, .msync), (154, .mlock), (155, .munlock), (359, .mlock2), (156, .mlockall), (157, .munlockall), (217, .mincore), (358, .membarrier),
    (271, .mqOpen), (272, .mqUnlink), (273, .mqTimedsend), (418, .mqTimedsend64), (274, .mqTimedreceive), (419, .mqTimedreceive64), (275, .mqNotify), (276, .mqGetsetattr),
    (395, .shmget), (397, .shmat), (398, .shmdt), (396, .shmctl), (393, .semget), (420, .semtimedop64), (394, .semctl), (399, .msgget), (400, .msgsnd), (401, .msgrcv), (402, .msgctl), (117, .ipc),
    (21, .mount), (52, .umount2), (61, .chroot), (216, .pivotRoot),
@@ -193,7 +198,8 @@ def o32Calls : List (Nat × Call) :=
 
 /-- The numbers of the n64 ABI of MIPS, without their 5000. -/
 def n64Calls : List (Nat × Call) :=
-  [(25, .msync), (146, .mlock), (147, .munlock), (319, .mlock2), (148, .mlockall), (149, .munlockall), (26, .mincore), (318, .membarrier),
+  [(200, .ioSetup), (201, .ioDestroy), (203, .ioSubmit), (204, .ioCancel), (202, .ioGetevents), (328, .ioPgetevents), (425, .ioUringSetup), (426, .ioUringEnter), (427, .ioUringRegister),
+   (25, .msync), (146, .mlock), (147, .munlock), (319, .mlock2), (148, .mlockall), (149, .munlockall), (26, .mincore), (318, .membarrier),
    (230, .mqOpen), (231, .mqUnlink), (232, .mqTimedsend), (233, .mqTimedreceive), (234, .mqNotify), (235, .mqGetsetattr),
    (28, .shmget), (29, .shmat), (65, .shmdt), (30, .shmctl), (62, .semget), (63, .semop), (214, .semtimedop), (64, .semctl), (66, .msgget), (67, .msgsnd), (68, .msgrcv), (69, .msgctl),
    (160, .mount), (161, .umount2), (156, .chroot), (151, .pivotRoot),
@@ -219,7 +225,8 @@ def n64Calls : List (Nat × Call) :=
 
 /-- The numbers of 32-bit ARM, with EABI, and two of its own: `set_tls` and `cacheflush`. -/
 def armCalls : List (Nat × Call) :=
-  [(144, .msync), (150, .mlock), (151, .munlock), (390, .mlock2), (152, .mlockall), (153, .munlockall), (219, .mincore), (389, .membarrier),
+  [(243, .ioSetup), (244, .ioDestroy), (246, .ioSubmit), (247, .ioCancel), (245, .ioGetevents), (399, .ioPgetevents), (416, .ioPgetevents64), (425, .ioUringSetup), (426, .ioUringEnter), (427, .ioUringRegister),
+   (144, .msync), (150, .mlock), (151, .munlock), (390, .mlock2), (152, .mlockall), (153, .munlockall), (219, .mincore), (389, .membarrier),
    (274, .mqOpen), (275, .mqUnlink), (276, .mqTimedsend), (418, .mqTimedsend64), (277, .mqTimedreceive), (419, .mqTimedreceive64), (278, .mqNotify), (279, .mqGetsetattr),
    (307, .shmget), (305, .shmat), (306, .shmdt), (308, .shmctl), (299, .semget), (298, .semop), (312, .semtimedop), (420, .semtimedop64), (300, .semctl), (303, .msgget), (301, .msgsnd), (302, .msgrcv), (304, .msgctl),
    (21, .mount), (52, .umount2), (61, .chroot), (218, .pivotRoot),
@@ -247,7 +254,8 @@ def armCalls : List (Nat × Call) :=
 
 /-- The numbers of i686. -/
 def i686Calls : List (Nat × Call) :=
-  [(144, .msync), (150, .mlock), (151, .munlock), (376, .mlock2), (152, .mlockall), (153, .munlockall), (218, .mincore), (375, .membarrier),
+  [(245, .ioSetup), (246, .ioDestroy), (248, .ioSubmit), (249, .ioCancel), (247, .ioGetevents), (385, .ioPgetevents), (416, .ioPgetevents64), (425, .ioUringSetup), (426, .ioUringEnter), (427, .ioUringRegister),
+   (144, .msync), (150, .mlock), (151, .munlock), (376, .mlock2), (152, .mlockall), (153, .munlockall), (218, .mincore), (375, .membarrier),
    (277, .mqOpen), (418, .mqTimedsend64), (419, .mqTimedreceive64),
    (395, .shmget), (397, .shmat), (398, .shmdt), (396, .shmctl), (393, .semget), (420, .semtimedop64), (394, .semctl), (399, .msgget), (400, .msgsnd), (401, .msgrcv), (402, .msgctl), (117, .ipc),
    (21, .mount), (52, .umount2), (61, .chroot), (217, .pivotRoot),
@@ -274,7 +282,8 @@ def i686Calls : List (Nat × Call) :=
 
 /-- The numbers of PowerPC, where those of each width that the other doesn't have are left to it not asking for them. -/
 def powerpcCalls : List (Nat × Call) :=
-  [(144, .msync), (150, .mlock), (151, .munlock), (378, .mlock2), (152, .mlockall), (153, .munlockall), (206, .mincore), (365, .membarrier),
+  [(227, .ioSetup), (228, .ioDestroy), (230, .ioSubmit), (231, .ioCancel), (229, .ioGetevents), (388, .ioPgetevents), (416, .ioPgetevents64), (425, .ioUringSetup), (426, .ioUringEnter), (427, .ioUringRegister),
+   (144, .msync), (150, .mlock), (151, .munlock), (378, .mlock2), (152, .mlockall), (153, .munlockall), (206, .mincore), (365, .membarrier),
    (262, .mqOpen), (263, .mqUnlink), (264, .mqTimedsend), (418, .mqTimedsend64), (265, .mqTimedreceive), (419, .mqTimedreceive64), (266, .mqNotify), (267, .mqGetsetattr),
    (395, .shmget), (397, .shmat), (398, .shmdt), (396, .shmctl), (393, .semget), (420, .semtimedop64), (394, .semctl), (399, .msgget), (400, .msgsnd), (401, .msgrcv), (402, .msgctl), (117, .ipc),
    (21, .mount), (52, .umount2), (61, .chroot), (203, .pivotRoot),

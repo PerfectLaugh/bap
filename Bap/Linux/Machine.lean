@@ -12,6 +12,7 @@ import Bap.Linux.Files
 import Bap.Linux.Notify
 import Bap.Linux.SysV
 import Bap.Linux.Mqueue
+import Bap.Linux.Ring
 import Bap.Linux.GuestHeap
 import Bap.Linux.LoadedLibrary
 import Bap.Linux.Image
@@ -85,6 +86,8 @@ structure Machine where
   has looked for there, which it doesn't again, with a directory whose entries it took ending in `/`: see `Machine.mountHost`. -/
   hostMounts : IO.Ref (List (String × String))
   hostSeen : IO.Ref (Std.HashSet String)
+  /-- What AIO and io_uring have: see `Bap.Linux.Ring`. -/
+  rings : IO.Ref Ring.State
   /-- What `Machine.malloc` has given out, by address space. -/
   heaps : IO.Ref (Std.HashMap Nat GuestHeap)
   /-- What `Machine.loadLibrary` has loaded, by address space. -/
@@ -815,7 +818,7 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
   | _ => pure (errorOf Errno.enosys)
 
 /-- The system calls of files, memory that files are mapped into, time and what a process asks of itself. -/
-private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : List Nat) : IO SyscallAction := do
+private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : List Nat) : IO SyscallAction := do
     -- The ranges that these change may have a tag, as a program may give what it got from an allocator that tags them.
     let args := match call, args with
       | .munmap, address :: rest | .mprotect, address :: rest | .madvise, address :: rest => emu.config.untag address :: rest
@@ -919,7 +922,11 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       machine.kernel.set next
       returning emu out (Abi.time now scale big wordSize)
     -- Anonymous and private is for `serveTaskCalls`, once what it takes the place of isn't mapped.
+    let rings : Ring.Rings := { poller, state := machine.rings, perform := kernelCall machine emu }
     let mapMemory (offset : Nat) : IO SyscallAction := do
+      -- The rings of an io_uring.
+      if arg 3 &&& architecture.mapAnonymous == 0 then
+        if let some action ← Ring.map rings emu group (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) offset then return action
       if arg 3 &&& architecture.mapAnonymous == 0 then
         serveFileMap machine group (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) offset
       else if mapsShared (arg 3) then
@@ -973,6 +980,9 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     | .shmget | .shmat | .shmdt | .shmctl | .semget | .semop | .semtimedop | .semtimedop64 | .semctl | .msgget | .msgsnd | .msgrcv
     | .msgctl | .ipc =>
       pure ((← SysV.serve poller emu call args).getD (errorOf Errno.enosys))
+    | .ioSetup | .ioDestroy | .ioSubmit | .ioCancel | .ioGetevents | .ioPgetevents | .ioPgetevents64 | .ioUringSetup | .ioUringEnter
+    | .ioUringRegister =>
+      pure ((← Ring.serve rings emu call args).getD (errorOf Errno.enosys))
     | .mqOpen | .mqUnlink | .mqTimedsend | .mqTimedsend64 | .mqTimedreceive | .mqTimedreceive64 | .mqNotify | .mqGetsetattr =>
       pure ((← Mqueue.serve poller emu call args).getD (errorOf Errno.enosys))
     | .inotifyInit | .inotifyInit1 | .inotifyAddWatch | .inotifyRmWatch =>
@@ -1483,7 +1493,7 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
           | .open_, .returnValue fd | .openat, .returnValue fd | .dup, .returnValue fd | .socket, .returnValue fd
           | .accept, .returnValue fd | .accept4, .returnValue fd | .eventfd, .returnValue fd | .eventfd2, .returnValue fd | .epollCreate, .returnValue fd | .epollCreate1, .returnValue fd
           | .timerfdCreate, .returnValue fd | .signalfd4, .returnValue fd | .memfdCreate, .returnValue fd | .inotifyInit, .returnValue fd
-          | .inotifyInit1, .returnValue fd | .mqOpen, .returnValue fd
+          | .inotifyInit1, .returnValue fd | .mqOpen, .returnValue fd | .ioUringSetup, .returnValue fd
           -- Of fcntl, F_DUPFD and F_DUPFD_CLOEXEC, which make one, rather than what the others give, as flags.
           | .fcntl, .returnValue fd =>
             if call == .fcntl && args.getD 1 0 != 0 && args.getD 1 0 != 1030 then pure action else
@@ -1999,7 +2009,7 @@ private def libraryModelId : String := "bap.libraries"
 /-- The models that every machine has, with the versions of what they keep: of ptrace, 2 has the stops that tracees have yet to make
 and those that stopped for their end. -/
 private def builtinModels : List (String × Nat) :=
-  [(Signals.modelId, 1), (Ptrace.modelId, 2), (Seccomp.modelId, 1), (Timers.modelId, 1), (heapModelId, 1), (libraryModelId, 1)]
+  [(Signals.modelId, 1), (Ptrace.modelId, 2), (Seccomp.modelId, 1), (Timers.modelId, 1), (Ring.modelId, 1), (heapModelId, 1), (libraryModelId, 1)]
 
 private def builtinVersion (id : String) : Nat := (builtinModels.lookup id).getD 1
 
@@ -2017,7 +2027,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   let ptrace ← Ptrace.make architecture signals
   let kernelRef ← IO.mkRef kernel
   let timers ← Timers.make architecture kernelRef signals
-  let machine : Machine := { architecture, emu, kernel := kernelRef, models := ← IO.mkRef [], target, handled := handler.isSome, signals, ptrace, timers, notifier := ← Notify.make, hostMounts := ← IO.mkRef [], hostSeen := ← IO.mkRef {}, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {} }
+  let machine : Machine := { architecture, emu, kernel := kernelRef, models := ← IO.mkRef [], target, handled := handler.isSome, signals, ptrace, timers, notifier := ← Notify.make, hostMounts := ← IO.mkRef [], hostSeen := ← IO.mkRef {}, rings := ← IO.mkRef {}, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {} }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
@@ -2068,6 +2078,9 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   emu.betweenTurns.modify (· ++ [do let _ ← resumingCurrent (do timers.tick emu; pure true)])
   let timeState : ModelState := { save := timers.save, load := timers.load }
   machine.models.modify (· ++ [{ id := Timers.modelId, version := builtinVersion Timers.modelId, state := timeState }])
+  -- And what AIO and io_uring have.
+  machine.models.modify (· ++ [{ id := Ring.modelId, version := builtinVersion Ring.modelId
+                                 state := { save := Ring.save machine.rings, load := Ring.load machine.rings } }])
   signals.serve emu
   -- A process that is over has closed what it had open.
   let heard ← emu.processExited.get
