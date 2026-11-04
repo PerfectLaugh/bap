@@ -254,7 +254,8 @@ def armCalls : List (Nat × Call) :=
 
 /-- The numbers of i686. -/
 def i686Calls : List (Nat × Call) :=
-  [(245, .ioSetup), (246, .ioDestroy), (248, .ioSubmit), (249, .ioCancel), (247, .ioGetevents), (385, .ioPgetevents), (416, .ioPgetevents64), (425, .ioUringSetup), (426, .ioUringEnter), (427, .ioUringRegister),
+  [(260, .timerSettime), (261, .timerGettime), (262, .timerGetoverrun), (263, .timerDelete), (267, .clockNanosleep), (278, .mqUnlink), (279, .mqTimedsend), (280, .mqTimedreceive), (281, .mqNotify), (282, .mqGetsetattr),
+   (245, .ioSetup), (246, .ioDestroy), (248, .ioSubmit), (249, .ioCancel), (247, .ioGetevents), (385, .ioPgetevents), (416, .ioPgetevents64), (425, .ioUringSetup), (426, .ioUringEnter), (427, .ioUringRegister),
    (144, .msync), (150, .mlock), (151, .munlock), (376, .mlock2), (152, .mlockall), (153, .munlockall), (218, .mincore), (375, .membarrier),
    (277, .mqOpen), (418, .mqTimedsend64), (419, .mqTimedreceive64),
    (395, .shmget), (397, .shmat), (398, .shmdt), (396, .shmctl), (393, .semget), (420, .semtimedop64), (394, .semctl), (399, .msgget), (400, .msgsnd), (401, .msgrcv), (402, .msgctl), (117, .ipc),
@@ -278,7 +279,7 @@ def i686Calls : List (Nat × Call) :=
    (92, .truncate), (93, .ftruncate), (193, .truncate64), (194, .ftruncate64), (60, .umask), (192, .mmap2), (163, .mremap),
    (45, .brk), (78, .gettimeofday), (265, .clockGettime), (266, .clockGetres), (403, .clockGettime64), (406, .clockGetres64),
    (122, .uname), (191, .getrlimit), (340, .prlimit), (355, .getrandom), (186, .sigaltstack), (242, .schedGetaffinity),
-   (243, .setThreadArea), (118, .succeeds), (148, .succeeds), (94, .succeeds),    (267, .succeeds),    ]
+   (243, .setThreadArea), (118, .succeeds), (148, .succeeds), (94, .succeeds),       ]
 
 /-- The numbers of PowerPC, where those of each width that the other doesn't have are left to it not asking for them. -/
 def powerpcCalls : List (Nat × Call) :=

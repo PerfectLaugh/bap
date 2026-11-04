@@ -1,0 +1,14 @@
+a sleep takes its time 1
+the child wakes first
+then the parent
+setitimer 0
+a signal ends a sleep 1 1 1
+getitimer 30000 1
+it went on 4
+alarm 0 5
+until a time 1
+a futex times out 1 1
+timer_create 0
+timer_settime 0
+it signalled 3 10000000
+timer_delete 0 1

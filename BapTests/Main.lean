@@ -133,6 +133,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "riscv64-linux-musl-libc-mqueue",
     Bap.Tests.Emu.testLinuxRaises "mips-linux-musl-libc-mqueue",
     Bap.Tests.Emu.testLinuxRaises "mipsel-linux-musl-libc-mqueue",
+    Bap.Tests.Emu.testLinuxRaises "i686-linux-musl-libc-mqueue",
+    Bap.Tests.Emu.testLinuxRaises "i686-linux-musl-libc-time",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-memcalls",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-memcalls",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-memcalls",
