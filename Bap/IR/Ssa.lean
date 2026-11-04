@@ -131,9 +131,82 @@ private theorem insertPhisForVar_eq (cfg0 : Cfg) (var : Bap.Var) (frontier : Lis
       rw [← h2]
       exact ih _ _ _ _ _ h1 h3
 
+/-- Of placing phis in one pass, the last first: the phis of a block, as a set of their variables. -/
+private def placeInit (blk : Blk) : Std.HashSet Bap.Var := (blk.phis.map Phi.var).foldl (init := {}) fun set var => set.insert var
+
+/-- A phi placed, unless one of its variable is: what has been placed, the last first, and the variables of all. -/
+private def placeOne (phi : Phi) (state : List Phi × Std.HashSet Bap.Var) : List Phi × Std.HashSet Bap.Var :=
+  if state.2.contains phi.var then state else (phi :: state.1, state.2.insert phi.var)
+
+/-- `placePhi` of all of them, the last first, in one pass rather than looking through the phis of the block for each. -/
+private def placeAllFast (phis : List Phi) (blk : Blk) : Blk :=
+  { blk with phis := blk.phis ++ (phis.foldr placeOne ([], placeInit blk)).1.reverse }
+
+private theorem foldl_insert_contains (vars : List Bap.Var) (set : Std.HashSet Bap.Var) (var : Bap.Var) :
+    (vars.foldl (init := set) fun set var => set.insert var).contains var = (set.contains var || decide (var ∈ vars)) := by
+  induction vars generalizing set with
+  | nil => simp
+  | cons head tail ih =>
+    rw [List.foldl_cons, ih, Std.HashSet.contains_insert]
+    by_cases hv : head = var
+    · subst hv; simp
+    · have h' : (head == var) = false := beq_false_of_ne hv
+      have h'' : var ≠ head := fun e => hv e.symm
+      simp [h', h'']
+
+private theorem placeOne_step (blk : Blk) (phi : Phi) (state : List Phi × Std.HashSet Bap.Var)
+    (hs : ∀ var, state.2.contains var = decide (var ∈ (blk.phis ++ state.1.reverse).map Phi.var)) :
+    placePhi phi { blk with phis := blk.phis ++ state.1.reverse } = { blk with phis := blk.phis ++ (placeOne phi state).1.reverse } ∧
+      ∀ var, (placeOne phi state).2.contains var = decide (var ∈ (blk.phis ++ (placeOne phi state).1.reverse).map Phi.var) := by
+  obtain ⟨placed, seen⟩ := state
+  dsimp only at hs ⊢
+  unfold placeOne placePhi
+  dsimp only
+  by_cases hc : seen.contains phi.var = true
+  · have hany : (blk.phis ++ placed.reverse).any (·.var == phi.var) = true := by
+      rw [hs] at hc
+      simpa [List.any_eq_true, List.mem_map] using hc
+    simp only [hc, hany, ite_true]
+    exact ⟨trivial, hs⟩
+  · have hany : (blk.phis ++ placed.reverse).any (·.var == phi.var) = false := by
+      rw [hs] at hc
+      simpa [List.any_eq_false, List.mem_map] using hc
+    simp only [hc, hany, Bool.false_eq_true, ite_false]
+    refine ⟨by simp, fun var => ?_⟩
+    rw [Std.HashSet.contains_insert, hs]
+    by_cases hv : phi.var = var
+    · subst hv; simp
+    · have h' : (phi.var == var) = false := beq_false_of_ne hv
+      have h'' : var ≠ phi.var := fun e => hv e.symm
+      simp [h', h'']
+
+private theorem placeAllFast_spec (phis : List Phi) (blk : Blk) :
+    phis.foldr placePhi blk = placeAllFast phis blk ∧
+      ∀ var, (phis.foldr placeOne ([], placeInit blk)).2.contains var =
+        decide (var ∈ (blk.phis ++ (phis.foldr placeOne ([], placeInit blk)).1.reverse).map Phi.var) := by
+  induction phis with
+  | nil =>
+    refine ⟨by simp [placeAllFast], fun var => ?_⟩
+    simp [placeInit, foldl_insert_contains]
+  | cons phi rest ih =>
+    obtain ⟨hb, hs⟩ := ih
+    have step := placeOne_step blk phi _ hs
+    simp only [List.foldr_cons, hb]
+    exact step
+
 /-- The phis placed so far, last first, by block. -/
 private def applyPending (pending : Std.HashMap Tid (List Phi)) (cfg : Cfg) : Cfg :=
   { cfg with blocks := cfg.blocks.map fun blk => (pending.getD blk.tid []).foldr placePhi blk }
+
+
+
+/-- `applyPending`, each block in one pass rather than looking through its phis for each that is placed. -/
+private def applyPendingFast (pending : Std.HashMap Tid (List Phi)) (cfg : Cfg) : Cfg :=
+  { cfg with blocks := cfg.blocks.map fun blk => placeAllFast (pending.getD blk.tid []) blk }
+
+@[csimp] private theorem applyPending_eq_fast : @applyPending = @applyPendingFast := by
+  funext pending cfg
+  simp only [applyPending, applyPendingFast, fun phis blk => (placeAllFast_spec phis blk).1]
 
 private theorem placePhi_tid (phi : Phi) (blk : Blk) : (placePhi phi blk).tid = blk.tid := by
   unfold placePhi
