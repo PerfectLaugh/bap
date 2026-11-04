@@ -197,6 +197,11 @@ def Kernel.image (kernel : Kernel) : Image where
       | .ptyMaster terminal => (11, terminalBytes terminal)
       | .ptySlave master => (12, Wire.putNat ByteArray.empty master)
       | .device kind => (13, Wire.putNat ByteArray.empty kind)
+      | .inotify watches notices next cookies =>
+        let out := Wire.putList (Wire.putList Wire.putNat) ByteArray.empty (watches.map fun watch => [watch.wd, watch.inode, watch.mask])
+        let out := Wire.putList (fun out (notice : Notice) =>
+          Wire.putText (Wire.putList Wire.putNat out [notice.wd, notice.mask, notice.cookie]) notice.name) out notices.toList
+        (14, Wire.putNat (Wire.putNat out next) cookies)
     { number, mode := inode.mode, kind, data, details := metaBytes inode.details }
   nextInode := kernel.nextInode
   openFiles := (sorted kernel.openFiles.toList).map fun (id, file) => (id, file.inode, file.offset, file.flags)
@@ -252,6 +257,16 @@ def Image.kernel (image : Image) : Except String Kernel := do
       | 11 => pure (Content.ptyMaster (← terminalOfBytes entry.data))
       | 12 => pure (Content.ptySlave (← Wire.getNat entry.data 0).1)
       | 13 => pure (Content.device (← Wire.getNat entry.data 0).1)
+      | 14 =>
+        let (watches, at_) ← Wire.getList (Wire.getList Wire.getNat) entry.data 0
+        let (notices, at_) ← Wire.getList (fun data at_ => do
+          let (numbers, at_) ← Wire.getList Wire.getNat data at_
+          let (name, at_) ← Wire.getText data at_
+          .ok ({ wd := numbers.getD 0 0, mask := numbers.getD 1 0, cookie := numbers.getD 2 0, name }, at_)) entry.data at_
+        let (next, at_) ← Wire.getNat entry.data at_
+        let (cookies, _) ← Wire.getNat entry.data at_
+        pure (Content.inotify (watches.map fun fields => { wd := fields.getD 0 0, inode := fields.getD 1 0, mask := fields.getD 2 0 })
+          notices.toArray next cookies)
       | kind => .error s!"a Linux checkpoint with an inode of kind {kind}"
     pure (inodes.insert entry.number { number := entry.number, content, mode := entry.mode, details := ← metaOfBytes entry.details })
   pure {

@@ -9,6 +9,7 @@ import Bap.Linux.Poll
 import Bap.Linux.Identity
 import Bap.Linux.Tty
 import Bap.Linux.Files
+import Bap.Linux.Notify
 import Bap.Linux.GuestHeap
 import Bap.Linux.LoadedLibrary
 import Bap.Linux.Image
@@ -76,6 +77,8 @@ structure Machine where
   ptrace : Ptrace
   /-- The timers and the deadlines of the calls that wait with a timeout: see `Bap.Linux.Timers`. -/
   timers : Timers
+  /-- What finds what `inotify` has to say after each call: see `Bap.Linux.Notify`. -/
+  notifier : Notify.Notifier
   /-- What `Machine.malloc` has given out, by address space. -/
   heaps : IO.Ref (Std.HashMap Nat GuestHeap)
   /-- What `Machine.loadLibrary` has loaded, by address space. -/
@@ -938,6 +941,9 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       return ← socketCall machine emu call args
     match call with
     | .read =>
+      match ← Notify.serve machine.notifier poller emu call args with
+      | some action => pure action
+      | none =>
       match ← Tty.serve poller emu call args with
       | some action => pure action
       | none =>
@@ -954,6 +960,8 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       match ← poller.serve emu call args with
       | some action => pure action
       | none => writeOut (arg 0) (arg 1) (arg 2)
+    | .inotifyInit | .inotifyInit1 | .inotifyAddWatch | .inotifyRmWatch =>
+      pure ((← Notify.serve machine.notifier poller emu call args).getD (errorOf Errno.enosys))
     | .poll | .ppoll | .ppoll64 | .select | .pselect6 | .pselect664 | .epollCreate | .epollCreate1 | .epollCtl | .epollWait
     | .epollPwait | .epollPwait2 | .eventfd | .eventfd2 | .timerfdCreate | .timerfdSettime | .timerfdSettime64 | .timerfdGettime
     | .timerfdGettime64 | .signalfd | .signalfd4 =>
@@ -1071,6 +1079,9 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
           | .ok value => .returnValue value)
       | _ => pure ((← Files.serveLock poller emu args).getD (errorOf Errno.einval))
     | .ioctl =>
+      match ← Notify.serve machine.notifier poller emu call args with
+      | some action => pure action
+      | none =>
       -- No descriptor is a terminal but those of a pseudo-terminal.
       match ← Tty.serve poller emu call args with
       | some action => pure action
@@ -1311,18 +1322,24 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
         | .ok (_, _, { content := .eventfd .., .. }) | .ok (_, _, { content := .ptyMaster _, .. })
         | .ok (_, _, { content := .ptySlave _, .. }) => true
         | _ => false)
-      match call, shared || socket with
+      -- And while `inotify` watches, what a write changes is found out from what it was before.
+      let watching := !(← Notify.instancesOf machine.notifier (← machine.kernel.get)).isEmpty
+      match call, shared || socket || watching with
       | .write, false => handOver machine emu (← writeDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0))
       | .writev, false => handOver machine emu (← writeVectorDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0))
       | _, _ =>
         let before ← machine.kernel.get
         let action ← kernelCall machine emu call args
         refreshChanged machine emu before
+        if watching then
+          let live := ((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups
+          if ← Notify.after machine.notifier machine.kernel group call args before action live then wakePipeReaders emu
         -- What makes a descriptor makes none past RLIMIT_NOFILE.
         let action ← match call, action with
           | .open_, .returnValue fd | .openat, .returnValue fd | .dup, .returnValue fd | .socket, .returnValue fd
           | .accept, .returnValue fd | .accept4, .returnValue fd | .eventfd, .returnValue fd | .eventfd2, .returnValue fd | .epollCreate, .returnValue fd | .epollCreate1, .returnValue fd
-          | .timerfdCreate, .returnValue fd | .signalfd4, .returnValue fd
+          | .timerfdCreate, .returnValue fd | .signalfd4, .returnValue fd | .memfdCreate, .returnValue fd | .inotifyInit, .returnValue fd
+          | .inotifyInit1, .returnValue fd
           -- Of fcntl, F_DUPFD and F_DUPFD_CLOEXEC, which make one, rather than what the others give, as flags.
           | .fcntl, .returnValue fd =>
             if call == .fcntl && args.getD 1 0 != 0 && args.getD 1 0 != 1030 then pure action else
@@ -1855,7 +1872,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   let ptrace ← Ptrace.make architecture signals
   let kernelRef ← IO.mkRef kernel
   let timers ← Timers.make architecture kernelRef signals
-  let machine : Machine := { architecture, emu, kernel := kernelRef, models := ← IO.mkRef [], target, handled := handler.isSome, signals, ptrace, timers, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {} }
+  let machine : Machine := { architecture, emu, kernel := kernelRef, models := ← IO.mkRef [], target, handled := handler.isSome, signals, ptrace, timers, notifier := ← Notify.make, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {} }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
@@ -1867,6 +1884,8 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
     flushShared machine emu
     pure .default
   emu.leavingSpace.set (some (flushShared machine emu))
+  -- What was found of the instances of `inotify` is of the kernel that was.
+  machine.restored.modify ((fun _ => Notify.forget machine.notifier) :: ·)
   emu.enteredSpace.set (some (refreshShared machine emu))
   emu.futexKey.set (some fun address => do
     let some group ← runningGroup emu | return none

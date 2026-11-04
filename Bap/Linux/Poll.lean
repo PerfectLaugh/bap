@@ -82,6 +82,7 @@ def readiness (kernel : Kernel) (live : List Nat) (now pending file : Nat) : Nat
         | .timerfd expiry _ => { read := expiry.any (· ≤ now) }
         | .signalfd mask => { read := mask &&& pending != 0 }
         | .ptyMaster terminal => { read := terminal.output.size > 0, write := true }
+        | .inotify _ notices _ _ => { read := !notices.isEmpty }
         | .ptySlave master =>
           match kernel.inodes.get? master with
           | some { content := .ptyMaster terminal, .. } =>

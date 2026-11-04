@@ -25,7 +25,7 @@ private def numberOf (big : Bool) (bytes : ByteArray) : Nat :=
   ordered.foldl (fun value byte => value * 256 + byte.toNat) 0
 
 /-- A string of the guest, to its zero, which doesn't read past the page where it ends. -/
-private def readString (emu : Emu) (address : Nat) : IO String := do
+def readString (emu : Emu) (address : Nat) : IO String := do
   let mut out := ByteArray.empty
   let mut at_ := address
   while out.size < 4096 do

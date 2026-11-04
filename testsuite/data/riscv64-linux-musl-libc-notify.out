@@ -1,0 +1,71 @@
+init 1 1
+watch 1
+nothing yet -11
+made: 1 256 0
+  name a
+made: 1 32 0
+  name a
+made: 1 2 0
+  name a
+made: 1 8 0
+  name a
+read: 1 32 0
+  name a
+read: 1 1 0
+  name a
+read: 1 16 0
+  name a
+chmod: 1 4 0
+  name a
+moved: 1 64 1
+  name a
+moved: 1 128 2
+  name b
+directory: 1 1073742080 0
+  name sub
+directory: 1 1073742336 0
+  name sub
+file watch 2
+same again 2
+both: 1 32 0
+  name b
+both: 2 32 0
+both: 1 2 0
+  name b
+both: 2 2 0
+both: 1 8 0
+  name b
+both: 2 8 0
+deleted: 2 4 0
+deleted: 2 1024 0
+deleted: 2 32768 0
+deleted: 1 512 0
+  name b
+waiting 64
+too small -22
+c: 1 256 0
+  name c
+c: 1 32 0
+  name c
+one shot 3
+shot: 1 2 0
+  name c
+shot: 3 2 0
+shot: 3 32768 0
+shot: 1 2 0
+  name c
+shot: 1 8 0
+  name c
+rm_watch 0 -22
+removed: 1 32768 0
+empty -11
+no events -22
+only a directory -20
+missing -2
+watch twice 4 -17
+not inotify -22
+bad flags -22
+move watch 4
+move self: 4 2048 0
+waited: 1 256 0
+  name late
