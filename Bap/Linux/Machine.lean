@@ -2131,7 +2131,9 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   let resumingCurrent (action : IO Bool) : IO Bool := do
     let waited ← Bap.Emu.stopped emu
     let changed ← action
-    if waited && !(← Bap.Emu.stopped emu) then signals.switchedIn emu
+    if waited && !(← Bap.Emu.stopped emu) then
+      signals.switchedIn emu
+      timers.resumed emu
     pure changed
   emu.idle.set (some (resumingCurrent (timers.idle emu)))
   -- A signal that comes has what waits to read one look again, and what it woke from a call that runs again hear of it.
@@ -2148,6 +2150,11 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   machine.models.modify (· ++ [{ id := Ring.modelId, version := builtinVersion Ring.modelId
                                  state := { save := Ring.save machine.rings, load := Ring.load machine.rings } }])
   signals.serve emu
+  -- A thread that a switch has run again has what was left of a sleep that a signal ended.
+  let arrived ← emu.switchedIn.get
+  emu.switchedIn.set (some do
+    if let some arrived := arrived then arrived
+    timers.resumed emu)
   -- A process that is over has closed what it had open.
   let heard ← emu.processExited.get
   emu.processExited.set (some fun group status => do
