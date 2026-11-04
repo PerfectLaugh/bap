@@ -1,5 +1,7 @@
 namespace Bap.LLVM
 
+/-! What these are given they only borrow: the native side keeps nothing of it, and an address is a number of 64 bits. -/
+
 inductive Operand where
   | reg (name : String)
   | imm (value : Int)
@@ -14,14 +16,14 @@ structure Decoded where
   deriving Repr
 
 @[extern "bap_llvm_assemble"]
-opaque assemble (triple source : String) : IO ByteArray
+opaque assemble (triple source : @& String) : IO ByteArray
 
 @[extern "bap_llvm_disassemble"]
-opaque disassembleRaw (triple : String) (data : ByteArray) (address : Nat) :
+opaque disassembleRaw (triple : @& String) (data : @& ByteArray) (address : UInt64) :
   IO (String × Nat × Nat × String × List Operand)
 
 def disassemble (triple : String) (data : ByteArray) (address : Nat := 0) : IO Decoded := do
-  let (assembly, size, flags, opcode, operands) ← disassembleRaw triple data address
+  let (assembly, size, flags, opcode, operands) ← disassembleRaw triple data address.toUInt64
   pure ⟨assembly, size, flags, opcode, operands⟩
 
 opaque MCInst : Type
@@ -38,29 +40,29 @@ structure MCDecoded where
   instruction : MCInst
 
 @[extern "bap_llvm_disassemble_mc"]
-opaque disassembleMCRaw (triple : String) (data : ByteArray) (address : Nat) :
+opaque disassembleMCRaw (triple : @& String) (data : @& ByteArray) (address : UInt64) :
   IO (String × Nat × Nat × MCInst)
 
 @[extern "bap_llvm_mc_opcode"]
-opaque mcOpcode (instruction : MCInst) : Nat
+opaque mcOpcode (instruction : @& MCInst) : Nat
 
 @[extern "bap_llvm_mc_operands"]
-opaque mcOperands (instruction : MCInst) : IO (List MCOperand)
+opaque mcOperands (instruction : @& MCInst) : IO (List MCOperand)
 
 @[extern "bap_llvm_opcode_id"]
-opaque opcodeId (triple name : String) : IO Nat
+opaque opcodeId (triple name : @& String) : IO Nat
 
 @[extern "bap_llvm_opcode_id_opt"]
-opaque opcodeId? (triple name : String) : IO (Option Nat)
+opaque opcodeId? (triple name : @& String) : IO (Option Nat)
 
 @[extern "bap_llvm_register_id"]
-opaque registerId (triple name : String) : IO Nat
+opaque registerId (triple name : @& String) : IO Nat
 
 @[extern "bap_llvm_register_names"]
-opaque registerNames (triple : String) : IO (List (Nat × String))
+opaque registerNames (triple : @& String) : IO (List (Nat × String))
 
 def disassembleMC (triple : String) (data : ByteArray) (address : Nat := 0) : IO MCDecoded := do
-  let (assembly, size, flags, instruction) ← disassembleMCRaw triple data address
+  let (assembly, size, flags, instruction) ← disassembleMCRaw triple data address.toUInt64
   pure ⟨assembly, size, flags, instruction⟩
 
 end Bap.LLVM

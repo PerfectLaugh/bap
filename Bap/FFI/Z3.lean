@@ -3,7 +3,7 @@ import Bap.Symbolic.Expr
 namespace Bap.FFI.Z3
 
 @[extern "bap_z3_check_sat"]
-opaque checkSat (script : String) : IO Bool
+opaque checkSat (script : @& String) : IO Bool
 
 def isSat (constraints : List Symbolic.Expr) : IO Bool :=
   checkSat (Symbolic.renderScript constraints)
