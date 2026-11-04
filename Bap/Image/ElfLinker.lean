@@ -1027,6 +1027,17 @@ structure Tables where
   addrs : Array (Option Nat)
   commons : Array (Option Nat)
   externals : Std.HashMap String Nat
+  /-- The `R_PPC64_ADDR64` relocations of each place of a PowerPC64 file, in order, where a function descriptor in `.opd`
+  says where its code is. -/
+  descriptors : Std.HashMap (Nat × Nat) (List Rel) := {}
+
+/-- What `Tables.descriptors` is of a file. -/
+def descriptorsOf (input : Input) : Std.HashMap (Nat × Nat) (List Rel) :=
+  if input.machine == emPpc64 then
+    input.relocations.foldr (init := {}) fun entry table =>
+      if entry.typ == 38 then table.alter (entry.target, entry.offset) fun entries => some (entry :: entries.getD [])
+      else table
+  else {}
 
 def nullSym : Sym := ⟨"", shnUndef, false, 0, 0, 0, 0, 0⟩
 
@@ -1067,13 +1078,11 @@ def resolveBranchTarget (tables : Tables) (rel : Rel) (sym : Sym) : Option Nat :
   if tables.input.machine == emPpc64 && (rel.typ == 10 || rel.typ == 18) then
     let descriptor := match relocatedSection tables sym.shndx with
       | some (sec, _) =>
-        if sec.name == ".opd" then
-          tables.input.relocations.findSome? fun entry =>
-            if entry.target == sym.shndx && entry.typ == 38 &&
-                (entry.offset : Int) == (sym.value : Int) + rel.addend then
-              (resolve tables entry.symbol ((tables.input.symbols[entry.symbol]?).getD nullSym)).map
-                fun code => field ((code : Int) + entry.addend - rel.addend) 0 64
-            else none
+        let place : Int := (sym.value : Int) + rel.addend
+        if sec.name == ".opd" && 0 ≤ place then
+          (tables.descriptors.getD (sym.shndx, place.toNat) []).findSome? fun entry =>
+            (resolve tables entry.symbol ((tables.input.symbols[entry.symbol]?).getD nullSym)).map
+              fun code => field ((code : Int) + entry.addend - rel.addend) 0 64
         else none
       | none => none
     match descriptor with
@@ -1573,7 +1582,7 @@ def link (input : Input) : Output :=
   let env : Env := { machine := input.machine, width := input.width, little := input.little
                      codeLittle := input.little || input.machine == 183, gotBase, gotOff := input.data.size
                      tls := tlsBlock input.sections.toList layout.addrs, gp0 := input.gp0 }
-  let tables : Tables := ⟨input, env, layout.addrs, commons, externals⟩
+  let tables : Tables := ⟨input, env, layout.addrs, commons, externals, descriptorsOf input⟩
   let start : LinkState := { memory := input.data }
   let state := match (relocate tables).run start with
     | .ok _ state => state
@@ -1881,7 +1890,7 @@ def layoutTables (input : Input) : Tables :=
   let env : Env := { machine := input.machine, width := input.width, little := input.little
                      codeLittle := input.little || input.machine == 183, gotBase := alignUp externalsEnd word
                      gotOff := input.data.size, tls := tlsBlock input.sections.toList layout.addrs, gp0 := input.gp0 }
-  ⟨input, env, layout.addrs, commons, externals⟩
+  ⟨input, env, layout.addrs, commons, externals, descriptorsOf input⟩
 
 /-- A file with `size` bytes more of executable section after the section `at'`, whose number the sections after it move up for. -/
 def withThunkSection (input : Input) (at' size : Nat) : Input :=

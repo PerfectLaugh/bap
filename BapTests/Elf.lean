@@ -729,6 +729,26 @@ private def outOfRange (input : ElfLinker.Input) : Bool :=
 private def relocatedBytes (input : ElfLinker.Input) (n : Nat) : Nat :=
   ElfLinker.readNat (ElfLinker.link input).memory input.little 0 n
 
+/-- A PowerPC64 ELFv1 call of a function's descriptor in `.opd` branches to the code that the descriptor's relocation points to,
+and one of a descriptor that no relocation fills branches to the descriptor itself. -/
+private def runOpd : IO Unit := do
+  let text : ElfLinker.Section := ⟨".text", 1, ElfLinker.shfAlloc + ElfLinker.shfExecinstr, 0, 16, 16⟩
+  let opd : ElfLinker.Section := ⟨".opd", 1, ElfLinker.shfAlloc + ElfLinker.shfWrite, 16, 48, 8⟩
+  let bl : List UInt8 := [0x48, 0, 0, 1]
+  let input : ElfLinker.Input :=
+    { machine := ElfLinker.emPpc64, width := 64, little := false, base := 0x10000000
+      data := ByteArray.mk ((bl ++ bl ++ List.replicate 56 0).toArray)
+      sections := #[⟨"", 0, 0, 0, 0, 0⟩, text, opd]
+      symbols := #[⟨"code", 1, false, 12, 0, 2, 1, 0⟩, ⟨"f", 2, false, 0, 24, 2, 1, 0⟩, ⟨"g", 2, false, 24, 24, 2, 1, 0⟩]
+      relocations := [⟨1, 0, 10, 1, 0, true⟩, ⟨1, 4, 10, 2, 0, true⟩, ⟨2, 0, 38, 0, 0, true⟩] }
+  let output := ElfLinker.link input
+  let textAddr := (output.sectionAddrs[1]?).join.getD 0
+  let opdAddr := (output.sectionAddrs[2]?).join.getD 0
+  assertEqual "a call of a descriptor branches to its code" 0x4800000d (ElfLinker.readNat output.memory false 0 4)
+  assertEqual "a call of a descriptor that nothing fills branches to it"
+    (0x48000001 + (opdAddr + 24 - (textAddr + 4))) (ElfLinker.readNat output.memory false 4 4)
+  assertEqual "the descriptor holds the address of its code" (textAddr + 12) (ElfLinker.readNat output.memory false 16 8)
+
 /-- What `relocate_image` says of a link: each store of its log reads back, and the bytes that nothing stored to are the input's. -/
 private def checkImage (name : String) (input : ElfLinker.Input) : IO Unit := do
   let output := ElfLinker.link input
@@ -1124,6 +1144,7 @@ private def runElf32 : IO Unit := do
   | .ok _ => throw <| IO.userError "undersized ELF program entries accepted"
 
 def run : IO Unit := do
+  runOpd
   -- Two LOAD entries, each of 3 GiB of zeros, which is more than a host gives all together.
   let twoHuge := ofHex "7f454c4602010100000000000000000002003e00010000000000400000000000400000000000000000000000000000000000000040003800020040000000000001000000050000000000000000000000000040000000000000004000000000000000000000000000000000c000000000001000000000000001000000050000000000000000000000000040000200000000004000000000000000000000000000000000c0000000000010000000000000"
   assertEqual "ELF segments too large together are refused" (some "the regions of the file are too large")

@@ -3401,7 +3401,7 @@ theorem link_relocate (input : Input) :
       refine ⟨⟨input, { machine := input.machine, width := input.width, little := input.little
                         codeLittle := input.little || input.machine == 183, gotBase := alignUp externalsEnd (input.width / 8)
                         gotOff := input.data.size, tls := tlsBlock input.sections.toList layout.addrs, gp0 := input.gp0 },
-          layout.addrs, commons, externals⟩, rfl, rfl, rfl, rfl, rfl, rfl, rfl, ?_⟩
+          layout.addrs, commons, externals, descriptorsOf input⟩, rfl, rfl, rfl, rfl, rfl, rfl, rfl, ?_⟩
       dsimp only [link]
       rw [hl, hc]
       dsimp only
