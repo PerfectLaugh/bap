@@ -242,6 +242,31 @@ private def binRule (op : BinOp) (left right : Exp) : Exp :=
     else .bin op left right
   | _, _, _ => .bin op left right
 
+/-- `binRule`, which of a product by a constant other than 0 or 1 makes nothing else, without finding the width of the other side. -/
+private def binRuleFast (op : BinOp) (left right : Exp) : Exp :=
+  match op, left, right with
+  | .mul, @Exp.int _ one, _ => if one ≠ 0 ∧ one ≠ 1 ∧ !isZeroLiteral right then .bin op left right else binRule op left right
+  | .mul, _, @Exp.int _ one => if one ≠ 0 ∧ one ≠ 1 then .bin op left right else binRule op left right
+  | _, _, _ => binRule op left right
+
+@[csimp] private theorem binRule_eq_fast : @binRule = @binRuleFast := by
+  funext op left right
+  unfold binRuleFast
+  split
+  · split
+    · rename_i h
+      obtain ⟨h0, h1, hz⟩ := h
+      simp only [binRule]
+      split <;> simp_all
+    · rfl
+  · split
+    · rename_i h
+      obtain ⟨h0, h1⟩ := h
+      simp only [binRule]
+      split <;> simp_all
+    · rfl
+  · rfl
+
 private def iteRule (condition yes no : Exp) : Exp :=
   match condition with
   | @Exp.int 1 value => if value = 1 then yes else no
