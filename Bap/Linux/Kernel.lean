@@ -890,6 +890,10 @@ def writeError (kernel : Kernel) (group fd count : Nat) : Option Nat :=
       | some { content := .device 2, .. } => some 28
       | some inode@{ content := .file data, .. } =>
         inode.sealedAgainst data.size (if has file.flags oAppend then data.size else file.offset) count
+      -- What `Kernel.write` doesn't take: these have calls of their own, and the rest nothing.
+      | some { content := .timerfd .., .. } | some { content := .signalfd _, .. } | some { content := .epoll _, .. }
+      | some { content := .inotify .., .. } | some { content := .mqueue .., .. } | some { content := .eventfd .., .. }
+      | some { content := .ptyMaster _, .. } | some { content := .ptySlave _, .. } => some Errno.einval
       | _ => none
 
 /-- `write` for what `writeError` has nothing against, which changes all it can in place: one that takes the kernel as it is the only holder of it makes as many small

@@ -1,0 +1,6 @@
+writev master 6 0
+readv slave 6 1
+writev eventfd 8 0
+readv eventfd 8 5
+write timerfd -22 0
+writev timerfd -22 0

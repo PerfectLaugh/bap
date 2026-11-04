@@ -954,6 +954,12 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
     -- A path in the directory of the second, from another call of `at_`.
     let inDirectory (directory address : Nat) (action : String → IO SyscallAction) : IO SyscallAction :=
       at_ directory address fun from_ path => action (if path.startsWith "/" then path else from_ ++ "/" ++ path)
+    -- Of what `read` and `write` serve themselves: terminals, and the objects of `eventfd`, `timerfd`, `signalfd` and `inotify`.
+    let isObject (fd : Nat) : Bool := match kernel.objectOf group fd with
+      | .ok (_, _, { content := .eventfd .., .. }) | .ok (_, _, { content := .timerfd .., .. }) | .ok (_, _, { content := .signalfd _, .. })
+      | .ok (_, _, { content := .ptyMaster _, .. }) | .ok (_, _, { content := .ptySlave _, .. }) | .ok (_, _, { content := .inotify .., .. }) => true
+      | _ => false
+    let number (address size : Nat) : IO Nat := do pure (numberAt (← read emu address size) 0 size big)
     if [Call.read, .write, .readv, .writev].contains call && kernel.isSocket group (arg 0) then
       return ← socketCall machine emu call args
     match call with
@@ -1069,10 +1075,20 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       | .error _ => pure (errorOf Errno.efault)
       | .ok bytes => applyNat machine (·.writeTo group (arg 0) bytes (offset64 3))
     | .readv =>
+      -- What a terminal or another object of the kernel has is a read into the first buffer that has room, which may well be short.
+      if isObject (arg 0) then
+        let pieces ← (List.range (arg 2)).mapM fun index => do
+          pure (← number (arg 1 + 2 * wordSize * index) wordSize, ← number (arg 1 + 2 * wordSize * index + wordSize) wordSize)
+        match pieces.find? (·.2 > 0) with
+        | some (address, size) => kernelCall machine emu .read [arg 0, address, size]
+        | none => pure (.returnValue 0)
+      else
       match ← waitForPipe (arg 0) with
       | some action => pure action
       | none => vectors (arg 0) (arg 1) (arg 2) readInto
-    | .writev => vectors (arg 0) (arg 1) (arg 2) writeOut
+    | .writev =>
+      if isObject (arg 0) then vectors (arg 0) (arg 1) (arg 2) fun fd address count => kernelCall machine emu .write [fd, address, count]
+      else vectors (arg 0) (arg 1) (arg 2) writeOut
     | .access => accessAt here (arg 0)
     | .faccessat => accessAt (arg 0) (arg 1)
     | .dup => applyNat machine (·.dup group (arg 0))
@@ -1472,7 +1488,7 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
       -- A mapping of what is written has to hear of it. Otherwise a write is the only thing that a program does many of that gets longer with what it has done.
       let socket := (call == .write || call == .writev) && (← machine.kernel.get).isSocket group (args.getD 0 0)
       -- And what is written to an `eventfd` is counted, and to a terminal goes through it.
-      let socket := socket || (call == .write && match (← machine.kernel.get).objectOf group (args.getD 0 0) with
+      let socket := socket || ((call == .write || call == .writev) && match (← machine.kernel.get).objectOf group (args.getD 0 0) with
         | .ok (_, _, { content := .eventfd .., .. }) | .ok (_, _, { content := .ptyMaster _, .. })
         | .ok (_, _, { content := .ptySlave _, .. }) => true
         | _ => false)
