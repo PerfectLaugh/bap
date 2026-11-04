@@ -2105,8 +2105,10 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   let heard ← emu.processExited.get
   emu.processExited.set (some fun group status => do
     if let some heard := heard then heard group status
-    -- What `SEM_UNDO` did of it is taken back.
+    -- What `SEM_UNDO` did of it is taken back, its timers end, and what `inotify` it had is looked for again.
     kernelRef.modify (SysV.exited · group)
+    timers.exited emu group
+    Notify.forget machine.notifier
     wakePipeReaders emu
     ptrace.processExited emu group)
   -- So is what was allocated in it, as what has an address has to go on having it.

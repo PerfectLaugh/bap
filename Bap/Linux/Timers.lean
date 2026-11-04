@@ -196,6 +196,15 @@ def interrupted (timers : Timers) (emu : Emu) (tid : Nat) (restart : Bool) (spac
     if timers.mips then setThreadReg emu tid ⟨"R7", .imm width, 0, false⟩ (.bits (BitVec.ofNat width site.flag))
   else setThreadPc emu tid site.next
 
+/-- A process is over, and with it its timers, and what threads that are gone waited with. -/
+def exited (timers : Timers) (emu : Emu) (group : Nat) : IO Unit := do
+  let live := ((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.tid)
+  timers.state.modify fun state => { state with
+    timers := state.timers.filter fun (owner, _) _ => owner != group
+    nextTimer := state.nextTimer.erase group
+    deadlines := state.deadlines.filter fun tid _ => live.contains tid
+    sites := state.sites.filter fun tid _ => live.contains tid }
+
 /-- A process that `fork` made has no timers of its parent, and `execve` ends those of `timer_create` of a process. -/
 def executed (timers : Timers) (group : Nat) : IO Unit :=
   timers.state.modify fun state => { state with timers := state.timers.filter fun (owner, which) _ => owner != group || which < 3 }

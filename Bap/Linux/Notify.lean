@@ -56,9 +56,15 @@ def make : IO Notifier := do pure { instances := ← IO.mkRef none, entries := �
 /-- The instances of a kernel, from what was found of them before, if it was. -/
 def instancesOf (notifier : Notifier) (kernel : Kernel) : IO (List Nat) := do
   if let some found ← notifier.instances.get then return found
+  -- Those that a descriptor has: one that nothing has is gone, with its watches.
+  let held := kernel.processes.fold (init := ({} : Std.HashSet Nat)) fun held _ process =>
+    process.descriptors.fold (init := held) fun held _ descriptor =>
+      match kernel.openFiles.get? descriptor.openFile with
+      | some file => held.insert file.inode
+      | none => held
   let found := kernel.inodes.fold (init := []) fun found number inode =>
     match inode.content with
-    | .inotify .. => number :: found
+    | .inotify .. => if held.contains number then number :: found else found
     | _ => found
   notifier.instances.set (some found)
   pure found
