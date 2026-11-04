@@ -3057,16 +3057,8 @@ def testMipsErrno : IO Unit := do
 machine. -/
 def testHostMount (triple : String) : IO Unit := do
   let label := s!"Linux {triple} a directory of the host"
-  let host := s!"/tmp/bap-host-mount-{triple}"
-  if ← System.FilePath.pathExists host then IO.FS.removeDirAll host
-  IO.FS.createDirAll s!"{host}/sub"
-  IO.FS.writeFile s!"{host}/a.txt" "alpha"
-  IO.FS.writeFile s!"{host}/sub/b.txt" "beta"
-  let _ ← IO.Process.output { cmd := "ln", args := #["-s", "a.txt", s!"{host}/link"] }
-  -- What a link to outside of it has isn't there.
-  let _ ← IO.Process.output { cmd := "ln", args := #["-s", "/etc/hostname", s!"{host}/sub/outside"] }
-  -- What a link to outside of it has isn't there.
-  let _ ← IO.Process.output { cmd := "ln", args := #["-s", "/etc/hostname", s!"{host}/sub/outside"] }
+  -- Of the test suite, with a link in it and one to outside of it, whose target isn't there; nothing writes it.
+  let host := (← IO.FS.realPath "testsuite/host").toString
   let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-host"
   let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
   machine.mountHost host "/host"
@@ -3080,26 +3072,19 @@ def testHostMount (triple : String) : IO Unit := do
   assertEqual s!"{label} isn't written" "alpha" (← IO.FS.readFile s!"{host}/a.txt")
   assertTrue s!"{label} has what the program took away" (← System.FilePath.pathExists s!"{host}/sub/b.txt")
   assertTrue s!"{label} and not what it made" !(← System.FilePath.pathExists s!"{host}/new")
-  IO.FS.removeDirAll host
 
 /-- A program that runs a script of a directory of the host that the machine sees, which names a program there to run it through a
 link: none of them is in the machine until `execve` looks for it. -/
 def testHostExec (triple : String) : IO Unit := do
-  let host := s!"/tmp/bap-host-exec-{triple}"
-  if ← System.FilePath.pathExists host then IO.FS.removeDirAll host
-  IO.FS.createDirAll s!"{host}/bin"
+  -- Of the test suite: the program in `bin`, a link `alias` to it beside it, and a script that names the program through the link.
+  let host := (← IO.FS.realPath s!"testsuite/hostexec/{triple}").toString
   let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-hostexec"
-  IO.FS.writeBinFile s!"{host}/bin/prog" program
-  -- Through a link to a directory beside it, which is all that the path names of where the program is.
-  let _ ← IO.Process.output { cmd := "ln", args := #["-s", "bin", s!"{host}/alias"] }
-  IO.FS.writeFile s!"{host}/script" "#!/host/alias/prog c\n"
   let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
   machine.mountHost host "/host"
   let written ← IO.mkRef ByteArray.empty
   let outcome ← machine.run fun data => written.modify (· ++ data)
   assertEqual s!"Linux {triple} a script of the host runs a program of the host" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
   assertEqual s!"Linux {triple} with what it was given" "child /host/script x\n" (String.fromUTF8! (← written.get))
-  IO.FS.removeDirAll host
 
 /-- Shared libraries from outside a program, as `dlopen` has them, on a machine with no libc or linker to do it. -/
 def testLinuxLibraries (triple : String) (ifunc : Bool := false) : IO Unit := do
