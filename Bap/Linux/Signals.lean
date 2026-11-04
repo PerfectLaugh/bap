@@ -447,6 +447,9 @@ structure Signals where
   interrupted : IO.Ref (Emu → Nat → Bool → List Nat → IO Unit)
   /-- A signal was sent, as what waits to read one, as of `signalfd`, has to look again. -/
   sent : IO.Ref (Emu → IO Unit)
+  /-- The process group of a process, and the live processes of a process group, as the kernel has them, for `kill` of a group. -/
+  pgidOf : IO.Ref (Nat → IO Nat)
+  members : IO.Ref (Nat → IO (List Nat))
 
 namespace Signals
 
@@ -1163,17 +1166,20 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
     else if calls.returns.contains number then
       sigreturn signals current
     else if number == calls.kill then
-      let target := arg 0
+      -- A `pid_t`: a process, its own process group of 0, every process but the first and itself of -1, and a group of the rest.
+      let target := arg 0 % 2 ^ 32
       let signal := arg 1 % 2 ^ 32
-      -- There are no groups of processes: 0 and -1 are this one and all, of which this is the one that a program means by them.
-      let group := if target == 0 then task.group else target
       if signal != 0 && !valid signal then return ← fail current numbers.einval
-      if group ≥ 2 ^ (width - 1) then return ← fail current numbers.esrch
-      match (← current.taskTable.get).find? group with
-      | some { status := none, group := found, .. } =>
-        if signal != 0 then sendToGroup signals current found (← selfInfo current signal 0 0)
-        syscallReturn current (.ok 0)
-      | _ => fail current numbers.esrch
+      let live := (← current.taskTable.get).tasks.filter (·.status.isNone)
+      let groups ← if target == 0 then (← signals.members.get) ((← (← signals.pgidOf.get) task.group))
+        else if target == 2 ^ 32 - 1 then pure (((live.map (·.group)).eraseDups).filter fun group => group != task.group && group != 1)
+        else if target ≥ 2 ^ 31 then (← signals.members.get) (2 ^ 32 - target)
+        -- A thread's id is its process's, as Linux has it.
+        else pure ((live.find? (·.tid == target)).map (·.group)).toList
+      if groups.isEmpty then return ← fail current numbers.esrch
+      if signal != 0 then
+        for group in groups do sendToGroup signals current group (← selfInfo current signal 0 0)
+      syscallReturn current (.ok 0)
     else if number == calls.tkill || number == calls.tgkill then
       let (expected, target, signal) := if number == calls.tkill then (none, arg 0, arg 1) else (some (arg 0), arg 1, arg 2)
       if signal != 0 && !valid signal then return ← fail current numbers.einval

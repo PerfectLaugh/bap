@@ -20,6 +20,8 @@ structure ProcessImage where
   program : String
   auxiliary : List Nat
   mappings : List FileMapping
+  /-- Its process group, session, terminal, credentials, limits and nice value, and whether it ended: see `identityBytes`. -/
+  identity : ByteArray := ByteArray.empty
   deriving DecidableEq
 
 /-- An inode, with what is in it as a tag and bytes: a link has its target in them. -/
@@ -85,6 +87,37 @@ def socketOfBytes (data : ByteArray) : Except String Socket := do
   Wire.expectEnd data at_
   pure { type, name, peer, listening, pending, waiting, incoming := incoming.toArray, readShut, writeShut, owner, family, remote }
 
+/-- Of a process, its process group, session, terminal, credentials, limits and nice value, and whether it ended, as bytes. -/
+def identityBytes (process : Process) : ByteArray :=
+  let out := Wire.putOption Wire.putNat (Wire.putNat (Wire.putNat ByteArray.empty process.pgid) process.sid) process.terminal
+  let ids := process.credentials
+  let out := Wire.putList Wire.putNat (Wire.putList Wire.putNat out
+    [ids.uid, ids.euid, ids.suid, ids.fsuid, ids.gid, ids.egid, ids.sgid, ids.fsgid]) ids.groups
+  let out := Wire.putList (fun out (resource, soft, hard) => Wire.putNat (Wire.putNat (Wire.putNat out resource) soft) hard) out
+    process.limits
+  Wire.putFlag (Wire.putNat out process.nice) process.ended
+
+/-- What `identityBytes` made, on a process that has the rest; nothing at all is what a process starts with. -/
+def withIdentity (process : Process) (data : ByteArray) : Except String Process := do
+  if data.isEmpty then return process
+  let (pgid, at_) ← Wire.getNat data 0
+  let (sid, at_) ← Wire.getNat data at_
+  let (terminal, at_) ← Wire.getOption Wire.getNat data at_
+  let (ids, at_) ← Wire.getList Wire.getNat data at_
+  let (groups, at_) ← Wire.getList Wire.getNat data at_
+  let (limits, at_) ← Wire.getList (fun data at_ => do
+    let (resource, at_) ← Wire.getNat data at_
+    let (soft, at_) ← Wire.getNat data at_
+    let (hard, at_) ← Wire.getNat data at_
+    .ok ((resource, soft, hard), at_)) data at_
+  let (nice, at_) ← Wire.getNat data at_
+  let (ended, at_) ← Wire.getFlag data at_
+  Wire.expectEnd data at_
+  let id (index : Nat) : Nat := ids.getD index 0
+  pure { process with pgid, sid, terminal, limits, nice, ended
+                      credentials := { uid := id 0, euid := id 1, suid := id 2, fsuid := id 3, gid := id 4, egid := id 5, sgid := id 6
+                                       fsgid := id 7, groups } }
+
 /-- The image of a kernel. -/
 def Kernel.image (kernel : Kernel) : Image where
   paths := (kernel.paths.toList.toArray.qsort fun left right => left.1 < right.1).toList
@@ -111,7 +144,8 @@ def Kernel.image (kernel : Kernel) : Image where
     { group, cwd := process.cwd, umask := process.umask, breakStart := process.breakStart, breakEnd := process.breakEnd
       command := process.command, environment := process.environment, program := process.program
       auxiliary := process.auxiliary, mappings := process.mappings
-      descriptors := (sorted process.descriptors.toList).map fun (fd, entry) => (fd, entry.openFile, entry.closeOnExec) }
+      descriptors := (sorted process.descriptors.toList).map fun (fd, entry) => (fd, entry.openFile, entry.closeOnExec)
+      identity := identityBytes process }
   output := kernel.output
   clock := kernel.clock
   cycles := kernel.cycles
@@ -162,13 +196,14 @@ def Image.kernel (image : Image) : Except String Kernel := do
     nextInode := image.nextInode
     openFiles := image.openFiles.foldl (init := {}) fun files (id, inode, offset, flags) => files.insert id { inode, offset, flags }
     nextOpenFile := image.nextOpenFile
-    processes := image.processes.foldl (init := {}) fun processes process =>
-      processes.insert process.group
+    processes := ← image.processes.foldlM (init := {}) fun processes process => do
+      let made : Process :=
         { cwd := process.cwd, umask := process.umask, breakStart := process.breakStart, breakEnd := process.breakEnd
           command := process.command, environment := process.environment, program := process.program
           auxiliary := process.auxiliary, mappings := process.mappings
           descriptors := process.descriptors.foldl (init := {}) fun descriptors (fd, openFile, closeOnExec) =>
             descriptors.insert fd { openFile, closeOnExec } }
+      pure (processes.insert process.group (← withIdentity made process.identity))
     output := image.output
     clock := image.clock
     cycles := image.cycles }
@@ -219,7 +254,8 @@ def putProcess (out : ByteArray) (process : ProcessImage) : ByteArray :=
   let out := putList putText out process.environment
   let out := putText out process.program
   let out := putList putNat out process.auxiliary
-  putList putMapping out process.mappings
+  let out := putList putMapping out process.mappings
+  putBytes out process.identity
 
 def getProcess : Decoder ProcessImage := fun data at_ => do
   let (group, at_) ← getNat data at_
@@ -233,7 +269,8 @@ def getProcess : Decoder ProcessImage := fun data at_ => do
   let (program, at_) ← getText data at_
   let (auxiliary, at_) ← getList getNat data at_
   let (mappings, at_) ← getList getMapping data at_
-  .ok ({ group, descriptors, cwd, umask, breakStart, breakEnd, command, environment, program, auxiliary, mappings }, at_)
+  let (identity, at_) ← getBytes data at_
+  .ok ({ group, descriptors, cwd, umask, breakStart, breakEnd, command, environment, program, auxiliary, mappings, identity }, at_)
 
 def putPiece (out : ByteArray) (piece : Nat × ByteArray) : ByteArray := putBytes (putNat out piece.1) piece.2
 

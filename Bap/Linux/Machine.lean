@@ -6,6 +6,7 @@ import Bap.Linux.Ptrace
 import Bap.Linux.Seccomp
 import Bap.Linux.Timers
 import Bap.Linux.Poll
+import Bap.Linux.Identity
 import Bap.Linux.GuestHeap
 import Bap.Linux.LoadedLibrary
 import Bap.Linux.Image
@@ -1162,13 +1163,13 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
         setReg emu ⟨"USERLOCAL", .imm wide, 0, false⟩ (bits wide (arg 0))
         pure (.returnValue 0)
     | .uname => returning emu (arg 0) (Abi.utsname "bap" architecture.name)
-    | .getrlimit =>
-      let unlimited := 2 ^ wide - 1
-      let stack := if arg 0 == 3 then 8 * 1024 * 1024 else unlimited
-      returning emu (arg 1) (cell wordSize stack ++ cell wordSize unlimited)
-    | .prlimit =>
-      let stack := if arg 1 == 3 then 8 * 1024 * 1024 else 2 ^ 64 - 1
-      returning emu (arg 3) (cell 8 stack ++ cell 8 (2 ^ 64 - 1))
+    | .getrlimit | .prlimit | .getpgid | .setpgid | .getpgrp | .setsid | .getsid | .getuid | .geteuid | .getgid | .getegid | .setuid
+    | .setgid | .setreuid | .setregid | .setresuid | .setresgid | .getresuid | .getresgid | .setfsuid | .setfsgid | .getgroups
+    | .setgroups | .capget | .capset | .setrlimit | .getrusage | .times | .getpriority | .setpriority | .schedSetaffinity
+    | .schedGetparam | .schedSetparam | .schedGetscheduler | .schedSetscheduler | .schedGetPriorityMax | .schedGetPriorityMin
+    | .schedRrGetInterval | .schedRrGetInterval64 =>
+      let identity : Identity := { architecture, kernel := machine.kernel }
+      pure ((← identity.serve emu call args).getD (errorOf Errno.enosys))
     | .getrandom =>
       -- A fixed sequence, as a run is the same each time.
       let bytes := ByteArray.mk ((List.range (arg 1)).map fun index => (index * 167 + 13).toUInt8).toArray
@@ -1278,6 +1279,23 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
         let before ← machine.kernel.get
         let action ← kernelCall machine emu call args
         refreshChanged machine emu before
+        -- What makes a descriptor makes none past RLIMIT_NOFILE.
+        let action ← match call, action with
+          | .open_, .returnValue fd | .openat, .returnValue fd | .dup, .returnValue fd | .socket, .returnValue fd
+          | .accept, .returnValue fd | .accept4, .returnValue fd | .eventfd, .returnValue fd | .eventfd2, .returnValue fd | .epollCreate, .returnValue fd | .epollCreate1, .returnValue fd
+          | .timerfdCreate, .returnValue fd | .signalfd4, .returnValue fd
+          -- Of fcntl, F_DUPFD and F_DUPFD_CLOEXEC, which make one, rather than what the others give, as flags.
+          | .fcntl, .returnValue fd =>
+            if call == .fcntl && args.getD 1 0 != 0 && args.getD 1 0 != 1030 then pure action else
+            -- A call that waits has the registers that it had, which aren't what it made.
+            if ← Bap.Emu.stopped emu then pure action else
+            let kernel ← machine.kernel.get
+            let made := !(before.process group).descriptors.contains fd
+            if made && fd ≥ (kernel.limitOf group 7).1 && fd < 2 ^ 31 then
+              if let .ok closed := kernel.close group fd then machine.kernel.set closed
+              pure (errorOf Errno.emfile)
+            else pure action
+          | _, _ => pure action
         handOver machine emu action
 
 /-- What is left: nothing else serves it, and it isn't there. -/
@@ -1794,7 +1812,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
                              failures := ← IO.mkRef #[], skipIgnoredFaults := ← IO.mkRef false
                              intercept := ← IO.mkRef fun _ _ _ => pure false, tracer := ← IO.mkRef fun _ => pure none
                              jobControl := ← IO.mkRef fun _ _ _ => pure (), interrupted := ← IO.mkRef fun _ _ _ _ => pure ()
-                             sent := ← IO.mkRef fun _ => pure () }
+                             sent := ← IO.mkRef fun _ => pure (), pgidOf := ← IO.mkRef pure, members := ← IO.mkRef fun _ => pure [] }
   let ptrace ← Ptrace.make architecture signals
   let kernelRef ← IO.mkRef kernel
   let timers ← Timers.make architecture kernelRef signals
@@ -1837,6 +1855,10 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   emu.idle.set (some (resumingCurrent (timers.idle emu)))
   -- A signal that comes has what waits to read one look again, and what it woke from a call that runs again hear of it.
   signals.sent.set wakePipeReaders
+  signals.pgidOf.set fun group => do pure ((← kernelRef.get).pgidOf group)
+  signals.members.set fun pgid => do
+    let live := (((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group)).eraseDups
+    pure (Identity.members (← kernelRef.get) live pgid)
   signals.interrupted.set (timers.interrupted)
   emu.betweenTurns.modify (· ++ [do let _ ← resumingCurrent (do timers.tick emu; pure true)])
   let timeState : ModelState := { save := timers.save, load := timers.load }

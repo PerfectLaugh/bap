@@ -571,7 +571,21 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
         serveClone current (0x4000 ||| 0x100 ||| (if current.config.syscallAbi == .mips then 18 else 17)) 0 0 0 0
       else if is calls.clone then
         serveClone current (arg 0) (arg 1) (arg 2) (if x86 then arg 4 else arg 3) (if x86 then arg 3 else arg 4)
-      else if is calls.clone3 || is calls.rseq then
+      else if is calls.clone3 then
+        -- `struct clone_args`, of 64 bytes at least: flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size and tls, of
+        -- 8 bytes each, of which the stack is its lowest address.
+        if arg 1 < 64 then syscallReturn current (.error einval) else
+        match ← (List.range 8).mapM (fun index => do
+            let first ← readWord32 current (arg 0 + 8 * index)
+            let second ← readWord32 current (arg 0 + 8 * index + 4)
+            pure (if current.config.endian == Endian.big then first * 2 ^ 32 + second else second * 2 ^ 32 + first)) |>.toBaseIO with
+        | .error _ => syscallReturn current (.error efault)
+        | .ok [flags, _, childTid, parentTid, exitSignal, stack, size, tls] =>
+          -- CLONE_PIDFD, which has no descriptor here, and a signal that isn't one.
+          if flags &&& 0x1000 != 0 || exitSignal > 255 then syscallReturn current (.error einval)
+          else serveClone current (flags ||| exitSignal) (if stack != 0 then stack + size else 0) parentTid tls childTid
+        | .ok _ => syscallReturn current (.error einval)
+      else if is calls.rseq then
         syscallReturn current (.error (enosys current))
       else if is calls.wait4 then
         serveWait current (arg 0) (arg 1) (arg 2) (arg 3)

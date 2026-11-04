@@ -110,6 +110,7 @@ private structure Numbers where
   kill : Nat := 9
   /-- The calls that make a process or a thread, and those that end one. -/
   clone : Nat
+  clone3 : Nat := 435
   fork : Option Nat := none
   vfork : Option Nat := none
   exit : Nat
@@ -125,9 +126,9 @@ private def numbersOf : Architecture → Numbers
   | .i686 => { ptrace := 26, wait4 := 114, waitpid := some 7, waitid := 284, stop := 19, cont := 18, chld := 17, clone := 120,
                fork := some 2, vfork := some 190, exit := 1, exitGroup := 252 }
   | .mips 32 _ _ => { ptrace := 4026, wait4 := 4114, waitpid := some 4007, waitid := 4278, stop := 23, cont := 25, chld := 18,
-                      clone := 4120, fork := some 4002, exit := 4001, exitGroup := 4246 }
+                      clone := 4120, clone3 := 4435, fork := some 4002, exit := 4001, exitGroup := 4246 }
   | .mips _ _ _ => { ptrace := 5099, wait4 := 5059, waitpid := none, waitid := 5237, stop := 23, cont := 25, chld := 18, clone := 5055,
-                     fork := some 5056, exit := 5058, exitGroup := 5205 }
+                     clone3 := 5435, fork := some 5056, exit := 5058, exitGroup := 5205 }
   | .powerpc _ _ => { ptrace := 26, wait4 := 114, waitpid := some 7, waitid := 272, stop := 19, cont := 18, chld := 17, clone := 120,
                       fork := some 2, vfork := some 189, exit := 1, exitGroup := 234 }
 
@@ -325,15 +326,23 @@ private structure Report where
   code : Nat
   value : Nat
 
+/-- Of a wait's target, a process group, which is above the ids of processes. -/
+private def groupTarget (pgid : Nat) : Nat := 2 ^ 32 + pgid
+
 /-- What a wait in the process that runs finds, of `target` or of any, with these options of `waitid`: `WEXITED`, `WSTOPPED`,
 `WCONTINUED`, `WNOWAIT`. `none` is that there is nothing that it could ever find. -/
 private def find (ptrace : Ptrace) (emu : Emu) (group : Nat) (target : Option Nat) (exited stopped continued keep : Bool) :
     IO (Option (Option Report)) := do
   let tasks ← emu.taskTable.get
   let table ← ptrace.table.get
-  let wanted (tid : Nat) : Bool := target.all (· == tid)
-  let children := tasks.tasks.filter fun task => task.tid == task.group && task.parent == group && wanted task.tid
-  let tracees := table.tracees.toList.filter fun (tid, tracee) => tracee.tracer == group && wanted tid
+  -- A target above the ids of processes is a process group: see `groupTarget`.
+  let pgidOf ← ptrace.signals.pgidOf.get
+  let wanted (tid : Nat) : IO Bool := do
+    match target with
+    | none => pure true
+    | some wantedTarget => if wantedTarget ≥ 2 ^ 32 then pure ((← pgidOf tid) == wantedTarget - 2 ^ 32) else pure (tid == wantedTarget)
+  let children ← (tasks.tasks.filter fun task => task.tid == task.group && task.parent == group).filterM fun task => wanted task.tid
+  let tracees ← (table.tracees.toList.filter fun (_, tracee) => tracee.tracer == group).filterM fun (tid, _) => wanted tid
   if children.isEmpty && tracees.isEmpty then return none
   -- A tracee that stopped, to its tracer.
   for (tid, _) in tracees do
@@ -354,6 +363,12 @@ private def find (ptrace : Ptrace) (emu : Emu) (group : Nat) (target : Option Na
   if exited then
     let ofStatus (pid status : Nat) : Report :=
       if status % 128 != 0 then { pid, status, code := 2, value := status % 128 } else { pid, status, code := 1, value := status / 256 % 256 }
+    -- Of a process group, the first of its children that ended.
+    let target := match target with
+      | some wantedTarget => if wantedTarget ≥ 2 ^ 32 then
+          (children.find? fun child => child.status.isSome).map (·.tid) |>.orElse fun _ => children.head?.map (·.tid)
+        else some wantedTarget
+      | none => none
     match tasks.poll group target with
     | .exited child status =>
       unless keep do
@@ -376,9 +391,12 @@ private def numberBytes (big : Bool) (size value : Nat) : ByteArray :=
 
 /-- What a wait asks for of its first argument, a `pid_t`, of which the kernel takes the low 32 bits: any, or one. A process group
 is any, as there is one. -/
-private def targetOf (value : Nat) : Option Nat :=
+private def targetOf (value own : Nat) : Option Nat :=
   let pid := value % 2 ^ 32
-  if 0 < pid && pid < 2 ^ 31 then some pid else none
+  if pid == 0 then some (groupTarget own)
+  else if pid == 2 ^ 32 - 1 then none
+  else if pid ≥ 2 ^ 31 then some (groupTarget (2 ^ 32 - pid))
+  else some pid
 
 /-! ### Registers -/
 
@@ -573,13 +591,20 @@ private def serveRequest (ptrace : Ptrace) (emu : Emu) (request : WaitRequest) (
 for what serves a system call of the thread that runs, and what it gives is what that gives back: one that waits stops the thread,
 which the call is made again for, or given its result, when it goes on. -/
 def serveWait (ptrace : Ptrace) (emu : Emu) (target status options usage : Nat) : IO SyscallAction := do
-  serveRequest ptrace emu { target := targetOf target, exited := true, stopped := options &&& 2 != 0, continued := options &&& 8 != 0
+  let own ← (← ptrace.signals.pgidOf.get) (← groupOf emu (← thread emu))
+  serveRequest ptrace emu { target := targetOf target own, exited := true, stopped := options &&& 2 != 0, continued := options &&& 8 != 0
                             keep := false, waitid := false, status, usage } (options &&& 1 != 0)
 
 /-- `waitid`, of all (0), a process (1) or a group (2), which is all, as there is one. -/
 private def serveWaitid (ptrace : Ptrace) (emu : Emu) (kind id info options : Nat) : IO SyscallAction := do
   if kind > 2 || options &&& (4 ||| 2 ||| 8) == 0 then return ← syscallReturn emu (.error einval)
-  serveRequest ptrace emu { target := if kind == 1 then some id else none, exited := options &&& 4 != 0, stopped := options &&& 2 != 0
+  -- P_PID, P_PGID, of which 0 is its own, and P_ALL.
+  let own ← (← ptrace.signals.pgidOf.get) (← groupOf emu (← thread emu))
+  let target := match kind with
+    | 1 => some id
+    | 2 => some (groupTarget (if id == 0 then own else id))
+    | _ => none
+  serveRequest ptrace emu { target, exited := options &&& 4 != 0, stopped := options &&& 2 != 0
                             continued := options &&& 8 != 0, keep := options &&& 0x1000000 != 0, waitid := true, status := info, usage := 0 }
     (options &&& 1 != 0)
 
@@ -843,10 +868,19 @@ def serve (ptrace : Ptrace) (emu : Emu) : IO Unit := do
     if let some action := ← (← ptrace.screen.get) current tid number args then return action
     if let some tracee := (← ptrace.table.get).tracees.get? tid then
       -- A call that makes a process or a thread, which its tracer hears of once it is made, if it asked to.
-      let flags := if some number == numbers.fork then some numbers.chld
-        else if some number == numbers.vfork then some (0x4000 ||| 0x100 ||| numbers.chld)
-        else if number == numbers.clone then some (arg 0)
-        else none
+      let flags ← if some number == numbers.fork then pure (some numbers.chld)
+        else if some number == numbers.vfork then pure (some (0x4000 ||| 0x100 ||| numbers.chld))
+        else if number == numbers.clone then pure (some (arg 0))
+        -- Of `clone3`, its flags and exit signal, of `struct clone_args`.
+        else if number == numbers.clone3 then do
+          let big := current.config.endian == .big
+          let read64 (address : Nat) : IO Nat := do
+            let bytes ← read current address 8
+            pure ((if big then bytes.toList else bytes.toList.reverse).foldl (fun value byte => value * 256 + byte.toNat) 0)
+          match ← (do pure ((← read64 (arg 0)) ||| (← read64 (arg 0 + 32)) % 256) : IO Nat).toBaseIO with
+          | .ok flags => pure (some flags)
+          | .error _ => pure none
+        else pure none
       if let some flags := flags then
         let event := eventOfClone numbers.chld flags
         if event != 0 && tracee.options &&& (1 <<< event) != 0 then

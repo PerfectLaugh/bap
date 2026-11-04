@@ -167,6 +167,20 @@ def overlaps (mapping : FileMapping) (lower upper : Nat) : Bool :=
 
 end FileMapping
 
+/-- Who a process is, as `setuid` and its kin have it: of users and of groups, the real, the effective, the saved and that of the
+filesystem, and the groups that it is in besides. Everyone starts as root. -/
+structure Credentials where
+  uid : Nat := 0
+  euid : Nat := 0
+  suid : Nat := 0
+  fsuid : Nat := 0
+  gid : Nat := 0
+  egid : Nat := 0
+  sgid : Nat := 0
+  fsgid : Nat := 0
+  groups : List Nat := []
+  deriving DecidableEq, Repr
+
 /-- What belongs to a process. -/
 structure Process where
   descriptors : Std.HashMap Nat Descriptor := {}
@@ -183,6 +197,18 @@ structure Process where
   auxiliary : List Nat := []
   /-- What of its memory has a file behind it, which a child has too and `execve` ends. -/
   mappings : List FileMapping := []
+  /-- Its process group and its session, of which 0 is its own id: see `pgidOf` and `sidOf`. -/
+  pgid : Nat := 0
+  sid : Nat := 0
+  /-- The terminal that it has as its controlling terminal, by the inode of its end that a process has. -/
+  terminal : Option Nat := none
+  credentials : Credentials := {}
+  /-- What `setrlimit` and `prlimit` set, by resource as Linux numbers them besides MIPS: soft and hard. -/
+  limits : List (Nat × Nat × Nat) := []
+  /-- Its nice value, as 20 more than it, from 0 to 39. -/
+  nice : Nat := 20
+  /-- That it is over: only its process group and session are kept, which a wait of a group goes by until it is reaped. -/
+  ended : Bool := false
 
 /-- What a mapping of a process is: where, how much, and what it may do. -/
 structure MappedRange where
@@ -461,13 +487,38 @@ def withConsole (kernel : Kernel) (group : Nat) (input : ByteArray := ByteArray.
     nextOpenFile := openFile + 1 }
   (List.range 3).foldl (init := kernel) fun kernel _ => (kernel.addDescriptor group openFile).1
 
-/-- A child has copies of the descriptors, which share the open files with its parent, and the rest of its parent's state. -/
-def fork (kernel : Kernel) (parent child : Nat) : Kernel :=
-  kernel.setProcess child (kernel.process parent)
+/-- The process group of a process. -/
+def pgidOf (kernel : Kernel) (group : Nat) : Nat :=
+  let process := kernel.process group
+  if process.pgid == 0 then group else process.pgid
 
-/-- A process is gone, and what only it had open with it. -/
+/-- The session of a process. -/
+def sidOf (kernel : Kernel) (group : Nat) : Nat :=
+  let process := kernel.process group
+  if process.sid == 0 then group else process.sid
+
+/-- A process made by another: it has copies of the descriptors, which share the open files with its parent, and the rest of its
+parent's state, in its process group and session. -/
+def fork (kernel : Kernel) (parent child : Nat) : Kernel :=
+  kernel.setProcess child { kernel.process parent with pgid := kernel.pgidOf parent, sid := kernel.sidOf parent }
+
+/-- A process is over, and what only it had open with it: of it, its process group and session stay. -/
 def exitProcess (kernel : Kernel) (group : Nat) : Kernel :=
-  { kernel with processes := kernel.processes.erase group }
+  kernel.setProcess group { pgid := kernel.pgidOf group, sid := kernel.sidOf group, ended := true }
+
+/-- The soft and hard limits of a resource of a process, as Linux numbers them besides MIPS. -/
+def limitOf (kernel : Kernel) (group resource : Nat) : Nat × Nat :=
+  match (kernel.process group).limits.find? (·.1 == resource) with
+  | some (_, soft, hard) => (soft, hard)
+  | none =>
+    let unlimited := 2 ^ 64 - 1
+    match resource with
+    | 3 => (8 * 1024 * 1024, unlimited)
+    | 7 => (1024, 4096)
+    | 4 => (0, unlimited)
+    | 8 => (8 * 1024 * 1024, 8 * 1024 * 1024)
+    | 13 | 14 => (0, 0)
+    | _ => (unlimited, unlimited)
 
 /-- The open file of a descriptor of a process, with its id, or `EBADF`. -/
 def openFileOf (kernel : Kernel) (group fd : Nat) : Result (Nat × OpenFile) :=
