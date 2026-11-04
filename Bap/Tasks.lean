@@ -38,8 +38,10 @@ structure FutexWaiter where
   space : Nat
   address : Nat
   bitset : Nat
-  /-- Whether it asked for a timeout. There is no clock: it times out when nothing else can run. -/
+  /-- Whether it asked for a timeout. Without a clock, it times out when nothing else can run. -/
   timed : Bool := false
+  /-- When it times out, by the clock of the machine, if it has one: see `Emu.now`. -/
+  deadline : Option Nat := none
   deriving DecidableEq, Repr
 
 /-- A task blocked in `waitpid`. -/

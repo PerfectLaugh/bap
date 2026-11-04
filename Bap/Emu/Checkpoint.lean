@@ -100,7 +100,7 @@ private def putFutex (writer : Writer) (waiter : Tasks.FutexWaiter) : Writer :=
   let writer := putNat writer waiter.space
   let writer := putNat writer waiter.address
   let writer := putNat writer waiter.bitset
-  putBool writer waiter.timed
+  putSkipBin (putBool writer waiter.timed) waiter.deadline
 
 private def putWaiter (writer : Writer) (waiter : Tasks.Waiter) : Writer :=
   let writer := putNat writer waiter.thread
@@ -265,7 +265,8 @@ private def getFutex (reader : Reader) : Except String (Tasks.FutexWaiter × Rea
   let (address, reader) ← getNat reader
   let (bitset, reader) ← getNat reader
   let (timed, reader) ← getBool reader
-  .ok (⟨thread, space, address, bitset, timed⟩, reader)
+  let (deadline, reader) ← getSkipBin reader
+  .ok (⟨thread, space, address, bitset, timed, deadline⟩, reader)
 
 private def getWaiter (reader : Reader) : Except String (Tasks.Waiter × Reader) := do
   let (thread, reader) ← getNat reader
@@ -337,7 +338,7 @@ private def taskFits (task : Tasks.Entry) : Bool :=
     skipFits task.clearTid
 
 private def futexFits (waiter : Tasks.FutexWaiter) : Bool :=
-  fitsWord waiter.thread && fitsWord waiter.space && fitsWord waiter.address && fitsWord waiter.bitset
+  fitsWord waiter.thread && fitsWord waiter.space && fitsWord waiter.address && fitsWord waiter.bitset && skipFits waiter.deadline
 
 private def waiterFits (waiter : Tasks.Waiter) : Bool :=
   fitsWord waiter.thread && skipFits waiter.target && skipFits waiter.statusAddress

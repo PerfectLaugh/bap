@@ -1,0 +1,307 @@
+import Bap.Linux.Ptrace
+import Bap.Linux.Calls
+
+/-! # Time that goes on
+
+The clock of a machine is the kernel's, in nanoseconds: it goes on by a microsecond each time that it is read, and, when nothing can
+run, to what happens next: a deadline of a call that waits with a timeout, or a timer. That is all that makes it go on, so that a run
+is the same each time, however it is cut into turns, stopped, checkpointed or stepped back, and a sleep of a second takes a second of
+the machine's time and none of the host's. A loop that waits for a timer without reading the clock or waiting for anything doesn't
+see it come.
+
+A sleep waits with its result, 0, which a signal makes `EINTR`, as Linux has it. A call that waits for something to be ready runs
+again when it is woken, with the deadline that it had: see `Timers.waitUntil`. A futex gives `ETIMEDOUT` at its deadline.
+
+The timers are those of `setitimer` and `alarm`, of each process, and those of `timer_create`. `ITIMER_VIRTUAL` and `ITIMER_PROF` go by
+the same clock, as the machine's time is that of what it runs. A process that `fork` makes has none of them, and `execve` ends those of
+`timer_create`. -/
+
+namespace Bap.Linux
+
+open Bap.Emu Bap.Tasks
+
+/-- An interval timer of `setitimer`, or a timer of `timer_create`: the process and thread that hear of it, by what signal and with
+what, when it next expires, if it is armed, and every how long after, and how many times it expired that its last signal didn't say. -/
+structure Timer where
+  group : Nat
+  thread : Option Nat := none
+  /-- None, of `SIGEV_NONE`. -/
+  signal : Option Nat
+  code : Nat
+  id : Nat := 0
+  value : Nat := 0
+  expiry : Option Nat := none
+  interval : Nat := 0
+  overrun : Nat := 0
+  deriving Repr
+
+/-- The timers, by the process and which they are: 0 to 2 of `setitimer` and `3 + id` of `timer_create`, the next id of
+`timer_create` of each process, and the deadline of each thread that waits with a timeout. -/
+structure TimeState where
+  timers : Std.HashMap (Nat × Nat) Timer := {}
+  nextTimer : Std.HashMap Nat Nat := {}
+  deadlines : Std.HashMap Nat Nat := {}
+
+/-- Where a thread waits until its deadline, by its id. A signal ends that wait. -/
+def sleepSpace : Nat := 2 ^ 60
+
+/-- Whether a wait in a space has its result already, rather than `ETIMEDOUT` of a futex at its deadline: of a sleep, and of a call
+that runs again when it is woken, which waits for a pipe, a socket or a descriptor to be ready, from `2 ^ 61` to the space of shared
+futexes. -/
+private def hasResult (space : Nat) : Bool := space == sleepSpace || (2 ^ 61 ≤ space && space < Kernel.fileSpace)
+
+structure Timers where
+  architecture : Architecture
+  kernel : IO.Ref Kernel
+  signals : Signals
+  state : IO.Ref TimeState
+
+namespace Timers
+
+def modelId : String := "bap.timers"
+
+def make (architecture : Architecture) (kernel : IO.Ref Kernel) (signals : Signals) : IO Timers := do
+  pure { architecture, kernel, signals, state := ← IO.mkRef {} }
+
+def now (timers : Timers) : IO Nat := do pure (← timers.kernel.get).clock
+
+private def mips (timers : Timers) : Bool := timers.architecture matches .mips ..
+
+/-- The signal of `setitimer` of each of its timers: SIGALRM, SIGVTALRM and SIGPROF. -/
+private def itimerSignal (timers : Timers) (which : Nat) : Nat :=
+  match which, timers.mips with
+  | 0, _ => 14
+  | 1, false => 26
+  | 1, true => 28
+  | _, false => 27
+  | _, true => 29
+
+/-- The timers that are due: each signals, once for however many times it expired, and is armed again by its interval. Whether any
+was due. -/
+private def fire (timers : Timers) (emu : Emu) : IO Bool := do
+  let now ← timers.now
+  let state ← timers.state.get
+  let due := state.timers.toList.filter fun (_, timer) => timer.expiry.any (· ≤ now)
+  if due.isEmpty then return false
+  let table ← emu.taskTable.get
+  for (key, timer) in due do
+    let some expiry := timer.expiry | continue
+    let periods := if timer.interval > 0 then (now - expiry) / timer.interval + 1 else 1
+    let alive := table.tasks.any fun task => task.group == timer.group && task.status.isNone
+    if !alive then
+      timers.state.modify fun state => { state with timers := state.timers.erase key }
+      continue
+    timers.state.modify fun state => { state with timers := state.timers.insert key { timer with
+      expiry := if timer.interval > 0 then some (expiry + periods * timer.interval) else none
+      overrun := periods - 1 } }
+    if let some signal := timer.signal then
+      let detail : SignalDetail := if key.2 < 3 then .sent 0 0 0 else .timer timer.id (periods - 1) timer.value
+      let thread := timer.thread.filter fun tid => table.tasks.any fun task => task.tid == tid && task.status.isNone
+      timers.signals.send emu thread timer.group ⟨signal, timer.code, detail⟩
+  pure true
+
+/-- What waits until a time that has come goes on: a call that runs again, which finds that its time has come, and a futex, which
+gives `ETIMEDOUT`. Whether anything did. -/
+private def wakeDue (timers : Timers) (emu : Emu) : IO Bool := do
+  let now ← timers.now
+  let table ← emu.taskTable.get
+  let due := table.futexes.filter fun waiter => waiter.deadline.any (· ≤ now)
+  if due.isEmpty then return false
+  emu.taskTable.set { table with futexes := table.futexes.filter fun waiter => !waiter.deadline.any (· ≤ now) }
+  for waiter in due do
+    unless hasResult waiter.space do
+      setSyscallResult emu waiter.thread (.error (if timers.mips then 145 else 110))
+    wakeThread emu waiter.thread
+  pure true
+
+/-- What is due happens, of the time that reads of the clock made go on. -/
+def tick (timers : Timers) (emu : Emu) : IO Unit := do
+  let _ ← timers.fire emu
+  let _ ← timers.wakeDue emu
+
+/-- Nothing can run: time goes on to what happens next, a deadline or a timer, if anything does. Whether anything changed. -/
+def idle (timers : Timers) (emu : Emu) : IO Bool := do
+  let deadlines := (← emu.taskTable.get).futexes.filterMap (·.deadline)
+  let expiries := (← timers.state.get).timers.toList.filterMap (·.2.expiry)
+  let some next := (deadlines ++ expiries).min? | return false
+  if next > (← timers.now) then timers.kernel.modify fun kernel => { kernel with clock := next }
+  let fired ← timers.fire emu
+  let woke ← timers.wakeDue emu
+  pure (fired || woke)
+
+/-- The deadline of the call of a thread that waits with a timeout: the one that it had, as it runs again, or this one. -/
+def deadlineOf (timers : Timers) (tid : Nat) (deadline : IO Nat) : IO Nat := do
+  if let some known := (← timers.state.get).deadlines.get? tid then return known
+  let deadline ← deadline
+  timers.state.modify fun state => { state with deadlines := state.deadlines.insert tid deadline }
+  pure deadline
+
+/-- The call of a thread is over, and with it its deadline. -/
+def finish (timers : Timers) (tid : Nat) : IO Unit :=
+  timers.state.modify fun state => { state with deadlines := state.deadlines.erase tid }
+
+/-- The thread that runs waits in `space`, for `address`, until something wakes it there or its deadline comes, if it has one, and
+then runs its call again, with its registers as they were. -/
+def waitUntil (emu : Emu) (space address : Nat) (deadline : Option Nat) : IO SyscallAction := do
+  emu.taskTable.modify (·.futexWait { thread := ← thread emu, space, address, bitset := 2 ^ 32 - 1, deadline })
+  emu.stopped.set true
+  Ptrace.again emu
+
+/-- A process that `fork` made has no timers of its parent, and `execve` ends those of `timer_create` of a process. -/
+def executed (timers : Timers) (group : Nat) : IO Unit :=
+  timers.state.modify fun state => { state with timers := state.timers.filter fun (owner, which) _ => owner != group || which < 3 }
+
+private def numberOf (big : Bool) (bytes : ByteArray) : Nat :=
+  let ordered := if big then bytes.toList else bytes.toList.reverse
+  ordered.foldl (fun value byte => value * 256 + byte.toNat) 0
+
+private def numberBytes (big : Bool) (size value : Nat) : ByteArray :=
+  let little := (List.range size).map fun index => (value >>> (8 * index)).toUInt8
+  ByteArray.mk (if big then little.reverse else little).toArray
+
+/-- `nanosleep`, `clock_nanosleep`, `setitimer`, `getitimer`, `alarm` and those of `timer_create`, if the call is one of them. -/
+def serve (timers : Timers) (emu : Emu) (call : Call) (args : List Nat) : IO (Option SyscallAction) := do
+  let architecture := timers.architecture
+  let big := architecture.big
+  let word := architecture.bits / 8
+  let arg (index : Nat) : Nat := args.getD index 0
+  let tid ← thread emu
+  let group := (← currentTask emu).group
+  let number (address size : Nat) : IO Nat := do pure (numberOf big (← read emu address size))
+  let einval : Nat := 22
+  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.error errno)))
+  let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.ok value)))
+  -- A `timespec` or a `timeval`, of fields of `field` bytes, in nanoseconds, of which the second field has `scale` of them each.
+  let span (address field scale : Nat) : IO Nat := do pure ((← number address field) * 1000000000 + (← number (address + field) field) * scale)
+  let spanBytes (nanoseconds field scale : Nat) : ByteArray :=
+    numberBytes big field (nanoseconds / 1000000000) ++ numberBytes big field (nanoseconds % 1000000000 / scale)
+  let now ← timers.now
+  let remaining (timer : Timer) : Nat := (timer.expiry.map fun expiry => expiry - min expiry now).getD 0
+  -- A sleep until a deadline, which gives 0 then, or `EINTR` if a signal comes first.
+  let sleep (deadline : Nat) : IO (Option SyscallAction) := do
+    if deadline > now then
+      emu.taskTable.modify (·.futexWait { thread := tid, space := sleepSpace, address := tid, bitset := 2 ^ 32 - 1, deadline })
+      emu.stopped.set true
+    succeed
+  -- What a timer is now, as `itimerval` or `itimerspec`: the interval, then what is left of it.
+  let current (timer : Option Timer) (field scale : Nat) : ByteArray :=
+    match timer with
+    | some timer => spanBytes timer.interval field scale ++ spanBytes (remaining timer) field scale
+    | none => spanBytes 0 field scale ++ spanBytes 0 field scale
+  let setTimer (key : Nat × Nat) (fresh : Timer) (value : Nat) (interval : Nat) (absolute : Bool) : IO Unit :=
+    timers.state.modify fun state =>
+      let timer := (state.timers.get? key).getD fresh
+      { state with timers := state.timers.insert key { timer with
+          expiry := if value == 0 then none else some (if absolute then value else now + value), interval, overrun := 0 } }
+  let itimer (which : Nat) : Timer := { group, signal := some (timers.itimerSignal which), code := 0x80 }
+  try
+    match call with
+    | .nanosleep => sleep (now + (← span (arg 0) word 1))
+    | .clockNanosleep | .clockNanosleep64 =>
+      if arg 0 > 11 then return ← fail einval
+      let field := if call == .clockNanosleep64 then 8 else word
+      let given ← span (arg 2) field 1
+      sleep (if arg 1 &&& 1 != 0 then given else now + given)
+    | .setitimer =>
+      if arg 0 > 2 then return ← fail einval
+      let key := (group, arg 0)
+      if arg 2 != 0 then write emu (arg 2) (current ((← timers.state.get).timers.get? key) word 1000)
+      if arg 1 != 0 then
+        setTimer key (itimer (arg 0)) (← span (arg 1 + 2 * word) word 1000) (← span (arg 1) word 1000) false
+      succeed
+    | .getitimer =>
+      if arg 0 > 2 then return ← fail einval
+      write emu (arg 1) (current ((← timers.state.get).timers.get? (group, arg 0)) word 1000)
+      succeed
+    | .alarm =>
+      let left := ((← timers.state.get).timers.get? (group, 0)).map remaining |>.getD 0
+      setTimer (group, 0) (itimer 0) (arg 0 * 1000000000) 0 false
+      succeed ((left + 999999999) / 1000000000)
+    | .timerCreate =>
+      if arg 0 > 11 then return ← fail einval
+      let id := ((← timers.state.get).nextTimer.get? group).getD 0
+      -- `struct sigevent`: the value, the signal, how it is told, and the thread of SIGEV_THREAD_ID; without one, SIGALRM with the id.
+      let (signal, value, thread, notify) ← if arg 1 == 0 then pure (some 14, id, none, 0) else do
+        let notify ← number (arg 1 + word + 4) 4
+        let signal ← number (arg 1 + word) 4
+        let value ← number (arg 1) word
+        let thread ← if notify == 4 then some <$> number (arg 1 + word + 8) 4 else pure none
+        pure (if notify == 1 then none else some signal, value, thread, notify)
+      if notify != 0 && notify != 1 && notify != 4 then return ← fail einval
+      write emu (arg 2) (numberBytes big 4 id)
+      timers.state.modify fun state => { state with
+        nextTimer := state.nextTimer.insert group (id + 1)
+        timers := state.timers.insert (group, 3 + id) { group, thread, signal, code := 2 ^ 32 - 2, id, value } }
+      succeed
+    | .timerSettime | .timerSettime64 =>
+      let field := if call == .timerSettime64 then 8 else word
+      let key := (group, 3 + arg 0)
+      let some timer := (← timers.state.get).timers.get? key | return ← fail einval
+      if arg 3 != 0 then write emu (arg 3) (current (some timer) field 1)
+      setTimer key timer (← span (arg 2 + 2 * field) field 1) (← span (arg 2) field 1) (arg 1 &&& 1 != 0)
+      succeed
+    | .timerGettime | .timerGettime64 =>
+      let field := if call == .timerGettime64 then 8 else word
+      let some timer := (← timers.state.get).timers.get? (group, 3 + arg 0) | return ← fail einval
+      write emu (arg 1) (current (some timer) field 1)
+      succeed
+    | .timerGetoverrun =>
+      let some timer := (← timers.state.get).timers.get? (group, 3 + arg 0) | return ← fail einval
+      succeed timer.overrun
+    | .timerDelete =>
+      let key := (group, 3 + arg 0)
+      if !(← timers.state.get).timers.contains key then return ← fail einval
+      timers.state.modify fun state => { state with timers := state.timers.erase key }
+      succeed
+    | _ => pure none
+  catch _ => fail 14
+
+open Wire in
+private def putTimer (out : ByteArray) (entry : (Nat × Nat) × Timer) : ByteArray :=
+  let ((group, which), timer) := entry
+  let out := putOption putNat (putNat (putNat (putNat out group) which) timer.group) timer.thread
+  let out := putOption putNat out timer.signal
+  let out := putNat (putNat (putNat out timer.code) timer.id) timer.value
+  putNat (putNat (putOption putNat out timer.expiry) timer.interval) timer.overrun
+
+open Wire in
+private def getTimer : Decoder ((Nat × Nat) × Timer) := fun data at_ => do
+  let (key, at_) ← getNat data at_
+  let (which, at_) ← getNat data at_
+  let (group, at_) ← getNat data at_
+  let (thread, at_) ← getOption getNat data at_
+  let (signal, at_) ← getOption getNat data at_
+  let (code, at_) ← getNat data at_
+  let (id, at_) ← getNat data at_
+  let (value, at_) ← getNat data at_
+  let (expiry, at_) ← getOption getNat data at_
+  let (interval, at_) ← getNat data at_
+  let (overrun, at_) ← getNat data at_
+  .ok (((key, which), { group, thread, signal, code, id, value, expiry, interval, overrun }), at_)
+
+open Wire in
+/-- What a checkpoint has of the timers and the deadlines: the same state makes the same bytes. -/
+def save (timers : Timers) : IO ByteArray := do
+  let state ← timers.state.get
+  let out := putSorted putTimer ByteArray.empty state.timers.toList
+  let pair (out : ByteArray) (entry : Nat × Nat) : ByteArray := putNat (putNat out entry.1) entry.2
+  let out := putSorted pair out state.nextTimer.toList
+  pure (putSorted pair out state.deadlines.toList)
+
+open Wire in
+def load (timers : Timers) (data : ByteArray) : IO Unit := do
+  let pair : Decoder (Nat × Nat) := fun data at_ => do
+    let (first, at_) ← getNat data at_
+    let (second, at_) ← getNat data at_
+    .ok ((first, second), at_)
+  let decoded : Except String TimeState := do
+    let (entries, at_) ← getList getTimer data 0
+    let (nextTimer, at_) ← getList pair data at_
+    let (deadlines, at_) ← getList pair data at_
+    expectEnd data at_
+    pure { timers := Std.HashMap.ofList entries, nextTimer := Std.HashMap.ofList nextTimer, deadlines := Std.HashMap.ofList deadlines }
+  timers.state.set (← IO.ofExcept decoded)
+
+end Timers
+
+end Bap.Linux

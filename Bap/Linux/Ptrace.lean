@@ -223,6 +223,7 @@ def intercept (ptrace : Ptrace) (emu : Emu) (tid : Nat) (info : SignalInfo) : IO
     | .child pid _ _ => (pid, false)
     -- Not a fault, which comes again by itself: what a tracer lets it have is sent again.
     | .seccomp address _ _ _ => (address, false)
+    | .timer id _ _ => (id, false)
   stopThread ptrace emu tid { status := stoppedStatus info.signal, traced := true, signal := info.signal, code := info.code, detail, fault }
   pure true
 

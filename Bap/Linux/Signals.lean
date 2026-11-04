@@ -36,6 +36,8 @@ inductive SignalDetail where
   /-- Of a system call that a filter of seccomp trapped: where it was made, its number, the architecture as `AUDIT_ARCH_*` says it,
   and what the filter gave with `SECCOMP_RET_TRAP`, which is `si_errno`. -/
   | seccomp (address syscall arch data : Nat)
+  /-- Of a timer of `timer_create`: its id, how many times it expired that this doesn't say, and its `sigev_value`. -/
+  | timer (id overrun value : Nat)
   deriving DecidableEq, Repr
 
 structure SignalInfo where
@@ -294,6 +296,7 @@ private def putInfo (out : ByteArray) (info : SignalInfo) : ByteArray :=
   | .child pid uid status => putNat (putNat (putNat (putNat out 1) pid) uid) status
   | .fault address => putNat (putNat out 2) address
   | .seccomp address syscall arch data => putNat (putNat (putNat (putNat (putNat out 3) address) syscall) arch) data
+  | .timer id overrun value => putNat (putNat (putNat (putNat out 4) id) overrun) value
 
 private def getInfo : Decoder SignalInfo := fun data at_ => do
   let (signal, at_) ← getNat data at_
@@ -309,6 +312,11 @@ private def getInfo : Decoder SignalInfo := fun data at_ => do
     let (arch, at_) ← getNat data at_
     let (value, at_) ← getNat data at_
     .ok (⟨signal, code, .seccomp address syscall arch value⟩, at_)
+  | 4 =>
+    let (id, at_) ← getNat data at_
+    let (overrun, at_) ← getNat data at_
+    let (value, at_) ← getNat data at_
+    .ok (⟨signal, code, .timer id overrun value⟩, at_)
   | _ =>
     let (first, at_) ← getNat data at_
     let (second, at_) ← getNat data at_
@@ -524,6 +532,10 @@ private def writeInfo (signals : Signals) (emu : Emu) (address : Nat) (info : Si
     write emu (address + base) (encodeNumber emu word callAddress)
     int (base + word) syscall
     int (base + word + 4) arch
+  | .timer id overrun value =>
+    int base id
+    int (base + 4) overrun
+    write emu (address + base + 8) (encodeNumber emu word value)
 
 /-- The way back for a handler without a restorer: the page is put there the first time that it is wanted. -/
 private def returnAddress (signals : Signals) (emu : Emu) : IO Nat := do
@@ -770,7 +782,7 @@ private def sendToThread (signals : Signals) (emu : Emu) (tid group : Nat) (info
   -- What is sent to a tracee waits to be delivered, as that stops it, whatever it would have come to.
   if info.signal != (signals.numbers).kill && ((← (← signals.tracer.get) tid).isSome) then
     modifyThread signals tid fun state => { state with pending := state.pending ++ [info] }
-    if (← thread emu) != tid then interrupt signals emu tid true
+    if (← thread emu) != tid || (← emu.taskTable.get).blocked tid then interrupt signals emu tid true
     return
   let realTime := info.signal ≥ 32
   -- Of one that isn't of real time one at most is pending.
@@ -791,7 +803,9 @@ private def sendToThread (signals : Signals) (emu : Emu) (tid group : Nat) (info
   | .terminate => kill emu group info.signal
   | .handle action =>
     unless already do modifyThread signals tid fun state => { state with pending := state.pending ++ [info] }
-    if (← thread emu) != tid then interrupt signals emu tid (hasFlag action.flags saRestart)
+    -- The thread that is current may wait too, as a timer comes while nothing can run: what woke it has it take what came, as a switch
+    -- to it would.
+    if (← thread emu) != tid || (← emu.taskTable.get).blocked tid then interrupt signals emu tid (hasFlag action.flags saRestart)
 
 /-- A signal is sent to a process: to a thread of it that doesn't block it, its first if that one doesn't. -/
 private def sendToGroup (signals : Signals) (emu : Emu) (group : Nat) (info : SignalInfo) : IO Unit := do

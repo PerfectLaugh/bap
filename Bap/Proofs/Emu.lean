@@ -2101,21 +2101,22 @@ theorem getTask_decodes (task : Tasks.Entry) (h : TaskSafe task) : Decodes getTa
 
 private def encFutex (waiter : Tasks.FutexWaiter) : ByteArray :=
   natBytes waiter.thread ++ natBytes waiter.space ++ natBytes waiter.address ++ natBytes waiter.bitset ++
-    byteEnc (if waiter.timed then 1 else 0)
+    byteEnc (if waiter.timed then 1 else 0) ++ encSkip waiter.deadline
 
 /-- A waiter on a futex representable in the binary format. -/
 def FutexSafe (waiter : Tasks.FutexWaiter) : Prop :=
-  waiter.thread < 2 ^ 64 ∧ waiter.space < 2 ^ 64 ∧ waiter.address < 2 ^ 64 ∧ waiter.bitset < 2 ^ 64
+  waiter.thread < 2 ^ 64 ∧ waiter.space < 2 ^ 64 ∧ waiter.address < 2 ^ 64 ∧ waiter.bitset < 2 ^ 64 ∧ SkipSafe waiter.deadline
 
 private theorem data_putFutex (writer : Writer) (waiter : Tasks.FutexWaiter) :
     Writer.data (putFutex writer waiter) = Writer.data writer ++ encFutex waiter := by
-  simp only [putFutex, encFutex, data_putBool, data_putNat, ByteArray.append_assoc]
+  simp only [putFutex, encFutex, data_putSkip, data_putBool, data_putNat, ByteArray.append_assoc]
 
 theorem getFutex_decodes (waiter : Tasks.FutexWaiter) (h : FutexSafe waiter) : Decodes getFutex (encFutex waiter) waiter := by
   intro data offset hat
-  obtain ⟨thread, space, address, bitset, timed⟩ := waiter
-  obtain ⟨h1, h2, h3, h4⟩ := h
-  obtain ⟨hl, hb⟩ := At.split hat
+  obtain ⟨thread, space, address, bitset, timed, deadline⟩ := waiter
+  obtain ⟨h1, h2, h3, h4, h5⟩ := h
+  obtain ⟨hl, hd⟩ := At.split hat
+  obtain ⟨hl, hb⟩ := At.split hl
   obtain ⟨hl, hm⟩ := At.split hl
   obtain ⟨hl, ha⟩ := At.split hl
   obtain ⟨ht, hs⟩ := At.split hl
@@ -2124,8 +2125,10 @@ theorem getFutex_decodes (waiter : Tasks.FutexWaiter) (h : FutexSafe waiter) : D
   have d3 := natBytes_decodes address h3 data _ ha
   have d4 := natBytes_decodes bitset h4 data _ hm
   have d5 := getBool_decodes timed data _ hb
-  simp only [ByteArray.size_append, natBytes_size, byteEnc_size, Nat.add_assoc] at d1 d2 d3 d4 d5
-  simp only [getFutex, bind, Except.bind, d1, d2, d3, d4, d5, encFutex, ByteArray.size_append, natBytes_size, byteEnc_size, Nat.add_assoc]
+  have d6 := getSkip_decodes deadline h5 data _ hd
+  simp only [ByteArray.size_append, natBytes_size, byteEnc_size, Nat.add_assoc] at d1 d2 d3 d4 d5 d6
+  simp only [getFutex, bind, Except.bind, d1, d2, d3, d4, d5, d6, encFutex, ByteArray.size_append, natBytes_size, byteEnc_size,
+    Nat.add_assoc]
 
 private def encWaiter (waiter : Tasks.Waiter) : ByteArray :=
   natBytes waiter.thread ++ encSkip waiter.target ++ encSkip waiter.statusAddress
@@ -2333,9 +2336,9 @@ private theorem fits_task {task : Tasks.Entry} (h : taskFits task = true) : Task
 
 private theorem fits_futex {waiter : Tasks.FutexWaiter} (h : futexFits waiter = true) : FutexSafe waiter := by
   simp only [futexFits, Bool.and_eq_true] at h
-  obtain ⟨⟨⟨h1, h2⟩, h3⟩, h4⟩ := h
+  obtain ⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩ := h
   exact ⟨by simpa [fitsWord] using h1, by simpa [fitsWord] using h2, by simpa [fitsWord] using h3,
-    by simpa [fitsWord] using h4⟩
+    by simpa [fitsWord] using h4, fits_skip h5⟩
 
 private theorem fits_waiter {waiter : Tasks.Waiter} (h : waiterFits waiter = true) : WaiterSafe waiter := by
   simp only [waiterFits, Bool.and_eq_true] at h

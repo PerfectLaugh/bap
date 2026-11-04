@@ -400,7 +400,7 @@ private def serveClone (emu : Emu) (flags stack parentTid threadPointer childTid
 /-- `futex`, for the word at `address` of the space of the thread that runs, or, without `FUTEX_PRIVATE_FLAG`, of what `futexKey` says
 it is shared as. Waits and wakes, with masks, and requeues, which is what `pthread_join`, mutexes and condition variables use: no
 priority inheritance and no `FUTEX_WAKE_OP`. There is no clock, so a thread with a timeout times out when nothing else can run. -/
-private def serveFutex (emu : Emu) (address operation value timeout target compare : Nat) : IO SyscallAction := do
+private def serveFutex (emu : Emu) (address operation value timeout target compare : Nat) (wideTime : Bool) : IO SyscallAction := do
   let own := (← currentTask emu).space
   -- Where a word is to whoever else waits on it.
   let keyOf (word : Nat) : IO (Nat × Nat) := do
@@ -419,7 +419,22 @@ private def serveFutex (emu : Emu) (address operation value timeout target compa
       if word != value % 2 ^ 32 then syscallReturn emu (.error eagain)
       else
         let (space, word) ← keyOf address
-        let waiter : FutexWaiter := { thread := ← thread emu, space, address := word, bitset, timed := timeout != 0 }
+        -- A timeout is a span of `FUTEX_WAIT` and a time of `FUTEX_WAIT_BITSET`, by the clock of the machine if it has one.
+        let deadline ← if timeout == 0 then pure none else
+          match ← emu.now.get with
+          | none => pure none
+          | some now =>
+            let field := if wideTime then 8 else 4
+            let number (at_ : Nat) : IO Nat := do
+              let bytes ← read emu at_ field
+              let ordered := if emu.config.endian == .big then bytes.toList else bytes.toList.reverse
+              pure (ordered.foldl (fun value byte => value * 256 + byte.toNat) 0)
+            match ← (do pure ((← number timeout) * 1000000000 + (← number (timeout + field)))).toBaseIO with
+            | .error _ => pure none
+            | .ok span =>
+              let start ← now
+              pure (some (if command == 9 then span else start + span))
+        let waiter : FutexWaiter := { thread := ← thread emu, space, address := word, bitset, timed := timeout != 0, deadline }
         emu.taskTable.modify (·.futexWait waiter)
         emu.stopped.set true
         syscallReturn emu (.ok 0)
@@ -575,7 +590,7 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
       else if is calls.gettid then
         syscallReturn current (.ok (← thread current))
       else if is calls.futex || isSome calls.futexTime64 then
-        serveFutex current (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) (arg 5)
+        serveFutex current (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) (arg 5) (width == 64 || isSome calls.futexTime64)
       else if is calls.setTidAddress then
         current.taskTable.modify (·.setClearTid (← thread current) (arg 0))
         syscallReturn current (.ok (← thread current))
@@ -675,6 +690,10 @@ private def scheduleLoop (emu : Emu) (quantum : Nat) : Nat → Nat → IO Schedu
     let next := pickNext (← emu.threadsRef.get) current
     let halted ← stopped emu
     let blocked ← blockedOrOver emu current
+    -- With a clock, time goes on to what happens next, which may let something run.
+    if halted && blocked && next.isNone then
+      if let some idle := ← emu.idle.get then
+        if ← idle then return ← scheduleLoop emu quantum rounds fuel
     let (table, timed) := table.timedOut
     if halted && blocked && next.isNone && !timed.isEmpty then
       emu.taskTable.set table

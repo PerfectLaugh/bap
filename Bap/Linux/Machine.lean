@@ -4,6 +4,7 @@ import Bap.Linux.Calls
 import Bap.Linux.Signals
 import Bap.Linux.Ptrace
 import Bap.Linux.Seccomp
+import Bap.Linux.Timers
 import Bap.Linux.GuestHeap
 import Bap.Linux.LoadedLibrary
 import Bap.Linux.Image
@@ -69,6 +70,8 @@ structure Machine where
   signals : Signals
   /-- What is traced and stopped, and what serves `ptrace` and the waits: see `Machine.servePtrace`. -/
   ptrace : Ptrace
+  /-- The timers and the deadlines of the calls that wait with a timeout: see `Bap.Linux.Timers`. -/
+  timers : Timers
   /-- What `Machine.malloc` has given out, by address space. -/
   heaps : IO.Ref (Std.HashMap Nat GuestHeap)
   /-- What `Machine.loadLibrary` has loaded, by address space. -/
@@ -1176,6 +1179,9 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     | .succeeds => pure (.returnValue 0)
     -- Served by `Bap.Linux.Seccomp` before it comes here.
     | .seccomp => pure (errorOf Errno.enosys)
+    | .nanosleep | .clockNanosleep | .clockNanosleep64 | .setitimer | .getitimer | .alarm | .timerCreate | .timerSettime
+    | .timerSettime64 | .timerGettime | .timerGettime64 | .timerGetoverrun | .timerDelete =>
+      pure ((← machine.timers.serve emu call args).getD (errorOf Errno.enosys))
     | .prctl =>
       -- What a program asks of tagged addresses, on AArch64: they are always taken here, where only a tag in the top byte is.
       if architecture == .aarch64 && arg 0 == 55 then
@@ -1622,6 +1628,7 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
         descriptors := process.descriptors.filter fun _ entry => !entry.closeOnExec
         breakStart := top, breakEnd := top, command := arguments, environment, program := name, auxiliary, mappings := [] })
       releaseVfork emu current
+      machine.timers.executed group
       pure (.returnValue 0)
 
 /-- The name of an intrinsic that goes by the rounding mode of the machine, by its mode. That is to nearest nearly always, so
@@ -1770,7 +1777,7 @@ private def libraryModelId : String := "bap.libraries"
 /-- The models that every machine has, with the versions of what they keep: of ptrace, 2 has the stops that tracees have yet to make
 and those that stopped for their end. -/
 private def builtinModels : List (String × Nat) :=
-  [(Signals.modelId, 1), (Ptrace.modelId, 2), (Seccomp.modelId, 1), (heapModelId, 1), (libraryModelId, 1)]
+  [(Signals.modelId, 1), (Ptrace.modelId, 2), (Seccomp.modelId, 1), (Timers.modelId, 1), (heapModelId, 1), (libraryModelId, 1)]
 
 private def builtinVersion (id : String) : Nat := (builtinModels.lookup id).getD 1
 
@@ -1785,7 +1792,9 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
                              intercept := ← IO.mkRef fun _ _ _ => pure false, tracer := ← IO.mkRef fun _ => pure none
                              jobControl := ← IO.mkRef fun _ _ _ => pure () }
   let ptrace ← Ptrace.make architecture signals
-  let machine : Machine := { architecture, emu, kernel := ← IO.mkRef kernel, models := ← IO.mkRef [], target, handled := handler.isSome, signals, ptrace, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {} }
+  let kernelRef ← IO.mkRef kernel
+  let timers ← Timers.make architecture kernelRef signals
+  let machine : Machine := { architecture, emu, kernel := kernelRef, models := ← IO.mkRef [], target, handled := handler.isSome, signals, ptrace, timers, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {} }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
@@ -1813,6 +1822,18 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   -- And what a thread may call, which ptrace asks of each call once a tracer saw it start.
   let seccomp ← Seccomp.attach architecture signals ptrace emu
   machine.models.modify (· ++ [{ id := Seccomp.modelId, version := builtinVersion Seccomp.modelId, state := seccomp.modelState emu }])
+  -- Time goes on as instructions run, and to what happens next when nothing can.
+  emu.now.set (some do pure (← kernelRef.get).clock)
+  -- The thread that is current, which a timer or a deadline woke there, takes what came for it, as a switch to it would have it.
+  let resumingCurrent (action : IO Bool) : IO Bool := do
+    let waited ← Bap.Emu.stopped emu
+    let changed ← action
+    if waited && !(← Bap.Emu.stopped emu) then signals.switchedIn emu
+    pure changed
+  emu.idle.set (some (resumingCurrent (timers.idle emu)))
+  emu.betweenTurns.modify (· ++ [do let _ ← resumingCurrent (do timers.tick emu; pure true)])
+  let timeState : ModelState := { save := timers.save, load := timers.load }
+  machine.models.modify (· ++ [{ id := Timers.modelId, version := builtinVersion Timers.modelId, state := timeState }])
   signals.serve emu
   -- A process that is over has closed what it had open.
   let heard ← emu.processExited.get

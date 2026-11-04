@@ -233,6 +233,11 @@ structure Emu where
   processHooks : IO.Ref (List (Nat → Nat → IO Unit))
   /-- What wants to know that the parent of `vfork` goes on, as its child runs a program or ends: of the parent, and of the child. -/
   vforkReleased : IO.Ref (List (Nat → Nat → IO Unit))
+  /-- The clock of the machine, in nanoseconds, which a wait with a timeout has its deadline by, if it has one. -/
+  now : IO.Ref (Option (IO Nat))
+  /-- What the scheduler asks when nothing can run: that time goes on to what happens next, as a deadline or a timer, which may let
+  something run. Whether anything changed. -/
+  idle : IO.Ref (Option (IO Bool))
   /-- Where the instruction that runs goes next, for a system call to know where a new thread starts. -/
   nextPc : IO.Ref Nat
   /-- Where the instruction that runs goes after all, for a program that a system call has replaced. -/
@@ -376,6 +381,8 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     servedPrograms := ← IO.mkRef {}
     processHooks := ← IO.mkRef []
     vforkReleased := ← IO.mkRef []
+    now := ← IO.mkRef none
+    idle := ← IO.mkRef none
     nextPc := ← IO.mkRef 0
     redirect := ← IO.mkRef none
     turnUsed := ← IO.mkRef 0
