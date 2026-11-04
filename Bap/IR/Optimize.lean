@@ -372,6 +372,54 @@ private def propagateAuxT (cfg : Cfg) (tables : PropTables) :
       else
         propagateAuxT cfg tables fuel (exits.insert tid env) (work ++ dedup (tables.succs.getD tid []))
 
+/-- `propagateAuxT` with its list of blocks to do as a queue, `front ++ back.reverse`, so that what a block adds to it isn't
+appended to all that is there. -/
+private def propagateAuxQ (cfg : Cfg) (tables : PropTables) :
+    Nat → Std.HashMap Tid ConstEnv → List Tid → List Tid → Std.HashMap Tid ConstEnv
+  | 0, exits, _, _ => exits
+  | fuel + 1, exits, front, back =>
+    let next := match front with
+      | tid :: front => some (tid, front, back)
+      | [] => match back.reverse with
+        | tid :: front => some (tid, front, [])
+        | [] => none
+    match next with
+    | none => exits
+    | some (tid, front, back) =>
+      match tables.blocks.get? tid with
+      | none => propagateAuxQ cfg tables fuel exits front back
+      | some blk =>
+        let env := keepReadsT tables tid (propagateExit blk (entryEnvT cfg tables exits tid))
+        if settled (exits.get? tid) env then
+          propagateAuxQ cfg tables fuel exits front back
+        else
+          propagateAuxQ cfg tables fuel (exits.insert tid env) front ((dedup (tables.succs.getD tid [])).reverse ++ back)
+
+private theorem propagateAuxQ_eq (cfg : Cfg) (tables : PropTables) (fuel : Nat) (exits : Std.HashMap Tid ConstEnv)
+    (front back : List Tid) :
+    propagateAuxQ cfg tables fuel exits front back = propagateAuxT cfg tables fuel exits (front ++ back.reverse) := by
+  induction fuel generalizing exits front back with
+  | zero => simp [propagateAuxQ, propagateAuxT]
+  | succ fuel ih =>
+    cases front with
+    | cons tid front =>
+      simp only [propagateAuxQ, propagateAuxT, List.cons_append]
+      split <;> (try split) <;> simp [ih]
+    | nil =>
+      cases hb : back.reverse with
+      | nil => simp [propagateAuxQ, propagateAuxT, hb]
+      | cons tid front =>
+        simp only [propagateAuxQ, propagateAuxT, hb, List.nil_append]
+        split <;> (try split) <;> simp [ih]
+
+private def propagateAuxTQ (cfg : Cfg) (tables : PropTables) (fuel : Nat) (exits : Std.HashMap Tid ConstEnv)
+    (work : List Tid) : Std.HashMap Tid ConstEnv :=
+  propagateAuxQ cfg tables fuel exits work []
+
+@[csimp] private theorem propagateAuxT_eq_queue : @propagateAuxT = @propagateAuxTQ := by
+  funext cfg tables fuel exits work
+  simp [propagateAuxTQ, propagateAuxQ_eq]
+
 private def propagateConstantsFast (cfg : Cfg) : Cfg :=
   let cfg := cfg.prune
   let tables := propTablesOf cfg (constReads cfg)
