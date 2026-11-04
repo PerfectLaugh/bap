@@ -295,6 +295,7 @@ def serve (notifier : Notifier) (poller : Poller) (emu : Emu) (call : Call) (arg
     if mask &&& 0xfff == 0 || (mask &&& 0x20000000 != 0 && mask &&& 0x10000000 != 0) then return ← fail Errno.einval
     let path ← try pure (some (← Files.readString emu (arg 1))) catch _ => pure none
     let some path := path | return ← fail Errno.efault
+    if path.isEmpty then return ← fail Errno.enoent
     let (base, path) := kernel.pathIn group (kernel.process group).cwd path
     let found := kernel.resolve base path (follow := mask &&& 0x02000000 == 0)
     let inode ← match found with

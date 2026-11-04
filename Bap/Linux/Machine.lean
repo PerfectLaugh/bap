@@ -149,7 +149,7 @@ private def readString (emu : Emu) (address : Nat) : IO String := do
       match bytes.data.findIdx? (· == 0) with
       | some index => pure (out ++ bytes.extract 0 index)
       | none => go fuel (from_ + bytes.size) (out ++ bytes)
-  pure (String.fromUTF8? (← go 16 address ByteArray.empty) |>.getD "")
+  pure (textOf (← go 16 address ByteArray.empty))
 
 /-- Writes across as many mappings as it takes, which a buffer on the program break or the stack may. -/
 private def writeGuest (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
@@ -850,7 +850,8 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
         match ← (readString emu address).toBaseIO with
         | .error _ => pure (errorOf Errno.efault)
         | .ok path =>
-          -- Within the root of the process.
+          -- No name is none, rather than where the call is from; within the root of the process.
+          if path.isEmpty then return errorOf Errno.enoent
           let (from_, path) := kernel.pathIn group from_ path
           action from_ path
     let here := 2 ^ 64 - 100

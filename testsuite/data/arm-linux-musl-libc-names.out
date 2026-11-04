@@ -1,0 +1,10 @@
+stat empty -2 0
+chdir empty -2 0
+mkdir empty -2 0
+rename empty -2 0
+chown empty -2 0
+watch empty -2 0
+linkat closed directory -9 0
+odd name 1 0
+another odd name -2 0
+unlink odd name 0 -2

@@ -31,11 +31,11 @@ def readString (emu : Emu) (address : Nat) : IO String := do
   while out.size < 4096 do
     let chunk ← read emu at_ (min 256 (4096 - at_ % 4096))
     match chunk.toList.findIdx? (· == 0) with
-    | some index => return String.fromUTF8! (out ++ chunk.extract 0 index)
+    | some index => return textOf (out ++ chunk.extract 0 index)
     | none =>
       out := out ++ chunk
       at_ := at_ + chunk.size
-  pure (String.fromUTF8! out)
+  pure (textOf out)
 
 /-- An inode of a kernel as it is now: its times set, or its owner, or its attributes. -/
 private def alter (kernel : Kernel) (number : Nat) (change : Meta → Meta) : Kernel :=
@@ -86,7 +86,9 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     match kernel.baseOf group directory (atCwd directory) with
     | .error errno => pure (.error errno)
     | .ok base =>
-      let (base, path) := kernel.pathIn group base (← readString emu address)
+      let given ← readString emu address
+      if given.isEmpty then return .error Errno.enoent
+      let (base, path) := kernel.pathIn group base given
       pure (.ok (Path.ofParts (Path.parts base path)))
   -- The inode of a path, or of what a descriptor has of `AT_EMPTY_PATH` with an empty path.
   let inodeAt (directory address : Nat) (follow empty : Bool) : IO (Result Nat) := do
@@ -211,22 +213,34 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
   try
     match call with
     | .link =>
-      let .ok source ← pathAt here (arg 0) | return ← fail Errno.enoent
-      let .ok target ← pathAt here (arg 1) | return ← fail Errno.enoent
+      let source ← match ← pathAt here (arg 0) with
+        | .ok path => pure path
+        | .error errno => return ← fail errno
+      let target ← match ← pathAt here (arg 1) with
+        | .ok path => pure path
+        | .error errno => return ← fail errno
       fromResult (kernel.link "/" source target false)
     | .linkat =>
       -- AT_EMPTY_PATH of a descriptor, and AT_SYMLINK_FOLLOW.
-      let .ok target ← pathAt (arg 2) (arg 3) | return ← fail Errno.enoent
+      let target ← match ← pathAt (arg 2) (arg 3) with
+        | .ok path => pure path
+        | .error errno => return ← fail errno
       if arg 4 &&& 0x1000 != 0 && (← readString emu (arg 1)).isEmpty then
         match ofFd (arg 0) with
         | .ok number => fromResult (kernel.linkInode number "/" target)
         | .error errno => fail errno
       else
-        let .ok source ← pathAt (arg 0) (arg 1) | return ← fail Errno.enoent
+        let source ← match ← pathAt (arg 0) (arg 1) with
+        | .ok path => pure path
+        | .error errno => return ← fail errno
         fromResult (kernel.link "/" source target (arg 4 &&& 0x400 != 0))
     | .renameat2 =>
-      let .ok source ← pathAt (arg 0) (arg 1) | return ← fail Errno.enoent
-      let .ok target ← pathAt (arg 2) (arg 3) | return ← fail Errno.enoent
+      let source ← match ← pathAt (arg 0) (arg 1) with
+        | .ok path => pure path
+        | .error errno => return ← fail errno
+      let target ← match ← pathAt (arg 2) (arg 3) with
+        | .ok path => pure path
+        | .error errno => return ← fail errno
       fromResult (kernel.renameWith "/" source target (arg 4))
     | .utimensat | .utimensat64 =>
       let field := if call == .utimensat64 then 8 else word

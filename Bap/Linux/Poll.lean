@@ -25,6 +25,11 @@ open Bap.Emu Bap.Tasks
 /-- Where what waits for a descriptor to be ready waits: whatever changes, it looks again. It is the first space of those of pipes. -/
 def readySpace : Nat := 2 ^ 61
 
+/-- Text of bytes of a guest, as a path or a name: of UTF-8 if they are, and otherwise a character of each byte, so that the same bytes
+are the same text. -/
+def textOf (bytes : ByteArray) : String :=
+  (String.fromUTF8? bytes).getD (String.mk (bytes.toList.map fun byte => Char.ofNat byte.toNat))
+
 /-- What is ready of an open file. -/
 structure Ready where
   read : Bool := false
