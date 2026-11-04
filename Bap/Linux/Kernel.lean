@@ -822,6 +822,13 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
     nextOpenFile := openFile + 1 }
   .ok (kernel.addDescriptor group openFile (has flags oCloexec))
 
+/-- What random bytes are here, the same each time, from the `start`th: as bytes, without a list of them first. -/
+def randomBytes (start count : Nat) : ByteArray := Id.run do
+  let mut out := ByteArray.emptyWithCapacity count
+  for index in [0:count] do
+    out := out.push ((start + index) * 167 + 13).toUInt8
+  pure out
+
 /-- `read`, at the offset of the file, which moves. Of a pipe, what is first in it, which goes. -/
 def read (kernel : Kernel) (group fd count : Nat) : Result (Kernel × ByteArray) := do
   let (id, file) ← openFileOf kernel group fd
@@ -837,7 +844,7 @@ def read (kernel : Kernel) (group fd count : Nat) : Result (Kernel × ByteArray)
   if let .device kind := inode.content then
     let bytes := match kind with
       | 1 | 2 => Bap.zeroBytes count
-      | 3 => ByteArray.mk ((List.range count).map fun index => ((file.offset + index) * 167 + 13).toUInt8).toArray
+      | 3 => randomBytes file.offset count
       | _ => ByteArray.empty
     return ({ kernel with openFiles := kernel.openFiles.insert id { file with offset := file.offset + bytes.size } }, bytes)
   let data ← match inode.content with

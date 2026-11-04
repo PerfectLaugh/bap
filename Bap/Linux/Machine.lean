@@ -1318,8 +1318,7 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       pure ((← identity.serve emu call args).getD (errorOf Errno.enosys))
     | .getrandom =>
       -- A fixed sequence, as a run is the same each time.
-      let bytes := ByteArray.mk ((List.range (arg 1)).map fun index => (index * 167 + 13).toUInt8).toArray
-      returning emu (arg 0) bytes (arg 1)
+      returning emu (arg 0) (Kernel.randomBytes 0 (arg 1)) (arg 1)
     | .sigaltstack => returning emu (arg 1) (ByteArray.mk (Array.replicate (3 * wordSize) 0))
     | .schedGetaffinity => returning emu (arg 2) (cell wordSize 1) wordSize
     | .succeeds => pure (.returnValue 0)
