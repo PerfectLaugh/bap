@@ -3040,6 +3040,12 @@ def testKernelFiles : IO Unit := do
   let refused ← (machine.addFile "/vendor/lib" ByteArray.empty *> pure false).catchExceptions fun _ => pure true
   assertTrue s!"{label} and a machine says what it can't put" refused
 
+/-- A byte of a node past 4096, as a read of a file makes, is its own: its tag is no other node's, and says its node and byte. -/
+def testTaintTags : IO Unit := do
+  let tag := Bap.Analysis.DynamicTaint.nodeTag 0 5000
+  assertTrue "Taint tags of a node of more than 4096 bytes are no other's" (tag != Bap.Analysis.DynamicTaint.nodeTag 1 904)
+  assertEqual "and say their node and byte" (0, 5000) (Bap.Analysis.DynamicTaint.Tag.node tag, Bap.Analysis.DynamicTaint.Tag.byte tag)
+
 /-- MIPS has its own numbers of errors above 34, which a call gives a program of it. -/
 def testMipsErrno : IO Unit := do
   let mips : Bap.Linux.Architecture := .mips 32 true false

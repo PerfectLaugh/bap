@@ -120,6 +120,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-mount",
     Bap.Tests.Emu.testLinuxRaises "riscv64-linux-musl-libc-mount",
     Bap.Tests.Emu.testMipsErrno,
+    Bap.Tests.Emu.testTaintTags,
     Bap.Tests.Emu.testHostMount "x86_64",
     Bap.Tests.Emu.testHostMount "aarch64",
     Bap.Tests.Emu.testHostExec "x86_64",

@@ -39,16 +39,19 @@ abbrev Tag := Nat
 
 /-- The tag of a clean byte that the instruction at `pc` computed. -/
 def cleanTag (pc : Nat) : Tag := 2 * pc + 1
+/-- How many bytes a node has at most, as `read` of a file gives at once: its bytes are tags of their own. -/
+def nodeBytes : Nat := 2 ^ 32
+
 /-- The tag of a byte of a node. -/
-def nodeTag (id byte : Nat) : Tag := 2 * ((id + 1) * 4096 + byte)
+def nodeTag (id byte : Nat) : Tag := 2 * ((id + 1) * nodeBytes + byte)
 /-- Whether it is the tag of a byte of a node. -/
 def Tag.isNode (tag : Tag) : Bool := tag != 0 && tag % 2 == 0
 /-- Whether it is the tag of a clean byte. -/
 def Tag.isClean (tag : Tag) : Bool := tag % 2 == 1
 /-- The node of the tag of a byte of one. -/
-def Tag.node (tag : Tag) : Nat := tag / 2 / 4096 - 1
+def Tag.node (tag : Tag) : Nat := tag / 2 / nodeBytes - 1
 /-- Which byte of its node the tag of a byte of one is. -/
-def Tag.byte (tag : Tag) : Nat := tag / 2 % 4096
+def Tag.byte (tag : Tag) : Nat := tag / 2 % nodeBytes
 
 /-- What a byte of a node came from, and how. -/
 structure Input where
