@@ -151,6 +151,15 @@ def deadlineOf (timers : Timers) (tid : Nat) (deadline : IO Nat) : IO Nat := do
 def finish (timers : Timers) (tid : Nat) : IO Unit :=
   timers.state.modify fun state => { state with deadlines := state.deadlines.erase tid, sites := state.sites.erase tid }
 
+/-- A call starts: what a thread has of one before it, a deadline that a call kept as it failed before it waited, or the site of one
+that ended without `finish`, is gone, but for the call that runs again where it waited. -/
+def entered (timers : Timers) (emu : Emu) : IO Unit := do
+  let tid ← thread emu
+  let state ← timers.state.get
+  if !state.deadlines.contains tid && !state.sites.contains tid then return
+  let next ← emu.nextPc.get
+  if !(state.sites.get? tid).any (·.next == next) then timers.finish tid
+
 /-- The thread that runs waits in `space`, for `address`, until something wakes it there or its deadline comes, if it has one, and
 then runs its call again, with its registers as they were. A signal that comes first has it run again or give `EINTR`, as
 `restartable` says of a handler of `SA_RESTART`: see `interrupted`. -/

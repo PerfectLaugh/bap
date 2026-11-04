@@ -57,8 +57,9 @@ structure Uring where
 structure State where
   contexts : List Context := []
   rings : List Uring := []
-  /-- Of a thread whose `io_uring_enter` waits for completions, how many it submitted, which it gives when it is done. -/
-  submitted : List (Nat × Nat) := []
+  /-- Of a thread whose `io_uring_enter` waits for completions, where the call is and how many it submitted, which it gives when it is
+  done. -/
+  submitted : List (Nat × Nat × Nat) := []
 
 /-- What serves these: the machine's own calls, of which `perform` does one as a program would, as it would give it. -/
 structure Rings where
@@ -82,7 +83,7 @@ def save (state : IO.Ref State) : IO ByteArray := do
       numbers (putOption putNat (putBytes out pending.entry) pending.deadline) [pending.count, pending.start]) out ring.pending
     let out := putList (fun out (address, size) => numbers out [address, size]) out ring.buffers
     putOption putNat (numbers out ring.files) ring.eventfd) out state.rings
-  pure (putList (fun out (tid, count) => numbers out [tid, count]) out state.submitted)
+  pure (putList (fun out (tid, at_, count) => numbers out [tid, at_, count]) out state.submitted)
 
 open Wire in
 def load (state : IO.Ref State) (data : ByteArray) : IO Unit := do
@@ -113,8 +114,8 @@ def load (state : IO.Ref State) (data : ByteArray) : IO Unit := do
       .ok ({ inode := field 0, entries := field 1, completions := field 2, sq := field 3, cq := field 4, sqes := field 5, head := field 6
              tail := field 7, posted := field 8, overflow, pending, buffers, files, eventfd : Uring }, at_)) data at_
     let (submitted, at_) ← getList (fun data at_ => do
-      let (pair, at_) ← numbers data at_
-      .ok ((pair.getD 0 0, pair.getD 1 0), at_)) data at_
+      let (fields, at_) ← numbers data at_
+      .ok ((fields.getD 0 0, fields.getD 1 0, fields.getD 2 0), at_)) data at_
     expectEnd data at_
     pure { contexts, rings, submitted }
   match decoded with
@@ -483,15 +484,16 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
       poller.wake emu
     let finished := ring
     let state ← rings.state.get
-    -- Of a thread that waited, what it submitted before it did.
-    let earlier := (state.submitted.find? (·.1 == tid)).map (·.2) |>.getD 0
+    -- Of a thread that waited here, what it submitted before it did; one that a signal ended is of another call.
+    let next ← emu.nextPc.get
+    let earlier := (state.submitted.find? fun (thread, at_, _) => thread == tid && at_ == next).map (·.2.2) |>.getD 0
     let total := earlier + count
     rings.state.set { state with rings := state.rings.map (fun other => if other.inode == finished.inode then finished else other)
                                  submitted := state.submitted.filter (·.1 != tid) }
     -- `IORING_ENTER_GETEVENTS`: as many as it asks for, or something to change, or the first timeout.
     let available := (finished.tail + 2 ^ 32 - cqHead) % 2 ^ 32
     if flags &&& 1 != 0 && available < arg 2 then
-      rings.state.modify fun state => { state with submitted := state.submitted ++ [(tid, total)] }
+      rings.state.modify fun state => { state with submitted := state.submitted ++ [(tid, next, total)] }
       let due := (finished.pending.filterMap (·.deadline)).min?
       return some (← poller.timers.waitUntil emu readySpace 0 due false)
     succeed total

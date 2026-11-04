@@ -1468,6 +1468,7 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
     -- What serveTaskCalls serves.
     | none => pure .default
     | some call =>
+      machine.timers.entered emu
       refreshProc machine emu call args
       let group := (← currentTask emu).group
       -- What it names of the directories of the host that the machine sees.

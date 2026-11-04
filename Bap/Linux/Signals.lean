@@ -1140,6 +1140,8 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
       let result ← registerValue current width resultRegister
       let pc ← current.pc.get
       modifyThread signals tid fun state => { state with last := some { pc, result, restartable := true } }
+    -- What started a call before this isn't where this one starts again.
+    else if (← threadOf signals tid).last.isSome then modifyThread signals tid fun state => { state with last := none }
     if number == calls.sigaction then
       let signal := arg 0
       let (act, old, size) := (arg 1, arg 2, arg 3)
