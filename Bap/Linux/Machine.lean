@@ -2054,7 +2054,12 @@ private def emulatorOf (architecture : Architecture) : IO Emu := do
   -- A real program runs more code than the working set of a few thousand blocks that the default is for, and past it, each one
   -- would be lifted each time it runs. Most of its code runs at its start, a few times, and compiling that takes longer than
   -- running it, up to about this threshold: at 16 a short program takes half as long again, and a long one no less.
-  let tuned (config : Config) : Config := { config with cacheLimit := 1048576, hotThreshold := 64 }
+  -- What is kept has a bound all the same, as each lifted block takes about 4 KB of the host and each piece of native code about
+  -- 45 KB: 131072 blocks and 16384 of native code come to some 500 and 700 MB at most, where a million blocks and as much native code
+  -- as there were blocks took a long program to gigabytes. Less than what a program keeps running makes it compile all of that again
+  -- and again: 14000 functions that run in turn take twice as long with 8192 of native code.
+  let tuned (config : Config) : Config :=
+    { config with cacheLimit := 131072, rangeCacheLimit := some 16384, nativeLimit := some 16384, hotThreshold := 64 }
   -- Nothing is in its one page, which goes at once.
   let page := ByteArray.mk (Array.replicate 16 0)
   let emu ← match architecture with

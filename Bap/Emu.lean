@@ -43,6 +43,11 @@ structure Config where
   hotThreshold : Nat := 16
   /-- How many instructions what is lifted and compiled is kept of, of which the least used go. -/
   cacheLimit : Nat := 4096
+  /-- How many compiled ranges are kept, of which the least used go; `none` is `cacheLimit`. -/
+  rangeCacheLimit : Option Nat := none
+  /-- How much native code is kept, of blocks and ranges and the versions of them that writes to code leave, each tens of kilobytes:
+  past it what ran least goes. `none` is 4 times `cacheLimit`. -/
+  nativeLimit : Option Nat := none
   /-- Whether a block that gets hot may run a range that has it from the middle, see `Lifted.Engine.rangeEntries`. The variable
   `BAP_RANGE_ENTRIES` of the environment says so too. -/
   rangeEntries : Bool := false
@@ -324,8 +329,9 @@ private def initializeMemory (config : Config) (regions : List Region) : Except 
 an access past the end of the address space, and a block that runs off its end goes on with the next one. -/
 private def createEngine (config : Config) (deferMemorySync : Bool) : IO Primus.Lifted.Engine := do
   let asked := (← IO.getEnv "BAP_RANGE_ENTRIES").isSome
-  Primus.Lifted.Engine.create config.hotThreshold config.cacheLimit (rangeLimitOf config) config.cacheLimit config.jitCooldown
-    deferMemorySync (nativeLimit := 4 * config.cacheLimit) (persistentFrom := 0) (wrapFaults := true) (chainFallthrough := true)
+  Primus.Lifted.Engine.create config.hotThreshold config.cacheLimit (rangeLimitOf config)
+    (config.rangeCacheLimit.getD config.cacheLimit) config.jitCooldown deferMemorySync
+    (nativeLimit := config.nativeLimit.getD (4 * config.cacheLimit)) (persistentFrom := 0) (wrapFaults := true) (chainFallthrough := true)
     (rangeEntries := config.rangeEntries || asked)
 
 /-- An emulator with these regions mapped and these registers, that starts at `entry` in one thread. -/

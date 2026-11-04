@@ -1312,8 +1312,41 @@ private def lowerGraph (blocks : List Block) (edges : List (Nat × Nat)) (wrapFa
   let lowering ← lowerBlocks (graphPlan blocks edges seed initial) initial blocks
   if lowerGraphChecked blocks initial lowering then some (flagOutputs (leadingMoves seed.program) lowering) else none
 
+/-- How much native code is kept: of the blocks, the ranges and the versions of both. -/
+private def countNative (engine : Engine) : IO Nat := do
+  let native (entry : CachedBlock) : Nat := match entry.plan with | .native .. => 1 | .interpreted _ => 0
+  let inMap (entries : Std.HashMap Nat CachedBlock) : Nat := entries.fold (fun count _ entry => count + native entry) 0
+  let inVersions (all : Std.HashMap Nat (List CachedBlock)) : Nat :=
+    all.fold (fun count _ entries => entries.foldl (fun count entry => count + native entry) count) 0
+  pure (inMap (← engine.cache.get) + inMap (← engine.ranges.get) + inVersions (← engine.cacheVersions.get) +
+    inVersions (← engine.rangeVersions.get))
+
+/-- Whether there is room for more native code. At `nativeLimit` the versions go, which are only there to save compiling again, and
+then the native blocks and ranges that ran least, down to 7/8 of it, so that this happens once in many compilations and what runs most
+stays compiled. A version is the same code as a block that has it, so what is counted is never less than what is held. -/
+private def makeRoom (engine : Engine) : IO Bool := do
+  if (← engine.nativeLive.get) < engine.nativeLimit then return true
+  engine.cacheVersions.set {}
+  engine.rangeVersions.set {}
+  let target := engine.nativeLimit - max 1 (engine.nativeLimit / 8)
+  let live ← countNative engine
+  if live > target then
+    let gather (isRange : Bool) (entries : Std.HashMap Nat CachedBlock) : IO (Array (Nat × Bool × Nat)) :=
+      entries.foldM (init := #[]) fun found address entry => do
+        match entry.plan with
+        | .native .. => pure (found.push (← entry.executions.get, isRange, address))
+        | .interpreted _ => pure found
+    let candidates := (← gather true (← engine.ranges.get)) ++ (← gather false (← engine.cache.get))
+    let coldest := (candidates.qsort fun left right => left.1 < right.1).extract 0 (live - target)
+    engine.statistics.modify fun stats => { stats with evictions := stats.evictions + coldest.size }
+    for (_, isRange, address) in coldest do
+      if isRange then engine.ranges.modify (·.erase address) else engine.cache.modify (·.erase address)
+  let live ← countNative engine
+  engine.nativeLive.set live
+  pure (live < engine.nativeLimit)
+
 private def compilePlan (engine : Engine) (block : Block) : IO Plan := do
-  if (← engine.nativeLive.get) ≥ engine.nativeLimit then pure (.interpreted block.program)
+  if !(← makeRoom engine) then pure (.interpreted block.program)
   else
     match lowerGraph [block] [] engine.wrapFaults with
     | none => pure (.interpreted block.program)
@@ -1326,24 +1359,22 @@ private def compilePlan (engine : Engine) (block : Block) : IO Plan := do
         { stats with nativeCompilations := stats.nativeCompilations + 1, compileMs := stats.compileMs + elapsed }
       pure (.native lowering program block.program)
 
-/-- Drops the entry that ran least, and of those the one at the lowest address. Only a miss gets here, whose
-lifting and compilation cost far more than a walk over the table. -/
+/-- Drops the entries that ran least, and of those the ones at the lowest addresses: an eighth of them, so that what a walk over the
+table costs is paid once in many misses, which a table of tens of thousands would otherwise cost on each. -/
 private def evictColdest (engine : Engine)
     (versions : IO.Ref (Std.HashMap Nat (List CachedBlock)))
     (entries : Std.HashMap Nat CachedBlock) : IO (Std.HashMap Nat CachedBlock) := do
-  let coldest ← entries.toList.foldlM (init := (none : Option (Nat × Nat × CachedBlock))) fun best (address, entry) => do
-    let executions ← entry.executions.get
-    match best with
-    | some (bestRuns, bestAddress, _) =>
-      if executions < bestRuns || (executions == bestRuns && address < bestAddress) then
-        pure (some (executions, address, entry))
-      else pure best
-    | none => pure (some (executions, address, entry))
-  match coldest with
-  | some (_, address, entry) =>
-    rememberVersion engine versions entry
-    pure (entries.erase address)
-  | none => pure entries
+  let ranked ← entries.foldM (init := (#[] : Array (Nat × Nat))) fun found address entry => do
+    pure (found.push (← entry.executions.get, address))
+  let coldest := (ranked.qsort fun left right => left.1 < right.1 || (left.1 == right.1 && left.2 < right.2)).extract 0
+    (max 1 (entries.size / 8))
+  engine.statistics.modify fun stats => { stats with evictions := stats.evictions + coldest.size }
+  coldest.foldlM (init := entries) fun entries (_, address) => do
+    match entries.get? address with
+    | some entry =>
+      rememberVersion engine versions entry
+      pure (entries.erase address)
+    | none => pure entries
 
 /-- Whether two byte strings are the same, without unpacking them. -/
 private def sameBytes (left right : ByteArray) : Bool :=
@@ -1387,7 +1418,6 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
       let entries ← engine.cache.get
       entries.get? address |>.forM fun previous => rememberVersion engine engine.cacheVersions previous
       let entries ← if entries.size ≥ engine.cacheLimit then do
-        engine.statistics.modify fun stats => { stats with evictions := stats.evictions + 1 }
         evictColdest engine engine.cacheVersions entries
       else pure entries
       engine.statistics.modify fun stats => { stats with lifts := stats.lifts + 1 }
@@ -1475,7 +1505,7 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
       let first ← prepare engine lift address code false
       -- Nothing to compile it with is a reason not to find and lower its graph either, each time it runs.
       if first.settled || (← first.executions.get) < engine.hotThreshold || cooldown != 0 ||
-          (← engine.nativeLive.get) ≥ engine.nativeLimit then return first
+          !(← makeRoom engine) then return first
       else
         let settle (entry : CachedBlock) : IO CachedBlock := do
           let updated := { entry with settled := true }
@@ -1556,7 +1586,6 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
               engine.entryRanges.modify fun ranges => points.foldl (init := ranges) fun ranges point => ranges.insert point.1 address
               let ranges ← engine.ranges.get
               let ranges ← if ranges.size ≥ engine.rangeCacheLimit then do
-                engine.statistics.modify fun stats => { stats with evictions := stats.evictions + 1 }
                 evictColdest engine engine.rangeVersions ranges
               else pure ranges
               engine.ranges.set (ranges.insert address entry)

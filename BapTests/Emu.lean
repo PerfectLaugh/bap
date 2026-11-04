@@ -807,6 +807,26 @@ def testLinuxRaises (name : String) : IO Unit := do
   assertEqual s!"Linux {name} is what qemu does" (String.fromUTF8! (← IO.FS.readBinFile s!"testsuite/data/{name}.out"))
     (String.fromUTF8! (← written.get))
 
+/-- Native code past `nativeLimit` makes room for itself: forty blocks of a loop, each hot, with room for four pieces of native code,
+come to what they do, and what is kept stays within it while what is hot goes on being compiled. -/
+def testNativeLimit : IO Unit := do
+  let blocks := (List.range 40).map fun index => s!"b{index}:\naddi a0, a0, 1\nj b{index + 1}"
+  let code ← LLVM.assemble "riscv64" (String.intercalate "\n" blocks ++ "\nb40:\naddi a1, a1, -1\nbnez a1, b0\nend:\nj end")
+  let register (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
+  let emu ← Bap.Emu.riscv64 code 0 0
+    (adjust := fun config => { config with hotThreshold := 2, rangeCacheLimit := some 4, nativeLimit := some 4 })
+  for (name, value) in [("X10", 0), ("X11", 50)] do
+    Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 64 value))
+  -- Fifty times round, of 82 instructions, and the jump to the end.
+  let _ ← Bap.Emu.run emu (50 * 82 + 1)
+  match ← Bap.Emu.reg emu (register "X10") with
+  | .bits bits => assertEqual "Native code within its limit comes to what the code does" (40 * 50) bits.toNat
+  | _ => throw <| IO.userError "no a0"
+  let stats ← Bap.Primus.Lifted.stats emu.engine
+  assertTrue s!"Native code stays within its limit: {← emu.engine.nativeLive.get}" ((← emu.engine.nativeLive.get) ≤ 4)
+  assertTrue s!"What is hot goes on being compiled past the limit: {stats.nativeCompilations}" (stats.nativeCompilations > 4)
+  assertTrue "What ran least made room" (stats.evictions > 0)
+
 /-- A range from the middle: a loop of three blocks that goes on as a loop of the last two, whose first gets hot in a range that
 it is in already. It comes to what it does without, and it is what happens. -/
 def testRangeEntries : IO Unit := do

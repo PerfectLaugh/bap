@@ -914,12 +914,15 @@ def run : IO Unit := do
   for address in [0x13000, 0x13004, 0x13008] do
     let _ ← Primus.Lifted.runBlock limitedEngine evictFetch evictLift {} address
   let limitedStats ← Primus.Lifted.stats limitedEngine
-  assertEqual "native limit compiles within budget" 2 limitedStats.nativeCompilations
-  assertEqual "native limit leaves excess blocks interpreted" 1 limitedStats.interpretedRuns
+  -- At the limit what ran least goes, rather than what comes next not being compiled.
+  assertEqual "native limit makes room for what is compiled next" 3 limitedStats.nativeCompilations
+  assertTrue "native limit keeps native code within budget" ((← limitedEngine.nativeLive.get) ≤ 2)
+  assertEqual "native limit runs each block compiled" 0 limitedStats.interpretedRuns
   Primus.Lifted.clearCache limitedEngine
   let _ ← Primus.Lifted.runBlock limitedEngine evictFetch evictLift {} 0x1300c
   let clearedStats ← Primus.Lifted.stats limitedEngine
-  assertEqual "clearing native programs releases budget" 3 clearedStats.nativeCompilations
+  assertEqual "clearing native programs leaves room" 4 clearedStats.nativeCompilations
+  assertEqual "clearing native programs leaves only what is compiled after" 1 (← limitedEngine.nativeLive.get)
 
   let rangeIncrement ← IO.mkRef 2
   let rangeFetch : Primus.Lifted.Fetch := fun _ => do
