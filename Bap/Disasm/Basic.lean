@@ -76,12 +76,17 @@ structure Block where
 def sortedInstructions (disasm : Disasm) : List Insn :=
   disasm.instructions.mergeSort fun left right => left.address ≤ right.address
 
-/-- The addresses where a block has to start. -/
+/-- Of instructions by address, those that don't start where the one before ends, as after one that didn't decode. -/
+def gapStarts (instructions : List Insn) : List Nat :=
+  (instructions.zip instructions.tail).filterMap fun (before, insn) => if before.next != insn.address then some insn.address else none
+
+/-- The addresses where a block has to start: what control goes to otherwise than by falling through, and an instruction that the one
+before doesn't fall through to. -/
 def Disasm.leaders (disasm : Disasm) (instructions : List Insn) : List Nat :=
-  disasm.entry :: instructions.flatMap fun insn =>
+  disasm.entry :: (instructions.flatMap fun insn =>
     match insn.flow with
     | .normal => insn.target.toList
-    | _ => insn.next :: insn.target.toList
+    | _ => insn.next :: insn.target.toList) ++ gapStarts instructions
 
 /-- The blocks of the instructions, and the current block, both from the last one. -/
 private def buildBlocks (leaders : Std.HashSet Nat) (current : List Insn) (blocks : List Block) : List Insn → List Block

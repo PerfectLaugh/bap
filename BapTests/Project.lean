@@ -550,7 +550,8 @@ def run : IO Unit := do
   let binary ← Project.load (bin "x86_64-linux-gnu-crc-loop")
   let binaryDisasm := binary.disasm.getD { entry := 0 }
   assertEqual "whole binary: instructions" 134 binaryDisasm.instructions.length
-  assertEqual "whole binary: blocks" 32 binaryDisasm.blocks.length
+  -- Blocks don't go over what wasn't decoded between instructions.
+  assertEqual "whole binary: blocks" 37 binaryDisasm.blocks.length
   assertEqual "whole binary: errors" [] binaryDisasm.errors
   let binaryIndex := Analysis.Xrefs.discover binary
   let binaryGraph := Analysis.Callgraph.create binaryIndex

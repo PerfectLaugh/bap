@@ -54,6 +54,11 @@ private def assertMemory (label : String) (address expected : Nat) (state : Bil.
   | .error error => throw <| IO.userError error
 
 def run : IO Unit := do
+  -- Instructions with a gap between them, as where one didn't decode, are of blocks of their own.
+  let gapped : Disasm.Disasm := { entry := 0, instructions := [⟨0, 4, "a", .normal, none, []⟩, ⟨8, 4, "b", .normal, none, []⟩,
+    ⟨12, 4, "c", .normal, none, []⟩] }
+  assertEqual "Disasm blocks don't go over a gap" [[0], [8, 12]]
+    (gapped.blocks.map fun block => block.instructions.map (·.address))
   let decode := decodeWith (← Target.X86.disassembler 0)
   let sub ← decode [0x48, 0x83, 0xec, 0x08]
   assertEqual "x86 stack subtraction assembly" "sub rsp, 0x8" sub.asm

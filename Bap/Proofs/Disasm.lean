@@ -383,10 +383,10 @@ theorem sortedInstructions_strict (disasm : Bap.Disasm.Disasm)
 
 /-- The block-leader addresses computed by `Disasm.blocks`. -/
 def leaders (disasm : Bap.Disasm.Disasm) : List Nat :=
-  disasm.entry :: (sortedInstructions disasm).flatMap fun insn =>
+  disasm.entry :: ((sortedInstructions disasm).flatMap fun insn =>
     match insn.flow with
     | .normal => insn.target.toList
-    | _ => insn.next :: insn.target.toList
+    | _ => insn.next :: insn.target.toList) ++ Bap.Disasm.gapStarts (sortedInstructions disasm)
 
 /-- What `Disasm.blocks` builds, on lists. -/
 def build (leaders : List Nat) (current : List Insn) (blocks : List Block) : List Insn → List Block
@@ -558,14 +558,14 @@ theorem blocks_tail_start_leader (disasm : Bap.Disasm.Disasm) :
 theorem target_mem_leaders (disasm : Bap.Disasm.Disasm) (insn : Insn)
     (hi : insn ∈ disasm.instructions) (target : Nat) (ht : insn.target = some target) :
     target ∈ leaders disasm := by
-  refine List.mem_cons_of_mem _ (List.mem_flatMap.2 ⟨insn, ?_, ?_⟩)
+  refine List.mem_cons_of_mem _ (List.mem_append_left _ (List.mem_flatMap.2 ⟨insn, ?_, ?_⟩))
   · exact (sortedInstructions_perm disasm).mem_iff.2 hi
   · cases insn.flow <;> simp [ht]
 
 theorem next_mem_leaders_of_not_normal (disasm : Bap.Disasm.Disasm) (insn : Insn)
     (hi : insn ∈ disasm.instructions) (hf : insn.flow ≠ .normal) :
     insn.next ∈ leaders disasm := by
-  refine List.mem_cons_of_mem _ (List.mem_flatMap.2 ⟨insn, ?_, ?_⟩)
+  refine List.mem_cons_of_mem _ (List.mem_append_left _ (List.mem_flatMap.2 ⟨insn, ?_, ?_⟩))
   · exact (sortedInstructions_perm disasm).mem_iff.2 hi
   · cases h : insn.flow <;> simp_all
 
