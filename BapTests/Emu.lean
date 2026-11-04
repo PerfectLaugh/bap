@@ -2328,7 +2328,8 @@ def testScalingEquivalents : IO Unit := do
     assertEqual "what is indexed is what is mapped" (((← emu.regions.get).filter (·.data.size != 0)).map (·.address) |>.toArray.qsort (· < ·)).toList tree.keys
 
 /-- Native code of each architecture calls JNI by its own convention, and what it gets is what the model says: results of each width,
-arguments past the registers, strings, objects and the VM. `floats` is whether this serves floating-point results there. -/
+arguments past the registers, strings, objects and the VM, and a method's arguments of each kind in each form of each kind of call,
+as a variadic function, a `va_list` and an array of `jvalue` have them. `floats` is whether this serves floating-point results there. -/
 def testJniNative (triple : String) (floats : Bool := true) : IO Unit := do
   let label := s!"JNI {triple}"
   let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-jni-native"
@@ -2342,21 +2343,34 @@ def testJniNative (triple : String) (floats : Bool := true) : IO Unit := do
   let arg := Bap.Emu.Jni.arg
   let method (name signature : String) (answer : Bap.Emu.Jni.Call → Bap.Emu.Jni.Answer) : Bap.Emu.Jni.MethodDecl :=
     { name, signature, answer := fun call => pure (answer call) }
+  -- A bit of each argument that is what native code gave, of `-7, 0x123456789abcdef0, 2.5, 1.25f, self, (jbyte)-3, (jshort)-300,
+  -- (jchar)0xBEEF`, after the method's ID, which `CallNonvirtual` has after the class.
+  let self ← IO.mkRef 0
+  let mixed (name : String) : Bap.Emu.Jni.MethodDecl := {
+    name, signature := "(IJDFLjava/lang/Object;BSC)I"
+    answer := fun call => do
+      let first := if call.index ≥ 64 && call.index ≤ 93 then 4 else 3
+      let expected := [2 ^ 32 - 7, 0x123456789abcdef0, 0x4004000000000000, 0x3FA00000, ← self.get, 2 ^ 32 - 3, 2 ^ 32 - 300, 0xBEEF]
+      pure (.value (expected.zipIdx.foldl (fun bits (value, index) =>
+        if arg call (first + index) == value then bits ||| 2 ^ index else bits) 0)) }
   let thing : Bap.Emu.Jni.ClassDecl := {
     name := "example/Thing"
     methods := [
       method "twice" "(I)I" fun call => .value (arg call 3 % 2 ^ 32 * 2),
       method "wide" "()J" fun _ => .value 0x123456789abcdef0,
       method "half" "()D" fun _ => .value 0x4004000000000000,
-      method "quarter" "()F" fun _ => .value 0x3FA00000]
-    staticMethods := [method "sum" "(IIIII)I" fun call => .value (((List.range 5).map fun index => arg call (3 + index)).foldl (· + ·) 0)] }
+      method "quarter" "()F" fun _ => .value 0x3FA00000,
+      mixed "mix"]
+    staticMethods := [method "sum" "(IIIII)I" fun call => .value (((List.range 5).map fun index => arg call (3 + index)).foldl (· + ·) 0),
+      mixed "mixStatic"] }
   let model ← Bap.Emu.Jni.create (Bap.Emu.Jni.readCString machine.emu) (fun text => place text.toUTF8) place
     (fun _ _ => pure (.value 0)) (classes := [thing]) (big := machine.architecture.big)
   let layout ← Bap.Emu.Jni.attachAt model machine.emu
-  let self ← Bap.Emu.Jni.intern model 0x9001
+  let selfHandle ← Bap.Emu.Jni.intern model 0x9001
+  self.set selfHandle
   -- The address of a function of Thumb says so in its lowest bit, which the symbol has apart.
-  let found ← machine.call (run.addr + if run.thumb then 1 else 0) [layout.env, self]
-  let all := 0x1FF
+  let found ← machine.call (run.addr + if run.thumb then 1 else 0) [layout.env, selfHandle]
+  let all := 0x3FFFF
   let expected := if floats then all else all - 8 - 16
   assertEqual s!"{label} native code finds what the model says, by its convention" expected found
 

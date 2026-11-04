@@ -14,7 +14,9 @@ stubs that `install` writes (`serve`). What it holds goes into a checkpoint (`st
 
 namespace Bap.Emu.Jni
 
-/-- A call of a function of a table: its index in the table, and the words of its arguments, from the `JNIEnv *` or `JavaVM *` on. -/
+/-- A call of a function of a table: its index in the table, and the words of its arguments, from the `JNIEnv *` or `JavaVM *` on.
+Of a call of a method whose signature the model knows, in any of its forms, the arguments of the method are a word each after its
+ID: see `serveIndex`. -/
 structure Call where
   index : Nat
   args : Array Nat
@@ -132,6 +134,8 @@ structure Model where
   stringsByContent : IO.Ref (Std.HashMap String Identity)
   dynamicIds : IO.Ref (Std.HashMap (Nat × Identity × String × String) Nat)
   dynamicNames : IO.Ref (Std.HashMap Identity String)
+  /-- The signature of each ID of `dynamicIds`, by its identity, which a checkpoint has as they have it. -/
+  dynamicSignatures : IO.Ref (Std.HashMap Identity String)
   nextDynamic : IO.Ref Nat
   readString : Nat → IO String
   allocString : String → IO Nat
@@ -421,6 +425,7 @@ def create (readString : Nat → IO String) (allocString : String → IO Nat)
     stringsByContent := ← IO.mkRef {}
     dynamicIds := ← IO.mkRef {}
     dynamicNames := ← IO.mkRef {}
+    dynamicSignatures := ← IO.mkRef {}
     nextDynamic := ← IO.mkRef 0x10000
     readString, allocString, allocBytes, classOf, default, log, version, big
     superclasses := classes.foldl (init := {}) fun table decl => table.insert decl.name decl.superclass
@@ -436,6 +441,13 @@ def create (readString : Nat → IO String) (allocString : String → IO Nat)
     model.objectClasses.modify (·.insert (.external object.identity) classId)
     model.arrays.modify (·.insert (.external object.identity) object.elements)
   pure model
+
+/-- The signature of a method, by the ID that `GetMethodID` or `GetStaticMethodID` gave for it, whether the model declares it or not. -/
+def methodSignature (model : Model) (handle : Nat) : IO (Option String) := do
+  let id ← resolve model handle
+  match (← model.methods.get).get? id with
+  | some info => pure (some info.decl.signature)
+  | none => pure ((← model.dynamicSignatures.get).get? id)
 
 /-- The name of a method or field that wasn't declared, by the ID that `GetMethodID` or `GetFieldID` gave for it. -/
 def dynamicName (model : Model) (handle : Nat) : IO (Option String) := do
@@ -454,6 +466,7 @@ private def dynamicBinding (model : Model) (call : Call) : IO Nat := do
       model.nextDynamic.set (id + 1)
       model.dynamicIds.modify (·.insert key id)
       model.dynamicNames.modify (·.insert (.external id) name)
+      model.dynamicSignatures.modify (·.insert (.external id) signature)
       pure id
   intern model id
 
@@ -717,7 +730,13 @@ def install (model : Model) (emu : Emu) (layout : Layout) : IO Unit := do
 
 Native code calls what a table has as a function of C, by the convention of its architecture: the arguments in registers and then on
 the stack, and the result in a register, or in two for a `jlong` on 32 bits, or in a register of floating point for a `jfloat` or a
-`jdouble`. A variadic call, `Call<Type>Method`, has its arguments where a call that isn't has them, on the systems that this serves. -/
+`jdouble`. A variadic call, `Call<Type>Method`, has its arguments where a call that isn't has them, on the systems that this serves,
+but for those of floating point, which some have in registers of their own; a `float` comes as a `double`. -/
+
+/-- How a `va_list` is: a pointer to the next argument, of those one after another as on the stack, or a structure of where the
+arguments that were in registers were put and where the rest are. -/
+private inductive VaList where
+  | pointer | aarch64 | x86_64 | powerpc
 
 private structure Convention where
   arguments : List String
@@ -731,27 +750,34 @@ private structure Convention where
   pair : Option (String × Bool) := none
   /-- The registers of a floating-point result, if the host serves those here. -/
   float : List String := []
+  /-- The registers that a variadic function has a `double` in, apart from the rest, and how wide they are. -/
+  floatArguments : List String := []
+  floatArgumentWidth : Nat := 64
+  /-- On 32 bits, whether a value of 64 bits starts at an even word, of the registers and of the stack. -/
+  pairs : Bool := false
+  vaList : VaList := .pointer
 
 private def conventionOf (emu : Emu) (width : Nat) : Convention :=
   let big := emu.config.endian == .big
   match emu.config.syscallAbi with
   | .aarch64 => { arguments := (List.range 8).map (s!"X{·}"), stack := "SP", stackOffset := 0, link := some "X30", result := "X0"
-                  float := ["Q0"] }
+                  float := ["Q0"], floatArguments := (List.range 8).map (s!"Q{·}"), floatArgumentWidth := 128, vaList := .aarch64 }
   | .x86_64 => { arguments := ["RDI", "RSI", "RDX", "RCX", "R8", "R9"], stack := "RSP", stackOffset := 8, link := none
-                 result := "RAX", float := ["ZMM0"] }
+                 result := "RAX", float := ["ZMM0"], floatArguments := (List.range 8).map (s!"ZMM{·}"), floatArgumentWidth := 512
+                 vaList := .x86_64 }
   | .x86_32 => { arguments := [], stack := "ESP", stackOffset := 4, link := none, result := "EAX", pair := some ("EDX", true) }
   -- Android's ARM is soft-float, with what floats in core registers, and the rest of Linux has `D0`: both have it.
   | .arm => { arguments := ["R0", "R1", "R2", "R3"], stack := "SP", stackOffset := 0, link := some "LR", result := "R0"
-              pair := some ("R1", true), float := ["D0"] }
+              pair := some ("R1", true), float := ["D0"], pairs := true }
   | .riscv => { arguments := (List.range 8).map (s!"X{10 + ·}"), stack := "X2", stackOffset := 0, link := some "X1", result := "X10"
-                pair := if width == 32 then some ("X11", true) else none, float := ["F10"] }
+                pair := if width == 32 then some ("X11", true) else none, float := ["F10"], pairs := width == 32 }
   | .mips =>
     if width == 32 then
       { arguments := ["R4", "R5", "R6", "R7"], stack := "R29", stackOffset := 16, link := some "R31", result := "R2"
-        pair := some ("R3", !big) }
+        pair := some ("R3", !big), pairs := true }
     else { arguments := (List.range 8).map (s!"R{4 + ·}"), stack := "R29", stackOffset := 0, link := some "R31", result := "R2" }
   | .powerpc => { arguments := (List.range 8).map (s!"R{3 + ·}"), stack := "R1", stackOffset := 8, link := some "LR", result := "R3"
-                  pair := some ("R4", false) }
+                  pair := some ("R4", false), floatArguments := (List.range 8).map (s!"F{1 + ·}"), pairs := true, vaList := .powerpc }
   | .powerpc64 => { arguments := (List.range 8).map (s!"R{3 + ·}"), stack := "R1", stackOffset := 96, link := some "LR", result := "R3" }
 
 /-- What a function of the table gives: of `Call<Type>Method` and `Get<Type>Field`, by their type, as `boolean`, `byte`, `char`, `short`,
@@ -788,8 +814,213 @@ private def readPointer (emu : Emu) (address width : Nat) : IO Nat := do
   let ordered := if emu.config.endian == .big then bytes.toList else bytes.toList.reverse
   pure (ordered.foldl (fun value byte => value * 256 + byte.toNat) 0)
 
+/-! ### The arguments of a method
+
+`NewObject`, `Call<Type>Method`, `CallNonvirtual<Type>Method` and `CallStatic<Type>Method` each come in three forms: the arguments
+of the method after its ID as a variadic function of C has them, a `va_list` of them (`V`), or an array of `jvalue` (`A`). A method
+is given them the same in each, a word for each after its ID, by its signature: an `int`, `short`, `byte`, `char` or `boolean` as
+the 32 bits of an `int`, a `long` as its 64, a `float` as the 32 bits of its IEEE form and a `double` as the 64 of its, and a
+reference as it is. -/
+
+/-- The kinds of the arguments of a signature, by the letter of each type, with `L` for each reference, arrays among them. -/
+private partial def argumentKinds : List Char → List Char → Option (List Char)
+  | ')' :: _, kinds => some kinds.reverse
+  | 'L' :: rest, kinds => argumentKinds ((rest.dropWhile (· != ';')).drop 1) ('L' :: kinds)
+  | '[' :: rest, kinds =>
+    match rest.dropWhile (· == '[') with
+    | 'L' :: more => argumentKinds ((more.dropWhile (· != ';')).drop 1) ('L' :: kinds)
+    | _ :: more => argumentKinds more ('L' :: kinds)
+    | [] => none
+  | kind :: rest, kinds => if "ZBCSIJFD".contains kind then argumentKinds rest (kind :: kinds) else none
+  | [], _ => none
+
+/-- The kinds of the arguments of a method of this signature, if it is one. -/
+def argumentTypes (signature : String) : Option (List Char) :=
+  match signature.toList with
+  | '(' :: rest => argumentKinds rest []
+  | _ => none
+
+/-- Of a function that calls a method: which argument has the method's ID, and whether the arguments are as a variadic function has
+them (0), a `va_list` (1) or an array of `jvalue` (2). -/
+def callForm (index : Nat) : Option (Nat × Nat) :=
+  match familyOf index with
+  | .callMethod _ methodArgument =>
+    let first := if index ≤ 30 then 28 else if index ≤ 63 then 34 else if index ≤ 93 then 64 else 114
+    some (methodArgument, (index - first) % 3)
+  | _ => none
+
+private def signExtend (bits width : Nat) : Nat :=
+  let value := bits % 2 ^ width
+  if value ≥ 2 ^ (width - 1) then value + 2 ^ 32 - 2 ^ width else value
+
+/-- The word that a method is given for an argument of a kind, from bits of it at least as wide as it. -/
+private def argumentWord (kind : Char) (width bits : Nat) : Nat :=
+  match kind with
+  | 'Z' => bits % 2 ^ 8
+  | 'B' => signExtend bits 8
+  | 'C' => bits % 2 ^ 16
+  | 'S' => signExtend bits 16
+  | 'I' | 'F' => bits % 2 ^ 32
+  | 'J' | 'D' => bits % 2 ^ 64
+  | _ => bits % 2 ^ width
+
+/-- A `float` of the bits of a `double`, as a `float` that was given to a variadic function comes back. -/
+private def floatOfDouble (bits : Nat) : Nat := (Float.ofBits bits.toUInt64).toFloat32.toBits.toNat
+
+/-- Where the next argument is, of a kind: a word, 64 bits of an integer, or a `double`. -/
+private structure Cursor where
+  word : IO Nat
+  long : IO Nat
+  double : IO Nat
+
+/-- Arguments in registers and then one after another in memory from `next`, with a `double` in registers of its own if the
+convention has those, which are used from `floatsUsed`. -/
+private def sequenceCursor (emu : Emu) (convention : Convention) (width : Nat) (registers : Array Nat) (used : Nat) (next : Nat)
+    (floats : List String) : IO Cursor := do
+  let big := emu.config.endian == .big
+  let word := width / 8
+  let used ← IO.mkRef used
+  let floatsUsed ← IO.mkRef 0
+  let next ← IO.mkRef next
+  let fromMemory (bytes : Nat) (align : Bool) : IO Nat := do
+    let here ← next.get
+    let at_ := if align then (here + 7) / 8 * 8 else here
+    next.set (at_ + bytes)
+    readPointer emu at_ (bytes * 8)
+  let takeWord : IO Nat := do
+    let index ← used.get
+    if h : index < registers.size then
+      used.set (index + 1)
+      pure registers[index]
+    else fromMemory word false
+  -- 64 bits on 32: two registers, the first at an even one if it has to be, or 8 bytes of memory once they don't fit.
+  let takeLong : IO Nat := do
+    if width == 64 then return ← takeWord
+    let index ← used.get
+    let index := if convention.pairs && index % 2 == 1 && index < registers.size then index + 1 else index
+    if h : index + 1 < registers.size then
+      used.set (index + 2)
+      let (first, second) := (registers[index] % 2 ^ 32, registers[index + 1] % 2 ^ 32)
+      pure (if big then first * 2 ^ 32 + second else second * 2 ^ 32 + first)
+    else
+      used.set (max index registers.size)
+      fromMemory 8 convention.pairs
+  let takeDouble : IO Nat := do
+    if floats.isEmpty then return ← takeLong
+    let index ← floatsUsed.get
+    match floats[index]? with
+    | some name =>
+      floatsUsed.set (index + 1)
+      pure ((← registerOf emu name convention.floatArgumentWidth) % 2 ^ 64)
+    | none => fromMemory 8 convention.pairs
+  pure { word := takeWord, long := takeLong, double := takeDouble }
+
+/-- The arguments of a `va_list`, which is `list`: on most systems a pointer to them one after another, and on AArch64, x86_64 and
+32-bit PowerPC the address of a structure of where those that were in registers were put and where the rest are. -/
+private def vaListCursor (emu : Emu) (convention : Convention) (width list : Nat) : IO Cursor := do
+  let read (address bits : Nat) : IO Nat := readPointer emu address bits
+  match convention.vaList with
+  | .pointer => sequenceCursor emu convention width #[] 0 list []
+  | .aarch64 =>
+    -- `__stack`, `__gr_top`, `__vr_top`, and the offsets from the tops of what is left there, which are negative while it is.
+    let stack ← IO.mkRef (← read list 64)
+    let grTop ← read (list + 8) 64
+    let vrTop ← read (list + 16) 64
+    let signed (value : Nat) : Int := if value ≥ 2 ^ 31 then Int.ofNat value - 2 ^ 32 else Int.ofNat value
+    let grOffs ← IO.mkRef (signed (← read (list + 24) 32))
+    let vrOffs ← IO.mkRef (signed (← read (list + 28) 32))
+    let fromStack : IO Nat := do
+      let at_ ← stack.get
+      stack.set (at_ + 8)
+      read at_ 64
+    let fromSaved (offsets : IO.Ref Int) (top step : Nat) : IO Nat := do
+      let offset ← offsets.get
+      if offset < 0 then
+        offsets.set (offset + step)
+        read (Int.ofNat top + offset).toNat 64
+      else fromStack
+    let word := fromSaved grOffs grTop 8
+    pure { word, long := word, double := fromSaved vrOffs vrTop 16 }
+  | .x86_64 =>
+    -- `gp_offset` and `fp_offset` into `reg_save_area`, of 6 words and then 8 registers of 16 bytes, and `overflow_arg_area`.
+    let gp ← IO.mkRef (← read list 32)
+    let fp ← IO.mkRef (← read (list + 4) 32)
+    let overflow ← IO.mkRef (← read (list + 8) 64)
+    let saved ← read (list + 16) 64
+    let fromOverflow : IO Nat := do
+      let at_ ← overflow.get
+      overflow.set (at_ + 8)
+      read at_ 64
+    let fromSaved (offset : IO.Ref Nat) (limit step : Nat) : IO Nat := do
+      let at_ ← offset.get
+      if at_ < limit then
+        offset.set (at_ + step)
+        read (saved + at_) 64
+      else fromOverflow
+    let word := fromSaved gp 48 8
+    pure { word, long := word, double := fromSaved fp 176 16 }
+  | .powerpc =>
+    -- How many of `r3`-`r10` and `f1`-`f8` were taken, `overflow_arg_area`, and `reg_save_area`: the 8 words and then 8 doubles.
+    let gpr ← IO.mkRef (← read list 8)
+    let fpr ← IO.mkRef (← read (list + 1) 8)
+    let overflow ← IO.mkRef (← read (list + 4) 32)
+    let saved ← read (list + 8) 32
+    let fromOverflow (bytes : Nat) (align : Bool) : IO Nat := do
+      let here ← overflow.get
+      let at_ := if align then (here + 7) / 8 * 8 else here
+      overflow.set (at_ + bytes)
+      read at_ (bytes * 8)
+    let word : IO Nat := do
+      let taken ← gpr.get
+      if taken < 8 then
+        gpr.set (taken + 1)
+        read (saved + 4 * taken) 32
+      else fromOverflow 4 false
+    let long : IO Nat := do
+      let taken := (← gpr.get) + (← gpr.get) % 2
+      if taken + 2 ≤ 8 then
+        gpr.set (taken + 2)
+        read (saved + 4 * taken) 64
+      else
+        gpr.set 8
+        fromOverflow 8 true
+    let double : IO Nat := do
+      let taken ← fpr.get
+      if taken < 8 then
+        fpr.set (taken + 1)
+        read (saved + 32 + 8 * taken) 64
+      else fromOverflow 8 true
+    pure { word, long, double }
+
+/-- The arguments of a method of these kinds, in the form of the call, of which `registers` are the core registers of arguments,
+`fixed` the arguments before the method's, and `list` what is after them, the `va_list` or the array of the last two forms. -/
+private def methodArguments (emu : Emu) (convention : Convention) (width : Nat) (form : Nat) (kinds : List Char)
+    (registers : Array Nat) (fixed sp list : Nat) : IO (List Nat) := do
+  if form == 2 then
+    -- A `jvalue` is 8 bytes, of which each kind is at the start.
+    return ← kinds.zipIdx.mapM fun (kind, index) => do
+      let bytes := match kind with
+        | 'Z' | 'B' => 1
+        | 'C' | 'S' => 2
+        | 'I' | 'F' => 4
+        | 'J' | 'D' => 8
+        | _ => width / 8
+      pure (argumentWord kind width (← readPointer emu (list + 8 * index) (bytes * 8)))
+  let cursor ← if form == 1 then vaListCursor emu convention width list else
+    -- What isn't in a register of the call is on the stack after what is of those before.
+    let stack := sp + convention.stackOffset + width / 8 * (fixed - min fixed registers.size)
+    sequenceCursor emu convention width registers fixed stack convention.floatArguments
+  kinds.mapM fun kind => do
+    let bits ← match kind with
+      | 'J' => cursor.long
+      | 'D' => cursor.double
+      | 'F' => do pure (floatOfDouble (← cursor.double))
+      | _ => cursor.word
+    pure (argumentWord kind width bits)
+
 /-- Serves the function `index` of the environment, or of the VM, for a call that is at its first instruction now, by the convention
-of the architecture, and returns to where it was called from. -/
+of the architecture, and returns to where it was called from. A method is given its arguments by its signature, from whichever form
+the call is of: see "The arguments of a method". -/
 def serveIndex (model : Model) (emu : Emu) (index : Nat) (vm : Bool := false) : IO Unit := do
   let width ← wordWidth emu
   let convention := conventionOf emu width
@@ -797,7 +1028,20 @@ def serveIndex (model : Model) (emu : Emu) (index : Nat) (vm : Bool := false) : 
   let sp ← registerOf emu convention.stack width
   let stacked ← (List.range (8 - min 8 registers.length)).mapM fun index =>
     readPointer emu (sp + convention.stackOffset + index * (width / 8)) width
-  let call : Call := ⟨index, (registers ++ stacked).take 8 |>.toArray⟩
+  let raw := (registers ++ stacked).take 8
+  -- A call of a method has the method's arguments by its signature, in whichever form it was made, if the model knows that.
+  let normalized : IO (Option Call) := do
+    if vm then return none
+    let some (methodArgument, form) := callForm index | return none
+    let fixed := methodArgument + 1
+    let some signature ← methodSignature model (raw.getD methodArgument 0) | return none
+    let some kinds := argumentTypes signature | return none
+    let arguments ← methodArguments emu convention width form kinds registers.toArray fixed sp (raw.getD fixed 0)
+    pure (some ⟨index, (raw.take fixed ++ arguments).toArray⟩)
+  let call : Call ← match ← normalized.toBaseIO with
+    | .ok (some call) => pure call
+    -- Arguments that can't be read are given as the words that they were.
+    | _ => pure ⟨index, raw.toArray⟩
   for starts in ← emu.hostStarts.get do starts s!"{if vm then "jni-vm" else "jni"}:{index}"
   let result ← if vm then do
       let result ← dispatchVm model call
@@ -1077,6 +1321,7 @@ private def loadBytes (model : Model) (data : ByteArray) : IO Unit := do
       model.stringsByContent.set stringsByContent
       model.dynamicIds.set dynamicIds
       model.dynamicNames.set dynamicNames
+      model.dynamicSignatures.set (dynamicIds.fold (fun table (_, _, _, signature) id => table.insert (.external id) signature) {})
       model.exception.set exception
       model.env.set env
       model.vm.set vm
