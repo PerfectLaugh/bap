@@ -1813,9 +1813,7 @@ private def fetch (emu : Emu) (address : Nat) : IO ByteArray := do
     | .error error => throw <| IO.userError error
     | .ok span =>
       match ← emu.engine.persistentMemory.get with
-      | some memory =>
-        (List.range span).foldlM (init := ByteArray.emptyWithCapacity span) fun bytes offset => do
-          pure (bytes.push (← Jit.readMemory memory (UInt64.ofNat (address + offset))))
+      | some memory => Jit.readMemoryRange memory (UInt64.ofNat address) span
       | none =>
         let ⟨_, memory⟩ ← cells emu (← emu.state.get)
         pure (peekBytes memory address span)
