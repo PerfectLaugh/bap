@@ -94,6 +94,42 @@ private def allLabels (state : State) : Labels :=
 private def memoryLabels (state : State) : Labels :=
   union ((state.memory.map Prod.fst).flatMap (byteLabels state)) state.anywhere
 
+instance : Hashable Cell where
+  hash cell := mixHash (hash cell.memory) (hash cell.address)
+
+/-- What each byte holds, which is its first binding, found in one pass. -/
+private def firstLabels (memory : List (Cell × Labels)) : Std.HashMap Cell Labels :=
+  memory.foldl (init := {}) fun firsts binding => firsts.insertIfNew binding.1 binding.2
+
+/-- `memoryLabels` with what each byte holds looked up in a map, rather than by looking through all bytes for each. -/
+private def memoryLabelsFast (state : State) : Labels :=
+  let firsts := firstLabels state.memory
+  union (state.memory.flatMap fun binding => firsts.getD binding.1 []) state.anywhere
+
+private theorem firstLabels_get (memory : List (Cell × Labels)) (acc : Std.HashMap Cell Labels) (cell : Cell) :
+    (memory.foldl (init := acc) fun firsts binding => firsts.insertIfNew binding.1 binding.2)[cell]? =
+      acc[cell]?.or ((memory.find? fun binding => binding.1 = cell).map Prod.snd) := by
+  induction memory generalizing acc with
+  | nil => simp
+  | cons binding rest ih =>
+    rw [List.foldl_cons, ih, Std.HashMap.getElem?_insertIfNew, List.find?_cons]
+    by_cases hk : binding.1 = cell
+    · subst hk
+      by_cases hm : binding.1 ∈ acc
+      · simp [hm, Std.HashMap.getElem?_eq_some_getElem hm]
+      · simp [hm, Std.HashMap.getElem?_eq_none hm]
+    · simp [hk]
+
+@[csimp] private theorem memoryLabels_eq_fast : @memoryLabels = @memoryLabelsFast := by
+  funext state
+  simp only [memoryLabels, memoryLabelsFast, List.flatMap_map]
+  have : (fun binding : Cell × Labels => byteLabels state binding.1) =
+      fun binding => (firstLabels state.memory).getD binding.1 [] := by
+    funext binding
+    simp only [byteLabels, firstLabels, Std.HashMap.getD_eq_getD_getElem?, firstLabels_get]
+    cases state.memory.find? fun b => b.1 = binding.1 <;> simp
+  simp only [Function.comp_def, this]
+
 /-- Labels may now be at any address of any memory. -/
 private def smear (state : State) : State := { state with anywhere := memoryLabels state }
 
