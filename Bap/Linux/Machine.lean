@@ -260,6 +260,9 @@ private def serveFileMap (machine : Machine) (group address size bits flags fd o
     let shared := mapsShared flags
     if !canRead || (shared && bits &&& 2 != 0 && !canWrite) then
       return errorOf Errno.eacces
+    -- `F_SEAL_WRITE` and `F_SEAL_FUTURE_WRITE`.
+    if shared && bits &&& 2 != 0 && (kernel.inodes.get? inode).any (·.details.seals &&& 0x18 != 0) then
+      return errorOf Errno.eperm
     match kernel.mappedBytes group fd offset (pageUp size) with
     | .error errno => pure (errorOf errno)
     | .ok data =>
@@ -838,6 +841,7 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     let openAt (directory address flags mode : Nat) : IO SyscallAction :=
       at_ directory address fun from_ path => do
         let flags := architecture.openFlags flags
+        if flags &&& 0x400000 != 0 then return ← applyNat machine (·.openTmpfile group from_ path flags mode)
         -- What makes a pseudo-terminal, and the controlling terminal.
         if let some action ← Tty.openDevice poller emu (Path.ofParts (Path.parts from_ path)) flags then return action
         let current ← machine.kernel.get
@@ -1060,6 +1064,11 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
           | .error errno => errorOf errno
           | .ok value => .returnValue (architecture.guestFlags value))
       | 4 => apply machine (·.setFlags group (arg 0) (architecture.openFlags (arg 2)))
+      | 1033 => apply machine (·.addSeals group (arg 0) (arg 2))
+      | 1034 =>
+        pure (match kernel.seals group (arg 0) with
+          | .error errno => errorOf errno
+          | .ok value => .returnValue value)
       | _ => pure (errorOf Errno.einval)
     | .ioctl =>
       -- No descriptor is a terminal but those of a pseudo-terminal.
@@ -1120,7 +1129,8 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
         apply machine (·.rename "/" source target)
     | .link | .linkat | .renameat2 | .utimensat | .utimensat64 | .utimes | .utime | .futimesat | .chown | .lchown | .fchown
     | .fchownat | .setxattr | .lsetxattr | .fsetxattr | .getxattr | .lgetxattr | .fgetxattr | .listxattr | .llistxattr
-    | .flistxattr | .removexattr | .lremovexattr | .fremovexattr =>
+    | .flistxattr | .removexattr | .lremovexattr | .fremovexattr | .memfdCreate | .sendfile | .sendfile64 | .splice | .tee
+    | .copyFileRange =>
       pure ((← Files.serve poller emu call args).getD (errorOf Errno.enosys))
     | .symlink | .symlinkat =>
       let (directory, address) := if call == .symlink then (here, arg 1) else (arg 1, arg 2)
@@ -1246,7 +1256,7 @@ private def refreshProc (machine : Machine) (emu : Emu) (call : Call) (args : Li
 /-- `write`, on its own: nothing here holds on to the kernel, so that a program that writes a little at a time doesn't have what it wrote before copied each time. -/
 private def writeDirect (machine : Machine) (emu : Emu) (group fd address count : Nat) : IO SyscallAction := do
   let current ← machine.kernel.get
-  if let some errno := current.writeError group fd then return errorOf errno
+  if let some errno := current.writeError group fd count then return errorOf errno
   let toPipe := current.pipeOf group fd
   if let some number := toPipe then
     let live := ((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups

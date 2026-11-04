@@ -3,13 +3,15 @@ import Bap.Linux.Identity
 
 /-! # What a file has of itself
 
-Hard links (`link`, `linkat`), `renameat2`, the times of a file (`utimensat`, `utimes`, `futimesat`, `utime`), whose it is (`chown` and
+Hard links (`link`, `linkat`), `renameat2`, files of memory (`memfd_create`), what goes from one file to another
+(`sendfile`, `splice`, `tee`, `copy_file_range`), the times of a file (`utimensat`, `utimes`, `futimesat`, `utime`), whose it is (`chown` and
 its kin), and its extended attributes (`setxattr`, `getxattr`, `listxattr`, `removexattr` and their kin of a link and of a
 descriptor).
 
 A file has the times that a write, a truncation or `chmod` gave it, which `stat` says, and these set. Only root gives a file to
 another, or to a group that it isn't in. An extended attribute's name has a namespace, as `user.`, of at most 255 bytes, and its value
-at most 64 KiB. -/
+at most 64 KiB. A file of `memfd_create` can have seals, which `fcntl` adds and `Kernel` keeps to. What goes from a file to another
+goes at most 1 MiB at a time, and from a pipe or a socket that has nothing yet, waits for it. -/
 
 namespace Bap.Linux
 
@@ -39,6 +41,27 @@ private def alter (kernel : Kernel) (number : Nat) (change : Meta → Meta) : Ke
   match kernel.inodes.get? number with
   | some inode => { kernel with inodes := kernel.inodes.insert number { inode with details := change inode.details } }
   | none => kernel
+
+/-- Up to `count` bytes of a descriptor, as `sendfile` and `splice` take them: from `offset` if it says, and otherwise from where the
+file is, which moves, or what a pipe or a socket has first, which goes; `none` while that has nothing and more may come. -/
+private def take (kernel : Kernel) (group fd count : Nat) (offset : Option Nat) (live : List Nat) : Result (Kernel × Option ByteArray) := do
+  if let some at_ := offset then return (kernel, some (← kernel.readFrom group fd count at_))
+  if kernel.isSocket group fd then
+    let (kernel, received) ← kernel.receive group fd count false (kernel.socketAlive · live)
+    return (kernel, received.map (·.data))
+  if let some number := kernel.pipeOf group fd then
+    if kernel.pipeWaiting number == 0 && kernel.pipeHeld number live true then return (kernel, none)
+  let (kernel, bytes) ← kernel.read group fd count
+  pure (kernel, some bytes)
+
+/-- Bytes to a descriptor, as `sendfile` and `splice` give them: at `offset` if it says, and otherwise where the file is, or to the
+other end of a socket, or to a pipe that something reads. -/
+private def put (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Option Nat) (live : List Nat) : Result (Kernel × Nat) := do
+  if let some at_ := offset then return ← kernel.writeTo group fd bytes at_
+  if kernel.isSocket group fd then return ← kernel.send group fd { data := bytes } none (kernel.socketAlive · live)
+  if let some number := kernel.pipeOf group fd then
+    if !kernel.pipeHeld number live false then .error Errno.epipe
+  kernel.write group fd bytes
 
 /-- The calls of this module, if the call is one of them. -/
 def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Option SyscallAction) := do
@@ -157,6 +180,32 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         { details with attributes := details.attributes.filter (·.1 != name), changed := now })
       succeed
   let here := 2 ^ 64 - 100
+  -- An offset of `size` bytes that a call is given the address of, if it is, and that address with how far it went.
+  let offsetAt (address size : Nat) : IO (Option Nat) := do
+    if address == 0 then pure none else pure (some (numberOf big (← read emu address size)))
+  let moveOffset (address size : Nat) (start : Option Nat) (count : Nat) : IO Unit := do
+    if let some start := start then write emu address (Abi.field big size (start + count))
+  -- Of `sendfile`, `splice` and `copy_file_range`: what goes from one to the other, at most 1 MiB at a time, from and to the offsets
+  -- that the call gives, which then move; or, while there is nothing yet, `EAGAIN` or a wait.
+  let transfer (source target count : Nat) (from_ to : Option Nat) (nonblocking : Bool) (moved : Nat → IO Unit) :
+      IO (Option SyscallAction) := do
+    let live ← poller.live
+    match take kernel group source (min count 0x100000) from_ live with
+    | .error errno => fail errno
+    | .ok (_, none) => if nonblocking then fail Errno.eagain else pure (some (← poller.timers.waitUntil emu readySpace 0 none true))
+    | .ok (taken, some bytes) =>
+      if bytes.isEmpty then
+        return ← match kernel.openFileOf group target with
+          | .ok (_, file) => if file.flags &&& 3 == 0 then fail Errno.ebadf else succeed
+          | .error errno => fail errno
+      match put taken group target bytes to live with
+      | .error errno => fail errno
+      | .ok (next, count) =>
+        poller.kernel.set next
+        moved count
+        poller.wake emu
+        succeed count
+  let pipeOf := kernel.pipeOf group
   try
     match call with
     | .link =>
@@ -203,6 +252,65 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     | .removexattr => removeAttribute (← inodeAt here (arg 0) true false) (arg 1)
     | .lremovexattr => removeAttribute (← inodeAt here (arg 0) false false) (arg 1)
     | .fremovexattr => removeAttribute (ofFd (arg 0)) (arg 1)
+    | .memfdCreate =>
+      -- `MFD_CLOEXEC`, `MFD_ALLOW_SEALING`, `MFD_HUGETLB`, and `MFD_NOEXEC_SEAL` or `MFD_EXEC`, of which the first seals that it
+      -- runs nothing, and so has seals.
+      let flags := arg 1
+      if flags ≥ 0x20 || flags &&& 0x18 == 0x18 || (← readString emu (arg 0)).utf8ByteSize > 249 then
+        return ← fail Errno.einval
+      let noexec := flags &&& 8 != 0
+      let seals := sealable ||| (if noexec then 0x20 else if flags &&& 2 != 0 then 0 else 1)
+      let (next, fd) := kernel.addObject group (.file ByteArray.empty) (if flags &&& 1 != 0 then Kernel.oCloexec else 0)
+        (if noexec then 0o100666 else 0o100777) seals
+      poller.kernel.set next
+      succeed fd
+    | .sendfile | .sendfile64 =>
+      let size := if call == .sendfile64 then 8 else word
+      let start ← offsetAt (arg 2) size
+      transfer (arg 1) (arg 0) (arg 3) start none (kernel.nonblocking group (arg 1)) (moveOffset (arg 2) size start)
+    | .splice =>
+      let (input, output) := (pipeOf (arg 0), pipeOf (arg 2))
+      if input.isNone && output.isNone then return ← fail Errno.einval
+      if (input.isSome && arg 1 != 0) || (output.isSome && arg 3 != 0) then return ← fail Errno.espipe
+      let (from_, to) := (← offsetAt (arg 1) 8, ← offsetAt (arg 3) 8)
+      transfer (arg 0) (arg 2) (arg 4) from_ to (arg 5 &&& 2 != 0 || kernel.nonblocking group (arg 0)) fun count => do
+        moveOffset (arg 1) 8 from_ count
+        moveOffset (arg 3) 8 to count
+    | .tee =>
+      -- What one pipe has, to another, which the first keeps.
+      let (some input, some output) := (pipeOf (arg 0), pipeOf (arg 1)) | return ← fail Errno.einval
+      if input == output then return ← fail Errno.einval
+      let live ← poller.live
+      let waiting := kernel.pipeWaiting input
+      if waiting == 0 then
+        if !kernel.pipeHeld input live true then return ← succeed
+        if arg 3 &&& 2 != 0 || kernel.nonblocking group (arg 0) then return ← fail Errno.eagain
+        return some (← poller.timers.waitUntil emu readySpace 0 none true)
+      let .some { content := .pipe buffer head _, .. } := kernel.inodes.get? input | fail Errno.einval
+      match put kernel group (arg 1) (buffer.extract head (head + min (arg 2) 0x100000)) none live with
+      | .error errno => fail errno
+      | .ok (next, count) =>
+        poller.kernel.set next
+        poller.wake emu
+        succeed count
+    | .copyFileRange =>
+      if arg 5 != 0 then return ← fail Errno.einval
+      let regular (fd : Nat) : Result (Nat × OpenFile) := do
+        let (_, file) ← kernel.openFileOf group fd
+        match (← kernel.inodeOf file.inode).content with
+        | .file _ => pure (file.inode, file)
+        | .directory => .error Errno.eisdir
+        | _ => .error Errno.einval
+      match regular (arg 0), regular (arg 2) with
+      | .error errno, _ | _, .error errno => fail errno
+      | .ok (source, input), .ok (target, output) =>
+        if input.flags &&& 3 == 1 || output.flags &&& 3 == 0 || output.flags &&& Kernel.oAppend != 0 then return ← fail Errno.ebadf
+        let (from_, to) := (← offsetAt (arg 1) 8, ← offsetAt (arg 3) 8)
+        let (first, second) := (from_.getD input.offset, to.getD output.offset)
+        if source == target && first < second + arg 4 && second < first + arg 4 then return ← fail Errno.einval
+        transfer (arg 0) (arg 2) (arg 4) from_ to false fun count => do
+          moveOffset (arg 1) 8 from_ count
+          moveOffset (arg 3) 8 to count
     | _ => pure none
   catch _ => fail 14
 

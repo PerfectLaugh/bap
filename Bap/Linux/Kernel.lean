@@ -174,6 +174,15 @@ structure Inode where
 def Inode.written (inode : Inode) (clock : Nat) : Inode :=
   { inode with details := { inode.details with modified := clock, changed := clock } }
 
+/-- Of a file that `memfd_create` makes, which can have seals: this is among them, which `F_GET_SEALS` doesn't say. -/
+def sealable : Nat := 2 ^ 31
+
+/-- Why the seals of a file keep `count` bytes from being written to it at `offset`, if they do: `F_SEAL_WRITE` and
+`F_SEAL_FUTURE_WRITE` keep all, and `F_SEAL_GROW` what goes past its end. -/
+def Inode.sealedAgainst (inode : Inode) (size offset count : Nat) : Option Nat :=
+  let seals := inode.details.seals
+  if seals &&& 0x18 != 0 || (seals &&& 4 != 0 && offset + count > size) then some 1 else none
+
 /-- What `open` makes: `dup` and `fork` share it, and with it the offset. -/
 structure OpenFile where
   inode : Nat
@@ -713,6 +722,7 @@ def write (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Result (Kerne
     .ok ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content := .pipe (buffer ++ bytes) head consumed } }, bytes.size)
   | .file data =>
     let offset := if has file.flags oAppend then data.size else file.offset
+    if let some errno := inode.sealedAgainst data.size offset bytes.size then .error errno
     .ok ({ kernel with
       inodes := kernel.inodes.insert file.inode ({ inode with content := .file (writeAt data offset bytes) }.written kernel.clock)
       openFiles := kernel.openFiles.insert id { file with offset := offset + bytes.size } }, bytes.size)
@@ -725,8 +735,8 @@ def writeInto (data : ByteArray) (offset : Nat) (bytes : ByteArray) : ByteArray 
   let filled := if data.size < offset then data ++ Bap.zeroBytes (offset - data.size) else data
   bytes.copySlice 0 filled offset bytes.size false
 
-/-- Why `write` can't go ahead, if it can't, for `writeKnown`. -/
-def writeError (kernel : Kernel) (group fd : Nat) : Option Nat :=
+/-- Why `write` of `count` bytes can't go ahead, if it can't, for `writeKnown`. -/
+def writeError (kernel : Kernel) (group fd count : Nat) : Option Nat :=
   match kernel.openFileOf group fd with
   | .error errno => some errno
   | .ok (_, file) =>
@@ -738,6 +748,8 @@ def writeError (kernel : Kernel) (group fd : Nat) : Option Nat :=
       | some { content := .symlink _, .. } | some { content := .generated _, .. } | some { content := .socket _, .. } => some Errno.einval
       -- `/dev/full` has no room.
       | some { content := .device 2, .. } => some 28
+      | some inode@{ content := .file data, .. } =>
+        inode.sealedAgainst data.size (if has file.flags oAppend then data.size else file.offset) count
       | _ => none
 
 /-- `write` for what `writeError` has nothing against, which changes all it can in place: one that takes the kernel as it is the only holder of it makes as many small
@@ -774,6 +786,7 @@ def writeTo (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Nat
   let inode ← inodeOf kernel file.inode
   match inode.content with
   | .file data =>
+    if let some errno := inode.sealedAgainst data.size offset bytes.size then .error errno
     .ok ({ kernel with inodes := kernel.inodes.insert file.inode ({ inode with content := .file (writeAt data offset bytes) }.written kernel.clock) },
       bytes.size)
   | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ => .error Errno.espipe
@@ -821,13 +834,15 @@ def pipe (kernel : Kernel) (group flags : Nat) : Kernel × Nat × Nat :=
 
 /-- A descriptor of something that has no path, as `eventfd` and `epoll_create` make: on a new inode of `content`, opened to read and
 write with `flags` of `O_NONBLOCK` and `O_CLOEXEC`. -/
-def addObject (kernel : Kernel) (group : Nat) (content : Content) (flags : Nat) : Kernel × Nat :=
+def addObject (kernel : Kernel) (group : Nat) (content : Content) (flags : Nat) (mode : Nat := 0o600) (seals : Nat := 0) (access : Nat := 2) :
+    Kernel × Nat :=
   let number := kernel.nextInode
   let openFile := kernel.nextOpenFile
+  let clock := kernel.clock
   let kernel := { kernel with
-    inodes := kernel.inodes.insert number { number, content, mode := 0o600 }
+    inodes := kernel.inodes.insert number { number, content, mode, details := { accessed := clock, modified := clock, changed := clock, seals } }
     nextInode := number + 1
-    openFiles := kernel.openFiles.insert openFile { inode := number, flags := 2 ||| (flags &&& oNonblock) }
+    openFiles := kernel.openFiles.insert openFile { inode := number, flags := access ||| (flags &&& oNonblock) }
     nextOpenFile := openFile + 1 }
   kernel.addDescriptor group openFile (flags &&& oCloexec != 0)
 
@@ -1136,6 +1151,8 @@ def truncateInode (kernel : Kernel) (number size : Nat) : Result Kernel := do
   let inode ← inodeOf kernel number
   match inode.content with
   | .file data =>
+    -- `F_SEAL_SHRINK` and `F_SEAL_GROW`.
+    if inode.details.seals &&& (if size < data.size then 2 else if size > data.size then 4 else 0) != 0 then .error Errno.eperm
     let data := if size ≤ data.size then data.extract 0 size
       else data ++ Bap.zeroBytes (size - data.size)
     .ok { kernel with inodes := kernel.inodes.insert number ({ inode with content := .file data }.written kernel.clock) }
@@ -1153,6 +1170,36 @@ def truncatePath (kernel : Kernel) (base path : String) (size : Nat) : Result Ke
   match (← kernel.resolve base path).2 with
   | none => .error Errno.enoent
   | some number => kernel.truncateInode number size
+
+/-- `fcntl` with `F_GET_SEALS`, of a file that can have them. -/
+def seals (kernel : Kernel) (group fd : Nat) : Result Nat := do
+  let (_, file) ← openFileOf kernel group fd
+  let held := (← inodeOf kernel file.inode).details.seals
+  if held &&& sealable == 0 then .error Errno.einval
+  .ok (held - sealable)
+
+/-- `fcntl` with `F_ADD_SEALS`, by a descriptor that writes, unless `F_SEAL_SEAL` is there. `F_SEAL_WRITE` waits for no mapping to
+write the file. -/
+def addSeals (kernel : Kernel) (group fd seals : Nat) : Result Kernel := do
+  let (_, file) ← openFileOf kernel group fd
+  let inode ← inodeOf kernel file.inode
+  let held := inode.details.seals
+  if held &&& sealable == 0 || seals ≥ 0x40 then .error Errno.einval
+  if !writable file.flags || held &&& 1 != 0 then .error Errno.eperm
+  if seals &&& 8 != 0 &&
+      kernel.processes.fold (fun found _ process => found || process.mappings.any fun mapping =>
+        mapping.inode == file.inode && mapping.shared && mapping.mayWrite) false then
+    .error 16
+  .ok { kernel with inodes := kernel.inodes.insert file.inode { inode with details := { inode.details with seals := held ||| seals } } }
+
+/-- `open` with `O_TMPFILE`: a file of no name in a directory, which only `linkat` gives one, to write. -/
+def openTmpfile (kernel : Kernel) (group : Nat) (base path : String) (flags mode : Nat) : Result (Kernel × Nat) := do
+  if !writable flags then .error Errno.einval
+  let some number := (← kernel.resolve base path).2 | .error Errno.enoent
+  let .directory := (← inodeOf kernel number).content | .error Errno.enotdir
+  let umask := (kernel.process group).umask
+  .ok (kernel.addObject group (.file ByteArray.empty) flags
+    (0o100000 ||| (mode &&& 0o7777 &&& (0o7777 - umask))) (access := flags &&& 3))
 
 /-- `chmod`. -/
 def chmod (kernel : Kernel) (base path : String) (mode : Nat) : Result Kernel := do
