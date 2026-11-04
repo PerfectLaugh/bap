@@ -769,6 +769,11 @@ def readOnly (kernel : Kernel) (path : String) : Bool :=
 
 private def erofs : Nat := 30
 
+/-- Whether something is mounted at a path of the tree, which can't be removed or moved then: `EBUSY`. -/
+def mountedAt (kernel : Kernel) (path : String) : Bool := kernel.mounts.any (·.target == path)
+
+private def ebusy : Nat := 16
+
 /-- `open`. -/
 def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : Nat) : Result (Kernel × Nat) := do
   if path == "" then .error Errno.enoent
@@ -786,7 +791,7 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
   let inode ← inodeOf kernel number
   let kernel ← match inode.content with
     | .directory =>
-      if writable flags then .error Errno.eisdir
+      if writable flags || has flags oCreat then .error Errno.eisdir
       .ok kernel
     | .symlink _ => .error Errno.eloop
     -- `Machine` opens these, with what they see, which this doesn't know.
@@ -801,7 +806,7 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
       if has flags oDirectory then .error Errno.enotdir
       .ok kernel
     -- `/dev/pts/N`: `Bap.Linux.Tty` says whether it may be opened.
-    | .ptySlave _ | .device _ => .ok kernel
+    | .ptySlave _ | .device _ => if has flags oDirectory then .error Errno.enotdir else .ok kernel
     -- It has no path.
     | .pipe .. | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .inotify .. | .mqueue .. => .error Errno.einval
     -- What is bound to a path is connected to, not opened.
@@ -1196,10 +1201,11 @@ def mkdir (kernel : Kernel) (group : Nat) (base path : String) (mode : Nat) : Re
 
 /-- `unlink`, and `rmdir` with `directory`. What is open stays open: its inode is still there. -/
 def remove (kernel : Kernel) (base path : String) (directory : Bool) : Result Kernel := do
-  let (normal, found) ← kernel.resolve base path (follow := false)
+  let (normal, found) ← kernel.resolve base path (follow := false) (mounted := false)
   match found with
   | none => .error Errno.enoent
   | some number =>
+    if kernel.mountedAt normal then .error ebusy
     let inode ← inodeOf kernel number
     match inode.content, directory with
     | .directory, true =>
@@ -1213,16 +1219,21 @@ def remove (kernel : Kernel) (base path : String) (directory : Bool) : Result Ke
 
 /-- `rename`: what was at the target is replaced, and all under a directory moves with it. -/
 def rename (kernel : Kernel) (base source target : String) : Result Kernel := do
-  let (from_, found) ← kernel.resolve base source (follow := false)
-  let some _ := found | .error Errno.enoent
-  let (to_, existing) ← kernel.resolve base target (follow := false)
+  let (from_, found) ← kernel.resolve base source (follow := false) (mounted := false)
+  let some number := found | .error Errno.enoent
+  let (to_, existing) ← kernel.resolve base target (follow := false) (mounted := false)
   if !parentIsDirectory kernel to_ then .error Errno.enoent
-  if from_ == to_ then return kernel
+  -- Two names of the same file stay as they are.
+  if from_ == to_ || existing == some number then return kernel
+  if kernel.mountedAt from_ || kernel.mountedAt to_ then .error ebusy
   if (to_ ++ "/").startsWith (from_ ++ "/") then .error Errno.einval
-  if let some number := existing then
-    let inode ← inodeOf kernel number
-    if let .directory := inode.content then
-      if !(children kernel to_).isEmpty then .error Errno.enotempty
+  if let some other := existing then
+    let isDirectory (number : Nat) : Result Bool := do pure ((← inodeOf kernel number).content matches .directory)
+    match ← isDirectory number, ← isDirectory other with
+    | true, false => .error Errno.enotdir
+    | false, true => .error Errno.eisdir
+    | true, true => if !(children kernel to_).isEmpty then .error Errno.enotempty
+    | false, false => pure ()
   if kernel.readOnly from_ || kernel.readOnly to_ then .error erofs
   let moved := kernel.paths.toList.foldl (init := kernel.paths.erase to_) fun paths entry =>
     if entry.1 == from_ then (paths.erase entry.1).insert to_ entry.2
@@ -1235,7 +1246,7 @@ def rename (kernel : Kernel) (base source target : String) : Result Kernel := do
 def linkInode (kernel : Kernel) (number : Nat) (base target : String) : Result Kernel := do
   let inode ← inodeOf kernel number
   if let .directory := inode.content then .error Errno.eperm
-  let (normal, existing) ← kernel.resolve base target (follow := false)
+  let (normal, existing) ← kernel.resolve base target (follow := false) (mounted := false)
   if existing.isSome then .error Errno.eexist
   if !parentIsDirectory kernel normal then .error Errno.enoent
   if kernel.readOnly normal then .error erofs
@@ -1252,11 +1263,12 @@ def link (kernel : Kernel) (base source target : String) (follow : Bool) : Resul
 /-- `renameat2`: of `RENAME_NOREPLACE`, not over what is there, and of `RENAME_EXCHANGE`, the two trade places, with all under them. -/
 def renameWith (kernel : Kernel) (base source target : String) (flags : Nat) : Result Kernel := do
   if flags &&& 3 == 3 || flags &&& 4 != 0 && flags &&& 2 != 0 then .error Errno.einval
-  let (from_, found) ← kernel.resolve base source (follow := false)
+  let (from_, found) ← kernel.resolve base source (follow := false) (mounted := false)
   let some _ := found | .error Errno.enoent
-  let (to_, existing) ← kernel.resolve base target (follow := false)
+  let (to_, existing) ← kernel.resolve base target (follow := false) (mounted := false)
   if flags &&& 1 != 0 && existing.isSome then .error Errno.eexist
   if flags &&& 2 == 0 then return ← kernel.rename base source target
+  if kernel.mountedAt from_ || kernel.mountedAt to_ then .error ebusy
   let some _ := existing | .error Errno.enoent
   if (to_ ++ "/").startsWith (from_ ++ "/") || (from_ ++ "/").startsWith (to_ ++ "/") then .error Errno.einval
   if kernel.readOnly from_ || kernel.readOnly to_ then .error erofs

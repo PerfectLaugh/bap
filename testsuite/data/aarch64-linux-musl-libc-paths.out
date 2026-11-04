@@ -1,0 +1,10 @@
+tmpfs 0 0
+rmdir mount point -16 0
+rename mount point -16 0
+bind a file 0 0
+unlink mount point -16 0
+file over directory -21 0
+directory over file -20 0
+rename to itself 0 1
+O_CREAT of a directory -21 0
+O_DIRECTORY of a device -20 0
