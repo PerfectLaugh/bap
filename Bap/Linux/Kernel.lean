@@ -206,6 +206,9 @@ inductive Content where
   /-- Of `inotify_init`: its watches, what it has to say and hasn't been read, and the number of the next watch and of the next move
   that it pairs the two sides of. -/
   | inotify (watches : List Watch) (notices : Array Notice) (next cookies : Nat)
+  /-- A queue of `mq_open`: its messages, of the highest priority first, how many it holds and how big each is at most, and of
+  `mq_notify`, the process that it tells when a message comes to it empty, how, with which signal and what value. -/
+  | mqueue (messages : List (Nat × ByteArray)) (capacity size : Nat) (notify : Option (Nat × Nat × Nat × Nat))
 
 /-- A file of any kind: its number, what it holds, and its type and permissions as `st_mode` has them. -/
 structure Inode where
@@ -798,7 +801,7 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
     -- `/dev/pts/N`: `Bap.Linux.Tty` says whether it may be opened.
     | .ptySlave _ | .device _ => .ok kernel
     -- It has no path.
-    | .pipe .. | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .inotify .. => .error Errno.einval
+    | .pipe .. | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .inotify .. | .mqueue .. => .error Errno.einval
     -- What is bound to a path is connected to, not opened.
     | .socket _ => .error Errno.enxio
   let openFile := kernel.nextOpenFile
@@ -828,7 +831,7 @@ def read (kernel : Kernel) (group fd count : Nat) : Result (Kernel × ByteArray)
   let data ← match inode.content with
     | .file data | .console data => .ok data
     | .directory => .error Errno.eisdir
-    | .symlink _ | .generated _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ | .inotify .. => .error Errno.einval
+    | .symlink _ | .generated _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ | .inotify .. | .mqueue .. => .error Errno.einval
   let bytes := readAt data file.offset count
   .ok ({ kernel with openFiles := kernel.openFiles.insert id { file with offset := file.offset + bytes.size } }, bytes)
 
@@ -839,7 +842,7 @@ def readFrom (kernel : Kernel) (group fd count offset : Nat) : Result ByteArray 
   let inode ← inodeOf kernel file.inode
   match inode.content with
   | .file data => .ok (readAt data offset count)
-  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ | .inotify .. => .error Errno.espipe
+  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ | .inotify .. | .mqueue .. => .error Errno.espipe
   | .directory => .error Errno.eisdir
   | .symlink _ | .generated _ => .error Errno.einval
 
@@ -863,7 +866,7 @@ def write (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Result (Kerne
       openFiles := kernel.openFiles.insert id { file with offset := offset + bytes.size } }, bytes.size)
   | .directory => .error Errno.eisdir
   -- `Machine` sends to a socket, and counts what is written to an `eventfd`.
-  | .symlink _ | .generated _ | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .inotify .. => .error Errno.einval
+  | .symlink _ | .generated _ | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .inotify .. | .mqueue .. => .error Errno.einval
 
 /-- `writeAt`, in the same bytes if nothing else holds them. -/
 def writeInto (data : ByteArray) (offset : Nat) (bytes : ByteArray) : ByteArray :=
@@ -924,7 +927,7 @@ def writeTo (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Nat
     if let some errno := inode.sealedAgainst data.size offset bytes.size then .error errno
     .ok ({ kernel with inodes := kernel.inodes.insert file.inode ({ inode with content := .file (writeAt data offset bytes) }.written kernel.clock) },
       bytes.size)
-  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ | .inotify .. => .error Errno.espipe
+  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ | .inotify .. | .mqueue .. => .error Errno.espipe
   | .directory => .error Errno.eisdir
   | .symlink _ | .generated _ => .error Errno.einval
 
@@ -935,7 +938,7 @@ def seek (kernel : Kernel) (group fd : Nat) (negative : Bool) (distance whence :
   let size ← match inode.content with
     | .file data => .ok data.size
     | .directory => .ok 0
-    | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ | .inotify .. => .error Errno.espipe
+    | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ | .inotify .. | .mqueue .. => .error Errno.espipe
     | .symlink _ | .generated _ => .error Errno.einval
   let start ← match whence with
     | 0 => .ok 0
@@ -1096,7 +1099,7 @@ private def statOf (inode : Inode) : Stat :=
     | .file data => (data.size, 1)
     | .directory => (4096, 2)
     | .symlink target => (target.utf8ByteSize, 1)
-    | .console _ | .generated _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ | .inotify .. => (0, 1)
+    | .console _ | .generated _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ | .inotify .. | .mqueue .. => (0, 1)
   { inode := inode.number, mode := inode.mode, size, links, accessed := inode.details.accessed, modified := inode.details.modified
     changed := inode.details.changed, uid := inode.details.uid, gid := inode.details.gid }
 

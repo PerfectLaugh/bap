@@ -286,6 +286,11 @@ def Kernel.image (kernel : Kernel) : Image where
         let out := Wire.putList (fun out (notice : Notice) =>
           Wire.putText (Wire.putList Wire.putNat out [notice.wd, notice.mask, notice.cookie]) notice.name) out notices.toList
         (14, Wire.putNat (Wire.putNat out next) cookies)
+      | .mqueue messages capacity size notify =>
+        let out := Wire.putList (fun out (priority, text) => Wire.putBytes (Wire.putNat out priority) text) ByteArray.empty messages
+        let out := Wire.putList Wire.putNat (Wire.putNat (Wire.putNat out capacity) size)
+          (match notify with | some (group, how, signal, value) => [group, how, signal, value] | none => [])
+        (15, out)
     { number, mode := inode.mode, kind, data, details := metaBytes inode.details }
   nextInode := kernel.nextInode
   openFiles := (sorted kernel.openFiles.toList).map fun (id, file) => (id, file.inode, file.offset, file.flags)
@@ -353,6 +358,17 @@ def Image.kernel (image : Image) : Except String Kernel := do
         let (cookies, _) ← Wire.getNat entry.data at_
         pure (Content.inotify (watches.map fun fields => { wd := fields.getD 0 0, inode := fields.getD 1 0, mask := fields.getD 2 0 })
           notices.toArray next cookies)
+      | 15 =>
+        let (messages, at_) ← Wire.getList (fun data at_ => do
+          let (priority, at_) ← Wire.getNat data at_
+          let (text, at_) ← Wire.getBytes data at_
+          .ok ((priority, text), at_)) entry.data 0
+        let (capacity, at_) ← Wire.getNat entry.data at_
+        let (size, at_) ← Wire.getNat entry.data at_
+        let (notify, _) ← Wire.getList Wire.getNat entry.data at_
+        pure (Content.mqueue messages capacity size (match notify with
+          | [group, how, signal, value] => some (group, how, signal, value)
+          | _ => none))
       | kind => .error s!"a Linux checkpoint with an inode of kind {kind}"
     pure (inodes.insert entry.number { number := entry.number, content, mode := entry.mode, details := ← metaOfBytes entry.details })
   pure {

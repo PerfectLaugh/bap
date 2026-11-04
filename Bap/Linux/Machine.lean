@@ -11,6 +11,7 @@ import Bap.Linux.Tty
 import Bap.Linux.Files
 import Bap.Linux.Notify
 import Bap.Linux.SysV
+import Bap.Linux.Mqueue
 import Bap.Linux.GuestHeap
 import Bap.Linux.LoadedLibrary
 import Bap.Linux.Image
@@ -972,6 +973,8 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     | .shmget | .shmat | .shmdt | .shmctl | .semget | .semop | .semtimedop | .semtimedop64 | .semctl | .msgget | .msgsnd | .msgrcv
     | .msgctl | .ipc =>
       pure ((← SysV.serve poller emu call args).getD (errorOf Errno.enosys))
+    | .mqOpen | .mqUnlink | .mqTimedsend | .mqTimedsend64 | .mqTimedreceive | .mqTimedreceive64 | .mqNotify | .mqGetsetattr =>
+      pure ((← Mqueue.serve poller emu call args).getD (errorOf Errno.enosys))
     | .inotifyInit | .inotifyInit1 | .inotifyAddWatch | .inotifyRmWatch =>
       pure ((← Notify.serve machine.notifier poller emu call args).getD (errorOf Errno.enosys))
     | .poll | .ppoll | .ppoll64 | .select | .pselect6 | .pselect664 | .epollCreate | .epollCreate1 | .epollCtl | .epollWait
@@ -1443,7 +1446,7 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
           | .open_, .returnValue fd | .openat, .returnValue fd | .dup, .returnValue fd | .socket, .returnValue fd
           | .accept, .returnValue fd | .accept4, .returnValue fd | .eventfd, .returnValue fd | .eventfd2, .returnValue fd | .epollCreate, .returnValue fd | .epollCreate1, .returnValue fd
           | .timerfdCreate, .returnValue fd | .signalfd4, .returnValue fd | .memfdCreate, .returnValue fd | .inotifyInit, .returnValue fd
-          | .inotifyInit1, .returnValue fd
+          | .inotifyInit1, .returnValue fd | .mqOpen, .returnValue fd
           -- Of fcntl, F_DUPFD and F_DUPFD_CLOEXEC, which make one, rather than what the others give, as flags.
           | .fcntl, .returnValue fd =>
             if call == .fcntl && args.getD 1 0 != 0 && args.getD 1 0 != 1030 then pure action else
