@@ -15,7 +15,7 @@ local elab "open_private_decls " mod:ident ns:ident ids:ident* : command => do
 
 open Bap.Symbolic
 open_private_decls Bap.Symbolic.Memory Bap.Symbolic.Memory offsetAddress byteAt
-open_private_decls Bap.Symbolic.Executor Bap.Symbolic lookup binaryApp binary evalCast
+open_private_decls Bap.Symbolic.Executor Bap.Symbolic lookup binaryApp binary evalCast unary extractOf concatOf iteOf
   isMemoryType evalMemory freshen withConstraint expectCondition
   executeStmt executeProgram executeStmt.continueResults executeProgram.continueResults
 
@@ -200,6 +200,52 @@ theorem denote_binary (σ : Assignment) (name : String) (width : Nat) (left righ
 theorem denote_ite (σ : Assignment) (c y n : Expr) :
     denote σ (.ite c y n) = if isOne (denote σ c) then denote σ y else denote σ n := by
   simp [denote]
+
+/-! What the executor's constructors that fold constants give denotes what the term they stand for does. -/
+
+theorem denote_unary (σ : Assignment) (op : Bil.UnOp) (value : Expr) :
+    denote σ (unary op value) = denote σ (.app (match op with | .neg => "bvneg" | .not => "bvnot") value.width [value]) := by
+  cases value <;> cases op <;> simp [unary, denote, denoteUnary, Expr.width] <;> rfl
+
+theorem width_unary (op : Bil.UnOp) (value : Expr) : (unary op value).width = value.width := by
+  cases value <;> cases op <;> rfl
+
+theorem denote_extractOf (σ : Assignment) (high low : Nat) (value : Expr) :
+    denote σ (extractOf high low value) = denote σ (.extract high low value) := by
+  cases value <;> simp [extractOf, denote]
+
+theorem width_extractOf {high low : Nat} (value : Expr) (h : low ≤ high) :
+    (extractOf high low value).width = high + 1 - low := by
+  cases value <;> simp only [extractOf, Expr.width] <;> omega
+
+theorem denote_concatOf (σ : Assignment) (left right : Expr) :
+    denote σ (concatOf left right) = denote σ (.concat left right) := by
+  cases left <;> cases right <;> simp [concatOf, denote]
+
+theorem width_concatOf (left right : Expr) : (concatOf left right).width = left.width + right.width := by
+  cases left <;> cases right <;> rfl
+
+theorem denote_iteOf (σ : Assignment) (condition yes no : Expr) :
+    denote σ (iteOf condition yes no) = denote σ (.ite condition yes no) := by
+  unfold iteOf
+  split
+  · next bits =>
+    simp only [denote, isOne]
+    by_cases h : bits = 1
+    · simp [h]
+    · have : bits.toNat ≠ 1 := fun e => h (BitVec.eq_of_toNat_eq (by simpa using e))
+      have h' : ¬bits = 1#1 := h
+      simp [h', this]
+  · rfl
+
+theorem width_iteOf (condition : Expr) {yes no : Expr} (h : yes.width = no.width) :
+    (iteOf condition yes no).width = yes.width := by
+  unfold iteOf
+  split
+  · split
+    · rfl
+    · exact h.symm
+  · rfl
 
 theorem isOne_bit (b : Bool) : isOne ⟨1, Word.bool b⟩ = b := by
   cases b <;> rfl
@@ -947,11 +993,11 @@ theorem width_evalCast {kind : Bil.Cast} {width : Nat} {value result : Expr}
     · split at h
       · cases h
       · cases h
-        simp only [Expr.width]
+        rw [width_extractOf _ (by omega)]
         omega
     all_goals
       split at h <;> cases h
-      · simp only [Expr.width]; omega
+      · rw [width_extractOf _ (by omega)]; omega
       · rfl
 
 theorem evalCast_zero (kind : Bil.Cast) (value : Expr) :
@@ -978,8 +1024,8 @@ private theorem zero_ne_sign (k : Nat) : s!"(_ {"zero_extend"} {k})" ≠ s!"(_ {
 
 private theorem denote_extract_of {σ : Assignment} {value : Expr} {w : Nat} {x : BitVec w}
     (h : denote σ value = ⟨w, x⟩) (high low : Nat) :
-    denote σ (.extract high low value) = ⟨_, BitVec.extractLsb high low x⟩ := by
-  simp only [denote]
+    denote σ (extractOf high low value) = ⟨_, BitVec.extractLsb high low x⟩ := by
+  simp only [denote_extractOf, denote]
   rw [h]
 
 theorem fst_evalCast {σ : Assignment} {kind : Bil.Cast} {width : Nat} {value result : Expr}
@@ -999,11 +1045,12 @@ theorem fst_evalCast {σ : Assignment} {kind : Bil.Cast} {width : Nat} {value re
     · split at h
       · cases h
       · cases h
-        simp only [denote, Expr.width]
+        rw [denote_extractOf, width_extractOf _ (by omega)]
+        simp only [denote]
         omega
     all_goals
       split at h <;> cases h
-      · simp only [denote, Expr.width]; omega
+      · rw [denote_extractOf, width_extractOf _ (by omega)]; simp only [denote]; omega
       · exact hunary _ _ (by split <;> simp)
 
 theorem width_readCells {cells : List (Expr × Expr)} (h : ∀ cell ∈ cells, cell.2.width = 8)
@@ -1144,6 +1191,7 @@ theorem sized_eval (σ : Assignment) (e : Bil.Exp) :
     obtain ⟨v, hv, h⟩ := h
     cases h
     have := ih.1 hs hv
+    rw [denote_unary, width_unary]
     cases op <;> simp [denote, denoteUnary, Expr.width, this]
   | cast kind width value ih =>
     refine ⟨fun hs h => ?_, fun _ h => by simp [evalMemory] at h⟩
@@ -1175,6 +1223,7 @@ theorem sized_eval (σ : Assignment) (e : Bil.Exp) :
         · next hne =>
           cases h
           have hne' : y.width = n.width := by simpa using hne
+          rw [denote_iteOf, width_iteOf _ hne']
           simp only [denote, Expr.width]
           split
           · exact ihy.1 hs hy
@@ -1193,14 +1242,16 @@ theorem sized_eval (σ : Assignment) (e : Bil.Exp) :
     · split at h
       · cases h
       · cases h
-        simp only [denote, Expr.width]
+        rw [denote_extractOf, width_extractOf _ (by omega)]
+        simp only [denote]
         omega
   | concat left right ihl ihr =>
     refine ⟨fun hs h => ?_, fun _ h => by simp [evalMemory] at h⟩
     simp only [evalExp, bind_ok] at h
     obtain ⟨l, hl, r, hr, h⟩ := h
     cases h
-    simp only [denote, Expr.width, ihl.1 hs hl, ihr.1 hs hr]
+    rw [denote_concatOf, width_concatOf]
+    simp only [denote, ihl.1 hs hl, ihr.1 hs hr]
   | unknown message typ =>
     refine ⟨fun _ h => ?_, fun _ h => ?_⟩
     · simp only [evalExp] at h
@@ -1697,7 +1748,7 @@ private theorem denote_binary_sound {σ : Assignment} {op : Bil.BinOp} {left rig
 
 private theorem denote_truncate {σ : Assignment} {x : Expr} {w width : Nat} {v : BitVec w}
     (hd : denote σ x = ⟨w, v⟩) (hpos : width ≠ 0) :
-    denote σ (.extract (width - 1) 0 x) = ⟨width, BitVec.zeroExtend width v⟩ := by
+    denote σ (extractOf (width - 1) 0 x) = ⟨width, BitVec.zeroExtend width v⟩ := by
   rw [denote_extract_of hd]
   apply bits_ext (by simp only; omega)
   simp only [BitVec.extractLsb_toNat, Nat.shiftRight_zero, BitVec.truncate_eq_setWidth, BitVec.toNat_setWidth]
@@ -1901,7 +1952,7 @@ theorem evalExp_sound (σ : Assignment) {o : Oracle} (ho : Agrees σ o) (e : Bil
     have hdx := ih.1 hr hx hcv
     have hunary : ∀ name k, denote σ (.app name k [x]) = denoteUnary name k (denote σ x) := by
       intro name k; simp [denote]
-    rw [hunary, hdx]
+    rw [denote_unary, hunary, hdx]
     cases op <;> simp only [evalUn, Except.ok.injEq] at hc <;> cases hc <;> simp [denoteUnary]
   | cast kind width value ih =>
     refine ⟨fun hr h hc => ?_, fun _ h _ => by simp [evalMemory] at h⟩
@@ -2020,7 +2071,7 @@ theorem evalExp_sound (σ : Assignment) {o : Oracle} (ho : Agrees σ o) (e : Bil
         by_cases hw : cw = 1
         · subst hw
           have hdc := ihc.1 hr hcond hcv
-          rw [denote_ite, hdc]
+          rw [denote_iteOf, denote_ite, hdc]
           simp only [↓reduceDIte] at hc
           by_cases h1 : cb = 1
           · rw [ite_eq_left h1] at hc
@@ -2066,7 +2117,7 @@ theorem evalExp_sound (σ : Assignment) {o : Oracle} (ho : Agrees σ o) (e : Bil
     cases hc
     have hdl := ihl.1 hr hl hlv
     have hdr := ihr.1 hr hrr hrv
-    simp only [denote]
+    simp only [denote_concatOf, denote]
     rw [hdl, hdr]
     rfl
   | unknown message typ =>
@@ -3952,10 +4003,9 @@ theorem eval_total (e : Bil.Exp) : ∀ {s : State} {t : Typ}, Typed s → inferE
     simp only [Except.ok.injEq] at ht
     subst ht
     obtain ⟨x, hx, hxw⟩ := (ih hs htv).1 rfl
-    have he : evalExp s (.un op value) =
-        .ok (.app (match op with | .neg => "bvneg" | .not => "bvnot") x.width [x]) := by
-      cases op <;> simp [evalExp, hx, bind, Except.bind]
-    exact ⟨fun _ => ⟨_, he, hxw⟩, fun hm => by cases hm⟩
+    have he : evalExp s (.un op value) = .ok (unary op x) := by
+      simp [evalExp, hx, bind, Except.bind]
+    exact ⟨fun _ => ⟨_, he, (width_unary op x).trans hxw⟩, fun hm => by cases hm⟩
   | cast kind width value ih =>
     intro s t hs ht
     simp only [inferExp, bind_ok] at ht
@@ -4050,7 +4100,7 @@ theorem eval_total (e : Bil.Exp) : ∀ {s : State} {t : Typ}, Typed s → inferE
       · intro hm
         obtain ⟨y, hy, hyw⟩ := (ihy hs hty).1 hm
         obtain ⟨n, hn, hnw⟩ := (ihn hs htn).1 hm
-        refine ⟨.ite c y n, ?_, hyw⟩
+        refine ⟨iteOf c y n, ?_, (width_iteOf c (hyw.trans hnw.symm)).trans hyw⟩
         simp [evalExp, hc, hy, hn, hcw1, hyw, hnw, bind, Except.bind]
       · intro hm
         obtain ⟨y, hy, hyb⟩ := (ihy hs hty).2 hm
@@ -4081,7 +4131,8 @@ theorem eval_total (e : Bil.Exp) : ∀ {s : State} {t : Typ}, Typed s → inferE
         obtain ⟨x, hx, hxw⟩ := (ih hs htv).1 rfl
         have hxw' : x.width = w := hxw
         refine ⟨fun _ => ⟨_, by simp [evalExp, hx, hlow, hxw', hhigh, bind, Except.bind]; rfl, ?_⟩, fun hm => by cases hm⟩
-        simp only [Expr.width, typeWidth]
+        rw [width_extractOf _ (by omega)]
+        simp only [typeWidth]
         omega
   | concat left right ihl ihr =>
     intro s t hs ht
@@ -4094,7 +4145,7 @@ theorem eval_total (e : Bil.Exp) : ∀ {s : State} {t : Typ}, Typed s → inferE
     obtain ⟨l, hl, hlw⟩ := (ihl hs htl).1 rfl
     obtain ⟨r, hrr', hrw⟩ := (ihr hs htr).1 rfl
     refine ⟨fun _ => ⟨_, by simp [evalExp, hl, hrr', bind, Except.bind]; rfl, ?_⟩, fun hm => by cases hm⟩
-    simp only [Expr.width, hlw, hrw, typeWidth]
+    simp only [width_concatOf, hlw, hrw, typeWidth]
   | unknown message typ =>
     intro s t hs ht
     simp only [inferExp] at ht
@@ -4506,6 +4557,34 @@ theorem WellSorted.width_pos {e : Expr} (h : WellSorted e) : 0 < e.width := by
   | concat _ _ ihl => simp only [Expr.width]; omega
   | ite _ _ _ _ _ _ ihy => exact ihy
   | select _ _ => show 0 < 8; decide
+
+theorem sorted_unary (op : Bil.UnOp) {value : Expr} (hv : WellSorted value) : WellSorted (unary op value) := by
+  have hp := hv.width_pos
+  cases value <;> first
+    | exact .const _ hp
+    | exact .unary (by cases op <;> simp) hv
+
+theorem sorted_extractOf {high low : Nat} {value : Expr} (hv : WellSorted value) (hl : low ≤ high)
+    (hh : high < value.width) : WellSorted (extractOf high low value) := by
+  cases value <;> first
+    | exact .const _ (by omega)
+    | exact .extract hv hl hh
+
+theorem sorted_concatOf {left right : Expr} (hl : WellSorted left) (hr : WellSorted right) :
+    WellSorted (concatOf left right) := by
+  have hp := hl.width_pos
+  cases left <;> cases right <;> first
+    | exact .const _ (by simp only [Expr.width] at hp; omega)
+    | exact .concat hl hr
+
+theorem sorted_iteOf {condition yes no : Expr} (hc : WellSorted condition) (hcw : condition.width = 1)
+    (hy : WellSorted yes) (hn : WellSorted no) (hw : yes.width = no.width) : WellSorted (iteOf condition yes no) := by
+  unfold iteOf
+  split
+  · split
+    · exact hy
+    · exact hn
+  · exact .ite hc hcw hy hn hw
 
 private theorem str_ext {a b : String} (h : a.toList = b.toList) : a = b := String.toList_inj.mp h
 
@@ -5239,11 +5318,11 @@ private theorem sorted_evalCast {kind : Bil.Cast} {width : Nat} {value result : 
       · cases h
       · next hle =>
         cases h
-        exact .extract hv (by omega) (by omega)
+        exact sorted_extractOf hv (by omega) (by omega)
     all_goals
       simp only at h
       split at h <;> cases h
-      · exact .extract hv (by omega) (by omega)
+      · exact sorted_extractOf hv (by omega) (by omega)
       · refine .extension (by first | exact .inr rfl | exact .inl rfl | (split <;> simp)) hv (by omega)
 
 /-- Every expression and memory the evaluator builds from well-sorted parts is well sorted. -/
@@ -5306,7 +5385,7 @@ theorem eval_sorted (e : Bil.Exp) :
     simp only [evalExp, bind_ok] at h
     obtain ⟨v, hv, h⟩ := h
     cases h
-    exact .unary (by cases op <;> simp) (ih.1 hs hv)
+    exact sorted_unary op (ih.1 hs hv)
   | cast kind width value ih =>
     refine ⟨fun hs h => ?_, fun _ h => by simp [evalMemory] at h⟩
     simp only [evalExp, bind_ok] at h
@@ -5351,7 +5430,7 @@ theorem eval_sorted (e : Bil.Exp) :
         · cases h
         · next hw =>
           cases h
-          exact .ite (ihc.1 hs hc) (Decidable.not_not.mp hcw) (ihy.1 hs hy) (ihn.1 hs hn) (Decidable.not_not.mp hw)
+          exact sorted_iteOf (ihc.1 hs hc) (Decidable.not_not.mp hcw) (ihy.1 hs hy) (ihn.1 hs hn) (Decidable.not_not.mp hw)
     · simp only [evalMemory, bind_ok] at h
       obtain ⟨c, hc, y, hy, n, hn, h⟩ := h
       split at h
@@ -5375,13 +5454,13 @@ theorem eval_sorted (e : Bil.Exp) :
       · cases h
       · next hh =>
         cases h
-        exact .extract (ih.1 hs hx) (by omega) (by omega)
+        exact sorted_extractOf (ih.1 hs hx) (by omega) (by omega)
   | concat left right ihl ihr =>
     refine ⟨fun hs h => ?_, fun _ h => by simp [evalMemory] at h⟩
     simp only [evalExp, bind_ok] at h
     obtain ⟨l, hl, r, hr, h⟩ := h
     cases h
-    exact .concat (ihl.1 hs hl) (ihr.1 hs hr)
+    exact sorted_concatOf (ihl.1 hs hl) (ihr.1 hs hr)
   | unknown message typ =>
     refine ⟨fun _ h => ?_, fun _ h => ?_⟩
     · simp only [evalExp] at h

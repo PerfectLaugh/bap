@@ -41,6 +41,13 @@ private def paths : IO Unit := do
   match Bap.Symbolic.run [.while (.int (BitVec.ofNat 1 1)) []] {} 5 with
   | .ok [⟨_, .exhausted⟩] => IO.println "ok: while true reports the bound"
   | _ => throw <| IO.userError "while true should be reported as exhausted"
+  -- A condition of constants is known whatever it is made of: a cast, a negation, a concatenation, a conditional.
+  let closed : Bil.Exp := .ite (.extract 0 0 (.concat (.int (BitVec.ofNat 4 0)) (.un .not (.int (BitVec.ofNat 4 0)))))
+    (.cast .low 1 (.int (BitVec.ofNat 8 2))) (.int (BitVec.ofNat 1 1))
+  match Bap.Symbolic.run [.ifElse closed [.special "yes"] [.special "no"]] with
+  | .ok [⟨state, .special "no"⟩] => assertEqual "a closed condition takes its branch with no constraint" 0 state.constraints.length
+  | .ok results => throw <| IO.userError s!"a closed condition should have one path, not {results.length}"
+  | .error message => throw <| IO.userError message
   let counter : Bap.Var := ⟨"i", .imm 8, 0, false⟩
   let counting : Bil.Program := [
     .move counter (.int (BitVec.ofNat 8 0)),

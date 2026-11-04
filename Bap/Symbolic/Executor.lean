@@ -102,6 +102,28 @@ private def binary (op : Bil.BinOp) (left right : Expr) : Expr :=
     | _ => binaryApp op left right
   | _, _ => binaryApp op left right
 
+/-- The constructors below give the constant itself for a term of constants, as `binary` does, so that a condition is
+known whenever it doesn't depend on the assignment. -/
+private def unary (op : Bil.UnOp) (value : Expr) : Expr :=
+  match value with
+  | .const bits => .const (match op with | .neg => -bits | .not => ~~~bits)
+  | _ => .app (match op with | .neg => "bvneg" | .not => "bvnot") value.width [value]
+
+private def extractOf (high low : Nat) (value : Expr) : Expr :=
+  match value with
+  | .const bits => .const (BitVec.extractLsb high low bits)
+  | _ => .extract high low value
+
+private def concatOf (left right : Expr) : Expr :=
+  match left, right with
+  | .const leftBits, .const rightBits => .const (leftBits ++ rightBits)
+  | _, _ => .concat left right
+
+private def iteOf (condition yes no : Expr) : Expr :=
+  match condition with
+  | @Expr.const 1 bits => if bits = 1 then yes else no
+  | _ => .ite condition yes no
+
 private def evalCast (kind : Bil.Cast) (width : Nat) (value : Expr) : Except String Expr :=
   if width = 0 then
     .error "cast width must be positive"
@@ -111,10 +133,10 @@ private def evalCast (kind : Bil.Cast) (width : Nat) (value : Expr) : Except Str
       if value.width < width then
         .error "invalid high cast"
       else
-        .ok (.extract (value.width - 1) (value.width - width) value)
+        .ok (extractOf (value.width - 1) (value.width - width) value)
     | .low | .unsigned | .signed =>
       if width ≤ value.width then
-        .ok (.extract (width - 1) 0 value)
+        .ok (extractOf (width - 1) 0 value)
       else
         let extension := if kind matches .signed then "sign_extend" else "zero_extend"
         .ok (.app s!"(_ {extension} {width - value.width})" width [value])
@@ -178,7 +200,7 @@ def evalExp (state : State) : Bil.Exp → Except String Expr
       .ok (binary op left right)
   | .un op value => do
     let value ← evalExp state value
-    .ok (.app (match op with | .neg => "bvneg" | .not => "bvnot") value.width [value])
+    .ok (unary op value)
   | .cast kind width value => do
     let value ← evalExp state value
     evalCast kind width value
@@ -198,7 +220,7 @@ def evalExp (state : State) : Bil.Exp → Except String Expr
     else if yes.width ≠ no.width then
       .error "branches of a conditional have different widths"
     else
-      .ok (.ite condition yes no)
+      .ok (iteOf condition yes no)
   | .extract high low value => do
     let value ← evalExp state value
     if high < low then
@@ -206,11 +228,11 @@ def evalExp (state : State) : Bil.Exp → Except String Expr
     else if high ≥ value.width then
       .error "extract high bound exceeds source width"
     else
-      .ok (.extract high low value)
+      .ok (extractOf high low value)
   | .concat left right => do
     let left ← evalExp state left
     let right ← evalExp state right
-    .ok (.concat left right)
+    .ok (concatOf left right)
   | .unknown message typ =>
     if typeWidth typ = 0 then .error "an unknown value must have at least one bit"
     else .ok (.var (unknownName message) (typeWidth typ))
