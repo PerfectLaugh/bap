@@ -2968,6 +2968,27 @@ def testWaitResultMapping (triple : String) : IO Unit := do
   again.setWaitResultMapping (· + 1000)
   assertEqual s!"{label} and are what the host says once it is told again" "1000 1000\n" (← outputOf again)
 
+/-- What seccomp keeps comes out of a checkpoint as it went in, of the threads that there are, and a filter that isn't one is refused
+before it is run. -/
+def testSeccompState : IO Unit := do
+  let program : Array Bap.Linux.Seccomp.Insn := #[⟨0x20, 0, 0, 0⟩, ⟨0x15, 0, 1, 39⟩, ⟨0x06, 0, 0, 0x00050001⟩, ⟨0x06, 0, 0, 0x7fff0000⟩]
+  let state : Bap.Linux.Seccomp.State := {
+    programs := #[program, program], filters := Std.HashMap.ofList [(5, [1, 0]), (6, [0]), (9, [1])]
+    strict := Std.HashSet.ofList [7], noNewPrivs := Std.HashSet.ofList [5, 9], traced := Std.HashSet.ofList [6] }
+  let live (tid : Nat) : Bool := tid != 9
+  let some again := (Bap.Linux.Seccomp.decode (Bap.Linux.Seccomp.encode state live)).toOption
+    | throw <| IO.userError "seccomp: a checkpoint of it isn't read back"
+  let sorted (list : List Nat) : List Nat := list.mergeSort (· ≤ ·)
+  assertEqual "seccomp: its filters, of the threads that there are" [(5, [1, 0]), (6, [0])]
+    (again.filters.toList.mergeSort (fun a b => a.1 ≤ b.1))
+  assertEqual "seccomp: and its programs" [program.toList, program.toList] (again.programs.toList.map (·.toList))
+  assertEqual "seccomp: and its modes" ([7], [5], [6]) (sorted again.strict.toList, sorted again.noNewPrivs.toList, sorted again.traced.toList)
+  let word (offset : Nat) : Nat := if offset == 0 then 39 else 0
+  assertEqual "seccomp: a filter runs" 0x00050001 (Bap.Linux.Seccomp.run program word)
+  assertEqual "seccomp: the first result of the actions" 0x80000000
+    (Bap.Linux.Seccomp.combine [0x7fff0000, 0x00050001, 0x80000000, 0x00030000])
+  assertTrue "seccomp: a load past seccomp_data isn't a filter" (!Bap.Linux.Seccomp.valid #[⟨0x20, 0, 0, 64⟩, ⟨0x06, 0, 0, 0⟩])
+
 /-- Files and directories put in a kernel, before a run and as a machine runs, through links and over what is there. -/
 def testKernelFiles : IO Unit := do
   let label := "Kernel files"

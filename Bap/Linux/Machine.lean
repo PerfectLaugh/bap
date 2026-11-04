@@ -3,6 +3,7 @@ import Bap.Emu.Checkpoint
 import Bap.Linux.Calls
 import Bap.Linux.Signals
 import Bap.Linux.Ptrace
+import Bap.Linux.Seccomp
 import Bap.Linux.GuestHeap
 import Bap.Linux.LoadedLibrary
 import Bap.Linux.Image
@@ -1173,6 +1174,8 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     | .sigaltstack => returning emu (arg 1) (ByteArray.mk (Array.replicate (3 * wordSize) 0))
     | .schedGetaffinity => returning emu (arg 2) (cell wordSize 1) wordSize
     | .succeeds => pure (.returnValue 0)
+    -- Served by `Bap.Linux.Seccomp` before it comes here.
+    | .seccomp => pure (errorOf Errno.enosys)
     | .prctl =>
       -- What a program asks of tagged addresses, on AArch64: they are always taken here, where only a tag in the top byte is.
       if architecture == .aarch64 && arg 0 == 55 then
@@ -1764,6 +1767,13 @@ private def heapModelId : String := "bap.heap"
 /-- What a checkpoint knows what `Machine.loadLibrary` has loaded by. -/
 private def libraryModelId : String := "bap.libraries"
 
+/-- The models that every machine has, with the versions of what they keep: of ptrace, 2 has the stops that tracees have yet to make
+and those that stopped for their end. -/
+private def builtinModels : List (String × Nat) :=
+  [(Signals.modelId, 1), (Ptrace.modelId, 2), (Seccomp.modelId, 1), (heapModelId, 1), (libraryModelId, 1)]
+
+private def builtinVersion (id : String) : Nat := (builtinModels.lookup id).getD 1
+
 /-- Where a word is to `futex` that is in the file of a shared mapping, which is no address space, of which there are as many as tasks. -/
 private def sharedFutexSpace : Nat := Kernel.fileSpace
 
@@ -1796,11 +1806,13 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   for model in models do
     let _ ← machine.attachModel model
   -- Signals are part of what it is, and it is in a checkpoint like what a model holds.
-  machine.models.modify (· ++ [{ id := Signals.modelId, version := 1, state := { save := signals.save, load := signals.load } }])
+  machine.models.modify (· ++ [{ id := Signals.modelId, version := builtinVersion Signals.modelId, state := { save := signals.save, load := signals.load } }])
   -- So is what is traced and stopped, which serves the waits, and so is before the signals.
   ptrace.install emu
-  -- 2: with the stops that tracees have yet to make, and those that stopped for their end.
-  machine.models.modify (· ++ [{ id := Ptrace.modelId, version := 2, state := { save := ptrace.save, load := ptrace.load } }])
+  machine.models.modify (· ++ [{ id := Ptrace.modelId, version := builtinVersion Ptrace.modelId, state := { save := ptrace.save, load := ptrace.load } }])
+  -- And what a thread may call, which ptrace asks of each call once a tracer saw it start.
+  let seccomp ← Seccomp.attach architecture signals ptrace emu
+  machine.models.modify (· ++ [{ id := Seccomp.modelId, version := builtinVersion Seccomp.modelId, state := seccomp.modelState emu }])
   signals.serve emu
   -- A process that is over has closed what it had open.
   let heard ← emu.processExited.get
@@ -1810,7 +1822,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
     ptrace.processExited emu group)
   -- So is what was allocated in it, as what has an address has to go on having it.
   machine.models.modify (· ++ [{
-    id := heapModelId, version := 1,
+    id := heapModelId, version := builtinVersion heapModelId,
     state := {
       save := do
         -- Of what is still there, as a process that went doesn't say so.
@@ -1818,7 +1830,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
         pure (GuestHeap.encode ((← machine.heaps.get).filter fun space _ => table.tasks.any (·.space == space)))
       load := fun data => do machine.heaps.set (← IO.ofExcept (GuestHeap.decode data)) } }])
   machine.models.modify (· ++ [{
-    id := libraryModelId, version := 1,
+    id := libraryModelId, version := builtinVersion libraryModelId,
     state := {
       save := do
         let table ← emu.taskTable.get
@@ -2328,9 +2340,12 @@ def Machine.checkpointInfo (data : ByteArray) : IO Machine.CheckpointInfo := do
 
 /-- Says what can't be restored of the models of a checkpoint, as going on without one or with another isn't going on as it would have. -/
 private def modelConflict (saved : List (String × Nat × ByteArray)) (models : List RuntimeModel) : Option String :=
-  -- Those that every machine has are no one's to give.
-  let saved := saved.filter fun entry =>
-    entry.1 != Signals.modelId && entry.1 != Ptrace.modelId && entry.1 != heapModelId && entry.1 != libraryModelId
+  -- Those that every machine has are no one's to give, and are of the versions that it has.
+  let builtin := saved.filterMap fun (id, version, _) => (builtinModels.lookup id).map (id, version, ·)
+  match builtin.find? fun (_, version, current) => version != current with
+  | some (id, version, current) => some s!"a checkpoint with version {version} of model {id}, and this is version {current}"
+  | none =>
+  let saved := saved.filter fun entry => !(builtinModels.lookup entry.1).isSome
   match saved.find? (fun entry => !(models.any (·.id == entry.1))) with
   | some entry => some s!"a checkpoint with the state of model {entry.1}, which wasn't given"
   | none =>

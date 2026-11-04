@@ -33,6 +33,9 @@ inductive SignalDetail where
   | sent (pid uid value : Nat)
   | child (pid uid status : Nat)
   | fault (address : Nat)
+  /-- Of a system call that a filter of seccomp trapped: where it was made, its number, the architecture as `AUDIT_ARCH_*` says it,
+  and what the filter gave with `SECCOMP_RET_TRAP`, which is `si_errno`. -/
+  | seccomp (address syscall arch data : Nat)
   deriving DecidableEq, Repr
 
 structure SignalInfo where
@@ -290,6 +293,7 @@ private def putInfo (out : ByteArray) (info : SignalInfo) : ByteArray :=
   | .sent pid uid value => putNat (putNat (putNat (putNat out 0) pid) uid) value
   | .child pid uid status => putNat (putNat (putNat (putNat out 1) pid) uid) status
   | .fault address => putNat (putNat out 2) address
+  | .seccomp address syscall arch data => putNat (putNat (putNat (putNat (putNat out 3) address) syscall) arch) data
 
 private def getInfo : Decoder SignalInfo := fun data at_ => do
   let (signal, at_) ← getNat data at_
@@ -299,6 +303,12 @@ private def getInfo : Decoder SignalInfo := fun data at_ => do
   | 2 =>
     let (address, at_) ← getNat data at_
     .ok (⟨signal, code, .fault address⟩, at_)
+  | 3 =>
+    let (address, at_) ← getNat data at_
+    let (syscall, at_) ← getNat data at_
+    let (arch, at_) ← getNat data at_
+    let (value, at_) ← getNat data at_
+    .ok (⟨signal, code, .seccomp address syscall arch value⟩, at_)
   | _ =>
     let (first, at_) ← getNat data at_
     let (second, at_) ← getNat data at_
@@ -509,6 +519,11 @@ private def writeInfo (signals : Signals) (emu : Emu) (address : Nat) (info : Si
     int (base + 4) uid
     int (base + 8) status
   | .fault faulting => write emu (address + base) (encodeNumber emu word faulting)
+  | .seccomp callAddress syscall arch data =>
+    int (if mips then 8 else 4) data
+    write emu (address + base) (encodeNumber emu word callAddress)
+    int (base + word) syscall
+    int (base + word + 4) arch
 
 /-- The way back for a handler without a restorer: the page is put there the first time that it is wanted. -/
 private def returnAddress (signals : Signals) (emu : Emu) : IO Nat := do

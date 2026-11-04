@@ -92,6 +92,9 @@ structure Ptrace where
   /-- Of each thread in a call that makes a process or a thread, which a tracer is to hear of: the event, and the first id that the
   call can give. Nothing is in the middle of a call when a checkpoint is made. -/
   cloning : IO.Ref (Std.HashMap Nat (Nat × Nat))
+  /-- What decides of a call of a thread, by its number and its arguments, after its tracer saw it start and before anything serves
+  it: what `Bap.Linux.Seccomp` makes of it, if anything. -/
+  screen : IO.Ref (Emu → Nat → Nat → List Nat → IO (Option SyscallAction))
 
 namespace Ptrace
 
@@ -134,6 +137,11 @@ private def vforkEvent : Nat := 2
 private def cloneEvent : Nat := 3
 private def vforkDoneEvent : Nat := 5
 private def exitEvent : Nat := 6
+private def seccompEvent : Nat := 7
+
+/-- Whether an event is of a call that was made, after which its end comes, rather than before it is made: `PTRACE_EVENT_EXIT` and
+`PTRACE_EVENT_SECCOMP` stop a call that is made when the tracee goes on. -/
+private def afterCall (event : Nat) : Bool := event ≥ forkEvent && event ≤ vforkDoneEvent
 
 /-- Which event a call that makes a process or a thread is, of its flags, as Linux has it: none of one that says `CLONE_UNTRACED`,
 `PTRACE_EVENT_VFORK` of `CLONE_VFORK`, `PTRACE_EVENT_CLONE` of one that signals other than `SIGCHLD` when it ends, as a thread
@@ -213,6 +221,8 @@ def intercept (ptrace : Ptrace) (emu : Emu) (tid : Nat) (info : SignalInfo) : IO
     | .fault address => (address, true)
     | .sent pid _ _ => (pid, false)
     | .child pid _ _ => (pid, false)
+    -- Not a fault, which comes again by itself: what a tracer lets it have is sent again.
+    | .seccomp address _ _ _ => (address, false)
   stopThread ptrace emu tid { status := stoppedStatus info.signal, traced := true, signal := info.signal, code := info.code, detail, fault }
   pure true
 
@@ -618,6 +628,7 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
     ptrace.table.modify fun table => { table with tracees := table.tracees.insert pid { tracee with syscalls } }
     -- A stop of an event has no signal to go on with, as Linux has it.
     let event := stop.any (·.status >>> 16 % 256 != 0)
+    let madeCall := stop.any fun stop => afterCall (stop.status >>> 16 % 256)
     if data != 0 && !event then
       ptrace.table.modify fun table => { table with injected := table.injected.insert pid data }
       -- A fault comes again by itself, and anything else is sent again, to go through.
@@ -629,7 +640,7 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
       stopThread ptrace emu pid next
       return ← ok
     | [] => pure ()
-    if event && tracee.inSyscall && !vforkWaiting (← emu.taskTable.get) pid then
+    if madeCall && tracee.inSyscall && !vforkWaiting (← emu.taskTable.get) pid then
       ptrace.table.modify fun table => { table with tracees := table.tracees.insert pid { tracee with syscalls, inSyscall := false } }
       if syscalls then
         let signal := numbers.trap ||| (if tracee.options &&& 1 != 0 then 0x80 else 0)
@@ -787,6 +798,30 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
   | 0x4203 => if mine.isSome then ok else fail esrch
   | _ => fail eio
 
+/-- What a call that isn't made gives, with its registers as they were: the register of the result keeps what it had. -/
+def unmade (emu : Emu) : IO SyscallAction := do
+  let width ← wordWidth emu
+  let (_, _, register) := syscallRegisters emu.config.syscallAbi
+  match Value.asBits (← reg emu ⟨register, .imm width, 0, false⟩) with
+  | .ok bits => pure (.returnValue bits.2.toNat)
+  | .error _ => pure .default
+
+/-- A call that is made again when the thread goes on, with its registers as they were. -/
+def again (emu : Emu) : IO SyscallAction := do
+  emu.redirect.set (some (← emu.pc.get))
+  unmade emu
+
+/-- A filter of seccomp said `SECCOMP_RET_TRACE` of a call of a tracee: it stops for that if its tracer asked to hear of it, as
+`PTRACE_O_TRACESECCOMP` has it, which `PTRACE_GETEVENTMSG` says `data` of, and the call is decided again when it goes on. Whether it
+stopped. -/
+def seccompStop (ptrace : Ptrace) (emu : Emu) (tid data : Nat) : IO Bool := do
+  let some tracee := (← ptrace.table.get).tracees.get? tid | return false
+  if tracee.options &&& (1 <<< seccompEvent) == 0 then return false
+  let numbers := ptrace.numbers
+  ptrace.table.modify fun table => { table with messages := table.messages.insert tid data }
+  stopThread ptrace emu tid { status := stoppedStatus numbers.trap seccompEvent, traced := true, signal := numbers.trap }
+  pure true
+
 /-- Serves `ptrace` and the waits, and has a tracee that traces its system calls stop at their start; `syscallEnds` has it stop at
 their end. -/
 def serve (ptrace : Ptrace) (emu : Emu) : IO Unit := do
@@ -802,7 +837,10 @@ def serve (ptrace : Ptrace) (emu : Emu) : IO Unit := do
         ptrace.table.modify fun table => { table with tracees := table.tracees.insert tid { tracee with inSyscall := true } }
         let signal := numbers.trap ||| (if tracee.options &&& 1 != 0 then 0x80 else 0)
         stopThread ptrace current tid { status := stoppedStatus signal, traced := true, signal := numbers.trap }
-        return ← waitAgainFor current
+        return ← again current
+    -- What seccomp makes of the call, which it decides once a tracer saw it start, as Linux has it.
+    if let some action := ← (← ptrace.screen.get) current tid number args then return action
+    if let some tracee := (← ptrace.table.get).tracees.get? tid then
       -- A call that makes a process or a thread, which its tracer hears of once it is made, if it asked to.
       let flags := if some number == numbers.fork then some numbers.chld
         else if some number == numbers.vfork then some (0x4000 ||| 0x100 ||| numbers.chld)
@@ -820,7 +858,7 @@ def serve (ptrace : Ptrace) (emu : Emu) : IO Unit := do
           ptrace.table.modify fun table =>
             { table with exiting := tid :: table.exiting, messages := table.messages.insert tid ((arg 0 % 256) <<< 8) }
           stopThread ptrace current tid { status := stoppedStatus numbers.trap exitEvent, traced := true, signal := numbers.trap }
-          return ← waitAgainFor current
+          return ← again current
     if number == numbers.ptrace then servePtrace ptrace current (arg 0) (arg 1) (arg 2) (arg 3)
     else if number == numbers.wait4 then serveWait ptrace current (arg 0) (arg 1) (arg 2) (arg 3)
     else if some number == numbers.waitpid then serveWait ptrace current (arg 0) (arg 1) (arg 2) 0
@@ -840,15 +878,6 @@ def serve (ptrace : Ptrace) (emu : Emu) : IO Unit := do
         ptrace.table.modify fun table => { table with tracees := table.tracees.insert tid { tracee with inSyscall := false } }
         let signal := numbers.trap ||| (if tracee.options &&& 1 != 0 then 0x80 else 0)
         stopThread ptrace emu tid { status := stoppedStatus signal, traced := true, signal := numbers.trap }) :: ·)
-where
-  /-- A call that runs again when the thread goes on, with its registers as they were. -/
-  waitAgainFor (emu : Emu) : IO SyscallAction := do
-    let width ← wordWidth emu
-    let (_, _, register) := syscallRegisters emu.config.syscallAbi
-    emu.redirect.set (some (← emu.pc.get))
-    match Value.asBits (← reg emu ⟨register, .imm width, 0, false⟩) with
-    | .ok bits => pure (.returnValue bits.2.toNat)
-    | .error _ => pure .default
 
 /-! ### Checkpoints -/
 
@@ -956,7 +985,7 @@ def load (ptrace : Ptrace) (data : ByteArray) : IO Unit := do
 def make (architecture : Architecture) (signals : Signals) : IO Ptrace := do
   let ptrace : Ptrace := {
     architecture, signals, table := ← IO.mkRef {}, stepHooks := ← IO.mkRef {}, settle := ← IO.mkRef (fun _ => pure ())
-    changed := ← IO.mkRef true, resultOf := ← IO.mkRef id, cloning := ← IO.mkRef {} }
+    changed := ← IO.mkRef true, resultOf := ← IO.mkRef id, cloning := ← IO.mkRef {}, screen := ← IO.mkRef fun _ _ _ _ => pure none }
   ptrace.settle.set (settleWaits ptrace)
   pure ptrace
 

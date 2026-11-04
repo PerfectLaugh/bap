@@ -1,0 +1,17 @@
+no_new_privs 0 1
+a filter that jumps out isn't taken 1
+an action that there is 0
+and one that there isn't 1
+filter 0 2
+errno -77
+of an argument -55 1
+trace without a tracer 1
+trap 1 1 1 66
+what it makes has it 77
+kill thread 1
+kill process 1
+the filtered process ends 0
+strict mode writes
+and then is killed -9
+a tracer hears of it 7 7
+and the call is made 3
