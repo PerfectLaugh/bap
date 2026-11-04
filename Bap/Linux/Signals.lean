@@ -727,11 +727,13 @@ unblocked a signal returns. -/
 def deliverPending (signals : Signals) (emu : Emu) : IO Unit :=
   deliver signals emu false
 
-/-- A thread that has to wake for a signal: it isn't waiting any longer, and what it was doing says so, or starts again if it may. -/
+/-- A thread that has to wake for a signal: it isn't waiting any longer, and what it was doing says so, or starts again if it may. A
+stop of its tracer and the wait of the parent of `vfork` aren't for a signal to end, and it goes on once nothing else holds it. -/
 private def interrupt (signals : Signals) (emu : Emu) (tid : Nat) (restart : Bool) : IO Unit := do
   let table ← emu.taskTable.get
-  if !table.futexes.any (·.thread == tid) && !table.waiters.any (·.thread == tid) then return
-  emu.taskTable.set { table with futexes := table.futexes.filter (·.thread != tid), waiters := table.waiters.filter (·.thread != tid) }
+  let interruptible (waiter : FutexWaiter) : Bool := waiter.thread == tid && !uninterruptible waiter.space
+  if !table.futexes.any interruptible && !table.waiters.any (·.thread == tid) then return
+  emu.taskTable.set { table with futexes := table.futexes.filter (!interruptible ·), waiters := table.waiters.filter (·.thread != tid) }
   let state ← threadOf signals tid
   match state.last, restart && (state.last.map (·.restartable)).getD false with
   | some last, true =>
@@ -742,7 +744,7 @@ private def interrupt (signals : Signals) (emu : Emu) (tid : Nat) (restart : Boo
     emu.threadsRef.modify fun threads => threads.map fun context =>
       if context.id == tid then { context with pc := last.pc, pending := none, skip := none } else context
   | _, _ => setSyscallResult emu tid (.error (signals.numbers).eintr)
-  resumeThread emu tid
+  wakeThread emu tid
 
 /-- A signal is sent to a thread. -/
 private def sendToThread (signals : Signals) (emu : Emu) (tid group : Nat) (info : SignalInfo) : IO Unit := do
@@ -765,8 +767,8 @@ private def sendToThread (signals : Signals) (emu : Emu) (tid group : Nat) (info
     unless already do modifyThread signals tid fun state => { state with pending := state.pending ++ [info] }
     if waitingFor then
       let table ← emu.taskTable.get
-      emu.taskTable.set { table with futexes := table.futexes.filter (·.thread != tid) }
-      resumeThread emu tid
+      emu.taskTable.set { table with futexes := table.futexes.filter fun waiter => waiter.thread != tid || uninterruptible waiter.space }
+      wakeThread emu tid
     return
   match ← dispositionOf signals group info.signal with
   | .ignore => pure ()

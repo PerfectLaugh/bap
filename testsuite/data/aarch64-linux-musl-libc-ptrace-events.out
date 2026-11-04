@@ -1,0 +1,16 @@
+options 0
+event 1 1
+event 2 1
+event 5 1
+vfork done of the vforked 1
+event 3 1
+event 6 1
+exit message 1
+exited 3
+made and stopped by SIGSTOP 3 3
+seized 0
+interrupted 1
+fork event 1
+what it made stops 1 1
+and ends 1
+as does the tracee 4

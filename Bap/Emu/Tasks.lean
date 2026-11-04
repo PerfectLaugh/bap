@@ -66,6 +66,26 @@ def clone (emu : Emu) (options : CloneOptions) : IO ThreadId := do
 /-- A new process at `childPc`, with a copy of the memory. -/
 def fork (emu : Emu) (childPc : Nat) : IO ThreadId := clone emu { start := childPc }
 
+/-- Where a thread waits that only what it waits for lets go on, and not a signal: a stop that its tracer made, and the parent of
+`vfork` until its child runs a program or ends. -/
+def stopSpace : Nat := 2 ^ 58
+def vforkSpace : Nat := 2 ^ 59
+
+def uninterruptible (space : Nat) : Bool := space == stopSpace || space == vforkSpace
+
+/-- A thread that was let go from a wait goes on, unless it waits for something else still, as its tracer. -/
+def wakeThread (emu : Emu) (tid : ThreadId) : IO Unit := do
+  if !(← emu.taskTable.get).blocked tid then resumeThread emu tid
+
+/-- A child of `vfork` runs a program of its own or is over: the parent that waits for it goes on, and what hears of that hears. -/
+def releaseVfork (emu : Emu) (child : ThreadId) : IO Unit := do
+  let (table, woken) := (← emu.taskTable.get).futexWake vforkSpace child (2 ^ 32 - 1) 1
+  if woken.isEmpty then return
+  emu.taskTable.set table
+  for parent in woken do
+    wakeThread emu parent
+    for heard in ← emu.vforkReleased.get do heard parent child
+
 /-- The first task, which takes in the children of a process that is over. -/
 private def initTask (table : TaskTable) (fallback : Nat) : Nat :=
   match table.tasks.head? with
@@ -81,6 +101,7 @@ private def markExited (emu : Emu) (group status : Nat) : IO Unit := do
     if task.group == group then
       if task.tid == current then emu.stopped.set true
       else emu.threadsRef.modify (setThreadStopped · task.tid true)
+      releaseVfork emu task.tid
   if let some heard := ← emu.processExited.get then heard group status
 
 /-- The process that runs calls `exit_group` with `code`. -/
@@ -99,7 +120,7 @@ private def readWord32 (emu : Emu) (address : Nat) : IO Nat := do
 
 /-- The threads go on, each where it stopped. -/
 private def wakeThreads (emu : Emu) (threads : List ThreadId) : IO Unit :=
-  threads.forM (resumeThread emu)
+  threads.forM (wakeThread emu)
 
 /-- The thread that runs is over, and its process if that was the last of it. As the kernel does for `pthread_join`, it
 writes 0 where `set_tid_address` says and wakes whoever waits there. -/
@@ -115,6 +136,7 @@ def exitThread (emu : Emu) (code : Nat) : IO Unit := do
   let table ← emu.taskTable.get
   emu.taskTable.set (table.exitTask (← thread emu) (exitedStatus code) (initTask table 0))
   emu.stopped.set true
+  releaseVfork emu task.tid
   -- The last of its process ends the process, which what hears of that hears of as of `exit_group`.
   let left ← emu.taskTable.get
   if let some leader := left.find? task.group then
@@ -217,7 +239,7 @@ private def settleWaiters (emu : Emu) : IO Unit := do
         | none => pure (.ok child)
       | _ => pure (.error echild)
     setSyscallResult emu waiter.thread result
-    resumeThread emu waiter.thread
+    wakeThread emu waiter.thread
   if !woken.isEmpty then collectGone emu
   emu.switchedIn.set arrived
   -- What runs from here may be one of those, and wouldn't be switched to.
@@ -337,9 +359,10 @@ private def serveClone (emu : Emu) (flags stack parentTid threadPointer childTid
   let setParentTid := 0x100000
   let clearChildTid := 0x200000
   let setChildTid := 0x1000000
+  let cloneVfork := 0x4000
   -- `CLONE_DETACHED`, 0x400000, has been ignored since Linux 2.6.2, and musl still passes it.
   let known := 0xff ||| cloneVm ||| 0x200 ||| 0x400 ||| 0x800 ||| cloneThreadFlag ||| 0x40000 ||| setTls ||| setParentTid |||
-    clearChildTid ||| 0x400000 ||| setChildTid
+    clearChildTid ||| 0x400000 ||| setChildTid ||| cloneVfork
   let has (flag : Nat) : Bool := flags &&& flag != 0
   -- On i686 it is a `struct user_desc`, with the base at 4, as for `set_thread_area`.
   let threadBase ← if emu.config.syscallAbi == .x86_32 && has setTls then readWord32 emu (threadPointer + 4) else pure threadPointer
@@ -367,6 +390,11 @@ private def serveClone (emu : Emu) (flags stack parentTid threadPointer childTid
         pure id
     if has setParentTid then write emu parentTid (word32 emu id)
     if has clearChildTid then emu.taskTable.modify (·.setClearTid id childTid)
+    -- The parent of `vfork` waits until its child runs a program or ends, as that has its memory and, without a stack of its own, its
+    -- stack: see `releaseVfork`.
+    if has cloneVfork then
+      emu.taskTable.modify (·.futexWait { thread := ← thread emu, space := vforkSpace, address := id, bitset := 2 ^ 32 - 1 })
+      emu.stopped.set true
     syscallReturn emu (.ok id)
 
 /-- `futex`, for the word at `address` of the space of the thread that runs, or, without `FUTEX_PRIVATE_FLAG`, of what `futexKey` says
@@ -521,8 +549,11 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
     else
       if current.engine.deferMemorySync then
         throw <| IO.userError "the system calls of tasks need runProcesses, not a parallel round"
-      if isSome calls.fork || isSome calls.vfork then
+      if isSome calls.fork then
         syscallReturn current (.ok (← fork current (← current.nextPc.get)))
+      else if isSome calls.vfork then
+        -- `CLONE_VM | CLONE_VFORK | SIGCHLD`, as Linux has it.
+        serveClone current (0x4000 ||| 0x100 ||| (if current.config.syscallAbi == .mips then 18 else 17)) 0 0 0 0
       else if is calls.clone then
         serveClone current (arg 0) (arg 1) (arg 2) (if x86 then arg 4 else arg 3) (if x86 then arg 3 else arg 4)
       else if is calls.clone3 || is calls.rseq then
@@ -649,7 +680,7 @@ private def scheduleLoop (emu : Emu) (quantum : Nat) : Nat → Nat → IO Schedu
       emu.taskTable.set table
       for id in timed do
         setSyscallResult emu id (.error (etimedout emu))
-        resumeThread emu id
+        wakeThread emu id
       scheduleLoop emu quantum rounds fuel
     else
       match scheduleStep current fuel halted blocked next (← emu.taskTable.get).blockedTasks first with

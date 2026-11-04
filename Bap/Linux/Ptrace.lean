@@ -89,9 +89,9 @@ structure Ptrace where
   /-- What a wait says of the process that it reports, from its id here: the same, unless the host gives the guest ids of its own.
   It is a function, which isn't in a checkpoint: the host gives it again to a machine that goes on from one. -/
   resultOf : IO.Ref (Nat → Nat)
-  /-- Of each thread in a call that makes a process or a thread, which a tracer is to hear of: the event, whether it is to hear when
-  it is done as of `vfork`, and the first id that the call can give. Nothing is in the middle of a call when a checkpoint is made. -/
-  cloning : IO.Ref (Std.HashMap Nat (Nat × Bool × Nat))
+  /-- Of each thread in a call that makes a process or a thread, which a tracer is to hear of: the event, and the first id that the
+  call can give. Nothing is in the middle of a call when a checkpoint is made. -/
+  cloning : IO.Ref (Std.HashMap Nat (Nat × Nat))
 
 namespace Ptrace
 
@@ -152,7 +152,6 @@ private def einval : Nat := 22
 private def eperm : Nat := 1
 
 /-- Where stopped threads wait, by thread, and where waits wait, by process: no guest can wake them, as this isn't memory that it has. -/
-private def stopSpace : Nat := 2 ^ 58
 private def waitSpace : Nat := 2 ^ 58 + 2 ^ 48
 
 private def stoppedStatus (signal : Nat) (event : Nat := 0) : Nat := 0x7f ||| (signal <<< 8) ||| (event <<< 16)
@@ -161,6 +160,10 @@ private def numbers (ptrace : Ptrace) : Numbers := numbersOf ptrace.architecture
 
 private def groupOf (emu : Emu) (tid : Nat) : IO Nat := do
   pure (((← emu.taskTable.get).find? tid).map (·.group) |>.getD tid)
+
+/-- Whether a thread waits for its child of `vfork`. -/
+private def vforkWaiting (table : TaskTable) (tid : Nat) : Bool :=
+  table.futexes.any fun waiter => waiter.thread == tid && waiter.space == vforkSpace
 
 /-- Blocks a thread where nothing but its tracer or SIGCONT lets it go: the thread that runs, or another, which the scheduler would
 pick otherwise, as it goes by what is stopped, until `release`. -/
@@ -175,7 +178,8 @@ private def release (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Unit := do
   ptrace.table.modify fun table => { table with stops := table.stops.erase tid }
   emu.taskTable.modify fun table =>
     { table with futexes := table.futexes.filter fun waiter => !(waiter.thread == tid && waiter.space == stopSpace) }
-  resumeThread emu tid
+  -- The parent of `vfork` waits for its child still.
+  wakeThread emu tid
 
 /-- Something has happened that a wait may be waiting for, which it is given between turns, when what made it happen is over: a
 process that exited has left all that it wrote where others see it. -/
@@ -248,24 +252,37 @@ def executed (ptrace : Ptrace) (emu : Emu) : IO Unit := do
   else if !tracee.seized then
     stopThread ptrace emu tid { status := stoppedStatus numbers.trap, traced := true, signal := numbers.trap }
 
-/-- A tracee made `child`, by a call that is `event` and that its tracer asked to hear of, or that is done as of `vfork` and that it
-asked to hear of that of. Of the event, the child is traced as it is, and stops before it runs, by `SIGSTOP` or, if it was seized, as
-`PTRACE_INTERRUPT` has it; and the tracee stops, which `PTRACE_GETEVENTMSG` says the child of. `vfork` is done at once here, as the
-child's memory is a copy: its stop comes when the tracer lets the tracee go on from the event, or at once without one. -/
-def cloned (ptrace : Ptrace) (emu : Emu) (tid child event : Nat) (vforkDone : Bool) : IO Unit := do
+/-- A tracee made `child`, by a call that is `event`, which its tracer asked to hear of: the child is traced as it is, and stops
+before it runs, by `SIGSTOP` or, if it was seized, as `PTRACE_INTERRUPT` has it; and the tracee stops, which `PTRACE_GETEVENTMSG` says
+the child of. -/
+def cloned (ptrace : Ptrace) (emu : Emu) (tid child event : Nat) : IO Unit := do
   let some tracee := (← ptrace.table.get).tracees.get? tid | return
   let numbers := ptrace.numbers
   let eventStop (event : Nat) : Stop := { status := stoppedStatus numbers.trap event, traced := true, signal := numbers.trap }
-  ptrace.table.modify fun table => { table with messages := table.messages.insert tid child }
-  if event != 0 then
-    ptrace.table.modify fun table =>
-      { table with tracees := table.tracees.insert child { tracer := tracee.tracer, options := tracee.options, seized := tracee.seized } }
-    if tracee.seized then stopThread ptrace emu child (eventStop 128)
-    else ptrace.signals.send emu (some child) (← groupOf emu child) ⟨numbers.stop, 0, .sent (← groupOf emu tid) 0 0⟩
-    stopThread ptrace emu tid (eventStop event)
-    if vforkDone then
-      ptrace.table.modify fun table => { table with pending := table.pending.insert tid [eventStop vforkDoneEvent] }
-  else if vforkDone then stopThread ptrace emu tid (eventStop vforkDoneEvent)
+  ptrace.table.modify fun table =>
+    { table with
+      messages := table.messages.insert tid child
+      tracees := table.tracees.insert child { tracer := tracee.tracer, options := tracee.options, seized := tracee.seized } }
+  if tracee.seized then stopThread ptrace emu child (eventStop 128)
+  else ptrace.signals.send emu (some child) (← groupOf emu child) ⟨numbers.stop, 0, .sent (← groupOf emu tid) 0 0⟩
+  stopThread ptrace emu tid (eventStop event)
+
+/-- A tracee that `vfork` made wait goes on, as its child ran a program or ended: it stops for that if its tracer asked to hear of it,
+after the stop that it is in if it is in one, and otherwise for the end of the call if it is traced at those. -/
+def vforkReleased (ptrace : Ptrace) (emu : Emu) (tid child : Nat) : IO Unit := do
+  let table ← ptrace.table.get
+  let some tracee := table.tracees.get? tid | return
+  let numbers := ptrace.numbers
+  if tracee.options &&& (1 <<< vforkDoneEvent) != 0 then
+    let done : Stop := { status := stoppedStatus numbers.trap vforkDoneEvent, traced := true, signal := numbers.trap }
+    ptrace.table.modify fun table => { table with messages := table.messages.insert tid child }
+    if table.stops.contains tid then
+      ptrace.table.modify fun table => { table with pending := table.pending.insert tid (table.pending.getD tid [] ++ [done]) }
+    else stopThread ptrace emu tid done
+  else if tracee.syscalls && tracee.inSyscall && !table.stops.contains tid then
+    ptrace.table.modify fun table => { table with tracees := table.tracees.insert tid { tracee with inSyscall := false } }
+    let signal := numbers.trap ||| (if tracee.options &&& 1 != 0 then 0x80 else 0)
+    stopThread ptrace emu tid { status := stoppedStatus signal, traced := true, signal := numbers.trap }
 
 /-- A process is over: what it traced goes on, or is killed if it asked for that, and what waits asks again. -/
 def processExited (ptrace : Ptrace) (emu : Emu) (group : Nat) : IO Unit := do
@@ -612,7 +629,7 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
       stopThread ptrace emu pid next
       return ← ok
     | [] => pure ()
-    if event && tracee.inSyscall then
+    if event && tracee.inSyscall && !vforkWaiting (← emu.taskTable.get) pid then
       ptrace.table.modify fun table => { table with tracees := table.tracees.insert pid { tracee with syscalls, inSyscall := false } }
       if syscalls then
         let signal := numbers.trap ||| (if tracee.options &&& 1 != 0 then 0x80 else 0)
@@ -793,9 +810,8 @@ def serve (ptrace : Ptrace) (emu : Emu) : IO Unit := do
         else none
       if let some flags := flags then
         let event := eventOfClone numbers.chld flags
-        let event := if event != 0 && tracee.options &&& (1 <<< event) != 0 then event else 0
-        let vforkDone := flags &&& 0x4000 != 0 && tracee.options &&& (1 <<< vforkDoneEvent) != 0
-        if event != 0 || vforkDone then ptrace.cloning.modify (·.insert tid (event, vforkDone, ← current.nextThreadRef.get))
+        if event != 0 && tracee.options &&& (1 <<< event) != 0 then
+          ptrace.cloning.modify (·.insert tid (event, ← current.nextThreadRef.get))
       -- A call that ends it stops it first, with the status that it ends with, and goes through when it is made again.
       if (number == numbers.exit || number == numbers.exitGroup) && tracee.options &&& (1 <<< exitEvent) != 0 then
         if (← ptrace.table.get).exiting.contains tid then
@@ -812,14 +828,15 @@ def serve (ptrace : Ptrace) (emu : Emu) : IO Unit := do
     else pure .default
   emu.syscallEnds.modify ((fun result => do
     let tid ← thread emu
-    if let some (event, vforkDone, first) := (← ptrace.cloning.get).get? tid then
+    if let some (event, first) := (← ptrace.cloning.get).get? tid then
       ptrace.cloning.modify (·.erase tid)
       -- What the call gave is the child if it made one: on MIPS an error is a small number too, and isn't a new thread.
       if let some child := result then
-        if child ≥ first && ((← emu.taskTable.get).find? child).isSome then cloned ptrace emu tid child event vforkDone
+        if child ≥ first && ((← emu.taskTable.get).find? child).isSome then cloned ptrace emu tid child event
     if let some tracee := (← ptrace.table.get).tracees.get? tid then
-      -- An event that it stopped for in the call comes before the end of the call, which it stops for once it goes on from that.
-      if tracee.syscalls && tracee.inSyscall && !(← ptrace.table.get).stops.contains tid then
+      -- An event that it stopped for in the call comes before the end of the call, which it stops for once it goes on from that, and
+      -- the parent of `vfork` comes to the end once its child lets it: see `vforkReleased`.
+      if tracee.syscalls && tracee.inSyscall && !(← ptrace.table.get).stops.contains tid && !(vforkWaiting (← emu.taskTable.get) tid) then
         ptrace.table.modify fun table => { table with tracees := table.tracees.insert tid { tracee with inSyscall := false } }
         let signal := numbers.trap ||| (if tracee.options &&& 1 != 0 then 0x80 else 0)
         stopThread ptrace emu tid { status := stoppedStatus signal, traced := true, signal := numbers.trap }) :: ·)
@@ -950,6 +967,7 @@ def install (ptrace : Ptrace) (emu : Emu) : IO Unit := do
   signals.intercept.set (intercept ptrace)
   signals.tracer.set (tracerOf ptrace)
   signals.jobControl.set (jobControl ptrace)
+  emu.vforkReleased.modify (· ++ [vforkReleased ptrace emu])
   ptrace.serve emu
 
 end Ptrace

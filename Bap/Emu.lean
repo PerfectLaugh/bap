@@ -231,6 +231,8 @@ structure Emu where
   servedPrograms : IO.Ref (Std.HashMap Nat Bil.Program)
   /-- What wants to know of a new process: of the one that made it, and of it. -/
   processHooks : IO.Ref (List (Nat → Nat → IO Unit))
+  /-- What wants to know that the parent of `vfork` goes on, as its child runs a program or ends: of the parent, and of the child. -/
+  vforkReleased : IO.Ref (List (Nat → Nat → IO Unit))
   /-- Where the instruction that runs goes next, for a system call to know where a new thread starts. -/
   nextPc : IO.Ref Nat
   /-- Where the instruction that runs goes after all, for a program that a system call has replaced. -/
@@ -373,6 +375,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     intrinsicControls := ← IO.mkRef fun _ _ => (id, id)
     servedPrograms := ← IO.mkRef {}
     processHooks := ← IO.mkRef []
+    vforkReleased := ← IO.mkRef []
     nextPc := ← IO.mkRef 0
     redirect := ← IO.mkRef none
     turnUsed := ← IO.mkRef 0
