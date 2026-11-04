@@ -1,3 +1,4 @@
+import Bap.Core.Zeros
 import Bap.Image.Basic
 import Bap.Image.ElfLinker
 import Bap.IO.Reader
@@ -78,7 +79,7 @@ private def parseSection (data : ByteArray) (header : Header) (offset : Nat) :
     let executable := flags &&& 0x20000000 != 0
     let size := if virtualSize = 0 then rawSize else virtualSize
     let memorySize := max size rawSize
-    let bytes := fileBytes.append (ByteArray.mk (Array.replicate (memorySize - fileSize) 0))
+    let bytes := fileBytes.append (Bap.zeroBytes (memorySize - fileSize))
     .ok ⟨⟨name, address, rawOffset, size, flags, 0⟩,
       ⟨name, address, memorySize, readable, writable, executable⟩,
       ⟨address, bytes, readable, writable, executable⟩, relocationOffset, relocationCount⟩
@@ -384,14 +385,34 @@ private def placeUndefined (data : ByteArray) (header : Header) (word : Nat) (se
 private def zeroRegion (name : String) (start stop : Nat) (writable : Bool) : List (Segment × MemRegion) :=
   if stop > start then
     [(⟨name, start, stop - start, true, writable, false⟩,
-      ⟨start, ByteArray.mk (Array.replicate (stop - start) 0), true, writable, false⟩)]
+      ⟨start, Bap.zeroBytes (stop - start), true, writable, false⟩)]
   else []
+
+/-- How many bytes of zeros past what the file has its sections and its common symbols would take, as its headers say. -/
+def zeroFill (data : ByteArray) : Nat :=
+  match parseHeader data with
+  | .error _ => 0
+  | .ok header =>
+    let number (read : Except String Nat) : Nat := read.toOption.getD 0
+    let sections := (List.range (min header.sectionCount (data.size / 40 + 1))).foldl (init := 0) fun total index =>
+      let at_ := header.sectionOffset + index * 40
+      let virtualSize := number (IO.Reader.u32 data .little (at_ + 8))
+      let rawSize := number (IO.Reader.u32 data .little (at_ + 16))
+      let size := if virtualSize = 0 then rawSize else virtualSize
+      total + max size rawSize
+    -- What a common symbol has, which is of no section and of a value that is its size.
+    let commons := (List.range (min header.symbolCount (data.size / 18 + 1))).foldl (init := 0) fun total index =>
+      let at_ := header.symbolOffset + index * 18
+      if number (IO.Reader.u16 data .little (at_ + 12)) == 0 then total + number (IO.Reader.u32 data .little (at_ + 8)) else total
+    sections + commons
 
 /-- Decodes an object file, with the relocations that could not be applied. Like upstream's linker for ELF files,
 it maps what occupies memory after laying it out, then commons (undefined symbols with a size) in `%common` and
 externals in `EXTERNAL`. Upstream's COFF loader instead hides all but the executable sections, as they all have the
 same address, and applies no relocations; once the sections are laid out there is nothing left to hide. -/
 def decodeReport (data : ByteArray) : Except String (Image × List String) := do
+  -- A header can say anything: what it asks for of the host is at most 4 GiB, all together.
+  if zeroFill data > 2 ^ 32 then throw "the regions of the COFF file are too large"
   let header ← parseHeader data
   let parsed ← parseSections data header
   let placed := placeObjects 0 parsed

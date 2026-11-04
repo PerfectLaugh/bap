@@ -1124,6 +1124,10 @@ private def runElf32 : IO Unit := do
   | .ok _ => throw <| IO.userError "undersized ELF program entries accepted"
 
 def run : IO Unit := do
+  -- Two LOAD entries, each of 3 GiB of zeros, which is more than a host gives all together.
+  let twoHuge := ofHex "7f454c4602010100000000000000000002003e00010000000000400000000000400000000000000000000000000000000000000040003800020040000000000001000000050000000000000000000000000040000000000000004000000000000000000000000000000000c000000000001000000000000001000000050000000000000000000000000040000200000000004000000000000000000000000000000000c0000000000010000000000000"
+  assertEqual "ELF segments too large together are refused" (some "the regions of the file are too large")
+    (match Image.decode twoHuge with | .error message => some message | .ok _ => none)
   runObjects
   runRelocations
   runFieldChecks

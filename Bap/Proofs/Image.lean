@@ -416,20 +416,20 @@ namespace Dispatch
 
 /-- ELF magic selects the ELF decoder. -/
 theorem decode_elf {data : ByteArray} (hs : 4 ≤ data.size) (h0 : data.get! 0 = 0x7f) (h1 : data.get! 1 = 0x45)
-    (h2 : data.get! 2 = 0x4c) (h3 : data.get! 3 = 0x46) : decode data = Elf.decode data := by
-  simp [decode, hs, h0, h1, h2, h3]
+    (h2 : data.get! 2 = 0x4c) (h3 : data.get! 3 = 0x46) : dispatch data = Elf.decode data := by
+  simp [dispatch, hs, h0, h1, h2, h3]
 
 /-- `MZ` selects the PE decoder, when the input is not ELF. -/
 theorem decode_pe {data : ByteArray} (hs : 2 ≤ data.size) (h0 : data.get! 0 = 0x4d) (h1 : data.get! 1 = 0x5a) :
-    decode data = Pe.decode data := by
-  simp [decode, hs, h0, h1]
+    dispatch data = Pe.decode data := by
+  simp [dispatch, hs, h0, h1]
 
 /-- Either byte order of the 64-bit Mach-O magic selects the Mach-O decoder. -/
 theorem decode_macho {data : ByteArray} (hs : 4 ≤ data.size)
     (h : (data.get! 0 = 0xcf ∧ data.get! 1 = 0xfa ∧ data.get! 2 = 0xed ∧ data.get! 3 = 0xfe) ∨
       (data.get! 0 = 0xfe ∧ data.get! 1 = 0xed ∧ data.get! 2 = 0xfa ∧ data.get! 3 = 0xcf)) :
-    decode data = Macho.decode data := by
-  rcases h with ⟨h0, h1, h2, h3⟩ | ⟨h0, h1, h2, h3⟩ <;> simp [decode, hs, h0, h1, h2, h3]
+    dispatch data = Macho.decode data := by
+  rcases h with ⟨h0, h1, h2, h3⟩ | ⟨h0, h1, h2, h3⟩ <;> simp [dispatch, hs, h0, h1, h2, h3]
 
 /-- The dispatcher is exhaustive: every other input is rejected without parsing. -/
 theorem decode_unknown {data : ByteArray}
@@ -438,9 +438,16 @@ theorem decode_unknown {data : ByteArray}
     (hmacho : ¬ (4 ≤ data.size ∧
       ((data.get! 0 = 0xcf ∧ data.get! 1 = 0xfa ∧ data.get! 2 = 0xed ∧ data.get! 3 = 0xfe) ∨
        (data.get! 0 = 0xfe ∧ data.get! 1 = 0xed ∧ data.get! 2 = 0xfa ∧ data.get! 3 = 0xcf)))) :
-    decode data = .error "unsupported executable format" := by
-  simp only [decode, Bool.and_eq_true, decide_eq_true_eq, Bool.or_eq_true, and_assoc]
+    dispatch data = .error "unsupported executable format" := by
+  simp only [dispatch, Bool.and_eq_true, decide_eq_true_eq, Bool.or_eq_true, and_assoc]
   rw [ite_eq_right helf, ite_eq_right hpe, ite_eq_right hmacho]
+
+/-- What `decode` accepts, `dispatch` does: it only refuses more. -/
+theorem dispatch_of_decode {data : ByteArray} {image : Image} (h : decode data = .ok image) : dispatch data = .ok image := by
+  unfold decode at h
+  split at h
+  · cases h
+  · exact h
 
 /-- Anything `decode` accepts carries one of the recognized magic numbers. -/
 theorem decode_ok_has_magic {data : ByteArray} {image : Image} (h : decode data = .ok image) :
@@ -457,11 +464,12 @@ theorem decode_ok_has_magic {data : ByteArray} {image : Image} (h : decode data 
       ((data.get! 0 = 0xcf ∧ data.get! 1 = 0xfa ∧ data.get! 2 = 0xed ∧ data.get! 3 = 0xfe) ∨
        (data.get! 0 = 0xfe ∧ data.get! 1 = 0xed ∧ data.get! 2 = 0xfa ∧ data.get! 3 = 0xcf))
   · exact .inr (.inr hmacho)
-  rw [decode_unknown helf hpe hmacho] at h
-  cases h
+  have hd := dispatch_of_decode h
+  rw [decode_unknown helf hpe hmacho] at hd
+  cases hd
 
 theorem decode_short (data : ByteArray) (h : data.size < 2) :
-    decode data = .error "unsupported executable format" :=
+    dispatch data = .error "unsupported executable format" :=
   decode_unknown (by omega) (by omega) (by omega)
 
 end Dispatch
@@ -685,11 +693,11 @@ theorem link_regions_disjoint (input : Input) : (link input).regions.Pairwise Be
 theorem regionBytes_size (memory : ByteArray) (fileSize : Nat) (region : Region) :
     (regionBytes memory fileSize region).size = region.size := by
   unfold regionBytes
+  simp only [Bap.zeroBytes]
   split
   · show (Array.replicate region.size 0).size = _
     simp
   · rename_i off _
-    simp only
     rw [size_zeroFilled]
     simp only [ByteArray.size_extract]
     generalize hl : (if region.isSection = true then min fileSize memory.size else memory.size) = limit
@@ -730,7 +738,7 @@ theorem regionBytes_unmapped {memory : ByteArray} {fileSize : Nat} {region : Reg
     (hi : i < region.size) : (regionBytes memory fileSize region).get! i = 0 := by
   have hdef : regionBytes memory fileSize region = ByteArray.mk (Array.replicate region.size 0) := by
     unfold regionBytes
-    simp only [ho]
+    simp only [ho, Bap.zeroBytes]
   rw [hdef]
   show (Array.replicate region.size (0 : UInt8))[i]! = 0
   rw [getElem!_pos (Array.replicate region.size (0 : UInt8)) i (by simpa using hi)]
@@ -6287,7 +6295,10 @@ theorem decodeReport_ok {data : ByteArray} {image : Image} {errors : List String
       ∃ pairs : List (Segment × MemRegion), image.segments = pairs.map Prod.fst ∧
         image.memory.entries = (pairs.map Prod.snd).reverse.map (fun region => (region, ())) ∧
         ∀ pair ∈ pairs, pair.1.addr = pair.2.addr ∧ pair.1.size = pair.2.size := by
-  simp only [Coff.decodeReport, bind_ok_iff] at h
+  unfold Coff.decodeReport at h
+  by_cases hz : Coff.zeroFill data > 2 ^ 32
+  · simp [hz] at h; cases h
+  simp only [hz, if_false, bind_ok_iff] at h
   rcases h with ⟨header, h1, parsed, h2, parsedSymbols, _, h⟩
   have hgood : ∀ object ∈ parsed, GoodObject object := by
     intro object hm
@@ -6555,7 +6566,7 @@ theorem toImage_ofImage (image : Image) :
   · simp [List.filterMap_append, List.filterMap_map, Function.comp_def, filterMap_none_nil]
   · rw [Map.foldl_add_entries]
     simp [List.filterMap_append, List.filterMap_map, Function.comp_def, filterMap_none_nil, zeroRegion,
-      MemRegion.size, MemoryMap.empty]
+      MemRegion.size, MemoryMap.empty, Bap.zeroBytes]
 
 theorem zeroRegion_contains (region : MemRegion) (address : Nat) :
     (zeroRegion region).contains address = region.contains address := by

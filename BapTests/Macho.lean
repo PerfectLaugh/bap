@@ -60,8 +60,28 @@ private def fixture : ByteArray :=
   let b := appendNat b 0x1000 8
   ByteArray.mk #[0, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0] |>.foldl (init := b) fun result byte => result.push byte
 
+
+/-- A field of `size` bytes of a fixture, little-endian or big, set to `value`. -/
+private def setField (data : ByteArray) (offset size value : Nat) (big : Bool := false) : ByteArray :=
+  (List.range size).foldl (init := data) fun data index =>
+    data.set! (offset + (if big then size - 1 - index else index)) (UInt8.ofNat (value / 256 ^ index % 256))
+
+private def fieldOf (data : ByteArray) (offset size : Nat) (big : Bool := false) : Nat :=
+  (List.range size).foldl (init := 0) fun value index =>
+    value + (data.get! (offset + (if big then size - 1 - index else index))).toNat * 256 ^ index
+
 def run : IO Unit := do
   assertEqual "Mach-O fixture size" 260 fixture.size
+  -- A segment whose command asks for more zeros than a host can give isn't made.
+  let big := fixture.get! 0 == 0xfe
+  let (_, huge, found) := (List.range (fieldOf fixture 16 4 big)).foldl (init := (32, fixture, false)) fun (offset, data, found) _ =>
+    let size := fieldOf data (offset + 4) 4 big
+    if fieldOf data offset 4 big == 0x19 then
+      (offset + size, setField (setField data (offset + 32) 8 (2 ^ 40) big) (offset + 60) 4 7 big, true)
+    else (offset + size, data, found)
+  assertTrue "Mach-O fixture has a segment" found
+  assertEqual "Mach-O segments too large are refused" (some "the regions of the file are too large")
+    (match Image.decode huge with | .error message => some message | .ok _ => none)
   match Macho.decode (ByteArray.mk #[1, 2, 3, 4]) with
   | .error _ => IO.println "ok: malformed Mach-O rejected"
   | .ok _ => throw <| IO.userError "malformed Mach-O accepted"

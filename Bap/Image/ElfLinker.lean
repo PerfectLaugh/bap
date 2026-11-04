@@ -1,3 +1,4 @@
+import Bap.Core.Zeros
 import Std.Data.HashMap
 import Bap.Image.Basic
 
@@ -1930,11 +1931,11 @@ def prepare (input : Input) : Input := addThunks (relaxTls input)
 the file's `fileSize` bytes into the GOT that follows them. -/
 def regionBytes (memory : ByteArray) (fileSize : Nat) (region : Region) : ByteArray :=
   match region.off with
-  | none => ByteArray.mk (Array.replicate region.size 0)
+  | none => Bap.zeroBytes region.size
   | some off =>
     let limit := if region.isSection then min fileSize memory.size else memory.size
     let available := min region.size (limit - off)
-    (memory.extract off (off + available)).append (ByteArray.mk (Array.replicate (region.size - available) 0))
+    (memory.extract off (off + available)).append (Bap.zeroBytes (region.size - available))
 
 def toMemRegion (memory : ByteArray) (fileSize : Nat) (region : Region) : MemRegion :=
   ⟨region.addr, regionBytes memory fileSize region, region.r, region.w, region.x⟩

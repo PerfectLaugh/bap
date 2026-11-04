@@ -1,3 +1,4 @@
+import Bap.Core.Zeros
 import Bap.Image.Basic
 import Bap.IO.Reader
 
@@ -75,7 +76,7 @@ private def parseSegment (data : ByteArray) (endian : Endian) (offset commandSiz
       let fileBytes ← IO.Reader.slice data fileOffset fileSize
       -- __PAGEZERO reserves 4 GiB that nothing can access and no file holds: it maps nothing.
       let mapped := if protection = 0 && fileSize = 0 then 0 else memorySize
-      let bytes := fileBytes.append (ByteArray.mk (Array.replicate (mapped - fileSize) 0))
+      let bytes := fileBytes.append (Bap.zeroBytes (mapped - fileSize))
       let sections ← (List.range sectionCount).mapM fun index =>
         parseSection data endian (offset + 72 + index * 80)
       let readable := protection &&& 1 != 0
@@ -155,6 +156,23 @@ private def architecture (cpuType : Nat) : Arch :=
   | 0x01000007 => .x86_64
   | 0x0100000c => .aarch64
   | _ => .unknown
+
+/-- How many bytes of zeros past what the file has its segments would take, as its load commands say. -/
+def zeroFill (data : ByteArray) : Nat :=
+  match parseHeader data with
+  | .error _ => 0
+  | .ok header =>
+    let number (read : Except String Nat) : Nat := read.toOption.getD 0
+    let (_, total) := (List.range (min header.commandCount (header.commandBytes / 8 + 1))).foldl (init := (32, 0))
+      fun (offset, total) _ =>
+        let size := number (IO.Reader.u32 data header.endian (offset + 4))
+        let total := if number (IO.Reader.u32 data header.endian offset) != 0x19 then total else
+          let memorySize := number (IO.Reader.u64 data header.endian (offset + 32))
+          let fileSize := number (IO.Reader.u64 data header.endian (offset + 48))
+          let protection := number (IO.Reader.u32 data header.endian (offset + 60))
+          if protection == 0 && fileSize == 0 then total else total + (memorySize - fileSize)
+        (offset + max size 8, total)
+    total
 
 def decode (data : ByteArray) : Except String Image := do
   let header ← parseHeader data

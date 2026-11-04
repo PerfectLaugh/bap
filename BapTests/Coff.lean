@@ -169,7 +169,24 @@ private def runObject : IO Unit := do
   assertEqual "COFF A32 BRANCH24 is not applied" none (Coff.relocationKind 0x01c4 3)
   assertEqual "COFF ABSOLUTE does nothing" (some Coff.RelocationKind.ignored) (Coff.relocationKind 0xaa64 0)
 
+
+/-- A field of `size` bytes of a fixture, little-endian or big, set to `value`. -/
+private def setField (data : ByteArray) (offset size value : Nat) (big : Bool := false) : ByteArray :=
+  (List.range size).foldl (init := data) fun data index =>
+    data.set! (offset + (if big then size - 1 - index else index)) (UInt8.ofNat (value / 256 ^ index % 256))
+
+private def fieldOf (data : ByteArray) (offset size : Nat) (big : Bool := false) : Nat :=
+  (List.range size).foldl (init := 0) fun value index =>
+    value + (data.get! (offset + (if big then size - 1 - index else index))).toNat * 256 ^ index
+
 def run : IO Unit := do
+  -- Sections and commons whose headers ask for more zeros than a host can give, all together, aren't made.
+  let table := 20 + fieldOf objectFixture 16 2
+  let symbols := fieldOf objectFixture 8 4
+  let huge := setField (setField (setField objectFixture (table + 8) 4 0xffffffff) (symbols + 12) 2 0) (symbols + 8) 4 0xffffffff
+  assertTrue "COFF fixture has a symbol" (fieldOf objectFixture 12 4 ≥ 1)
+  assertEqual "COFF regions too large are refused" (some "the regions of the COFF file are too large")
+    (match Coff.decodeReport huge with | .error message => some message | .ok _ => none)
   runObject
   runInstructions
   assertEqual "COFF fixture size" 164 fixture.size

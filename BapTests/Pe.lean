@@ -86,8 +86,26 @@ private def pe32Fixture : ByteArray :=
   let b := appendNat b 0xc3 1
   appendNat b 0 15
 
+
+/-- A field of `size` bytes of a fixture, little-endian or big, set to `value`. -/
+private def setField (data : ByteArray) (offset size value : Nat) (big : Bool := false) : ByteArray :=
+  (List.range size).foldl (init := data) fun data index =>
+    data.set! (offset + (if big then size - 1 - index else index)) (UInt8.ofNat (value / 256 ^ index % 256))
+
+private def fieldOf (data : ByteArray) (offset size : Nat) (big : Bool := false) : Nat :=
+  (List.range size).foldl (init := 0) fun value index =>
+    value + (data.get! (offset + (if big then size - 1 - index else index))).toNat * 256 ^ index
+
 def run : IO Unit := do
   assertEqual "PE fixture size" 394 fixture.size
+  -- Sections whose headers ask for more zeros than a host can give, all together, aren't made.
+  let headers := fieldOf fixture 0x3c 4
+  let table := headers + 24 + fieldOf fixture (headers + 20) 2
+  -- Two of them, the second after the first, in what is added past the end.
+  let padded := fixture ++ ByteArray.mk (Array.replicate (table + 80 - min fixture.size (table + 80)) 0)
+  let huge := [0, 1].foldl (init := setField padded (headers + 6) 2 2) fun data index => setField data (table + index * 40 + 8) 4 0xffffffff
+  assertEqual "PE sections too large are refused" (some "the regions of the file are too large")
+    (match Image.decode huge with | .error message => some message | .ok _ => none)
   match Pe.decode (ByteArray.mk #[1, 2, 3, 4]) with
   | .error _ => IO.println "ok: malformed PE rejected"
   | .ok _ => throw <| IO.userError "malformed PE accepted"

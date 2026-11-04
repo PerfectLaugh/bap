@@ -1,3 +1,4 @@
+import Bap.Core.Zeros
 import Bap.Image.Basic
 import Bap.Core.Sexp
 
@@ -156,7 +157,7 @@ def toImage (doc : Doc) : Except String Image := do
   let regions := doc.fields.filterMap fun field =>
     match field with
     | .codeRegion address size _ =>
-      some (⟨address, ByteArray.mk (List.replicate size 0).toArray, true, false, true⟩ : MemRegion)
+      some (⟨address, Bap.zeroBytes size, true, false, true⟩ : MemRegion)
     | _ => none
   let memory : MemoryMap Unit := regions.foldl (init := MemoryMap.empty) fun memory region => memory.add region ()
   .ok {

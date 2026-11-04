@@ -1,3 +1,4 @@
+import Bap.Core.Zeros
 import Bap.Image.Basic
 import Bap.IO.Reader
 
@@ -79,7 +80,7 @@ private def parseSection (data : ByteArray) (imageBase offset : Nat) :
   let flags ← IO.Reader.u32 data .little (offset + 36)
   let fileBytes ← IO.Reader.slice data rawOffset rawSize
   let memorySize := max virtualSize rawSize
-  let bytes := fileBytes.append (ByteArray.mk (Array.replicate (memorySize - rawSize) 0))
+  let bytes := fileBytes.append (Bap.zeroBytes (memorySize - rawSize))
   let address := imageBase + rva
   let readable := flags &&& 0x40000000 != 0
   let writable := flags &&& 0x80000000 != 0
@@ -138,6 +139,17 @@ private def architecture (machine : Nat) : Arch :=
   | 0x014c => .x86
   | 0x01c0 | 0x01c2 | 0x01c4 => .arm
   | _ => .unknown
+
+/-- How many bytes of zeros past what the file has its sections would take, as its headers say. -/
+def zeroFill (data : ByteArray) : Nat :=
+  match parseHeader data with
+  | .error _ => 0
+  | .ok header =>
+    (List.range (min header.sectionCount (data.size / 40 + 1))).foldl (init := 0) fun total index =>
+      let at_ := header.sectionOffset + index * 40
+      let virtualSize := (IO.Reader.u32 data .little (at_ + 8)).toOption.getD 0
+      let rawSize := (IO.Reader.u32 data .little (at_ + 16)).toOption.getD 0
+      total + (max virtualSize rawSize - rawSize)
 
 def decode (data : ByteArray) : Except String Image := do
   let header ← parseHeader data

@@ -491,6 +491,27 @@ private def loadedSymbols (data : ByteArray) (header : Header) (sections : List 
   if sections.isEmpty then .ok ((dynamicSymbols data header).toOption.getD [])
   else parseSymbols data header sections
 
+/-- How many bytes of zeros past what the file has its regions would take, as its headers say: of its LOAD entries, or of a relocatable
+file, the sections that it lays out. `Image.decode` keeps it to what a host can give. -/
+def zeroFill (data : ByteArray) : Nat :=
+  match parseHeader data with
+  | .error _ => 0
+  | .ok header =>
+    let field (offset : Nat) : Nat := (word data header.endian header.is64 offset).toOption.getD 0
+    if header.fileType == 1 then
+      -- Of each section that is laid out, all of it, as `regionBytes` makes it.
+      let entries := min header.sectionCount (data.size / max header.sectionEntrySize 1 + 1)
+      (List.range entries).foldl (init := 0) fun total index =>
+        let at_ := header.sectionOffset + index * header.sectionEntrySize
+        let flags := field (at_ + 8)
+        if flags &&& 2 != 0 then total + field (at_ + if header.is64 then 32 else 20) else total
+    else
+      let entries := min header.programCount (data.size / max header.programEntrySize 1 + 1)
+      (List.range entries).foldl (init := 0) fun total index =>
+        let at_ := header.programOffset + index * header.programEntrySize
+        if (IO.Reader.u32 data header.endian at_).toOption != some 1 then total
+        else total + (field (at_ + if header.is64 then 40 else 20) - field (at_ + if header.is64 then 32 else 16))
+
 def decode (data : ByteArray) : Except String Image := do
   let header ← parseHeader data
   if header.fileType == 1 then
