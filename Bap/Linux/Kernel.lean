@@ -545,7 +545,9 @@ def addFile (kernel : Kernel) (path : String) (data : ByteArray) (mode : Nat := 
   let kernel := addDirectories kernel (Path.parent normal)
   match kernel.paths.get? normal with
   | some number =>
-    { kernel with inodes := kernel.inodes.insert number { number, content := .file data, mode } }
+    -- What it has of itself stays: who it is of, its locks, and the rest, and it was written now.
+    let details := ((kernel.inodes.get? number).map (·.details)).getD {}
+    { kernel with inodes := kernel.inodes.insert number ({ number, content := .file data, mode, details : Inode }.written kernel.clock) }
   | none => (addInode kernel normal (.file data) mode).1
 
 /-- Puts a file in whose bytes `generate` makes each time that it is opened, for what it sees of the process that opens it. What is
@@ -635,7 +637,9 @@ def putFile (kernel : Kernel) (path : String) (data : ByteArray) (mode : Nat := 
   match ← kernel.resolve parent name with
   | (_, some number) =>
     match kernel.inodes.get? number with
-    | some { content := .file _, .. } => pure { kernel with inodes := kernel.inodes.insert number { number, content := .file data, mode } }
+    | some inode@{ content := .file _, .. } =>
+      -- What it has of itself stays, and it was written now.
+      pure { kernel with inodes := kernel.inodes.insert number ({ inode with content := .file data, mode }.written kernel.clock) }
     | some { content := .directory, .. } => throw Errno.eisdir
     | _ => throw Errno.eexist
   | (found, none) => pure (addInode kernel found (.file data) mode).1

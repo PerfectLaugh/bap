@@ -3019,6 +3019,16 @@ def testKernelFiles : IO Unit := do
   assertEqual s!"{label} not a file over a directory" Bap.Linux.Errno.eisdir (error (kernel.putFile "/app/lib" ByteArray.empty))
   assertEqual s!"{label} not a directory over a file" Bap.Linux.Errno.eexist (error (kernel.putDirectory "/app/lib/one.so"))
   assertEqual s!"{label} not under a file" Bap.Linux.Errno.enotdir (error (kernel.putFile "/app/lib/one.so/x" ByteArray.empty))
+  -- What a file has of itself stays as its bytes are put again, and it was written then.
+  let some number := kernel.paths.get? "/data/app/lib/one.so" | throw <| IO.userError s!"{label}: no inode"
+  let owned := { kernel with inodes := kernel.inodes.modify number fun inode =>
+    { inode with details := { inode.details with uid := 7, attributes := [("user.kept", "yes".toUTF8)] } } }
+  let owned := { owned with clock := owned.clock + 5 }
+  let some again := (owned.putFile "/app/lib/one.so" "three".toUTF8).toOption | throw <| IO.userError s!"{label}: not put again"
+  let details := (again.inodes.get? number).map (·.details)
+  assertEqual s!"{label} keeps its owner and attributes as its bytes are put again" (some (7, ["user.kept"]))
+    (details.map fun details => (details.uid, details.attributes.map (·.1)))
+  assertEqual s!"{label} and was written then" (some owned.clock) (details.map (·.modified))
   -- On a machine that runs: what a library is loaded from is there as it is put there.
   let triple := "x86_64"
   let binary (name : String) : IO ByteArray := IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-{name}"
