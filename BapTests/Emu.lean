@@ -2393,6 +2393,23 @@ def testJniNative (triple : String) (floats : Bool := true) : IO Unit := do
   let all := 0x3FFFF
   let expected := if floats then all else all - 8 - 16
   assertEqual s!"{label} native code finds what the model says, by its convention" expected found
+  -- The functions of the VM's table, called as native code calls them: those that attach a thread give its `JNIEnv *` where they are
+  -- asked to, and so does `GetEnv` of a version the model has, while one of a newer version leaves it as it was.
+  let width ← Bap.Emu.wordWidth machine.emu
+  let readWord (address : Nat) : IO Nat := do
+    let bytes ← Bap.Emu.read machine.emu address (width / 8)
+    let ordered := if machine.architecture.big then bytes.toList else bytes.toList.reverse
+    pure (ordered.foldl (fun value byte => value * 256 + byte.toNat) 0)
+  let slot ← machine.malloc (width / 8)
+  let vmCall (index : Nat) (extra : Nat) : IO (Nat × Nat) := do
+    machine.write slot (ByteArray.mk (Array.replicate (width / 8) 0))
+    let function ← readWord (layout.vmFunctions + index * (width / 8))
+    let result ← machine.call function [layout.vm, slot, extra]
+    pure (result % 2 ^ 32, ← readWord slot)
+  assertEqual s!"{label} AttachCurrentThread gives the JNIEnv" (0, layout.env) (← vmCall 4 0)
+  assertEqual s!"{label} AttachCurrentThreadAsDaemon gives the JNIEnv" (0, layout.env) (← vmCall 7 0)
+  assertEqual s!"{label} GetEnv gives the JNIEnv" (0, layout.env) (← vmCall 6 0x10006)
+  assertEqual s!"{label} GetEnv of a newer version gives none" (2 ^ 32 - 3, 0) (← vmCall 6 0x10008)
 
 /-- `java/io/File` of a JNI model, from the files of a machine: paths, what is in a directory as a `File[]`, a child of a directory, what
 isn't there, a file's length, and the path of a file after a checkpoint of the model. -/
