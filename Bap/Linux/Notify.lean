@@ -253,7 +253,8 @@ def after (notifier : Notifier) (kernelRef : IO.Ref Kernel) (group : Nat) (call 
   if let some (inode, mask) := ofCall then kernel := say kernel inode mask entriesAfter true
   let told := instances.any fun listener =>
     match before.inodes.get? listener, kernel.inodes.get? listener with
-    | some { content := .inotify _ notices .., .. }, some { content := .inotify _ notices' .., .. } => notices.size != notices'.size
+    -- That it has more to say, rather than that a read took some.
+    | some { content := .inotify _ notices .., .. }, some { content := .inotify _ notices' .., .. } => notices'.size > notices.size
     | _, _ => true
   kernelRef.set kernel
   pure told
