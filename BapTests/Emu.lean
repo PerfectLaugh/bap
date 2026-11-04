@@ -3030,6 +3030,35 @@ def testKernelFiles : IO Unit := do
   let refused ← (machine.addFile "/vendor/lib" ByteArray.empty *> pure false).catchExceptions fun _ => pure true
   assertTrue s!"{label} and a machine says what it can't put" refused
 
+/-- A directory of the host that a machine sees: what a program finds in it comes from the host, and what it changes stays in the
+machine. -/
+def testHostMount (triple : String) : IO Unit := do
+  let label := s!"Linux {triple} a directory of the host"
+  let host := s!"/tmp/bap-host-mount-{triple}"
+  if ← System.FilePath.pathExists host then IO.FS.removeDirAll host
+  IO.FS.createDirAll s!"{host}/sub"
+  IO.FS.writeFile s!"{host}/a.txt" "alpha"
+  IO.FS.writeFile s!"{host}/sub/b.txt" "beta"
+  let _ ← IO.Process.output { cmd := "ln", args := #["-s", "a.txt", s!"{host}/link"] }
+  -- What a link to outside of it has isn't there.
+  let _ ← IO.Process.output { cmd := "ln", args := #["-s", "/etc/hostname", s!"{host}/sub/outside"] }
+  -- What a link to outside of it has isn't there.
+  let _ ← IO.Process.output { cmd := "ln", args := #["-s", "/etc/hostname", s!"{host}/sub/outside"] }
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-host"
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  machine.mountHost host "/host"
+  let written ← IO.mkRef ByteArray.empty
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual s!"{label} is read and ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual s!"{label} has what the host has, as the program changes it"
+    ("names a.txt link sub\na alpha\nb beta\nlink /host/a.txt\nthrough the link alpha\nwritten changed\nunlink 0\nunlinked -2\n" ++
+      "sub\nmissing -2\nnames after a.txt link new sub\n")
+    (String.fromUTF8! (← written.get))
+  assertEqual s!"{label} isn't written" "alpha" (← IO.FS.readFile s!"{host}/a.txt")
+  assertTrue s!"{label} has what the program took away" (← System.FilePath.pathExists s!"{host}/sub/b.txt")
+  assertTrue s!"{label} and not what it made" !(← System.FilePath.pathExists s!"{host}/new")
+  IO.FS.removeDirAll host
+
 /-- Shared libraries from outside a program, as `dlopen` has them, on a machine with no libc or linker to do it. -/
 def testLinuxLibraries (triple : String) (ifunc : Bool := false) : IO Unit := do
   let label := s!"Library {triple}"

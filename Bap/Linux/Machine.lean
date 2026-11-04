@@ -79,6 +79,10 @@ structure Machine where
   timers : Timers
   /-- What finds what `inotify` has to say after each call: see `Bap.Linux.Notify`. -/
   notifier : Notify.Notifier
+  /-- The directories of the host that it sees, each as the path of the host and that of the tree, and the paths under those that it
+  has looked for there, which it doesn't again, with a directory whose entries it took ending in `/`: see `Machine.mountHost`. -/
+  hostMounts : IO.Ref (List (String × String))
+  hostSeen : IO.Ref (Std.HashSet String)
   /-- What `Machine.malloc` has given out, by address space. -/
   heaps : IO.Ref (Std.HashMap Nat GuestHeap)
   /-- What `Machine.loadLibrary` has loaded, by address space. -/
@@ -1269,6 +1273,66 @@ private def pathArgument : Call → Option Nat
   | .openat | .fstatat | .statx | .faccessat | .readlinkat => some 1
   | _ => none
 
+/-- The paths that a call is given, by the index of each, and whether the argument before it is a directory that it is from. -/
+private def pathArguments : Call → List (Nat × Bool)
+  | .open_ | .stat | .lstat | .access | .readlink | .chdir | .truncate | .truncate64 | .statfs | .statfs64 | .execve | .mkdir | .rmdir
+  | .unlink | .chmod | .chown | .lchown | .utimes | .utime | .setxattr | .lsetxattr | .getxattr | .lgetxattr | .listxattr
+  | .llistxattr | .removexattr | .lremovexattr | .chroot | .umount2 => [(0, false)]
+  | .openat | .fstatat | .statx | .faccessat | .readlinkat | .mkdirat | .unlinkat | .fchmodat | .fchownat | .utimensat
+  | .utimensat64 | .futimesat => [(1, true)]
+  | .rename | .link => [(0, false), (1, false)]
+  | .renameat | .renameat2 | .linkat => [(1, true), (3, true)]
+  | .symlink | .inotifyAddWatch | .mount => [(1, false)]
+  | .symlinkat => [(2, true)]
+  | _ => []
+
+/-- What a path of the tree is under a directory of the host that the machine sees: each part of it that the kernel hasn't and the
+host has comes in, once, as a directory, as a file with what it holds, or as a link to what is in the same directory of the host; a
+link to anything else of the host isn't there, so that nothing of the host but what is in the directory comes in. A directory at the
+end comes in with its entries, each of which is a directory that is empty until it is looked in, a file or a link. -/
+private def fromHost (machine : Machine) (path : String) : IO Unit := do
+  let within (path prefix_ : String) : Bool := prefix_ == "/" || path == prefix_ || path.startsWith (prefix_ ++ "/")
+  let some (hostRoot, guestRoot) := (← machine.hostMounts.get).reverse.find? (within path ·.2) | return
+  let child (parent name : String) : String := if parent == "/" then "/" ++ name else parent ++ "/" ++ name
+  -- One path, and whether it is a directory to go on into.
+  let bring (guest host : String) : IO Bool := do
+    let isDirectory : IO Bool := do
+      let kernel ← machine.kernel.get
+      pure ((kernel.paths.get? guest).bind kernel.inodes.get? |>.any (·.content matches .directory))
+    if (← machine.hostSeen.get).contains guest || (← machine.kernel.get).paths.contains guest then return ← isDirectory
+    machine.hostSeen.modify (·.insert guest)
+    let real ← (IO.FS.realPath host).toBaseIO
+    match real with
+    | .error _ => return false
+    | .ok real =>
+      let realText := real.toString
+      if !within realText hostRoot then return false
+      if (← (System.FilePath.mk host).symlinkMetadata.toBaseIO).toOption.any (·.type == .symlink) then
+        machine.kernel.modify (·.addSymlink guest (if realText == hostRoot then guestRoot
+          else child guestRoot (realText.drop (hostRoot.length + if hostRoot == "/" then 0 else 1)).toString))
+        return false
+      match ← real.metadata.toBaseIO with
+      | .ok { type := .dir, .. } =>
+        machine.kernel.modify (·.addDirectories guest)
+        pure true
+      | .ok { type := .file, .. } =>
+        if let .ok data ← (IO.FS.readBinFile real).toBaseIO then machine.kernel.modify (·.addFile guest data)
+        pure false
+      | _ => pure false
+  let parts := (Path.parts "/" path).drop (Path.parts "/" guestRoot).length
+  let mut guest := guestRoot
+  let mut host := hostRoot
+  for part in parts do
+    guest := child guest part
+    host := child host part
+    if !(← bring guest host) then return
+  -- What the directory at the end has.
+  if (← machine.hostSeen.get).contains (guest ++ "/") then return
+  machine.hostSeen.modify (·.insert (guest ++ "/"))
+  if let .ok entries ← (System.FilePath.mk host).readDir.toBaseIO then
+    for entry in entries do
+      let _ ← bring (child guest entry.fileName) (child host entry.fileName)
+
 /-- Makes `/proc` what it has to be for a call that may look at it, which only a path can tell. -/
 private def refreshProc (machine : Machine) (emu : Emu) (call : Call) (args : List Nat) : IO Unit := do
   if let some index := pathArgument call then
@@ -1336,6 +1400,20 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
     | some call =>
       refreshProc machine emu call args
       let group := (← currentTask emu).group
+      -- What it names of the directories of the host that the machine sees.
+      if !(← machine.hostMounts.get).isEmpty then
+        let kernel ← machine.kernel.get
+        let cwd := (kernel.process group).cwd
+        for (index, relative) in pathArguments call do
+          if let .ok path ← (readString emu (args.getD index 0)).toBaseIO then
+            let base := if relative && !atCwd (args.getD (index - 1) 0) then
+                (kernel.baseOf group (args.getD (index - 1) 0) false).toOption.getD cwd
+              else cwd
+            let (base, path) := kernel.pathIn group base path
+            fromHost machine (Path.ofParts (Path.parts base path))
+        if call == .getdents then
+          if let .ok (_, file) := kernel.openFileOf group (args.getD 0 0) then
+            if let some path := kernel.pathOfInode file.inode then fromHost machine path
       let shared := ((← machine.kernel.get).process group).mappings.any (·.shared)
       -- A mapping of what is written has to hear of it. Otherwise a write is the only thing that a program does many of that gets longer with what it has done.
       let socket := (call == .write || call == .writev) && (← machine.kernel.get).isSocket group (args.getD 0 0)
@@ -1895,7 +1973,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   let ptrace ← Ptrace.make architecture signals
   let kernelRef ← IO.mkRef kernel
   let timers ← Timers.make architecture kernelRef signals
-  let machine : Machine := { architecture, emu, kernel := kernelRef, models := ← IO.mkRef [], target, handled := handler.isSome, signals, ptrace, timers, notifier := ← Notify.make, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {} }
+  let machine : Machine := { architecture, emu, kernel := kernelRef, models := ← IO.mkRef [], target, handled := handler.isSome, signals, ptrace, timers, notifier := ← Notify.make, hostMounts := ← IO.mkRef [], hostSeen := ← IO.mkRef {}, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {} }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
@@ -1909,6 +1987,8 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   emu.leavingSpace.set (some (flushShared machine emu))
   -- What was found of the instances of `inotify` is of the kernel that was.
   machine.restored.modify ((fun _ => Notify.forget machine.notifier) :: ·)
+  -- And what was looked for on the host may not be in the kernel that was.
+  machine.restored.modify ((fun _ => machine.hostSeen.set {}) :: ·)
   emu.enteredSpace.set (some (refreshShared machine emu))
   emu.futexKey.set (some fun address => do
     let some group ← runningGroup emu | return none
@@ -2595,7 +2675,17 @@ def Machine.addFile (machine : Machine) (path : String) (data : ByteArray) (mode
 def Machine.addDirectory (machine : Machine) (path : String) (mode : Nat := 0o40755) : IO Unit :=
   machine.changeKernel s!"a directory can't be made at {path}" (·.putDirectory path mode)
 
-/-- A file of the host for a kernel, before a run: this is the only way that anything gets from there to in here. -/
+/-- A directory of the host, which the machine sees at `guest` of its tree, which may be `/`: what a program looks for there comes in
+from the host when it looks, once, and what it changes stays in the tree, as nothing of the host is written. Unlike the rest of a
+run, what it finds is what the host has when it looks. A checkpoint has what came in, and a machine that goes on from one is given the
+directory again. -/
+def Machine.mountHost (machine : Machine) (host guest : String) : IO Unit := do
+  let guest := Path.ofParts (Path.parts "/" guest)
+  let host := (← IO.FS.realPath host).toString
+  machine.hostMounts.modify (· ++ [(host, guest)])
+  machine.kernel.modify (·.addDirectories guest)
+
+/-- A file of the host for a kernel, before a run, other than what `Machine.mountHost` brings in when a program looks for it. -/
 def Kernel.copyFromHost (kernel : Kernel) (path : String) (into : String := path) : IO Kernel := do
   let rec walk : Nat → Kernel → System.FilePath → String → IO Kernel
     | 0, kernel, _, _ => pure kernel

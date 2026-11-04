@@ -6,7 +6,7 @@ import Bap.Core.Zeros
 What a program sees of Linux besides its memory and its tasks: files, directories, descriptors, the working directory, the
 program break and a clock. This is pure and it is all there is: nothing here touches the machine that this runs on, so a run
 is the same wherever and whenever it happens, and a program can do no harm. A file of the host is in here only if somebody put
-it in before the run.
+it in before the run, or gave a machine a directory of the host to see (`Machine.mountHost`), which it never writes.
 
 Everyone is root, and modes are kept but not enforced. Times come from a clock that ticks when it is read.
 
