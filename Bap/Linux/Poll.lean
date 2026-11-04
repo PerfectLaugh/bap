@@ -106,14 +106,16 @@ def bits (ready : Ready) (wrnorm : Nat) : Nat :=
     (if ready.hangup then 0x10 else 0) ||| (if ready.readHangup then 0x2000 else 0)
 
 /-- When a `timerfd` of these open files that isn't ready expires, which a call that watches it waits due. -/
-private def expiries (kernel : Kernel) (now : Nat) (files : List Nat) : List Nat :=
-  files.filterMap fun file =>
+private def expiries (kernel : Kernel) (now : Nat) (files : List Nat) (depth : Nat := 4) : List Nat :=
+  files.flatMap fun file =>
     match kernel.openFiles.get? file with
     | some opened =>
-      match kernel.inodes.get? opened.inode with
-      | some { content := .timerfd (some expiry) _, .. } => if expiry > now then some expiry else none
-      | _ => none
-    | none => none
+      match kernel.inodes.get? opened.inode, depth with
+      | some { content := .timerfd (some expiry) _, .. }, _ => if expiry > now then [expiry] else []
+      -- Of one that an epoll watches, which `readiness` goes into as deep.
+      | some { content := .epoll items, .. }, depth + 1 => expiries kernel now (items.map (·.file)) depth
+      | _, _ => []
+    | none => []
 
 private def numberOf (big : Bool) (bytes : ByteArray) : Nat :=
   let ordered := if big then bytes.toList else bytes.toList.reverse
