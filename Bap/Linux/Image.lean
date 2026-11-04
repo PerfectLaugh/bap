@@ -45,6 +45,8 @@ structure Image where
   output : ByteArray
   clock : Nat
   cycles : Nat
+  /-- What is mounted: see `mountsBytes`. -/
+  mounts : ByteArray := ByteArray.empty
   deriving DecidableEq
 
 private def sorted (items : List (Nat × α)) : List (Nat × α) :=
@@ -97,7 +99,7 @@ def identityBytes (process : Process) : ByteArray :=
     [ids.uid, ids.euid, ids.suid, ids.fsuid, ids.gid, ids.egid, ids.sgid, ids.fsgid]) ids.groups
   let out := Wire.putList (fun out (resource, soft, hard) => Wire.putNat (Wire.putNat (Wire.putNat out resource) soft) hard) out
     process.limits
-  Wire.putFlag (Wire.putNat out process.nice) process.ended
+  Wire.putText (Wire.putFlag (Wire.putNat out process.nice) process.ended) process.root
 
 /-- What `identityBytes` made, on a process that has the rest; nothing at all is what a process starts with. -/
 def withIdentity (process : Process) (data : ByteArray) : Except String Process := do
@@ -114,9 +116,10 @@ def withIdentity (process : Process) (data : ByteArray) : Except String Process 
     .ok ((resource, soft, hard), at_)) data at_
   let (nice, at_) ← Wire.getNat data at_
   let (ended, at_) ← Wire.getFlag data at_
+  let (root, at_) ← Wire.getText data at_
   Wire.expectEnd data at_
   let id (index : Nat) : Nat := ids.getD index 0
-  pure { process with pgid, sid, terminal, limits, nice, ended
+  pure { process with pgid, sid, terminal, limits, nice, ended, root
                       credentials := { uid := id 0, euid := id 1, suid := id 2, fsuid := id 3, gid := id 4, egid := id 5, sgid := id 6
                                        fsgid := id 7, groups } }
 
@@ -152,6 +155,25 @@ def metaOfBytes (data : ByteArray) : Except String Meta := do
   let number (index : Nat) : Nat := numbers.getD index 0
   pure { accessed := number 0, modified := number 1, changed := number 2, uid := number 3, gid := number 4, seals := number 5
          attributes, locks }
+
+/-- What is mounted, as bytes. -/
+def mountsBytes (mounts : List Mount) : ByteArray :=
+  Wire.putList (fun out mount =>
+    Wire.putNat (Wire.putText (Wire.putText (Wire.putText (Wire.putText out mount.target) mount.source) mount.fstype) mount.device) mount.flags)
+    ByteArray.empty mounts
+
+/-- What `mountsBytes` made. -/
+def mountsOfBytes (data : ByteArray) : Except String (List Mount) := do
+  if data.isEmpty then return []
+  let (mounts, at_) ← Wire.getList (fun data at_ => do
+    let (target, at_) ← Wire.getText data at_
+    let (source, at_) ← Wire.getText data at_
+    let (fstype, at_) ← Wire.getText data at_
+    let (device, at_) ← Wire.getText data at_
+    let (flags, at_) ← Wire.getNat data at_
+    .ok ({ target, source, fstype, device, flags }, at_)) data 0
+  Wire.expectEnd data at_
+  pure mounts
 
 /-- A terminal, as bytes. -/
 def terminalBytes (terminal : Terminal) : ByteArray :=
@@ -215,6 +237,7 @@ def Kernel.image (kernel : Kernel) : Image where
   output := kernel.output
   clock := kernel.clock
   cycles := kernel.cycles
+  mounts := mountsBytes kernel.mounts
 
 /-- The kernel of an image, or why there can't be one. -/
 def Image.kernel (image : Image) : Except String Kernel := do
@@ -285,7 +308,8 @@ def Image.kernel (image : Image) : Except String Kernel := do
       pure (processes.insert process.group (← withIdentity made process.identity))
     output := image.output
     clock := image.clock
-    cycles := image.cycles }
+    cycles := image.cycles
+    mounts := ← mountsOfBytes image.mounts }
 
 namespace Image
 
@@ -412,7 +436,7 @@ def encode (out : ByteArray) (image : Image) : ByteArray :=
   let out := putNat out image.nextOpenFile
   let out := putList putProcess out image.processes
   let out := putBytes out image.output
-  putNat (putNat out image.clock) image.cycles
+  putBytes (putNat (putNat out image.clock) image.cycles) image.mounts
 
 /-- An image from bytes, and where they end. -/
 def decode : Decoder Image := fun data at_ => do
@@ -425,7 +449,8 @@ def decode : Decoder Image := fun data at_ => do
   let (output, at_) ← getBytes data at_
   let (clock, at_) ← getNat data at_
   let (cycles, at_) ← getNat data at_
-  .ok ({ paths, inodes, nextInode, openFiles, nextOpenFile, processes, output, clock, cycles }, at_)
+  let (mounts, at_) ← getBytes data at_
+  .ok ({ paths, inodes, nextInode, openFiles, nextOpenFile, processes, output, clock, cycles, mounts }, at_)
 
 end Image
 

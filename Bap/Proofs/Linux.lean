@@ -448,9 +448,11 @@ theorem putProcess_inverts : Inverts putProcess getProcess := by
 /-- A checkpoint reads back as the image that it was made from, wherever in a file that is and whatever comes after it. -/
 theorem decode_encode (data out : ByteArray) (image : Image) (hp : Prefix (encode out image) data) :
     decode data out.size = .ok (image, (encode out image).size) := by
-  obtain ⟨paths, inodes, nextInode, openFiles, nextOpenFile, processes, output, clock, cycles⟩ := image
-  have h9 := putNat_inverts data _ cycles hp
-  have p8 := (putNat_extends _ cycles).trans hp
+  obtain ⟨paths, inodes, nextInode, openFiles, nextOpenFile, processes, output, clock, cycles, mounts⟩ := image
+  have h10 := putBytes_inverts data _ mounts hp
+  have p9 := (putBytes_extends _ mounts).trans hp
+  have h9 := putNat_inverts data _ cycles p9
+  have p8 := (putNat_extends _ cycles).trans p9
   have h8 := putNat_inverts data _ clock p8
   have p7 := (putNat_extends _ clock).trans p8
   have h7 := putBytes_inverts data _ output p7
@@ -466,7 +468,7 @@ theorem decode_encode (data out : ByteArray) (image : Image) (hp : Prefix (encod
   have h2 := putList_inverts putInode_extends putInode_inverts data _ inodes p2
   have p1 := (putList_extends putInode_extends _ inodes).trans p2
   have h1 := putList_inverts putPath_extends putPath_inverts data out paths p1
-  simp [decode, encode, h1, h2, h3, h4, h5, h6, h7, h8, h9, bind, Except.bind]
+  simp [decode, encode, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, bind, Except.bind]
 
 /-- What comes after the image in a file is where the emulator starts: nothing of one reads into the other. -/
 theorem decode_encode_append (out : ByteArray) (image : Image) (rest : ByteArray) :

@@ -82,13 +82,15 @@ inductive Call where
   | memfdCreate | sendfile | sendfile64 | splice | tee | copyFileRange
   | flock
   | inotifyInit | inotifyInit1 | inotifyAddWatch | inotifyRmWatch
+  | mount | umount2 | chroot | pivotRoot
   /-- What has nothing to do here: everyone is root and nothing has to reach a disk. -/
   | succeeds
   deriving DecidableEq, Repr
 
 /-- The numbers of x86-64. -/
 def x86_64Calls : List (Nat × Call) :=
-  [(253, .inotifyInit), (294, .inotifyInit1), (254, .inotifyAddWatch), (255, .inotifyRmWatch),
+  [(165, .mount), (166, .umount2), (161, .chroot), (155, .pivotRoot),
+   (253, .inotifyInit), (294, .inotifyInit1), (254, .inotifyAddWatch), (255, .inotifyRmWatch),
    (73, .flock),
    (319, .memfdCreate), (40, .sendfile), (275, .splice), (276, .tee), (326, .copyFileRange),
    (86, .link), (265, .linkat), (280, .utimensat), (235, .utimes), (132, .utime), (261, .futimesat), (92, .chown), (94, .lchown), (93, .fchown), (260, .fchownat), (188, .setxattr), (189, .lsetxattr), (190, .fsetxattr), (191, .getxattr), (192, .lgetxattr), (193, .fgetxattr), (194, .listxattr), (195, .llistxattr), (196, .flistxattr), (197, .removexattr), (198, .lremovexattr), (199, .fremovexattr),
@@ -111,7 +113,8 @@ def x86_64Calls : List (Nat × Call) :=
 
 /-- The numbers of the architectures that came after the old calls went: `asm-generic/unistd.h`. -/
 def genericCalls : List (Nat × Call) :=
-  [(26, .inotifyInit1), (27, .inotifyAddWatch), (28, .inotifyRmWatch),
+  [(40, .mount), (39, .umount2), (51, .chroot), (41, .pivotRoot),
+   (26, .inotifyInit1), (27, .inotifyAddWatch), (28, .inotifyRmWatch),
    (32, .flock),
    (279, .memfdCreate), (71, .sendfile), (76, .splice), (77, .tee), (285, .copyFileRange),
    (37, .linkat), (88, .utimensat), (55, .fchown), (54, .fchownat), (5, .setxattr), (6, .lsetxattr), (7, .fsetxattr), (8, .getxattr), (9, .lgetxattr), (10, .fgetxattr), (11, .listxattr), (12, .llistxattr), (13, .flistxattr), (14, .removexattr), (15, .lremovexattr), (16, .fremovexattr),
@@ -132,7 +135,8 @@ def genericCalls : List (Nat × Call) :=
 
 /-- The numbers of `asm-generic` on 32 bits, where whatever has a time or an offset in a word has gone. -/
 def generic32Calls : List (Nat × Call) :=
-  [(26, .inotifyInit1), (27, .inotifyAddWatch), (28, .inotifyRmWatch),
+  [(40, .mount), (39, .umount2), (51, .chroot), (41, .pivotRoot),
+   (26, .inotifyInit1), (27, .inotifyAddWatch), (28, .inotifyRmWatch),
    (32, .flock),
    (279, .memfdCreate), (71, .sendfile64), (76, .splice), (77, .tee), (285, .copyFileRange),
    (37, .linkat), (412, .utimensat64), (55, .fchown), (54, .fchownat), (5, .setxattr), (6, .lsetxattr), (7, .fsetxattr), (8, .getxattr), (9, .lgetxattr), (10, .fgetxattr), (11, .listxattr), (12, .llistxattr), (13, .flistxattr), (14, .removexattr), (15, .lremovexattr), (16, .fremovexattr),
@@ -153,7 +157,8 @@ def generic32Calls : List (Nat × Call) :=
 
 /-- The numbers of the o32 ABI of MIPS, without their 4000. -/
 def o32Calls : List (Nat × Call) :=
-  [(284, .inotifyInit), (329, .inotifyInit1), (285, .inotifyAddWatch), (286, .inotifyRmWatch),
+  [(21, .mount), (52, .umount2), (61, .chroot), (216, .pivotRoot),
+   (284, .inotifyInit), (329, .inotifyInit1), (285, .inotifyAddWatch), (286, .inotifyRmWatch),
    (143, .flock),
    (354, .memfdCreate), (207, .sendfile), (237, .sendfile64), (304, .splice), (306, .tee), (360, .copyFileRange),
    (9, .link), (296, .linkat), (316, .utimensat), (412, .utimensat64), (267, .utimes), (30, .utime), (292, .futimesat), (202, .chown), (16, .lchown), (95, .fchown), (291, .fchownat), (224, .setxattr), (225, .lsetxattr), (226, .fsetxattr), (227, .getxattr), (228, .lgetxattr), (229, .fgetxattr), (230, .listxattr), (231, .llistxattr), (232, .flistxattr), (233, .removexattr), (234, .lremovexattr), (235, .fremovexattr),
@@ -177,7 +182,8 @@ def o32Calls : List (Nat × Call) :=
 
 /-- The numbers of the n64 ABI of MIPS, without their 5000. -/
 def n64Calls : List (Nat × Call) :=
-  [(243, .inotifyInit), (288, .inotifyInit1), (244, .inotifyAddWatch), (245, .inotifyRmWatch),
+  [(160, .mount), (161, .umount2), (156, .chroot), (151, .pivotRoot),
+   (243, .inotifyInit), (288, .inotifyInit1), (244, .inotifyAddWatch), (245, .inotifyRmWatch),
    (71, .flock),
    (314, .memfdCreate), (39, .sendfile), (263, .splice), (265, .tee), (320, .copyFileRange),
    (84, .link), (255, .linkat), (275, .utimensat), (226, .utimes), (130, .utime), (251, .futimesat), (90, .chown), (92, .lchown), (91, .fchown), (250, .fchownat), (180, .setxattr), (181, .lsetxattr), (182, .fsetxattr), (183, .getxattr), (184, .lgetxattr), (185, .fgetxattr), (186, .listxattr), (187, .llistxattr), (188, .flistxattr), (189, .removexattr), (190, .lremovexattr), (191, .fremovexattr),
@@ -200,7 +206,8 @@ def n64Calls : List (Nat × Call) :=
 
 /-- The numbers of 32-bit ARM, with EABI, and two of its own: `set_tls` and `cacheflush`. -/
 def armCalls : List (Nat × Call) :=
-  [(316, .inotifyInit), (360, .inotifyInit1), (317, .inotifyAddWatch), (318, .inotifyRmWatch),
+  [(21, .mount), (52, .umount2), (61, .chroot), (218, .pivotRoot),
+   (316, .inotifyInit), (360, .inotifyInit1), (317, .inotifyAddWatch), (318, .inotifyRmWatch),
    (143, .flock),
    (385, .memfdCreate), (187, .sendfile), (239, .sendfile64), (340, .splice), (342, .tee), (391, .copyFileRange),
    (182, .chown), (16, .lchown), (95, .fchown), (24, .getuid), (49, .geteuid), (47, .getgid), (50, .getegid), (23, .setuid), (46, .setgid), (70, .setreuid), (71, .setregid), (164, .setresuid), (170, .setresgid), (165, .getresuid), (171, .getresgid), (138, .setfsuid), (139, .setfsgid), (80, .getgroups), (81, .setgroups),
@@ -225,7 +232,8 @@ def armCalls : List (Nat × Call) :=
 
 /-- The numbers of i686. -/
 def i686Calls : List (Nat × Call) :=
-  [(291, .inotifyInit), (332, .inotifyInit1), (292, .inotifyAddWatch), (293, .inotifyRmWatch),
+  [(21, .mount), (52, .umount2), (61, .chroot), (217, .pivotRoot),
+   (291, .inotifyInit), (332, .inotifyInit1), (292, .inotifyAddWatch), (293, .inotifyRmWatch),
    (143, .flock),
    (356, .memfdCreate), (187, .sendfile), (239, .sendfile64), (313, .splice), (315, .tee), (377, .copyFileRange),
    (182, .chown), (16, .lchown), (95, .fchown), (24, .getuid), (49, .geteuid), (47, .getgid), (50, .getegid), (23, .setuid), (46, .setgid), (70, .setreuid), (71, .setregid), (164, .setresuid), (170, .setresgid), (165, .getresuid), (171, .getresgid), (138, .setfsuid), (139, .setfsgid), (80, .getgroups), (81, .setgroups),
@@ -249,7 +257,8 @@ def i686Calls : List (Nat × Call) :=
 
 /-- The numbers of PowerPC, where those of each width that the other doesn't have are left to it not asking for them. -/
 def powerpcCalls : List (Nat × Call) :=
-  [(275, .inotifyInit), (318, .inotifyInit1), (276, .inotifyAddWatch), (277, .inotifyRmWatch),
+  [(21, .mount), (52, .umount2), (61, .chroot), (203, .pivotRoot),
+   (275, .inotifyInit), (318, .inotifyInit1), (276, .inotifyAddWatch), (277, .inotifyRmWatch),
    (143, .flock),
    (360, .memfdCreate), (186, .sendfile), (226, .sendfile64), (283, .splice), (284, .tee), (379, .copyFileRange),
    (9, .link), (294, .linkat), (304, .utimensat), (412, .utimensat64), (251, .utimes), (30, .utime), (290, .futimesat), (181, .chown), (16, .lchown), (95, .fchown), (289, .fchownat), (209, .setxattr), (210, .lsetxattr), (211, .fsetxattr), (212, .getxattr), (213, .lgetxattr), (214, .fgetxattr), (215, .listxattr), (216, .llistxattr), (217, .flistxattr), (218, .removexattr), (219, .lremovexattr), (220, .fremovexattr),

@@ -60,12 +60,23 @@ def fdinfo (view : ProcessView) (fd : Nat) : ByteArray :=
   | some (_, offset, flags) => text s!"pos:\t{offset}\nflags:\t0{String.ofList (Nat.toDigits 8 flags)}\nmnt_id:\t1\n"
   | none => ByteArray.empty
 
-/-- `/proc/PID/mountinfo`, of what `mounts` says. -/
-def mountinfo : ByteArray :=
-  text "1 0 0:1 / / rw - rootfs rootfs rw\n2 1 0:2 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n3 1 0:3 / /sys rw,nosuid,nodev,noexec,relatime - sysfs sysfs rw\n"
+/-- What a process has mounted, the first first, after `/`, `/proc` and `/sys`: where, of what file system, what was mounted, and what
+of `MS_RDONLY`, `MS_NOSUID`, `MS_NODEV` and `MS_NOEXEC` it was mounted with. -/
+private def mounted (view : ProcessView) : List (String × String × String × String) :=
+  [("/", "rootfs", "rootfs", "rw"), ("/proc", "proc", "proc", "rw,nosuid,nodev,noexec,relatime"),
+   ("/sys", "sysfs", "sysfs", "rw,nosuid,nodev,noexec,relatime")] ++
+  view.mounts.reverse.map fun (target, fstype, device, flags) =>
+    let options := [(1, "ro"), (2, "nosuid"), (4, "nodev"), (8, "noexec")].filterMap fun (bit, name) =>
+      if flags &&& bit != 0 then some name else none
+    (target, fstype, if device.isEmpty then "none" else device, ",".intercalate ((if flags &&& 1 != 0 then [] else ["rw"]) ++ options))
 
-def mounts : ByteArray :=
-  text "rootfs / rootfs rw 0 0\nproc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\nsysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0\n"
+/-- `/proc/PID/mountinfo`, of what `mounts` says. -/
+def mountinfo (view : ProcessView) : ByteArray :=
+  text (String.join ((mounted view).zipIdx.map fun ((target, fstype, device, options), index) =>
+    s!"{index + 1} {if index == 0 then 0 else 1} 0:{index + 1} / {target} {options} - {fstype} {device} {if options.startsWith "ro" then "ro" else "rw"}\n"))
+
+def mounts (view : ProcessView) : ByteArray :=
+  text (String.join ((mounted view).map fun (target, fstype, device, options) => s!"{device} {target} {fstype} {options} 0 0\n"))
 
 def cpuinfo (view : ProcessView) : ByteArray :=
   text s!"processor\t: 0\nmodel name\t: bap virtual {view.machine}\ncpu MHz\t\t: 1000.000\nbogomips\t: 2000.00\n\n"
@@ -99,7 +110,7 @@ def builtin : String → Option Generator
   | "environ" => some fun view => zeroEnded view.environment
   | "comm" => some fun view => text (baseName view.program ++ "\n")
   | "limits" => some limits
-  | "mountinfo" => some fun _ => mountinfo
+  | "mountinfo" => some mountinfo
   | "cgroup" => some fun _ => text "0::/\n"
   | "oom_score_adj" => some fun _ => text "0\n"
   | "random-uuid" => some fun view => text s!"{hex 8 (view.clock / 1000 % 2 ^ 32)}-0000-4000-8000-000000000000\n"
@@ -108,7 +119,7 @@ def builtin : String → Option Generator
   | "file-max" => some fun _ => text "9223372036854775807\n"
   | "somaxconn" => some fun _ => text "4096\n"
   | "transparent-hugepage" => some fun _ => text "always [madvise] never\n"
-  | "mounts" => some fun _ => mounts
+  | "mounts" => some mounts
   | "cpuinfo" => some cpuinfo
   | "meminfo" => some fun _ => meminfo
   | "uptime" => some uptime

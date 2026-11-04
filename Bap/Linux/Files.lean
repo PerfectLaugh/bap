@@ -86,7 +86,9 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
   let pathAt (directory address : Nat) : IO (Result String) := do
     match kernel.baseOf group directory (atCwd directory) with
     | .error errno => pure (.error errno)
-    | .ok base => pure (.ok (Path.ofParts (Path.parts base (← readString emu address))))
+    | .ok base =>
+      let (base, path) := kernel.pathIn group base (← readString emu address)
+      pure (.ok (Path.ofParts (Path.parts base path)))
   -- The inode of a path, or of what a descriptor has of `AT_EMPTY_PATH` with an empty path.
   let inodeAt (directory address : Nat) (follow empty : Bool) : IO (Result Nat) := do
     if empty && (← readString emu address).isEmpty then

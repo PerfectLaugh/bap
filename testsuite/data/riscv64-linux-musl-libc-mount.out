@@ -1,0 +1,46 @@
+tmpfs 0
+mode 17407
+hidden -2
+on tmpfs inside
+mountinfo 1
+umount 0
+back under
+gone -2
+mountinfo after 0
+umount again -22
+bind 0
+through bind bound
+in the source shared
+same inode 1
+unbind 0
+unbound under
+no such type -19
+no such place -2
+remount nothing -22
+private nothing -22
+bad flags -22
+on a file -20
+cwd on tmpfs /tmp/mount-point
+remount 0 1
+read-only -30 -30
+writable again 0 0
+busy -16
+not busy 0
+chroot 0
+chdir 0
+jail cwd /
+jail file jailed
+above the root jailed
+outside -2
+jail etc
+parent cwd /
+chroot a file -20
+chdir 0
+new root 0
+pivot_root 0
+pivot cwd /
+pivot file pivoted
+old root jailed
+detach old 0
+old gone -2
+pivot here old

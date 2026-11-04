@@ -455,7 +455,8 @@ private def viewOf (machine : Machine) (emu : Emu) (group : Nat) : IO ProcessVie
     program := process.program
     auxiliary := process.auxiliary
     big := architecture.big
-    cwd := process.cwd
+    cwd := kernel.shownPath group process.cwd
+    mounts := kernel.mounts.map fun mount => (kernel.shownPath group mount.target, mount.fstype, mount.device, mount.flags)
     ranges := regions.map fun region =>
       { start := region.address, size := region.data.size, readable := region.protection.readable
         writable := region.protection.writable, executable := region.protection.executable }
@@ -839,7 +840,10 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       | .ok from_ =>
         match ← (readString emu address).toBaseIO with
         | .error _ => pure (errorOf Errno.efault)
-        | .ok path => action from_ path
+        | .ok path =>
+          -- Within the root of the process.
+          let (from_, path) := kernel.pathIn group from_ path
+          action from_ path
     let here := 2 ^ 64 - 100
     let openAt (directory address flags mode : Nat) : IO SyscallAction :=
       at_ directory address fun from_ path => do
@@ -1118,7 +1122,7 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
           machine.kernel.set (kernel.advance id count)
           returning emu (arg 1) bytes bytes.size
     | .getcwd =>
-      let text := (cwd ++ "\x00").toUTF8
+      let text := (kernel.shownPath group cwd ++ "\x00").toUTF8
       if text.size > arg 1 then pure (errorOf Errno.erange)
       else returning emu (arg 0) text text.size
     | .chdir => at_ here (arg 0) fun _ path => apply machine (·.chdir group path)
@@ -1138,6 +1142,24 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     | .renameat =>
       inDirectory (arg 0) (arg 1) fun source => inDirectory (arg 2) (arg 3) fun target =>
         apply machine (·.rename "/" source target)
+    | .mount =>
+      at_ here (arg 1) fun from_ target => do
+        let text (address : Nat) : IO String := do if address == 0 then pure "" else readString emu address
+        let source ← text (arg 0)
+        let fstype ← text (arg 2)
+        -- What a bind or a move mounts is a path, within the root of the process.
+        let source := if arg 3 &&& (4096 ||| 8192) != 0 then
+            let (base, path) := kernel.pathIn group cwd source
+            Path.ofParts (Path.parts base path)
+          else source
+        apply machine (·.mount group from_ source target fstype (arg 3))
+    | .umount2 => at_ here (arg 0) fun from_ target => apply machine (·.unmount group from_ target (arg 1))
+    | .chroot => at_ here (arg 0) fun from_ path => apply machine (·.chroot group from_ path)
+    | .pivotRoot =>
+      at_ here (arg 0) fun from_ newRoot => at_ here (arg 1) fun base putOld =>
+        apply machine fun kernel =>
+          if from_ != base then .error Errno.einval
+          else kernel.pivotRoot group from_ newRoot putOld
     | .link | .linkat | .renameat2 | .utimensat | .utimensat64 | .utimes | .utime | .futimesat | .chown | .lchown | .fchown
     | .fchownat | .setxattr | .lsetxattr | .fsetxattr | .getxattr | .lgetxattr | .fgetxattr | .listxattr | .llistxattr
     | .flistxattr | .removexattr | .lremovexattr | .fremovexattr | .flock | .memfdCreate | .sendfile | .sendfile64 | .splice | .tee
@@ -1681,7 +1703,8 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
       ← readStrings emu architecture (args.getD 2 0)) : IO _).toBaseIO with
   | .error _ => pure (errorOf Errno.efault)
   | .ok (path, arguments, environment) =>
-    let absolute := if path.startsWith "/" then path else (kernel.process group).cwd ++ "/" ++ path
+    let (base, relative) := kernel.pathIn group (kernel.process group).cwd path
+    let absolute := if relative.startsWith "/" then relative else base ++ "/" ++ relative
     match programOf kernel architecture 4 absolute (if arguments.isEmpty then [path] else arguments) with
     | .error errno => pure (errorOf errno)
     | .ok (name, data, program, interpreter, arguments) =>

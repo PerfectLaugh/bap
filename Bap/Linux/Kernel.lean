@@ -8,7 +8,12 @@ program break and a clock. This is pure and it is all there is: nothing here tou
 is the same wherever and whenever it happens, and a program can do no harm. A file of the host is in here only if somebody put
 it in before the run.
 
-Everyone is root, and modes are kept but not enforced. Times come from a clock that ticks when it is read. -/
+Everyone is root, and modes are kept but not enforced. Times come from a clock that ticks when it is read.
+
+What is mounted is seen where it is mounted as `resolve` walks a path: a bind mount is what it mounts, and a file system of its own
+is a directory that no name reaches. A path that goes through one is the path of what is there, so that `..` of a bind mount is the
+parent of what it mounts. A process may have a root of its own, which `pathIn` puts the paths that it gives within. A read-only
+mount keeps what is on a file system of its own from changing, but not what a bind mount mounts. -/
 
 namespace Bap.Linux
 
@@ -303,6 +308,8 @@ structure Process where
   nice : Nat := 20
   /-- That it is over: only its process group and session are kept, which a wait of a group goes by until it is reaped. -/
   ended : Bool := false
+  /-- What `chroot` made `/` of its paths, as a path of the tree. -/
+  root : String := "/"
 
 /-- What a mapping of a process is: where, how much, and what it may do. -/
 structure MappedRange where
@@ -326,6 +333,8 @@ structure ProcessView where
   auxiliary : List Nat := []
   big : Bool := false
   cwd : String := "/"
+  /-- What is mounted, the last first: where, of what file system, what was mounted, and with which flags of `mount`. -/
+  mounts : List (String × String × String × Nat) := []
   ranges : List MappedRange := []
   breakStart : Nat := 0
   breakEnd : Nat := 0
@@ -350,6 +359,20 @@ structure ProcessView where
 /-- What makes the bytes of a generated file. -/
 abbrev Generator := ProcessView → ByteArray
 
+/-- A file system mounted at a path of the tree: what is seen there is what the tree has at `source`, which for one of its own, as
+`tmpfs` is, is a directory that no name of the tree reaches, under `hiddenRoot`. -/
+structure Mount where
+  target : String
+  source : String
+  fstype : String
+  /-- What `mount` was given as what it mounts, which `/proc/self/mountinfo` says. -/
+  device : String
+  flags : Nat
+  deriving DecidableEq, Repr
+
+/-- Where the directories of mounts of their own are, which a listing of `/` doesn't show. -/
+def hiddenRoot : String := "/\x01mounts"
+
 /-- All that the kernel is: its files, what is open of them, its processes, what was written to the console and its clock. A socket that
 is bound to a name of its own, or to an address of the Internet, has that name among the paths, which don't start with `/`. -/
 structure Kernel where
@@ -369,6 +392,8 @@ structure Kernel where
   /-- What makes the generated files that aren't those of `/proc`, by name. A function can't go in a checkpoint: only the names do,
   and these are given again to go on from it. -/
   generators : Std.HashMap String Generator := {}
+  /-- What is mounted, the last first. -/
+  mounts : List Mount := []
 
 /-- A result, or the number of an error. -/
 abbrev Result (α : Type) := Except Nat α
@@ -412,7 +437,7 @@ private def addInode (kernel : Kernel) (path : String) (content : Content) (mode
 
 /-- Follows a path, and its last part if `follow`, up to 40 links as Linux does. Each part before the last must be a directory,
 and the last doesn't have to be there: the result says whether it is. -/
-def resolve (kernel : Kernel) (base path : String) (follow : Bool := true) (links : Nat := 40) :
+def resolve (kernel : Kernel) (base path : String) (follow : Bool := true) (links : Nat := 40) (mounted : Bool := true) :
     Result (String × Option Nat) :=
   let rec walk (done : List String) (todo : List String) : Nat → Nat → Result (String × Option Nat)
     | 0, _ => .error Errno.eloop
@@ -423,6 +448,10 @@ def resolve (kernel : Kernel) (base path : String) (follow : Bool := true) (link
         .ok (path, kernel.paths.get? path)
       | part :: rest =>
         let path := Path.ofParts (part :: done).reverse
+        -- Where something is mounted, what is seen is what it mounted, but for the place itself when `mounted` says not.
+        match if kernel.mounts.isEmpty || (rest.isEmpty && !mounted) then none else kernel.mounts.find? (·.target == path) with
+        | some mount => walk (Path.parts "/" mount.source).reverse rest fuel links
+        | none =>
         match kernel.paths.get? path with
         | none => if rest.isEmpty then .ok (path, none) else .error Errno.enoent
         | some number =>
@@ -670,6 +699,13 @@ private def parentIsDirectory (kernel : Kernel) (path : String) : Bool :=
     | _ => false
   | none => false
 
+/-- Whether a path of the tree is within a file system of its own that is mounted read-only, which nothing changes: `EROFS`. -/
+def readOnly (kernel : Kernel) (path : String) : Bool :=
+  !kernel.mounts.isEmpty && kernel.mounts.any fun mount =>
+    mount.flags &&& 1 != 0 && mount.source.startsWith hiddenRoot && (path == mount.source || path.startsWith (mount.source ++ "/"))
+
+private def erofs : Nat := 30
+
 /-- `open`. -/
 def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : Nat) : Result (Kernel × Nat) := do
   if path == "" then .error Errno.enoent
@@ -681,6 +717,7 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
     | none =>
       if !has flags oCreat then .error Errno.enoent
       if !parentIsDirectory kernel normal then .error Errno.enoent
+      if kernel.readOnly normal then .error erofs
       let umask := (kernel.process group).umask
       .ok (addInode kernel normal (.file ByteArray.empty) (0o100000 ||| (mode &&& 0o7777 &&& (0o7777 - umask))))
   let inode ← inodeOf kernel number
@@ -693,6 +730,7 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
     | .generated _ => .error Errno.eacces
     | .file _ =>
       if has flags oDirectory then .error Errno.enotdir
+      if writable flags && kernel.readOnly normal then .error erofs
       if has flags oTrunc && writable flags then
         .ok { kernel with inodes := kernel.inodes.insert number ({ inode with content := .file ByteArray.empty }.written kernel.clock) }
       else .ok kernel
@@ -1035,8 +1073,9 @@ def children (kernel : Kernel) (path : String) : List (String × Nat) :=
   let inside := Path.parts "/" path
   let entries := kernel.paths.toList.filterMap fun entry =>
     let parts := Path.parts "/" entry.1
-    -- A name of a socket of its own isn't in a directory.
-    if entry.1.startsWith "/" && parts.length == inside.length + 1 && parts.take inside.length == inside then
+    -- A name of a socket of its own isn't in a directory, nor is where mounts keep their own.
+    if entry.1.startsWith "/" && parts.length == inside.length + 1 && parts.take inside.length == inside &&
+        !(parts.getLast?.getD "").startsWith "\x01" then
       some ((parts.getLast?.getD ""), entry.2)
     else none
   (entries.toArray.qsort fun left right => left.1 < right.1).toList
@@ -1084,6 +1123,7 @@ def mkdir (kernel : Kernel) (group : Nat) (base path : String) (mode : Nat) : Re
   let (normal, found) ← kernel.resolve base path (follow := false)
   if found.isSome then .error Errno.eexist
   if !parentIsDirectory kernel normal then .error Errno.enoent
+  if kernel.readOnly normal then .error erofs
   let umask := (kernel.process group).umask
   .ok (addInode kernel normal .directory (0o40000 ||| (mode &&& 0o7777 &&& (0o7777 - umask)))).1
 
@@ -1101,6 +1141,7 @@ def remove (kernel : Kernel) (base path : String) (directory : Bool) : Result Ke
     | .directory, false => .error Errno.eisdir
     | _, true => .error Errno.enotdir
     | _, false => pure ()
+    if kernel.readOnly normal then .error erofs
     .ok { kernel with paths := kernel.paths.erase normal }
 
 /-- `rename`: what was at the target is replaced, and all under a directory moves with it. -/
@@ -1115,6 +1156,7 @@ def rename (kernel : Kernel) (base source target : String) : Result Kernel := do
     let inode ← inodeOf kernel number
     if let .directory := inode.content then
       if !(children kernel to_).isEmpty then .error Errno.enotempty
+  if kernel.readOnly from_ || kernel.readOnly to_ then .error erofs
   let moved := kernel.paths.toList.foldl (init := kernel.paths.erase to_) fun paths entry =>
     if entry.1 == from_ then (paths.erase entry.1).insert to_ entry.2
     else if entry.1.startsWith (from_ ++ "/") then
@@ -1129,6 +1171,7 @@ def linkInode (kernel : Kernel) (number : Nat) (base target : String) : Result K
   let (normal, existing) ← kernel.resolve base target (follow := false)
   if existing.isSome then .error Errno.eexist
   if !parentIsDirectory kernel normal then .error Errno.enoent
+  if kernel.readOnly normal then .error erofs
   .ok { kernel with
     paths := kernel.paths.insert normal number
     inodes := kernel.inodes.insert number { inode with details := { inode.details with changed := kernel.clock } } }
@@ -1149,6 +1192,7 @@ def renameWith (kernel : Kernel) (base source target : String) (flags : Nat) : R
   if flags &&& 2 == 0 then return ← kernel.rename base source target
   let some _ := existing | .error Errno.enoent
   if (to_ ++ "/").startsWith (from_ ++ "/") || (from_ ++ "/").startsWith (to_ ++ "/") then .error Errno.einval
+  if kernel.readOnly from_ || kernel.readOnly to_ then .error erofs
   let swap (path : String) : String :=
     if path == from_ then to_ else if path == to_ then from_
     else if path.startsWith (from_ ++ "/") then to_ ++ (path.drop from_.length).toString
@@ -1172,6 +1216,7 @@ def symlink (kernel : Kernel) (base target path : String) : Result Kernel := do
   let (normal, found) ← kernel.resolve base path (follow := false)
   if found.isSome then .error Errno.eexist
   if !parentIsDirectory kernel normal then .error Errno.enoent
+  if kernel.readOnly normal then .error erofs
   .ok (addInode kernel normal (.symlink target) 0o120777).1
 
 /-- `readlink`. -/
@@ -1183,6 +1228,110 @@ def readlink (kernel : Kernel) (base path : String) : Result String := do
     match (← inodeOf kernel number).content with
     | .symlink target => .ok target
     | _ => .error Errno.einval
+
+/-- A path that a process gives, as the tree has it, with the base that a relative one is from: one from `/` is from its root, and `..`
+of its root stays there, as long as `base` is within it. -/
+def pathIn (kernel : Kernel) (group : Nat) (base path : String) : String × String :=
+  let root := (kernel.process group).root
+  if root == "/" then (base, path)
+  else if path.startsWith "/" then ("/", root ++ Path.ofParts (Path.parts "/" path))
+  else
+    let inside (at_ : String) : Bool := at_ == root || at_.startsWith (root ++ "/")
+    if inside base && !inside (Path.ofParts (Path.parts base path)) then ("/", root) else (base, path)
+
+/-- A path of the tree as a process sees it: within a mount of its own, from where that is mounted, and from its root. -/
+def shownPath (kernel : Kernel) (group : Nat) (path : String) : String :=
+  let within (path prefix_ : String) : Bool := path == prefix_ || path.startsWith (prefix_ ++ "/")
+  let mounted (path : String) : String := kernel.mounts.length.fold (init := path) fun _ _ path =>
+    match kernel.mounts.find? fun mount => mount.source.startsWith hiddenRoot && within path mount.source with
+    | some mount => Path.ofParts (Path.parts "/" (mount.target ++ "/" ++ (path.drop mount.source.length).toString))
+    | none => path
+  let path := mounted path
+  let root := mounted (kernel.process group).root
+  if root == "/" || !within path root then path else Path.ofParts (Path.parts "/" (path.drop root.length).toString)
+
+/-- `mount` of a file system of `fstype` at `target`, or with `MS_BIND`, of what `source` is, or with `MS_REMOUNT`, `MS_MOVE` and those
+of how mounts are shared, of a mount that is there. A file system of its own is an empty directory: `proc`, `sysfs` and `devtmpfs`
+are what the tree has of them. -/
+def mount (kernel : Kernel) (group : Nat) (base source target fstype : String) (flags : Nat) : Result Kernel := do
+  if (kernel.process group).credentials.euid != 0 then .error Errno.eperm
+  let (normal, found) ← kernel.resolve base target (mounted := false)
+  let some number := found | .error Errno.enoent
+  let here := kernel.mounts.find? (·.target == normal)
+  -- `MS_REMOUNT`, and `MS_UNBINDABLE`, `MS_PRIVATE`, `MS_SLAVE` and `MS_SHARED`, are of what is mounted there, as `/` is.
+  if flags &&& 32 != 0 || flags &&& 0x1e0000 != 0 then
+    if here.isNone && normal != "/" then .error Errno.einval
+    if flags &&& 32 == 0 then return kernel
+    return { kernel with mounts := kernel.mounts.map fun mount => if some mount == here then { mount with flags } else mount }
+  -- `MS_MOVE`.
+  if flags &&& 8192 != 0 then
+    let (from_, _) ← kernel.resolve base source (mounted := false)
+    let some moving := kernel.mounts.find? (·.target == from_) | .error Errno.einval
+    return { kernel with mounts := kernel.mounts.map fun mount => if mount == moving then { mount with target := normal } else mount }
+  let isDirectory (inode : Inode) : Bool := inode matches { content := .directory, .. }
+  let inode ← inodeOf kernel number
+  -- `MS_BIND`, of a directory on a directory or of anything else on anything else.
+  if flags &&& 4096 != 0 then
+    let (from_, found) ← kernel.resolve base source
+    let some other := found | .error Errno.enoent
+    if isDirectory (← inodeOf kernel other) != isDirectory inode then .error Errno.enotdir
+    return { kernel with mounts := { target := normal, source := from_, fstype := "none", device := source, flags } :: kernel.mounts }
+  if !isDirectory inode then .error Errno.enotdir
+  let tree := match fstype with
+    | "proc" => some "/proc"
+    | "sysfs" => some "/sys"
+    | "devtmpfs" => some "/dev"
+    | _ => none
+  let ownKinds := ["tmpfs", "ramfs", "mqueue", "devpts", "cgroup", "cgroup2", "debugfs", "tracefs", "securityfs", "bpf", "hugetlbfs",
+    "fusectl", "configfs", "pstore", "binfmt_misc", "autofs"]
+  if tree.isNone && !ownKinds.contains fstype then .error 19
+  let (kernel, from_) := match tree with
+    | some path => if kernel.paths.contains path then (kernel, path) else (addDirectories kernel path, path)
+    | none =>
+      let hidden := hiddenRoot ++ "/" ++ toString kernel.nextInode
+      let kernel := addDirectories kernel hiddenRoot
+      ((addInode kernel hidden .directory (if fstype == "tmpfs" then 0o41777 else 0o40755)).1, hidden)
+  .ok { kernel with mounts := { target := normal, source := from_, fstype, device := source, flags } :: kernel.mounts }
+
+/-- `umount2`: what was mounted last at `target` isn't. What a file system of its own had is gone once nothing mounts it. -/
+def unmount (kernel : Kernel) (group : Nat) (base target : String) (flags : Nat) : Result Kernel := do
+  if (kernel.process group).credentials.euid != 0 then .error Errno.eperm
+  if flags ≥ 16 then .error Errno.einval
+  let (normal, _) ← kernel.resolve base target (follow := flags &&& 8 == 0) (mounted := false)
+  let some mount := kernel.mounts.find? (·.target == normal) | .error Errno.einval
+  let mounts := kernel.mounts.erase mount
+  if !mount.source.startsWith hiddenRoot || mounts.any (·.source == mount.source) then return { kernel with mounts }
+  let within (path : String) : Bool := path == mount.source || path.startsWith (mount.source ++ "/")
+  -- What a process is in keeps it, unless `MNT_DETACH` lets it go later, which here is now.
+  if flags &&& 2 == 0 && kernel.processes.fold (fun busy _ process => busy || (!process.ended && (within process.cwd || within process.root))) false then
+    .error 16
+  .ok { kernel with mounts, paths := kernel.paths.filter fun path _ => !within path }
+
+/-- `chroot`: what a process has as `/` is a directory of the tree. -/
+def chroot (kernel : Kernel) (group : Nat) (base path : String) : Result Kernel := do
+  let process := kernel.process group
+  if process.credentials.euid != 0 then .error Errno.eperm
+  let (normal, found) ← kernel.resolve base path
+  let some number := found | .error Errno.enoent
+  let .directory := (← inodeOf kernel number).content | .error Errno.enotdir
+  .ok (kernel.setProcess group { process with root := normal })
+
+/-- `pivot_root`: what is mounted at `newRoot` is `/` of the processes whose `/` was the tree's, and in their working directory if they
+were there, and what was `/` is seen at `putOld`, which is within it. -/
+def pivotRoot (kernel : Kernel) (group : Nat) (base newRoot putOld : String) : Result Kernel := do
+  let process := kernel.process group
+  if process.credentials.euid != 0 then .error Errno.eperm
+  if process.root != "/" then .error Errno.einval
+  let (target, found) ← kernel.resolve base newRoot (mounted := false)
+  let some _ := found | .error Errno.enoent
+  let some mount := kernel.mounts.find? (·.target == target) | .error Errno.einval
+  let (old, found) ← kernel.resolve base putOld (mounted := false)
+  let some number := found | .error Errno.enoent
+  let .directory := (← inodeOf kernel number).content | .error Errno.enotdir
+  if !(old == mount.source || old.startsWith (mount.source ++ "/")) then .error Errno.einval
+  let kernel := { kernel with mounts := { target := old, source := "/", fstype := "rootfs", device := "rootfs", flags := 0 } :: kernel.mounts }
+  .ok { kernel with processes := kernel.processes.map fun _ other =>
+    if other.root != "/" then other else { other with root := target, cwd := if other.cwd == "/" then target else other.cwd } }
 
 /-- `chdir`. -/
 def chdir (kernel : Kernel) (group : Nat) (path : String) : Result Kernel := do
@@ -1216,9 +1365,9 @@ def truncateDescriptor (kernel : Kernel) (group fd size : Nat) : Result Kernel :
 
 /-- `truncate`. -/
 def truncatePath (kernel : Kernel) (base path : String) (size : Nat) : Result Kernel := do
-  match (← kernel.resolve base path).2 with
-  | none => .error Errno.enoent
-  | some number => kernel.truncateInode number size
+  match ← kernel.resolve base path with
+  | (_, none) => .error Errno.enoent
+  | (normal, some number) => if kernel.readOnly normal then .error erofs else kernel.truncateInode number size
 
 /-- Whether the owner of a lock of the inode `number` is there yet, of the processes `live`: a process that has it open, or an open
 file that one of them has a descriptor of. -/
@@ -1306,9 +1455,10 @@ def openTmpfile (kernel : Kernel) (group : Nat) (base path : String) (flags mode
 
 /-- `chmod`. -/
 def chmod (kernel : Kernel) (base path : String) (mode : Nat) : Result Kernel := do
-  match (← kernel.resolve base path).2 with
-  | none => .error Errno.enoent
-  | some number =>
+  match ← kernel.resolve base path with
+  | (_, none) => .error Errno.enoent
+  | (normal, some number) =>
+    if kernel.readOnly normal then .error erofs
     let inode ← inodeOf kernel number
     let kept := inode.mode - (inode.mode &&& 0o7777)
     .ok { kernel with inodes := kernel.inodes.insert number { inode with mode := kept ||| (mode &&& 0o7777), details := { inode.details with changed := kernel.clock } } }
