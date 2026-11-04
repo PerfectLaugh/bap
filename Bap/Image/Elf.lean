@@ -542,8 +542,13 @@ private def dynamicString (image : Image) (headers : List ProgramHeader) (string
     match offsetOf headers image.data.size (strings + offset) (size - offset) with
     | none => ""
     | some fileOffset =>
-      let bytes := image.data.extract fileOffset (fileOffset + size - offset)
-      String.ofList (bytes.toList.takeWhile (· != 0) |>.map fun byte => Char.ofNat byte.toNat)
+      -- To its zero, rather than all of the table after it.
+      let stop := min (fileOffset + size - offset) image.data.size
+      let finish := Id.run do
+        let mut at_ := fileOffset
+        while at_ < stop && image.data.get! at_ != 0 do at_ := at_ + 1
+        pure at_
+      String.ofList ((image.data.extract fileOffset finish).toList.map fun byte => Char.ofNat byte.toNat)
 
 def dynamicSymbol (image : Image) (headers : List ProgramHeader) (tags : List (Nat × Nat))
     (index : Nat) : Except String (Option DynamicSymbol) := do
@@ -930,8 +935,9 @@ def imports (image : Image) (spec : RelocationSpec) (endp : Nat) : Except String
       address ≥ sec.addr && address < sec.addr + sec.size)
   let references := spec.references.map (fun entry => (entry.1, unversioned entry.2)) |>.mergeSort fun left right =>
     left.1 < right.1 || (left.1 = right.1 && left.2 ≤ right.2)
-  let unique (entries : List (Nat × String)) := entries.foldl (init := []) fun result entry =>
-    if result.contains entry then result else result ++ [entry]
+  -- Of a sorted list, whose same entries are next to each other: each once, in one pass.
+  let unique (entries : List (Nat × String)) := (entries.foldl (init := []) fun result entry =>
+    if result.head? == some entry then result else entry :: result).reverse
   let references := unique references
   let objects := references.filter fun entry =>
     importedDataName entry.2 && inFile entry.1 && storedWord image headers entry.1 = some 0
@@ -940,8 +946,7 @@ def imports (image : Image) (spec : RelocationSpec) (endp : Nat) : Except String
   let functions := unique functions
   let all : List (Nat × String × Bool) :=
     objects.map (fun entry => (entry.1, entry.2, true)) ++ functions.map (fun entry => (entry.1, entry.2, false))
-  .ok ((List.range all.length).map fun index =>
-    let entry := all[index]!
+  .ok (all.zipIdx.map fun (entry, index) =>
     ⟨entry.1, entry.2.1, endp + index * (image.addrWidth / 8), entry.2.2⟩)
 
 def importBytes (image : Image) (count : Nat) : Nat :=
