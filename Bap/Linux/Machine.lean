@@ -470,6 +470,7 @@ private def viewOf (machine : Machine) (emu : Emu) (group : Nat) : IO ProcessVie
       { start := region.address, size := region.data.size, readable := region.protection.readable
         writable := region.protection.writable, executable := region.protection.executable }
     breakStart := process.breakStart
+    umask := process.umask
     breakEnd := process.breakEnd
     stackStart
     credentials := process.credentials

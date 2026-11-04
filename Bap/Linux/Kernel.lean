@@ -342,6 +342,7 @@ structure ProcessView where
   mounts : List (String × String × String × Nat) := []
   ranges : List MappedRange := []
   breakStart : Nat := 0
+  umask : Nat := 0o022
   breakEnd : Nat := 0
   stackStart : Nat := 0
   /-- How many bits it has, and what `uname` calls it. -/
