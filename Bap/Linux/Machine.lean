@@ -1483,6 +1483,31 @@ private def handOver (machine : Machine) (emu : Emu) : SyscallAction → IO Sysc
     else syscallReturn emu (.ok value)
   | action => pure action
 
+/-- What makes a descriptor makes none at or past RLIMIT_NOFILE, which is known before the call does anything, as Linux takes the
+descriptor first: `EMFILE`, and of `dup2` and `dup3` to one past it `EBADF`, and of `F_DUPFD` from one past it `EINVAL`. -/
+private def descriptorLimit (machine : Machine) (group : Nat) (call : Call) (args : List Nat) : IO (Option SyscallAction) := do
+  let kernel ← machine.kernel.get
+  let limit := (kernel.limitOf group 7).1
+  let descriptors := (kernel.process group).descriptors
+  let free (from_ : Nat) : Nat := Kernel.lowestFree descriptors from_
+  let arg (index : Nat) : Nat := args.getD index 0
+  -- A descriptor that is none, as `signalfd` is given to make one.
+  let none_ (value : Nat) : Bool := value % 2 ^ 32 == 2 ^ 32 - 1
+  let full := free 0 ≥ limit
+  pure <| match call with
+    | .open_ | .openat | .dup | .socket | .accept | .accept4 | .eventfd | .eventfd2 | .epollCreate | .epollCreate1 | .timerfdCreate
+    | .memfdCreate | .inotifyInit | .inotifyInit1 | .mqOpen | .ioUringSetup =>
+      if full then some (errorOf Errno.emfile) else none
+    | .signalfd | .signalfd4 => if none_ (arg 0) && full then some (errorOf Errno.emfile) else none
+    -- Two of them.
+    | .pipe | .pipe2 | .socketpair => if free (free 0 + 1) ≥ limit then some (errorOf Errno.emfile) else none
+    | .dup2 | .dup3 => if arg 1 % 2 ^ 32 < 2 ^ 31 && arg 1 % 2 ^ 32 ≥ limit then some (errorOf Errno.ebadf) else none
+    | .fcntl =>
+      if arg 1 != 0 && arg 1 != 1030 then none
+      else if arg 2 % 2 ^ 32 ≥ limit then some (errorOf Errno.einval)
+      else if free (arg 2 % 2 ^ 32) ≥ limit then some (errorOf Errno.emfile) else none
+    | _ => none
+
 private def serveKernelCalls (machine : Machine) : IO HookId :=
   onSyscall machine.emu fun emu number args => do
     match machine.architecture.call number with
@@ -1490,8 +1515,9 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
     | none => pure .default
     | some call =>
       machine.timers.entered emu
-      refreshProc machine emu call args
       let group := (← currentTask emu).group
+      if let some refused ← descriptorLimit machine group call args then return ← handOver machine emu refused
+      refreshProc machine emu call args
       -- What it names of the directories of the host that the machine sees.
       if !(← machine.hostMounts.get).isEmpty then
         let kernel ← machine.kernel.get
@@ -1537,24 +1563,6 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
         if watching then
           let live := ((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups
           if ← Notify.after machine.notifier machine.kernel group call args before action live then wakePipeReaders emu
-        -- What makes a descriptor makes none past RLIMIT_NOFILE.
-        let action ← match call, action with
-          | .open_, .returnValue fd | .openat, .returnValue fd | .dup, .returnValue fd | .socket, .returnValue fd
-          | .accept, .returnValue fd | .accept4, .returnValue fd | .eventfd, .returnValue fd | .eventfd2, .returnValue fd | .epollCreate, .returnValue fd | .epollCreate1, .returnValue fd
-          | .timerfdCreate, .returnValue fd | .signalfd4, .returnValue fd | .memfdCreate, .returnValue fd | .inotifyInit, .returnValue fd
-          | .inotifyInit1, .returnValue fd | .mqOpen, .returnValue fd | .ioUringSetup, .returnValue fd
-          -- Of fcntl, F_DUPFD and F_DUPFD_CLOEXEC, which make one, rather than what the others give, as flags.
-          | .fcntl, .returnValue fd =>
-            if call == .fcntl && args.getD 1 0 != 0 && args.getD 1 0 != 1030 then pure action else
-            -- A call that waits has the registers that it had, which aren't what it made.
-            if ← Bap.Emu.stopped emu then pure action else
-            let kernel ← machine.kernel.get
-            let made := !(before.process group).descriptors.contains fd
-            if made && fd ≥ (kernel.limitOf group 7).1 && fd < 2 ^ 31 then
-              if let .ok closed := kernel.close group fd then machine.kernel.set closed
-              pure (errorOf Errno.emfile)
-            else pure action
-          | _, _ => pure action
         handOver machine emu action
 
 /-- What is left: nothing else serves it, and it isn't there. -/

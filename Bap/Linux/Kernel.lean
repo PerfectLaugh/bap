@@ -652,7 +652,7 @@ def process (kernel : Kernel) (group : Nat) : Process := kernel.processes.getD g
 def setProcess (kernel : Kernel) (group : Nat) (process : Process) : Kernel :=
   { kernel with processes := kernel.processes.insert group process }
 
-private def lowestFree (descriptors : Std.HashMap Nat Descriptor) (from_ : Nat) : Nat :=
+def lowestFree (descriptors : Std.HashMap Nat Descriptor) (from_ : Nat) : Nat :=
   let rec go : Nat → Nat → Nat
     | 0, candidate => candidate
     | fuel + 1, candidate => if descriptors.contains candidate then go fuel (candidate + 1) else candidate

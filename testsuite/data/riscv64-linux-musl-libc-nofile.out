@@ -1,0 +1,6 @@
+pipe with one left -24 0
+last 9 0
+open past -24 -2
+dup2 past -9 5
+F_DUPFD from past -22 -24
+F_DUPFD with room 5 0
