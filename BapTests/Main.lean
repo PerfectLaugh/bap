@@ -122,6 +122,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testMipsErrno,
     Bap.Tests.Emu.testHostMount "x86_64",
     Bap.Tests.Emu.testHostMount "aarch64",
+    Bap.Tests.Emu.testHostExec "x86_64",
+    Bap.Tests.Emu.testHostExec "aarch64",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-sysv",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-sysv",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-sysv",

@@ -1848,6 +1848,21 @@ private def programOf (kernel : Kernel) (architecture : Architecture) : Nat → 
           .ok (some (bytes, loaded))
       .ok (path, data, program, interpreter, arguments)
 
+/-- What `execve` runs, of the directories of the host that the machine sees: the program, what a script names to run it, and the
+interpreter of a program of ELF, as `programOf` looks for them. -/
+private def programFromHost (machine : Machine) (path : String) : IO Unit := do
+  if (← machine.hostMounts.get).isEmpty then return
+  let mut path := path
+  for _ in [0:4] do
+    fromHost machine path
+    let .ok data := fileOf (← machine.kernel.get) path | return
+    if data.size ≥ 2 && data.get! 0 == 35 && data.get! 1 == 33 then
+      let first := (String.fromUTF8? (data.extract 2 (min data.size 256))).getD ""
+      path := ((((first.splitOn "\n").headD "").trimAscii.toString.splitOn " ").headD "")
+    else
+      if let some name := (Elf.parse data).toOption.bind (·.interpreter) then fromHost machine name
+      return
+
 /-- The strings of a list of pointers that a null ends, as `execve` is given them. -/
 private def readStrings (emu : Emu) (architecture : Architecture) (address : Nat) : IO (List String) := do
   if address == 0 then return []
@@ -1874,6 +1889,8 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
   | .ok (path, arguments, environment) =>
     let (base, relative) := kernel.pathIn group (kernel.process group).cwd path
     let absolute := if relative.startsWith "/" then relative else base ++ "/" ++ relative
+    programFromHost machine absolute
+    let kernel ← machine.kernel.get
     match programOf kernel architecture 4 absolute (if arguments.isEmpty then [path] else arguments) with
     | .error errno => pure (errorOf errno)
     | .ok (name, data, program, interpreter, arguments) =>

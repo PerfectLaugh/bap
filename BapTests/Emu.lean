@@ -3066,6 +3066,23 @@ def testHostMount (triple : String) : IO Unit := do
   assertTrue s!"{label} and not what it made" !(← System.FilePath.pathExists s!"{host}/new")
   IO.FS.removeDirAll host
 
+/-- A program that runs a script of a directory of the host that the machine sees, which names a program there to run it: neither is
+in the machine until `execve` looks for it. -/
+def testHostExec (triple : String) : IO Unit := do
+  let host := s!"/tmp/bap-host-exec-{triple}"
+  if ← System.FilePath.pathExists host then IO.FS.removeDirAll host
+  IO.FS.createDirAll host
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-hostexec"
+  IO.FS.writeBinFile s!"{host}/prog" program
+  IO.FS.writeFile s!"{host}/script" "#!/host/prog c\n"
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  machine.mountHost host "/host"
+  let written ← IO.mkRef ByteArray.empty
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual s!"Linux {triple} a script of the host runs a program of the host" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual s!"Linux {triple} with what it was given" "child /host/script x\n" (String.fromUTF8! (← written.get))
+  IO.FS.removeDirAll host
+
 /-- Shared libraries from outside a program, as `dlopen` has them, on a machine with no libc or linker to do it. -/
 def testLinuxLibraries (triple : String) (ifunc : Bool := false) : IO Unit := do
   let label := s!"Library {triple}"
