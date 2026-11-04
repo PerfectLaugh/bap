@@ -3033,7 +3033,7 @@ def testKernelFiles : IO Unit := do
 /-- MIPS has its own numbers of errors above 34, which a call gives a program of it. -/
 def testMipsErrno : IO Unit := do
   let mips : Bap.Linux.Architecture := .mips 32 true false
-  for (generic, own) in [(42, 35), (43, 36), (61, 96), (110, 145), (38, 89), (95, 122), (11, 11), (22, 22)] do
+  for (generic, own) in [(42, 35), (43, 36), (61, 61), (74, 77), (110, 145), (38, 89), (95, 122), (11, 11), (22, 22)] do
     assertEqual s!"MIPS has error {generic} as {own}" own (mips.errno generic)
   assertEqual "and others have it as it is" 42 (Bap.Linux.Architecture.x86_64.errno 42)
 
