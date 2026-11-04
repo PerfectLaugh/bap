@@ -97,6 +97,12 @@ def Kernel.image (kernel : Kernel) : Image where
       | .generated name => (4, name.toUTF8)
       | .pipe buffer head consumed => (5, Wire.putBytes (Wire.putNat ByteArray.empty consumed) (buffer.extract head buffer.size))
       | .socket socket => (6, socketBytes socket)
+      | .eventfd count semaphore => (7, Wire.putFlag (Wire.putNat ByteArray.empty count) semaphore)
+      | .timerfd expiry interval => (8, Wire.putNat (Wire.putOption Wire.putNat ByteArray.empty expiry) interval)
+      | .signalfd mask => (9, Wire.putNat ByteArray.empty mask)
+      | .epoll items => (10, Wire.putList (fun out (item : EpollItem) =>
+          Wire.putFlag (Wire.putNat (Wire.putNat (Wire.putNat (Wire.putNat out item.fd) item.file) item.events) item.data) item.told)
+          ByteArray.empty items)
     { number, mode := inode.mode, kind, data }
   nextInode := kernel.nextInode
   openFiles := (sorted kernel.openFiles.toList).map fun (id, file) => (id, file.inode, file.offset, file.flags)
@@ -130,6 +136,24 @@ def Image.kernel (image : Image) : Except String Kernel := do
         let (buffer, _) ← Wire.getBytes entry.data at_
         pure (Content.pipe buffer 0 consumed)
       | 6 => pure (Content.socket (← socketOfBytes entry.data))
+      | 7 =>
+        let (count, at_) ← Wire.getNat entry.data 0
+        let (semaphore, _) ← Wire.getFlag entry.data at_
+        pure (Content.eventfd count semaphore)
+      | 8 =>
+        let (expiry, at_) ← Wire.getOption Wire.getNat entry.data 0
+        let (interval, _) ← Wire.getNat entry.data at_
+        pure (Content.timerfd expiry interval)
+      | 9 => pure (Content.signalfd (← Wire.getNat entry.data 0).1)
+      | 10 =>
+        let (items, _) ← Wire.getList (fun data at_ => do
+          let (fd, at_) ← Wire.getNat data at_
+          let (file, at_) ← Wire.getNat data at_
+          let (events, at_) ← Wire.getNat data at_
+          let (value, at_) ← Wire.getNat data at_
+          let (told, at_) ← Wire.getFlag data at_
+          .ok ({ fd, file, events, data := value, told }, at_)) entry.data 0
+        pure (Content.epoll items)
       | kind => .error s!"a Linux checkpoint with an inode of kind {kind}"
     pure (inodes.insert entry.number { number := entry.number, content, mode := entry.mode })
   pure {

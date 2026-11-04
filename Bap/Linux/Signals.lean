@@ -442,6 +442,11 @@ structure Signals where
   tracer : IO.Ref (Nat → IO (Option Nat))
   /-- A process that a signal stops, by what does that by default, or that SIGCONT lets go on: the process and the signal. -/
   jobControl : IO.Ref (Emu → Nat → Nat → IO Unit)
+  /-- A thread that a signal woke from what it waited in: the thread, whether its handler has `SA_RESTART`, and the spaces that it
+  waited in, as a call that runs again when it is woken has to hear of it. -/
+  interrupted : IO.Ref (Emu → Nat → Bool → List Nat → IO Unit)
+  /-- A signal was sent, as what waits to read one, as of `signalfd`, has to look again. -/
+  sent : IO.Ref (Emu → IO Unit)
 
 namespace Signals
 
@@ -761,6 +766,7 @@ private def interrupt (signals : Signals) (emu : Emu) (tid : Nat) (restart : Boo
   let interruptible (waiter : FutexWaiter) : Bool := waiter.thread == tid && !uninterruptible waiter.space
   if !table.futexes.any interruptible && !table.waiters.any (·.thread == tid) then return
   emu.taskTable.set { table with futexes := table.futexes.filter (!interruptible ·), waiters := table.waiters.filter (·.thread != tid) }
+  let spaces := (table.futexes.filter interruptible).map (·.space)
   let state ← threadOf signals tid
   match state.last, restart && (state.last.map (·.restartable)).getD false with
   | some last, true =>
@@ -771,6 +777,7 @@ private def interrupt (signals : Signals) (emu : Emu) (tid : Nat) (restart : Boo
     emu.threadsRef.modify fun threads => threads.map fun context =>
       if context.id == tid then { context with pc := last.pc, pending := none, skip := none } else context
   | _, _ => setSyscallResult emu tid (.error (signals.numbers).eintr)
+  (← signals.interrupted.get) emu tid restart spaces
   wakeThread emu tid
 
 /-- A signal is sent to a thread. -/
@@ -828,10 +835,43 @@ private def sendToGroup (signals : Signals) (emu : Emu) (group : Nat) (info : Si
       signals.table.modify fun table => { table with groupPending := table.groupPending.insert group (shared ++ [info]) }
 
 /-- Sends a signal to a thread of a process, or to the process, as `tgkill` and `kill` do. -/
-def send (signals : Signals) (emu : Emu) (tid : Option Nat) (group : Nat) (info : SignalInfo) : IO Unit :=
+def send (signals : Signals) (emu : Emu) (tid : Option Nat) (group : Nat) (info : SignalInfo) : IO Unit := do
   match tid with
   | some tid => sendToThread signals emu tid group info
   | none => sendToGroup signals emu group info
+  (← signals.sent.get) emu
+
+/-- The signals that are pending for a thread, of its own and of its process, as bits. -/
+def pendingBits (signals : Signals) (tid group : Nat) : IO Nat := do
+  let table ← signals.table.get
+  let own := (table.threads.getD tid {}).pending
+  let shared := table.groupPending.getD group []
+  pure ((own ++ shared).foldl (fun bits info => bits ||| bitOf info.signal) 0)
+
+/-- Takes the lowest signal of `mask` that is pending for a thread, of its own first and then of its process, as `signalfd` reads it. -/
+def takePending (signals : Signals) (tid group mask : Nat) : IO (Option SignalInfo) := do
+  let table ← signals.table.get
+  let own := (table.threads.getD tid {}).pending
+  let shared := table.groupPending.getD group []
+  let lowest (list : List SignalInfo) : Option SignalInfo :=
+    (list.filter fun info => bitOf info.signal &&& mask != 0).foldl (fun best info =>
+      match best with
+      | some found => if info.signal < found.signal then some info else best
+      | none => some info) none
+  match lowest own, lowest shared with
+  | some info, _ =>
+    modifyThread signals tid fun state => { state with pending := state.pending.eraseP (·.signal == info.signal) }
+    pure (some info)
+  | none, some info =>
+    signals.table.modify fun table => { table with groupPending := table.groupPending.insert group (shared.eraseP (·.signal == info.signal)) }
+    pure (some info)
+  | none, none => pure none
+
+/-- A thread has `mask` while it waits in a call, as `ppoll`, `pselect6` and `epoll_pwait` have it, and its own again once the call is
+over, as `sigsuspend` has it. -/
+def suspendWith (signals : Signals) (tid mask : Nat) : IO Unit :=
+  modifyThread signals tid fun state =>
+    if state.suspended.isSome then state else { state with suspended := some state.mask, mask := blockable signals mask }
 
 /-- Where a thread blocks that waits for no address: no guest can wake it, as this isn't memory that it has. -/
 private def waitAddress (tid : Nat) : Nat := 2 ^ 64 - 8 * (tid + 1)

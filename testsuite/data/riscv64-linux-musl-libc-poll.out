@@ -1,0 +1,25 @@
+poll of an empty pipe 0 0
+times out 0 1
+and of one that has something 1 1
+a wait that something ends 1 1
+select 1 0 1
+a pipe that nothing writes 1 16
+eventfd 3 1 4
+eventfd counts 5
+one at a time 2 1 0
+timerfd 1 1
+as many times as it expired 3
+signalfd with nothing 0
+and with a signal 1 1
+reads it 128 1
+epoll_ctl 0
+epoll_wait of nothing 0
+epoll_wait 1 1 42
+edge 1 0
+one shot 1 0
+until it is changed 1
+an eventfd is watched 1
+nor what was taken away 0
+a signal ends ppoll 1 1
+a read without SA_RESTART 1 2
+and with it 1 1 3

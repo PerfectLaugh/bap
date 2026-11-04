@@ -35,12 +35,23 @@ structure Timer where
   overrun : Nat := 0
   deriving Repr
 
+/-- Of a call that waits and runs again when it is woken: where it ends, what its result register had at its start, which it has
+again to run again, and whether a handler of `SA_RESTART` has it run again, as a read does, rather than give `EINTR`, as `poll`
+does. -/
+structure Site where
+  next : Nat
+  result : Nat
+  restartable : Bool
+  deriving Repr
+
 /-- The timers, by the process and which they are: 0 to 2 of `setitimer` and `3 + id` of `timer_create`, the next id of
-`timer_create` of each process, and the deadline of each thread that waits with a timeout. -/
+`timer_create` of each process, the deadline of each thread that waits with a timeout, and where the call of each that waits to run
+again is. -/
 structure TimeState where
   timers : Std.HashMap (Nat × Nat) Timer := {}
   nextTimer : Std.HashMap Nat Nat := {}
   deadlines : Std.HashMap Nat Nat := {}
+  sites : Std.HashMap Nat Site := {}
 
 /-- Where a thread waits until its deadline, by its id. A signal ends that wait. -/
 def sleepSpace : Nat := 2 ^ 60
@@ -138,14 +149,35 @@ def deadlineOf (timers : Timers) (tid : Nat) (deadline : IO Nat) : IO Nat := do
 
 /-- The call of a thread is over, and with it its deadline. -/
 def finish (timers : Timers) (tid : Nat) : IO Unit :=
-  timers.state.modify fun state => { state with deadlines := state.deadlines.erase tid }
+  timers.state.modify fun state => { state with deadlines := state.deadlines.erase tid, sites := state.sites.erase tid }
 
 /-- The thread that runs waits in `space`, for `address`, until something wakes it there or its deadline comes, if it has one, and
-then runs its call again, with its registers as they were. -/
-def waitUntil (emu : Emu) (space address : Nat) (deadline : Option Nat) : IO SyscallAction := do
-  emu.taskTable.modify (·.futexWait { thread := ← thread emu, space, address, bitset := 2 ^ 32 - 1, deadline })
+then runs its call again, with its registers as they were. A signal that comes first has it run again or give `EINTR`, as
+`restartable` says of a handler of `SA_RESTART`: see `interrupted`. -/
+def waitUntil (timers : Timers) (emu : Emu) (space address : Nat) (deadline : Option Nat) (restartable : Bool) : IO SyscallAction := do
+  let tid ← thread emu
+  let action ← Ptrace.again emu
+  let result := match action with
+    | .returnValue value => value
+    | .default => 0
+  let next ← emu.nextPc.get
+  timers.state.modify fun state => { state with sites := state.sites.insert tid { next, result, restartable } }
+  emu.taskTable.modify (·.futexWait { thread := tid, space, address, bitset := 2 ^ 32 - 1, deadline })
   emu.stopped.set true
-  Ptrace.again emu
+  pure action
+
+/-- A signal woke a thread from what it waited in. Of a call that runs again, which waited from `2 ^ 61` to the space of shared
+futexes: it runs again with the registers that it had, of a handler of `SA_RESTART` and a call that it restarts, and otherwise goes
+on past the call with `EINTR`, which the signals gave it, and its deadline is gone either way. -/
+def interrupted (timers : Timers) (emu : Emu) (tid : Nat) (restart : Bool) (spaces : List Nat) : IO Unit := do
+  unless spaces.any fun space => 2 ^ 61 ≤ space && space < Kernel.fileSpace do return
+  let some site := (← timers.state.get).sites.get? tid | return
+  timers.finish tid
+  if restart && site.restartable then
+    let width := timers.architecture.bits
+    let (_, _, register) := syscallRegisters emu.config.syscallAbi
+    setThreadReg emu tid ⟨register, .imm width, 0, false⟩ (.bits (BitVec.ofNat width site.result))
+  else setThreadPc emu tid site.next
 
 /-- A process that `fork` made has no timers of its parent, and `execve` ends those of `timer_create` of a process. -/
 def executed (timers : Timers) (group : Nat) : IO Unit :=
@@ -286,7 +318,9 @@ def save (timers : Timers) : IO ByteArray := do
   let out := putSorted putTimer ByteArray.empty state.timers.toList
   let pair (out : ByteArray) (entry : Nat × Nat) : ByteArray := putNat (putNat out entry.1) entry.2
   let out := putSorted pair out state.nextTimer.toList
-  pure (putSorted pair out state.deadlines.toList)
+  let out := putSorted pair out state.deadlines.toList
+  pure (putSorted (fun out (tid, site) => putFlag (putNat (putNat (putNat out tid) site.next) site.result) site.restartable) out
+    state.sites.toList)
 
 open Wire in
 def load (timers : Timers) (data : ByteArray) : IO Unit := do
@@ -298,8 +332,15 @@ def load (timers : Timers) (data : ByteArray) : IO Unit := do
     let (entries, at_) ← getList getTimer data 0
     let (nextTimer, at_) ← getList pair data at_
     let (deadlines, at_) ← getList pair data at_
+    let (sites, at_) ← getList (fun data at_ => do
+      let (tid, at_) ← getNat data at_
+      let (next, at_) ← getNat data at_
+      let (result, at_) ← getNat data at_
+      let (restartable, at_) ← getFlag data at_
+      .ok ((tid, { next, result, restartable }), at_)) data at_
     expectEnd data at_
-    pure { timers := Std.HashMap.ofList entries, nextTimer := Std.HashMap.ofList nextTimer, deadlines := Std.HashMap.ofList deadlines }
+    pure { timers := Std.HashMap.ofList entries, nextTimer := Std.HashMap.ofList nextTimer, deadlines := Std.HashMap.ofList deadlines
+           sites := Std.HashMap.ofList sites }
   timers.state.set (← IO.ofExcept decoded)
 
 end Timers

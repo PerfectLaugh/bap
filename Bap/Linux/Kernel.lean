@@ -89,6 +89,17 @@ structure Socket where
   /-- Where datagrams of the Internet go when a send doesn't say: the address that it was connected to, whoever has it then. -/
   remote : Option String := none
 
+/-- What an epoll instance watches of a descriptor: the descriptor that it was given, its open file, which is what is watched, the
+events that it asks for, the data that it gives back with them, and whether it was told of and hasn't been ready since, of
+`EPOLLET`, or is told of no more until it is changed, of `EPOLLONESHOT`. -/
+structure EpollItem where
+  fd : Nat
+  file : Nat
+  events : Nat
+  data : Nat
+  told : Bool := false
+  deriving Repr
+
 /-- What an inode is and holds. -/
 inductive Content where
   | file (data : ByteArray)
@@ -102,6 +113,14 @@ inductive Content where
   | pipe (buffer : ByteArray) (head consumed : Nat)
   /-- A socket, with all that it holds: see `Bap.Linux.Sockets`. -/
   | socket (socket : Socket)
+  /-- Of `eventfd`: its count, and whether a read takes one of it, as `EFD_SEMAPHORE` has it, rather than all of it. -/
+  | eventfd (count : Nat) (semaphore : Bool)
+  /-- Of `timerfd_create`: when it next expires, if it is armed, by the kernel's clock, and every how long after. -/
+  | timerfd (expiry : Option Nat) (interval : Nat)
+  /-- Of `signalfd`: the signals that it reads. -/
+  | signalfd (mask : Nat)
+  /-- Of `epoll_create`: what it watches. -/
+  | epoll (items : List EpollItem)
 
 /-- A file of any kind: its number, what it holds, and its type and permissions as `st_mode` has them. -/
 structure Inode where
@@ -527,7 +546,7 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
       if has flags oDirectory then .error Errno.enotdir
       .ok kernel
     -- It has no path.
-    | .pipe .. => .error Errno.einval
+    | .pipe .. | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ => .error Errno.einval
     -- What is bound to a path is connected to, not opened.
     | .socket _ => .error Errno.enxio
   let openFile := kernel.nextOpenFile
@@ -550,7 +569,7 @@ def read (kernel : Kernel) (group fd count : Nat) : Result (Kernel × ByteArray)
   let data ← match inode.content with
     | .file data | .console data => .ok data
     | .directory => .error Errno.eisdir
-    | .symlink _ | .generated _ | .pipe .. | .socket _ => .error Errno.einval
+    | .symlink _ | .generated _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ => .error Errno.einval
   let bytes := readAt data file.offset count
   .ok ({ kernel with openFiles := kernel.openFiles.insert id { file with offset := file.offset + bytes.size } }, bytes)
 
@@ -561,7 +580,7 @@ def readFrom (kernel : Kernel) (group fd count offset : Nat) : Result ByteArray 
   let inode ← inodeOf kernel file.inode
   match inode.content with
   | .file data => .ok (readAt data offset count)
-  | .console _ | .pipe .. | .socket _ => .error Errno.espipe
+  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ => .error Errno.espipe
   | .directory => .error Errno.eisdir
   | .symlink _ | .generated _ => .error Errno.einval
 
@@ -580,8 +599,8 @@ def write (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Result (Kerne
       inodes := kernel.inodes.insert file.inode { inode with content := .file (writeAt data offset bytes) }
       openFiles := kernel.openFiles.insert id { file with offset := offset + bytes.size } }, bytes.size)
   | .directory => .error Errno.eisdir
-  -- `Machine` sends to a socket.
-  | .symlink _ | .generated _ | .socket _ => .error Errno.einval
+  -- `Machine` sends to a socket, and counts what is written to an `eventfd`.
+  | .symlink _ | .generated _ | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ => .error Errno.einval
 
 /-- `writeAt`, in the same bytes if nothing else holds them. -/
 def writeInto (data : ByteArray) (offset : Nat) (bytes : ByteArray) : ByteArray :=
@@ -637,7 +656,7 @@ def writeTo (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Nat
   | .file data =>
     .ok ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content := .file (writeAt data offset bytes) } },
       bytes.size)
-  | .console _ | .pipe .. | .socket _ => .error Errno.espipe
+  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ => .error Errno.espipe
   | .directory => .error Errno.eisdir
   | .symlink _ | .generated _ => .error Errno.einval
 
@@ -648,7 +667,7 @@ def seek (kernel : Kernel) (group fd : Nat) (negative : Bool) (distance whence :
   let size ← match inode.content with
     | .file data => .ok data.size
     | .directory => .ok 0
-    | .console _ | .pipe .. | .socket _ => .error Errno.espipe
+    | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ => .error Errno.espipe
     | .symlink _ | .generated _ => .error Errno.einval
   let start ← match whence with
     | 0 => .ok 0
@@ -679,6 +698,29 @@ def pipe (kernel : Kernel) (group flags : Nat) : Kernel × Nat × Nat :=
   let (kernel, readFd) := kernel.addDescriptor group reading (flags &&& oCloexec != 0)
   let (kernel, writeFd) := kernel.addDescriptor group writing (flags &&& oCloexec != 0)
   (kernel, readFd, writeFd)
+
+/-- A descriptor of something that has no path, as `eventfd` and `epoll_create` make: on a new inode of `content`, opened to read and
+write with `flags` of `O_NONBLOCK` and `O_CLOEXEC`. -/
+def addObject (kernel : Kernel) (group : Nat) (content : Content) (flags : Nat) : Kernel × Nat :=
+  let number := kernel.nextInode
+  let openFile := kernel.nextOpenFile
+  let kernel := { kernel with
+    inodes := kernel.inodes.insert number { number, content, mode := 0o600 }
+    nextInode := number + 1
+    openFiles := kernel.openFiles.insert openFile { inode := number, flags := 2 ||| (flags &&& oNonblock) }
+    nextOpenFile := openFile + 1 }
+  kernel.addDescriptor group openFile (flags &&& oCloexec != 0)
+
+/-- What a descriptor is on, of the open file and the inode. -/
+def objectOf (kernel : Kernel) (group fd : Nat) : Result (Nat × OpenFile × Inode) := do
+  let (_, file) ← openFileOf kernel group fd
+  pure (file.inode, file, ← inodeOf kernel file.inode)
+
+/-- What an inode holds now. -/
+def setContent (kernel : Kernel) (number : Nat) (content : Content) : Kernel :=
+  match kernel.inodes.get? number with
+  | some inode => { kernel with inodes := kernel.inodes.insert number { inode with content } }
+  | none => kernel
 
 /-- The inode of a descriptor, if that is a pipe. -/
 def pipeOf (kernel : Kernel) (group fd : Nat) : Option Nat :=
@@ -765,7 +807,7 @@ private def statOf (kernel : Kernel) (inode : Inode) : Stat :=
     | .file data => (data.size, 1)
     | .directory => (4096, 2)
     | .symlink target => (target.utf8ByteSize, 1)
-    | .console _ | .generated _ | .pipe .. | .socket _ => (0, 1)
+    | .console _ | .generated _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ => (0, 1)
   { inode := inode.number, mode := inode.mode, size, links, time := kernel.clock }
 
 /-- `stat` and `lstat`. -/
@@ -821,7 +863,7 @@ def directoryEntries (kernel : Kernel) (group fd : Nat) : Result (Nat × Nat × 
       | some { content := .pipe .., .. } => 1
       | some { content := .generated _, .. } => 8
       | some { content := .socket _, .. } => 12
-      | none => 0
+      | some _ | none => 0
     let parentNumber := (kernel.paths.get? (Path.parent path)).getD inode.number
     let all := [(inode.number, 4, "."), (parentNumber, 4, "..")] ++
       (children kernel path).map fun entry => (entry.2, typeOf entry.2, entry.1)

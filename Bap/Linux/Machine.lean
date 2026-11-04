@@ -5,6 +5,7 @@ import Bap.Linux.Signals
 import Bap.Linux.Ptrace
 import Bap.Linux.Seccomp
 import Bap.Linux.Timers
+import Bap.Linux.Poll
 import Bap.Linux.GuestHeap
 import Bap.Linux.LoadedLibrary
 import Bap.Linux.Image
@@ -465,16 +466,9 @@ private def numberAt (bytes : ByteArray) (offset size : Nat) (big : Bool) : Nat 
     value + bytes[at_]!.toNat * 256 ^ index) 0
 
 /-- A call that has to wait for what happens to the inode `number`: it stops here and runs again when something changes, with its
-registers as they were, as a read of a pipe does. -/
-private def waitOn (emu : Emu) (wide number : Nat) : IO SyscallAction := do
-  let (_, _, register) := syscallRegisters emu.config.syscallAbi
-  let waiter : Bap.Tasks.FutexWaiter := { thread := ← thread emu, space := pipeSpace + number, address := 0, bitset := 2 ^ 32 - 1, timed := false }
-  emu.taskTable.modify (·.futexWait waiter)
-  emu.redirect.set (some (← emu.pc.get))
-  emu.stopped.set true
-  match Value.asBits (← reg emu ⟨register, .imm wide, 0, false⟩) with
-  | .ok bits => pure (.returnValue bits.2.toNat)
-  | .error _ => pure (errorOf Errno.eio)
+registers as they were, as a read of a pipe does, or, of a signal, as `Timers.interrupted` says. -/
+private def waitOn (machine : Machine) (emu : Emu) (number : Nat) : IO SyscallAction :=
+  machine.timers.waitUntil emu (pipeSpace + number) 0 none true
 
 /-- The name in a `struct sockaddr` of `size` bytes. Of `sockaddr_un`, a path, to its first zero, or a name of its own, which starts with
 one, and of `sockaddr_in` and `sockaddr_in6`, an address of the Internet as a socket has it as its name. -/
@@ -608,7 +602,7 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       if flags &&& 0x40 != 0 || kernel.nonblocking group fd then pure (errorOf Errno.eagain)
       else
         match kernel.socketOf group fd with
-        | .ok (number, _) => waitOn emu wide number
+        | .ok (number, _) => waitOn machine emu number
         | .error errno => pure (errorOf errno)
     | .ok (next, some received) =>
       machine.kernel.set next
@@ -670,7 +664,7 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       if kernel.nonblocking group (arg 0) then pure (errorOf Errno.eagain)
       else
         match kernel.socketOf group (arg 0) with
-        | .ok (number, _) => waitOn emu wide number
+        | .ok (number, _) => waitOn machine emu number
         | .error errno => pure (errorOf errno)
     | .ok (next, some (fd, server)) =>
       machine.kernel.set next
@@ -819,6 +813,9 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     let group := (← currentTask emu).group
     let kernel ← machine.kernel.get
     let cwd := (kernel.process group).cwd
+    let poller : Poller := { architecture, kernel := machine.kernel, timers := machine.timers, signals := machine.signals
+                             live := do pure (((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups)
+                             wake := wakePipeReaders }
     -- `path` from an address, in the directory that the call says.
     let at_ (directory address : Nat) (action : String → String → IO SyscallAction) : IO SyscallAction := do
       match kernel.baseOf group directory (atCwd directory) with
@@ -859,15 +856,7 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
         if current.pipeWaiting number > 0 || !current.pipeHeld number (← liveGroups) true then pure none
         else if current.nonblocking group fd then pure (some (errorOf (Errno.eagain)))
         else
-          let (_, _, register) := syscallRegisters emu.config.syscallAbi
-          let waiter : Bap.Tasks.FutexWaiter := { thread := ← thread emu, space := pipeSpace + number, address := 0, bitset := 2 ^ 32 - 1, timed := false }
-          emu.taskTable.modify (·.futexWait waiter)
-          emu.redirect.set (some (← emu.pc.get))
-          emu.stopped.set true
-          let held ← reg emu ⟨register, .imm wide, 0, false⟩
-          match Value.asBits held with
-          | .ok bits => pure (some (.returnValue bits.2.toNat))
-          | .error _ => pure (some (errorOf Errno.eio))
+          pure (some (← waitOn machine emu number))
     let readInto (fd address count : Nat) : IO SyscallAction := do
       let kernel ← machine.kernel.get
       match kernel.read group fd count with
@@ -928,10 +917,20 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       return ← socketCall machine emu call args
     match call with
     | .read =>
+      match ← poller.serve emu call args with
+      | some action => pure action
+      | none =>
       match ← waitForPipe (arg 0) with
       | some action => pure action
       | none => readInto (arg 0) (arg 1) (arg 2)
-    | .write => writeOut (arg 0) (arg 1) (arg 2)
+    | .write =>
+      match ← poller.serve emu call args with
+      | some action => pure action
+      | none => writeOut (arg 0) (arg 1) (arg 2)
+    | .poll | .ppoll | .ppoll64 | .select | .pselect6 | .pselect664 | .epollCreate | .epollCreate1 | .epollCtl | .epollWait
+    | .epollPwait | .epollPwait2 | .eventfd | .eventfd2 | .timerfdCreate | .timerfdSettime | .timerfdSettime64 | .timerfdGettime
+    | .timerfdGettime64 | .signalfd | .signalfd4 =>
+      pure ((← poller.serve emu call args).getD (errorOf Errno.enosys))
     | .open_ => openAt here (arg 0) (arg 1) (arg 2)
     | .openat => openAt (arg 0) (arg 1) (arg 2) (arg 3)
     | .close =>
@@ -1268,6 +1267,10 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
       let shared := ((← machine.kernel.get).process group).mappings.any (·.shared)
       -- A mapping of what is written has to hear of it. Otherwise a write is the only thing that a program does many of that gets longer with what it has done.
       let socket := (call == .write || call == .writev) && (← machine.kernel.get).isSocket group (args.getD 0 0)
+      -- And what is written to an `eventfd` is counted.
+      let socket := socket || (call == .write && match (← machine.kernel.get).objectOf group (args.getD 0 0) with
+        | .ok (_, _, { content := .eventfd .., .. }) => true
+        | _ => false)
       match call, shared || socket with
       | .write, false => handOver machine emu (← writeDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0))
       | .writev, false => handOver machine emu (← writeVectorDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0))
@@ -1790,7 +1793,8 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   let signals : Signals := { architecture, returnPage := stackTop architecture + 4096, table := ← IO.mkRef {}
                              failures := ← IO.mkRef #[], skipIgnoredFaults := ← IO.mkRef false
                              intercept := ← IO.mkRef fun _ _ _ => pure false, tracer := ← IO.mkRef fun _ => pure none
-                             jobControl := ← IO.mkRef fun _ _ _ => pure () }
+                             jobControl := ← IO.mkRef fun _ _ _ => pure (), interrupted := ← IO.mkRef fun _ _ _ _ => pure ()
+                             sent := ← IO.mkRef fun _ => pure () }
   let ptrace ← Ptrace.make architecture signals
   let kernelRef ← IO.mkRef kernel
   let timers ← Timers.make architecture kernelRef signals
@@ -1831,6 +1835,9 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
     if waited && !(← Bap.Emu.stopped emu) then signals.switchedIn emu
     pure changed
   emu.idle.set (some (resumingCurrent (timers.idle emu)))
+  -- A signal that comes has what waits to read one look again, and what it woke from a call that runs again hear of it.
+  signals.sent.set wakePipeReaders
+  signals.interrupted.set (timers.interrupted)
   emu.betweenTurns.modify (· ++ [do let _ ← resumingCurrent (do timers.tick emu; pure true)])
   let timeState : ModelState := { save := timers.save, load := timers.load }
   machine.models.modify (· ++ [{ id := Timers.modelId, version := builtinVersion Timers.modelId, state := timeState }])

@@ -76,13 +76,15 @@ inductive Call where
   /-- What `Bap.Linux.Seccomp` serves, in front of the kernel. -/
   | seccomp
   | nanosleep | clockNanosleep | clockNanosleep64 | setitimer | getitimer | alarm | timerCreate | timerSettime | timerSettime64 | timerGettime | timerGettime64 | timerGetoverrun | timerDelete
+  | poll | ppoll | ppoll64 | select | pselect6 | pselect664 | epollCreate | epollCreate1 | epollCtl | epollWait | epollPwait | epollPwait2 | eventfd | eventfd2 | timerfdCreate | timerfdSettime | timerfdSettime64 | timerfdGettime | timerfdGettime64 | signalfd | signalfd4
   /-- What has nothing to do here: everyone is root and nothing has to reach a disk. -/
   | succeeds
   deriving DecidableEq, Repr
 
 /-- The numbers of x86-64. -/
 def x86_64Calls : List (Nat × Call) :=
-  [(35, .nanosleep), (230, .clockNanosleep), (38, .setitimer), (36, .getitimer), (37, .alarm), (222, .timerCreate), (223, .timerSettime), (224, .timerGettime), (225, .timerGetoverrun), (226, .timerDelete),
+  [(7, .poll), (271, .ppoll), (23, .select), (270, .pselect6), (213, .epollCreate), (291, .epollCreate1), (233, .epollCtl), (232, .epollWait), (281, .epollPwait), (441, .epollPwait2), (284, .eventfd), (290, .eventfd2), (283, .timerfdCreate), (286, .timerfdSettime), (287, .timerfdGettime), (282, .signalfd), (289, .signalfd4),
+   (35, .nanosleep), (230, .clockNanosleep), (38, .setitimer), (36, .getitimer), (37, .alarm), (222, .timerCreate), (223, .timerSettime), (224, .timerGettime), (225, .timerGetoverrun), (226, .timerDelete),
    (157, .prctl), (317, .seccomp), (41, .socket), (42, .connect), (43, .accept), (44, .sendto), (45, .recvfrom), (46, .sendmsg), (47, .recvmsg), (48, .shutdown), (49, .bind), (50, .listen), (51, .getsockname), (52, .getpeername), (53, .socketpair), (54, .setsockopt), (55, .getsockopt), (288, .accept4),
    (22, .pipe), (293, .pipe2),
    (11, .munmap), (10, .mprotect), (28, .madvise), (26, .succeeds),
@@ -99,7 +101,8 @@ def x86_64Calls : List (Nat × Call) :=
 
 /-- The numbers of the architectures that came after the old calls went: `asm-generic/unistd.h`. -/
 def genericCalls : List (Nat × Call) :=
-  [(101, .nanosleep), (115, .clockNanosleep), (103, .setitimer), (102, .getitimer), (107, .timerCreate), (110, .timerSettime), (108, .timerGettime), (109, .timerGetoverrun), (111, .timerDelete),
+  [(73, .ppoll), (72, .pselect6), (20, .epollCreate1), (21, .epollCtl), (22, .epollPwait), (441, .epollPwait2), (19, .eventfd2), (85, .timerfdCreate), (86, .timerfdSettime), (87, .timerfdGettime), (74, .signalfd4),
+   (101, .nanosleep), (115, .clockNanosleep), (103, .setitimer), (102, .getitimer), (107, .timerCreate), (110, .timerSettime), (108, .timerGettime), (109, .timerGetoverrun), (111, .timerDelete),
    (277, .seccomp), (198, .socket), (199, .socketpair), (200, .bind), (201, .listen), (202, .accept), (203, .connect), (204, .getsockname), (205, .getpeername), (206, .sendto), (207, .recvfrom), (208, .setsockopt), (209, .getsockopt), (210, .shutdown), (211, .sendmsg), (212, .recvmsg), (242, .accept4),
    (59, .pipe2), (167, .prctl),
    (215, .munmap), (226, .mprotect), (233, .madvise), (227, .succeeds),
@@ -114,7 +117,8 @@ def genericCalls : List (Nat × Call) :=
 
 /-- The numbers of `asm-generic` on 32 bits, where whatever has a time or an offset in a word has gone. -/
 def generic32Calls : List (Nat × Call) :=
-  [(101, .nanosleep), (407, .clockNanosleep64), (103, .setitimer), (102, .getitimer), (107, .timerCreate), (409, .timerSettime64), (408, .timerGettime64), (109, .timerGetoverrun), (111, .timerDelete),
+  [(414, .ppoll64), (413, .pselect664), (20, .epollCreate1), (21, .epollCtl), (22, .epollPwait), (441, .epollPwait2), (19, .eventfd2), (85, .timerfdCreate), (411, .timerfdSettime64), (410, .timerfdGettime64), (74, .signalfd4),
+   (101, .nanosleep), (407, .clockNanosleep64), (103, .setitimer), (102, .getitimer), (107, .timerCreate), (409, .timerSettime64), (408, .timerGettime64), (109, .timerGetoverrun), (111, .timerDelete),
    (277, .seccomp), (198, .socket), (199, .socketpair), (200, .bind), (201, .listen), (202, .accept), (203, .connect), (204, .getsockname), (205, .getpeername), (206, .sendto), (207, .recvfrom), (208, .setsockopt), (209, .getsockopt), (210, .shutdown), (211, .sendmsg), (212, .recvmsg), (242, .accept4),
    (59, .pipe2), (167, .prctl),
    (215, .munmap), (226, .mprotect), (233, .madvise), (227, .succeeds),
@@ -129,7 +133,8 @@ def generic32Calls : List (Nat × Call) :=
 
 /-- The numbers of the o32 ABI of MIPS, without their 4000. -/
 def o32Calls : List (Nat × Call) :=
-  [(265, .clockNanosleep), (258, .timerSettime), (259, .timerGettime),
+  [(188, .poll), (302, .ppoll), (414, .ppoll64), (142, .select), (301, .pselect6), (413, .pselect664), (248, .epollCreate), (326, .epollCreate1), (249, .epollCtl), (250, .epollWait), (313, .epollPwait), (441, .epollPwait2), (319, .eventfd), (325, .eventfd2), (321, .timerfdCreate), (323, .timerfdSettime), (411, .timerfdSettime64), (322, .timerfdGettime), (410, .timerfdGettime64), (317, .signalfd), (324, .signalfd4),
+   (265, .clockNanosleep), (258, .timerSettime), (259, .timerGettime),
    (166, .nanosleep), (407, .clockNanosleep64), (104, .setitimer), (105, .getitimer), (27, .alarm), (257, .timerCreate), (409, .timerSettime64), (408, .timerGettime64), (260, .timerGetoverrun), (261, .timerDelete),
    (192, .prctl), (352, .seccomp), (168, .accept), (169, .bind), (170, .connect), (171, .getpeername), (172, .getsockname), (173, .getsockopt), (174, .listen), (175, .recv), (176, .recvfrom), (177, .recvmsg), (178, .send), (179, .sendmsg), (180, .sendto), (181, .setsockopt), (182, .shutdown), (183, .socket), (184, .socketpair), (334, .accept4),
    (42, .pipe), (328, .pipe2),
@@ -148,7 +153,8 @@ def o32Calls : List (Nat × Call) :=
 
 /-- The numbers of the n64 ABI of MIPS, without their 5000. -/
 def n64Calls : List (Nat × Call) :=
-  [(34, .nanosleep), (224, .clockNanosleep), (36, .setitimer), (35, .getitimer), (37, .alarm), (216, .timerCreate), (217, .timerSettime), (218, .timerGettime), (219, .timerGetoverrun), (220, .timerDelete),
+  [(7, .poll), (261, .ppoll), (22, .select), (260, .pselect6), (207, .epollCreate), (285, .epollCreate1), (208, .epollCtl), (209, .epollWait), (272, .epollPwait), (441, .epollPwait2), (278, .eventfd), (284, .eventfd2), (280, .timerfdCreate), (282, .timerfdSettime), (281, .timerfdGettime), (276, .signalfd), (283, .signalfd4),
+   (34, .nanosleep), (224, .clockNanosleep), (36, .setitimer), (35, .getitimer), (37, .alarm), (216, .timerCreate), (217, .timerSettime), (218, .timerGettime), (219, .timerGetoverrun), (220, .timerDelete),
    (153, .prctl), (312, .seccomp), (40, .socket), (41, .connect), (42, .accept), (43, .sendto), (44, .recvfrom), (45, .sendmsg), (46, .recvmsg), (47, .shutdown), (48, .bind), (49, .listen), (50, .getsockname), (51, .getpeername), (52, .socketpair), (53, .setsockopt), (54, .getsockopt), (293, .accept4),
    (21, .pipe), (287, .pipe2),
    (11, .munmap), (10, .mprotect), (27, .madvise), (25, .succeeds),
@@ -165,7 +171,8 @@ def n64Calls : List (Nat × Call) :=
 
 /-- The numbers of 32-bit ARM, with EABI, and two of its own: `set_tls` and `cacheflush`. -/
 def armCalls : List (Nat × Call) :=
-  [(265, .clockNanosleep), (258, .timerSettime), (259, .timerGettime),
+  [(168, .poll), (336, .ppoll), (414, .ppoll64), (142, .select), (335, .pselect6), (413, .pselect664), (250, .epollCreate), (357, .epollCreate1), (251, .epollCtl), (252, .epollWait), (346, .epollPwait), (441, .epollPwait2), (351, .eventfd), (356, .eventfd2), (350, .timerfdCreate), (353, .timerfdSettime), (411, .timerfdSettime64), (354, .timerfdGettime), (410, .timerfdGettime64), (349, .signalfd), (355, .signalfd4),
+   (265, .clockNanosleep), (258, .timerSettime), (259, .timerGettime),
    (162, .nanosleep), (407, .clockNanosleep64), (104, .setitimer), (105, .getitimer), (257, .timerCreate), (409, .timerSettime64), (408, .timerGettime64), (260, .timerGetoverrun), (261, .timerDelete),
    (172, .prctl), (383, .seccomp), (281, .socket), (282, .bind), (283, .connect), (284, .listen), (285, .accept), (286, .getsockname), (287, .getpeername), (288, .socketpair), (289, .send), (290, .sendto), (291, .recv), (292, .recvfrom), (293, .shutdown), (294, .setsockopt), (295, .getsockopt), (296, .sendmsg), (297, .recvmsg), (366, .accept4),
    (42, .pipe), (359, .pipe2),
@@ -184,7 +191,8 @@ def armCalls : List (Nat × Call) :=
 
 /-- The numbers of i686. -/
 def i686Calls : List (Nat × Call) :=
-  [(162, .nanosleep), (407, .clockNanosleep64), (104, .setitimer), (105, .getitimer), (27, .alarm), (259, .timerCreate), (409, .timerSettime64), (408, .timerGettime64),
+  [(168, .poll), (309, .ppoll), (414, .ppoll64), (142, .select), (308, .pselect6), (413, .pselect664), (254, .epollCreate), (329, .epollCreate1), (255, .epollCtl), (256, .epollWait), (319, .epollPwait), (441, .epollPwait2), (323, .eventfd), (328, .eventfd2), (322, .timerfdCreate), (325, .timerfdSettime), (411, .timerfdSettime64), (326, .timerfdGettime), (410, .timerfdGettime64), (321, .signalfd), (327, .signalfd4),
+   (162, .nanosleep), (407, .clockNanosleep64), (104, .setitimer), (105, .getitimer), (27, .alarm), (259, .timerCreate), (409, .timerSettime64), (408, .timerGettime64),
    (172, .prctl), (354, .seccomp), (359, .socket), (360, .socketpair), (361, .bind), (362, .connect), (363, .listen), (364, .accept4), (365, .getsockopt), (366, .setsockopt), (367, .getsockname), (368, .getpeername), (369, .sendto), (370, .sendmsg), (371, .recvfrom), (372, .recvmsg), (373, .shutdown),
    (42, .pipe), (331, .pipe2),
    (91, .munmap), (125, .mprotect), (219, .madvise), (144, .succeeds),
@@ -203,7 +211,8 @@ def i686Calls : List (Nat × Call) :=
 
 /-- The numbers of PowerPC, where those of each width that the other doesn't have are left to it not asking for them. -/
 def powerpcCalls : List (Nat × Call) :=
-  [(248, .clockNanosleep), (241, .timerSettime), (242, .timerGettime),
+  [(167, .poll), (281, .ppoll), (414, .ppoll64), (142, .select), (280, .pselect6), (413, .pselect664), (236, .epollCreate), (315, .epollCreate1), (237, .epollCtl), (238, .epollWait), (303, .epollPwait), (441, .epollPwait2), (307, .eventfd), (314, .eventfd2), (306, .timerfdCreate), (311, .timerfdSettime), (411, .timerfdSettime64), (312, .timerfdGettime), (410, .timerfdGettime64), (305, .signalfd), (313, .signalfd4),
+   (248, .clockNanosleep), (241, .timerSettime), (242, .timerGettime),
    (162, .nanosleep), (407, .clockNanosleep64), (104, .setitimer), (105, .getitimer), (27, .alarm), (240, .timerCreate), (409, .timerSettime64), (408, .timerGettime64), (243, .timerGetoverrun), (244, .timerDelete),
    (171, .prctl), (358, .seccomp), (326, .socket), (327, .bind), (328, .connect), (329, .listen), (330, .accept), (331, .getsockname), (332, .getpeername), (333, .socketpair), (334, .send), (335, .sendto), (336, .recv), (337, .recvfrom), (338, .shutdown), (339, .setsockopt), (340, .getsockopt), (341, .sendmsg), (342, .recvmsg), (344, .accept4),
    (42, .pipe), (317, .pipe2),
