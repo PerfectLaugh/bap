@@ -8,6 +8,7 @@ import Bap.Linux.Timers
 import Bap.Linux.Poll
 import Bap.Linux.Identity
 import Bap.Linux.Tty
+import Bap.Linux.Files
 import Bap.Linux.GuestHeap
 import Bap.Linux.LoadedLibrary
 import Bap.Linux.Image
@@ -455,6 +456,13 @@ private def viewOf (machine : Machine) (emu : Emu) (group : Nat) : IO ProcessVie
     breakStart := process.breakStart
     breakEnd := process.breakEnd
     stackStart
+    credentials := process.credentials
+    pgid := kernel.pgidOf group
+    sid := kernel.sidOf group
+    stack := kernel.limitOf group 3
+    files := kernel.limitOf group 7
+    descriptors := process.descriptors.toList.filterMap fun (fd, entry) =>
+      (kernel.openFiles.get? entry.openFile).map fun file => (fd, file.offset, file.flags)
     bits := architecture.bits
     machine := architecture.name
     clock := kernel.clock
@@ -1110,6 +1118,10 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     | .renameat =>
       inDirectory (arg 0) (arg 1) fun source => inDirectory (arg 2) (arg 3) fun target =>
         apply machine (·.rename "/" source target)
+    | .link | .linkat | .renameat2 | .utimensat | .utimensat64 | .utimes | .utime | .futimesat | .chown | .lchown | .fchown
+    | .fchownat | .setxattr | .lsetxattr | .fsetxattr | .getxattr | .lgetxattr | .fgetxattr | .listxattr | .llistxattr
+    | .flistxattr | .removexattr | .lremovexattr | .fremovexattr =>
+      pure ((← Files.serve poller emu call args).getD (errorOf Errno.enosys))
     | .symlink | .symlinkat =>
       let (directory, address) := if call == .symlink then (here, arg 1) else (arg 1, arg 2)
       at_ directory address fun from_ path => do
@@ -1969,7 +1981,7 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   let kernel := kernel.withConsole first input
   let kernel := kernel.setProcess first { kernel.process first with
     breakStart := top, breakEnd := top, command := if arguments.isEmpty then [path] else arguments, environment, program := path, auxiliary }
-  let kernel := Proc.install kernel
+  let kernel := Proc.install kernel.installDevices
   machineOf architecture emu kernel watch handler (targetDigest architecture data) models
 
 /-- Runs `fuel` instructions at most in turns of the scheduler, in pieces that end where `every` says from where it starts, which is what it goes by when it runs them again. Each piece ends

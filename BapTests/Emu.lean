@@ -3372,7 +3372,7 @@ private def testKernel : IO Unit := do
   assertEqual "Kernel a directory with something in it stays" (some Bap.Linux.Errno.enotempty)
     (errnoOf (start.remove "/" "/etc" true))
   assertEqual "Kernel the entries are sorted" ["etc", "link"] ((start.children "/").map (·.1))
-  assertEqual "Kernel struct stat" 144 (Bap.Linux.Abi.stat { inode := 1, mode := 0, size := 0, links := 1, time := 0 }).size
+  assertEqual "Kernel struct stat" 144 (Bap.Linux.Abi.stat { inode := 1, mode := 0, size := 0, links := 1, accessed := 0, modified := 0, changed := 0 }).size
   match Bap.Linux.Elf.parse "not an elf".toUTF8 with
   | .error _ => IO.println "ok: Kernel what isn't ELF doesn't start"
   | .ok _ => throw <| IO.userError "Kernel started what isn't ELF"
@@ -3382,7 +3382,7 @@ def testLinuxLayouts : IO Unit := do
   let word (bytes : ByteArray) (at_ : Nat) (big : Bool) : Nat :=
     let part := (List.range 4).map fun index => bytes[at_ + (if big then 3 - index else index)]!.toNat <<< (8 * index)
     part.foldl (· + ·) 0
-  let value : Bap.Linux.Kernel.Stat := { inode := 7, mode := 0o100644, size := 0x12345, links := 2, time := 0 }
+  let value : Bap.Linux.Kernel.Stat := { inode := 7, mode := 0o100644, size := 0x12345, links := 2, accessed := 0, modified := 0, changed := 0 }
   let cases : List (String × Bap.Linux.Architecture × Bool × Nat × Nat × Nat × Nat) :=
     [("i686", .i686, false, 96, 44, 16, 20), ("arm", .arm, false, 104, 48, 16, 20),
      ("mips", .mips 32 true false, true, 104, 60, 24, 28), ("powerpc", .powerpc 32 true, true, 104, 52, 16, 20)]

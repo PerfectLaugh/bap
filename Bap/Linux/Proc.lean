@@ -35,19 +35,34 @@ def zeroEnded (items : List String) : ByteArray :=
 
 def status (view : ProcessView) : ByteArray :=
   let memory := view.ranges.foldl (fun total range => total + range.size) 0
-  text s!"Name:\t{baseName view.program}\nUmask:\t0022\nState:\tR (running)\nTgid:\t{view.pid}\nNgid:\t0\nPid:\t{view.pid}\nPPid:\t{view.parent}\nTracerPid:\t0\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\nFDSize:\t64\nGroups:\t\nVmSize:\t{memory / 1024} kB\nVmRSS:\t{memory / 1024} kB\nThreads:\t{view.threads.length}\nCpus_allowed:\t1\nCpus_allowed_list:\t0\n"
+  let ids := view.credentials
+  let groups := " ".intercalate (ids.groups.map toString)
+  text s!"Name:\t{baseName view.program}\nUmask:\t0022\nState:\tR (running)\nTgid:\t{view.pid}\nNgid:\t0\nPid:\t{view.pid}\nPPid:\t{view.parent}\nTracerPid:\t0\nUid:\t{ids.uid}\t{ids.euid}\t{ids.suid}\t{ids.fsuid}\nGid:\t{ids.gid}\t{ids.egid}\t{ids.sgid}\t{ids.fsgid}\nFDSize:\t64\nGroups:\t{groups}\nVmSize:\t{memory / 1024} kB\nVmRSS:\t{memory / 1024} kB\nThreads:\t{view.threads.length}\nCpus_allowed:\t1\nCpus_allowed_list:\t0\n"
 
 /-- `/proc/PID/stat`, with what isn't modelled at zero. -/
 def stat (view : ProcessView) : ByteArray :=
   let memory := view.ranges.foldl (fun total range => total + range.size) 0
-  text s!"{view.pid} ({baseName view.program}) R {view.parent} {view.pid} {view.pid} 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 {view.threads.length} 0 0 {memory} {memory / 4096} 18446744073709551615 0 0 {view.stackStart} 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 {view.breakStart} {view.breakEnd} 0 0 0 0 0\n"
+  text s!"{view.pid} ({baseName view.program}) R {view.parent} {view.pgid} {view.sid} 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 {view.threads.length} 0 0 {memory} {memory / 4096} 18446744073709551615 0 0 {view.stackStart} 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 {view.breakStart} {view.breakEnd} 0 0 0 0 0\n"
 
 def statm (view : ProcessView) : ByteArray :=
   let pages := view.ranges.foldl (fun total range => total + range.size) 0 / 4096
   text s!"{pages} {pages} 0 0 0 0 0\n"
 
-def limits : ByteArray :=
-  text "Limit                     Soft Limit           Hard Limit           Units     \nMax stack size            8388608              unlimited            bytes     \nMax open files            1024                 1048576              files     \n"
+def limits (view : ProcessView) : ByteArray :=
+  let shown (value : Nat) : String :=
+    let value := if value ≥ 2 ^ 64 - 1 then "unlimited" else toString value
+    value ++ String.ofList (List.replicate (21 - value.length) ' ')
+  text s!"Limit                     Soft Limit           Hard Limit           Units     \nMax stack size            {shown view.stack.1}{shown view.stack.2}bytes     \nMax open files            {shown view.files.1}{shown view.files.2}files     \n"
+
+/-- `/proc/PID/fdinfo/N`, of a descriptor that it has. -/
+def fdinfo (view : ProcessView) (fd : Nat) : ByteArray :=
+  match view.descriptors.find? (·.1 == fd) with
+  | some (_, offset, flags) => text s!"pos:\t{offset}\nflags:\t0{String.ofList (Nat.toDigits 8 flags)}\nmnt_id:\t1\n"
+  | none => ByteArray.empty
+
+/-- `/proc/PID/mountinfo`, of what `mounts` says. -/
+def mountinfo : ByteArray :=
+  text "1 0 0:1 / / rw - rootfs rootfs rw\n2 1 0:2 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n3 1 0:3 / /sys rw,nosuid,nodev,noexec,relatime - sysfs sysfs rw\n"
 
 def mounts : ByteArray :=
   text "rootfs / rootfs rw 0 0\nproc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\nsysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0\n"
@@ -83,7 +98,16 @@ def builtin : String → Option Generator
       bytes ++ ByteArray.mk (if view.big then word.reverse else word).toArray
   | "environ" => some fun view => zeroEnded view.environment
   | "comm" => some fun view => text (baseName view.program ++ "\n")
-  | "limits" => some fun _ => limits
+  | "limits" => some limits
+  | "mountinfo" => some fun _ => mountinfo
+  | "cgroup" => some fun _ => text "0::/\n"
+  | "oom_score_adj" => some fun _ => text "0\n"
+  | "random-uuid" => some fun view => text s!"{hex 8 (view.clock / 1000 % 2 ^ 32)}-0000-4000-8000-000000000000\n"
+  | "boot-id" => some fun view => text s!"{hex 8 ((view.clock - view.uptime) / 1000000000 % 2 ^ 32)}-0000-4000-8000-000000000000\n"
+  | "nr-open" => some fun _ => text "1048576\n"
+  | "file-max" => some fun _ => text "9223372036854775807\n"
+  | "somaxconn" => some fun _ => text "4096\n"
+  | "transparent-hugepage" => some fun _ => text "always [madvise] never\n"
   | "mounts" => some fun _ => mounts
   | "cpuinfo" => some cpuinfo
   | "meminfo" => some fun _ => meminfo
@@ -100,7 +124,11 @@ def builtin : String → Option Generator
   | "overcommit" => some fun _ => text "0\n"
   | "max-map-count" => some fun _ => text "65530\n"
   | "cpus" => some fun _ => text "0\n"
-  | _ => none
+  -- A descriptor of `/proc/PID/fdinfo`, by its number.
+  | name =>
+    match name.splitOn ":" with
+    | ["fdinfo", fd] => fd.toNat?.map fun fd view => fdinfo view fd
+    | _ => none
 
 /-- The files of `/proc` and `/sys` of anything that runs, and what makes them. -/
 def systemFiles : List (String × String) :=
@@ -109,11 +137,14 @@ def systemFiles : List (String × String) :=
    ("/proc/sys/kernel/osrelease", "osrelease"), ("/proc/sys/kernel/ostype", "ostype"), ("/proc/sys/kernel/version", "kernel-version"),
    ("/proc/sys/kernel/hostname", "hostname"), ("/proc/sys/kernel/pid_max", "pid-max"), ("/proc/sys/vm/overcommit_memory", "overcommit"),
    ("/proc/sys/vm/max_map_count", "max-map-count"), ("/sys/devices/system/cpu/online", "cpus"),
-   ("/sys/devices/system/cpu/possible", "cpus")]
+   ("/sys/devices/system/cpu/possible", "cpus"), ("/sys/devices/system/cpu/present", "cpus"),
+   ("/proc/sys/kernel/random/uuid", "random-uuid"), ("/proc/sys/kernel/random/boot_id", "boot-id"), ("/proc/sys/fs/nr_open", "nr-open"),
+   ("/proc/sys/fs/file-max", "file-max"), ("/proc/sys/net/core/somaxconn", "somaxconn"),
+   ("/sys/kernel/mm/transparent_hugepage/enabled", "transparent-hugepage")]
 
 /-- The files of each process, under `/proc/PID`, by the names of what makes them. -/
 def processFiles : List String :=
-  ["maps", "status", "stat", "statm", "cmdline", "environ", "comm", "limits", "mounts", "auxv"]
+  ["maps", "status", "stat", "statm", "cmdline", "environ", "comm", "limits", "mounts", "auxv", "mountinfo", "cgroup", "oom_score_adj"]
 
 /-- Puts in what is in `/proc` and `/sys` of anything that runs. Nothing replaces what is already there. -/
 def install (kernel : Kernel) : Kernel :=
@@ -153,6 +184,10 @@ def refresh (kernel : Kernel) (group thread : Nat) (live : List Nat) (threadsOf 
       fun kernel name => kernel.addBuiltin s!"{directory}/{name}" name
     let kernel := kernel.addDirectories s!"{directory}/fd"
     let kernel := kernel.removeUnder s!"{directory}/fd"
+    let kernel := kernel.addDirectories s!"{directory}/fdinfo"
+    let kernel := kernel.removeUnder s!"{directory}/fdinfo"
+    let kernel := (kernel.process pid).descriptors.toList.foldl (init := kernel) fun kernel entry =>
+      kernel.addBuiltin s!"{directory}/fdinfo/{entry.1}" s!"fdinfo:{entry.1}"
     let kernel := kernel.addDirectories s!"{directory}/task"
     let kernel := kernel.removeUnder s!"{directory}/task"
     let kernel := (threadsOf pid).foldl (init := kernel) fun kernel task =>

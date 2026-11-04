@@ -371,17 +371,20 @@ theorem putSparse_inverts : Inverts putSparse getSparse := by
     simp [getSparse, h1, h2, bind, Except.bind]
 
 theorem putInode_extends : Extends putInode := fun out _ =>
-  (putNat_extends out _).trans ((putNat_extends _ _).trans ((putNat_extends _ _).trans (putSparse_extends _ _)))
+  (putNat_extends out _).trans ((putNat_extends _ _).trans ((putNat_extends _ _).trans ((putSparse_extends _ _).trans
+    (putBytes_extends _ _))))
 
 theorem putInode_inverts : Inverts putInode getInode := by
-  rintro data out ⟨number, mode, kind, bytes⟩ hp
-  have h4 := putSparse_inverts data _ bytes hp
-  have p3 := (putSparse_extends _ bytes).trans hp
+  rintro data out ⟨number, mode, kind, bytes, details⟩ hp
+  have h5 := putBytes_inverts data _ details hp
+  have p4 := (putBytes_extends _ details).trans hp
+  have h4 := putSparse_inverts data _ bytes p4
+  have p3 := (putSparse_extends _ bytes).trans p4
   have h3 := putNat_inverts data _ kind p3
   have p2 := (putNat_extends _ kind).trans p3
   have h2 := putNat_inverts data _ mode p2
   have h1 := putNat_inverts data out number ((putNat_extends _ mode).trans p2)
-  simp [getInode, putInode, h1, h2, h3, h4, bind, Except.bind]
+  simp [getInode, putInode, h1, h2, h3, h4, h5, bind, Except.bind]
 
 theorem putMapping_extends : Extends putMapping := fun out _ =>
   (putNat_extends out _).trans ((putNat_extends _ _).trans ((putNat_extends _ _).trans

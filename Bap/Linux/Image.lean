@@ -30,6 +30,8 @@ structure InodeImage where
   mode : Nat
   kind : Nat
   data : ByteArray
+  /-- Its times, owner, extended attributes and seals: see `metaBytes`. -/
+  details : ByteArray := ByteArray.empty
   deriving DecidableEq
 
 /-- A kernel as plain data. -/
@@ -118,6 +120,24 @@ def withIdentity (process : Process) (data : ByteArray) : Except String Process 
                       credentials := { uid := id 0, euid := id 1, suid := id 2, fsuid := id 3, gid := id 4, egid := id 5, sgid := id 6
                                        fsgid := id 7, groups } }
 
+/-- Of an inode, its times, owner, extended attributes and seals, as bytes. -/
+def metaBytes (details : Meta) : ByteArray :=
+  let out := Wire.putList Wire.putNat ByteArray.empty [details.accessed, details.modified, details.changed, details.uid, details.gid, details.seals]
+  Wire.putList (fun out (name, value) => Wire.putBytes (Wire.putText out name) value) out details.attributes
+
+/-- What `metaBytes` made; nothing at all is what an inode starts with. -/
+def metaOfBytes (data : ByteArray) : Except String Meta := do
+  if data.isEmpty then return {}
+  let (numbers, at_) ← Wire.getList Wire.getNat data 0
+  let (attributes, at_) ← Wire.getList (fun data at_ => do
+    let (name, at_) ← Wire.getText data at_
+    let (value, at_) ← Wire.getBytes data at_
+    .ok ((name, value), at_)) data at_
+  Wire.expectEnd data at_
+  let number (index : Nat) : Nat := numbers.getD index 0
+  pure { accessed := number 0, modified := number 1, changed := number 2, uid := number 3, gid := number 4, seals := number 5
+         attributes }
+
 /-- A terminal, as bytes. -/
 def terminalBytes (terminal : Terminal) : ByteArray :=
   let out := Wire.putList Wire.putNat ByteArray.empty
@@ -161,7 +181,8 @@ def Kernel.image (kernel : Kernel) : Image where
           ByteArray.empty items)
       | .ptyMaster terminal => (11, terminalBytes terminal)
       | .ptySlave master => (12, Wire.putNat ByteArray.empty master)
-    { number, mode := inode.mode, kind, data }
+      | .device kind => (13, Wire.putNat ByteArray.empty kind)
+    { number, mode := inode.mode, kind, data, details := metaBytes inode.details }
   nextInode := kernel.nextInode
   openFiles := (sorted kernel.openFiles.toList).map fun (id, file) => (id, file.inode, file.offset, file.flags)
   nextOpenFile := kernel.nextOpenFile
@@ -215,8 +236,9 @@ def Image.kernel (image : Image) : Except String Kernel := do
         pure (Content.epoll items)
       | 11 => pure (Content.ptyMaster (← terminalOfBytes entry.data))
       | 12 => pure (Content.ptySlave (← Wire.getNat entry.data 0).1)
+      | 13 => pure (Content.device (← Wire.getNat entry.data 0).1)
       | kind => .error s!"a Linux checkpoint with an inode of kind {kind}"
-    pure (inodes.insert entry.number { number := entry.number, content, mode := entry.mode })
+    pure (inodes.insert entry.number { number := entry.number, content, mode := entry.mode, details := ← metaOfBytes entry.details })
   pure {
     paths := image.paths.foldl (init := {}) fun paths entry => paths.insert entry.1 entry.2
     inodes
@@ -324,14 +346,15 @@ def getSparse : Decoder ByteArray := fun data at_ => do
   | _ => .error "a Linux checkpoint with bytes of an unknown kind"
 
 def putInode (out : ByteArray) (inode : InodeImage) : ByteArray :=
-  putSparse (putNat (putNat (putNat out inode.number) inode.mode) inode.kind) inode.data
+  putBytes (putSparse (putNat (putNat (putNat out inode.number) inode.mode) inode.kind) inode.data) inode.details
 
 def getInode : Decoder InodeImage := fun data at_ => do
   let (number, at_) ← getNat data at_
   let (mode, at_) ← getNat data at_
   let (kind, at_) ← getNat data at_
   let (bytes, at_) ← getSparse data at_
-  .ok ({ number, mode, kind, data := bytes }, at_)
+  let (details, at_) ← getBytes data at_
+  .ok ({ number, mode, kind, data := bytes, details }, at_)
 
 def putPath (out : ByteArray) (entry : String × Nat) : ByteArray := putNat (putText out entry.1) entry.2
 

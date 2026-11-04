@@ -56,7 +56,7 @@ def readiness (kernel : Kernel) (live : List Nat) (now pending file : Nat) : Nat
       | none => { error := true }
       | some inode =>
         match inode.content with
-        | .file _ | .directory | .symlink _ | .generated _ | .console _ => { read := true, write := true }
+        | .file _ | .directory | .symlink _ | .generated _ | .console _ | .device _ => { read := true, write := true }
         | .pipe .. =>
           if opened.flags &&& 3 == 0 then
             let writers := kernel.pipeHeld opened.inode live true

@@ -123,6 +123,17 @@ structure Terminal where
   locked : Bool := true
   opened : Bool := false
 
+/-- What an inode has of itself besides what it holds: when it was last read, written and changed, by the kernel's clock, whose it is,
+its extended attributes, and the seals of `memfd_create`. -/
+structure Meta where
+  accessed : Nat := 1700000000 * 1000000000
+  modified : Nat := 1700000000 * 1000000000
+  changed : Nat := 1700000000 * 1000000000
+  uid : Nat := 0
+  gid : Nat := 0
+  attributes : List (String × ByteArray) := []
+  seals : Nat := 0
+
 /-- What an inode is and holds. -/
 inductive Content where
   | file (data : ByteArray)
@@ -148,12 +159,20 @@ inductive Content where
   | ptyMaster (terminal : Terminal)
   /-- The slave of a pseudo-terminal, `/dev/pts/N`, of the master at that inode. -/
   | ptySlave (master : Nat)
+  /-- A device of `/dev`: 0 is `null`, 1 `zero`, 2 `full`, 3 `random` and `urandom`, and 4 `tty` and 5 `ptmx`, which opening asks of
+  `Bap.Linux.Tty`. -/
+  | device (kind : Nat)
 
 /-- A file of any kind: its number, what it holds, and its type and permissions as `st_mode` has them. -/
 structure Inode where
   number : Nat
   content : Content
   mode : Nat
+  details : Meta := {}
+
+/-- An inode that was written at a time, and so changed then. -/
+def Inode.written (inode : Inode) (clock : Nat) : Inode :=
+  { inode with details := { inode.details with modified := clock, changed := clock } }
 
 /-- What `open` makes: `dup` and `fork` share it, and with it the offset. -/
 structure OpenFile where
@@ -271,6 +290,14 @@ structure ProcessView where
   uptime : Nat := 0
   /-- The processes that there are. -/
   processes : List Nat := []
+  /-- Who it is, its process group and session, and its limits of the stack and of descriptors, soft and hard. -/
+  credentials : Credentials := {}
+  pgid : Nat := 0
+  sid : Nat := 0
+  stack : Nat × Nat := (8 * 1024 * 1024, 2 ^ 64 - 1)
+  files : Nat × Nat := (1024, 4096)
+  /-- The descriptors that it has, as `/proc/PID/fdinfo` says of them: each, its offset and its flags. -/
+  descriptors : List (Nat × Nat × Nat) := []
 
 /-- What makes the bytes of a generated file. -/
 abbrev Generator := ProcessView → ByteArray
@@ -331,7 +358,8 @@ private def addInode (kernel : Kernel) (path : String) (content : Content) (mode
   let number := kernel.nextInode
   ({ kernel with
       paths := kernel.paths.insert path number
-      inodes := kernel.inodes.insert number { number, content, mode }
+      inodes := kernel.inodes.insert number
+        { number, content, mode, details := { accessed := kernel.clock, modified := kernel.clock, changed := kernel.clock } }
       nextInode := number + 1 }, number)
 
 /-- Follows a path, and its last part if `follow`, up to 40 links as Linux does. Each part before the last must be a directory,
@@ -618,13 +646,13 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
     | .file _ =>
       if has flags oDirectory then .error Errno.enotdir
       if has flags oTrunc && writable flags then
-        .ok { kernel with inodes := kernel.inodes.insert number { inode with content := .file ByteArray.empty } }
+        .ok { kernel with inodes := kernel.inodes.insert number ({ inode with content := .file ByteArray.empty }.written kernel.clock) }
       else .ok kernel
     | .console _ =>
       if has flags oDirectory then .error Errno.enotdir
       .ok kernel
     -- `/dev/pts/N`: `Bap.Linux.Tty` says whether it may be opened.
-    | .ptySlave _ => .ok kernel
+    | .ptySlave _ | .device _ => .ok kernel
     -- It has no path.
     | .pipe .. | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ => .error Errno.einval
     -- What is bound to a path is connected to, not opened.
@@ -646,10 +674,17 @@ def read (kernel : Kernel) (group fd count : Nat) : Result (Kernel × ByteArray)
     let content := if next * 2 ≥ buffer.size then Content.pipe (buffer.extract next buffer.size) 0 (consumed + bytes.size)
       else .pipe buffer next (consumed + bytes.size)
     return ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content } }, bytes)
+  -- What a device gives: nothing of `null`, zeros of `zero` and `full`, and of `random`, bytes that are the same each time.
+  if let .device kind := inode.content then
+    let bytes := match kind with
+      | 1 | 2 => Bap.zeroBytes count
+      | 3 => ByteArray.mk ((List.range count).map fun index => ((file.offset + index) * 167 + 13).toUInt8).toArray
+      | _ => ByteArray.empty
+    return ({ kernel with openFiles := kernel.openFiles.insert id { file with offset := file.offset + bytes.size } }, bytes)
   let data ← match inode.content with
     | .file data | .console data => .ok data
     | .directory => .error Errno.eisdir
-    | .symlink _ | .generated _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ => .error Errno.einval
+    | .symlink _ | .generated _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ => .error Errno.einval
   let bytes := readAt data file.offset count
   .ok ({ kernel with openFiles := kernel.openFiles.insert id { file with offset := file.offset + bytes.size } }, bytes)
 
@@ -660,7 +695,7 @@ def readFrom (kernel : Kernel) (group fd count offset : Nat) : Result ByteArray 
   let inode ← inodeOf kernel file.inode
   match inode.content with
   | .file data => .ok (readAt data offset count)
-  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ => .error Errno.espipe
+  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ => .error Errno.espipe
   | .directory => .error Errno.eisdir
   | .symlink _ | .generated _ => .error Errno.einval
 
@@ -671,12 +706,15 @@ def write (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Result (Kerne
   let inode ← inodeOf kernel file.inode
   match inode.content with
   | .console _ => .ok ({ kernel with output := kernel.output ++ bytes }, bytes.size)
+  -- `full` has no room, and the others take all of it.
+  | .device 2 => .error 28
+  | .device _ => .ok (kernel, bytes.size)
   | .pipe buffer head consumed =>
     .ok ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content := .pipe (buffer ++ bytes) head consumed } }, bytes.size)
   | .file data =>
     let offset := if has file.flags oAppend then data.size else file.offset
     .ok ({ kernel with
-      inodes := kernel.inodes.insert file.inode { inode with content := .file (writeAt data offset bytes) }
+      inodes := kernel.inodes.insert file.inode ({ inode with content := .file (writeAt data offset bytes) }.written kernel.clock)
       openFiles := kernel.openFiles.insert id { file with offset := offset + bytes.size } }, bytes.size)
   | .directory => .error Errno.eisdir
   -- `Machine` sends to a socket, and counts what is written to an `eventfd`.
@@ -698,6 +736,8 @@ def writeError (kernel : Kernel) (group fd : Nat) : Option Nat :=
       | none => some Errno.eio
       | some { content := .directory, .. } => some Errno.eisdir
       | some { content := .symlink _, .. } | some { content := .generated _, .. } | some { content := .socket _, .. } => some Errno.einval
+      -- `/dev/full` has no room.
+      | some { content := .device 2, .. } => some 28
       | _ => none
 
 /-- `write` for what `writeError` has nothing against, which changes all it can in place: one that takes the kernel as it is the only holder of it makes as many small
@@ -723,8 +763,8 @@ def writeKnown (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Kernel :
         openFiles := if isFile then kernel.openFiles.insert id { file with offset := offset + bytes.size } else kernel.openFiles
         inodes := kernel.inodes.alter number (·.map fun inode =>
           match inode with
-          | { number, content := .file data, mode } => { number, content := .file (writeInto data offset bytes), mode }
-          | { number, content := .pipe buffer head consumed, mode } => { number, content := .pipe (buffer ++ bytes) head consumed, mode }
+          | inode@{ content := .file data, .. } => { inode with content := .file (writeInto data offset bytes) }.written kernel.clock
+          | inode@{ content := .pipe buffer head consumed, .. } => { inode with content := .pipe (buffer ++ bytes) head consumed }
           | other => other) }
 
 /-- `pwrite`, which leaves the offset. -/
@@ -734,9 +774,9 @@ def writeTo (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Nat
   let inode ← inodeOf kernel file.inode
   match inode.content with
   | .file data =>
-    .ok ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content := .file (writeAt data offset bytes) } },
+    .ok ({ kernel with inodes := kernel.inodes.insert file.inode ({ inode with content := .file (writeAt data offset bytes) }.written kernel.clock) },
       bytes.size)
-  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ => .error Errno.espipe
+  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ => .error Errno.espipe
   | .directory => .error Errno.eisdir
   | .symlink _ | .generated _ => .error Errno.einval
 
@@ -747,7 +787,7 @@ def seek (kernel : Kernel) (group fd : Nat) (negative : Bool) (distance whence :
   let size ← match inode.content with
     | .file data => .ok data.size
     | .directory => .ok 0
-    | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ => .error Errno.espipe
+    | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ => .error Errno.espipe
     | .symlink _ | .generated _ => .error Errno.einval
   let start ← match whence with
     | 0 => .ok 0
@@ -884,16 +924,21 @@ structure Stat where
   mode : Nat
   size : Nat
   links : Nat
-  time : Nat
+  accessed : Nat
+  modified : Nat
+  changed : Nat
+  uid : Nat := 0
+  gid : Nat := 0
   deriving DecidableEq, Repr
 
-private def statOf (kernel : Kernel) (inode : Inode) : Stat :=
+private def statOf (inode : Inode) : Stat :=
   let (size, links) := match inode.content with
     | .file data => (data.size, 1)
     | .directory => (4096, 2)
     | .symlink target => (target.utf8ByteSize, 1)
-    | .console _ | .generated _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ => (0, 1)
-  { inode := inode.number, mode := inode.mode, size, links, time := kernel.clock }
+    | .console _ | .generated _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ => (0, 1)
+  { inode := inode.number, mode := inode.mode, size, links, accessed := inode.details.accessed, modified := inode.details.modified
+    changed := inode.details.changed, uid := inode.details.uid, gid := inode.details.gid }
 
 /-- `stat` and `lstat`. -/
 def statPath (kernel : Kernel) (base path : String) (follow : Bool := true) : Result Stat := do
@@ -901,12 +946,12 @@ def statPath (kernel : Kernel) (base path : String) (follow : Bool := true) : Re
   let (_, found) ← kernel.resolve base path follow
   match found with
   | none => .error Errno.enoent
-  | some number => .ok (statOf kernel (← inodeOf kernel number))
+  | some number => .ok (statOf (← inodeOf kernel number))
 
 /-- `fstat`. -/
 def statDescriptor (kernel : Kernel) (group fd : Nat) : Result Stat := do
   let (_, file) ← openFileOf kernel group fd
-  .ok (statOf kernel (← inodeOf kernel file.inode))
+  .ok (statOf (← inodeOf kernel file.inode))
 
 /-- The path of what is open, for a directory. -/
 private def pathOfInode (kernel : Kernel) (number : Nat) : Option String :=
@@ -1013,6 +1058,51 @@ def rename (kernel : Kernel) (base source target : String) : Result Kernel := do
     else paths
   .ok { kernel with paths := moved }
 
+/-- Another path of an inode, as `linkat` of `AT_EMPTY_PATH` gives one to what a descriptor is open on. -/
+def linkInode (kernel : Kernel) (number : Nat) (base target : String) : Result Kernel := do
+  let inode ← inodeOf kernel number
+  if let .directory := inode.content then .error Errno.eperm
+  let (normal, existing) ← kernel.resolve base target (follow := false)
+  if existing.isSome then .error Errno.eexist
+  if !parentIsDirectory kernel normal then .error Errno.enoent
+  .ok { kernel with
+    paths := kernel.paths.insert normal number
+    inodes := kernel.inodes.insert number { inode with details := { inode.details with changed := kernel.clock } } }
+
+/-- `link`: another path of the inode of `source`, which isn't a directory, followed through a link at its end if `follow`. -/
+def link (kernel : Kernel) (base source target : String) (follow : Bool) : Result Kernel := do
+  let (_, found) ← kernel.resolve base source (follow := follow)
+  let some number := found | .error Errno.enoent
+  kernel.linkInode number base target
+
+/-- `renameat2`: of `RENAME_NOREPLACE`, not over what is there, and of `RENAME_EXCHANGE`, the two trade places, with all under them. -/
+def renameWith (kernel : Kernel) (base source target : String) (flags : Nat) : Result Kernel := do
+  if flags &&& 3 == 3 || flags &&& 4 != 0 && flags &&& 2 != 0 then .error Errno.einval
+  let (from_, found) ← kernel.resolve base source (follow := false)
+  let some _ := found | .error Errno.enoent
+  let (to_, existing) ← kernel.resolve base target (follow := false)
+  if flags &&& 1 != 0 && existing.isSome then .error Errno.eexist
+  if flags &&& 2 == 0 then return ← kernel.rename base source target
+  let some _ := existing | .error Errno.enoent
+  if (to_ ++ "/").startsWith (from_ ++ "/") || (from_ ++ "/").startsWith (to_ ++ "/") then .error Errno.einval
+  let swap (path : String) : String :=
+    if path == from_ then to_ else if path == to_ then from_
+    else if path.startsWith (from_ ++ "/") then to_ ++ (path.drop from_.length).toString
+    else if path.startsWith (to_ ++ "/") then from_ ++ (path.drop to_.length).toString
+    else path
+  .ok { kernel with paths := kernel.paths.fold (init := {}) fun paths path number => paths.insert (swap path) number }
+
+/-- The devices of `/dev` and what is around them: `null`, `zero`, `full`, `random`, `urandom`, `tty` and `ptmx`, the directories
+`pts` and `shm`, and `stdin`, `stdout`, `stderr` and `fd` of `/proc/self/fd`. Nothing replaces what is already there. -/
+def installDevices (kernel : Kernel) : Kernel :=
+  let kernel := [("/dev/null", 0), ("/dev/zero", 1), ("/dev/full", 2), ("/dev/random", 3), ("/dev/urandom", 3), ("/dev/tty", 4),
+      ("/dev/ptmx", 5)].foldl (init := kernel) fun kernel (path, kind) =>
+    if kernel.paths.contains path then kernel else (addInode (addDirectories kernel "/dev") path (.device kind) 0o20666).1
+  let kernel := addDirectories (addDirectories kernel "/dev/pts") "/dev/shm"
+  [("/dev/stdin", "/proc/self/fd/0"), ("/dev/stdout", "/proc/self/fd/1"), ("/dev/stderr", "/proc/self/fd/2"),
+    ("/dev/fd", "/proc/self/fd")].foldl (init := kernel) fun kernel (path, target) =>
+    if kernel.paths.contains path then kernel else kernel.addSymlink path target
+
 /-- `symlink`. -/
 def symlink (kernel : Kernel) (base target path : String) : Result Kernel := do
   let (normal, found) ← kernel.resolve base path (follow := false)
@@ -1048,7 +1138,7 @@ def truncateInode (kernel : Kernel) (number size : Nat) : Result Kernel := do
   | .file data =>
     let data := if size ≤ data.size then data.extract 0 size
       else data ++ Bap.zeroBytes (size - data.size)
-    .ok { kernel with inodes := kernel.inodes.insert number { inode with content := .file data } }
+    .ok { kernel with inodes := kernel.inodes.insert number ({ inode with content := .file data }.written kernel.clock) }
   | .directory => .error Errno.eisdir
   | _ => .error Errno.einval
 
@@ -1071,7 +1161,7 @@ def chmod (kernel : Kernel) (base path : String) (mode : Nat) : Result Kernel :=
   | some number =>
     let inode ← inodeOf kernel number
     let kept := inode.mode - (inode.mode &&& 0o7777)
-    .ok { kernel with inodes := kernel.inodes.insert number { inode with mode := kept ||| (mode &&& 0o7777) } }
+    .ok { kernel with inodes := kernel.inodes.insert number { inode with mode := kept ||| (mode &&& 0o7777), details := { inode.details with changed := kernel.clock } } }
 
 /-- Where a byte of an inode is, to what goes by address spaces, of which there are as many as tasks: this and the inode, and its offset. -/
 def fileSpace : Nat := 2 ^ 62
@@ -1098,7 +1188,7 @@ def writeChanges (kernel : Kernel) (number offset : Nat) (before memory : ByteAr
     | .file data =>
       let data := (List.range (min before.size memory.size)).foldl (init := data) fun data index =>
         if before[index]! != memory[index]! then data.set! (offset + index) memory[index]! else data
-      { kernel with inodes := kernel.inodes.insert number { inode with content := .file data } }
+      { kernel with inodes := kernel.inodes.insert number ({ inode with content := .file data }.written kernel.clock) }
     | _ => kernel
   | none => kernel
 
@@ -1161,57 +1251,55 @@ def field (big : Bool) (size value : Nat) : ByteArray :=
 /-- `struct stat` of x86-64 and 64-bit PowerPC. -/
 def stat (value : Kernel.Stat) (big : Bool := false) : ByteArray :=
   let get := field big
-  let seconds := value.time / 1000000000
-  let nanos := value.time % 1000000000
-  let time := get 8 seconds ++ get 8 nanos
-  get 8 1 ++ get 8 value.inode ++ get 8 value.links ++ get 4 value.mode ++ get 4 0 ++ get 4 0 ++
+  let time (at_ : Nat) : ByteArray := get 8 (at_ / 1000000000) ++ get 8 (at_ % 1000000000)
+  get 8 1 ++ get 8 value.inode ++ get 8 value.links ++ get 4 value.mode ++ get 4 value.uid ++ get 4 value.gid ++
     get 4 0 ++ get 8 0 ++ get 8 value.size ++ get 8 4096 ++ get 8 ((value.size + 511) / 512) ++
-    time ++ time ++ time ++ bytesOf 24 0
+    time value.accessed ++ time value.modified ++ time value.changed ++ bytesOf 24 0
 
 /-- `struct stat` of `asm-generic/stat.h`, which has the order of the fields of 32-bit systems and is smaller. -/
 def genericStat (value : Kernel.Stat) : ByteArray :=
-  let seconds := value.time / 1000000000
-  let nanos := value.time % 1000000000
-  let time := bytesOf 8 seconds ++ bytesOf 8 nanos
-  bytesOf 8 1 ++ bytesOf 8 value.inode ++ bytesOf 4 value.mode ++ bytesOf 4 value.links ++ bytesOf 4 0 ++ bytesOf 4 0 ++
+  let time (at_ : Nat) : ByteArray := bytesOf 8 (at_ / 1000000000) ++ bytesOf 8 (at_ % 1000000000)
+  bytesOf 8 1 ++ bytesOf 8 value.inode ++ bytesOf 4 value.mode ++ bytesOf 4 value.links ++ bytesOf 4 value.uid ++ bytesOf 4 value.gid ++
     bytesOf 8 0 ++ bytesOf 8 0 ++ bytesOf 8 value.size ++ bytesOf 4 4096 ++ bytesOf 4 0 ++ bytesOf 8 ((value.size + 511) / 512) ++
-    time ++ time ++ time ++ bytesOf 8 0
+    time value.accessed ++ time value.modified ++ time value.changed ++ bytesOf 8 0
 
 /-- `struct stat` of 64-bit MIPS, which holds its times in 32 bits. -/
 def mips64Stat (value : Kernel.Stat) (big : Bool) : ByteArray :=
   let get := field big
-  let time := get 4 (value.time / 1000000000) ++ get 4 (value.time % 1000000000)
-  get 4 1 ++ bytesOf 12 0 ++ get 8 value.inode ++ get 4 value.mode ++ get 4 value.links ++ get 4 0 ++ get 4 0 ++ get 4 0 ++
-    bytesOf 12 0 ++ get 8 value.size ++ time ++ time ++ time ++ get 4 4096 ++ bytesOf 4 0 ++ get 8 ((value.size + 511) / 512) ++
-    bytesOf 56 0
+  let time (at_ : Nat) : ByteArray := get 4 (at_ / 1000000000) ++ get 4 (at_ % 1000000000)
+  get 4 1 ++ bytesOf 12 0 ++ get 8 value.inode ++ get 4 value.mode ++ get 4 value.links ++ get 4 value.uid ++ get 4 value.gid ++
+    get 4 0 ++ bytesOf 12 0 ++ get 8 value.size ++ time value.accessed ++ time value.modified ++ time value.changed ++ get 4 4096 ++
+    bytesOf 4 0 ++ get 8 ((value.size + 511) / 512) ++ bytesOf 56 0
 
 /-- `struct stat64` of i686, which is packed. -/
 def stat64 (value : Kernel.Stat) : ByteArray :=
-  let time := bytesOf 4 (value.time / 1000000000) ++ bytesOf 4 (value.time % 1000000000)
-  bytesOf 8 1 ++ bytesOf 4 0 ++ bytesOf 4 (value.inode % 2 ^ 32) ++ bytesOf 4 value.mode ++ bytesOf 4 value.links ++ bytesOf 8 0 ++
-    bytesOf 8 0 ++ bytesOf 4 0 ++ bytesOf 8 value.size ++ bytesOf 4 4096 ++ bytesOf 8 ((value.size + 511) / 512) ++
-    time ++ time ++ time ++ bytesOf 8 value.inode
+  let time (at_ : Nat) : ByteArray := bytesOf 4 (at_ / 1000000000) ++ bytesOf 4 (at_ % 1000000000)
+  bytesOf 8 1 ++ bytesOf 4 0 ++ bytesOf 4 (value.inode % 2 ^ 32) ++ bytesOf 4 value.mode ++ bytesOf 4 value.links ++
+    bytesOf 4 value.uid ++ bytesOf 4 value.gid ++ bytesOf 8 0 ++ bytesOf 4 0 ++ bytesOf 8 value.size ++ bytesOf 4 4096 ++
+    bytesOf 8 ((value.size + 511) / 512) ++ time value.accessed ++ time value.modified ++ time value.changed ++ bytesOf 8 value.inode
 
 /-- `struct stat64` of ARM, whose wide fields are aligned. -/
 def armStat64 (value : Kernel.Stat) : ByteArray :=
-  let time := bytesOf 4 (value.time / 1000000000) ++ bytesOf 4 (value.time % 1000000000)
-  bytesOf 8 1 ++ bytesOf 4 0 ++ bytesOf 4 (value.inode % 2 ^ 32) ++ bytesOf 4 value.mode ++ bytesOf 4 value.links ++ bytesOf 8 0 ++
-    bytesOf 8 0 ++ bytesOf 8 0 ++ bytesOf 8 value.size ++ bytesOf 4 4096 ++ bytesOf 4 0 ++ bytesOf 8 ((value.size + 511) / 512) ++
-    time ++ time ++ time ++ bytesOf 8 value.inode
+  let time (at_ : Nat) : ByteArray := bytesOf 4 (at_ / 1000000000) ++ bytesOf 4 (at_ % 1000000000)
+  bytesOf 8 1 ++ bytesOf 4 0 ++ bytesOf 4 (value.inode % 2 ^ 32) ++ bytesOf 4 value.mode ++ bytesOf 4 value.links ++
+    bytesOf 4 value.uid ++ bytesOf 4 value.gid ++ bytesOf 8 0 ++ bytesOf 8 0 ++ bytesOf 8 value.size ++ bytesOf 4 4096 ++ bytesOf 4 0 ++
+    bytesOf 8 ((value.size + 511) / 512) ++ time value.accessed ++ time value.modified ++ time value.changed ++ bytesOf 8 value.inode
 
 /-- `struct stat64` of 32-bit PowerPC. -/
 def powerpcStat64 (value : Kernel.Stat) (big : Bool) : ByteArray :=
   let get := field big
-  let time := get 4 (value.time / 1000000000) ++ get 4 (value.time % 1000000000)
-  get 8 1 ++ get 8 value.inode ++ get 4 value.mode ++ get 4 value.links ++ bytesOf 8 0 ++ bytesOf 8 0 ++ bytesOf 8 0 ++
-    get 8 value.size ++ get 4 4096 ++ bytesOf 4 0 ++ get 8 ((value.size + 511) / 512) ++ time ++ time ++ time ++ bytesOf 8 0
+  let time (at_ : Nat) : ByteArray := get 4 (at_ / 1000000000) ++ get 4 (at_ % 1000000000)
+  get 8 1 ++ get 8 value.inode ++ get 4 value.mode ++ get 4 value.links ++ get 4 value.uid ++ get 4 value.gid ++ bytesOf 8 0 ++
+    bytesOf 8 0 ++ get 8 value.size ++ get 4 4096 ++ bytesOf 4 0 ++ get 8 ((value.size + 511) / 512) ++ time value.accessed ++
+    time value.modified ++ time value.changed ++ bytesOf 8 0
 
 /-- `struct stat64` of the o32 ABI of MIPS. -/
 def mipsStat64 (value : Kernel.Stat) (big : Bool) : ByteArray :=
   let get := field big
-  let time := get 4 (value.time / 1000000000) ++ get 4 (value.time % 1000000000)
-  get 4 1 ++ bytesOf 12 0 ++ get 8 value.inode ++ get 4 value.mode ++ get 4 value.links ++ bytesOf 8 0 ++ bytesOf 4 0 ++
-    bytesOf 12 0 ++ get 8 value.size ++ time ++ time ++ time ++ get 4 4096 ++ bytesOf 4 0 ++ get 8 ((value.size + 511) / 512)
+  let time (at_ : Nat) : ByteArray := get 4 (at_ / 1000000000) ++ get 4 (at_ % 1000000000)
+  get 4 1 ++ bytesOf 12 0 ++ get 8 value.inode ++ get 4 value.mode ++ get 4 value.links ++ get 4 value.uid ++ get 4 value.gid ++
+    bytesOf 4 0 ++ bytesOf 12 0 ++ get 8 value.size ++ time value.accessed ++ time value.modified ++ time value.changed ++ get 4 4096 ++
+    bytesOf 4 0 ++ get 8 ((value.size + 511) / 512)
 
 /-- What `statfs` says of the file system that all files are on, a tmpfs of 4 GiB with all of it free. Its type, block size and the three at the end of it are of the word, so that `statfs` and `statfs64` of a 64-bit system
 are the same. MIPS has its fields in another order. -/
@@ -1239,13 +1327,12 @@ def sysinfo (wide big : Bool) (uptime processes : Nat) : ByteArray :=
 /-- `struct statx`. -/
 def statx (value : Kernel.Stat) (big : Bool := false) : ByteArray :=
   let get := field big
-  let seconds := value.time / 1000000000
-  let nanos := value.time % 1000000000
-  let time := get 8 seconds ++ get 4 nanos ++ get 4 0
-  -- STATX_BASIC_STATS
-  get 4 0x7ff ++ get 4 4096 ++ get 8 0 ++ get 4 value.links ++ get 4 0 ++ get 4 0 ++
+  let time (at_ : Nat) : ByteArray := get 8 (at_ / 1000000000) ++ get 4 (at_ % 1000000000) ++ get 4 0
+  -- STATX_BASIC_STATS: of the times, read, born, changed and written.
+  get 4 0x7ff ++ get 4 4096 ++ get 8 0 ++ get 4 value.links ++ get 4 value.uid ++ get 4 value.gid ++
     get 2 value.mode ++ get 2 0 ++ get 8 value.inode ++ get 8 value.size ++
-    get 8 ((value.size + 511) / 512) ++ get 8 0 ++ time ++ time ++ time ++ time ++ get 128 0
+    get 8 ((value.size + 511) / 512) ++ get 8 0 ++ time value.accessed ++ time value.changed ++ time value.changed ++
+    time value.modified ++ get 128 0
 
 /-- One `struct linux_dirent64`, aligned to 8. -/
 def dirent (number : Nat) (next : Nat) (kind : Nat) (name : String) (big : Bool := false) : ByteArray :=

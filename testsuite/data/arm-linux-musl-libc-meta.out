@@ -1,0 +1,24 @@
+utimensat 0
+its times 1 1 1
+a write moves it 1
+UTIME_OMIT 1 1
+link 0
+the same file 1
+after the other goes 6
+RENAME_NOREPLACE -17
+RENAME_EXCHANGE 0
+each has the other 1 6
+setxattr 0
+XATTR_CREATE of one that is there 1
+getxattr 4 1 4
+too small 1
+listxattr 1
+removexattr 0 1
+of no namespace 1
+fchown 0
+/dev/null 3 0
+/dev/zero 8 1
+/dev/full 1
+/dev/urandom 16
+/proc/self/status has its uid 1
+/proc/self/fdinfo 1

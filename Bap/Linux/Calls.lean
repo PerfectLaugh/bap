@@ -78,13 +78,15 @@ inductive Call where
   | nanosleep | clockNanosleep | clockNanosleep64 | setitimer | getitimer | alarm | timerCreate | timerSettime | timerSettime64 | timerGettime | timerGettime64 | timerGetoverrun | timerDelete
   | poll | ppoll | ppoll64 | select | pselect6 | pselect664 | epollCreate | epollCreate1 | epollCtl | epollWait | epollPwait | epollPwait2 | eventfd | eventfd2 | timerfdCreate | timerfdSettime | timerfdSettime64 | timerfdGettime | timerfdGettime64 | signalfd | signalfd4
   | getpgid | setpgid | getpgrp | setsid | getsid | getuid | geteuid | getgid | getegid | setuid | setgid | setreuid | setregid | setresuid | setresgid | getresuid | getresgid | setfsuid | setfsgid | getgroups | setgroups | capget | capset | setrlimit | getrusage | times | getpriority | setpriority | schedSetaffinity | schedGetparam | schedSetparam | schedGetscheduler | schedSetscheduler | schedGetPriorityMax | schedGetPriorityMin | schedRrGetInterval | schedRrGetInterval64
+  | link | linkat | renameat2 | utimensat | utimensat64 | utimes | utime | futimesat | chown | lchown | fchown | fchownat | setxattr | lsetxattr | fsetxattr | getxattr | lgetxattr | fgetxattr | listxattr | llistxattr | flistxattr | removexattr | lremovexattr | fremovexattr
   /-- What has nothing to do here: everyone is root and nothing has to reach a disk. -/
   | succeeds
   deriving DecidableEq, Repr
 
 /-- The numbers of x86-64. -/
 def x86_64Calls : List (Nat × Call) :=
-  [(121, .getpgid), (109, .setpgid), (111, .getpgrp), (112, .setsid), (124, .getsid), (102, .getuid), (107, .geteuid), (104, .getgid), (108, .getegid), (105, .setuid), (106, .setgid), (113, .setreuid), (114, .setregid), (117, .setresuid), (119, .setresgid), (118, .getresuid), (120, .getresgid), (122, .setfsuid), (123, .setfsgid), (115, .getgroups), (116, .setgroups), (125, .capget), (126, .capset), (160, .setrlimit), (98, .getrusage), (100, .times), (140, .getpriority), (141, .setpriority), (203, .schedSetaffinity), (143, .schedGetparam), (142, .schedSetparam), (145, .schedGetscheduler), (144, .schedSetscheduler), (146, .schedGetPriorityMax), (147, .schedGetPriorityMin), (148, .schedRrGetInterval),
+  [(86, .link), (265, .linkat), (280, .utimensat), (235, .utimes), (132, .utime), (261, .futimesat), (92, .chown), (94, .lchown), (93, .fchown), (260, .fchownat), (188, .setxattr), (189, .lsetxattr), (190, .fsetxattr), (191, .getxattr), (192, .lgetxattr), (193, .fgetxattr), (194, .listxattr), (195, .llistxattr), (196, .flistxattr), (197, .removexattr), (198, .lremovexattr), (199, .fremovexattr),
+   (121, .getpgid), (109, .setpgid), (111, .getpgrp), (112, .setsid), (124, .getsid), (102, .getuid), (107, .geteuid), (104, .getgid), (108, .getegid), (105, .setuid), (106, .setgid), (113, .setreuid), (114, .setregid), (117, .setresuid), (119, .setresgid), (118, .getresuid), (120, .getresgid), (122, .setfsuid), (123, .setfsgid), (115, .getgroups), (116, .setgroups), (125, .capget), (126, .capset), (160, .setrlimit), (98, .getrusage), (100, .times), (140, .getpriority), (141, .setpriority), (203, .schedSetaffinity), (143, .schedGetparam), (142, .schedSetparam), (145, .schedGetscheduler), (144, .schedSetscheduler), (146, .schedGetPriorityMax), (147, .schedGetPriorityMin), (148, .schedRrGetInterval),
    (7, .poll), (271, .ppoll), (23, .select), (270, .pselect6), (213, .epollCreate), (291, .epollCreate1), (233, .epollCtl), (232, .epollWait), (281, .epollPwait), (441, .epollPwait2), (284, .eventfd), (290, .eventfd2), (283, .timerfdCreate), (286, .timerfdSettime), (287, .timerfdGettime), (282, .signalfd), (289, .signalfd4),
    (35, .nanosleep), (230, .clockNanosleep), (38, .setitimer), (36, .getitimer), (37, .alarm), (222, .timerCreate), (223, .timerSettime), (224, .timerGettime), (225, .timerGetoverrun), (226, .timerDelete),
    (157, .prctl), (317, .seccomp), (41, .socket), (42, .connect), (43, .accept), (44, .sendto), (45, .recvfrom), (46, .sendmsg), (47, .recvmsg), (48, .shutdown), (49, .bind), (50, .listen), (51, .getsockname), (52, .getpeername), (53, .socketpair), (54, .setsockopt), (55, .getsockopt), (288, .accept4),
@@ -95,15 +97,16 @@ def x86_64Calls : List (Nat × Call) :=
    (332, .statx), (8, .lseek), (17, .pread), (18, .pwrite), (19, .readv), (20, .writev), (21, .access), (269, .faccessat),
    (439, .faccessat), (32, .dup), (33, .dup2), (292, .dup3), (72, .fcntl), (16, .ioctl), (217, .getdents), (79, .getcwd),
    (80, .chdir), (81, .fchdir), (83, .mkdir), (258, .mkdirat), (84, .rmdir), (87, .unlink), (263, .unlinkat), (82, .rename),
-   (264, .renameat), (316, .renameat), (88, .symlink), (266, .symlinkat), (89, .readlink), (267, .readlinkat), (90, .chmod),
+   (264, .renameat), (316, .renameat2), (88, .symlink), (266, .symlinkat), (89, .readlink), (267, .readlinkat), (90, .chmod),
    (268, .fchmodat), (76, .truncate), (77, .ftruncate), (95, .umask), (9, .mmap), (25, .mremap), (12, .brk),
    (96, .gettimeofday), (201, .time), (228, .clockGettime), (229, .clockGetres), (63, .uname), (97, .getrlimit),
    (302, .prlimit), (318, .getrandom), (131, .sigaltstack), (204, .schedGetaffinity), (74, .succeeds), (75, .succeeds),
-   (91, .succeeds), (92, .succeeds), (93, .succeeds), (94, .succeeds), (260, .succeeds), (280, .succeeds),    ]
+   (91, .succeeds),    ]
 
 /-- The numbers of the architectures that came after the old calls went: `asm-generic/unistd.h`. -/
 def genericCalls : List (Nat × Call) :=
-  [(155, .getpgid), (154, .setpgid), (157, .setsid), (156, .getsid), (174, .getuid), (175, .geteuid), (176, .getgid), (177, .getegid), (146, .setuid), (144, .setgid), (145, .setreuid), (143, .setregid), (147, .setresuid), (149, .setresgid), (148, .getresuid), (150, .getresgid), (151, .setfsuid), (152, .setfsgid), (158, .getgroups), (159, .setgroups), (90, .capget), (91, .capset), (164, .setrlimit), (165, .getrusage), (153, .times), (141, .getpriority), (140, .setpriority), (122, .schedSetaffinity), (121, .schedGetparam), (118, .schedSetparam), (120, .schedGetscheduler), (119, .schedSetscheduler), (125, .schedGetPriorityMax), (126, .schedGetPriorityMin), (127, .schedRrGetInterval),
+  [(37, .linkat), (88, .utimensat), (55, .fchown), (54, .fchownat), (5, .setxattr), (6, .lsetxattr), (7, .fsetxattr), (8, .getxattr), (9, .lgetxattr), (10, .fgetxattr), (11, .listxattr), (12, .llistxattr), (13, .flistxattr), (14, .removexattr), (15, .lremovexattr), (16, .fremovexattr),
+   (155, .getpgid), (154, .setpgid), (157, .setsid), (156, .getsid), (174, .getuid), (175, .geteuid), (176, .getgid), (177, .getegid), (146, .setuid), (144, .setgid), (145, .setreuid), (143, .setregid), (147, .setresuid), (149, .setresgid), (148, .getresuid), (150, .getresgid), (151, .setfsuid), (152, .setfsgid), (158, .getgroups), (159, .setgroups), (90, .capget), (91, .capset), (164, .setrlimit), (165, .getrusage), (153, .times), (141, .getpriority), (140, .setpriority), (122, .schedSetaffinity), (121, .schedGetparam), (118, .schedSetparam), (120, .schedGetscheduler), (119, .schedSetscheduler), (125, .schedGetPriorityMax), (126, .schedGetPriorityMin), (127, .schedRrGetInterval),
    (73, .ppoll), (72, .pselect6), (20, .epollCreate1), (21, .epollCtl), (22, .epollPwait), (441, .epollPwait2), (19, .eventfd2), (85, .timerfdCreate), (86, .timerfdSettime), (87, .timerfdGettime), (74, .signalfd4),
    (101, .nanosleep), (115, .clockNanosleep), (103, .setitimer), (102, .getitimer), (107, .timerCreate), (110, .timerSettime), (108, .timerGettime), (109, .timerGetoverrun), (111, .timerDelete),
    (277, .seccomp), (198, .socket), (199, .socketpair), (200, .bind), (201, .listen), (202, .accept), (203, .connect), (204, .getsockname), (205, .getpeername), (206, .sendto), (207, .recvfrom), (208, .setsockopt), (209, .getsockopt), (210, .shutdown), (211, .sendmsg), (212, .recvmsg), (242, .accept4),
@@ -113,14 +116,15 @@ def genericCalls : List (Nat × Call) :=
    (63, .read), (64, .write), (56, .openat), (57, .close), (80, .fstat), (79, .fstatat), (291, .statx), (62, .lseek),
    (67, .pread), (68, .pwrite), (65, .readv), (66, .writev), (48, .faccessat), (439, .faccessat), (23, .dup), (24, .dup3),
    (25, .fcntl), (29, .ioctl), (61, .getdents), (17, .getcwd), (49, .chdir), (50, .fchdir), (34, .mkdirat), (35, .unlinkat),
-   (38, .renameat), (276, .renameat), (36, .symlinkat), (78, .readlinkat), (53, .fchmodat), (45, .truncate), (46, .ftruncate),
+   (38, .renameat), (276, .renameat2), (36, .symlinkat), (78, .readlinkat), (53, .fchmodat), (45, .truncate), (46, .ftruncate),
    (166, .umask), (222, .mmap), (216, .mremap), (214, .brk), (169, .gettimeofday), (113, .clockGettime), (114, .clockGetres),
    (160, .uname), (163, .getrlimit), (261, .prlimit), (278, .getrandom), (132, .sigaltstack), (123, .schedGetaffinity),
-   (82, .succeeds), (83, .succeeds), (52, .succeeds), (54, .succeeds), (55, .succeeds), (88, .succeeds),    ]
+   (82, .succeeds), (83, .succeeds), (52, .succeeds),    ]
 
 /-- The numbers of `asm-generic` on 32 bits, where whatever has a time or an offset in a word has gone. -/
 def generic32Calls : List (Nat × Call) :=
-  [(155, .getpgid), (154, .setpgid), (157, .setsid), (156, .getsid), (174, .getuid), (175, .geteuid), (176, .getgid), (177, .getegid), (146, .setuid), (144, .setgid), (145, .setreuid), (143, .setregid), (147, .setresuid), (149, .setresgid), (148, .getresuid), (150, .getresgid), (151, .setfsuid), (152, .setfsgid), (158, .getgroups), (159, .setgroups), (90, .capget), (91, .capset), (165, .getrusage), (153, .times), (141, .getpriority), (140, .setpriority), (122, .schedSetaffinity), (121, .schedGetparam), (118, .schedSetparam), (120, .schedGetscheduler), (119, .schedSetscheduler), (125, .schedGetPriorityMax), (126, .schedGetPriorityMin), (423, .schedRrGetInterval64),
+  [(37, .linkat), (412, .utimensat64), (55, .fchown), (54, .fchownat), (5, .setxattr), (6, .lsetxattr), (7, .fsetxattr), (8, .getxattr), (9, .lgetxattr), (10, .fgetxattr), (11, .listxattr), (12, .llistxattr), (13, .flistxattr), (14, .removexattr), (15, .lremovexattr), (16, .fremovexattr),
+   (155, .getpgid), (154, .setpgid), (157, .setsid), (156, .getsid), (174, .getuid), (175, .geteuid), (176, .getgid), (177, .getegid), (146, .setuid), (144, .setgid), (145, .setreuid), (143, .setregid), (147, .setresuid), (149, .setresgid), (148, .getresuid), (150, .getresgid), (151, .setfsuid), (152, .setfsgid), (158, .getgroups), (159, .setgroups), (90, .capget), (91, .capset), (165, .getrusage), (153, .times), (141, .getpriority), (140, .setpriority), (122, .schedSetaffinity), (121, .schedGetparam), (118, .schedSetparam), (120, .schedGetscheduler), (119, .schedSetscheduler), (125, .schedGetPriorityMax), (126, .schedGetPriorityMin), (423, .schedRrGetInterval64),
    (414, .ppoll64), (413, .pselect664), (20, .epollCreate1), (21, .epollCtl), (22, .epollPwait), (441, .epollPwait2), (19, .eventfd2), (85, .timerfdCreate), (411, .timerfdSettime64), (410, .timerfdGettime64), (74, .signalfd4),
    (101, .nanosleep), (407, .clockNanosleep64), (103, .setitimer), (102, .getitimer), (107, .timerCreate), (409, .timerSettime64), (408, .timerGettime64), (109, .timerGetoverrun), (111, .timerDelete),
    (277, .seccomp), (198, .socket), (199, .socketpair), (200, .bind), (201, .listen), (202, .accept), (203, .connect), (204, .getsockname), (205, .getpeername), (206, .sendto), (207, .recvfrom), (208, .setsockopt), (209, .getsockopt), (210, .shutdown), (211, .sendmsg), (212, .recvmsg), (242, .accept4),
@@ -130,14 +134,15 @@ def generic32Calls : List (Nat × Call) :=
    (63, .read), (64, .write), (56, .openat), (57, .close), (291, .statx), (62, .llseek),
    (67, .pread), (68, .pwrite), (65, .readv), (66, .writev), (48, .faccessat), (439, .faccessat), (23, .dup), (24, .dup3),
    (25, .fcntl), (29, .ioctl), (61, .getdents), (17, .getcwd), (49, .chdir), (50, .fchdir), (34, .mkdirat), (35, .unlinkat),
-   (38, .renameat), (276, .renameat), (36, .symlinkat), (78, .readlinkat), (53, .fchmodat), (45, .truncate64), (46, .ftruncate64),
+   (38, .renameat), (276, .renameat2), (36, .symlinkat), (78, .readlinkat), (53, .fchmodat), (45, .truncate64), (46, .ftruncate64),
    (166, .umask), (222, .mmap2), (216, .mremap), (214, .brk), (403, .clockGettime64), (406, .clockGetres64),
    (160, .uname), (261, .prlimit), (278, .getrandom), (132, .sigaltstack), (123, .schedGetaffinity),
-   (82, .succeeds), (83, .succeeds), (52, .succeeds), (54, .succeeds), (55, .succeeds), (412, .succeeds),    ]
+   (82, .succeeds), (83, .succeeds), (52, .succeeds),    ]
 
 /-- The numbers of the o32 ABI of MIPS, without their 4000. -/
 def o32Calls : List (Nat × Call) :=
-  [(132, .getpgid), (57, .setpgid), (65, .getpgrp), (66, .setsid), (151, .getsid), (24, .getuid), (49, .geteuid), (47, .getgid), (50, .getegid), (23, .setuid), (46, .setgid), (70, .setreuid), (71, .setregid), (185, .setresuid), (190, .setresgid), (186, .getresuid), (191, .getresgid), (138, .setfsuid), (139, .setfsgid), (80, .getgroups), (81, .setgroups), (204, .capget), (205, .capset), (75, .setrlimit), (77, .getrusage), (43, .times), (96, .getpriority), (97, .setpriority), (239, .schedSetaffinity), (159, .schedGetparam), (158, .schedSetparam), (161, .schedGetscheduler), (160, .schedSetscheduler), (163, .schedGetPriorityMax), (164, .schedGetPriorityMin), (165, .schedRrGetInterval), (423, .schedRrGetInterval64),
+  [(9, .link), (296, .linkat), (316, .utimensat), (412, .utimensat64), (267, .utimes), (30, .utime), (292, .futimesat), (202, .chown), (16, .lchown), (95, .fchown), (291, .fchownat), (224, .setxattr), (225, .lsetxattr), (226, .fsetxattr), (227, .getxattr), (228, .lgetxattr), (229, .fgetxattr), (230, .listxattr), (231, .llistxattr), (232, .flistxattr), (233, .removexattr), (234, .lremovexattr), (235, .fremovexattr),
+   (132, .getpgid), (57, .setpgid), (65, .getpgrp), (66, .setsid), (151, .getsid), (24, .getuid), (49, .geteuid), (47, .getgid), (50, .getegid), (23, .setuid), (46, .setgid), (70, .setreuid), (71, .setregid), (185, .setresuid), (190, .setresgid), (186, .getresuid), (191, .getresgid), (138, .setfsuid), (139, .setfsgid), (80, .getgroups), (81, .setgroups), (204, .capget), (205, .capset), (75, .setrlimit), (77, .getrusage), (43, .times), (96, .getpriority), (97, .setpriority), (239, .schedSetaffinity), (159, .schedGetparam), (158, .schedSetparam), (161, .schedGetscheduler), (160, .schedSetscheduler), (163, .schedGetPriorityMax), (164, .schedGetPriorityMin), (165, .schedRrGetInterval), (423, .schedRrGetInterval64),
    (188, .poll), (302, .ppoll), (414, .ppoll64), (142, .select), (301, .pselect6), (413, .pselect664), (248, .epollCreate), (326, .epollCreate1), (249, .epollCtl), (250, .epollWait), (313, .epollPwait), (441, .epollPwait2), (319, .eventfd), (325, .eventfd2), (321, .timerfdCreate), (323, .timerfdSettime), (411, .timerfdSettime64), (322, .timerfdGettime), (410, .timerfdGettime64), (317, .signalfd), (324, .signalfd4),
    (265, .clockNanosleep), (258, .timerSettime), (259, .timerGettime),
    (166, .nanosleep), (407, .clockNanosleep64), (104, .setitimer), (105, .getitimer), (27, .alarm), (257, .timerCreate), (409, .timerSettime64), (408, .timerGettime64), (260, .timerGetoverrun), (261, .timerDelete),
@@ -149,16 +154,16 @@ def o32Calls : List (Nat × Call) :=
    (200, .pread), (201, .pwrite), (145, .readv), (146, .writev), (33, .access), (300, .faccessat), (439, .faccessat),
    (41, .dup), (63, .dup2), (327, .dup3), (55, .fcntl), (220, .fcntl), (54, .ioctl), (219, .getdents), (203, .getcwd),
    (12, .chdir), (133, .fchdir), (39, .mkdir), (289, .mkdirat), (40, .rmdir), (10, .unlink), (294, .unlinkat), (38, .rename),
-   (295, .renameat), (351, .renameat), (83, .symlink), (297, .symlinkat), (85, .readlink), (298, .readlinkat), (15, .chmod),
+   (295, .renameat), (351, .renameat2), (83, .symlink), (297, .symlinkat), (85, .readlink), (298, .readlinkat), (15, .chmod),
    (299, .fchmodat), (92, .truncate), (93, .ftruncate), (211, .truncate64), (212, .ftruncate64), (60, .umask), (210, .mmap2),
    (167, .mremap), (45, .brk), (78, .gettimeofday), (263, .clockGettime), (264, .clockGetres), (403, .clockGettime64),
    (406, .clockGetres64), (122, .uname), (76, .getrlimit), (338, .prlimit), (353, .getrandom), (206, .sigaltstack),
-   (240, .schedGetaffinity), (283, .setThreadArea), (118, .succeeds), (152, .succeeds), (94, .succeeds), (16, .succeeds),
-   (95, .succeeds), (291, .succeeds), (316, .succeeds), (412, .succeeds),    ]
+   (240, .schedGetaffinity), (283, .setThreadArea), (118, .succeeds), (152, .succeeds), (94, .succeeds),       ]
 
 /-- The numbers of the n64 ABI of MIPS, without their 5000. -/
 def n64Calls : List (Nat × Call) :=
-  [(119, .getpgid), (107, .setpgid), (109, .getpgrp), (110, .setsid), (122, .getsid), (100, .getuid), (105, .geteuid), (102, .getgid), (106, .getegid), (103, .setuid), (104, .setgid), (111, .setreuid), (112, .setregid), (115, .setresuid), (117, .setresgid), (116, .getresuid), (118, .getresgid), (120, .setfsuid), (121, .setfsgid), (113, .getgroups), (114, .setgroups), (123, .capget), (124, .capset), (155, .setrlimit), (96, .getrusage), (98, .times), (137, .getpriority), (138, .setpriority), (140, .schedGetparam), (139, .schedSetparam), (142, .schedGetscheduler), (141, .schedSetscheduler), (143, .schedGetPriorityMax), (144, .schedGetPriorityMin), (145, .schedRrGetInterval),
+  [(84, .link), (255, .linkat), (275, .utimensat), (226, .utimes), (130, .utime), (251, .futimesat), (90, .chown), (92, .lchown), (91, .fchown), (250, .fchownat), (180, .setxattr), (181, .lsetxattr), (182, .fsetxattr), (183, .getxattr), (184, .lgetxattr), (185, .fgetxattr), (186, .listxattr), (187, .llistxattr), (188, .flistxattr), (189, .removexattr), (190, .lremovexattr), (191, .fremovexattr),
+   (119, .getpgid), (107, .setpgid), (109, .getpgrp), (110, .setsid), (122, .getsid), (100, .getuid), (105, .geteuid), (102, .getgid), (106, .getegid), (103, .setuid), (104, .setgid), (111, .setreuid), (112, .setregid), (115, .setresuid), (117, .setresgid), (116, .getresuid), (118, .getresgid), (120, .setfsuid), (121, .setfsgid), (113, .getgroups), (114, .setgroups), (123, .capget), (124, .capset), (155, .setrlimit), (96, .getrusage), (98, .times), (137, .getpriority), (138, .setpriority), (140, .schedGetparam), (139, .schedSetparam), (142, .schedGetscheduler), (141, .schedSetscheduler), (143, .schedGetPriorityMax), (144, .schedGetPriorityMin), (145, .schedRrGetInterval),
    (7, .poll), (261, .ppoll), (22, .select), (260, .pselect6), (207, .epollCreate), (285, .epollCreate1), (208, .epollCtl), (209, .epollWait), (272, .epollPwait), (441, .epollPwait2), (278, .eventfd), (284, .eventfd2), (280, .timerfdCreate), (282, .timerfdSettime), (281, .timerfdGettime), (276, .signalfd), (283, .signalfd4),
    (34, .nanosleep), (224, .clockNanosleep), (36, .setitimer), (35, .getitimer), (37, .alarm), (216, .timerCreate), (217, .timerSettime), (218, .timerGettime), (219, .timerGetoverrun), (220, .timerDelete),
    (153, .prctl), (312, .seccomp), (40, .socket), (41, .connect), (42, .accept), (43, .sendto), (44, .recvfrom), (45, .sendmsg), (46, .recvmsg), (47, .shutdown), (48, .bind), (49, .listen), (50, .getsockname), (51, .getpeername), (52, .socketpair), (53, .setsockopt), (54, .getsockopt), (293, .accept4),
@@ -169,15 +174,17 @@ def n64Calls : List (Nat × Call) :=
    (326, .statx), (8, .lseek), (16, .pread), (17, .pwrite), (18, .readv), (19, .writev), (20, .access), (259, .faccessat),
    (439, .faccessat), (31, .dup), (32, .dup2), (286, .dup3), (70, .fcntl), (15, .ioctl), (308, .getdents), (77, .getcwd),
    (78, .chdir), (79, .fchdir), (81, .mkdir), (248, .mkdirat), (82, .rmdir), (85, .unlink), (253, .unlinkat), (80, .rename),
-   (254, .renameat), (311, .renameat), (86, .symlink), (256, .symlinkat), (87, .readlink), (257, .readlinkat), (88, .chmod),
+   (254, .renameat), (311, .renameat2), (86, .symlink), (256, .symlinkat), (87, .readlink), (257, .readlinkat), (88, .chmod),
    (258, .fchmodat), (74, .truncate), (75, .ftruncate), (93, .umask), (9, .mmap), (24, .mremap), (12, .brk),
    (94, .gettimeofday), (222, .clockGettime), (223, .clockGetres), (61, .uname), (95, .getrlimit), (297, .prlimit),
    (313, .getrandom), (129, .sigaltstack), (196, .schedGetaffinity), (195, .schedSetaffinity), (242, .setThreadArea), (72, .succeeds), (73, .succeeds),
-   (89, .succeeds), (90, .succeeds), (91, .succeeds), (92, .succeeds), (250, .succeeds), (275, .succeeds),    ]
+   (89, .succeeds),    ]
 
 /-- The numbers of 32-bit ARM, with EABI, and two of its own: `set_tls` and `cacheflush`. -/
 def armCalls : List (Nat × Call) :=
-  [(132, .getpgid), (57, .setpgid), (65, .getpgrp), (66, .setsid), (147, .getsid), (199, .getuid), (201, .geteuid), (200, .getgid), (202, .getegid), (213, .setuid), (214, .setgid), (203, .setreuid), (204, .setregid), (208, .setresuid), (210, .setresgid), (209, .getresuid), (211, .getresgid), (215, .setfsuid), (216, .setfsgid), (205, .getgroups), (206, .setgroups), (184, .capget), (185, .capset), (75, .setrlimit), (77, .getrusage), (43, .times), (96, .getpriority), (97, .setpriority), (241, .schedSetaffinity), (155, .schedGetparam), (154, .schedSetparam), (157, .schedGetscheduler), (156, .schedSetscheduler), (159, .schedGetPriorityMax), (160, .schedGetPriorityMin), (161, .schedRrGetInterval), (423, .schedRrGetInterval64),
+  [(182, .chown), (16, .lchown), (95, .fchown), (24, .getuid), (49, .geteuid), (47, .getgid), (50, .getegid), (23, .setuid), (46, .setgid), (70, .setreuid), (71, .setregid), (164, .setresuid), (170, .setresgid), (165, .getresuid), (171, .getresgid), (138, .setfsuid), (139, .setfsgid), (80, .getgroups), (81, .setgroups),
+   (9, .link), (330, .linkat), (348, .utimensat), (412, .utimensat64), (269, .utimes), (326, .futimesat), (212, .chown), (198, .lchown), (207, .fchown), (325, .fchownat), (226, .setxattr), (227, .lsetxattr), (228, .fsetxattr), (229, .getxattr), (230, .lgetxattr), (231, .fgetxattr), (232, .listxattr), (233, .llistxattr), (234, .flistxattr), (235, .removexattr), (236, .lremovexattr), (237, .fremovexattr),
+   (132, .getpgid), (57, .setpgid), (65, .getpgrp), (66, .setsid), (147, .getsid), (199, .getuid), (201, .geteuid), (200, .getgid), (202, .getegid), (213, .setuid), (214, .setgid), (203, .setreuid), (204, .setregid), (208, .setresuid), (210, .setresgid), (209, .getresuid), (211, .getresgid), (215, .setfsuid), (216, .setfsgid), (205, .getgroups), (206, .setgroups), (184, .capget), (185, .capset), (75, .setrlimit), (77, .getrusage), (43, .times), (96, .getpriority), (97, .setpriority), (241, .schedSetaffinity), (155, .schedGetparam), (154, .schedSetparam), (157, .schedGetscheduler), (156, .schedSetscheduler), (159, .schedGetPriorityMax), (160, .schedGetPriorityMin), (161, .schedRrGetInterval), (423, .schedRrGetInterval64),
    (168, .poll), (336, .ppoll), (414, .ppoll64), (142, .select), (335, .pselect6), (413, .pselect664), (250, .epollCreate), (357, .epollCreate1), (251, .epollCtl), (252, .epollWait), (346, .epollPwait), (441, .epollPwait2), (351, .eventfd), (356, .eventfd2), (350, .timerfdCreate), (353, .timerfdSettime), (411, .timerfdSettime64), (354, .timerfdGettime), (410, .timerfdGettime64), (349, .signalfd), (355, .signalfd4),
    (265, .clockNanosleep), (258, .timerSettime), (259, .timerGettime),
    (162, .nanosleep), (407, .clockNanosleep64), (104, .setitimer), (105, .getitimer), (257, .timerCreate), (409, .timerSettime64), (408, .timerGettime64), (260, .timerGetoverrun), (261, .timerDelete),
@@ -189,16 +196,17 @@ def armCalls : List (Nat × Call) :=
    (180, .pread), (181, .pwrite), (145, .readv), (146, .writev), (33, .access), (334, .faccessat), (439, .faccessat), (41, .dup),
    (63, .dup2), (358, .dup3), (55, .fcntl), (221, .fcntl), (54, .ioctl), (217, .getdents), (183, .getcwd), (12, .chdir),
    (133, .fchdir), (39, .mkdir), (323, .mkdirat), (40, .rmdir), (10, .unlink), (328, .unlinkat), (38, .rename), (329, .renameat),
-   (382, .renameat), (83, .symlink), (331, .symlinkat), (85, .readlink), (332, .readlinkat), (15, .chmod), (333, .fchmodat),
+   (382, .renameat2), (83, .symlink), (331, .symlinkat), (85, .readlink), (332, .readlinkat), (15, .chmod), (333, .fchmodat),
    (92, .truncate), (93, .ftruncate), (193, .truncate64), (194, .ftruncate64), (60, .umask), (192, .mmap2), (163, .mremap),
    (45, .brk), (78, .gettimeofday), (263, .clockGettime), (264, .clockGetres), (403, .clockGettime64), (406, .clockGetres64),
    (122, .uname), (191, .getrlimit), (369, .prlimit), (384, .getrandom), (186, .sigaltstack), (242, .schedGetaffinity),
-   (0xf0005, .setThreadArea), (0xf0002, .succeeds), (118, .succeeds), (148, .succeeds), (94, .succeeds), (207, .succeeds),
-   (212, .succeeds), (325, .succeeds), (348, .succeeds), (412, .succeeds),    ]
+   (0xf0005, .setThreadArea), (0xf0002, .succeeds), (118, .succeeds), (148, .succeeds), (94, .succeeds),       ]
 
 /-- The numbers of i686. -/
 def i686Calls : List (Nat × Call) :=
-  [(132, .getpgid), (57, .setpgid), (65, .getpgrp), (66, .setsid), (147, .getsid), (199, .getuid), (201, .geteuid), (200, .getgid), (202, .getegid), (213, .setuid), (214, .setgid), (203, .setreuid), (204, .setregid), (208, .setresuid), (210, .setresgid), (209, .getresuid), (211, .getresgid), (215, .setfsuid), (216, .setfsgid), (205, .getgroups), (206, .setgroups), (184, .capget), (185, .capset), (75, .setrlimit), (77, .getrusage), (43, .times), (96, .getpriority), (97, .setpriority), (241, .schedSetaffinity), (155, .schedGetparam), (154, .schedSetparam), (157, .schedGetscheduler), (156, .schedSetscheduler), (159, .schedGetPriorityMax), (160, .schedGetPriorityMin), (161, .schedRrGetInterval), (423, .schedRrGetInterval64),
+  [(182, .chown), (16, .lchown), (95, .fchown), (24, .getuid), (49, .geteuid), (47, .getgid), (50, .getegid), (23, .setuid), (46, .setgid), (70, .setreuid), (71, .setregid), (164, .setresuid), (170, .setresgid), (165, .getresuid), (171, .getresgid), (138, .setfsuid), (139, .setfsgid), (80, .getgroups), (81, .setgroups),
+   (9, .link), (303, .linkat), (320, .utimensat), (412, .utimensat64), (271, .utimes), (30, .utime), (299, .futimesat), (212, .chown), (198, .lchown), (207, .fchown), (298, .fchownat), (226, .setxattr), (227, .lsetxattr), (228, .fsetxattr), (229, .getxattr), (230, .lgetxattr), (231, .fgetxattr), (232, .listxattr), (233, .llistxattr), (234, .flistxattr), (235, .removexattr), (236, .lremovexattr), (237, .fremovexattr),
+   (132, .getpgid), (57, .setpgid), (65, .getpgrp), (66, .setsid), (147, .getsid), (199, .getuid), (201, .geteuid), (200, .getgid), (202, .getegid), (213, .setuid), (214, .setgid), (203, .setreuid), (204, .setregid), (208, .setresuid), (210, .setresgid), (209, .getresuid), (211, .getresgid), (215, .setfsuid), (216, .setfsgid), (205, .getgroups), (206, .setgroups), (184, .capget), (185, .capset), (75, .setrlimit), (77, .getrusage), (43, .times), (96, .getpriority), (97, .setpriority), (241, .schedSetaffinity), (155, .schedGetparam), (154, .schedSetparam), (157, .schedGetscheduler), (156, .schedSetscheduler), (159, .schedGetPriorityMax), (160, .schedGetPriorityMin), (161, .schedRrGetInterval), (423, .schedRrGetInterval64),
    (168, .poll), (309, .ppoll), (414, .ppoll64), (142, .select), (308, .pselect6), (413, .pselect664), (254, .epollCreate), (329, .epollCreate1), (255, .epollCtl), (256, .epollWait), (319, .epollPwait), (441, .epollPwait2), (323, .eventfd), (328, .eventfd2), (322, .timerfdCreate), (325, .timerfdSettime), (411, .timerfdSettime64), (326, .timerfdGettime), (410, .timerfdGettime64), (321, .signalfd), (327, .signalfd4),
    (162, .nanosleep), (407, .clockNanosleep64), (104, .setitimer), (105, .getitimer), (27, .alarm), (259, .timerCreate), (409, .timerSettime64), (408, .timerGettime64),
    (172, .prctl), (354, .seccomp), (359, .socket), (360, .socketpair), (361, .bind), (362, .connect), (363, .listen), (364, .accept4), (365, .getsockopt), (366, .setsockopt), (367, .getsockname), (368, .getpeername), (369, .sendto), (370, .sendmsg), (371, .recvfrom), (372, .recvmsg), (373, .shutdown),
@@ -209,16 +217,16 @@ def i686Calls : List (Nat × Call) :=
    (180, .pread), (181, .pwrite), (145, .readv), (146, .writev), (33, .access), (307, .faccessat), (439, .faccessat), (41, .dup),
    (63, .dup2), (330, .dup3), (55, .fcntl), (221, .fcntl), (54, .ioctl), (220, .getdents), (183, .getcwd), (12, .chdir),
    (133, .fchdir), (39, .mkdir), (296, .mkdirat), (40, .rmdir), (10, .unlink), (301, .unlinkat), (38, .rename), (302, .renameat),
-   (353, .renameat), (83, .symlink), (304, .symlinkat), (85, .readlink), (305, .readlinkat), (15, .chmod), (306, .fchmodat),
+   (353, .renameat2), (83, .symlink), (304, .symlinkat), (85, .readlink), (305, .readlinkat), (15, .chmod), (306, .fchmodat),
    (92, .truncate), (93, .ftruncate), (193, .truncate64), (194, .ftruncate64), (60, .umask), (192, .mmap2), (163, .mremap),
    (45, .brk), (78, .gettimeofday), (265, .clockGettime), (266, .clockGetres), (403, .clockGettime64), (406, .clockGetres64),
    (122, .uname), (191, .getrlimit), (340, .prlimit), (355, .getrandom), (186, .sigaltstack), (242, .schedGetaffinity),
-   (243, .setThreadArea), (118, .succeeds), (148, .succeeds), (94, .succeeds), (207, .succeeds), (212, .succeeds), (198, .succeeds),
-   (298, .succeeds), (320, .succeeds), (412, .succeeds), (267, .succeeds),    ]
+   (243, .setThreadArea), (118, .succeeds), (148, .succeeds), (94, .succeeds),    (267, .succeeds),    ]
 
 /-- The numbers of PowerPC, where those of each width that the other doesn't have are left to it not asking for them. -/
 def powerpcCalls : List (Nat × Call) :=
-  [(132, .getpgid), (57, .setpgid), (65, .getpgrp), (66, .setsid), (147, .getsid), (24, .getuid), (49, .geteuid), (47, .getgid), (50, .getegid), (23, .setuid), (46, .setgid), (70, .setreuid), (71, .setregid), (164, .setresuid), (169, .setresgid), (165, .getresuid), (170, .getresgid), (138, .setfsuid), (139, .setfsgid), (80, .getgroups), (81, .setgroups), (183, .capget), (184, .capset), (75, .setrlimit), (77, .getrusage), (43, .times), (96, .getpriority), (97, .setpriority), (222, .schedSetaffinity), (155, .schedGetparam), (154, .schedSetparam), (157, .schedGetscheduler), (156, .schedSetscheduler), (159, .schedGetPriorityMax), (160, .schedGetPriorityMin), (161, .schedRrGetInterval), (423, .schedRrGetInterval64),
+  [(9, .link), (294, .linkat), (304, .utimensat), (412, .utimensat64), (251, .utimes), (30, .utime), (290, .futimesat), (181, .chown), (16, .lchown), (95, .fchown), (289, .fchownat), (209, .setxattr), (210, .lsetxattr), (211, .fsetxattr), (212, .getxattr), (213, .lgetxattr), (214, .fgetxattr), (215, .listxattr), (216, .llistxattr), (217, .flistxattr), (218, .removexattr), (219, .lremovexattr), (220, .fremovexattr),
+   (132, .getpgid), (57, .setpgid), (65, .getpgrp), (66, .setsid), (147, .getsid), (24, .getuid), (49, .geteuid), (47, .getgid), (50, .getegid), (23, .setuid), (46, .setgid), (70, .setreuid), (71, .setregid), (164, .setresuid), (169, .setresgid), (165, .getresuid), (170, .getresgid), (138, .setfsuid), (139, .setfsgid), (80, .getgroups), (81, .setgroups), (183, .capget), (184, .capset), (75, .setrlimit), (77, .getrusage), (43, .times), (96, .getpriority), (97, .setpriority), (222, .schedSetaffinity), (155, .schedGetparam), (154, .schedSetparam), (157, .schedGetscheduler), (156, .schedSetscheduler), (159, .schedGetPriorityMax), (160, .schedGetPriorityMin), (161, .schedRrGetInterval), (423, .schedRrGetInterval64),
    (167, .poll), (281, .ppoll), (414, .ppoll64), (142, .select), (280, .pselect6), (413, .pselect664), (236, .epollCreate), (315, .epollCreate1), (237, .epollCtl), (238, .epollWait), (303, .epollPwait), (441, .epollPwait2), (307, .eventfd), (314, .eventfd2), (306, .timerfdCreate), (311, .timerfdSettime), (411, .timerfdSettime64), (312, .timerfdGettime), (410, .timerfdGettime64), (305, .signalfd), (313, .signalfd4),
    (248, .clockNanosleep), (241, .timerSettime), (242, .timerGettime),
    (162, .nanosleep), (407, .clockNanosleep64), (104, .setitimer), (105, .getitimer), (27, .alarm), (240, .timerCreate), (409, .timerSettime64), (408, .timerGettime64), (243, .timerGetoverrun), (244, .timerDelete),
@@ -230,12 +238,12 @@ def powerpcCalls : List (Nat × Call) :=
    (383, .statx), (19, .lseek), (140, .llseek), (179, .pread), (180, .pwrite), (145, .readv), (146, .writev), (33, .access),
    (298, .faccessat), (439, .faccessat), (41, .dup), (63, .dup2), (316, .dup3), (55, .fcntl), (204, .fcntl), (54, .ioctl),
    (202, .getdents), (182, .getcwd), (12, .chdir), (133, .fchdir), (39, .mkdir), (287, .mkdirat), (40, .rmdir), (10, .unlink),
-   (292, .unlinkat), (38, .rename), (293, .renameat), (357, .renameat), (83, .symlink), (295, .symlinkat), (85, .readlink),
+   (292, .unlinkat), (38, .rename), (293, .renameat), (357, .renameat2), (83, .symlink), (295, .symlinkat), (85, .readlink),
    (296, .readlinkat), (15, .chmod), (297, .fchmodat), (92, .truncate), (93, .ftruncate), (193, .truncate64), (194, .ftruncate64),
    (60, .umask), (90, .mmap), (192, .mmap2), (163, .mremap), (45, .brk), (78, .gettimeofday), (246, .clockGettime),
    (247, .clockGetres), (403, .clockGettime64), (406, .clockGetres64), (122, .uname), (76, .getrlimit), (190, .getrlimit),
    (325, .prlimit), (359, .getrandom), (185, .sigaltstack), (223, .schedGetaffinity), (118, .succeeds), (148, .succeeds),
-   (94, .succeeds), (16, .succeeds), (95, .succeeds), (289, .succeeds), (304, .succeeds), (412, .succeeds),    ]
+   (94, .succeeds),    ]
 
 /-- The calls that the kernel serves, by their numbers on it. What isn't here is for `serveTaskCalls`, or isn't there. -/
 def Architecture.calls : Architecture → List (Nat × Call)
