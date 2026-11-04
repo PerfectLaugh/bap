@@ -313,6 +313,8 @@ structure Process where
   ended : Bool := false
   /-- What `chroot` made `/` of its paths, as a path of the tree. -/
   root : String := "/"
+  /-- What `membarrier` it registered for, as the bits of the commands that register. -/
+  barriers : Nat := 0
 
 /-- What a mapping of a process is: where, how much, and what it may do. -/
 structure MappedRange where

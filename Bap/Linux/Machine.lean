@@ -1213,7 +1213,44 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       if arg 2 &&& 2 != 0 && (kernel.process group).mappings.any (fun mapping => mapping.shared && !mapping.mayWrite && mapping.overlaps (arg 0) upper) then
         pure (errorOf Errno.eacces)
       else pure .default
-    | .madvise => serveAdvice machine group (arg 0) (arg 1) (arg 2)
+    | .madvise =>
+      -- The advice that there is, of a range that is mapped.
+      let advice := arg 2
+      if arg 0 % 4096 != 0 || !(advice ≤ 4 || (8 ≤ advice && advice ≤ 25) || advice == 100 || advice == 101) then
+        pure (errorOf Errno.einval)
+      else if !coversRange (← emu.regions.get) (arg 0) (arg 0 + pageUp (arg 1)) then pure (errorOf Errno.enomem)
+      else serveAdvice machine group (arg 0) (arg 1) advice
+    | .msync =>
+      -- `MS_ASYNC`, `MS_INVALIDATE` and `MS_SYNC`, but not the first and the last. What a shared mapping wrote is in its file already.
+      if arg 0 % 4096 != 0 || arg 2 ≥ 8 || arg 2 &&& 5 == 5 then pure (errorOf Errno.einval)
+      else if !coversRange (← emu.regions.get) (arg 0) (arg 0 + pageUp (arg 1)) then pure (errorOf Errno.enomem)
+      else pure (.returnValue 0)
+    | .mlock | .munlock | .mlock2 =>
+      -- Of the pages of the range, which are all in memory as they are.
+      let lower := arg 0 - arg 0 % 4096
+      if call == .mlock2 && arg 2 > 1 then pure (errorOf Errno.einval)
+      else if !coversRange (← emu.regions.get) lower (pageUp (arg 0 + arg 1)) then pure (errorOf Errno.enomem)
+      else pure (.returnValue 0)
+    | .mlockall =>
+      -- `MCL_CURRENT` or `MCL_FUTURE`, and `MCL_ONFAULT` with one of them.
+      if arg 0 &&& 3 == 0 || arg 0 ≥ 8 then pure (errorOf Errno.einval) else pure (.returnValue 0)
+    | .munlockall => pure (.returnValue 0)
+    | .mincore =>
+      if arg 0 % 4096 != 0 then pure (errorOf Errno.einval)
+      else if !coversRange (← emu.regions.get) (arg 0) (arg 0 + pageUp (arg 1)) then pure (errorOf Errno.enomem)
+      else returning emu (arg 2) (ByteArray.mk (Array.replicate (pageUp (arg 1) / 4096) 1))
+    | .membarrier =>
+      -- What it can do, and what a process has to register for first: the expedited private ones, of a core too, and of rseq.
+      let process := kernel.process group
+      let command := arg 0
+      let known := 0x1ff
+      if arg 1 != 0 || (command != 0 && (command &&& (command - 1) != 0 || command &&& known == 0)) then pure (errorOf Errno.einval)
+      else if command == 0 then pure (.returnValue known)
+      else if command ∈ [16, 64, 256] then
+        machine.kernel.set (kernel.setProcess group { process with barriers := process.barriers ||| command })
+        pure (.returnValue 0)
+      else if command ∈ [8, 32, 128] && process.barriers &&& (2 * command) == 0 then pure (errorOf Errno.eperm)
+      else pure (.returnValue 0)
     | .mremap => serveRemap machine group (arg 0) (arg 1) (arg 2) (arg 3) (arg 4)
     | .brk => serveBreak machine group (arg 0)
     | .gettimeofday => clock (arg 0) 1000

@@ -85,13 +85,15 @@ inductive Call where
   | mount | umount2 | chroot | pivotRoot
   | shmget | shmat | shmdt | shmctl | semget | semop | semtimedop | semtimedop64 | semctl | msgget | msgsnd | msgrcv | msgctl | ipc
   | mqOpen | mqUnlink | mqTimedsend | mqTimedsend64 | mqTimedreceive | mqTimedreceive64 | mqNotify | mqGetsetattr
+  | msync | mlock | munlock | mlock2 | mlockall | munlockall | mincore | membarrier
   /-- What has nothing to do here: everyone is root and nothing has to reach a disk. -/
   | succeeds
   deriving DecidableEq, Repr
 
 /-- The numbers of x86-64. -/
 def x86_64Calls : List (Nat × Call) :=
-  [(240, .mqOpen), (241, .mqUnlink), (242, .mqTimedsend), (243, .mqTimedreceive), (244, .mqNotify), (245, .mqGetsetattr),
+  [(26, .msync), (149, .mlock), (150, .munlock), (325, .mlock2), (151, .mlockall), (152, .munlockall), (27, .mincore), (324, .membarrier),
+   (240, .mqOpen), (241, .mqUnlink), (242, .mqTimedsend), (243, .mqTimedreceive), (244, .mqNotify), (245, .mqGetsetattr),
    (29, .shmget), (30, .shmat), (67, .shmdt), (31, .shmctl), (64, .semget), (65, .semop), (220, .semtimedop), (66, .semctl), (68, .msgget), (69, .msgsnd), (70, .msgrcv), (71, .msgctl),
    (165, .mount), (166, .umount2), (161, .chroot), (155, .pivotRoot),
    (253, .inotifyInit), (294, .inotifyInit1), (254, .inotifyAddWatch), (255, .inotifyRmWatch),
@@ -103,8 +105,7 @@ def x86_64Calls : List (Nat × Call) :=
    (35, .nanosleep), (230, .clockNanosleep), (38, .setitimer), (36, .getitimer), (37, .alarm), (222, .timerCreate), (223, .timerSettime), (224, .timerGettime), (225, .timerGetoverrun), (226, .timerDelete),
    (157, .prctl), (317, .seccomp), (41, .socket), (42, .connect), (43, .accept), (44, .sendto), (45, .recvfrom), (46, .sendmsg), (47, .recvmsg), (48, .shutdown), (49, .bind), (50, .listen), (51, .getsockname), (52, .getpeername), (53, .socketpair), (54, .setsockopt), (55, .getsockopt), (288, .accept4),
    (22, .pipe), (293, .pipe2),
-   (11, .munmap), (10, .mprotect), (28, .madvise), (26, .succeeds),
-   (59, .execve), (137, .statfs), (138, .fstatfs), (99, .sysinfo),
+   (11, .munmap), (10, .mprotect), (28, .madvise),    (59, .execve), (137, .statfs), (138, .fstatfs), (99, .sysinfo),
    (0, .read), (1, .write), (2, .open_), (257, .openat), (3, .close), (4, .stat), (6, .lstat), (5, .fstat), (262, .fstatat),
    (332, .statx), (8, .lseek), (17, .pread), (18, .pwrite), (19, .readv), (20, .writev), (21, .access), (269, .faccessat),
    (439, .faccessat), (32, .dup), (33, .dup2), (292, .dup3), (72, .fcntl), (16, .ioctl), (217, .getdents), (79, .getcwd),
@@ -117,7 +118,8 @@ def x86_64Calls : List (Nat × Call) :=
 
 /-- The numbers of the architectures that came after the old calls went: `asm-generic/unistd.h`. -/
 def genericCalls : List (Nat × Call) :=
-  [(180, .mqOpen), (181, .mqUnlink), (182, .mqTimedsend), (183, .mqTimedreceive), (184, .mqNotify), (185, .mqGetsetattr),
+  [(227, .msync), (228, .mlock), (229, .munlock), (284, .mlock2), (230, .mlockall), (231, .munlockall), (232, .mincore), (283, .membarrier),
+   (180, .mqOpen), (181, .mqUnlink), (182, .mqTimedsend), (183, .mqTimedreceive), (184, .mqNotify), (185, .mqGetsetattr),
    (194, .shmget), (196, .shmat), (197, .shmdt), (195, .shmctl), (190, .semget), (193, .semop), (192, .semtimedop), (191, .semctl), (186, .msgget), (189, .msgsnd), (188, .msgrcv), (187, .msgctl),
    (40, .mount), (39, .umount2), (51, .chroot), (41, .pivotRoot),
    (26, .inotifyInit1), (27, .inotifyAddWatch), (28, .inotifyRmWatch),
@@ -129,8 +131,7 @@ def genericCalls : List (Nat × Call) :=
    (101, .nanosleep), (115, .clockNanosleep), (103, .setitimer), (102, .getitimer), (107, .timerCreate), (110, .timerSettime), (108, .timerGettime), (109, .timerGetoverrun), (111, .timerDelete),
    (277, .seccomp), (198, .socket), (199, .socketpair), (200, .bind), (201, .listen), (202, .accept), (203, .connect), (204, .getsockname), (205, .getpeername), (206, .sendto), (207, .recvfrom), (208, .setsockopt), (209, .getsockopt), (210, .shutdown), (211, .sendmsg), (212, .recvmsg), (242, .accept4),
    (59, .pipe2), (167, .prctl),
-   (215, .munmap), (226, .mprotect), (233, .madvise), (227, .succeeds),
-   (221, .execve), (43, .statfs), (44, .fstatfs), (179, .sysinfo),
+   (215, .munmap), (226, .mprotect), (233, .madvise),    (221, .execve), (43, .statfs), (44, .fstatfs), (179, .sysinfo),
    (63, .read), (64, .write), (56, .openat), (57, .close), (80, .fstat), (79, .fstatat), (291, .statx), (62, .lseek),
    (67, .pread), (68, .pwrite), (65, .readv), (66, .writev), (48, .faccessat), (439, .faccessat), (23, .dup), (24, .dup3),
    (25, .fcntl), (29, .ioctl), (61, .getdents), (17, .getcwd), (49, .chdir), (50, .fchdir), (34, .mkdirat), (35, .unlinkat),
@@ -141,7 +142,8 @@ def genericCalls : List (Nat × Call) :=
 
 /-- The numbers of `asm-generic` on 32 bits, where whatever has a time or an offset in a word has gone. -/
 def generic32Calls : List (Nat × Call) :=
-  [(180, .mqOpen), (181, .mqUnlink), (418, .mqTimedsend64), (419, .mqTimedreceive64), (184, .mqNotify), (185, .mqGetsetattr),
+  [(227, .msync), (228, .mlock), (229, .munlock), (284, .mlock2), (230, .mlockall), (231, .munlockall), (232, .mincore), (283, .membarrier),
+   (180, .mqOpen), (181, .mqUnlink), (418, .mqTimedsend64), (419, .mqTimedreceive64), (184, .mqNotify), (185, .mqGetsetattr),
    (194, .shmget), (196, .shmat), (197, .shmdt), (195, .shmctl), (190, .semget), (193, .semop), (420, .semtimedop64), (191, .semctl), (186, .msgget), (189, .msgsnd), (188, .msgrcv), (187, .msgctl),
    (40, .mount), (39, .umount2), (51, .chroot), (41, .pivotRoot),
    (26, .inotifyInit1), (27, .inotifyAddWatch), (28, .inotifyRmWatch),
@@ -153,8 +155,7 @@ def generic32Calls : List (Nat × Call) :=
    (101, .nanosleep), (407, .clockNanosleep64), (103, .setitimer), (102, .getitimer), (107, .timerCreate), (409, .timerSettime64), (408, .timerGettime64), (109, .timerGetoverrun), (111, .timerDelete),
    (277, .seccomp), (198, .socket), (199, .socketpair), (200, .bind), (201, .listen), (202, .accept), (203, .connect), (204, .getsockname), (205, .getpeername), (206, .sendto), (207, .recvfrom), (208, .setsockopt), (209, .getsockopt), (210, .shutdown), (211, .sendmsg), (212, .recvmsg), (242, .accept4),
    (59, .pipe2), (167, .prctl),
-   (215, .munmap), (226, .mprotect), (233, .madvise), (227, .succeeds),
-   (221, .execve), (43, .statfs64), (44, .fstatfs64), (179, .sysinfo),
+   (215, .munmap), (226, .mprotect), (233, .madvise),    (221, .execve), (43, .statfs64), (44, .fstatfs64), (179, .sysinfo),
    (63, .read), (64, .write), (56, .openat), (57, .close), (291, .statx), (62, .llseek),
    (67, .pread), (68, .pwrite), (65, .readv), (66, .writev), (48, .faccessat), (439, .faccessat), (23, .dup), (24, .dup3),
    (25, .fcntl), (29, .ioctl), (61, .getdents), (17, .getcwd), (49, .chdir), (50, .fchdir), (34, .mkdirat), (35, .unlinkat),
@@ -165,7 +166,8 @@ def generic32Calls : List (Nat × Call) :=
 
 /-- The numbers of the o32 ABI of MIPS, without their 4000. -/
 def o32Calls : List (Nat × Call) :=
-  [(271, .mqOpen), (272, .mqUnlink), (273, .mqTimedsend), (418, .mqTimedsend64), (274, .mqTimedreceive), (419, .mqTimedreceive64), (275, .mqNotify), (276, .mqGetsetattr),
+  [(144, .msync), (154, .mlock), (155, .munlock), (359, .mlock2), (156, .mlockall), (157, .munlockall), (217, .mincore), (358, .membarrier),
+   (271, .mqOpen), (272, .mqUnlink), (273, .mqTimedsend), (418, .mqTimedsend64), (274, .mqTimedreceive), (419, .mqTimedreceive64), (275, .mqNotify), (276, .mqGetsetattr),
    (395, .shmget), (397, .shmat), (398, .shmdt), (396, .shmctl), (393, .semget), (420, .semtimedop64), (394, .semctl), (399, .msgget), (400, .msgsnd), (401, .msgrcv), (402, .msgctl), (117, .ipc),
    (21, .mount), (52, .umount2), (61, .chroot), (216, .pivotRoot),
    (284, .inotifyInit), (329, .inotifyInit1), (285, .inotifyAddWatch), (286, .inotifyRmWatch),
@@ -178,8 +180,7 @@ def o32Calls : List (Nat × Call) :=
    (166, .nanosleep), (407, .clockNanosleep64), (104, .setitimer), (105, .getitimer), (27, .alarm), (257, .timerCreate), (409, .timerSettime64), (408, .timerGettime64), (260, .timerGetoverrun), (261, .timerDelete),
    (192, .prctl), (352, .seccomp), (168, .accept), (169, .bind), (170, .connect), (171, .getpeername), (172, .getsockname), (173, .getsockopt), (174, .listen), (175, .recv), (176, .recvfrom), (177, .recvmsg), (178, .send), (179, .sendmsg), (180, .sendto), (181, .setsockopt), (182, .shutdown), (183, .socket), (184, .socketpair), (334, .accept4),
    (42, .pipe), (328, .pipe2),
-   (91, .munmap), (125, .mprotect), (218, .madvise), (144, .succeeds),
-   (11, .execve), (213, .stat), (214, .lstat), (215, .fstat), (293, .fstatat), (255, .statfs64), (256, .fstatfs64), (116, .sysinfo),
+   (91, .munmap), (125, .mprotect), (218, .madvise),    (11, .execve), (213, .stat), (214, .lstat), (215, .fstat), (293, .fstatat), (255, .statfs64), (256, .fstatfs64), (116, .sysinfo),
    (3, .read), (4, .write), (5, .open_), (288, .openat), (6, .close), (366, .statx), (19, .lseek), (140, .llseek),
    (200, .pread), (201, .pwrite), (145, .readv), (146, .writev), (33, .access), (300, .faccessat), (439, .faccessat),
    (41, .dup), (63, .dup2), (327, .dup3), (55, .fcntl), (220, .fcntl), (54, .ioctl), (219, .getdents), (203, .getcwd),
@@ -192,7 +193,8 @@ def o32Calls : List (Nat × Call) :=
 
 /-- The numbers of the n64 ABI of MIPS, without their 5000. -/
 def n64Calls : List (Nat × Call) :=
-  [(230, .mqOpen), (231, .mqUnlink), (232, .mqTimedsend), (233, .mqTimedreceive), (234, .mqNotify), (235, .mqGetsetattr),
+  [(25, .msync), (146, .mlock), (147, .munlock), (319, .mlock2), (148, .mlockall), (149, .munlockall), (26, .mincore), (318, .membarrier),
+   (230, .mqOpen), (231, .mqUnlink), (232, .mqTimedsend), (233, .mqTimedreceive), (234, .mqNotify), (235, .mqGetsetattr),
    (28, .shmget), (29, .shmat), (65, .shmdt), (30, .shmctl), (62, .semget), (63, .semop), (214, .semtimedop), (64, .semctl), (66, .msgget), (67, .msgsnd), (68, .msgrcv), (69, .msgctl),
    (160, .mount), (161, .umount2), (156, .chroot), (151, .pivotRoot),
    (243, .inotifyInit), (288, .inotifyInit1), (244, .inotifyAddWatch), (245, .inotifyRmWatch),
@@ -204,8 +206,7 @@ def n64Calls : List (Nat × Call) :=
    (34, .nanosleep), (224, .clockNanosleep), (36, .setitimer), (35, .getitimer), (37, .alarm), (216, .timerCreate), (217, .timerSettime), (218, .timerGettime), (219, .timerGetoverrun), (220, .timerDelete),
    (153, .prctl), (312, .seccomp), (40, .socket), (41, .connect), (42, .accept), (43, .sendto), (44, .recvfrom), (45, .sendmsg), (46, .recvmsg), (47, .shutdown), (48, .bind), (49, .listen), (50, .getsockname), (51, .getpeername), (52, .socketpair), (53, .setsockopt), (54, .getsockopt), (293, .accept4),
    (21, .pipe), (287, .pipe2),
-   (11, .munmap), (10, .mprotect), (27, .madvise), (25, .succeeds),
-   (57, .execve), (134, .statfs), (135, .fstatfs), (97, .sysinfo),
+   (11, .munmap), (10, .mprotect), (27, .madvise),    (57, .execve), (134, .statfs), (135, .fstatfs), (97, .sysinfo),
    (0, .read), (1, .write), (2, .open_), (247, .openat), (3, .close), (4, .stat), (6, .lstat), (5, .fstat), (252, .fstatat),
    (326, .statx), (8, .lseek), (16, .pread), (17, .pwrite), (18, .readv), (19, .writev), (20, .access), (259, .faccessat),
    (439, .faccessat), (31, .dup), (32, .dup2), (286, .dup3), (70, .fcntl), (15, .ioctl), (308, .getdents), (77, .getcwd),
@@ -218,7 +219,8 @@ def n64Calls : List (Nat × Call) :=
 
 /-- The numbers of 32-bit ARM, with EABI, and two of its own: `set_tls` and `cacheflush`. -/
 def armCalls : List (Nat × Call) :=
-  [(274, .mqOpen), (275, .mqUnlink), (276, .mqTimedsend), (418, .mqTimedsend64), (277, .mqTimedreceive), (419, .mqTimedreceive64), (278, .mqNotify), (279, .mqGetsetattr),
+  [(144, .msync), (150, .mlock), (151, .munlock), (390, .mlock2), (152, .mlockall), (153, .munlockall), (219, .mincore), (389, .membarrier),
+   (274, .mqOpen), (275, .mqUnlink), (276, .mqTimedsend), (418, .mqTimedsend64), (277, .mqTimedreceive), (419, .mqTimedreceive64), (278, .mqNotify), (279, .mqGetsetattr),
    (307, .shmget), (305, .shmat), (306, .shmdt), (308, .shmctl), (299, .semget), (298, .semop), (312, .semtimedop), (420, .semtimedop64), (300, .semctl), (303, .msgget), (301, .msgsnd), (302, .msgrcv), (304, .msgctl),
    (21, .mount), (52, .umount2), (61, .chroot), (218, .pivotRoot),
    (316, .inotifyInit), (360, .inotifyInit1), (317, .inotifyAddWatch), (318, .inotifyRmWatch),
@@ -232,8 +234,7 @@ def armCalls : List (Nat × Call) :=
    (162, .nanosleep), (407, .clockNanosleep64), (104, .setitimer), (105, .getitimer), (257, .timerCreate), (409, .timerSettime64), (408, .timerGettime64), (260, .timerGetoverrun), (261, .timerDelete),
    (172, .prctl), (383, .seccomp), (281, .socket), (282, .bind), (283, .connect), (284, .listen), (285, .accept), (286, .getsockname), (287, .getpeername), (288, .socketpair), (289, .send), (290, .sendto), (291, .recv), (292, .recvfrom), (293, .shutdown), (294, .setsockopt), (295, .getsockopt), (296, .sendmsg), (297, .recvmsg), (366, .accept4),
    (42, .pipe), (359, .pipe2),
-   (91, .munmap), (125, .mprotect), (220, .madvise), (144, .succeeds),
-   (11, .execve), (195, .stat), (196, .lstat), (197, .fstat), (327, .fstatat), (266, .statfs64), (267, .fstatfs64), (116, .sysinfo),
+   (91, .munmap), (125, .mprotect), (220, .madvise),    (11, .execve), (195, .stat), (196, .lstat), (197, .fstat), (327, .fstatat), (266, .statfs64), (267, .fstatfs64), (116, .sysinfo),
    (3, .read), (4, .write), (5, .open_), (322, .openat), (6, .close), (397, .statx), (19, .lseek), (140, .llseek),
    (180, .pread), (181, .pwrite), (145, .readv), (146, .writev), (33, .access), (334, .faccessat), (439, .faccessat), (41, .dup),
    (63, .dup2), (358, .dup3), (55, .fcntl), (221, .fcntl), (54, .ioctl), (217, .getdents), (183, .getcwd), (12, .chdir),
@@ -246,7 +247,8 @@ def armCalls : List (Nat × Call) :=
 
 /-- The numbers of i686. -/
 def i686Calls : List (Nat × Call) :=
-  [(277, .mqOpen), (418, .mqTimedsend64), (419, .mqTimedreceive64),
+  [(144, .msync), (150, .mlock), (151, .munlock), (376, .mlock2), (152, .mlockall), (153, .munlockall), (218, .mincore), (375, .membarrier),
+   (277, .mqOpen), (418, .mqTimedsend64), (419, .mqTimedreceive64),
    (395, .shmget), (397, .shmat), (398, .shmdt), (396, .shmctl), (393, .semget), (420, .semtimedop64), (394, .semctl), (399, .msgget), (400, .msgsnd), (401, .msgrcv), (402, .msgctl), (117, .ipc),
    (21, .mount), (52, .umount2), (61, .chroot), (217, .pivotRoot),
    (291, .inotifyInit), (332, .inotifyInit1), (292, .inotifyAddWatch), (293, .inotifyRmWatch),
@@ -259,8 +261,7 @@ def i686Calls : List (Nat × Call) :=
    (162, .nanosleep), (407, .clockNanosleep64), (104, .setitimer), (105, .getitimer), (27, .alarm), (259, .timerCreate), (409, .timerSettime64), (408, .timerGettime64),
    (172, .prctl), (354, .seccomp), (359, .socket), (360, .socketpair), (361, .bind), (362, .connect), (363, .listen), (364, .accept4), (365, .getsockopt), (366, .setsockopt), (367, .getsockname), (368, .getpeername), (369, .sendto), (370, .sendmsg), (371, .recvfrom), (372, .recvmsg), (373, .shutdown),
    (42, .pipe), (331, .pipe2),
-   (91, .munmap), (125, .mprotect), (219, .madvise), (144, .succeeds),
-   (11, .execve), (195, .stat), (196, .lstat), (197, .fstat), (300, .fstatat), (268, .statfs64), (269, .fstatfs64), (116, .sysinfo),
+   (91, .munmap), (125, .mprotect), (219, .madvise),    (11, .execve), (195, .stat), (196, .lstat), (197, .fstat), (300, .fstatat), (268, .statfs64), (269, .fstatfs64), (116, .sysinfo),
    (3, .read), (4, .write), (5, .open_), (295, .openat), (6, .close), (383, .statx), (19, .lseek), (140, .llseek),
    (180, .pread), (181, .pwrite), (145, .readv), (146, .writev), (33, .access), (307, .faccessat), (439, .faccessat), (41, .dup),
    (63, .dup2), (330, .dup3), (55, .fcntl), (221, .fcntl), (54, .ioctl), (220, .getdents), (183, .getcwd), (12, .chdir),
@@ -273,7 +274,8 @@ def i686Calls : List (Nat × Call) :=
 
 /-- The numbers of PowerPC, where those of each width that the other doesn't have are left to it not asking for them. -/
 def powerpcCalls : List (Nat × Call) :=
-  [(262, .mqOpen), (263, .mqUnlink), (264, .mqTimedsend), (418, .mqTimedsend64), (265, .mqTimedreceive), (419, .mqTimedreceive64), (266, .mqNotify), (267, .mqGetsetattr),
+  [(144, .msync), (150, .mlock), (151, .munlock), (378, .mlock2), (152, .mlockall), (153, .munlockall), (206, .mincore), (365, .membarrier),
+   (262, .mqOpen), (263, .mqUnlink), (264, .mqTimedsend), (418, .mqTimedsend64), (265, .mqTimedreceive), (419, .mqTimedreceive64), (266, .mqNotify), (267, .mqGetsetattr),
    (395, .shmget), (397, .shmat), (398, .shmdt), (396, .shmctl), (393, .semget), (420, .semtimedop64), (394, .semctl), (399, .msgget), (400, .msgsnd), (401, .msgrcv), (402, .msgctl), (117, .ipc),
    (21, .mount), (52, .umount2), (61, .chroot), (203, .pivotRoot),
    (275, .inotifyInit), (318, .inotifyInit1), (276, .inotifyAddWatch), (277, .inotifyRmWatch),
@@ -286,8 +288,7 @@ def powerpcCalls : List (Nat × Call) :=
    (162, .nanosleep), (407, .clockNanosleep64), (104, .setitimer), (105, .getitimer), (27, .alarm), (240, .timerCreate), (409, .timerSettime64), (408, .timerGettime64), (243, .timerGetoverrun), (244, .timerDelete),
    (171, .prctl), (358, .seccomp), (326, .socket), (327, .bind), (328, .connect), (329, .listen), (330, .accept), (331, .getsockname), (332, .getpeername), (333, .socketpair), (334, .send), (335, .sendto), (336, .recv), (337, .recvfrom), (338, .shutdown), (339, .setsockopt), (340, .getsockopt), (341, .sendmsg), (342, .recvmsg), (344, .accept4),
    (42, .pipe), (317, .pipe2),
-   (91, .munmap), (125, .mprotect), (205, .madvise), (144, .succeeds),
-   (11, .execve), (116, .sysinfo),
+   (91, .munmap), (125, .mprotect), (205, .madvise),    (11, .execve), (116, .sysinfo),
    (3, .read), (4, .write), (5, .open_), (286, .openat), (6, .close), (106, .stat), (107, .lstat), (108, .fstat), (291, .fstatat),
    (383, .statx), (19, .lseek), (140, .llseek), (179, .pread), (180, .pwrite), (145, .readv), (146, .writev), (33, .access),
    (298, .faccessat), (439, .faccessat), (41, .dup), (63, .dup2), (316, .dup3), (55, .fcntl), (204, .fcntl), (54, .ioctl),

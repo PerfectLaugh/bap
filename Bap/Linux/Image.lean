@@ -101,7 +101,7 @@ def identityBytes (process : Process) : ByteArray :=
     [ids.uid, ids.euid, ids.suid, ids.fsuid, ids.gid, ids.egid, ids.sgid, ids.fsgid]) ids.groups
   let out := Wire.putList (fun out (resource, soft, hard) => Wire.putNat (Wire.putNat (Wire.putNat out resource) soft) hard) out
     process.limits
-  Wire.putText (Wire.putFlag (Wire.putNat out process.nice) process.ended) process.root
+  Wire.putNat (Wire.putText (Wire.putFlag (Wire.putNat out process.nice) process.ended) process.root) process.barriers
 
 /-- What `identityBytes` made, on a process that has the rest; nothing at all is what a process starts with. -/
 def withIdentity (process : Process) (data : ByteArray) : Except String Process := do
@@ -119,9 +119,10 @@ def withIdentity (process : Process) (data : ByteArray) : Except String Process 
   let (nice, at_) ← Wire.getNat data at_
   let (ended, at_) ← Wire.getFlag data at_
   let (root, at_) ← Wire.getText data at_
+  let (barriers, at_) ← Wire.getNat data at_
   Wire.expectEnd data at_
   let id (index : Nat) : Nat := ids.getD index 0
-  pure { process with pgid, sid, terminal, limits, nice, ended, root
+  pure { process with pgid, sid, terminal, limits, nice, ended, root, barriers
                       credentials := { uid := id 0, euid := id 1, suid := id 2, fsuid := id 3, gid := id 4, egid := id 5, sgid := id 6
                                        fsgid := id 7, groups } }
 

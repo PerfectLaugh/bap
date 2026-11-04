@@ -1,0 +1,15 @@
+msync 0 -22 -22
+msync unmapped -12 -22
+mlock 0 0 -12
+mlock2 0 -22
+munlock 0
+mlockall -22 -22 0
+mincore 0
+resident 1 1 1
+mincore wrong -22 -12
+membarrier query 1 1
+private before -1
+register 0 0
+wrong -22 -22
+madvise 0 0 -22
+madvise unmapped -12
