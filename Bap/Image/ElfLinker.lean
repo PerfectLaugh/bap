@@ -242,9 +242,13 @@ def commit (site : Site) (writes : List Write) : LinkM Unit := do
   let state ← get
   if writes.all fun write => site.off ≤ write.off && write.off + write.n ≤ site.limit &&
       write.off + write.n ≤ state.memory.size then
-    let memory := writes.foldl (init := state.memory) fun memory write =>
-      writeNat memory write.little write.off write.n write.value
-    set { state with memory, applied := (site, writes) :: state.applied }
+    -- The bytes are taken out of the state as they are written, so that nothing else has them and they change where they are,
+    -- rather than all of them being copied for each site.
+    modify fun state =>
+      let memory := state.memory
+      let state := { state with memory := ByteArray.empty }
+      { state with memory := writes.foldl (init := memory) (fun memory write =>
+          writeNat memory write.little write.off write.n write.value), applied := (site, writes) :: state.applied }
   else
     throw (outside site)
 
@@ -258,12 +262,15 @@ def gotEntry (env : Env) (value : Int) : LinkM Int := do
     let word := env.width / 8
     let slot := env.gotBase + state.gotCount * word
     let off := env.gotOff + state.gotCount * word
-    let padded := (List.range (off + word - state.memory.size)).foldl (init := state.memory)
-      fun memory _ => memory.push 0
-    set { state with
-      memory := writeNat padded env.little off word value
-      got := state.got.insert key slot
-      gotCount := state.gotCount + 1 }
+    -- The bytes are taken out of the state as in `commit`, so that they grow and change where they are.
+    modify fun state =>
+      let memory := state.memory
+      let state := { state with memory := ByteArray.empty }
+      let padded := (List.range (off + word - memory.size)).foldl (init := memory) fun memory _ => memory.push 0
+      { state with
+        memory := writeNat padded env.little off word value
+        got := state.got.insert key slot
+        gotCount := state.gotCount + 1 }
     pure slot
 
 /-- A symbol's address as an offset from the thread pointer. The thread pointer is where each psABI puts it relative to
