@@ -88,6 +88,8 @@ structure Machine where
   hostSeen : IO.Ref (Std.HashSet String)
   /-- What AIO and io_uring have: see `Bap.Linux.Ring`. -/
   rings : IO.Ref Ring.State
+  /-- How many calls that may let go of something there were since what nothing holds was let go of: see `Kernel.collect`. -/
+  releases : IO.Ref Nat
   /-- What `Machine.malloc` has given out, by address space. -/
   heaps : IO.Ref (Std.HashMap Nat GuestHeap)
   /-- What `Machine.loadLibrary` has loaded, by address space. -/
@@ -1483,6 +1485,14 @@ private def handOver (machine : Machine) (emu : Emu) : SyscallAction → IO Sysc
     else syscallReturn emu (.ok value)
   | action => pure action
 
+/-- Something may have been let go of: once in a while, what nothing holds goes. -/
+private def released (machine : Machine) : IO Unit := do
+  let count := (← machine.releases.get) + 1
+  if count < 256 then machine.releases.set count
+  else
+    machine.releases.set 0
+    machine.kernel.modify Kernel.collect
+
 /-- What makes a descriptor makes none at or past RLIMIT_NOFILE, which is known before the call does anything, as Linux takes the
 descriptor first: `EMFILE`, and of `dup2` and `dup3` to one past it `EBADF`, and of `F_DUPFD` from one past it `EINVAL`. -/
 private def descriptorLimit (machine : Machine) (group : Nat) (call : Call) (args : List Nat) : IO (Option SyscallAction) := do
@@ -1560,6 +1570,7 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
         -- as `ipc` of i386 has all of its calls, would take as its own.
         if !(← Bap.Emu.stopped emu) then machine.timers.finish (← thread emu)
         refreshChanged machine emu before
+        if [Call.close, .dup2, .dup3, .execve].contains call then released machine
         if watching then
           let live := ((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups
           if ← Notify.after machine.notifier machine.kernel group call args before action live then wakePipeReaders emu
@@ -2101,7 +2112,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   let ptrace ← Ptrace.make architecture signals
   let kernelRef ← IO.mkRef kernel
   let timers ← Timers.make architecture kernelRef signals
-  let machine : Machine := { architecture, emu, kernel := kernelRef, models := ← IO.mkRef [], target, handled := handler.isSome, signals, ptrace, timers, notifier := ← Notify.make, hostMounts := ← IO.mkRef [], hostSeen := ← IO.mkRef {}, rings := ← IO.mkRef {}, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {} }
+  let machine : Machine := { architecture, emu, kernel := kernelRef, models := ← IO.mkRef [], target, handled := handler.isSome, signals, ptrace, timers, notifier := ← Notify.make, hostMounts := ← IO.mkRef [], hostSeen := ← IO.mkRef {}, rings := ← IO.mkRef {}, releases := ← IO.mkRef 0, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {} }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
@@ -2171,6 +2182,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
     kernelRef.modify (SysV.exited · group)
     timers.exited emu group
     Notify.forget machine.notifier
+    released machine
     wakePipeReaders emu
     ptrace.processExited emu group)
   -- So is what was allocated in it, as what has an address has to go on having it.

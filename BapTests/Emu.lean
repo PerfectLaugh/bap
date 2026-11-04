@@ -3058,6 +3058,18 @@ def testCall32 : IO Unit := do
     let result ← Bap.Emu.call machine.emu 0x7000000 0x7001000 (if adds == 1 then [41] else [40, 2])
     assertBits s!"Emu call of {binary} gives what its function does" (BitVec.ofNat 32 42) (.ok result)
 
+/-- What a program opens and closes many times is let go of, and what it keeps open stays. -/
+def testChurn (triple : String) : IO Unit := do
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-churn"
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let written ← IO.mkRef ByteArray.empty
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual s!"Linux {triple} churn ends with what it kept" (Bap.Tasks.ScheduleOutcome.finished 0, "kept\n")
+    (outcome, String.fromUTF8! (← written.get))
+  let kernel ← machine.kernel.get
+  assertTrue s!"Linux {triple} of 6000 open files and 3000 pipes, few are left ({kernel.openFiles.size}, {kernel.inodes.size})"
+    (kernel.openFiles.size < 600 && kernel.inodes.size < 600)
+
 /-- MIPS has its own numbers of errors above 34, which a call gives a program of it. -/
 def testMipsErrno : IO Unit := do
   let mips : Bap.Linux.Architecture := .mips 32 true false

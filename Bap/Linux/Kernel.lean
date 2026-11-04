@@ -1656,6 +1656,45 @@ def tick (kernel : Kernel) : Kernel × Nat :=
 def takeOutput (kernel : Kernel) : Kernel × ByteArray :=
   ({ kernel with output := ByteArray.empty }, kernel.output)
 
+/-- What nothing holds any more goes: open files that no descriptor has, nor a message to a socket that hands it over, and inodes that
+no path, open file, mapping or segment has, nor a socket that listens and has it as a connection to accept, nor the slave of a terminal.
+An epoll keeps nothing, as Linux has it, and what is left of an inode elsewhere, by its number, finds none. -/
+def collect (kernel : Kernel) : Kernel := Id.run do
+  let mut files : Std.HashSet Nat := {}
+  let mut inodes : Std.HashSet Nat := {}
+  let mut fileWork : List Nat := []
+  let mut inodeWork : List Nat := []
+  for (_, process) in kernel.processes do
+    for (_, descriptor) in process.descriptors do
+      fileWork := descriptor.openFile :: fileWork
+    for mapping in process.mappings do
+      inodeWork := mapping.inode :: inodeWork
+  for (_, number) in kernel.paths do
+    inodeWork := number :: inodeWork
+  for segment in kernel.ipc.segments do
+    inodeWork := segment.inode :: inodeWork
+  -- As far as what is held holds more, each once.
+  for _ in [0:kernel.openFiles.size + kernel.inodes.size + 1] do
+    if fileWork.isEmpty && inodeWork.isEmpty then break
+    for id in fileWork do
+      if !files.contains id then
+        files := files.insert id
+        if let some file := kernel.openFiles.get? id then inodeWork := file.inode :: inodeWork
+    fileWork := []
+    let pending := inodeWork
+    inodeWork := []
+    for number in pending do
+      if inodes.contains number then continue
+      inodes := inodes.insert number
+      match kernel.inodes.get? number with
+      | some { content := .socket socket, .. } =>
+        inodeWork := socket.pending ++ inodeWork
+        for message in socket.incoming do fileWork := message.rights ++ fileWork
+      | some { content := .ptySlave master, .. } => inodeWork := master :: inodeWork
+      | _ => pure ()
+  pure { kernel with openFiles := kernel.openFiles.filter fun id _ => files.contains id
+                     inodes := kernel.inodes.filter fun number _ => inodes.contains number }
+
 end Kernel
 
 /-! ### What the calls write to memory -/
