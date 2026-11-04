@@ -3066,15 +3066,17 @@ def testHostMount (triple : String) : IO Unit := do
   assertTrue s!"{label} and not what it made" !(← System.FilePath.pathExists s!"{host}/new")
   IO.FS.removeDirAll host
 
-/-- A program that runs a script of a directory of the host that the machine sees, which names a program there to run it: neither is
-in the machine until `execve` looks for it. -/
+/-- A program that runs a script of a directory of the host that the machine sees, which names a program there to run it through a
+link: none of them is in the machine until `execve` looks for it. -/
 def testHostExec (triple : String) : IO Unit := do
   let host := s!"/tmp/bap-host-exec-{triple}"
   if ← System.FilePath.pathExists host then IO.FS.removeDirAll host
-  IO.FS.createDirAll host
+  IO.FS.createDirAll s!"{host}/bin"
   let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-hostexec"
-  IO.FS.writeBinFile s!"{host}/prog" program
-  IO.FS.writeFile s!"{host}/script" "#!/host/prog c\n"
+  IO.FS.writeBinFile s!"{host}/bin/prog" program
+  -- Through a link to a directory beside it, which is all that the path names of where the program is.
+  let _ ← IO.Process.output { cmd := "ln", args := #["-s", "bin", s!"{host}/alias"] }
+  IO.FS.writeFile s!"{host}/script" "#!/host/alias/prog c\n"
   let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
   machine.mountHost host "/host"
   let written ← IO.mkRef ByteArray.empty

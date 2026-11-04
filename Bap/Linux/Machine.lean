@@ -1361,7 +1361,7 @@ private def pathArguments : Call → List (Nat × Bool)
 host has comes in, once, as a directory, as a file with what it holds, or as a link to what is in the same directory of the host; a
 link to anything else of the host isn't there, so that nothing of the host but what is in the directory comes in. A directory at the
 end comes in with its entries, each of which is a directory that is empty until it is looked in, a file or a link. -/
-private def fromHost (machine : Machine) (path : String) : IO Unit := do
+private partial def fromHost (machine : Machine) (path : String) (links : Nat := 8) : IO Unit := do
   let within (path prefix_ : String) : Bool := prefix_ == "/" || path == prefix_ || path.startsWith (prefix_ ++ "/")
   let some (hostRoot, guestRoot) := (← machine.hostMounts.get).reverse.find? (within path ·.2) | return
   let child (parent name : String) : String := if parent == "/" then "/" ++ name else parent ++ "/" ++ name
@@ -1393,10 +1393,17 @@ private def fromHost (machine : Machine) (path : String) : IO Unit := do
   let parts := (Path.parts "/" path).drop (Path.parts "/" guestRoot).length
   let mut guest := guestRoot
   let mut host := hostRoot
-  for part in parts do
+  for (part, index) in parts.zipIdx do
     guest := child guest part
     host := child host part
-    if !(← bring guest host) then return
+    if !(← bring guest host) then
+      -- A link goes on where it leads, with the rest of the path, as resolving it will.
+      let kernel ← machine.kernel.get
+      if let some { content := .symlink target, .. } := (kernel.paths.get? guest).bind kernel.inodes.get? then
+        if links > 0 then
+          let rest := parts.drop (index + 1)
+          fromHost machine (Path.ofParts (Path.parts (Path.parent guest) target ++ rest)) (links - 1)
+      return
   -- What the directory at the end has.
   if (← machine.hostSeen.get).contains (guest ++ "/") then return
   machine.hostSeen.modify (·.insert (guest ++ "/"))
