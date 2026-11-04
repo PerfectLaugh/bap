@@ -432,6 +432,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testRollbackMemory,
     Bap.Tests.Emu.testCheckpointMoments,
     Bap.Tests.Emu.testParallelAtomics,
+    Bap.Tests.Emu.testLinuxAtomics,
     Bap.Tests.Emu.testParallelTearing,
     Bap.Tests.Emu.testParallelFences,
     Bap.Tests.Emu.testParallelUnaligned,

@@ -807,6 +807,19 @@ def testLinuxRaises (name : String) : IO Unit := do
   assertEqual s!"Linux {name} is what qemu does" (String.fromUTF8! (← IO.FS.readBinFile s!"testsuite/data/{name}.out"))
     (String.fromUTF8! (← written.get))
 
+/-- Threads that race on the atomics of AArch64, exclusive loads and stores and each LSE instruction (`libc-atomics.c`), lose nothing
+and see what they left, whether the switches between them are few or come every few instructions, into the middle of what is atomic. -/
+def testLinuxAtomics (quanta : List Nat := [100000, 7]) : IO Unit := do
+  let name := "aarch64-linux-musl-libc-atomics"
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{name}"
+  let expected := String.fromUTF8! (← IO.FS.readBinFile s!"testsuite/data/{name}.out")
+  for quantum in quanta do
+    let written ← IO.mkRef ByteArray.empty
+    let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+    let outcome ← machine.run (quantum := quantum) fun data => written.modify (· ++ data)
+    assertEqual s!"Linux {name} at a quantum of {quantum} ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+    assertEqual s!"Linux {name} at a quantum of {quantum} is what qemu does" expected (String.fromUTF8! (← written.get))
+
 /-- Native code past `nativeLimit` makes room for itself: forty blocks of a loop, each hot, with room for four pieces of native code,
 come to what they do, and what is kept stays within it while what is hot goes on being compiled. -/
 def testNativeLimit : IO Unit := do
@@ -1300,6 +1313,18 @@ def testParallelAtomics : IO Unit := do
   trial "Parallel ldxr and stxr"
     (aarch64 "ldxr w1, [x0]\nadd w1, w1, #1\nstxr w2, w1, [x0]\ncbnz w2, #-12\nsub x3, x3, #1\ncbnz x3, #-20\nb #0") armRegister 4 1000
   trial "Parallel ldadd" (aarch64 "ldadd w4, wzr, [x0]\nsub x3, x3, #1\ncbnz x3, #-8\nb #0") armRegister 4 1000
+  -- What a shared_ptr and its locks do: an increment that orders both ways, a compare and swap in a loop, a lock of a swap let go by a
+  -- store-release, and a pair of words loaded and stored exclusively.
+  trial "Parallel ldaddal" (aarch64 "top:\nldaddal x4, x5, [x0]\nsub x3, x3, #1\ncbnz x3, top\nb .") armRegister 4 1000
+  trial "Parallel casal" (aarch64
+    "top:\nldr x5, [x0]\nagain:\nadd x6, x5, x4\nmov x7, x5\ncasal x7, x6, [x0]\ncmp x7, x5\nmov x5, x7\nb.ne again\nsub x3, x3, #1\ncbnz x3, top\nb .")
+    armRegister 4 1000
+  trial "Parallel lock of swpal and stlr" (aarch64
+    "top:\nadd x8, x0, #8\ntake:\nswpal x4, x9, [x8]\ncbnz x9, take\nldr w1, [x0]\nadd w1, w1, #1\nstr w1, [x0]\nstlr xzr, [x8]\nsub x3, x3, #1\ncbnz x3, top\nb .")
+    armRegister 4 300
+  trial "Parallel ldaxp and stlxp" (aarch64
+    "top:\nldaxp x5, x6, [x0]\nadd x5, x5, #1\nadd x6, x6, #1\nstlxp w7, x5, x6, [x0]\ncbnz w7, top\nsub x3, x3, #1\ncbnz x3, top\nb .")
+    armRegister 4 1000
   -- The others that have a monitor or instructions that are atomic.
   let mips (source : String) : IO Bap.Emu.Emu := do Bap.Emu.mips32 (← LLVM.assemble "mips" source) 0 0
   let mipsRegister (index : Nat) : Bap.Var := ⟨s!"R{[4, 5, 6][index]!}", .imm 32, 0, false⟩
