@@ -1418,10 +1418,12 @@ private def refreshProc (machine : Machine) (emu : Emu) (call : Call) (args : Li
     | .error _ => pure ()
     | .ok path =>
       let group := (← currentTask emu).group
-      let cwd := ((← machine.kernel.get).process group).cwd
+      let kernel ← machine.kernel.get
       let relative := !path.startsWith "/"
       -- What the second argument is relative to is the first, which may be in there.
-      if path.startsWith "/proc" || (relative && ((index == 1 && !atCwd (args.getD 0 0)) || cwd.startsWith "/proc")) then
+      let base := if index == 1 && !atCwd (args.getD 0 0) then (kernel.baseOf group (args.getD 0 0) false).toOption.getD ""
+        else (kernel.process group).cwd
+      if path.startsWith "/proc" || (relative && base.startsWith "/proc") then
         let self ← thread emu
         let live ← liveProcesses emu
         let tasks := (← emu.taskTable.get).tasks.filter (·.status.isNone)
