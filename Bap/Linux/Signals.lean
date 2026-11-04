@@ -521,7 +521,7 @@ private def encodeMask (signals : Signals) (emu : Emu) (mask size : Nat) : ByteA
   (List.range (size / word)).foldl (init := ByteArray.empty) fun out index =>
     out ++ encodeNumber emu word (mask >>> (index * word * 8))
 
-private def readMask (signals : Signals) (emu : Emu) (address size : Nat) : IO Nat := do
+def readMask (signals : Signals) (emu : Emu) (address size : Nat) : IO Nat := do
   let word := signals.architecture.bits / 8
   (List.range (size / word)).foldlM (init := 0) fun mask index => do
     pure (mask ||| ((← readNumber emu (address + index * word) word) <<< (index * word * 8)))
@@ -883,6 +883,12 @@ over, as `sigsuspend` has it. -/
 def suspendWith (signals : Signals) (tid mask : Nat) : IO Unit :=
   modifyThread signals tid fun state =>
     if state.suspended.isSome then state else { state with suspended := some state.mask, mask := blockable signals mask }
+
+/-- Whether a signal is pending for a thread that its mask lets through, which a call that waits with a mask of its own, as `ppoll`
+does, ends with `EINTR` for rather than waiting. -/
+def unblockedPending (signals : Signals) (tid group : Nat) : IO Bool := do
+  let pending ← signals.pendingBits tid group
+  pure (pending - (pending &&& (← threadOf signals tid).mask) != 0)
 
 /-- Where a thread blocks that waits for no address: no guest can wake it, as this isn't memory that it has. -/
 private def waitAddress (tid : Nat) : Nat := 2 ^ 64 - 8 * (tid + 1)

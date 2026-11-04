@@ -1,0 +1,4 @@
+pselect6 -4 1 1
+ppoll -4 2 1
+epoll_pwait -4 3 1
+blocked after 3 0 0

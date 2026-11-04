@@ -139,6 +139,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
   let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (.returnValue (2 ^ 64 - errno)))
   let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (.returnValue value))
   let einval := 22
+  let eintr := 4
   let ebadf := 9
   let eagain := if mips then 11 else 11
   -- A timeout as a deadline, the same each time that the call runs again: none waits as long as it takes.
@@ -160,8 +161,14 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     | .ok (id, _) => pure (some id)
     | .error _ => pure none
   let nonblocking (fd : Nat) : IO Bool := do pure ((← poller.kernel.get).nonblocking group fd)
-  let mask (address size : Nat) : IO Unit := do
-    if address != 0 then poller.signals.suspendWith tid (← number address (min size 16))
+  -- The mask that the call waits with, a word at a time, and whether that lets through a signal that is pending, which ends it now.
+  let mask (address size : Nat) : IO Bool := do
+    if address == 0 then return false
+    poller.signals.suspendWith tid (← poller.signals.readMask emu address (min size 16 / word * word))
+    if ← poller.signals.unblockedPending tid group then
+      timers.finish tid
+      return true
+    pure false
   let flags (given : Nat) : Nat := architecture.openFlags given
   let eventSize := if architecture == .x86_64 || architecture == .i686 then 12 else 16
   let eventData := if eventSize == 12 then 4 else 8
@@ -265,13 +272,14 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     match call with
     | .poll => poll (arg 0) (arg 1) (millis (arg 2))
     | .ppoll | .ppoll64 =>
-      mask (arg 3) (arg 4)
+      if ← mask (arg 3) (arg 4) then return ← fail eintr
       poll (arg 0) (arg 1) (← timespec (arg 2) (if call == .ppoll64 then 8 else word))
     | .select =>
       let timeout ← if arg 4 == 0 then pure none else pure (some ((← number (arg 4) word) * 1000000000 + (← number (arg 4 + word) word) * 1000))
       select (arg 0) [arg 1, arg 2, arg 3] timeout
     | .pselect6 | .pselect664 =>
-      if arg 5 != 0 then mask (← number (arg 5) word) (← number (arg 5 + word) word)
+      if arg 5 != 0 then
+        if ← mask (← number (arg 5) word) (← number (arg 5 + word) word) then return ← fail eintr
       select (arg 0) [arg 1, arg 2, arg 3] (← timespec (arg 4) (if call == .pselect664 then 8 else word))
     | .epollCreate =>
       if arg 0 == 0 || arg 0 ≥ 2 ^ 31 then return ← fail einval
@@ -310,10 +318,10 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       succeed
     | .epollWait => epollWait (arg 0) (arg 1) (arg 2) (millis (arg 3))
     | .epollPwait =>
-      mask (arg 4) (arg 5)
+      if ← mask (arg 4) (arg 5) then return ← fail eintr
       epollWait (arg 0) (arg 1) (arg 2) (millis (arg 3))
     | .epollPwait2 =>
-      mask (arg 4) (arg 5)
+      if ← mask (arg 4) (arg 5) then return ← fail eintr
       epollWait (arg 0) (arg 1) (arg 2) (← timespec (arg 3) 8)
     | .eventfd | .eventfd2 =>
       let given := if call == .eventfd then 0 else arg 1
