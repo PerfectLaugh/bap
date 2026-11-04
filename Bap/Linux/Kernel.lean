@@ -909,25 +909,47 @@ def writeKnown (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Kernel :
   | .error _ => kernel
   | .ok (id, file) =>
     let number := file.inode
-    let isConsole := match kernel.inodes.get? number with
-      | some { content := .console _, .. } => true
-      | _ => false
+    -- What it is, of one look, which holds nothing of it after: the clock too is taken first, so that no function holds the kernel.
+    let (isConsole, size) := match kernel.inodes.get? number with
+      | some { content := .console _, .. } => (true, none)
+      | some { content := .file data, .. } => (false, some data.size)
+      | _ => (false, none)
     if isConsole then { kernel with output := kernel.output ++ bytes }
     else
-      let size := match kernel.inodes.get? number with
-        | some { content := .file data, .. } => data.size
-        | _ => 0
-      let offset := if has file.flags oAppend then size else file.offset
-      let isFile := match kernel.inodes.get? number with
-        | some { content := .file _, .. } => true
-        | _ => false
+      let offset := if has file.flags oAppend then size.getD 0 else file.offset
+      let clock := kernel.clock
       { kernel with
-        openFiles := if isFile then kernel.openFiles.insert id { file with offset := offset + bytes.size } else kernel.openFiles
+        openFiles := if size.isSome then kernel.openFiles.insert id { file with offset := offset + bytes.size } else kernel.openFiles
         inodes := kernel.inodes.alter number (·.map fun inode =>
           match inode with
-          | inode@{ content := .file data, .. } => { inode with content := .file (writeInto data offset bytes) }.written kernel.clock
+          | inode@{ content := .file data, .. } => { inode with content := .file (writeInto data offset bytes) }.written clock
           | inode@{ content := .pipe buffer head consumed, .. } => { inode with content := .pipe (buffer ++ bytes) head consumed }
           | other => other) }
+
+/-- Why `pwrite` of `count` bytes at `offset` can't go ahead, if it can't, for `writeKnownAt`: only a file is written where a call says. -/
+def writeAtError (kernel : Kernel) (group fd count offset : Nat) : Option Nat :=
+  match kernel.openFileOf group fd with
+  | .error errno => some errno
+  | .ok (_, file) =>
+    if !writable file.flags then some Errno.ebadf
+    else
+      match kernel.inodes.get? file.inode with
+      | some inode@{ content := .file data, .. } => inode.sealedAgainst data.size offset count
+      | some { content := .directory, .. } => some Errno.eisdir
+      | some { content := .symlink _, .. } | some { content := .generated _, .. } => some Errno.einval
+      | some _ => some Errno.espipe
+      | none => some Errno.eio
+
+/-- `pwrite` for what `writeAtError` has nothing against, in the bytes of the file if nothing else holds them, as `writeKnown`. -/
+def writeKnownAt (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Nat) : Kernel :=
+  match kernel.openFileOf group fd with
+  | .error _ => kernel
+  | .ok (_, file) =>
+    let clock := kernel.clock
+    { kernel with inodes := kernel.inodes.alter file.inode (·.map fun inode =>
+        match inode with
+        | inode@{ content := .file data, .. } => { inode with content := .file (writeInto data offset bytes) }.written clock
+        | other => other) }
 
 /-- `pwrite`, which leaves the offset. -/
 def writeTo (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Nat) : Result (Kernel × Nat) := do

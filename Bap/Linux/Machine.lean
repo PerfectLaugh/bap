@@ -1436,6 +1436,15 @@ private def writeDirect (machine : Machine) (emu : Emu) (group fd address count 
     if toPipe.isSome then wakePipeReaders emu
     pure (.returnValue bytes.size)
 
+/-- `pwrite`, on its own, as `writeDirect` is. -/
+private def writeDirectAt (machine : Machine) (emu : Emu) (group fd address count offset : Nat) : IO SyscallAction := do
+  if let some errno := (← machine.kernel.get).writeAtError group fd count offset then return errorOf errno
+  match ← (read emu address count).toBaseIO with
+  | .error _ => pure (errorOf Errno.efault)
+  | .ok bytes =>
+    machine.kernel.modify (·.writeKnownAt group fd bytes offset)
+    pure (.returnValue bytes.size)
+
 /-- `writev`, by `writeDirect`. -/
 private def writeVectorDirect (machine : Machine) (emu : Emu) (group fd address count : Nat) : IO SyscallAction := do
   let word := machine.architecture.bits / 8
@@ -1501,6 +1510,14 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
       match call, shared || socket || watching with
       | .write, false => handOver machine emu (← writeDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0))
       | .writev, false => handOver machine emu (← writeVectorDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0))
+      | .pwrite, false =>
+        -- Its offset, which on 32 bits is in two arguments in the order of the guest.
+        let architecture := machine.architecture
+        let offset := if architecture.bits == 64 then args.getD 3 0 else
+          let (low, high) := if architecture.big then (args.getD (architecture.pairBase + 1) 0, args.getD architecture.pairBase 0)
+            else (args.getD architecture.pairBase 0, args.getD (architecture.pairBase + 1) 0)
+          high * 2 ^ 32 + low
+        handOver machine emu (← writeDirectAt machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0) offset)
       | _, _ =>
         let before ← machine.kernel.get
         let action ← kernelCall machine emu call args
