@@ -1633,6 +1633,33 @@ def cloneProcessMemory (emu : Emu) (child : ThreadId) : IO Unit := do
     emu.sharedMemory.set (some parent)
     attachMemory emu childMemory
 
+/-- The thread that runs, of a process that has the memory of another, as a child of `vfork` has, goes to memory of its own with
+nothing in it, for `execve` to put a program in: the other keeps the memory and its map. What follows memory hears that what was
+mapped is gone, and what was compiled of it goes, as if it were unmapped, without a copy of what the other has. -/
+def leaveSharedMemory (emu : Emu) : IO Unit := do
+  let current ← emu.currentThreadRef.get
+  let shared ← match ← emu.engine.persistentMemory.get with
+    | some shared => pure shared
+    | none =>
+      let shared ← nativeFromState emu (← emu.state.get)
+      attachMemory emu shared
+      pure shared
+  let mapped ← emu.regions.get
+  emu.parkedRegions.modify (·.insert ((← emu.taskTable.get).spaceOf current) mapped)
+  emu.taskTable.modify (·.setSpace current current)
+  let own ← Jit.createMemory #[] #[]
+  emu.processMemory.modify (·.insert current own)
+  for region in mapped do
+    if region.data.size > 0 then
+      for changed in ← emu.memoryChanged.get do changed region.address region.data.size true
+      Primus.Lifted.discardRange emu.engine region.address (region.address + region.data.size - 1)
+  let state ← emu.state.get
+  let ⟨width, _⟩ ← cells emu state
+  emu.state.set { env := Bil.bind state.env emu.config.memory (.memory (Bap.Memory.empty width)) }
+  setRegions emu []
+  emu.sharedMemory.set (some shared)
+  attachMemory emu own
+
 /-- A register of any thread. -/
 def threadReg (emu : Emu) (id : ThreadId) (var : Bap.Var) : IO Bap.Value := do
   let contexts ← captureThreads emu

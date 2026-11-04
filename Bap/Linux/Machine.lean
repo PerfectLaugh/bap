@@ -1605,10 +1605,10 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
         if task.group == group && task.tid != current && task.status.isNone then
           emu.taskTable.modify (·.exitTask task.tid 0 group)
           emu.threadsRef.modify (setThreadStopped · task.tid true)
-      -- A child of `vfork` has its parent's memory, which the parent keeps: the program goes in a copy of its own.
+      -- A child of `vfork` has its parent's memory, which the parent keeps: the program goes in memory of its own.
       let space := (← currentTask emu).space
       if table.tasks.any fun task => task.space == space && task.group != group && task.status.isNone then
-        cloneProcessMemory emu current
+        leaveSharedMemory emu
       for region in ← emu.regions.get do
         unmap emu region.address region.data.size
       let (top, auxiliary) ← loadProgram emu architecture name data program interpreter arguments environment
