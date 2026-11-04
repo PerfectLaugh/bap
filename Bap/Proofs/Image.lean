@@ -4122,6 +4122,9 @@ theorem parseProgramHeader_layout {data : ByteArray} {header : Elf.Header} {offs
   by_cases hm : fileSize > memorySize
   · rw [ite_eq_left hm] at h; cases h
   rw [ite_eq_right hm] at h
+  by_cases hc : memorySize - fileSize > 2 ^ 32
+  · rw [ite_eq_left hc] at h; cases h
+  rw [ite_eq_right hc] at h
   simp only [bind_ok_iff] at h
   rcases h with ⟨file, hslice, h⟩
   cases h
@@ -4144,6 +4147,9 @@ theorem parseProgramHeader_load {data : ByteArray} {header : Elf.Header} {offset
   by_cases hm : fileSize > memorySize
   · rw [ite_eq_left hm] at h; cases h
   rw [ite_eq_right hm] at h
+  by_cases hc : memorySize - fileSize > 2 ^ 32
+  · rw [ite_eq_left hc] at h; cases h
+  rw [ite_eq_right hc] at h
   simp only [bind_ok_iff] at h
   rcases h with ⟨file, hs, h⟩
   cases h

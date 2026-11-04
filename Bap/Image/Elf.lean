@@ -1,6 +1,7 @@
 import Bap.Image.Raw
 import Bap.Image.ElfLinker
 import Bap.IO.Reader
+import Bap.Core.Zeros
 
 namespace Bap.Image.Elf
 
@@ -86,9 +87,12 @@ private def parseProgramHeader (data : ByteArray) (header : Header) (offset : Na
     let memorySize ← word data header.endian header.is64 (offset + if header.is64 then 40 else 20)
     if fileSize > memorySize then
       .error "ELF LOAD file size exceeds memory size"
+    -- What a header says is zeros can't be more than an address space of 32 bits, which takes memory of the host.
+    else if memorySize - fileSize > 2 ^ 32 then
+      .error "ELF LOAD memory size is too large"
     else
       let fileBytes ← IO.Reader.slice data offset' fileSize
-      let bytes := fileBytes.append (ByteArray.mk (Array.replicate (memorySize - fileSize) 0))
+      let bytes := fileBytes.append (Bap.zeroBytes (memorySize - fileSize))
       let readable := flags &&& 4 != 0
       let writable := flags &&& 2 != 0
       let executable := flags &&& 1 != 0
@@ -167,7 +171,8 @@ private def parseSymbols (data : ByteArray) (header : Header) (sections : List S
       | none => .error "missing ELF symbol string table"
       | some strings =>
         let entrySize := if sh.entrySize = 0 then (if header.is64 then 24 else 16) else sh.entrySize
-        let count := sh.size / entrySize
+        -- No more entries than the file has room for, and one, which reading fails at: a size of a table can be anything.
+        let count := min (sh.size / entrySize) (data.size / entrySize + 1)
         let parsed ← (List.range count).mapM fun index =>
           parseSymbol data header strings (sh.offset + index * entrySize)
         .ok (symbols ++ parsed.filterMap id)
@@ -208,7 +213,7 @@ private def rawSymbols (data : ByteArray) (header : Header) (sections : List Sec
   let read (symtab : SectionHeader) (symtabIndex : Nat) : Except String (List ElfLinker.Sym) := do
     let strings := sections[symtab.link]?
     let indices := (sections.find? fun sec => sec.kind == 18 && sec.link == symtabIndex).map (·.offset)
-    (List.range (symtab.size / entrySize)).mapM fun index => do
+    (List.range (min (symtab.size / entrySize) (data.size / entrySize + 1))).mapM fun index => do
       let offset := symtab.offset + index * entrySize
       let nameOffset ← IO.Reader.u32 data header.endian offset
       let info ← IO.Reader.get8 data (offset + if header.is64 then 4 else 12)
@@ -234,7 +239,7 @@ private def sectionRelocations (data : ByteArray) (header : Header) (sec : Secti
   let wordSize := width / 8
   let rela := sec.kind == 4
   let entrySize := wordSize * (if rela then 3 else 2)
-  (List.range (sec.size / entrySize)).mapM fun index => do
+  (List.range (min (sec.size / entrySize) (data.size / entrySize + 1))).mapM fun index => do
     let entry := sec.offset + index * entrySize
     let offset ← word data header.endian header.is64 entry
     let info ← word data header.endian header.is64 (entry + wordSize)
@@ -448,7 +453,8 @@ private def dynamicSymbolCount (data : ByteArray) (headers : List ProgramHeader)
     let bloom ← read (hash + 8)
     let wordSize := if is64 then 8 else 4
     let bucketsAt := hash + 16 + bloom * wordSize
-    let highest ← (List.range buckets).foldlM (init := 0) fun highest index => do
+    -- No more buckets than the file has room for, and one, as a count can be anything.
+    let highest ← (List.range (min buckets (data.size / 4 + 1))).foldlM (init := 0) fun highest index => do
       pure (max highest (← read (bucketsAt + index * 4)))
     if highest < first then .ok first
     else
@@ -472,7 +478,7 @@ private def dynamicSymbols (data : ByteArray) (header : Header) : Except String 
     | some tableOffset, some stringsOffset =>
       let count ← dynamicSymbolCount data headers tags header.is64 header.endian
       let strings : SectionHeader := ⟨0, 3, 0, strings, stringsOffset, 0, 0, 0, 0, 0⟩
-      let parsed ← (List.range count).mapM fun index =>
+      let parsed ← (List.range (min count (data.size / max entrySize 1 + 1))).mapM fun index =>
         parseSymbol data header strings (tableOffset + index * entrySize)
       .ok (parsed.filterMap id)
     | _, _ => .ok []
@@ -880,7 +886,8 @@ def allDynamicSymbols (image : Image) : Except String (List DynamicSymbol) := do
   let headers ← programHeaders image.data
   let tags ← dynamicTags image.data headers header.is64 image.endian
   let count ← dynamicSymbolCount image.data headers tags header.is64 header.endian
-  let symbols ← (List.range count).mapM fun index => dynamicSymbol image headers tags index
+  let symbols ← (List.range (min count (image.data.size / (if header.is64 then 24 else 16) + 1))).mapM fun index =>
+    dynamicSymbol image headers tags index
   .ok (symbols.filterMap id)
 
 private def unversioned (name : String) : String :=
