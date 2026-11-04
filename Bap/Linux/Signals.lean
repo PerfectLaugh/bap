@@ -893,8 +893,8 @@ def unblockedPending (signals : Signals) (tid group : Nat) : IO Bool := do
 /-- Where a thread blocks that waits for no address: no guest can wake it, as this isn't memory that it has. -/
 private def waitAddress (tid : Nat) : Nat := 2 ^ 64 - 8 * (tid + 1)
 
-private def blockOnSignal (emu : Emu) (tid space : Nat) (timed : Bool) : IO Unit := do
-  emu.taskTable.modify (·.futexWait { thread := tid, space, address := waitAddress tid, bitset := 2 ^ 32 - 1, timed })
+private def blockOnSignal (emu : Emu) (tid space : Nat) (timed : Bool) (deadline : Option Nat := none) : IO Unit := do
+  emu.taskTable.modify (·.futexWait { thread := tid, space, address := waitAddress tid, bitset := 2 ^ 32 - 1, timed, deadline })
   emu.stopped.set true
 
 /-- What a `sigtimedwait` that was woken comes to, when it runs again. -/
@@ -1239,17 +1239,21 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
           finishWait signals current
           pure (.returnValue (← registerValue current width resultRegister))
         else
-          let zero ← if timeout == 0 then pure false else do
+          let span ← if timeout == 0 then pure none else do
             -- The size of its fields is that of a word, or 64 bits by the numbers of time64.
             let fieldSize := if number == 421 || number == 4421 then 8 else width / 8
             let seconds ← readNumber current timeout fieldSize
             let nanoseconds ← readNumber current (timeout + fieldSize) fieldSize
-            pure (seconds == 0 && nanoseconds == 0)
-          if zero then
+            pure (some (seconds * 1000000000 + nanoseconds))
+          if span == some 0 then
             modifyThread signals tid fun state => { state with waiting := none }
             fail current numbers.eagain
           else
-            blockOnSignal current tid task.space (timeout != 0)
+            -- Until its time, by the clock of the machine, after which it has nothing: `EAGAIN`.
+            let now ← match ← current.now.get with
+              | some clock => clock
+              | none => pure 0
+            blockOnSignal current tid task.space (timeout != 0) (span.map (now + ·))
             fail current numbers.eagain
       catch _ =>
         modifyThread signals tid fun state => { state with waiting := none }
