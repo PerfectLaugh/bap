@@ -488,6 +488,14 @@ private def dispositionOf (signals : Signals) (group signal : Nat) : IO Disposit
   | 1 => pure .ignore
   | _ => pure (.handle action)
 
+/-- Whether a signal comes to a thread, rather than being blocked or ignored, as a terminal asks before it sends `SIGTTIN` or
+`SIGTTOU` to a process that isn't in its foreground: `EIO` otherwise. -/
+def comesTo (signals : Signals) (tid group signal : Nat) : IO Bool := do
+  if bitOf signal &&& (← threadOf signals tid).mask != 0 then return false
+  match ← dispositionOf signals group signal with
+  | .ignore => pure false
+  | _ => pure true
+
 private def wordOfWidth (width value : Nat) : Bap.Value := .bits (BitVec.ofNat width value)
 
 private def registerValue (emu : Emu) (width : Nat) (name : String) : IO Nat := do

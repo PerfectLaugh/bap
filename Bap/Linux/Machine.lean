@@ -7,6 +7,7 @@ import Bap.Linux.Seccomp
 import Bap.Linux.Timers
 import Bap.Linux.Poll
 import Bap.Linux.Identity
+import Bap.Linux.Tty
 import Bap.Linux.GuestHeap
 import Bap.Linux.LoadedLibrary
 import Bap.Linux.Image
@@ -829,6 +830,8 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     let openAt (directory address flags mode : Nat) : IO SyscallAction :=
       at_ directory address fun from_ path => do
         let flags := architecture.openFlags flags
+        -- What makes a pseudo-terminal, and the controlling terminal.
+        if let some action ← Tty.openDevice poller emu (Path.ofParts (Path.parts from_ path)) flags then return action
         let current ← machine.kernel.get
         match generatedAt current from_ path with
         | some (name, normal) =>
@@ -839,7 +842,12 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
             | some generate =>
               let bytes := generate (← viewOf machine emu (processOfPath normal group))
               applyNat machine fun kernel => .ok (kernel.openBytes group bytes flags)
-        | none => applyNat machine (·.openPath group from_ path flags mode)
+        | none =>
+          let action ← applyNat machine (·.openPath group from_ path flags mode)
+          -- A slave of a pseudo-terminal, which may be locked, or be what its process takes as its controlling terminal.
+          match action with
+          | .returnValue fd => if fd < 2 ^ 31 then pure ((← Tty.opened poller emu fd flags).getD action) else pure action
+          | other => pure other
     let accessAt (directory address : Nat) : IO SyscallAction :=
       at_ directory address fun from_ path =>
         pure (match kernel.statPath from_ path with
@@ -918,6 +926,9 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       return ← socketCall machine emu call args
     match call with
     | .read =>
+      match ← Tty.serve poller emu call args with
+      | some action => pure action
+      | none =>
       match ← poller.serve emu call args with
       | some action => pure action
       | none =>
@@ -925,6 +936,9 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       | some action => pure action
       | none => readInto (arg 0) (arg 1) (arg 2)
     | .write =>
+      match ← Tty.serve poller emu call args with
+      | some action => pure action
+      | none =>
       match ← poller.serve emu call args with
       | some action => pure action
       | none => writeOut (arg 0) (arg 1) (arg 2)
@@ -1040,8 +1054,10 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       | 4 => apply machine (·.setFlags group (arg 0) (architecture.openFlags (arg 2)))
       | _ => pure (errorOf Errno.einval)
     | .ioctl =>
-      -- No descriptor is a terminal.
-      pure (errorOf (match kernel.statDescriptor group (arg 0) with | .ok _ => Errno.enotty | .error errno => errno))
+      -- No descriptor is a terminal but those of a pseudo-terminal.
+      match ← Tty.serve poller emu call args with
+      | some action => pure action
+      | none => pure (errorOf (match kernel.statDescriptor group (arg 0) with | .ok _ => Errno.enotty | .error errno => errno))
     | .getdents =>
       -- What a directory has takes going through all paths, and a program may read it a little at a time.
       let found : Result (Nat × Nat × List (Nat × Nat × String)) ← match kernel.openFileOf group (arg 0) with
@@ -1268,9 +1284,10 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
       let shared := ((← machine.kernel.get).process group).mappings.any (·.shared)
       -- A mapping of what is written has to hear of it. Otherwise a write is the only thing that a program does many of that gets longer with what it has done.
       let socket := (call == .write || call == .writev) && (← machine.kernel.get).isSocket group (args.getD 0 0)
-      -- And what is written to an `eventfd` is counted.
+      -- And what is written to an `eventfd` is counted, and to a terminal goes through it.
       let socket := socket || (call == .write && match (← machine.kernel.get).objectOf group (args.getD 0 0) with
-        | .ok (_, _, { content := .eventfd .., .. }) => true
+        | .ok (_, _, { content := .eventfd .., .. }) | .ok (_, _, { content := .ptyMaster _, .. })
+        | .ok (_, _, { content := .ptySlave _, .. }) => true
         | _ => false)
       match call, shared || socket with
       | .write, false => handOver machine emu (← writeDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0))

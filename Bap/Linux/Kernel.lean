@@ -100,6 +100,29 @@ structure EpollItem where
   told : Bool := false
   deriving Repr
 
+/-- A pseudo-terminal, as its master has it: its number under `/dev/pts`, its `termios` and window, what its slave has to read, as a
+line at a time in canonical mode, the line that is being edited, how many ends of file are to be read, what its master has to read,
+its foreground process group and its session, whether its slave is locked, as `unlockpt` undoes, and whether its slave was opened. -/
+structure Terminal where
+  index : Nat
+  iflag : Nat := 0x500
+  oflag : Nat := 0x5
+  cflag : Nat := 0xbf
+  lflag : Nat := 0x8a3b
+  /-- VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME, VMIN, VSWTC, VSTART, VSTOP, VSUSP, VEOL, VREPRINT, VDISCARD, VWERASE, VLNEXT,
+  VEOL2. -/
+  cc : List Nat := [3, 28, 127, 21, 4, 0, 1, 0, 17, 19, 26, 0, 18, 15, 23, 22, 0, 0, 0]
+  rows : Nat := 24
+  cols : Nat := 80
+  input : List ByteArray := []
+  line : ByteArray := ByteArray.empty
+  ends : Nat := 0
+  output : ByteArray := ByteArray.empty
+  foreground : Nat := 0
+  session : Nat := 0
+  locked : Bool := true
+  opened : Bool := false
+
 /-- What an inode is and holds. -/
 inductive Content where
   | file (data : ByteArray)
@@ -121,6 +144,10 @@ inductive Content where
   | signalfd (mask : Nat)
   /-- Of `epoll_create`: what it watches. -/
   | epoll (items : List EpollItem)
+  /-- The master of a pseudo-terminal, as `/dev/ptmx` opens it, which has the terminal. -/
+  | ptyMaster (terminal : Terminal)
+  /-- The slave of a pseudo-terminal, `/dev/pts/N`, of the master at that inode. -/
+  | ptySlave (master : Nat)
 
 /-- A file of any kind: its number, what it holds, and its type and permissions as `st_mode` has them. -/
 structure Inode where
@@ -596,8 +623,10 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
     | .console _ =>
       if has flags oDirectory then .error Errno.enotdir
       .ok kernel
+    -- `/dev/pts/N`: `Bap.Linux.Tty` says whether it may be opened.
+    | .ptySlave _ => .ok kernel
     -- It has no path.
-    | .pipe .. | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ => .error Errno.einval
+    | .pipe .. | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ => .error Errno.einval
     -- What is bound to a path is connected to, not opened.
     | .socket _ => .error Errno.enxio
   let openFile := kernel.nextOpenFile
@@ -620,7 +649,7 @@ def read (kernel : Kernel) (group fd count : Nat) : Result (Kernel × ByteArray)
   let data ← match inode.content with
     | .file data | .console data => .ok data
     | .directory => .error Errno.eisdir
-    | .symlink _ | .generated _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ => .error Errno.einval
+    | .symlink _ | .generated _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ => .error Errno.einval
   let bytes := readAt data file.offset count
   .ok ({ kernel with openFiles := kernel.openFiles.insert id { file with offset := file.offset + bytes.size } }, bytes)
 
@@ -631,7 +660,7 @@ def readFrom (kernel : Kernel) (group fd count offset : Nat) : Result ByteArray 
   let inode ← inodeOf kernel file.inode
   match inode.content with
   | .file data => .ok (readAt data offset count)
-  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ => .error Errno.espipe
+  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ => .error Errno.espipe
   | .directory => .error Errno.eisdir
   | .symlink _ | .generated _ => .error Errno.einval
 
@@ -651,7 +680,7 @@ def write (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Result (Kerne
       openFiles := kernel.openFiles.insert id { file with offset := offset + bytes.size } }, bytes.size)
   | .directory => .error Errno.eisdir
   -- `Machine` sends to a socket, and counts what is written to an `eventfd`.
-  | .symlink _ | .generated _ | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ => .error Errno.einval
+  | .symlink _ | .generated _ | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ => .error Errno.einval
 
 /-- `writeAt`, in the same bytes if nothing else holds them. -/
 def writeInto (data : ByteArray) (offset : Nat) (bytes : ByteArray) : ByteArray :=
@@ -707,7 +736,7 @@ def writeTo (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Nat
   | .file data =>
     .ok ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content := .file (writeAt data offset bytes) } },
       bytes.size)
-  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ => .error Errno.espipe
+  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ => .error Errno.espipe
   | .directory => .error Errno.eisdir
   | .symlink _ | .generated _ => .error Errno.einval
 
@@ -718,7 +747,7 @@ def seek (kernel : Kernel) (group fd : Nat) (negative : Bool) (distance whence :
   let size ← match inode.content with
     | .file data => .ok data.size
     | .directory => .ok 0
-    | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ => .error Errno.espipe
+    | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ => .error Errno.espipe
     | .symlink _ | .generated _ => .error Errno.einval
   let start ← match whence with
     | 0 => .ok 0
@@ -766,6 +795,11 @@ def addObject (kernel : Kernel) (group : Nat) (content : Content) (flags : Nat) 
 def objectOf (kernel : Kernel) (group fd : Nat) : Result (Nat × OpenFile × Inode) := do
   let (_, file) ← openFileOf kernel group fd
   pure (file.inode, file, ← inodeOf kernel file.inode)
+
+/-- A file of a device at a path, with the directories that it needs, which `Bap.Linux.Tty` and the devices make as they are asked for. -/
+def addDevice (kernel : Kernel) (path : String) (content : Content) (mode : Nat) : Kernel × Nat :=
+  let kernel := addDirectories kernel (Path.parent path)
+  addInode kernel path content mode
 
 /-- What an inode holds now. -/
 def setContent (kernel : Kernel) (number : Nat) (content : Content) : Kernel :=
@@ -858,7 +892,7 @@ private def statOf (kernel : Kernel) (inode : Inode) : Stat :=
     | .file data => (data.size, 1)
     | .directory => (4096, 2)
     | .symlink target => (target.utf8ByteSize, 1)
-    | .console _ | .generated _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ => (0, 1)
+    | .console _ | .generated _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ => (0, 1)
   { inode := inode.number, mode := inode.mode, size, links, time := kernel.clock }
 
 /-- `stat` and `lstat`. -/

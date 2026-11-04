@@ -1,0 +1,15 @@
+ptmx 1 1
+a terminal and a pipe 0 -25
+a line ac\012
+and the next d\012
+its echo ab\010 \010c\015\012d\015\012
+what goes out out\015\012
+an end of file 0
+raw xy
+and the rest z
+no echo 1
+the window 30 100
+its controlling terminal yy
+^C ends it 1 2
+and is seen ^C
+a hangup 0 0

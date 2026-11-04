@@ -118,6 +118,29 @@ def withIdentity (process : Process) (data : ByteArray) : Except String Process 
                       credentials := { uid := id 0, euid := id 1, suid := id 2, fsuid := id 3, gid := id 4, egid := id 5, sgid := id 6
                                        fsgid := id 7, groups } }
 
+/-- A terminal, as bytes. -/
+def terminalBytes (terminal : Terminal) : ByteArray :=
+  let out := Wire.putList Wire.putNat ByteArray.empty
+    [terminal.index, terminal.iflag, terminal.oflag, terminal.cflag, terminal.lflag, terminal.rows, terminal.cols, terminal.ends,
+     terminal.foreground, terminal.session]
+  let out := Wire.putList Wire.putNat out terminal.cc
+  let out := Wire.putBytes (Wire.putList Wire.putBytes out terminal.input) terminal.line
+  Wire.putFlag (Wire.putFlag (Wire.putBytes out terminal.output) terminal.locked) terminal.opened
+
+/-- What `terminalBytes` made. -/
+def terminalOfBytes (data : ByteArray) : Except String Terminal := do
+  let (numbers, at_) ← Wire.getList Wire.getNat data 0
+  let (cc, at_) ← Wire.getList Wire.getNat data at_
+  let (input, at_) ← Wire.getList Wire.getBytes data at_
+  let (line, at_) ← Wire.getBytes data at_
+  let (output, at_) ← Wire.getBytes data at_
+  let (locked, at_) ← Wire.getFlag data at_
+  let (opened, at_) ← Wire.getFlag data at_
+  Wire.expectEnd data at_
+  let number (index : Nat) : Nat := numbers.getD index 0
+  pure { index := number 0, iflag := number 1, oflag := number 2, cflag := number 3, lflag := number 4, rows := number 5
+         cols := number 6, ends := number 7, foreground := number 8, session := number 9, cc, input, line, output, locked, opened }
+
 /-- The image of a kernel. -/
 def Kernel.image (kernel : Kernel) : Image where
   paths := (kernel.paths.toList.toArray.qsort fun left right => left.1 < right.1).toList
@@ -136,6 +159,8 @@ def Kernel.image (kernel : Kernel) : Image where
       | .epoll items => (10, Wire.putList (fun out (item : EpollItem) =>
           Wire.putFlag (Wire.putNat (Wire.putNat (Wire.putNat (Wire.putNat out item.fd) item.file) item.events) item.data) item.told)
           ByteArray.empty items)
+      | .ptyMaster terminal => (11, terminalBytes terminal)
+      | .ptySlave master => (12, Wire.putNat ByteArray.empty master)
     { number, mode := inode.mode, kind, data }
   nextInode := kernel.nextInode
   openFiles := (sorted kernel.openFiles.toList).map fun (id, file) => (id, file.inode, file.offset, file.flags)
@@ -188,6 +213,8 @@ def Image.kernel (image : Image) : Except String Kernel := do
           let (told, at_) ← Wire.getFlag data at_
           .ok ({ fd, file, events, data := value, told }, at_)) entry.data 0
         pure (Content.epoll items)
+      | 11 => pure (Content.ptyMaster (← terminalOfBytes entry.data))
+      | 12 => pure (Content.ptySlave (← Wire.getNat entry.data 0).1)
       | kind => .error s!"a Linux checkpoint with an inode of kind {kind}"
     pure (inodes.insert entry.number { number := entry.number, content, mode := entry.mode })
   pure {

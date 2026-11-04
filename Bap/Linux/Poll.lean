@@ -81,6 +81,13 @@ def readiness (kernel : Kernel) (live : List Nat) (now pending file : Nat) : Nat
         | .eventfd count _ => { read := count > 0, write := count < 2 ^ 64 - 2 }
         | .timerfd expiry _ => { read := expiry.any (· ≤ now) }
         | .signalfd mask => { read := mask &&& pending != 0 }
+        | .ptyMaster terminal => { read := terminal.output.size > 0, write := true }
+        | .ptySlave master =>
+          match kernel.inodes.get? master with
+          | some { content := .ptyMaster terminal, .. } =>
+            { read := !terminal.input.isEmpty || terminal.ends > 0 || (terminal.lflag &&& 2 == 0 && terminal.cc.getD 6 1 == 0)
+              write := true }
+          | _ => { hangup := true }
         | .epoll items =>
           { read := items.any fun item =>
               let ready := readiness kernel live now pending item.file depth
