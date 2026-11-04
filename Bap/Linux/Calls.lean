@@ -83,13 +83,15 @@ inductive Call where
   | flock
   | inotifyInit | inotifyInit1 | inotifyAddWatch | inotifyRmWatch
   | mount | umount2 | chroot | pivotRoot
+  | shmget | shmat | shmdt | shmctl | semget | semop | semtimedop | semtimedop64 | semctl | msgget | msgsnd | msgrcv | msgctl | ipc
   /-- What has nothing to do here: everyone is root and nothing has to reach a disk. -/
   | succeeds
   deriving DecidableEq, Repr
 
 /-- The numbers of x86-64. -/
 def x86_64Calls : List (Nat × Call) :=
-  [(165, .mount), (166, .umount2), (161, .chroot), (155, .pivotRoot),
+  [(29, .shmget), (30, .shmat), (67, .shmdt), (31, .shmctl), (64, .semget), (65, .semop), (220, .semtimedop), (66, .semctl), (68, .msgget), (69, .msgsnd), (70, .msgrcv), (71, .msgctl),
+   (165, .mount), (166, .umount2), (161, .chroot), (155, .pivotRoot),
    (253, .inotifyInit), (294, .inotifyInit1), (254, .inotifyAddWatch), (255, .inotifyRmWatch),
    (73, .flock),
    (319, .memfdCreate), (40, .sendfile), (275, .splice), (276, .tee), (326, .copyFileRange),
@@ -113,7 +115,8 @@ def x86_64Calls : List (Nat × Call) :=
 
 /-- The numbers of the architectures that came after the old calls went: `asm-generic/unistd.h`. -/
 def genericCalls : List (Nat × Call) :=
-  [(40, .mount), (39, .umount2), (51, .chroot), (41, .pivotRoot),
+  [(194, .shmget), (196, .shmat), (197, .shmdt), (195, .shmctl), (190, .semget), (193, .semop), (192, .semtimedop), (191, .semctl), (186, .msgget), (189, .msgsnd), (188, .msgrcv), (187, .msgctl),
+   (40, .mount), (39, .umount2), (51, .chroot), (41, .pivotRoot),
    (26, .inotifyInit1), (27, .inotifyAddWatch), (28, .inotifyRmWatch),
    (32, .flock),
    (279, .memfdCreate), (71, .sendfile), (76, .splice), (77, .tee), (285, .copyFileRange),
@@ -135,7 +138,8 @@ def genericCalls : List (Nat × Call) :=
 
 /-- The numbers of `asm-generic` on 32 bits, where whatever has a time or an offset in a word has gone. -/
 def generic32Calls : List (Nat × Call) :=
-  [(40, .mount), (39, .umount2), (51, .chroot), (41, .pivotRoot),
+  [(194, .shmget), (196, .shmat), (197, .shmdt), (195, .shmctl), (190, .semget), (193, .semop), (420, .semtimedop64), (191, .semctl), (186, .msgget), (189, .msgsnd), (188, .msgrcv), (187, .msgctl),
+   (40, .mount), (39, .umount2), (51, .chroot), (41, .pivotRoot),
    (26, .inotifyInit1), (27, .inotifyAddWatch), (28, .inotifyRmWatch),
    (32, .flock),
    (279, .memfdCreate), (71, .sendfile64), (76, .splice), (77, .tee), (285, .copyFileRange),
@@ -157,7 +161,8 @@ def generic32Calls : List (Nat × Call) :=
 
 /-- The numbers of the o32 ABI of MIPS, without their 4000. -/
 def o32Calls : List (Nat × Call) :=
-  [(21, .mount), (52, .umount2), (61, .chroot), (216, .pivotRoot),
+  [(395, .shmget), (397, .shmat), (398, .shmdt), (396, .shmctl), (393, .semget), (420, .semtimedop64), (394, .semctl), (399, .msgget), (400, .msgsnd), (401, .msgrcv), (402, .msgctl), (117, .ipc),
+   (21, .mount), (52, .umount2), (61, .chroot), (216, .pivotRoot),
    (284, .inotifyInit), (329, .inotifyInit1), (285, .inotifyAddWatch), (286, .inotifyRmWatch),
    (143, .flock),
    (354, .memfdCreate), (207, .sendfile), (237, .sendfile64), (304, .splice), (306, .tee), (360, .copyFileRange),
@@ -182,7 +187,8 @@ def o32Calls : List (Nat × Call) :=
 
 /-- The numbers of the n64 ABI of MIPS, without their 5000. -/
 def n64Calls : List (Nat × Call) :=
-  [(160, .mount), (161, .umount2), (156, .chroot), (151, .pivotRoot),
+  [(28, .shmget), (29, .shmat), (65, .shmdt), (30, .shmctl), (62, .semget), (63, .semop), (214, .semtimedop), (64, .semctl), (66, .msgget), (67, .msgsnd), (68, .msgrcv), (69, .msgctl),
+   (160, .mount), (161, .umount2), (156, .chroot), (151, .pivotRoot),
    (243, .inotifyInit), (288, .inotifyInit1), (244, .inotifyAddWatch), (245, .inotifyRmWatch),
    (71, .flock),
    (314, .memfdCreate), (39, .sendfile), (263, .splice), (265, .tee), (320, .copyFileRange),
@@ -206,7 +212,8 @@ def n64Calls : List (Nat × Call) :=
 
 /-- The numbers of 32-bit ARM, with EABI, and two of its own: `set_tls` and `cacheflush`. -/
 def armCalls : List (Nat × Call) :=
-  [(21, .mount), (52, .umount2), (61, .chroot), (218, .pivotRoot),
+  [(307, .shmget), (305, .shmat), (306, .shmdt), (308, .shmctl), (299, .semget), (298, .semop), (312, .semtimedop), (420, .semtimedop64), (300, .semctl), (303, .msgget), (301, .msgsnd), (302, .msgrcv), (304, .msgctl),
+   (21, .mount), (52, .umount2), (61, .chroot), (218, .pivotRoot),
    (316, .inotifyInit), (360, .inotifyInit1), (317, .inotifyAddWatch), (318, .inotifyRmWatch),
    (143, .flock),
    (385, .memfdCreate), (187, .sendfile), (239, .sendfile64), (340, .splice), (342, .tee), (391, .copyFileRange),
@@ -232,7 +239,8 @@ def armCalls : List (Nat × Call) :=
 
 /-- The numbers of i686. -/
 def i686Calls : List (Nat × Call) :=
-  [(21, .mount), (52, .umount2), (61, .chroot), (217, .pivotRoot),
+  [(395, .shmget), (397, .shmat), (398, .shmdt), (396, .shmctl), (393, .semget), (420, .semtimedop64), (394, .semctl), (399, .msgget), (400, .msgsnd), (401, .msgrcv), (402, .msgctl), (117, .ipc),
+   (21, .mount), (52, .umount2), (61, .chroot), (217, .pivotRoot),
    (291, .inotifyInit), (332, .inotifyInit1), (292, .inotifyAddWatch), (293, .inotifyRmWatch),
    (143, .flock),
    (356, .memfdCreate), (187, .sendfile), (239, .sendfile64), (313, .splice), (315, .tee), (377, .copyFileRange),
@@ -257,7 +265,8 @@ def i686Calls : List (Nat × Call) :=
 
 /-- The numbers of PowerPC, where those of each width that the other doesn't have are left to it not asking for them. -/
 def powerpcCalls : List (Nat × Call) :=
-  [(21, .mount), (52, .umount2), (61, .chroot), (203, .pivotRoot),
+  [(395, .shmget), (397, .shmat), (398, .shmdt), (396, .shmctl), (393, .semget), (420, .semtimedop64), (394, .semctl), (399, .msgget), (400, .msgsnd), (401, .msgrcv), (402, .msgctl), (117, .ipc),
+   (21, .mount), (52, .umount2), (61, .chroot), (203, .pivotRoot),
    (275, .inotifyInit), (318, .inotifyInit1), (276, .inotifyAddWatch), (277, .inotifyRmWatch),
    (143, .flock),
    (360, .memfdCreate), (186, .sendfile), (226, .sendfile64), (283, .splice), (284, .tee), (379, .copyFileRange),

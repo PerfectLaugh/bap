@@ -373,6 +373,62 @@ structure Mount where
 /-- Where the directories of mounts of their own are, which a listing of `/` doesn't show. -/
 def hiddenRoot : String := "/\x01mounts"
 
+/-- Who a SysV object is of and who may use it, as `struct ipc_perm` has it: its key, owner, creator and mode. -/
+structure IpcPerm where
+  key : Nat
+  uid : Nat
+  gid : Nat
+  cuid : Nat
+  cgid : Nat
+  mode : Nat
+  deriving DecidableEq, Repr
+
+/-- A segment of `shmget`: the inode that holds it, which an attachment maps, how big it is, who made it and attached or detached
+last, and when, and whether `IPC_RMID` took it away, after which it lasts as long as something has it attached. -/
+structure Segment where
+  id : Nat
+  perm : IpcPerm
+  inode : Nat
+  size : Nat
+  cpid : Nat
+  lpid : Nat := 0
+  atime : Nat := 0
+  dtime : Nat := 0
+  ctime : Nat
+  removed : Bool := false
+  deriving DecidableEq, Repr
+
+/-- A set of semaphores of `semget`: their values, the process that changed each last, and when one was changed and the set was. -/
+structure SemaphoreSet where
+  id : Nat
+  perm : IpcPerm
+  values : List Nat
+  pids : List Nat
+  otime : Nat := 0
+  ctime : Nat
+  deriving DecidableEq, Repr
+
+/-- A queue of `msgget`: its messages, each of a type, how many bytes it holds at most, who sent and received last, and when. -/
+structure MessageQueue where
+  id : Nat
+  perm : IpcPerm
+  messages : List (Nat × ByteArray) := []
+  qbytes : Nat := 16384
+  stime : Nat := 0
+  rtime : Nat := 0
+  ctime : Nat
+  lspid : Nat := 0
+  lrpid : Nat := 0
+
+/-- What SysV IPC has: segments, sets of semaphores and queues, how many of each were ever made, which numbers them, and what
+`SEM_UNDO` takes back of a process when it ends, by process, set and semaphore. -/
+structure Ipc where
+  segments : List Segment := []
+  sets : List SemaphoreSet := []
+  queues : List MessageQueue := []
+  made : Nat × Nat × Nat := (0, 0, 0)
+  undo : List (Nat × Nat × Nat × Int) := []
+
 /-- All that the kernel is: its files, what is open of them, its processes, what was written to the console and its clock. A socket that
 is bound to a name of its own, or to an address of the Internet, has that name among the paths, which don't start with `/`. -/
 structure Kernel where
@@ -394,6 +450,8 @@ structure Kernel where
   generators : Std.HashMap String Generator := {}
   /-- What is mounted, the last first. -/
   mounts : List Mount := []
+  /-- What SysV IPC has. -/
+  ipc : Ipc := {}
 
 /-- A result, or the number of an error. -/
 abbrev Result (α : Type) := Except Nat α

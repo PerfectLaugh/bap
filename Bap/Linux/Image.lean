@@ -47,6 +47,8 @@ structure Image where
   cycles : Nat
   /-- What is mounted: see `mountsBytes`. -/
   mounts : ByteArray := ByteArray.empty
+  /-- What SysV IPC has: see `ipcBytes`. -/
+  ipc : ByteArray := ByteArray.empty
   deriving DecidableEq
 
 private def sorted (items : List (Nat × α)) : List (Nat × α) :=
@@ -175,6 +177,66 @@ def mountsOfBytes (data : ByteArray) : Except String (List Mount) := do
   Wire.expectEnd data at_
   pure mounts
 
+private def putPerm (out : ByteArray) (perm : IpcPerm) : ByteArray :=
+  Wire.putList Wire.putNat out [perm.key, perm.uid, perm.gid, perm.cuid, perm.cgid, perm.mode]
+
+private def getPerm : Wire.Decoder IpcPerm := fun data at_ => do
+  let (fields, at_) ← Wire.getList Wire.getNat data at_
+  let field (index : Nat) : Nat := fields.getD index 0
+  .ok ({ key := field 0, uid := field 1, gid := field 2, cuid := field 3, cgid := field 4, mode := field 5 }, at_)
+
+/-- What SysV IPC has, as bytes. -/
+def ipcBytes (ipc : Ipc) : ByteArray :=
+  let out := Wire.putList (fun out (segment : Segment) =>
+    Wire.putFlag (Wire.putList Wire.putNat (putPerm out segment.perm) [segment.id, segment.inode, segment.size, segment.cpid,
+      segment.lpid, segment.atime, segment.dtime, segment.ctime]) segment.removed) ByteArray.empty ipc.segments
+  let out := Wire.putList (fun out (set : SemaphoreSet) =>
+    Wire.putList Wire.putNat (Wire.putList Wire.putNat (Wire.putList Wire.putNat (putPerm out set.perm) [set.id, set.otime, set.ctime])
+      set.values) set.pids) out ipc.sets
+  let out := Wire.putList (fun out (queue : MessageQueue) =>
+    Wire.putList (fun out (type, text) => Wire.putBytes (Wire.putNat out type) text)
+      (Wire.putList Wire.putNat (putPerm out queue.perm) [queue.id, queue.qbytes, queue.stime, queue.rtime, queue.ctime, queue.lspid,
+        queue.lrpid]) queue.messages) out ipc.queues
+  let out := Wire.putList Wire.putNat out [ipc.made.1, ipc.made.2.1, ipc.made.2.2]
+  Wire.putList (fun out (group, set, number, change) =>
+    Wire.putFlag (Wire.putList Wire.putNat out [group, set, number, change.natAbs]) (change < 0)) out ipc.undo
+
+/-- What `ipcBytes` made. -/
+def ipcOfBytes (data : ByteArray) : Except String Ipc := do
+  if data.isEmpty then return {}
+  let numbers : Wire.Decoder (List Nat) := Wire.getList Wire.getNat
+  let (segments, at_) ← Wire.getList (fun data at_ => do
+    let (perm, at_) ← getPerm data at_
+    let (fields, at_) ← numbers data at_
+    let (removed, at_) ← Wire.getFlag data at_
+    let field (index : Nat) : Nat := fields.getD index 0
+    .ok ({ perm, id := field 0, inode := field 1, size := field 2, cpid := field 3, lpid := field 4, atime := field 5, dtime := field 6
+           ctime := field 7, removed : Segment }, at_)) data 0
+  let (sets, at_) ← Wire.getList (fun data at_ => do
+    let (perm, at_) ← getPerm data at_
+    let (fields, at_) ← numbers data at_
+    let (values, at_) ← numbers data at_
+    let (pids, at_) ← numbers data at_
+    .ok ({ perm, id := fields.getD 0 0, otime := fields.getD 1 0, ctime := fields.getD 2 0, values, pids : SemaphoreSet }, at_)) data at_
+  let (queues, at_) ← Wire.getList (fun data at_ => do
+    let (perm, at_) ← getPerm data at_
+    let (fields, at_) ← numbers data at_
+    let (messages, at_) ← Wire.getList (fun data at_ => do
+      let (type, at_) ← Wire.getNat data at_
+      let (text, at_) ← Wire.getBytes data at_
+      .ok ((type, text), at_)) data at_
+    let field (index : Nat) : Nat := fields.getD index 0
+    .ok ({ perm, id := field 0, qbytes := field 1, stime := field 2, rtime := field 3, ctime := field 4, lspid := field 5, lrpid := field 6
+           messages : MessageQueue }, at_)) data at_
+  let (made, at_) ← numbers data at_
+  let (undo, at_) ← Wire.getList (fun data at_ => do
+    let (fields, at_) ← numbers data at_
+    let (negative, at_) ← Wire.getFlag data at_
+    let change : Int := if negative then -(fields.getD 3 0 : Int) else fields.getD 3 0
+    .ok ((fields.getD 0 0, fields.getD 1 0, fields.getD 2 0, change), at_)) data at_
+  Wire.expectEnd data at_
+  pure { segments, sets, queues, made := (made.getD 0 0, made.getD 1 0, made.getD 2 0), undo }
+
 /-- A terminal, as bytes. -/
 def terminalBytes (terminal : Terminal) : ByteArray :=
   let out := Wire.putList Wire.putNat ByteArray.empty
@@ -238,6 +300,7 @@ def Kernel.image (kernel : Kernel) : Image where
   clock := kernel.clock
   cycles := kernel.cycles
   mounts := mountsBytes kernel.mounts
+  ipc := ipcBytes kernel.ipc
 
 /-- The kernel of an image, or why there can't be one. -/
 def Image.kernel (image : Image) : Except String Kernel := do
@@ -309,7 +372,8 @@ def Image.kernel (image : Image) : Except String Kernel := do
     output := image.output
     clock := image.clock
     cycles := image.cycles
-    mounts := ← mountsOfBytes image.mounts }
+    mounts := ← mountsOfBytes image.mounts
+    ipc := ← ipcOfBytes image.ipc }
 
 namespace Image
 
@@ -436,7 +500,7 @@ def encode (out : ByteArray) (image : Image) : ByteArray :=
   let out := putNat out image.nextOpenFile
   let out := putList putProcess out image.processes
   let out := putBytes out image.output
-  putBytes (putNat (putNat out image.clock) image.cycles) image.mounts
+  putBytes (putBytes (putNat (putNat out image.clock) image.cycles) image.mounts) image.ipc
 
 /-- An image from bytes, and where they end. -/
 def decode : Decoder Image := fun data at_ => do
@@ -450,7 +514,8 @@ def decode : Decoder Image := fun data at_ => do
   let (clock, at_) ← getNat data at_
   let (cycles, at_) ← getNat data at_
   let (mounts, at_) ← getBytes data at_
-  .ok ({ paths, inodes, nextInode, openFiles, nextOpenFile, processes, output, clock, cycles, mounts }, at_)
+  let (ipc, at_) ← getBytes data at_
+  .ok ({ paths, inodes, nextInode, openFiles, nextOpenFile, processes, output, clock, cycles, mounts, ipc }, at_)
 
 end Image
 

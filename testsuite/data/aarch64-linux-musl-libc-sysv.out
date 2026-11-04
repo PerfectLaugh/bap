@@ -1,0 +1,54 @@
+shmget 1
+shmat 1
+stat 384 10000 1
+stat 1
+child sees hello
+parent sees child
+after the child 384 10000 1
+after the child 1
+read only 1 1
+twice 384 10000 2
+twice 1
+unaligned -22
+by key 1 -17 -22
+no key -2
+removed key -2
+rmid 0
+going 896 10000 2
+going 1
+shmdt 0 0
+gone -22
+shmdt again -22
+semget 1
+setval 0 1
+take 0 0
+none left -11
+all or nothing -11 0
+no such -27 -34
+child gives
+waited 0
+by the child 0
+timed out -11
+child had 5
+undone 0
+getall 0 0 0
+nsems 2
+sem rmid 0 -22
+msgget 1
+send 0 0 0
+send type 0 -22
+held 11 3
+first 3 2
+first two
+lowest up to 2 3 1
+lowest up to 2 one
+not 3 4 4
+not 3 four
+too small -7
+cut 2 3
+cut th
+empty -42
+child sends
+waited 4 7
+waited late
+msg rmid 0 -22

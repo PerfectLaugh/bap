@@ -10,6 +10,7 @@ import Bap.Linux.Identity
 import Bap.Linux.Tty
 import Bap.Linux.Files
 import Bap.Linux.Notify
+import Bap.Linux.SysV
 import Bap.Linux.GuestHeap
 import Bap.Linux.LoadedLibrary
 import Bap.Linux.Image
@@ -968,6 +969,9 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       match ← poller.serve emu call args with
       | some action => pure action
       | none => writeOut (arg 0) (arg 1) (arg 2)
+    | .shmget | .shmat | .shmdt | .shmctl | .semget | .semop | .semtimedop | .semtimedop64 | .semctl | .msgget | .msgsnd | .msgrcv
+    | .msgctl | .ipc =>
+      pure ((← SysV.serve poller emu call args).getD (errorOf Errno.enosys))
     | .inotifyInit | .inotifyInit1 | .inotifyAddWatch | .inotifyRmWatch =>
       pure ((← Notify.serve machine.notifier poller emu call args).getD (errorOf Errno.enosys))
     | .poll | .ppoll | .ppoll64 | .select | .pselect6 | .pselect664 | .epollCreate | .epollCreate1 | .epollCtl | .epollWait
@@ -2029,6 +2033,8 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   let heard ← emu.processExited.get
   emu.processExited.set (some fun group status => do
     if let some heard := heard then heard group status
+    -- What `SEM_UNDO` did of it is taken back.
+    kernelRef.modify (SysV.exited · group)
     wakePipeReaders emu
     ptrace.processExited emu group)
   -- So is what was allocated in it, as what has an address has to go on having it.
