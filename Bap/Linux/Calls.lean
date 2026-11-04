@@ -353,14 +353,12 @@ def Architecture.stat : Architecture → Kernel.Stat → ByteArray
 
 /-- The number of an error of a guest, which on MIPS isn't that of Linux elsewhere for those above 34. -/
 def Architecture.errno : Architecture → Nat → Nat
-  | .mips _ _ _, 36 => 78
-  | .mips _ _ _, 38 => 89
-  | .mips _ _ _, 39 => 93
-  | .mips _ _ _, 40 => 90
   | .mips _ _ _, errno =>
-    -- Those of sockets.
-    match [(88, 95), (89, 96), (90, 97), (91, 98), (92, 99), (93, 120), (94, 121), (95, 122), (97, 124), (98, 125), (104, 131),
-        (106, 133), (107, 134), (111, 146), (99, 126), (101, 128)].lookup errno with
+    match [(35, 45), (36, 78), (37, 46), (38, 89), (39, 93), (40, 90), (42, 35), (43, 36), (61, 96), (62, 62), (75, 79), (84, 88),
+        (110, 145), (112, 147), (113, 148), (114, 149), (115, 150), (125, 158),
+        -- Those of sockets.
+        (88, 95), (89, 96), (90, 97), (91, 98), (92, 99), (93, 120), (94, 121), (95, 122), (97, 124), (98, 125), (100, 127),
+        (103, 130), (104, 131), (105, 132), (106, 133), (107, 134), (108, 143), (111, 146), (99, 126), (101, 128)].lookup errno with
     | some number => number
     | none => errno
   | _, errno => errno

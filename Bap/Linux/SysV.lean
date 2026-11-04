@@ -70,7 +70,7 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
   let ipc := kernel.ipc
   let now := kernel.clock
   let seconds := now / 1000000000
-  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.error errno)))
+  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.error (architecture.errno errno))))
   let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.ok value)))
   let save (ipc : Ipc) (kernel : Kernel := kernel) : IO Unit := poller.kernel.set { kernel with ipc }
   let number (address size : Nat) : IO Nat := do pure (numberOf big (← read emu address size))

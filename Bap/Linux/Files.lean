@@ -69,18 +69,17 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
   let architecture := poller.architecture
   let big := architecture.big
   let word := architecture.bits / 8
-  let mips := architecture matches .mips ..
   let arg (index : Nat) : Nat := args.getD index 0
   let group := (← currentTask emu).group
   let kernel ← poller.kernel.get
   let now := kernel.clock
-  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.error errno)))
+  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.error (architecture.errno errno))))
   let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.ok value)))
   let fromResult (result : Result Kernel) : IO (Option SyscallAction) := do
     match result with
     | .ok next => poller.kernel.set next; succeed
     | .error errno => fail errno
-  let (eopnotsupp, enodata, erange, e2big) := (if mips then 122 else 95, 61, 34, 7)
+  let (eopnotsupp, enodata, erange, e2big) := (95, 61, 34, 7)
   let atCwd (value : Nat) : Bool := value == 2 ^ 64 - 100 || value == 2 ^ 32 - 100
   -- A path from an address, as an absolute one, of the directory that the call says.
   let pathAt (directory address : Nat) : IO (Result String) := do
