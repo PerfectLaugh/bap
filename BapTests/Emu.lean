@@ -3046,6 +3046,18 @@ def testTaintTags : IO Unit := do
   assertTrue "Taint tags of a node of more than 4096 bytes are no other's" (tag != Bap.Analysis.DynamicTaint.nodeTag 1 904)
   assertEqual "and say their node and byte" (0, 5000) (Bap.Analysis.DynamicTaint.Tag.node tag, Bap.Analysis.DynamicTaint.Tag.byte tag)
 
+/-- A function of a target of 32 bits that `Emu.call` calls has its arguments and gives its result, in registers of that width, or on
+the stack of i386. -/
+def testCall32 : IO Unit := do
+  for (triple, binary, source, adds) in [("riscv32", "riscv32", "addi a0, a0, 1\njalr x0, 0(ra)", 1),
+      ("armv7", "arm", "add r0, r0, r1\nbx lr", 2), ("i686", "i686", "movl 4(%esp), %eax\naddl 8(%esp), %eax\nret", 2)] do
+    let program ← IO.FS.readBinFile s!"testsuite/bin/{binary}-linux-musl-libc-signals"
+    let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+    let code ← LLVM.assemble triple source
+    Bap.Emu.map machine.emu ⟨0x7000000, code, ⟨true, true, true⟩⟩
+    let result ← Bap.Emu.call machine.emu 0x7000000 0x7001000 (if adds == 1 then [41] else [40, 2])
+    assertBits s!"Emu call of {binary} gives what its function does" (BitVec.ofNat 32 42) (.ok result)
+
 /-- MIPS has its own numbers of errors above 34, which a call gives a program of it. -/
 def testMipsErrno : IO Unit := do
   let mips : Bap.Linux.Architecture := .mips 32 true false
@@ -4164,7 +4176,7 @@ private def runEmulator : IO Unit := do
 
   let stubRegion : Bap.Emu.Region := ⟨0x1000, functionCode, ⟨true, true, true⟩⟩
   Bap.Emu.map emu stubRegion
-  let stubResult ← Bap.Emu.stub emu 0x1000 0x2000 [41]
+  let stubResult ← Bap.Emu.call emu 0x1000 0x2000 [41]
   assertBits "Emu native stub result" (BitVec.ofNat 64 42) (.ok stubResult)
   assertEqual "Emu native stub restores PC" previousPc (← Bap.Emu.pc emu)
   let stubRegions ← Bap.Emu.regions emu

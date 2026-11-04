@@ -2493,31 +2493,37 @@ private def callAbi : SyscallAbi → List String × String × String × Bool
   | .x86_64 => (["RDI", "RSI", "RDX", "RCX", "R8", "R9"], "", "RAX", true)
 
 /-- Calls a function with these arguments, by the convention of the target, until it returns to `returnTo`, and gives its result. Its
-registers go back after; what it did to memory stays. -/
+registers go back after; what it did to memory stays. Registers are of the width of the target, and on i386 the arguments are on the
+stack, the last first, under where it returns to. -/
 def call (emu : Emu) (address returnTo : Nat) (args : List UInt64) (fuel : Nat := 100000) :
     IO Bap.Value := do
   let (arguments, link, result, stackReturn) := callAbi emu.config.syscallAbi
-  if args.length > arguments.length then
+  let width ← wordWidth emu
+  let word := width / 8
+  let onStack := emu.config.syscallAbi matches .x86_32
+  if !onStack && args.length > arguments.length then
     throw <| IO.userError "Emu.call has too many integer arguments for the target ABI"
   let saved ← snapshot emu
   let skipped ← emu.skipCode.get
+  let bytesOf (value : Nat) : ByteArray := ByteArray.mk ((List.range word).map fun index => UInt8.ofNat (value / 256 ^ index % 256)).toArray
   try
-    (List.range args.length).forM fun index => do
-      let var : Bap.Var := ⟨arguments[index]!, .imm 64, 0, false⟩
-      setReg emu var (.bits (BitVec.ofNat 64 args[index]!.toNat))
+    if !onStack then
+      (List.range args.length).forM fun index => do
+        setReg emu ⟨arguments[index]!, .imm width, 0, false⟩ (.bits (BitVec.ofNat width args[index]!.toNat))
     if stackReturn then
-      let sp := stackAfterPush (← readWord emu "RSP")
-      write emu sp (ByteArray.mk ((List.range 8).map fun index =>
-        UInt8.ofNat (returnTo / 256 ^ index % 256)).toArray)
-      setReg emu ⟨"RSP", .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 sp))
+      let pointer := if width == 64 then "RSP" else "ESP"
+      let pushed := if onStack then args.map (·.toNat) else []
+      let sp := ((← readWord emu pointer) + 2 ^ width - word * (pushed.length + 1)) % 2 ^ width
+      write emu sp (pushed.foldl (fun out value => out ++ bytesOf value) (bytesOf returnTo))
+      setReg emu ⟨pointer, .imm width, 0, false⟩ (.bits (BitVec.ofNat width sp))
     else
-      setReg emu ⟨link, .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 returnTo))
+      setReg emu ⟨link, .imm width, 0, false⟩ (.bits (BitVec.ofNat width returnTo))
     setPc emu address
     let _ ← runUntil emu returnTo fuel
     let reached ← pc emu
     if reached != returnTo then
       throw <| IO.userError s!"Emu.call stopped before returning at {reached}"
-    let result ← reg emu ⟨result, .imm 64, 0, false⟩
+    let result ← reg emu ⟨result, .imm width, 0, false⟩
     restoreRegisters emu saved
     emu.skipCode.set skipped
     pure result
@@ -2525,11 +2531,6 @@ def call (emu : Emu) (address returnTo : Nat) (args : List UInt64) (fuel : Nat :
     restoreRegisters emu saved
     emu.skipCode.set skipped
     throw error
-
-/-- `call`. -/
-def stub (emu : Emu) (address returnTo : Nat) (args : List UInt64) (fuel : Nat := 100000) :
-    IO Bap.Value :=
-  call emu address returnTo args fuel
 
 /-- Decoding with the semantics loaded once. `lift` decodes at each address, which is the base of the bytes it
 fetched, and loading the semantics takes far longer than all that follows it. -/
