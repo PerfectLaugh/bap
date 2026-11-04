@@ -107,7 +107,7 @@ theorem slotOf_gotAfter (env : Env) (value : Int) (st : LinkState) :
   simp only [gotVal, gotAfter, stateOf, gotEntry, slotOf, bind, EStateM.bind, get, getThe, MonadStateOf.get, EStateM.get]
   cases hc : st.got[field value 0 64]? with
   | some slot => simp only [pure, EStateM.pure]; simp [hc]
-  | none => simp [modify, modifyGet, MonadStateOf.modifyGet, EStateM.modifyGet, set, MonadStateOf.set, EStateM.set, EStateM.bind, pure, EStateM.pure]
+  | none => simp [modify, modifyGet, MonadStateOf.modifyGet, EStateM.modifyGet, EStateM.bind, pure, EStateM.pure]
 
 theorem got_frame (env : Env) (value : Int) (st : LinkState) :
     st.memory.size ≤ (gotAfter env value st).memory.size ∧ ∀ o, o < st.memory.size → o < env.gotOff →

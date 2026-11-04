@@ -115,9 +115,7 @@ private theorem firstLabels_get (memory : List (Cell × Labels)) (acc : Std.Hash
     rw [List.foldl_cons, ih, Std.HashMap.getElem?_insertIfNew, List.find?_cons]
     by_cases hk : binding.1 = cell
     · subst hk
-      by_cases hm : binding.1 ∈ acc
-      · simp [hm, Std.HashMap.getElem?_eq_some_getElem hm]
-      · simp [hm, Std.HashMap.getElem?_eq_none hm]
+      by_cases hm : binding.1 ∈ acc <;> simp [hm]
     · simp [hk]
 
 @[csimp] private theorem memoryLabels_eq_fast : @memoryLabels = @memoryLabelsFast := by
@@ -128,7 +126,7 @@ private theorem firstLabels_get (memory : List (Cell × Labels)) (acc : Std.Hash
     funext binding
     simp only [byteLabels, firstLabels, Std.HashMap.getD_eq_getD_getElem?, firstLabels_get]
     cases state.memory.find? fun b => b.1 = binding.1 <;> simp
-  simp only [Function.comp_def, this]
+  simp only [this]
 
 /-- Labels may now be at any address of any memory. -/
 private def smear (state : State) : State := { state with anywhere := memoryLabels state }

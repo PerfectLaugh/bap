@@ -31,7 +31,7 @@ private def baseName (path : String) : String := Path.name path
 
 /-- A number in octal of four digits, as `Umask` is. -/
 private def octal4 (value : Nat) : String :=
-  String.mk ((List.range 4).reverse.map fun place => Char.ofNat (48 + value / 8 ^ place % 8))
+  String.ofList ((List.range 4).reverse.map fun place => Char.ofNat (48 + value / 8 ^ place % 8))
 
 /-- Strings with a zero after each, as `cmdline` and `environ` have them. -/
 def zeroEnded (items : List String) : ByteArray :=

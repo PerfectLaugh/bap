@@ -6298,7 +6298,7 @@ theorem decodeReport_ok {data : ByteArray} {image : Image} {errors : List String
   unfold Coff.decodeReport at h
   by_cases hz : Coff.zeroFill data > 2 ^ 32
   · simp [hz] at h; cases h
-  simp only [hz, if_false, bind_ok_iff] at h
+  simp only [hz, ite_false, bind_ok_iff] at h
   rcases h with ⟨header, h1, parsed, h2, parsedSymbols, _, h⟩
   have hgood : ∀ object ∈ parsed, GoodObject object := by
     intro object hm

@@ -1192,7 +1192,7 @@ theorem sized_eval (σ : Assignment) (e : Bil.Exp) :
     cases h
     have := ih.1 hs hv
     rw [denote_unary, width_unary]
-    cases op <;> simp [denote, denoteUnary, Expr.width, this]
+    cases op <;> simp [denote, denoteUnary, this]
   | cast kind width value ih =>
     refine ⟨fun hs h => ?_, fun _ h => by simp [evalMemory] at h⟩
     simp only [evalExp, bind_ok] at h
@@ -1224,7 +1224,7 @@ theorem sized_eval (σ : Assignment) (e : Bil.Exp) :
           cases h
           have hne' : y.width = n.width := by simpa using hne
           rw [denote_iteOf, width_iteOf _ hne']
-          simp only [denote, Expr.width]
+          simp only [denote]
           split
           · exact ihy.1 hs hy
           · rw [ihn.1 hs hn, hne']
