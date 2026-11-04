@@ -1794,7 +1794,8 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   machine.models.modify (· ++ [{ id := Signals.modelId, version := 1, state := { save := signals.save, load := signals.load } }])
   -- So is what is traced and stopped, which serves the waits, and so is before the signals.
   ptrace.install emu
-  machine.models.modify (· ++ [{ id := Ptrace.modelId, version := 1, state := { save := ptrace.save, load := ptrace.load } }])
+  -- 2: with the stops that tracees have yet to make, and those that stopped for their end.
+  machine.models.modify (· ++ [{ id := Ptrace.modelId, version := 2, state := { save := ptrace.save, load := ptrace.load } }])
   signals.serve emu
   -- A process that is over has closed what it had open.
   let heard ← emu.processExited.get

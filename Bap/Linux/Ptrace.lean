@@ -68,6 +68,11 @@ structure PtraceTable where
   toldExits : List (Nat × Nat) := []
   /-- Where a thread that steps went on from, which it stops after running. -/
   stepping : Std.HashMap Nat Nat := {}
+  /-- The stops that a thread has yet to make, one each time that its tracer lets it go on: `PTRACE_EVENT_VFORK_DONE` after
+  `PTRACE_EVENT_VFORK`. -/
+  pending : Std.HashMap Nat (List Stop) := {}
+  /-- The threads that stopped for `PTRACE_EVENT_EXIT`, whose call to end goes through when it is made again. -/
+  exiting : List Nat := []
 
 /-- The ptrace and the stops of a machine. -/
 structure Ptrace where
@@ -84,6 +89,9 @@ structure Ptrace where
   /-- What a wait says of the process that it reports, from its id here: the same, unless the host gives the guest ids of its own.
   It is a function, which isn't in a checkpoint: the host gives it again to a machine that goes on from one. -/
   resultOf : IO.Ref (Nat → Nat)
+  /-- Of each thread in a call that makes a process or a thread, which a tracer is to hear of: the event, whether it is to hear when
+  it is done as of `vfork`, and the first id that the call can give. Nothing is in the middle of a call when a checkpoint is made. -/
+  cloning : IO.Ref (Std.HashMap Nat (Nat × Bool × Nat))
 
 namespace Ptrace
 
@@ -97,15 +105,44 @@ private structure Numbers where
   chld : Nat
   trap : Nat := 5
   kill : Nat := 9
+  /-- The calls that make a process or a thread, and those that end one. -/
+  clone : Nat
+  fork : Option Nat := none
+  vfork : Option Nat := none
+  exit : Nat
+  exitGroup : Nat
 
 private def numbersOf : Architecture → Numbers
-  | .x86_64 => { ptrace := 101, wait4 := 61, waitpid := none, waitid := 247, stop := 19, cont := 18, chld := 17 }
-  | .aarch64 | .riscv64 | .riscv32 => { ptrace := 117, wait4 := 260, waitpid := none, waitid := 95, stop := 19, cont := 18, chld := 17 }
-  | .arm => { ptrace := 26, wait4 := 114, waitpid := none, waitid := 280, stop := 19, cont := 18, chld := 17 }
-  | .i686 => { ptrace := 26, wait4 := 114, waitpid := some 7, waitid := 284, stop := 19, cont := 18, chld := 17 }
-  | .mips 32 _ _ => { ptrace := 4026, wait4 := 4114, waitpid := some 4007, waitid := 4278, stop := 23, cont := 25, chld := 18 }
-  | .mips _ _ _ => { ptrace := 5099, wait4 := 5059, waitpid := none, waitid := 5237, stop := 23, cont := 25, chld := 18 }
-  | .powerpc _ _ => { ptrace := 26, wait4 := 114, waitpid := some 7, waitid := 272, stop := 19, cont := 18, chld := 17 }
+  | .x86_64 => { ptrace := 101, wait4 := 61, waitpid := none, waitid := 247, stop := 19, cont := 18, chld := 17, clone := 56,
+                 fork := some 57, vfork := some 58, exit := 60, exitGroup := 231 }
+  | .aarch64 | .riscv64 | .riscv32 => { ptrace := 117, wait4 := 260, waitpid := none, waitid := 95, stop := 19, cont := 18, chld := 17,
+                                         clone := 220, exit := 93, exitGroup := 94 }
+  | .arm => { ptrace := 26, wait4 := 114, waitpid := none, waitid := 280, stop := 19, cont := 18, chld := 17, clone := 120, fork := some 2,
+              vfork := some 190, exit := 1, exitGroup := 248 }
+  | .i686 => { ptrace := 26, wait4 := 114, waitpid := some 7, waitid := 284, stop := 19, cont := 18, chld := 17, clone := 120,
+               fork := some 2, vfork := some 190, exit := 1, exitGroup := 252 }
+  | .mips 32 _ _ => { ptrace := 4026, wait4 := 4114, waitpid := some 4007, waitid := 4278, stop := 23, cont := 25, chld := 18,
+                      clone := 4120, fork := some 4002, exit := 4001, exitGroup := 4246 }
+  | .mips _ _ _ => { ptrace := 5099, wait4 := 5059, waitpid := none, waitid := 5237, stop := 23, cont := 25, chld := 18, clone := 5055,
+                     fork := some 5056, exit := 5058, exitGroup := 5205 }
+  | .powerpc _ _ => { ptrace := 26, wait4 := 114, waitpid := some 7, waitid := 272, stop := 19, cont := 18, chld := 17, clone := 120,
+                      fork := some 2, vfork := some 189, exit := 1, exitGroup := 234 }
+
+/-- The events of `PTRACE_O_TRACE*`, each of which has the option `1 <<< event`. -/
+private def forkEvent : Nat := 1
+private def vforkEvent : Nat := 2
+private def cloneEvent : Nat := 3
+private def vforkDoneEvent : Nat := 5
+private def exitEvent : Nat := 6
+
+/-- Which event a call that makes a process or a thread is, of its flags, as Linux has it: none of one that says `CLONE_UNTRACED`,
+`PTRACE_EVENT_VFORK` of `CLONE_VFORK`, `PTRACE_EVENT_CLONE` of one that signals other than `SIGCHLD` when it ends, as a thread
+doesn't, and `PTRACE_EVENT_FORK` otherwise. -/
+private def eventOfClone (chld flags : Nat) : Nat :=
+  if flags &&& 0x800000 != 0 then 0
+  else if flags &&& 0x4000 != 0 then vforkEvent
+  else if flags % 256 != chld then cloneEvent
+  else forkEvent
 
 private def esrch : Nat := 3
 private def eio : Nat := 5
@@ -125,12 +162,13 @@ private def numbers (ptrace : Ptrace) : Numbers := numbersOf ptrace.architecture
 private def groupOf (emu : Emu) (tid : Nat) : IO Nat := do
   pure (((← emu.taskTable.get).find? tid).map (·.group) |>.getD tid)
 
-/-- Blocks a thread where nothing but its tracer or SIGCONT lets it go. -/
+/-- Blocks a thread where nothing but its tracer or SIGCONT lets it go: the thread that runs, or another, which the scheduler would
+pick otherwise, as it goes by what is stopped, until `release`. -/
 private def block (emu : Emu) (tid : Nat) : IO Unit := do
   emu.taskTable.modify fun table =>
     if table.futexes.any fun waiter => waiter.thread == tid && waiter.space == stopSpace then table
     else table.futexWait { thread := tid, space := stopSpace, address := tid, bitset := 2 ^ 32 - 1 }
-  if (← thread emu) == tid then emu.stopped.set true
+  Bap.Emu.stopThread emu tid
 
 /-- Lets a stopped thread go on. -/
 private def release (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Unit := do
@@ -210,6 +248,25 @@ def executed (ptrace : Ptrace) (emu : Emu) : IO Unit := do
   else if !tracee.seized then
     stopThread ptrace emu tid { status := stoppedStatus numbers.trap, traced := true, signal := numbers.trap }
 
+/-- A tracee made `child`, by a call that is `event` and that its tracer asked to hear of, or that is done as of `vfork` and that it
+asked to hear of that of. Of the event, the child is traced as it is, and stops before it runs, by `SIGSTOP` or, if it was seized, as
+`PTRACE_INTERRUPT` has it; and the tracee stops, which `PTRACE_GETEVENTMSG` says the child of. `vfork` is done at once here, as the
+child's memory is a copy: its stop comes when the tracer lets the tracee go on from the event, or at once without one. -/
+def cloned (ptrace : Ptrace) (emu : Emu) (tid child event : Nat) (vforkDone : Bool) : IO Unit := do
+  let some tracee := (← ptrace.table.get).tracees.get? tid | return
+  let numbers := ptrace.numbers
+  let eventStop (event : Nat) : Stop := { status := stoppedStatus numbers.trap event, traced := true, signal := numbers.trap }
+  ptrace.table.modify fun table => { table with messages := table.messages.insert tid child }
+  if event != 0 then
+    ptrace.table.modify fun table =>
+      { table with tracees := table.tracees.insert child { tracer := tracee.tracer, options := tracee.options, seized := tracee.seized } }
+    if tracee.seized then stopThread ptrace emu child (eventStop 128)
+    else ptrace.signals.send emu (some child) (← groupOf emu child) ⟨numbers.stop, 0, .sent (← groupOf emu tid) 0 0⟩
+    stopThread ptrace emu tid (eventStop event)
+    if vforkDone then
+      ptrace.table.modify fun table => { table with pending := table.pending.insert tid [eventStop vforkDoneEvent] }
+  else if vforkDone then stopThread ptrace emu tid (eventStop vforkDoneEvent)
+
 /-- A process is over: what it traced goes on, or is killed if it asked for that, and what waits asks again. -/
 def processExited (ptrace : Ptrace) (emu : Emu) (group : Nat) : IO Unit := do
   let table ← ptrace.table.get
@@ -226,7 +283,9 @@ def processExited (ptrace : Ptrace) (emu : Emu) (group : Nat) : IO Unit := do
     { table with
       tracees := table.tracees.filter fun tid _ => !gone.contains tid
       stops := table.stops.filter fun tid _ => !gone.contains tid
-      injected := table.injected.filter fun tid _ => !gone.contains tid }
+      injected := table.injected.filter fun tid _ => !gone.contains tid
+      pending := table.pending.filter fun tid _ => !gone.contains tid
+      exiting := table.exiting.filter (!gone.contains ·) }
   wakeWaits ptrace
 
 /-! ### Waiting -/
@@ -540,10 +599,25 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
     if !stoppedHere then return ← fail esrch
     let stop := table.stops.get? pid
     ptrace.table.modify fun table => { table with tracees := table.tracees.insert pid { tracee with syscalls } }
-    if data != 0 then
+    -- A stop of an event has no signal to go on with, as Linux has it.
+    let event := stop.any (·.status >>> 16 % 256 != 0)
+    if data != 0 && !event then
       ptrace.table.modify fun table => { table with injected := table.injected.insert pid data }
       -- A fault comes again by itself, and anything else is sent again, to go through.
       unless stop.any (·.fault) do ptrace.signals.send emu (some pid) (← groupOf emu pid) ⟨data, 0, .sent group 0 0⟩
+    -- What it has yet to stop for, it stops for now: the next of an event, and then the end of the call that the event was in.
+    match table.pending.getD pid [] with
+    | next :: rest =>
+      ptrace.table.modify fun table => { table with pending := if rest.isEmpty then table.pending.erase pid else table.pending.insert pid rest }
+      stopThread ptrace emu pid next
+      return ← ok
+    | [] => pure ()
+    if event && tracee.inSyscall then
+      ptrace.table.modify fun table => { table with tracees := table.tracees.insert pid { tracee with syscalls, inSyscall := false } }
+      if syscalls then
+        let signal := numbers.trap ||| (if tracee.options &&& 1 != 0 then 0x80 else 0)
+        stopThread ptrace emu pid { status := stoppedStatus signal, traced := true, signal := numbers.trap }
+        return ← ok
     release ptrace emu pid
     if step then armStep ptrace emu pid
     ok
@@ -581,7 +655,7 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
   | 17 =>
     -- PTRACE_DETACH, with a signal to go on with.
     if mine.isNone then return ← fail esrch
-    ptrace.table.modify fun table => { table with tracees := table.tracees.erase pid }
+    ptrace.table.modify fun table => { table with tracees := table.tracees.erase pid, pending := table.pending.erase pid }
     if stoppedHere then
       if data != 0 then ptrace.signals.send emu (some pid) (← groupOf emu pid) ⟨data, 0, .sent group 0 0⟩
       release ptrace emu pid
@@ -712,15 +786,40 @@ def serve (ptrace : Ptrace) (emu : Emu) : IO Unit := do
         let signal := numbers.trap ||| (if tracee.options &&& 1 != 0 then 0x80 else 0)
         stopThread ptrace current tid { status := stoppedStatus signal, traced := true, signal := numbers.trap }
         return ← waitAgainFor current
+      -- A call that makes a process or a thread, which its tracer hears of once it is made, if it asked to.
+      let flags := if some number == numbers.fork then some numbers.chld
+        else if some number == numbers.vfork then some (0x4000 ||| 0x100 ||| numbers.chld)
+        else if number == numbers.clone then some (arg 0)
+        else none
+      if let some flags := flags then
+        let event := eventOfClone numbers.chld flags
+        let event := if event != 0 && tracee.options &&& (1 <<< event) != 0 then event else 0
+        let vforkDone := flags &&& 0x4000 != 0 && tracee.options &&& (1 <<< vforkDoneEvent) != 0
+        if event != 0 || vforkDone then ptrace.cloning.modify (·.insert tid (event, vforkDone, ← current.nextThreadRef.get))
+      -- A call that ends it stops it first, with the status that it ends with, and goes through when it is made again.
+      if (number == numbers.exit || number == numbers.exitGroup) && tracee.options &&& (1 <<< exitEvent) != 0 then
+        if (← ptrace.table.get).exiting.contains tid then
+          ptrace.table.modify fun table => { table with exiting := table.exiting.erase tid }
+        else
+          ptrace.table.modify fun table =>
+            { table with exiting := tid :: table.exiting, messages := table.messages.insert tid ((arg 0 % 256) <<< 8) }
+          stopThread ptrace current tid { status := stoppedStatus numbers.trap exitEvent, traced := true, signal := numbers.trap }
+          return ← waitAgainFor current
     if number == numbers.ptrace then servePtrace ptrace current (arg 0) (arg 1) (arg 2) (arg 3)
     else if number == numbers.wait4 then serveWait ptrace current (arg 0) (arg 1) (arg 2) (arg 3)
     else if some number == numbers.waitpid then serveWait ptrace current (arg 0) (arg 1) (arg 2) 0
     else if number == numbers.waitid then serveWaitid ptrace current (arg 0) (arg 1) (arg 2) (arg 3)
     else pure .default
-  emu.syscallEnds.modify ((fun _ => do
+  emu.syscallEnds.modify ((fun result => do
     let tid ← thread emu
+    if let some (event, vforkDone, first) := (← ptrace.cloning.get).get? tid then
+      ptrace.cloning.modify (·.erase tid)
+      -- What the call gave is the child if it made one: on MIPS an error is a small number too, and isn't a new thread.
+      if let some child := result then
+        if child ≥ first && ((← emu.taskTable.get).find? child).isSome then cloned ptrace emu tid child event vforkDone
     if let some tracee := (← ptrace.table.get).tracees.get? tid then
-      if tracee.syscalls && tracee.inSyscall then
+      -- An event that it stopped for in the call comes before the end of the call, which it stops for once it goes on from that.
+      if tracee.syscalls && tracee.inSyscall && !(← ptrace.table.get).stops.contains tid then
         ptrace.table.modify fun table => { table with tracees := table.tracees.insert tid { tracee with inSyscall := false } }
         let signal := numbers.trap ||| (if tracee.options &&& 1 != 0 then 0x80 else 0)
         stopThread ptrace emu tid { status := stoppedStatus signal, traced := true, signal := numbers.trap }) :: ·)
@@ -809,7 +908,10 @@ def save (ptrace : Ptrace) : IO ByteArray := do
   let out := putList putNat out table.continued
   let out := putSorted putPair out table.injected.toList
   let out := putSorted putPair out table.messages.toList
-  pure (putList putPair out table.toldExits)
+  let out := putList putPair out table.toldExits
+  let out := putSorted (fun out (tid, stops) => putList (fun out stop => putStop out (tid, stop)) (putNat out tid) stops) out
+    table.pending.toList
+  pure (putList putNat out table.exiting)
 
 open Wire in
 def load (ptrace : Ptrace) (data : ByteArray) : IO Unit := do
@@ -821,9 +923,14 @@ def load (ptrace : Ptrace) (data : ByteArray) : IO Unit := do
     let (injected, at_) ← getList getPair data at_
     let (messages, at_) ← getList getPair data at_
     let (toldExits, at_) ← getList getPair data at_
+    let (pending, at_) ← getList (fun data at_ => do
+      let (tid, at_) ← getNat data at_
+      let (stops, at_) ← getList getStop data at_
+      .ok ((tid, stops.map (·.2)), at_)) data at_
+    let (exiting, at_) ← getList getNat data at_
     expectEnd data at_
     .ok { waiting := Std.HashMap.ofList waiting, tracees := Std.HashMap.ofList tracees, stops := Std.HashMap.ofList stops, continued, injected := Std.HashMap.ofList injected
-          messages := Std.HashMap.ofList messages, toldExits }
+          messages := Std.HashMap.ofList messages, toldExits, pending := Std.HashMap.ofList pending, exiting }
   ptrace.table.set (← IO.ofExcept decoded)
   -- What waits may have what it waits for already.
   ptrace.changed.set true
@@ -832,7 +939,7 @@ def load (ptrace : Ptrace) (data : ByteArray) : IO Unit := do
 def make (architecture : Architecture) (signals : Signals) : IO Ptrace := do
   let ptrace : Ptrace := {
     architecture, signals, table := ← IO.mkRef {}, stepHooks := ← IO.mkRef {}, settle := ← IO.mkRef (fun _ => pure ())
-    changed := ← IO.mkRef true, resultOf := ← IO.mkRef id }
+    changed := ← IO.mkRef true, resultOf := ← IO.mkRef id, cloning := ← IO.mkRef {} }
   ptrace.settle.set (settleWaits ptrace)
   pure ptrace
 
