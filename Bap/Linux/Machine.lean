@@ -1530,6 +1530,9 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
       | _, _ =>
         let before ← machine.kernel.get
         let action ← kernelCall machine emu call args
+        -- A call that is over, rather than waiting to run again, has no site nor deadline left, which another at the same place,
+        -- as `ipc` of i386 has all of its calls, would take as its own.
+        if !(← Bap.Emu.stopped emu) then machine.timers.finish (← thread emu)
         refreshChanged machine emu before
         if watching then
           let live := ((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups
