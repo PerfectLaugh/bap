@@ -472,11 +472,14 @@ maps much has that in one piece, down to where there is room: otherwise each map
 def freeAddress (emu : Emu) (size : Nat) : IO Nat := do
   let tree ← regionTree emu
   let base := mappingBase (← wordWidth emu)
+  -- What doesn't fit below where it would be has no place, rather than the first page.
+  let below (top : Nat) : IO Nat :=
+    if size ≤ top then pure (top - size) else throw (IO.userError s!"no room for a mapping of {size} bytes")
   let rec go : Nat → Nat → Nat → Bool → IO Nat
-    | 0, _, top, _ => pure (top - size)
+    | 0, _, top, _ => below top
     | fuel + 1, cursor, top, whole => do
       match tree.getEntryLT? cursor with
-      | none => pure (top - size)
+      | none => below top
       | some (start, region) =>
         let stop := start + region.data.size
         let whole := whole && stop ≥ top
