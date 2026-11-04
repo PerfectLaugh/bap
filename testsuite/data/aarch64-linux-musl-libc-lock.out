@@ -1,0 +1,45 @@
+lock 0
+own 2
+child sees 1 0 10
+child sees 1 0
+child kept -11
+child beside 0
+child reads 0
+read locks 0 0
+unlock 0
+merged 0 20 20
+merged 1 0
+relock 0 0
+split 1 5 5
+split 1 0
+from the end 0
+before here 0
+after close 2
+bad type -22
+bad whence -22
+before start -22
+write unwritable -9
+getlk unlock -22
+bad descriptor -9
+ofd 0
+ofd other -11
+ofd same 0
+process kept -11
+ofd sees 0 0 5
+ofd sees 0 1
+ofd pid -22
+ofd unlock 0 0
+flock 0
+flock other -11 -11
+fcntl beside 0
+flock shared 0 0 -11
+flock unlock 0 0
+flock bad -22
+parent lets go
+child waits 0
+child got it
+parent unflocks
+child flock 0
+child flocked
+child holds 0
+after end 0

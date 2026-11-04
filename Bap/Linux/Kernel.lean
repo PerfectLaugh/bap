@@ -123,8 +123,28 @@ structure Terminal where
   locked : Bool := true
   opened : Bool := false
 
+/-- Whose a lock of a file is: a process's, that `F_SETLK` took, an open file's, that `F_OFD_SETLK` took, which the same ranges as
+those of a process are in the way of, or an open file's of `flock`, which only other such are in the way of. -/
+inductive LockOwner where
+  | process (group : Nat)
+  | openFile (id : Nat)
+  | flock (id : Nat)
+  deriving DecidableEq, Repr
+
+/-- A lock of the bytes of a file from `start` up to `stop`, which `lockEnd` is the end of all of, shared or not. -/
+structure FileLock where
+  owner : LockOwner
+  start : Nat
+  stop : Nat
+  exclusive : Bool
+  deriving DecidableEq, Repr
+
+/-- Where a lock of a file to its end ends, past what an offset can be. -/
+def lockEnd : Nat := 2 ^ 63
+
 /-- What an inode has of itself besides what it holds: when it was last read, written and changed, by the kernel's clock, whose it is,
-its extended attributes, and the seals of `memfd_create`. -/
+its extended attributes, the seals of `memfd_create`, and its locks, of which those whose owner is gone are let go of as it is locked
+again. -/
 structure Meta where
   accessed : Nat := 1700000000 * 1000000000
   modified : Nat := 1700000000 * 1000000000
@@ -133,6 +153,7 @@ structure Meta where
   gid : Nat := 0
   attributes : List (String × ByteArray) := []
   seals : Nat := 0
+  locks : List FileLock := []
 
 /-- What an inode is and holds. -/
 inductive Content where
@@ -811,11 +832,21 @@ def seek (kernel : Kernel) (group fd : Nat) (negative : Bool) (distance whence :
   let offset := if negative then start - distance else start + distance
   .ok ({ kernel with openFiles := kernel.openFiles.insert id { file with offset } }, offset)
 
+/-- What a process had locked of the file of an open file, which closing any descriptor of that file lets go of. Nothing else changes. -/
+def releaseLocks (kernel : Kernel) (group openFile : Nat) : Kernel :=
+  match (kernel.openFiles.get? openFile).bind fun file => kernel.inodes.get? file.inode with
+  | some inode =>
+    if inode.details.locks.any (·.owner == .process group) then
+      let locks := inode.details.locks.filter (·.owner != .process group)
+      { kernel with inodes := kernel.inodes.insert inode.number { inode with details := { inode.details with locks } } }
+    else kernel
+  | none => kernel
+
 /-- `close`. -/
 def close (kernel : Kernel) (group fd : Nat) : Result Kernel := do
   let process := kernel.process group
-  if !process.descriptors.contains fd then .error Errno.ebadf
-  .ok (kernel.setProcess group { process with descriptors := process.descriptors.erase fd })
+  let some descriptor := process.descriptors.get? fd | .error Errno.ebadf
+  .ok ((kernel.setProcess group { process with descriptors := process.descriptors.erase fd }).releaseLocks group descriptor.openFile)
 
 /-- `pipe2`: a pipe, and its descriptors, to read and to write. -/
 def pipe (kernel : Kernel) (group flags : Nat) : Kernel × Nat × Nat :=
@@ -1170,6 +1201,60 @@ def truncatePath (kernel : Kernel) (base path : String) (size : Nat) : Result Ke
   match (← kernel.resolve base path).2 with
   | none => .error Errno.enoent
   | some number => kernel.truncateInode number size
+
+/-- Whether the owner of a lock of the inode `number` is there yet, of the processes `live`: a process that has it open, or an open
+file that one of them has a descriptor of. -/
+def lockHeld (kernel : Kernel) (live : List Nat) (number : Nat) (lock : FileLock) : Bool :=
+  match lock.owner with
+  | .process group =>
+    live.contains group && (kernel.process group).descriptors.toList.any fun (_, descriptor) =>
+      (kernel.openFiles.get? descriptor.openFile).any (·.inode == number)
+  | .openFile id | .flock id => live.any fun group => (kernel.process group).descriptors.toList.any (·.2.openFile == id)
+
+/-- The locks of an inode whose owners are there yet. -/
+def locksOf (kernel : Kernel) (live : List Nat) (number : Nat) : List FileLock :=
+  ((kernel.inodes.get? number).map fun inode => inode.details.locks.filter (kernel.lockHeld live number)).getD []
+
+/-- Whether `owner` had a lock of an inode, which then may have been let go of. -/
+def hadLock (kernel : Kernel) (number : Nat) (owner : LockOwner) : Bool :=
+  (kernel.inodes.get? number).any (·.details.locks.any (·.owner == owner))
+
+/-- A lock of another that is in the way of one of `owner` of `start`..`stop`, if there is one. -/
+def lockConflict (locks : List FileLock) (owner : LockOwner) (start stop : Nat) (exclusive : Bool) : Option FileLock :=
+  let isFlock : LockOwner → Bool | .flock _ => true | _ => false
+  locks.find? fun lock => lock.owner != owner && isFlock lock.owner == isFlock owner && lock.start < stop && start < lock.stop &&
+    (exclusive || lock.exclusive)
+
+/-- The locks of `owner` without `start`..`stop`, and with a lock of it there if `kind` says whether it is exclusive, which takes in
+those of its own of the same kind that it touches. They are in the order of where they start, which is that `F_GETLK` finds them in. -/
+def withLock (locks : List FileLock) (owner : LockOwner) (start stop : Nat) (kind : Option Bool) : List FileLock :=
+  let cut := locks.flatMap fun lock =>
+    if lock.owner != owner || lock.stop ≤ start || stop ≤ lock.start then [lock]
+    else (if lock.start < start then [{ lock with stop := start }] else []) ++ (if stop < lock.stop then [{ lock with start := stop }] else [])
+  let locks := match kind with
+    | none => cut
+    | some exclusive =>
+      let (touching, rest) := cut.partition fun (lock : FileLock) => lock.owner == owner && lock.exclusive == exclusive && lock.start ≤ stop && start ≤ lock.stop
+      let first := touching.foldl (fun least (lock : FileLock) => min least lock.start) start
+      let last := touching.foldl (fun most (lock : FileLock) => max most lock.stop) stop
+      { owner, start := first, stop := last, exclusive } :: rest
+  locks.mergeSort fun first second => first.start ≤ second.start
+
+/-- A lock of `owner` of an inode, or none there if `kind` is none, unless one of another is in the way, which it then gives. What
+`flock` had first goes even then, as Linux has it. -/
+def lockRange (kernel : Kernel) (live : List Nat) (number : Nat) (owner : LockOwner) (start stop : Nat) (kind : Option Bool) :
+    Kernel × Option FileLock :=
+  match kernel.inodes.get? number with
+  | none => (kernel, none)
+  | some inode =>
+    let locks := inode.details.locks.filter (kernel.lockHeld live number)
+    let set (locks : List FileLock) : Kernel :=
+      { kernel with inodes := kernel.inodes.insert number { inode with details := { inode.details with locks } } }
+    let conflict := kind.bind (lockConflict locks owner start stop)
+    match conflict, owner with
+    | some lock, .flock _ => (set (withLock locks owner start stop none), some lock)
+    | some lock, _ => (set locks, some lock)
+    | none, _ => (set (withLock locks owner start stop kind), none)
 
 /-- `fcntl` with `F_GET_SEALS`, of a file that can have them. -/
 def seals (kernel : Kernel) (group fd : Nat) : Result Nat := do

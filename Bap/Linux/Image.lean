@@ -123,7 +123,13 @@ def withIdentity (process : Process) (data : ByteArray) : Except String Process 
 /-- Of an inode, its times, owner, extended attributes and seals, as bytes. -/
 def metaBytes (details : Meta) : ByteArray :=
   let out := Wire.putList Wire.putNat ByteArray.empty [details.accessed, details.modified, details.changed, details.uid, details.gid, details.seals]
-  Wire.putList (fun out (name, value) => Wire.putBytes (Wire.putText out name) value) out details.attributes
+  let out := Wire.putList (fun out (name, value) => Wire.putBytes (Wire.putText out name) value) out details.attributes
+  Wire.putList (Wire.putList Wire.putNat) out (details.locks.map fun lock =>
+    let (kind, owner) := match lock.owner with
+      | .process group => (0, group)
+      | .openFile id => (1, id)
+      | .flock id => (2, id)
+    [kind, owner, lock.start, lock.stop, if lock.exclusive then 1 else 0])
 
 /-- What `metaBytes` made; nothing at all is what an inode starts with. -/
 def metaOfBytes (data : ByteArray) : Except String Meta := do
@@ -133,10 +139,19 @@ def metaOfBytes (data : ByteArray) : Except String Meta := do
     let (name, at_) ← Wire.getText data at_
     let (value, at_) ← Wire.getBytes data at_
     .ok ((name, value), at_)) data at_
+  let (locks, at_) ← Wire.getList (Wire.getList Wire.getNat) data at_
   Wire.expectEnd data at_
+  let locks ← locks.mapM fun fields => do
+    let field (index : Nat) : Nat := fields.getD index 0
+    let owner ← match field 0 with
+      | 0 => pure (LockOwner.process (field 1))
+      | 1 => pure (.openFile (field 1))
+      | 2 => pure (.flock (field 1))
+      | other => throw s!"no lock is of kind {other}"
+    pure { owner, start := field 2, stop := field 3, exclusive := field 4 == 1 : FileLock }
   let number (index : Nat) : Nat := numbers.getD index 0
   pure { accessed := number 0, modified := number 1, changed := number 2, uid := number 3, gid := number 4, seals := number 5
-         attributes }
+         attributes, locks }
 
 /-- A terminal, as bytes. -/
 def terminalBytes (terminal : Terminal) : ByteArray :=

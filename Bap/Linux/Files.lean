@@ -4,14 +4,15 @@ import Bap.Linux.Identity
 /-! # What a file has of itself
 
 Hard links (`link`, `linkat`), `renameat2`, files of memory (`memfd_create`), what goes from one file to another
-(`sendfile`, `splice`, `tee`, `copy_file_range`), the times of a file (`utimensat`, `utimes`, `futimesat`, `utime`), whose it is (`chown` and
+(`sendfile`, `splice`, `tee`, `copy_file_range`), locks (`flock`, and `fcntl` of `serveLock`), the times of a file (`utimensat`, `utimes`, `futimesat`, `utime`), whose it is (`chown` and
 its kin), and its extended attributes (`setxattr`, `getxattr`, `listxattr`, `removexattr` and their kin of a link and of a
 descriptor).
 
 A file has the times that a write, a truncation or `chmod` gave it, which `stat` says, and these set. Only root gives a file to
 another, or to a group that it isn't in. An extended attribute's name has a namespace, as `user.`, of at most 255 bytes, and its value
 at most 64 KiB. A file of `memfd_create` can have seals, which `fcntl` adds and `Kernel` keeps to. What goes from a file to another
-goes at most 1 MiB at a time, and from a pipe or a socket that has nothing yet, waits for it. -/
+goes at most 1 MiB at a time, and from a pipe or a socket that has nothing yet, waits for it. Locks of files, of `flock` and of
+`fcntl`, are those of `Kernel.lockRange`, and one that something is in the way of waits for it to go, with no deadlock found. -/
 
 namespace Bap.Linux
 
@@ -252,6 +253,21 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     | .removexattr => removeAttribute (← inodeAt here (arg 0) true false) (arg 1)
     | .lremovexattr => removeAttribute (← inodeAt here (arg 0) false false) (arg 1)
     | .fremovexattr => removeAttribute (ofFd (arg 0)) (arg 1)
+    | .flock =>
+      -- `LOCK_SH`, `LOCK_EX` or `LOCK_UN`, and `LOCK_NB`, of all of the file, for the open file.
+      let operation := arg 1 - (arg 1 &&& 4)
+      let kind ← match operation with
+        | 1 => pure (some false)
+        | 2 => pure (some true)
+        | 8 => pure none
+        | _ => return ← fail Errno.einval
+      let .ok (id, file) := kernel.openFileOf group (arg 0) | fail Errno.ebadf
+      let (next, conflict) := kernel.lockRange (← poller.live) file.inode (.flock id) 0 lockEnd kind
+      poller.kernel.set next
+      if kernel.hadLock file.inode (.flock id) then poller.wake emu
+      match conflict with
+      | none => succeed
+      | some _ => if arg 1 &&& 4 != 0 then fail Errno.eagain else pure (some (← poller.timers.waitUntil emu readySpace 0 none true))
     | .memfdCreate =>
       -- `MFD_CLOEXEC`, `MFD_ALLOW_SEALING`, `MFD_HUGETLB`, and `MFD_NOEXEC_SEAL` or `MFD_EXEC`, of which the first seals that it
       -- runs nothing, and so has seals.
@@ -313,6 +329,73 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
           moveOffset (arg 3) 8 to count
     | _ => pure none
   catch _ => fail 14
+
+/-- `fcntl` of the locks of a range of a file, if the command is one of those: `F_GETLK`, `F_SETLK` and `F_SETLKW` as the libc of the
+guest numbers them, which on 32 bits are those of `struct flock64`, and `F_OFD_GETLK`, `F_OFD_SETLK` and `F_OFD_SETLKW`. -/
+def serveLock (poller : Poller) (emu : Emu) (args : List Nat) : IO (Option SyscallAction) := do
+  let architecture := poller.architecture
+  let big := architecture.big
+  let arg (index : Nat) : Nat := args.getD index 0
+  let (get, set, wait) := match architecture with
+    | .mips 64 _ _ => (14, 6, 7)
+    | .mips .. => (33, 34, 35)
+    | other => if other.bits == 64 then (5, 6, 7) else (12, 13, 14)
+  let command := arg 1
+  let ofd := 36 ≤ command && command ≤ 38
+  if !ofd && ![get, set, wait].contains command then return none
+  let group := (← currentTask emu).group
+  let kernel ← poller.kernel.get
+  let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.error errno)))
+  let succeed : IO (Option SyscallAction) := do pure (some (← syscallReturn emu (.ok 0)))
+  -- `struct flock`: its type and whence, of two bytes, then where it starts and how long it is, which i386 doesn't align, and the
+  -- process.
+  let startAt := if architecture matches .i686 then 4 else 8
+  try
+    let bytes ← read emu (arg 2) (startAt + 20)
+    let field (offset size : Nat) : Nat := numberOf big (bytes.extract offset (offset + size))
+    let signed (value : Nat) : Int := if value ≥ 2 ^ 63 then (value : Int) - 2 ^ 64 else value
+    let (type, whence, start, length) := (field 0 2, field 2 2, signed (field startAt 8), signed (field (startAt + 8) 8))
+    if type > 2 || (ofd && field (startAt + 16) 4 != 0) then return ← fail Errno.einval
+    let .ok (id, file) := kernel.openFileOf group (arg 0) | return ← fail Errno.ebadf
+    let size := match kernel.inodes.get? file.inode with
+      | some { content := .file data, .. } => data.size
+      | _ => 0
+    let base : Int ← match whence with
+      | 0 => pure 0
+      | 1 => pure file.offset
+      | 2 => pure size
+      | _ => return ← fail Errno.einval
+    let (first, last) := if length < 0 then (base + start + length, base + start) else (base + start, base + start + length)
+    if first < 0 then return ← fail Errno.einval
+    let (first, last) := (first.toNat, if length == 0 then lockEnd else last.toNat)
+    let owner := if ofd then LockOwner.openFile id else .process group
+    let live ← poller.live
+    if command == get || command == 36 then
+      if type == 2 then return ← fail Errno.einval
+      match Kernel.lockConflict (kernel.locksOf live file.inode) owner first last (type == 1) with
+      | none => write emu (arg 2) (Abi.field big 2 2)
+      | some lock =>
+        let pid := match lock.owner with
+          | .process holder => holder
+          | _ => 2 ^ 32 - 1
+        write emu (arg 2) (Abi.field big 2 (if lock.exclusive then 1 else 0) ++ Abi.field big 2 0)
+        write emu (arg 2 + startAt) (Abi.field big 8 lock.start ++ Abi.field big 8 (if lock.stop == lockEnd then 0 else lock.stop - lock.start) ++
+          Abi.field big 4 pid)
+      return ← succeed
+    -- A lock to read is of a file opened to read, and one to write of one opened to write.
+    let access := file.flags &&& 3
+    if (type == 0 && access == 1) || (type == 1 && access == 0) then return ← fail Errno.ebadf
+    let (next, conflict) := kernel.lockRange live file.inode owner first last (if type == 2 then none else some (type == 1))
+    poller.kernel.set next
+    match conflict with
+    | none =>
+      -- What waits may go on once something was let go of.
+      if kernel.hadLock file.inode owner then poller.wake emu
+      succeed
+    | some _ =>
+      if command == wait || command == 38 then pure (some (← poller.timers.waitUntil emu readySpace 0 none true))
+      else fail Errno.eagain
+  catch _ => fail Errno.efault
 
 end Files
 

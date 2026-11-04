@@ -18,15 +18,24 @@ private theorem process_setProcess_other (kernel : Kernel) {group other : Nat} (
     (kernel.setProcess group value).process other = kernel.process other := by
   simp [Kernel.process, Kernel.setProcess, Std.HashMap.getD_insert, h]
 
+private theorem openFileOf_releaseLocks (kernel : Kernel) (group openFile other fd : Nat) :
+    (kernel.releaseLocks group openFile).openFileOf other fd = kernel.openFileOf other fd := by
+  unfold Kernel.releaseLocks
+  split
+  · split <;> simp [Kernel.openFileOf, Kernel.process]
+  · rfl
+
 /-- A descriptor that was closed is gone, so nothing can read it. -/
 theorem read_after_close {kernel next : Kernel} {group fd : Nat} (h : kernel.close group fd = .ok next) (count : Nat) :
     next.read group fd count = .error Errno.ebadf := by
   simp only [Kernel.close] at h
-  by_cases hopen : (kernel.process group).descriptors.contains fd = true
-  · simp only [hopen, Bool.not_true, Bool.false_eq_true, ↓reduceIte, Except.ok.injEq] at h
+  cases hd : (kernel.process group).descriptors[fd]? with
+  | none => simp [hd] at h
+  | some descriptor =>
+    simp [hd] at h
     subst h
-    simp [Kernel.read, Kernel.openFileOf, bind, Except.bind]
-  · simp [hopen, bind, Except.bind] at h
+    simp only [Kernel.read, openFileOf_releaseLocks]
+    simp [Kernel.openFileOf, bind, Except.bind]
 
 /-- A child starts with the descriptors, the directory and the break of its parent, in its process group and session. -/
 theorem fork_process (kernel : Kernel) (parent child : Nat) :

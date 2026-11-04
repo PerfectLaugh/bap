@@ -1069,7 +1069,7 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
         pure (match kernel.seals group (arg 0) with
           | .error errno => errorOf errno
           | .ok value => .returnValue value)
-      | _ => pure (errorOf Errno.einval)
+      | _ => pure ((← Files.serveLock poller emu args).getD (errorOf Errno.einval))
     | .ioctl =>
       -- No descriptor is a terminal but those of a pseudo-terminal.
       match ← Tty.serve poller emu call args with
@@ -1129,7 +1129,7 @@ private def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
         apply machine (·.rename "/" source target)
     | .link | .linkat | .renameat2 | .utimensat | .utimensat64 | .utimes | .utime | .futimesat | .chown | .lchown | .fchown
     | .fchownat | .setxattr | .lsetxattr | .fsetxattr | .getxattr | .lgetxattr | .fgetxattr | .listxattr | .llistxattr
-    | .flistxattr | .removexattr | .lremovexattr | .fremovexattr | .memfdCreate | .sendfile | .sendfile64 | .splice | .tee
+    | .flistxattr | .removexattr | .lremovexattr | .fremovexattr | .flock | .memfdCreate | .sendfile | .sendfile64 | .splice | .tee
     | .copyFileRange =>
       pure ((← Files.serve poller emu call args).getD (errorOf Errno.enosys))
     | .symlink | .symlinkat =>
