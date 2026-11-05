@@ -769,7 +769,8 @@ private def closedTarget (target : Bil.Exp) : Option Nat :=
   let rec closed : Bil.Exp → Bool
     | .int _ => true
     | .bin _ left right => closed left && closed right
-    | .un _ value | .cast _ _ value => closed value
+    | .un _ value | .cast _ _ value | .extract _ _ value => closed value
+    | .concat left right => closed left && closed right
     | _ => false
   if closed target then
     match Bil.evalExp [] target with

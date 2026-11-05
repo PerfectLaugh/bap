@@ -820,6 +820,20 @@ def testLinuxAtomics (quanta : List Nat := [100000, 7]) : IO Unit := do
     assertEqual s!"Linux {name} at a quantum of {quantum} ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
     assertEqual s!"Linux {name} at a quantum of {quantum} is what qemu does" expected (String.fromUTF8! (← written.get))
 
+/-- A loop of AArch64 that is hot stays in the range of it: its branch goes to an address that the lifter works out from the pc with an
+extract, which is as closed as a constant, so that the range goes round in native code and doesn't leave for each time round. -/
+def testRangeLoopsAArch64 : IO Unit := do
+  let code ← LLVM.assemble "aarch64" "loop:\nadd x1, x1, #1\nsubs x0, x0, #1\nb.ne loop\nend:\nb end"
+  let emu ← Bap.Emu.aarch64 code 0 0
+  for name in ["X0", "X1"] do
+    Bap.Emu.setReg emu ⟨name, .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 (if name == "X0" then 3000 else 0)))
+  let _ ← Bap.Emu.run emu (3 * 3000)
+  match ← Bap.Emu.reg emu ⟨"X1", .imm 64, 0, false⟩ with
+  | .bits bits => assertEqual "An AArch64 loop in its range goes round as many times" 3000 bits.toNat
+  | _ => throw <| IO.userError "no x1"
+  let stats ← Bap.Primus.Lifted.stats emu.engine
+  assertTrue s!"An AArch64 loop goes round in its range: {stats.nativeRuns} native runs" (stats.nativeRuns < 10)
+
 /-- Native code past `nativeLimit` makes room for itself: forty blocks of a loop, each hot, with room for four pieces of native code,
 come to what they do, and what is kept stays within it while what is hot goes on being compiled. -/
 def testNativeLimit : IO Unit := do

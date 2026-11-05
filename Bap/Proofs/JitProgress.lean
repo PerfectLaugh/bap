@@ -1111,6 +1111,12 @@ theorem closed_evalExp (exp : Bil.Exp) (env : Bil.Env) (h : closedTarget.closed 
   | cast kind width value ih =>
     simp only [closedTarget.closed] at h
     rw [Bil.evalExp, Bil.evalExp, ih h]
+  | extract high low value ih =>
+    simp only [closedTarget.closed] at h
+    rw [Bil.evalExp, Bil.evalExp, ih h]
+  | concat left right ihl ihr =>
+    simp only [closedTarget.closed, Bool.and_eq_true] at h
+    rw [Bil.evalExp, Bil.evalExp, ihl h.1, ihr h.2]
   | _ => simp [closedTarget.closed] at h
 
 /-- A target that a range goes to directly is where the interpreter jumps, in whatever environment it runs. This is what
