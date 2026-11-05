@@ -421,7 +421,7 @@ bool getSlot(lean_obj_arg value, size_t &slot) {
 // `kept`, for what is optimized, is the slots that what runs it reads afterwards, as obligation 1 says: only those are left in the
 // state, so that the rest, the temporaries of expressions, live as long as they are used and not to the end of the run.
 static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg entries = nullptr, size_t entrySlot = 0,
-                               lean_obj_arg kept = nullptr) {
+                               lean_obj_arg kept = nullptr, uint64_t budgetSlot = ~uint64_t{0}) {
   try {
     std::string initializationError;
     if (!initialize(initializationError))
@@ -905,6 +905,126 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
     if (llvm::verifyModule(*module, &verificationStream))
       return ioError("invalid LLVM JIT module: " + verificationErrors);
 
+    // A copy of what is optimized that doesn't leave at each block for its budget, as QEMU counts instructions once a translation: as
+    // a run enters each block at most once between targets of jumps back, which every way round a loop goes through, the budget is
+    // checked against all the blocks there are at the start and at each of those, and while it is enough the copy goes on, and
+    // otherwise this, which checks at each block. It does what this does, as each check here would have gone on, and what is only
+    // there for a block to leave with, such as the flags that the next instruction sets again, is then for nothing and goes.
+    if (optimized && entries == nullptr && budgetSlot != ~uint64_t{0} && hasSlots && budgetSlot <= maxSlot) {
+      auto budgetBranch = [&](llvm::Instruction *terminator) -> llvm::CondBrInst * {
+        auto *branch = llvm::dyn_cast<llvm::CondBrInst>(terminator);
+        if (branch == nullptr)
+          return nullptr;
+        auto *compare = llvm::dyn_cast<llvm::ICmpInst>(branch->getCondition());
+        if (compare == nullptr || compare->getPredicate() != llvm::ICmpInst::ICMP_NE)
+          return nullptr;
+        auto *zeroValue = llvm::dyn_cast<llvm::ConstantInt>(compare->getOperand(1));
+        auto *loaded = llvm::dyn_cast<llvm::LoadInst>(compare->getOperand(0));
+        if (zeroValue == nullptr || !zeroValue->isZero() || loaded == nullptr)
+          return nullptr;
+        auto *address = llvm::dyn_cast<llvm::GetElementPtrInst>(loaded->getPointerOperand());
+        if (address == nullptr || address->getPointerOperand() != state || address->getNumOperands() != 2)
+          return nullptr;
+        auto *index = llvm::dyn_cast<llvm::ConstantInt>(address->getOperand(1));
+        return index != nullptr && index->getZExtValue() == budgetSlot ? branch : nullptr;
+      };
+      std::vector<llvm::BasicBlock *> original;
+      for (llvm::BasicBlock &block : *function)
+        original.push_back(&block);
+      uint64_t checks = 0;
+      for (llvm::BasicBlock *block : original)
+        if (budgetBranch(block->getTerminator()) != nullptr)
+          ++checks;
+      if (checks != 0) {
+        // A copy of each block and instruction, with what they use of each other the copy's.
+        std::unordered_map<llvm::Value *, llvm::Value *> map;
+        std::vector<llvm::BasicBlock *> copies;
+        for (llvm::BasicBlock *block : original) {
+          llvm::BasicBlock *copy = llvm::BasicBlock::Create(*context, block->getName() + ".fast", function);
+          map[block] = copy;
+          copies.push_back(copy);
+        }
+        for (size_t at = 0; at != original.size(); ++at)
+          for (llvm::Instruction &instruction : *original[at]) {
+            llvm::Instruction *copy = instruction.clone();
+            copy->insertInto(copies[at], copies[at]->end());
+            map[&instruction] = copy;
+          }
+        for (llvm::BasicBlock *copy : copies)
+          for (llvm::Instruction &instruction : *copy) {
+            for (unsigned index = 0; index != instruction.getNumOperands(); ++index) {
+              auto found = map.find(instruction.getOperand(index));
+              if (found != map.end())
+                instruction.setOperand(index, found->second);
+            }
+            if (auto *phi = llvm::dyn_cast<llvm::PHINode>(&instruction))
+              for (unsigned index = 0; index != phi->getNumIncomingValues(); ++index)
+                phi->setIncomingBlock(index, llvm::cast<llvm::BasicBlock>(map[phi->getIncomingBlock(index)]));
+          }
+        for (llvm::BasicBlock *copy : copies)
+          if (llvm::CondBrInst *branch = budgetBranch(copy->getTerminator())) {
+            llvm::BasicBlock *go = branch->getSuccessor(0);
+            branch->eraseFromParent();
+            builder.SetInsertPoint(copy);
+            builder.CreateBr(go);
+          }
+        // The targets of the jumps back of the copy, by a search in depth from its start.
+        std::unordered_map<llvm::BasicBlock *, int> visit;
+        std::vector<llvm::BasicBlock *> targets;
+        std::vector<std::pair<llvm::BasicBlock *, unsigned>> stack{{copies.front(), 0}};
+        visit[copies.front()] = 1;
+        while (!stack.empty()) {
+          auto &[block, at] = stack.back();
+          llvm::Instruction *terminator = block->getTerminator();
+          if (at < terminator->getNumSuccessors()) {
+            llvm::BasicBlock *successor = terminator->getSuccessor(at++);
+            int &mark = visit[successor];
+            if (mark == 1)
+              targets.push_back(successor);
+            else if (mark == 0) {
+              mark = 1;
+              stack.push_back({successor, 0});
+            }
+          } else {
+            visit[block] = 2;
+            stack.pop_back();
+          }
+        }
+        bool plain = true;
+        for (llvm::BasicBlock *target : targets)
+          plain = plain && !llvm::isa<llvm::PHINode>(target->front());
+        std::unordered_map<llvm::BasicBlock *, llvm::BasicBlock *> originalOf;
+        for (size_t at = 0; at != original.size(); ++at)
+          originalOf[copies[at]] = original[at];
+        auto checked = [&](llvm::BasicBlock *fast, llvm::BasicBlock *slow, const char *name) {
+          llvm::BasicBlock *check = llvm::BasicBlock::Create(*context, name, function, fast);
+          builder.SetInsertPoint(check);
+          llvm::Value *budget = builder.CreateLoad(word, builder.CreateConstGEP1_64(word, state, budgetSlot));
+          builder.CreateCondBr(builder.CreateICmpUGE(budget, llvm::ConstantInt::get(word, checks)), fast, slow);
+          return check;
+        };
+        if (plain) {
+          std::sort(targets.begin(), targets.end());
+          targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+          for (llvm::BasicBlock *target : targets) {
+            std::vector<llvm::Instruction *> users;
+            for (llvm::User *user : target->users())
+              if (auto *instruction = llvm::dyn_cast<llvm::Instruction>(user))
+                users.push_back(instruction);
+            llvm::BasicBlock *check = checked(target, originalOf[target], "budget_check");
+            for (llvm::Instruction *user : users)
+              user->replaceUsesOfWith(target, check);
+          }
+          llvm::BasicBlock *start = original.front();
+          llvm::BasicBlock *choose = checked(llvm::cast<llvm::BasicBlock>(map[start]), start, "budget_start");
+          choose->moveBefore(start);
+        } else {
+          for (llvm::BasicBlock *copy : copies)
+            copy->eraseFromParent();
+        }
+      }
+    }
+
     // What is optimized works on a copy of the slots on the stack, which LLVM keeps in registers, and leaves those it wrote in the
     // state at each return, as obligation 1 says: then a value isn't stored and loaded again for each operation, and what is
     // overwritten before anything reads it, such as most flags, isn't worked out at all.
@@ -1020,8 +1140,8 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
 
 extern "C" lean_obj_res bap_jit_compile(lean_obj_arg ops, lean_obj_arg) { return compileOps(ops, false); }
 
-extern "C" lean_obj_res bap_jit_compile_optimized(lean_obj_arg ops, lean_obj_arg kept, lean_obj_arg) {
-  return compileOps(ops, true, nullptr, 0, kept);
+extern "C" lean_obj_res bap_jit_compile_optimized(lean_obj_arg ops, lean_obj_arg kept, uint64_t budgetSlot, lean_obj_arg) {
+  return compileOps(ops, true, nullptr, 0, kept, budgetSlot);
 }
 
 extern "C" lean_obj_res bap_jit_compile_entries(lean_obj_arg ops, lean_obj_arg entries, lean_obj_arg slot, uint8_t optimized,

@@ -1444,7 +1444,8 @@ private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Optio
   | .native lowering _ fallback =>
     let started ← IO.monoMsNow
     let kept := keptSlots lowering
-    let program ← if entry.entryLabels.isEmpty then Jit.compileOptimized lowering.ops kept
+    let program ← if entry.entryLabels.isEmpty then
+        Jit.compileOptimized lowering.ops kept ((lowering.budget.map UInt64.ofNat).getD (UInt64.ofNat (2 ^ 64 - 1)))
       else Jit.compileEntries lowering.ops entry.entryLabels lowering.nextSlot true (kept.push (UInt64.ofNat lowering.nextSlot))
     let elapsed := (← IO.monoMsNow) - started
     engine.statistics.modify fun stats =>

@@ -133,7 +133,7 @@ opaque compile (ops : @& List Op) : IO Program
 
 /-- Compiled with the optimizations of LLVM, which takes longer and is worth it for what runs a lot. -/
 @[extern "bap_jit_compile_optimized"]
-opaque compileOptimized (ops : @& List Op) (kept : @& Array UInt64) : IO Program
+opaque compileOptimized (ops : @& List Op) (kept : @& Array UInt64) (budgetSlot : UInt64) : IO Program
 
 /-- A program that starts at the label that the slot `entrySlot` of its state says, as one more than it, of those that are
 `entries`, and where it would otherwise when that holds zero. It takes a state that has that slot. -/
