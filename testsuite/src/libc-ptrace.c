@@ -18,6 +18,9 @@ long syscall(long, ...);
 #define PTRACE_POKEDATA 5
 #define PTRACE_CONT 7
 #define PTRACE_SINGLESTEP 9
+#define PTRACE_GETREGS 12
+#define PTRACE_SETREGS 13
+#define PTRACE_SYSCALL 24
 #define PTRACE_ATTACH 16
 #define PTRACE_DETACH 17
 #define PTRACE_GETSIGINFO 0x4202
@@ -167,6 +170,33 @@ int main(void) {
     trace(PTRACE_DETACH, child, 0, 0);
   }
   say("step detached", 2, waitpid(child, &status, 0) == child, WIFEXITED(status) ? WEXITSTATUS(status) : 0, 0);
+
+  // At the end of a system call, orig_rax is the call that was made, and not what it gave.
+  child = fork();
+  if (child == 0) {
+    trace(PTRACE_TRACEME, 0, 0, 0);
+    raise(SIGSTOP);
+    syscall(SYS_getppid);
+    _exit(0);
+  }
+  waitpid(child, &status, 0);
+#if defined(__x86_64__)
+  unsigned long frame[27];
+  long atExit = -1;
+  int found = 0;
+  for (int stops = 0; stops < 40 && atExit == -1; stops++) {
+    trace(PTRACE_SYSCALL, child, 0, 0);
+    if (waitpid(child, &status, 0) != child || !WIFSTOPPED(status)) break;
+    trace(PTRACE_GETREGS, child, 0, (long)frame);
+    if (found) atExit = (long)frame[15];
+    else if (frame[15] == SYS_getppid) found = 1;
+  }
+  say("orig at exit", 1, atExit == SYS_getppid, 0, 0);
+#else
+  say("orig at exit", 1, 1, 0, 0);
+#endif
+  trace(PTRACE_CONT, child, 0, 0);
+  waitpid(child, &status, 0);
 
   // What isn't there.
   say("no child", 1, waitpid(12345, &status, 0) == -1 && errno == ECHILD, 0, 0);
