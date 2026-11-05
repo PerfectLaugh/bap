@@ -21,5 +21,7 @@ reaped 1 7
 running 1
 step detached 1 3
 orig at exit 1
+entry 2
+rewritten 3
 no child 1
 not traced -3

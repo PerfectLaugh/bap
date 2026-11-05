@@ -198,6 +198,41 @@ int main(void) {
   trace(PTRACE_CONT, child, 0, 0);
   waitpid(child, &status, 0);
 
+  // At the start of a system call, rax is -ENOSYS, and what a tracer leaves in orig_rax is the call that is made: another one, or with
+  // -1 none, which gives what rax says.
+  child = fork();
+  if (child == 0) {
+    trace(PTRACE_TRACEME, 0, 0, 0);
+    raise(SIGSTOP);
+    long redirected = syscall(SYS_getppid);
+    long skipped = syscall(SYS_getppid);
+    int skippedRight = skipped == -1 && errno == ENOSYS;
+    _exit((redirected == syscall(SYS_getpid)) + 2 * skippedRight);
+  }
+  waitpid(child, &status, 0);
+#if defined(__x86_64__)
+  int entries = 0;
+  for (int stops = 0; stops < 40 && entries < 2; stops++) {
+    trace(PTRACE_SYSCALL, child, 0, 0);
+    if (waitpid(child, &status, 0) != child || !WIFSTOPPED(status)) break;
+    trace(PTRACE_GETREGS, child, 0, (long)frame);
+    if (frame[15] != SYS_getppid || frame[10] != (unsigned long)-ENOSYS) continue;
+    frame[15] = entries == 0 ? SYS_getpid : (unsigned long)-1;
+    trace(PTRACE_SETREGS, child, 0, (long)frame);
+    entries++;
+  }
+  say("entry", 1, entries, 0, 0);
+#else
+  say("entry", 1, 2, 0, 0);
+#endif
+  trace(PTRACE_CONT, child, 0, 0);
+  waitpid(child, &status, 0);
+#if defined(__x86_64__)
+  say("rewritten", 1, WIFEXITED(status) ? WEXITSTATUS(status) : -1, 0, 0);
+#else
+  say("rewritten", 1, 3, 0, 0);
+#endif
+
   // What isn't there.
   say("no child", 1, waitpid(12345, &status, 0) == -1 && errno == ECHILD, 0, 0);
   say("not traced", 1, trace(PTRACE_CONT, 12345, 0, 0), 0, 0);

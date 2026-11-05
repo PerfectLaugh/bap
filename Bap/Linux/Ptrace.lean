@@ -77,6 +77,11 @@ structure PtraceTable where
   /-- Of each traced thread, the number and the first argument of the system call that it last started, which `orig_rax` and the like
   are: the registers have its result once it is made. -/
   calls : Std.HashMap Nat (Nat × Nat) := {}
+  /-- Of a thread stopped at the start of a system call, of a target whose result is in the register of its number: the number that it
+  is to make and what it gives if that is none, which `orig_rax` and `rax` are there, as Linux has it, until it goes on. -/
+  entries : Std.HashMap Nat (Nat × Nat) := {}
+  /-- The threads whose next call is not made, as their tracer said, with what it gives. -/
+  skipping : Std.HashMap Nat Nat := {}
 
 /-- The ptrace and the stops of a machine. -/
 structure Ptrace where
@@ -333,7 +338,10 @@ def processExited (ptrace : Ptrace) (emu : Emu) (group status : Nat) : IO Unit :
         match (← emu.taskTable.get).find? tid with
         | some { status := none, .. } => kill emu tid ptrace.numbers.kill
         | _ => pure ()
-      else if (table.stops.get? tid).any (·.traced) then release ptrace emu tid
+      else if (table.stops.get? tid).any (·.traced) then
+        -- A call that it is stopped at the start of is made as it started, as no tracer says otherwise now.
+        ptrace.table.modify fun table => { table with entries := table.entries.erase tid }
+        release ptrace emu tid
   for tid in gone do disarmStep ptrace emu tid
   ptrace.table.modify fun table =>
     { table with
@@ -343,6 +351,8 @@ def processExited (ptrace : Ptrace) (emu : Emu) (group status : Nat) : IO Unit :
       pending := table.pending.filter fun tid _ => !gone.contains tid
       exiting := table.exiting.filter (!gone.contains ·)
       calls := table.calls.filter fun tid _ => !gone.contains tid
+      entries := table.entries.filter fun tid _ => !gone.contains tid
+      skipping := table.skipping.filter fun tid _ => !gone.contains tid
       -- What it was to be told is no one's to hear now.
       untold := table.untold.filter (·.1 != group) }
   wakeWaits ptrace
@@ -438,12 +448,15 @@ private inductive Slot where
   | callNumber
   /-- What `ARM_ORIG_r0` is: the first argument of the system call that the thread last started, or `R0` if none. -/
   | callArgument
+  /-- A register that has the number of a system call at its start and its result at its end, as `rax` does. -/
+  | result (name : String)
 
 private def slotsOf : Architecture → Option (List Slot)
-  | .x86_64 => some ((["R15", "R14", "R13", "R12", "RBP", "RBX", "R11", "R10", "R9", "R8", "RAX", "RCX", "RDX", "RSI", "RDI"].map .register) ++
+  | .x86_64 => some ((["R15", "R14", "R13", "R12", "RBP", "RBX", "R11", "R10", "R9", "R8"].map .register) ++ [.result "RAX"] ++
+      (["RCX", "RDX", "RSI", "RDI"].map .register) ++
       [.callNumber, .pc, .constant 0x33, .flags, .register "RSP", .constant 0x2b, .register "FS_BASE", .register "GS_BASE",
        .constant 0, .constant 0, .constant 0, .constant 0])
-  | .i686 => some ((["EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "EAX"].map .register) ++
+  | .i686 => some ((["EBX", "ECX", "EDX", "ESI", "EDI", "EBP"].map .register) ++ [.result "EAX"] ++
       [.constant 0x2b, .constant 0x2b, .constant 0, .constant 0x63, .callNumber, .pc, .constant 0x23, .flags, .register "ESP", .constant 0x2b])
   | .aarch64 => some (((List.range 31).map fun index => .register s!"X{index}") ++ [.register "SP", .pc, .flags])
   | .riscv64 | .riscv32 => some (.pc :: (List.range 31).map fun index => .register s!"X{index + 1}")
@@ -472,7 +485,14 @@ private def readSlots (ptrace : Ptrace) (emu : Emu) (tid : Nat) (slots : List Sl
   let width ← wordWidth emu
   slots.mapM fun slot => match slot with
     | .register name => threadValue emu tid name width
-    | .callNumber => do pure ((((← ptrace.table.get).calls.get? tid).map (·.1)).getD (2 ^ width - 1))
+    | .result name => do
+      match ((← ptrace.table.get).entries.get? tid).map (·.2) with
+      | some result => pure result
+      | none => threadValue emu tid name width
+    | .callNumber => do
+      match ((← ptrace.table.get).entries.get? tid).map (·.1) with
+      | some number => pure number
+      | none => pure ((((← ptrace.table.get).calls.get? tid).map (·.1)).getD (2 ^ width - 1))
     | .callArgument => do
       match ((← ptrace.table.get).calls.get? tid).map (·.2) with
       | some argument => pure argument
@@ -493,6 +513,15 @@ private def writeSlots (ptrace : Ptrace) (emu : Emu) (tid : Nat) (slots : List S
   for (slot, value) in slots.zip values do
     match slot with
     | .register name => setThreadReg emu tid ⟨name, .imm width, 0, false⟩ (.bits (BitVec.ofNat width value))
+    -- At the start of a call, what it is to be and what it gives if it isn't one, until it goes on: see `leaveEntry`.
+    | .result name =>
+      match (← ptrace.table.get).entries.get? tid with
+      | some (number, _) => ptrace.table.modify fun table => { table with entries := table.entries.insert tid (number, value) }
+      | none => setThreadReg emu tid ⟨name, .imm width, 0, false⟩ (.bits (BitVec.ofNat width value))
+    | .callNumber =>
+      match (← ptrace.table.get).entries.get? tid with
+      | some (_, result) => ptrace.table.modify fun table => { table with entries := table.entries.insert tid (value, result) }
+      | none => pure ()
     | .pc =>
       if (← thread emu) == tid then setPc emu value
       else emu.threadsRef.modify fun contexts => contexts.map fun context =>
@@ -501,6 +530,19 @@ private def writeSlots (ptrace : Ptrace) (emu : Emu) (tid : Nat) (slots : List S
       for (name, bit) in flagBits ptrace.architecture do
         setThreadReg emu tid ⟨name, .imm 1, 0, false⟩ (.bits (BitVec.ofNat 1 ((value >>> bit) &&& 1)))
     | _ => pure ()
+
+/-- A thread goes on from the start of a system call, as its tracer left `orig_rax` and `rax`: the call that it says is made, or if it
+says none, as -1 and any other below 0 are, none is, and the call gives what `rax` says. -/
+private def leaveEntry (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Unit := do
+  let some (number, result) := (← ptrace.table.get).entries.get? tid | return
+  ptrace.table.modify fun table => { table with entries := table.entries.erase tid, calls := table.calls.insert tid (number, ((table.calls.get? tid).map (·.2)).getD 0) }
+  let width ← wordWidth emu
+  if number ≥ 2 ^ (width - 1) then
+    ptrace.table.modify fun table => { table with skipping := table.skipping.insert tid result }
+  else
+    match slotsOf ptrace.architecture |>.bind (·.findSome? fun slot => match slot with | .result name => some name | _ => none) with
+    | some name => setThreadReg emu tid ⟨name, .imm width, 0, false⟩ (.bits (BitVec.ofNat width number))
+    | none => pure ()
 
 /-! ### Memory of a tracee -/
 
@@ -725,6 +767,7 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
         let signal := numbers.trap ||| (if tracee.options &&& 1 != 0 then 0x80 else 0)
         stopThread ptrace emu pid { status := stoppedStatus signal, traced := true, signal := numbers.trap }
         return ← ok
+    leaveEntry ptrace emu pid
     release ptrace emu pid
     if step then armStep ptrace emu pid
     ok
@@ -767,6 +810,7 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
     ptrace.table.modify fun table =>
       { table with tracees := table.tracees.erase pid, pending := table.pending.erase pid, calls := table.calls.erase pid }
     disarmStep ptrace emu pid
+    leaveEntry ptrace emu pid
     if data != 0 then ptrace.signals.send emu (some pid) (← groupOf emu pid) ⟨data, 0, .sent group 0 0⟩
     release ptrace emu pid
     ok
@@ -913,6 +957,10 @@ def serve (ptrace : Ptrace) (emu : Emu) : IO Unit := do
     let arg (index : Nat) : Nat := args.getD index 0
     let tid ← thread current
     -- Where a wait that a signal interrupts starts again from, which the signals would have noted had they served it.
+    -- A call that its tracer said not to make, at its start: it gives what the tracer said, and is over.
+    if let some result := (← ptrace.table.get).skipping.get? tid then
+      ptrace.table.modify fun table => { table with skipping := table.skipping.erase tid }
+      return .returnValue result
     ptrace.signals.noteCall current number
     if (← ptrace.table.get).tracees.contains tid then
       ptrace.table.modify fun table => { table with calls := table.calls.insert tid (number, arg 0) }
@@ -922,6 +970,10 @@ def serve (ptrace : Ptrace) (emu : Emu) : IO Unit := do
         ptrace.table.modify fun table => { table with tracees := table.tracees.insert tid { tracee with inSyscall := true } }
         let signal := numbers.trap ||| (if tracee.options &&& 1 != 0 then 0x80 else 0)
         stopThread ptrace current tid { status := stoppedStatus signal, traced := true, signal := numbers.trap }
+        -- Where the number and the result are one register, it says -ENOSYS until the tracer says otherwise.
+        if slotsOf ptrace.architecture |>.any (·.any fun slot => slot matches .result _) then
+          let width ← wordWidth current
+          ptrace.table.modify fun table => { table with entries := table.entries.insert tid (number, 2 ^ width - 38) }
         return ← again current
     -- What seccomp makes of the call, which it decides once a tracer saw it start, as Linux has it.
     if let some action := ← (← ptrace.screen.get) current tid number args then return action
@@ -1053,7 +1105,9 @@ def save (ptrace : Ptrace) : IO ByteArray := do
     table.pending.toList
   let out := putList putNat out table.exiting
   let out := putSorted putPair out table.stepping.toList
-  pure (putSorted (fun out (tid, call) => putPair (putNat out tid) call) out table.calls.toList)
+  let out := putSorted (fun out (tid, call) => putPair (putNat out tid) call) out table.calls.toList
+  let out := putSorted (fun out (tid, entry) => putPair (putNat out tid) entry) out table.entries.toList
+  pure (putSorted putPair out table.skipping.toList)
 
 open Wire in
 def load (ptrace : Ptrace) (emu : Emu) (data : ByteArray) : IO Unit := do
@@ -1078,10 +1132,16 @@ def load (ptrace : Ptrace) (emu : Emu) (data : ByteArray) : IO Unit := do
       let (tid, at_) ← getNat data at_
       let (call, at_) ← getPair data at_
       .ok ((tid, call), at_)) data at_
+    let (entries, at_) ← getList (fun data at_ => do
+      let (tid, at_) ← getNat data at_
+      let (entry, at_) ← getPair data at_
+      .ok ((tid, entry), at_)) data at_
+    let (skipping, at_) ← getList getPair data at_
     expectEnd data at_
     .ok { waiting := Std.HashMap.ofList waiting, tracees := Std.HashMap.ofList tracees, stops := Std.HashMap.ofList stops, continued, injected := Std.HashMap.ofList injected
           messages := Std.HashMap.ofList messages, untold, pending := Std.HashMap.ofList pending, exiting
-          stepping := Std.HashMap.ofList stepping, calls := Std.HashMap.ofList calls }
+          stepping := Std.HashMap.ofList stepping, calls := Std.HashMap.ofList calls
+          entries := Std.HashMap.ofList entries, skipping := Std.HashMap.ofList skipping }
   let table ← IO.ofExcept decoded
   -- The steps that were armed are those of the table, each with its hook, which isn't in the bytes.
   for (_, hook) in (← ptrace.stepHooks.get).toList do removeHook emu hook
