@@ -74,6 +74,21 @@ class StoreLog {
 
 public:
   void note(uint64_t address, uint64_t size, bool bigEndian, uint64_t value) {
+    // An access as an instruction makes it, aligned to its size, is in one word of the bitmap and one page: one mask and one copy.
+    if ((size == 1 || size == 2 || size == 4 || size == 8) && (address & (size - 1)) == 0) {
+      Page *page = pageOf(address >> 12);
+      size_t offset = static_cast<size_t>(address & 4095);
+      // A bit for each byte of it.
+      uint64_t mask = ((uint64_t{1} << size) - 1) << (offset & 63);
+      uint64_t &word = page->written[offset >> 6];
+      count += static_cast<size_t>(__builtin_popcountll(mask & ~word));
+      word |= mask;
+      uint8_t bytes[8];
+      for (uint64_t index = 0; index != size; ++index)
+        bytes[index] = static_cast<uint8_t>(value >> ((bigEndian ? size - 1 - index : index) * 8));
+      std::memcpy(page->values + offset, bytes, size);
+      return;
+    }
     for (uint64_t index = 0; index != size; ++index) {
       uint64_t at = address + index;
       Page *page = pageOf(at >> 12);
