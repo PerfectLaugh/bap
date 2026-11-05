@@ -1626,6 +1626,8 @@ struct ChainEntry {
   // An output with the slot of its flag, none if it is always written.
   struct Output { uint64_t variable, slot, width, flag = none; };
   std::vector<Output> outputs;
+  // Those of them with a flag, which have to be looked at each time, where the others only once a run.
+  std::vector<Output> flagged;
   std::vector<std::pair<uint64_t, uint64_t>> flags;    // slot of an output, slot that says it was written
   std::unordered_map<uint64_t, std::vector<Output>> checkpoints;
   // Where it went last and what is there, so that a jump that goes where it went needs no search, as QEMU patches its jumps.
@@ -1633,6 +1635,9 @@ struct ChainEntry {
   ChainEntry *lastTarget = nullptr;
   // Whether its program reads and writes its variables in the registers of the chain.
   bool direct = false;
+  // The run of the chain in which its outputs that are always written were said to be, and in which what it needs was found bound,
+  // which, as what is bound stays so in a run, holds for the rest of it.
+  uint64_t outputsSaid = 0, readyIn = 0;
   // What a run of the chain did of it, to say at its end.
   bool touched = false;
   uint64_t runs = 0, executed = 0;
@@ -1640,6 +1645,8 @@ struct ChainEntry {
 
 struct Chain {
   std::unordered_map<uint64_t, ChainEntry> entries;
+  // Which run of it this is, from 1.
+  uint64_t run = 0;
   ~Chain() { clear(); }
   void clear() {
     for (auto &entry : entries)
@@ -1724,7 +1731,10 @@ extern "C" lean_obj_res bap_jit_chain_add(lean_obj_arg chainObject, uint64_t pc,
     for (const auto &flag : entry.flags)
       if (flag.first == output.slot) { output.flag = flag.second; return; }
   };
-  for (auto &output : entry.outputs) flagOf(output);
+  for (auto &output : entry.outputs) {
+    flagOf(output);
+    if (output.flag != ChainEntry::none) entry.flagged.push_back(output);
+  }
   for (auto &checkpoint : entry.checkpoints)
     for (auto &output : checkpoint.second) flagOf(output);
   auto found = chain->entries.find(pc);
@@ -1796,9 +1806,16 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
     BapCells memory{nullptr, 0, 0, observer, nullptr, persistent, &changes, codeObserver};
     memory.filter = filter;
     memory.quietSites = quietSites != 0;
-    // That a run left these variables written, which those with registers did there in place of their slots.
-    auto written = [&](const std::vector<ChainEntry::Output> &outputs, bool copy) {
-      for (const auto &output : outputs) {
+    const uint64_t run = ++chain->run;
+    // That a run left these variables written, which those with registers did there in place of their slots. What a range always
+    // writes, of its outputs rather than of a checkpoint's, it has said once this run as it has written there.
+    auto written = [&](ChainEntry *entry, const std::vector<ChainEntry::Output> &all, bool copy) {
+      const std::vector<ChainEntry::Output> *outputs = &all;
+      if (!copy && &all == &entry->outputs) {
+        if (entry->outputsSaid == run) outputs = &entry->flagged;
+        entry->outputsSaid = run;
+      }
+      for (const auto &output : *outputs) {
         if (output.flag != ChainEntry::none && state[output.flag] == 0)
           continue;
         ensure(output.variable);
@@ -1822,7 +1839,7 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
       next = program->function(state.data(), &memory);
       if (memory.error != nullptr) { error = memory.error; break; }
       if (current->direct)
-        written(outputsAt(current, next), false);
+        written(current, outputsAt(current, next), false);
       uint64_t effect = current->effectSlot == ChainEntry::none ? 0 : state[current->effectSlot];
       uint64_t left = current->budgetSlot == ChainEntry::none ? budget : state[current->budgetSlot];
       uint64_t ranChained = budget >= left ? budget - left : 0;
@@ -1849,12 +1866,15 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
       // What the run wrote, as Lean takes it: the outputs of the checkpoint where it went if it is one, each if its flag says so. If
       // the next can't run after all, Lean takes them again from the last run, the same.
       if (!current->direct)
-        written(outputsAt(current, next), true);
-      bool ready = true;
-      for (uint64_t variable : target->required)
-        if (variable >= bound.size() || bound[variable] == 0) { ready = false; break; }
-      if (!ready)
-        break;
+        written(current, outputsAt(current, next), true);
+      if (target->readyIn != run) {
+        bool ready = true;
+        for (uint64_t variable : target->required)
+          if (variable >= bound.size() || bound[variable] == 0) { ready = false; break; }
+        if (!ready)
+          break;
+        target->readyIn = run;
+      }
       uint64_t remaining = budget - ranChained;
       chained += ranChained + 1;
       budget = remaining - 1;
