@@ -2044,6 +2044,21 @@ extern "C" lean_obj_res bap_jit_memory_read_range(lean_obj_arg memoryObject, uin
   return lean_io_result_mk_ok(result);
 }
 
+// Whether the bytes from an address are these, without making an array of them: what a trace asks of each instruction that it keeps.
+extern "C" lean_obj_res bap_jit_memory_matches(lean_obj_arg memoryObject, uint64_t address, lean_obj_arg bytesObject, lean_obj_arg) {
+  auto *memory = static_cast<PagedMemory *>(lean_get_external_data(memoryObject));
+  size_t size = lean_sarray_size(bytesObject);
+  uint8_t small[64];
+  std::vector<uint8_t> large;
+  uint8_t *read = small;
+  if (size > sizeof small) {
+    large.resize(size);
+    read = large.data();
+  }
+  memory->readRange(address, size, read);
+  return lean_io_result_mk_ok(lean_box(std::memcmp(read, lean_sarray_cptr(bytesObject), size) == 0));
+}
+
 extern "C" lean_obj_res bap_jit_memory_step_begin(lean_obj_arg memoryObject, lean_obj_arg) {
   static_cast<PagedMemory *>(lean_get_external_data(memoryObject))->beginStep();
   return lean_io_result_mk_ok(lean_box(0));

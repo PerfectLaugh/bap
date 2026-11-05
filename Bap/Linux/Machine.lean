@@ -2103,7 +2103,7 @@ private def traceModelId : String := "bap.trace"
 and those that stopped for their end. -/
 private def builtinModels : List (String × Nat) :=
   [(Signals.modelId, 1), (Ptrace.modelId, 2), (Seccomp.modelId, 1), (Timers.modelId, 1), (Ring.modelId, 1), (heapModelId, 1), (libraryModelId, 1),
-    (traceModelId, 1)]
+    (traceModelId, 2)]
 
 private def builtinVersion (id : String) : Nat := (builtinModels.lookup id).getD 1
 

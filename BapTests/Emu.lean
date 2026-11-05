@@ -4527,6 +4527,7 @@ private def runEmulator : IO Unit := do
   let smcEmu ← Tuned.riscv64 smcCode 0 0
   Bap.Emu.setReg smcEmu input (.bits (BitVec.ofNat 64 patchWord))
   Bap.Emu.setReg smcEmu (reg "X12") (.bits (BitVec.ofNat 64 0))
+  Bap.Emu.traceStart smcEmu
   let _ ← Bap.Emu.run smcEmu 2
   assertTrue "Emu guest store updates mapped code" (patched == (← Bap.Emu.read smcEmu 0 4))
   onStepwise <| assertEqual "Emu guest code write preserves unrelated JIT blocks" 1 (← smcEmu.engine.cache.get).size
@@ -4537,6 +4538,27 @@ private def runEmulator : IO Unit := do
     (.ok (← Bap.Emu.reg smcEmu output))
   onStepwise <| assertEqual "Emu guest code write lifts the patched instruction again" 4
     (← Bap.Primus.Lifted.stats smcEmu.engine).lifts
+  -- The trace has what ran at each pc, which isn't what is there now the first time round.
+  let ran := [(0, smcCode.extract 0 4), (4, smcCode.extract 4 8), (8, smcCode.extract 8 12), (0, patched)]
+  let instructions ← Bap.Emu.traceInstructions smcEmu
+  assertTrue s!"Emu trace keeps the bytes that each instruction ran as: {instructions.map fun (pc, bytes) => (pc, bytes.toList)}"
+    (instructions.length == ran.length && (instructions.zip ran).all fun ((pc, bytes), (at_, expected)) => pc == at_ && bytes == expected)
+  let saved ← Bap.Emu.traceSave smcEmu
+  let _ ← Bap.Emu.traceStop smcEmu
+  Bap.Emu.traceLoad smcEmu saved
+  let loaded ← Bap.Emu.traceInstructions smcEmu
+  assertTrue "Emu a trace put back has the same bytes"
+    (loaded.length == ran.length && (loaded.zip instructions).all fun ((pc, bytes), (at_, expected)) => pc == at_ && bytes == expected)
+  let _ ← Bap.Emu.traceStop smcEmu
+  -- A ring of two keeps the bytes of what it kept, and lets go of those that nothing kept needs.
+  Bap.Emu.write smcEmu 0 (smcCode.extract 0 4)
+  Bap.Emu.setPc smcEmu 0
+  Bap.Emu.traceStartCapacity smcEmu 2
+  let _ ← Bap.Emu.run smcEmu 4
+  let kept ← Bap.Emu.traceInstructions smcEmu
+  assertTrue s!"Emu a ring keeps the bytes of the pcs it kept: {kept.map fun (pc, bytes) => (pc, bytes.toList)}"
+    (kept.map (·.1) == [8, 0] && (kept.map (·.2)) == [smcCode.extract 8 12, patched])
+  let _ ← Bap.Emu.traceStop smcEmu
 
   let x86Code := (← LLVM.assemble "x86_64" "movq $40, %rax") ++
     (← LLVM.assemble "x86_64" "addq $2, %rax")

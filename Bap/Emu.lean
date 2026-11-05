@@ -88,13 +88,28 @@ structure TraceAccess where
   thread : ThreadId
   deriving DecidableEq, Repr
 
+/-- The pcs of a trace, the last `capacity` of them or all if that is 0, in order: those of `front`, then those of `back` from the last.
+Of each instruction it also has the bytes that it ran as, by when they were new: what was at a pc is what it was the last time that it
+changed before then, which a program that writes its own code changes, and which disassembling it later wouldn't say. -/
+private structure TraceRing where
+  front : List Nat := []
+  back : List Nat := []
+  retained : Nat := 0
+  /-- How many it saw, kept or not. -/
+  count : Nat := 0
+  dropped : Nat := 0
+  capacity : Nat := 0
+  /-- Each time that the bytes at a pc were new, newest first: which of what it saw, from 0, was the first to run as them, where, and the
+  bytes. -/
+  code : List (Nat × Nat × ByteArray) := []
+  /-- How many there are of `code`, and how many there may be before what no pc kept needs any more goes. -/
+  codeSize : Nat := 0
+  codeLimit : Nat := 64
+  /-- The bytes that each pc had the last time that it ran, which also say how long the instruction there is, while they stay. -/
+  known : Std.HashMap Nat ByteArray := {}
+
 private structure TraceState where
-  pcsFront : List Nat := []
-  pcsBack : List Nat := []
-  pcRetained : Nat := 0
-  pcCount : Nat := 0
-  droppedPcs : Nat := 0
-  pcCapacity : Nat := 0
+  ring : TraceRing := {}
   accesses : List TraceAccess := []
   accessCount : Nat := 0
   /-- How many there are of `accesses`, which are let go of when they are twice what is kept. -/
@@ -1021,7 +1036,7 @@ def breakpoints (emu : Emu) : IO (List Nat) := do
 
 private def traceBeginPc (emu : Emu) (pcCapacity accessCapacity : Nat) (watch : Option (Nat × Nat)) : IO Unit := do
   forgetMemoryFilter emu
-  emu.trace.set (some { pcCapacity, accessCapacity, watch })
+  emu.trace.set (some { ring := { capacity := pcCapacity }, accessCapacity, watch })
 
 private def traceBegin (emu : Emu) (capacity : Nat) (watch : Option (Nat × Nat)) : IO Unit :=
   traceBeginPc emu 0 capacity watch
@@ -1041,8 +1056,27 @@ def traceStartWatch (emu : Emu) (range : Nat × Nat) (capacity : Nat) : IO Unit 
     throw <| IO.userError "invalid Emu trace watch range"
   traceBegin emu capacity (some range)
 
+private def TraceRing.pcs (ring : TraceRing) : List Nat :=
+  ring.front ++ ring.back.reverse
+
 private def pcList (state : TraceState) : List Nat :=
-  state.pcsFront ++ state.pcsBack.reverse
+  state.ring.pcs
+
+/-- Each pc that a ring kept, with the bytes that it ran as: the last that were new at it by then. -/
+private def TraceRing.instructions (ring : TraceRing) : List (Nat × ByteArray) := Id.run do
+  let pcs := ring.pcs
+  let versions := ring.code.reverse.toArray
+  let mut current : Std.HashMap Nat ByteArray := {}
+  let mut next := 0
+  let mut out : Array (Nat × ByteArray) := Array.mkEmpty pcs.length
+  for (pc, index) in pcs.zipIdx (ring.count - pcs.length) do
+    while h : next < versions.size do
+      let (at_, where_, bytes) := versions[next]
+      if at_ > index then break
+      current := current.insert where_ bytes
+      next := next + 1
+    out := out.push (pc, current.getD pc ByteArray.empty)
+  pure out.toList
 
 /-- Stops the trace, and gives the pcs that it kept. -/
 def traceStop (emu : Emu) : IO (List Nat) := do
@@ -1056,10 +1090,16 @@ def tracePcs (emu : Emu) : IO (List Nat) := do
   let current ← emu.trace.get
   pure (pcList (current.getD {}))
 
+/-- Each pc that the trace kept so far, with the bytes of the instruction that ran there then, which may not be what is there now. Empty
+bytes are of an instruction that couldn't be fetched and decoded. -/
+def traceInstructions (emu : Emu) : IO (List (Nat × ByteArray)) := do
+  let current ← emu.trace.get
+  pure (current.getD {}).ring.instructions
+
 /-- How many pcs the trace let go of for its capacity. -/
 def traceDroppedPcs (emu : Emu) : IO Nat := do
   let current ← emu.trace.get
-  pure (current.getD {}).droppedPcs
+  pure (current.getD {}).ring.dropped
 
 /-- The accesses that the trace kept. -/
 def traceAccesses (emu : Emu) : IO (List TraceAccess) := do
@@ -1085,11 +1125,15 @@ def traceSave (emu : Emu) : IO ByteArray := do
   match ← emu.trace.get with
   | none => pure (ByteArray.mk #[0])
   | some state =>
-    let pcs := pcList state
+    let ring := state.ring
+    let pcs := ring.pcs
     let accesses := state.accesses.reverse
     let mut out := (ByteArray.mk #[1]) ++ word pcs.length
     for pc in pcs do out := out ++ word pc
-    out := out ++ word state.pcRetained ++ word state.pcCount ++ word state.droppedPcs ++ word state.pcCapacity
+    out := out ++ word ring.retained ++ word ring.count ++ word ring.dropped ++ word ring.capacity
+    let code := ring.code.reverse
+    out := out ++ word code.length
+    for (at_, pc, bytes) in code do out := out ++ word at_ ++ word pc ++ word bytes.size ++ bytes
     out := out ++ word accesses.length
     for access in accesses do
       out := out ++ word access.insn ++ word access.pc ++ word access.address ++ word access.size
@@ -1112,6 +1156,12 @@ def traceLoad (emu : Emu) (data : ByteArray) : IO Unit := do
     let mut value := 0
     for index in List.range 8 do value := value + (← byte) * 256 ^ index
     pure value
+  let bytes : IO ByteArray := do
+    let size ← word
+    let index ← at_.get
+    if index + size > data.size then throw <| IO.userError "the trace of a checkpoint ends too soon"
+    at_.set (index + size)
+    pure (data.extract index (index + size))
   let list {α : Type} (item : IO α) : IO (List α) := do
     let count ← word
     let mut items := #[]
@@ -1121,10 +1171,14 @@ def traceLoad (emu : Emu) (data : ByteArray) : IO Unit := do
     | 0 => pure none
     | 1 => do
       let pcs ← list word
-      let pcRetained ← word
-      let pcCount ← word
-      let droppedPcs ← word
-      let pcCapacity ← word
+      let retained ← word
+      let count ← word
+      let dropped ← word
+      let capacity ← word
+      let code ← list do
+        let at_ ← word
+        let pc ← word
+        pure (at_, pc, ← bytes)
       let accesses ← list do
         let insn ← word
         let pc ← word
@@ -1138,12 +1192,10 @@ def traceLoad (emu : Emu) (data : ByteArray) : IO Unit := do
       let accessRetained ← word
       let accessCapacity ← word
       let watch ← if (← byte) == 1 then do let low ← word; pure (some (low, ← word)) else pure none
+      let known := code.foldl (init := {}) fun known (_, pc, bytes) => known.insert pc bytes
       let state : TraceState := {
-        pcsFront := pcs
-        pcRetained := pcRetained
-        pcCount := pcCount
-        droppedPcs := droppedPcs
-        pcCapacity := pcCapacity
+        ring := { front := pcs, retained, count, dropped, capacity, code := code.reverse, codeSize := code.length
+                  codeLimit := 2 * code.length + 64, known }
         accesses := accesses.reverse
         accessCount := accessCount
         accessRetained := accessRetained
@@ -1169,30 +1221,6 @@ private def serialize (emu : Emu) (action : IO α) : IO α := do
     try action finally Std.BaseMutex.unlock mutex
   | none => action
 
-private def recordTrace (emu : Emu) (address : Nat) : IO Unit := do
-  if (← emu.trace.get).isNone then return
-  serialize emu <| emu.trace.modify fun current => current.map fun state =>
-    if state.pcCapacity = 0 then
-      { state with pcsBack := address :: state.pcsBack, pcCount := state.pcCount + 1 }
-    else if state.pcRetained < state.pcCapacity then
-      { state with
-        pcsBack := address :: state.pcsBack
-        pcRetained := state.pcRetained + 1
-        pcCount := state.pcCount + 1
-      }
-    else
-      let (front, back) := if state.pcsFront.isEmpty then (state.pcsBack.reverse, []) else (state.pcsFront, state.pcsBack)
-      match front with
-      | [] =>
-        { state with pcsBack := [address], pcCount := state.pcCount + 1, droppedPcs := state.droppedPcs + 1 }
-      | _ :: rest =>
-        { state with
-          pcsFront := rest
-          pcsBack := address :: back
-          pcCount := state.pcCount + 1
-          droppedPcs := state.droppedPcs + 1
-        }
-
 private def recordAccess (emu : Emu) (write : Bool) (address size value : Nat) : IO Unit := do
   if (← emu.trace.get).isNone then return
   let pc ← emu.pc.get
@@ -1202,7 +1230,7 @@ private def recordAccess (emu : Emu) (write : Bool) (address size value : Nat) :
     else if state.watch.any fun range => !accessTouches range.1 range.2 address size then state
     else
       let access : TraceAccess := {
-        insn := state.pcCount - 1
+        insn := state.ring.count - 1
         pc
         address
         size
@@ -1244,24 +1272,6 @@ private def notifyCode (emu : Emu) (address : Nat) : IO Unit := do
 /-- Whether nothing watches the code that runs. -/
 private def rangeIsQuiet (emu : Emu) : IO Bool := do
   pure ((← emu.hooks.get).isEmpty && (← emu.trace.get).isNone)
-
-/-- The code site of a block inside a compiled range, whose first block is the step's. A block with hooks ends the range, with
-the block not entered and its hooks not fired: they are the next step's, which has the state that they read. -/
-private def observeRangeCode (emu : Emu) (address : Nat) : IO Bool := do
-  emu.pc.set address
-  let dirty := (← emu.engine.dirtyCode.get).isSome
-  let late := (← emu.rangeQuiet.get) &&
-    ((← emu.hookChanges.get) != (← emu.rangeHooks.get) || (← emu.trace.get).isSome)
-  let hooked := (← hooksNear emu address).any fun hook => hook.first ≤ address && address ≤ hook.last
-  -- A range that ends at its first site has done no good: where it starts, the step runs its one instruction by itself.
-  match ← emu.rangeStart.get with
-  | some start =>
-    emu.rangeStart.set none
-    if hooked then emu.watchedSteps.modify (·.insert start)
-  | none => pure ()
-  if rangeSiteStops dirty late hooked then return true
-  recordTrace emu address
-  pure false
 
 /-- The last access that faulted. -/
 def failure (emu : Emu) : IO (Option MemoryFault) := emu.lastFault.get
@@ -2039,6 +2049,93 @@ def nextInstruction (emu : Emu) (address : Nat) : IO (Option Nat) := do
     emu.lastFault.set fault
     emu.faultFresh.set fresh
     pure none
+
+/-- Lets go of what no pc that is kept ran as: of what was new before the first that is kept, only what was last at each pc. -/
+private def TraceRing.compact (ring : TraceRing) : TraceRing :=
+  let oldest := ring.count - ring.retained
+  let (kept, _) := ring.code.foldl (init := (([] : List (Nat × Nat × ByteArray)), ({} : Std.HashSet Nat)))
+    fun (kept, seen) version =>
+      if version.1 ≥ oldest then (version :: kept, seen)
+      else if seen.contains version.2.1 then (kept, seen)
+      else (version :: kept, seen.insert version.2.1)
+  let size := kept.length
+  { ring with code := kept.reverse, codeSize := size, codeLimit := 2 * size + 64 }
+
+/-- Whether two byte strings are the same, without unpacking them. -/
+private def sameBytes (left right : ByteArray) : Bool :=
+  left.size == right.size && Nat.all left.size fun index _ => left.get! index == right.get! index
+
+/-- Notes a pc in a ring. -/
+private def TraceRing.advance (ring : TraceRing) (address : Nat) : TraceRing :=
+  if ring.capacity = 0 then
+    { ring with back := address :: ring.back, count := ring.count + 1 }
+  else if ring.retained < ring.capacity then
+    { ring with back := address :: ring.back, retained := ring.retained + 1, count := ring.count + 1 }
+  else
+    let (front, back) := if ring.front.isEmpty then (ring.back.reverse, []) else (ring.front, ring.back)
+    match front with
+    | [] => { ring with back := [address], count := ring.count + 1, dropped := ring.dropped + 1 }
+    | _ :: rest => { ring with front := rest, back := address :: back, count := ring.count + 1, dropped := ring.dropped + 1 }
+
+/-- Notes a pc in a ring with the bytes that it runs as, if they may be new there. -/
+private def TraceRing.push (ring : TraceRing) (address : Nat) (bytes : ByteArray) : TraceRing :=
+  let same := match ring.known.get? address with
+    | some known => sameBytes known bytes
+    | none => false
+  let ring := if same then ring
+    else
+      let ring := { ring with code := (ring.count, address, bytes) :: ring.code, codeSize := ring.codeSize + 1
+                              known := ring.known.insert address bytes }
+      if ring.capacity != 0 && ring.codeSize > ring.codeLimit then ring.compact else ring
+  ring.advance address
+
+/-- The bytes of the instruction at an address as they are now, if they may not be `known`, which they were the last time: none if they
+are, and empty if it can't be fetched or decoded, without saying that anything faulted. -/
+private def changedBytes (emu : Emu) (known : Option ByteArray) (address : Nat) : IO (Option ByteArray) := do
+  -- What ran here before is still there, as the native memory says without making anything, which is most of the time.
+  if let some known := known then
+    if !known.isEmpty then
+      if let some native ← emu.engine.persistentMemory.get then
+        if ← Jit.memoryMatches native (UInt64.ofNat address) known then return none
+  let fault ← emu.lastFault.get
+  let fresh ← emu.faultFresh.get
+  try
+    let window ← fetch emu address
+    if let some known := known then
+      if !known.isEmpty && window.size ≥ known.size && sameBytes (window.extract 0 known.size) known then return none
+    match ← (← disassemblerFor emu (isThumb (← emu.state.get)) address).decode address window with
+    | .ok insn => pure (some (window.extract 0 (insn.next - address)))
+    | .error _ => pure (some ByteArray.empty)
+  catch _ =>
+    emu.lastFault.set fault
+    emu.faultFresh.set fresh
+    pure (some ByteArray.empty)
+
+private def recordTrace (emu : Emu) (address : Nat) : IO Unit := do
+  let some state ← emu.trace.get | return
+  let changed ← changedBytes emu (state.ring.known.get? address) address
+  serialize emu <| emu.trace.modify fun current => current.map fun state =>
+    { state with ring := match changed with
+      | some bytes => state.ring.push address bytes
+      | none => state.ring.advance address }
+
+/-- The code site of a block inside a compiled range, whose first block is the step's. A block with hooks ends the range, with
+the block not entered and its hooks not fired: they are the next step's, which has the state that they read. -/
+private def observeRangeCode (emu : Emu) (address : Nat) : IO Bool := do
+  emu.pc.set address
+  let dirty := (← emu.engine.dirtyCode.get).isSome
+  let late := (← emu.rangeQuiet.get) &&
+    ((← emu.hookChanges.get) != (← emu.rangeHooks.get) || (← emu.trace.get).isSome)
+  let hooked := (← hooksNear emu address).any fun hook => hook.first ≤ address && address ≤ hook.last
+  -- A range that ends at its first site has done no good: where it starts, the step runs its one instruction by itself.
+  match ← emu.rangeStart.get with
+  | some start =>
+    emu.rangeStart.set none
+    if hooked then emu.watchedSteps.modify (·.insert start)
+  | none => pure ()
+  if rangeSiteStops dirty late hooked then return true
+  recordTrace emu address
+  pure false
 
 /-- The bytes that `programAt` makes a program from, as they are now, which is what says whether it still stands. -/
 def codeAt (emu : Emu) (address : Nat) : IO ByteArray := do

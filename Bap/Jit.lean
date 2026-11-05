@@ -41,7 +41,8 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
     This takes a host whose accesses of those sizes are atomic, as x86-64 and AArch64 are. Between a store and a later
     load of another address there is no order: a fence of a guest is what gives that, by `Bap.Emu`'s stopping every
     worker of a parallel round at one, which `IO.wait` then orders.
-11. `readMemoryRange memory address size` is `size` bytes of what `readMemory` reads, from `address` on.
+11. `readMemoryRange memory address size` is `size` bytes of what `readMemory` reads, from `address` on, and `memoryMatches memory
+    address bytes` is whether those are `bytes`.
 12. `trimMemory` changes nothing that any operation here can tell. It may let the host have the memory of pages that
     hold only zeros, of those wholly between its bounds, when nothing stores there meanwhile.
 14. `createMemoryChunks bases chunks` is `createMemory` of each byte of each chunk at its base plus its offset, in that order,
@@ -261,6 +262,10 @@ opaque readMemory (memory : @& Memory) (address : UInt64) : IO UInt8
 /-- `size` bytes from an address (obligation 11). -/
 @[extern "bap_jit_memory_read_range"]
 opaque readMemoryRange (memory : @& Memory) (address : UInt64) (size : @& Nat) : IO ByteArray
+
+/-- Whether the bytes from an address are these: `readMemoryRange memory address bytes.size == bytes` (obligation 11). -/
+@[extern "bap_jit_memory_matches"]
+opaque memoryMatches (memory : @& Memory) (address : UInt64) (bytes : @& ByteArray) : IO Bool
 
 /-- A memory with each chunk at its base, which takes the host only the pages of them that aren't zeros (obligation 14). -/
 @[extern "bap_jit_memory_create_chunks"]
