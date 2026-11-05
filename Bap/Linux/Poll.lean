@@ -15,8 +15,9 @@ A call that has nothing ready waits until something changes, which has it run ag
 `timerfd` that it watches expires. A signal has it give `EINTR`, as Linux has it, with the mask that `ppoll`, `pselect6` and
 `epoll_pwait` give while it waits.
 
-An item of epoll with `EPOLLET` is told of when it becomes ready, and again once it was not ready, rather than each time that more
-comes; one of `EPOLLONESHOT` is told of once until `EPOLL_CTL_MOD`. An item goes when nothing has its open file any more. -/
+An item of epoll with `EPOLLET` is told of when it becomes ready, and again when what it watches changes or is ready of more than it
+was told, rather than each time that it is waited for; one of `EPOLLONESHOT` is told of once until `EPOLL_CTL_MOD`. An item goes when
+nothing has its open file any more. -/
 
 namespace Bap.Linux
 
@@ -99,6 +100,19 @@ def readiness (kernel : Kernel) (live : List Nat) (now pending file : Nat) : Nat
           { read := items.any fun item =>
               let ready := readiness kernel live now pending item.file depth
               (ready.read && item.events &&& 1 != 0) || (ready.write && item.events &&& 4 != 0) || ready.error || ready.hangup }
+
+/-- How many times what an open file is ready of has changed, which `EPOLLET` goes by: of the end of a pipe that reads, all that was
+ever written to it, and of one that writes, all that was ever read of it; of the slave of a pseudo-terminal, the changes of its master;
+and otherwise the changes of its inode. -/
+def changes (kernel : Kernel) (file : Nat) : Nat :=
+  match kernel.openFiles.get? file with
+  | none => 0
+  | some opened =>
+    match kernel.inodes.get? opened.inode with
+    | some { content := .pipe buffer head consumed, .. } => if opened.flags &&& 3 == 0 then consumed + (buffer.size - head) else consumed
+    | some { content := .ptySlave master, .. } => ((kernel.inodes.get? master).map (·.details.changes)).getD 0
+    | some inode => inode.details.changes
+    | none => 0
 
 /-- The bits of what is ready, of `poll` or of `epoll`, whose `POLLWRNORM` is `POLLOUT` on MIPS. -/
 def bits (ready : Ready) (wrnorm : Nat) : Nat :=
@@ -255,12 +269,17 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       let revents := bits state 0x100 &&& (item.events ||| 0x8 ||| 0x10) &&& 0x3fff
       let edge := item.events &&& 0x80000000 != 0
       let once := item.events &&& 0x40000000 != 0
-      if revents != 0 && !(item.told && (edge || once)) && events.length < limit then
+      let seen := changes kernel item.file
+      -- Of EPOLLET, what changed or is ready of more since it was told of is told of again; one of EPOLLONESHOT waits for EPOLL_CTL_MOD.
+      let fresh := match item.told with
+        | none => true
+        | some (told, before) => edge && !once && (revents ||| told != told || seen != before)
+      if revents != 0 && fresh && events.length < limit then
         events := events ++ [(revents, item.data)]
-        kept := kept ++ [{ item with told := edge || once }]
+        kept := kept ++ [{ item with told := if edge || once then some (revents, seen) else none }]
       else
-        -- What isn't ready may be told of again once it is, of EPOLLET; one of EPOLLONESHOT waits for EPOLL_CTL_MOD.
-        kept := kept ++ [if revents == 0 && edge && !once then { item with told := false } else item]
+        -- What isn't ready is told of again once it is, of EPOLLET.
+        kept := kept ++ [if revents == 0 && edge && !once then { item with told := none } else item]
     poller.kernel.modify (·.setContent number_ (.epoll kept))
     if !events.isEmpty || timeout == some 0 || due.any (· ≤ now) then
       timers.finish tid
@@ -317,7 +336,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         | 2, some _ => pure (items.filter fun item => !(item.fd == arg 2 && item.file == file))
         | 3, some _ => do
           let (events, data) ← event
-          pure (items.map fun item => if item.fd == arg 2 && item.file == file then { item with events, data, told := false } else item)
+          pure (items.map fun item => if item.fd == arg 2 && item.file == file then { item with events, data, told := none } else item)
         | 2, none | 3, none => return ← fail 2
         | _, _ => return ← fail einval
       poller.kernel.set (kernel.setContent epollNumber (.epoll changed))

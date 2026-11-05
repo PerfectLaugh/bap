@@ -23,9 +23,7 @@ def socketAt (kernel : Kernel) (number : Nat) : Option Socket :=
 
 /-- What the socket of an inode is now. An inode that isn't there stays not there. -/
 def setSocket (kernel : Kernel) (number : Nat) (socket : Socket) : Kernel :=
-  match kernel.inodes.get? number with
-  | some inode => { kernel with inodes := kernel.inodes.insert number { inode with content := .socket socket } }
-  | none => kernel
+  kernel.setContent number (.socket socket)
 
 /-- The socket of a descriptor, with its inode. -/
 def socketOf (kernel : Kernel) (group fd : Nat) : Result (Nat × Socket) := do

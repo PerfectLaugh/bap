@@ -1,0 +1,7 @@
+pipe 1 1 0
+pipe with more 1
+socketpair 1 1 0
+socketpair with more 1
+eventfd 1 1 0
+eventfd with more 1
+pipe to write 1 0

@@ -78,7 +78,7 @@ def forget (notifier : Notifier) : IO Unit := do
 once it has said something. -/
 def tell (kernel : Kernel) (listener : Nat) (inode mask : Nat) (name : String := "") (cookie : Nat := 0) : Kernel :=
   match kernel.inodes.get? listener with
-  | some entry@{ content := .inotify watches notices next cookies, .. } =>
+  | some { content := .inotify watches notices next cookies, .. } =>
     let (watches, notices) := watches.foldl (init := (([] : List Watch), notices)) fun (kept, notices) watch =>
       if watch.inode != inode || (watch.mask &&& mask &&& 0xfff == 0 && mask != inIgnored) then (kept ++ [watch], notices)
       else
@@ -90,7 +90,7 @@ def tell (kernel : Kernel) (listener : Nat) (inode mask : Nat) (name : String :=
         let notices := add notices { wd := watch.wd, mask, cookie, name }
         if watch.mask &&& inOneshot != 0 && mask != inIgnored then (kept, add notices { wd := watch.wd, mask := inIgnored })
         else (kept ++ [watch], notices)
-    { kernel with inodes := kernel.inodes.insert listener { entry with content := .inotify watches notices next cookies } }
+    kernel.setContent listener (.inotify watches notices next cookies)
   | _ => kernel
 
 /-- An instance has no watch of an inode any more, which it says. -/

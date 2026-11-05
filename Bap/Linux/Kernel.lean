@@ -96,14 +96,15 @@ structure Socket where
   remote : Option String := none
 
 /-- What an epoll instance watches of a descriptor: the descriptor that it was given, its open file, which is what is watched, the
-events that it asks for, the data that it gives back with them, and whether it was told of and hasn't been ready since, of
-`EPOLLET`, or is told of no more until it is changed, of `EPOLLONESHOT`. -/
+events that it asks for, the data that it gives back with them, and if it was told of and has been ready since, the events that it
+was told of and how many times what it watches had changed then: of `EPOLLET`, it is told of again once either is other, and of
+`EPOLLONESHOT`, no more until it is changed. -/
 structure EpollItem where
   fd : Nat
   file : Nat
   events : Nat
   data : Nat
-  told : Bool := false
+  told : Option (Nat × Nat) := none
   deriving Repr
 
 /-- A pseudo-terminal, as its master has it: its number under `/dev/pts`, its `termios` and window, what its slave has to read, as a
@@ -149,8 +150,8 @@ structure FileLock where
 def lockEnd : Nat := 2 ^ 63
 
 /-- What an inode has of itself besides what it holds: when it was last read, written and changed, by the kernel's clock, whose it is,
-its extended attributes, the seals of `memfd_create`, and its locks, of which those whose owner is gone are let go of as it is locked
-again. -/
+its extended attributes, the seals of `memfd_create`, its locks, of which those whose owner is gone are let go of as it is locked
+again, and how many times what it holds was set by `Kernel.setContent`, which an item of epoll with `EPOLLET` goes by. -/
 structure Meta where
   accessed : Nat := 1700000000 * 1000000000
   modified : Nat := 1700000000 * 1000000000
@@ -160,6 +161,7 @@ structure Meta where
   attributes : List (String × ByteArray) := []
   seals : Nat := 0
   locks : List FileLock := []
+  changes : Nat := 0
 
 /-- A watch of `inotify_add_watch`: its number, the inode that it watches, and what it is to hear of. -/
 structure Watch where
@@ -1073,10 +1075,11 @@ def addDevice (kernel : Kernel) (path : String) (content : Content) (mode : Nat)
   let kernel := addDirectories kernel (Path.parent path)
   addInode kernel path content mode
 
-/-- What an inode holds now. -/
+/-- What an inode holds now, which is one more change of it. -/
 def setContent (kernel : Kernel) (number : Nat) (content : Content) : Kernel :=
   match kernel.inodes.get? number with
-  | some inode => { kernel with inodes := kernel.inodes.insert number { inode with content } }
+  | some inode =>
+    { kernel with inodes := kernel.inodes.insert number { inode with content, details.changes := inode.details.changes + 1 } }
   | none => kernel
 
 /-- The inode of a descriptor, if that is a pipe. -/

@@ -128,9 +128,10 @@ def withIdentity (process : Process) (data : ByteArray) : Except String Process 
                       credentials := { uid := id 0, euid := id 1, suid := id 2, fsuid := id 3, gid := id 4, egid := id 5, sgid := id 6
                                        fsgid := id 7, groups } }
 
-/-- Of an inode, its times, owner, extended attributes and seals, as bytes. -/
+/-- Of an inode, its times, owner, extended attributes, seals and changes, as bytes. -/
 def metaBytes (details : Meta) : ByteArray :=
-  let out := Wire.putList Wire.putNat ByteArray.empty [details.accessed, details.modified, details.changed, details.uid, details.gid, details.seals]
+  let out := Wire.putList Wire.putNat ByteArray.empty [details.accessed, details.modified, details.changed, details.uid, details.gid, details.seals,
+    details.changes]
   let out := Wire.putList (fun out (name, value) => Wire.putBytes (Wire.putText out name) value) out details.attributes
   Wire.putList (Wire.putList Wire.putNat) out (details.locks.map fun lock =>
     let (kind, owner) := match lock.owner with
@@ -159,7 +160,7 @@ def metaOfBytes (data : ByteArray) : Except String Meta := do
     pure { owner, start := field 2, stop := field 3, exclusive := field 4 == 1 : FileLock }
   let number (index : Nat) : Nat := numbers.getD index 0
   pure { accessed := number 0, modified := number 1, changed := number 2, uid := number 3, gid := number 4, seals := number 5
-         attributes, locks }
+         changes := number 6, attributes, locks }
 
 /-- What is mounted, as bytes. -/
 def mountsBytes (mounts : List Mount) : ByteArray :=
@@ -279,7 +280,8 @@ def Kernel.image (kernel : Kernel) : Image where
       | .timerfd expiry interval => (8, Wire.putNat (Wire.putOption Wire.putNat ByteArray.empty expiry) interval)
       | .signalfd mask => (9, Wire.putNat ByteArray.empty mask)
       | .epoll items => (10, Wire.putList (fun out (item : EpollItem) =>
-          Wire.putFlag (Wire.putNat (Wire.putNat (Wire.putNat (Wire.putNat out item.fd) item.file) item.events) item.data) item.told)
+          Wire.putOption (fun out (events, changes) => Wire.putNat (Wire.putNat out events) changes)
+            (Wire.putNat (Wire.putNat (Wire.putNat (Wire.putNat out item.fd) item.file) item.events) item.data) item.told)
           ByteArray.empty items)
       | .ptyMaster terminal => (11, terminalBytes terminal)
       | .ptySlave master => (12, Wire.putNat ByteArray.empty master)
@@ -346,7 +348,10 @@ def Image.kernel (image : Image) : Except String Kernel := do
           let (file, at_) ← Wire.getNat data at_
           let (events, at_) ← Wire.getNat data at_
           let (value, at_) ← Wire.getNat data at_
-          let (told, at_) ← Wire.getFlag data at_
+          let (told, at_) ← Wire.getOption (fun data at_ => do
+            let (events, at_) ← Wire.getNat data at_
+            let (changes, at_) ← Wire.getNat data at_
+            .ok ((events, changes), at_)) data at_
           .ok ({ fd, file, events, data := value, told }, at_)) entry.data 0
         pure (Content.epoll items)
       | 11 => pure (Content.ptyMaster (← terminalOfBytes entry.data))
