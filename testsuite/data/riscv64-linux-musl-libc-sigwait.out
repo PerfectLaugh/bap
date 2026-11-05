@@ -1,1 +1,11 @@
 sigtimedwait -11 1
+interrupted timed -4 1
+interrupted untimed -4 2
+thread first 1 0
+thread second 1 0
+process first 1 0
+process second 1 0
+own first 1 0
+then shared 1 0
+sigsuspend -4 3
+ppoll -4 4

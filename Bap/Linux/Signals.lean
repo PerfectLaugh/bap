@@ -787,7 +787,14 @@ private def interrupt (signals : Signals) (emu : Emu) (tid : Nat) (restart : Boo
     setThreadReg emu tid ⟨result, .imm width, 0, false⟩ (wordOfWidth width last.result)
     emu.threadsRef.modify fun threads => threads.map fun context =>
       if context.id == tid then { context with pc := last.pc, pending := none, skip := none } else context
-  | _, _ => setSyscallResult emu tid (.error (signals.numbers).eintr)
+  | _, _ =>
+    setSyscallResult emu tid (.error (signals.numbers).eintr)
+    -- A `sigtimedwait` ends with that too, unless what it waits for is pending.
+    if let some (set, _) := state.waiting then
+      let group := (table.find? tid).map (·.group) |>.getD tid
+      let shared := (← signals.table.get).groupPending.getD group []
+      unless (state.pending ++ shared).any fun info => bitOf info.signal &&& set != 0 do
+        modifyThread signals tid fun state => { state with waiting := none }
   (← signals.interrupted.get) emu tid restart spaces
   wakeThread emu tid
 
@@ -884,9 +891,26 @@ def suspendWith (signals : Signals) (tid mask : Nat) : IO Unit :=
   modifyThread signals tid fun state =>
     if state.suspended.isSome then state else { state with suspended := some state.mask, mask := blockable signals mask }
 
+/-- What is pending for a thread that its mask lets through and that its process ignores is gone, as delivery would have it, unless
+a tracer has it stop for that. -/
+private def dropIgnored (signals : Signals) (tid group : Nat) : IO Unit := do
+  if (← (← signals.tracer.get) tid).isSome then return
+  let mask := (← threadOf signals tid).mask
+  let kept (info : SignalInfo) : IO Bool := do
+    if bitOf info.signal &&& mask != 0 then return true
+    match ← dispositionOf signals group info.signal with
+    | .ignore => pure false
+    | _ => pure true
+  let table ← signals.table.get
+  let own ← (table.threads.getD tid {}).pending.filterM kept
+  let shared ← (table.groupPending.getD group []).filterM kept
+  modifyThread signals tid fun state => { state with pending := own }
+  signals.table.modify fun table => { table with groupPending := table.groupPending.insert group shared }
+
 /-- Whether a signal is pending for a thread that its mask lets through, which a call that waits with a mask of its own, as `ppoll`
-does, ends with `EINTR` for rather than waiting. -/
+does, ends with `EINTR` for rather than waiting. What it ignores is gone first, and doesn't end the call. -/
 def unblockedPending (signals : Signals) (tid group : Nat) : IO Bool := do
+  dropIgnored signals tid group
   let pending ← signals.pendingBits tid group
   pure (pending - (pending &&& (← threadOf signals tid).mask) != 0)
 
@@ -897,23 +921,17 @@ private def blockOnSignal (emu : Emu) (tid space : Nat) (timed : Bool) (deadline
   emu.taskTable.modify (·.futexWait { thread := tid, space, address := waitAddress tid, bitset := 2 ^ 32 - 1, timed, deadline })
   emu.stopped.set true
 
-/-- What a `sigtimedwait` that was woken comes to, when it runs again. -/
+/-- What a `sigtimedwait` that was woken comes to, when it runs again: the lowest signal that it waits for, of the thread's own
+first, as Linux takes it. -/
 private def finishWait (signals : Signals) (emu : Emu) : IO Unit := do
   let tid ← thread emu
   let state ← threadOf signals tid
   let some (set, address) := state.waiting | return
   let task ← currentTask emu
   modifyThread signals tid fun state => { state with waiting := none }
-  let table ← signals.table.get
-  let found := (state.pending ++ table.groupPending.getD task.group []).find? fun info => bitOf info.signal &&& set != 0
-  match found with
+  match ← takePending signals tid task.group set with
   | none => setSyscallResult emu tid (.error (signals.numbers).eagain)
   | some info =>
-    if state.pending.any (· == info) then
-      modifyThread signals tid fun state => { state with pending := state.pending.erase info }
-    else
-      signals.table.modify fun table =>
-        { table with groupPending := table.groupPending.insert task.group ((table.groupPending.getD task.group []).erase info) }
     if address != 0 then
       try
         write emu address (ByteArray.mk (Array.replicate 128 0))
@@ -1270,19 +1288,13 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
       if size != maskBytes architecture then return ← fail current numbers.einval
       try
         let given ← readMask signals current set size
-        let state ← threadOf signals tid
         modifyThread signals tid fun state =>
           { state with suspended := some state.mask, mask := blockable signals given }
-        let shared := (← signals.table.get).groupPending.getD task.group []
-        let unblocked := (state.pending ++ shared).any fun info => bitOf info.signal &&& blockable signals given == 0
-        unless unblocked do blockOnSignal current tid task.space false
+        unless ← signals.unblockedPending tid task.group do blockOnSignal current tid task.space false
         fail current numbers.eintr
       catch _ => fail current numbers.efault
     else if some number == calls.pause then
-      let state ← threadOf signals tid
-      let shared := (← signals.table.get).groupPending.getD task.group []
-      unless (state.pending ++ shared).any (fun info => bitOf info.signal &&& state.mask == 0) do
-        blockOnSignal current tid task.space false
+      unless ← signals.unblockedPending tid task.group do blockOnSignal current tid task.space false
       fail current numbers.eintr
     else if number == calls.waitid then
       let (kind, id, infoAddress, options) := (arg 0, arg 1, arg 2, arg 3)
