@@ -61,7 +61,7 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
     Lean code, with budget left and with a range of the chain where it went, by that range, as `Bap.Primus.Lifted` would run it next:
     the outputs that the last run reached, by its flags, or those of its checkpoint where it went, each cut to its width, are what the
     variables now hold, which with those given at first (`variables`, `values`) are its slots of the layout, unless one that it needs
-    isn't bound, which ends the run there; its budget is what the last left less one, and its observed slot 0. A range that isn't
+    isn't bound, which ends the run there; the slots it has for 0 are 0, and the others, which it writes before it reads, as may be; its budget is what the last left less one, and its observed slot 0. A range that isn't
     optimized is gone on to as `Bap.Primus.Lifted` counts its executions: not once they come to when it is to be optimized, and with its
     budget no more than what they have left until then. It gives back what the
     run of the last range gives, with: that range's number, the blocks entered after the first of all, the variables that the ranges
@@ -225,7 +225,8 @@ opaque clearChain (chain : @& Chain) : IO Unit
 opaque chainHolds (chain : @& Chain) (pc : UInt64) (program : @& Program) : Bool
 
 /-- Puts a range in a chain at `pc`, numbered `id`: `data` is the number of its slots, its effect, budget and observed slots (all ones
-for none), its executions and the executions at which it is to be optimized (all ones if it is), and its layout, the variables it needs, its outputs, its flags and its checkpoints, each as a count and what it counts. -/
+for none), its executions and the executions at which it is to be optimized (all ones if it is), the slots that are 0 at its start, and
+its layout, the variables it needs, its outputs, its flags and its checkpoints, each as a count and what it counts. -/
 @[extern "bap_jit_chain_add"]
 opaque addToChain (chain : @& Chain) (pc id : UInt64) (program : @& Program) (data : @& Array UInt64) : IO Unit
 

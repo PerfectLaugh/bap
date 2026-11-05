@@ -1596,10 +1596,20 @@ struct ChainEntry {
   uint64_t executions = 0, optimizeAt = none;
   std::vector<std::pair<uint64_t, uint64_t>> layout;   // variable, slot
   std::vector<uint64_t> required;                      // what has to be bound
-  struct Output { uint64_t variable, slot, width; };
+  // The slots that a run reads before it writes, and that aren't of the layout or for control: the effect, the flags of outputs, and
+  // where a run with entries starts, which are 0 at its start. The rest are temporaries that it writes before it reads them.
+  std::vector<uint64_t> zeroed;
+  // An output with the slot of its flag, none if it is always written.
+  struct Output { uint64_t variable, slot, width, flag = none; };
   std::vector<Output> outputs;
   std::vector<std::pair<uint64_t, uint64_t>> flags;    // slot of an output, slot that says it was written
   std::unordered_map<uint64_t, std::vector<Output>> checkpoints;
+  // Where it went last and what is there, so that a jump that goes where it went needs no search, as QEMU patches its jumps.
+  uint64_t lastNext = none;
+  ChainEntry *lastTarget = nullptr;
+  // What a run of the chain did of it, to say at its end.
+  bool touched = false;
+  uint64_t runs = 0, executed = 0;
 };
 
 struct Chain {
@@ -1658,6 +1668,7 @@ extern "C" lean_obj_res bap_jit_chain_add(lean_obj_arg chainObject, uint64_t pc,
   entry.observedSlot = next();
   entry.executions = next();
   entry.optimizeAt = next();
+  for (uint64_t count = next(); count != 0 && !bad; --count) entry.zeroed.push_back(next());
   for (uint64_t count = next(); count != 0 && !bad; --count) { uint64_t v = next(); entry.layout.push_back({v, next()}); }
   for (uint64_t count = next(); count != 0 && !bad; --count) entry.required.push_back(next());
   auto outputs = [&](std::vector<ChainEntry::Output> &into) {
@@ -1678,12 +1689,22 @@ extern "C" lean_obj_res bap_jit_chain_add(lean_obj_arg chainObject, uint64_t pc,
   for (auto &binding : entry.layout) bad = bad || binding.second >= entry.slotCount;
   for (auto &output : entry.outputs) bad = bad || output.slot >= entry.slotCount || output.width == 0 || output.width > 64;
   for (auto &flag : entry.flags) bad = bad || flag.second >= entry.slotCount;
+  for (uint64_t slot : entry.zeroed) bad = bad || slot >= entry.slotCount;
   for (auto &checkpoint : entry.checkpoints)
     for (auto &output : checkpoint.second) bad = bad || output.slot >= entry.slotCount || output.width == 0 || output.width > 64;
   if (bad)
     return ioError("invalid JIT chain entry");
+  auto flagOf = [&](ChainEntry::Output &output) {
+    for (const auto &flag : entry.flags)
+      if (flag.first == output.slot) { output.flag = flag.second; return; }
+  };
+  for (auto &output : entry.outputs) flagOf(output);
+  for (auto &checkpoint : entry.checkpoints)
+    for (auto &output : checkpoint.second) flagOf(output);
   auto found = chain->entries.find(pc);
   if (found != chain->entries.end()) {
+    // What went to the one that goes is to look again.
+    for (auto &other : chain->entries) other.second.lastTarget = nullptr;
     lean_dec_ref(found->second.program);
     chain->entries.erase(found);
   }
@@ -1721,10 +1742,9 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
       registers[variable] = lean_unbox_uint64(lean_array_get_core(valuesObject, index));
       bound[variable] = 1;
     }
-    // By range: how many runs, and how many executions as Lean counts them, a run and the blocks it chained.
-    std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> runs;
     ChainEntry *current = nullptr;
     bool first = true;
+    std::vector<ChainEntry *> touched;
     {
       auto found = chain->entries.find(firstPc);
       if (found == chain->entries.end() || found->second.id != firstId || found->second.program != programObject)
@@ -1737,16 +1757,19 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
     std::vector<uint64_t> state(firstSize);
     for (size_t index = 0; index != firstSize; ++index)
       state[index] = lean_unbox_uint64(lean_array_get_core(stateObject, index));
+    std::vector<uint64_t> spare;
     uint64_t budget = firstBudget;
     uint64_t chained = 0;
     StoreLog changes;
     uint64_t next = 0;
     lean_object *error = nullptr;
+    // One for the whole run, whose pages stay known from one range to the next.
+    BapCells memory{nullptr, 0, 0, observer, nullptr, persistent, &changes, codeObserver};
+    memory.filter = filter;
+    memory.quietSites = quietSites != 0;
     for (;;) {
       auto *program = static_cast<Program *>(lean_get_external_data(current->program));
-      BapCells memory{nullptr, 0, 0, observer, nullptr, persistent, &changes, codeObserver};
-      memory.filter = filter;
-      memory.quietSites = quietSites != 0;
+      memory.pendingSite = false;
       next = program->function(state.data(), &memory);
       if (memory.error != nullptr) { error = memory.error; break; }
       uint64_t effect = current->effectSlot == ChainEntry::none ? 0 : state[current->effectSlot];
@@ -1755,66 +1778,71 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
       // Lean counted the entry of the first already.
       uint64_t executed = (first ? 0 : 1) + ranChained;
       current->executions += executed;
-      runs[current->id].first += 1;
-      runs[current->id].second += executed;
+      if (!current->touched) { current->touched = true; touched.push_back(current); }
+      current->runs += 1;
+      current->executed += executed;
       first = false;
       if (effect != 1 || memory.leanRan || current->budgetSlot == ChainEntry::none || budget - ranChained < 1)
         break;
-      auto found = chain->entries.find(next);
-      if (found == chain->entries.end())
+      ChainEntry *target = current->lastNext == next ? current->lastTarget : nullptr;
+      if (target == nullptr) {
+        auto found = chain->entries.find(next);
+        if (found == chain->entries.end())
+          break;
+        target = &found->second;
+        current->lastNext = next;
+        current->lastTarget = target;
+      }
+      if (target->optimizeAt != ChainEntry::none && target->executions + 1 >= target->optimizeAt)
         break;
-      ChainEntry &target = found->second;
-      if (target.optimizeAt != ChainEntry::none && target.executions + 1 >= target.optimizeAt)
-        break;
-      // What the run wrote, as Lean takes it: the outputs of the checkpoint where it went if it is one, each if its flag says so.
-      auto checkpoint = current->checkpoints.find(next);
+      // What the run wrote, as Lean takes it: the outputs of the checkpoint where it went if it is one, each if its flag says so. If
+      // the next can't run after all, Lean takes them again from the last run, the same.
+      auto checkpoint = current->checkpoints.empty() ? current->checkpoints.end() : current->checkpoints.find(next);
       const std::vector<ChainEntry::Output> &outputs = checkpoint != current->checkpoints.end() ? checkpoint->second : current->outputs;
-      std::vector<std::pair<uint64_t, uint64_t>> writes;
-      writes.reserve(outputs.size());
       for (const auto &output : outputs) {
-        bool reached = true;
-        for (const auto &flag : current->flags)
-          if (flag.first == output.slot) { reached = state[flag.second] != 0; break; }
-        if (reached) {
-          uint64_t value = state[output.slot];
-          if (output.width < 64) value &= (uint64_t{1} << output.width) - 1;
-          writes.push_back({output.variable, value});
-        }
+        if (output.flag != ChainEntry::none && state[output.flag] == 0)
+          continue;
+        uint64_t value = state[output.slot];
+        if (output.width < 64) value &= (uint64_t{1} << output.width) - 1;
+        ensure(output.variable);
+        if (bound[output.variable] != 2) dirty.push_back(output.variable);
+        registers[output.variable] = value;
+        bound[output.variable] = 2;
       }
-      // What the next one needs is bound, by what was or what was just written.
       bool ready = true;
-      for (uint64_t variable : target.required) {
-        bool written = false;
-        for (const auto &write : writes) if (write.first == variable) { written = true; break; }
-        if (!written && (variable >= bound.size() || bound[variable] == 0)) { ready = false; break; }
-      }
+      for (uint64_t variable : target->required)
+        if (variable >= bound.size() || bound[variable] == 0) { ready = false; break; }
       if (!ready)
         break;
-      for (const auto &write : writes) {
-        ensure(write.first);
-        if (bound[write.first] != 2) dirty.push_back(write.first);
-        registers[write.first] = write.second;
-        bound[write.first] = 2;
-      }
       uint64_t remaining = budget - ranChained;
       chained += ranChained + 1;
       budget = remaining - 1;
       // What isn't optimized yet comes back by when it has run enough to be, as `runBlockUnprofiled` has it.
-      if (target.optimizeAt != ChainEntry::none)
-        budget = std::min(budget, target.optimizeAt - (target.executions + 1));
-      std::vector<uint64_t> following(target.slotCount, 0);
-      for (const auto &binding : target.layout)
+      if (target->optimizeAt != ChainEntry::none)
+        budget = std::min(budget, target->optimizeAt - (target->executions + 1));
+      // What isn't written before it is read, and the rest as the last range left them, which nothing reads.
+      spare.resize(target->slotCount);
+      for (uint64_t slot : target->zeroed) spare[slot] = 0;
+      for (const auto &binding : target->layout)
         if (binding.first < bound.size() && bound[binding.first] != 0)
-          following[binding.second] = registers[binding.first];
-      if (target.budgetSlot != ChainEntry::none) following[target.budgetSlot] = budget;
-      if (target.observedSlot != ChainEntry::none) following[target.observedSlot] = 0;
-      state = std::move(following);
-      current = &target;
+          spare[binding.second] = registers[binding.first];
+      if (target->budgetSlot != ChainEntry::none) spare[target->budgetSlot] = budget;
+      if (target->observedSlot != ChainEntry::none) spare[target->observedSlot] = 0;
+      std::swap(state, spare);
+      current = target;
     }
     if (persistent->stepActive())
       changes.forEach([&](uint64_t address, uint8_t) { persistent->noteStep(address, 1); });
-    if (error != nullptr)
+    if (error != nullptr) {
+      // A run that failed is taken back, and what it counted with it.
+      for (ChainEntry *entry : touched) {
+        entry->executions -= std::min(entry->executions, entry->executed);
+        entry->touched = false;
+        entry->runs = 0;
+        entry->executed = 0;
+      }
       return lean_io_result_mk_error(error);
+    }
     if (current->budgetSlot != ChainEntry::none && budget >= state[current->budgetSlot])
       chained += budget - state[current->budgetSlot];
     const size_t stateSize = state.size();
@@ -1832,8 +1860,15 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
     // The last range, the blocks entered after the first of all, the variables written before the last range, and the runs of each.
     std::vector<uint64_t> info{current->id, chained, dirty.size()};
     for (uint64_t variable : dirty) { info.push_back(variable); info.push_back(registers[variable]); }
-    info.push_back(runs.size());
-    for (const auto &run : runs) { info.push_back(run.first); info.push_back(run.second.first); info.push_back(run.second.second); }
+    info.push_back(touched.size());
+    for (ChainEntry *entry : touched) {
+      info.push_back(entry->id);
+      info.push_back(entry->runs);
+      info.push_back(entry->executed);
+      entry->touched = false;
+      entry->runs = 0;
+      entry->executed = 0;
+    }
     lean_obj_res resultInfo = lean_alloc_array(info.size(), info.size());
     for (size_t at = 0; at != info.size(); ++at)
       lean_array_set_core(resultInfo, at, lean_box_uint64(info[at]));

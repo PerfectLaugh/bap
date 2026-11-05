@@ -1979,8 +1979,12 @@ private def registerChain (engine : Engine) (pc : Nat) (entry : CachedBlock) (sl
       data := data ++ #[UInt64.ofNat (← variableId engine var), UInt64.ofNat at_, UInt64.ofNat ((widthOf var).getD 64)]
     pure data
   let mut data := #[UInt64.ofNat slotCount, slot lowering.effectSlot, slot lowering.budget, slot lowering.observed,
-    UInt64.ofNat (← entry.executions.get), if entry.optimized then none else UInt64.ofNat optimizeFrom,
-    UInt64.ofNat lowering.layout.length]
+    UInt64.ofNat (← entry.executions.get), if entry.optimized then none else UInt64.ofNat optimizeFrom]
+  -- What a run reads before it writes that isn't a variable or for control, and is 0 at its start as `encodeState` makes it: the
+  -- effect, the flags of outputs, and the slot that says where a range with entries starts.
+  let zeroed := lowering.effectSlot.toList ++ lowering.flags.map (·.2) ++ (if slotCount > lowering.nextSlot then [lowering.nextSlot] else [])
+  data := (data.push (UInt64.ofNat zeroed.length)) ++ (zeroed.map UInt64.ofNat).toArray
+  data := data.push (UInt64.ofNat lowering.layout.length)
   for (var, at_) in lowering.layout do
     data := data ++ #[UInt64.ofNat (← variableId engine var), UInt64.ofNat at_]
   data := data.push (UInt64.ofNat lowering.inputs.length)
