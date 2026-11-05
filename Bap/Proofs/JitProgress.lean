@@ -358,6 +358,25 @@ theorem exp_bin (op : Bil.BinOp) (left right : Bil.Exp) (ihl : ExpOK left) (ihr 
   obtain ⟨bits, hb⟩ := evalBin_progress x y hop
   exact ⟨bits, by simp only [Bil.evalExp, hx, hy, bind, Except.bind, bits_asBits]; exact hb⟩
 
+theorem exp_concat (left right : Bil.Exp) (ihl : ExpOK left) (ihr : ExpOK right) : ExpOK (.concat left right) := by
+  intro first second operand h
+  rw [lowerExp] at h
+  obtain ⟨⟨l1, a⟩, h1, h⟩ := obind h
+  obtain ⟨⟨l2, b⟩, h2, h⟩ := obind h
+  dsimp only at h
+  split at h
+  · simp at h
+  simp only [Lowering.push, temporary, Option.some.injEq, Prod.mk.injEq] at h
+  obtain ⟨hs, rfl⟩ := h
+  obtain ⟨m1, e1⟩ := ihl h1
+  obtain ⟨m2, e2⟩ := ihr h2
+  have last : ExpMono l2 second := by subst hs; exact ⟨rfl, fun _ h => h, fun _ h => h⟩
+  refine ⟨(m1.trans m2).trans last, fun env ready => ?_⟩
+  have r2 := ready.before last
+  obtain ⟨x, hx⟩ := e1 env (r2.before m2)
+  obtain ⟨y, hy⟩ := e2 env (r2.after m1)
+  exact ⟨Word.concat x y, by simp only [Bil.evalExp, hx, hy, bind, Except.bind, bits_asBits]⟩
+
 theorem exp_cast (kind : Bil.Cast) (width : Nat) (value : Bil.Exp) (ih : ExpOK value) : ExpOK (.cast kind width value) := by
   intro first second operand h
   cases kind with
@@ -467,9 +486,7 @@ theorem lowered_exp (exp : Bil.Exp) : ExpOK exp := by
     rw [lowerExp] at h <;> simp_all
   | ite condition yes no ihc ihy ihn => exact exp_ite condition yes no ihc ihy ihn
   | extract high low value ih => exact exp_extract high low value ih
-  | concat left right =>
-    intro _ _ _ h
-    rw [lowerExp] at h <;> simp_all
+  | concat left right ihl ihr => exact exp_concat left right ihl ihr
   | unknown message typ =>
     intro _ _ _ h
     rw [lowerExp] at h <;> simp_all

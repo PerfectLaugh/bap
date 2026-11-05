@@ -7481,6 +7481,18 @@ theorem evalExp_extract_inv {env : Bil.Env} {high low : Nat} {exp : Bil.Exp} {va
   simp only [Except.ok.injEq] at h6
   exact ⟨r.1, r.2, x, by rw [h1, asBits_ok h3], h5, h6.symm⟩
 
+theorem evalExp_concat_inv {env : Bil.Env} {left right : Bil.Exp} {value : Bap.Value}
+    (h : Bil.evalExp env (.concat left right) = .ok value) :
+    ∃ (w₁ : Nat) (x : BitVec w₁) (w₂ : Nat) (y : BitVec w₂), Bil.evalExp env left = .ok (.bits x) ∧
+      Bil.evalExp env right = .ok (.bits y) ∧ value = .bits (Word.concat x y) := by
+  rw [Bil.evalExp] at h
+  obtain ⟨v1, h1, h2⟩ := bind_ok h
+  obtain ⟨l, h3, h4⟩ := bind_ok h2
+  obtain ⟨v2, h5, h6⟩ := bind_ok h4
+  obtain ⟨r, h7, h8⟩ := bind_ok h6
+  simp only [Except.ok.injEq] at h8
+  exact ⟨l.1, l.2, r.1, r.2, by rw [h1, asBits_ok h3], by rw [h5, asBits_ok h7], h8.symm⟩
+
 theorem evalExp_cast_inv {env : Bil.Env} {kind : Bil.Cast} {target : Nat} {exp : Bil.Exp} {value : Bap.Value}
     (h : Bil.evalExp env (.cast kind target exp) = .ok value) :
     ∃ (width : Nat) (bits : BitVec width), Bil.evalExp env exp = .ok (.bits bits) ∧
@@ -8154,6 +8166,72 @@ theorem lowered_extract {high low : Nat} {value : Bil.Exp} {first second : Lower
   have a2 : Lowering.nextSlot l1 ≠ Lowering.nextSlot l1 + 1 := by omega
   simp only [runOps_cons, runOps_nil, step, Machine.write_slots, ite_true, n1, ite_false, a1, Holds]
   rw [shifted_mask (by omega) (by omega), hbits, BitVec.extractLsb_toNat, hxv]
+
+/-- A left part shifted past a right part that fits under it, and the right part or-ed in: their concatenation. -/
+private theorem shifted_or {l r : Word64} {lw rw : Nat} {x : BitVec lw} {y : BitVec rw} (hsum : lw + rw ≤ 64) (h0 : 0 < lw)
+    (hl : Holds l x) (hr : Holds r y) :
+    Holds (denoteBin .or (denoteBin .lshift l (UInt64.ofNat rw).toBitVec) r) (Word.concat x y) := by
+  have hrw : rw < 64 := by omega
+  have hval : (UInt64.ofNat rw).toBitVec.toNat = rw := by
+    have he : (UInt64.ofNat rw).toBitVec = BitVec.ofNat 64 rw := rfl
+    rw [he, BitVec.toNat_ofNat]
+    exact Nat.mod_eq_of_lt (Nat.lt_trans hrw (by decide))
+  simp only [Holds] at hl hr ⊢
+  have hx : x.toNat < 2 ^ lw := x.isLt
+  have hfit : x.toNat <<< rw < 2 ^ 64 := by
+    rw [Nat.shiftLeft_eq]
+    calc x.toNat * 2 ^ rw < 2 ^ lw * 2 ^ rw := Nat.mul_lt_mul_of_pos_right hx (Nat.two_pow_pos _)
+      _ = 2 ^ (lw + rw) := (Nat.pow_add 2 lw rw).symm
+      _ ≤ 2 ^ 64 := Nat.pow_le_pow_right (by decide) hsum
+  simp only [denoteBin, hval, show ¬ 64 ≤ rw by omega, ite_false, BitVec.toNat_or, BitVec.toNat_shiftLeft, hl, hr,
+    Word.concat, Nat.mod_eq_of_lt hfit]
+  rw [show x.append y = x ++ y from rfl, BitVec.toNat_append]
+
+theorem lowered_concat {left right : Bil.Exp} {first second : Lowering} {operand : Operand}
+    (wf : LayoutWF first)
+    (ihl : ∀ {first second operand}, LayoutWF first → lowerExp first left = some (second, operand) →
+      Lowered first second operand left)
+    (ihr : ∀ {first second operand}, LayoutWF first → lowerExp first right = some (second, operand) →
+      Lowered first second operand right)
+    (h : lowerExp first (.concat left right) = some (second, operand)) :
+    Lowered first second operand (.concat left right) := by
+  rw [lowerExp] at h
+  obtain ⟨⟨l1, o1⟩, h1, h⟩ := obind h
+  obtain ⟨⟨l2, o2⟩, h2, h⟩ := obind h
+  obtain ⟨newL, heL, hsL, h0L, h64L, vL⟩ := ihl wf h1
+  have wf1 := heL.wf wf
+  obtain ⟨newR, heR, hsR, h0R, h64R, vR⟩ := ihr wf1 h2
+  have wf2 := heR.wf wf1
+  by_cases hc : Operand.width o1 + Operand.width o2 > 64
+  · simp [hc] at h
+  have hsum : Operand.width o1 + Operand.width o2 ≤ 64 := by omega
+  simp only [hc, ↓reduceIte, temporary, Option.some.injEq, Prod.mk.injEq] at h
+  simp only [Lowering.push] at h
+  obtain ⟨rfl, rfl⟩ := h
+  have hsL2 : Operand.slot o1 < Lowering.nextSlot l2 := Nat.lt_of_lt_of_le hsL heR.next
+  have hcount : ∀ o ∈ [Jit.Op.set (Lowering.nextSlot l2) (UInt64.ofNat (Operand.width o2)),
+        Jit.Op.bin .lshift (Lowering.nextSlot l2 + 1) (Operand.slot o1) (Lowering.nextSlot l2),
+        Jit.Op.bin .or (Lowering.nextSlot l2 + 1 + 1) (Lowering.nextSlot l2 + 1) (Operand.slot o2)],
+      ∀ d, opDst o = some d → Lowering.nextSlot l2 ≤ d ∧ d < Lowering.nextSlot l2 + 3 := by
+    intro o ho d hd
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at ho
+    rcases ho with rfl | rfl | rfl <;> simp only [opDst, Option.some.injEq] at hd <;> omega
+  refine lowered_tail (heL.trans heR) (Extends.tail 3 wf2 ?_ rfl rfl rfl rfl rfl rfl rfl rfl ?_ hcount)
+    (by simp) (by simp only; omega) (by simp only; omega) ?_
+  · simp [Lowering.ops, List.reverseAux_eq, List.append_assoc]
+  · simp [isExpressionOp]
+  intro env machine hs hm w bits hev
+  obtain ⟨w₁, x, w₂, y, hx, hy, hv⟩ := evalExp_concat_inv hev
+  obtain ⟨hw1, hw2, hxv, hyv⟩ := operands_hold heL heR hsL vL vR hs hm hx hy
+  subst hw1 hw2
+  cases hv
+  refine ⟨rfl, ?_⟩
+  have n1 : Operand.slot o1 ≠ Lowering.nextSlot l2 := by omega
+  have n2 : Operand.slot o2 ≠ Lowering.nextSlot l2 := by omega
+  have n3 : Operand.slot o2 ≠ Lowering.nextSlot l2 + 1 := by omega
+  have a1 : Lowering.nextSlot l2 + 1 ≠ Lowering.nextSlot l2 := by omega
+  simp only [runOps_cons, runOps_nil, step, Machine.write_slots, ite_true, n1, n2, n3, ite_false, a1]
+  exact shifted_or hsum h0L hxv hyv
 
 theorem lowered_cast_high {target : Nat} {value : Bil.Exp} {first second : Lowering} {operand : Operand}
     (wf : LayoutWF first)
@@ -8912,11 +8990,7 @@ theorem lowerExp_correct (exp : Bil.Exp) : ∀ {first second : Lowering} {operan
     all_goals (intros; simp_all)
   | ite condition yes no ihc ihy ihn => exact fun wf h => lowered_ite wf ihc ihy ihn h
   | extract high low value ih => exact fun wf h => lowered_extract wf ih h
-  | concat left right _ _ =>
-    intro first second operand wf h
-    rw [lowerExp] at h
-    · simp at h
-    all_goals (intros; simp_all)
+  | concat left right ihl ihr => exact fun wf h => lowered_concat wf ihl ihr h
   | unknown message typ =>
     intro first second operand wf h
     rw [lowerExp] at h

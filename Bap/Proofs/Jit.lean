@@ -1279,10 +1279,9 @@ theorem lowered_value_bits (exp : Bil.Exp) : ∀ {first second : Lowering} {oper
     obtain ⟨_, _, _, _, _, hv⟩ := evalExp_extract_inv hev
     exact ⟨_, _, hv⟩
   | concat left right _ _ =>
-    intro first second operand wf h
-    rw [lowerExp] at h
-    · simp at h
-    all_goals (intros; simp_all)
+    intro first second operand wf h env machine hs v hev
+    obtain ⟨_, _, _, _, _, _, hv⟩ := evalExp_concat_inv hev
+    exact ⟨_, _, hv⟩
   | unknown message typ =>
     intro first second operand wf h
     rw [lowerExp] at h

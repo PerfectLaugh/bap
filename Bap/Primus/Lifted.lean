@@ -671,6 +671,17 @@ private def lowerExp (lowering : Lowering) : Bil.Exp → Option (Lowering × Ope
     else
       let (lowering, dst) := temporary lowering
       some ((lowering.push [.andImm dst value.slot (mask width)]), ⟨dst, width⟩)
+  -- What writes part of a register, as x86 does of its bytes: the left one shifted up past the right one, which has nothing above it.
+  | .concat left right => do
+    let (lowering, left) ← lowerExp lowering left
+    let (lowering, right) ← lowerExp lowering right
+    if left.width + right.width > 64 then none
+    let (lowering, amount) := temporary lowering
+    let lowering := (lowering.push [.set amount (UInt64.ofNat right.width)])
+    let (lowering, shifted) := temporary lowering
+    let lowering := (lowering.push [.bin .lshift shifted left.slot amount])
+    let (lowering, dst) := temporary lowering
+    some ((lowering.push [.bin .or dst shifted right.slot]), ⟨dst, left.width + right.width⟩)
   | _ => none
 
 private def lowerMove (lowering : Lowering) (dst : Bap.Var) (value : Bil.Exp) :

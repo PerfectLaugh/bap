@@ -845,6 +845,24 @@ def testRangeLoopsAArch64 : IO Unit := do
   let _ ← Bap.Emu.run emu 3000
   assertEqual "A breakpoint that comes in a hot loop stops it there" 4 (← Bap.Emu.pc emu)
 
+/-- Loops of x86-64 that multiply with 64 bits and add to a byte of a register stay in their ranges: the high half of a product is of halves
+of 32 bits, with nothing of 128 bits, and a write to part of a register is a concatenation, which has its lowering. -/
+def testRangeLoopsX86 : IO Unit := do
+  let run (label source : String) (expected : Nat) : IO Unit := do
+    let emu ← Bap.Emu.x86_64 (← LLVM.assemble "x86_64" source) 0 0
+    for name in ["RAX", "RCX", "RDX"] do
+      Bap.Emu.setReg emu ⟨name, .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 (if name == "RCX" then 3000 else 1)))
+    let _ ← Bap.Emu.run emu (4 * 3000)
+    match ← Bap.Emu.reg emu ⟨"RAX", .imm 64, 0, false⟩ with
+    | .bits bits => assertEqual s!"An x86-64 loop of {label} in its range comes to what it does" expected bits.toNat
+    | _ => throw <| IO.userError "no rax"
+    let stats ← Bap.Primus.Lifted.stats emu.engine
+    assertTrue s!"An x86-64 loop of {label} goes round in its range: {stats.nativeRuns} native runs, {stats.interpretedRuns} interpreted"
+      (stats.nativeRuns < 10 && stats.interpretedRuns < 100)
+  run "imul" "loop:\nimulq $0x5851, %rax, %rax\naddq $7, %rax\ndecq %rcx\njnz loop\nend:\njmp end"
+    ((List.range 3000).foldl (fun value _ => (value * 0x5851 + 7) % 2 ^ 64) 1)
+  run "addb" "loop:\naddb $7, %al\naddb %al, %dl\ndecq %rcx\njnz loop\nend:\njmp end" ((1 + 7 * 3000) % 256)
+
 /-- Native code past `nativeLimit` makes room for itself: forty blocks of a loop, each hot, with room for four pieces of native code,
 come to what they do, and what is kept stays within it while what is hot goes on being compiled. -/
 def testNativeLimit : IO Unit := do
