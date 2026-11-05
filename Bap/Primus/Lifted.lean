@@ -242,9 +242,9 @@ structure Engine where
   chainAt : IO.Ref (Std.HashMap Nat Nat)
   variableIds : IO.Ref (Std.HashMap Bap.Var Nat)
   variables : IO.Ref (Array Bap.Var)
-  /-- What is being optimized on another thread, by where it starts, with the bytes it was compiled from: the run goes on with what
-  there is until it is done. -/
-  optimizing : IO.Ref (Std.HashMap Nat (ByteArray × Task (Except IO.Error (Jit.Program × Nat))))
+  /-- What is being optimized on another thread, by where it starts, with the bytes it was compiled from and what it is of them (see
+  `optimizedOf`): the run goes on with what there is until it is done. -/
+  optimizing : IO.Ref (Std.HashMap Nat (ByteArray × (List (Nat × Nat) × Nat × List Nat × Nat) × Task (Except IO.Error (Jit.Program × Nat))))
 
 /-- What a run of a block or a range comes to: the state after it, where it went, where the instruction after the last that it ran
 is, and how it ended. -/
@@ -1454,6 +1454,11 @@ private def keptSlots (lowering : Lowering) : Array UInt64 :=
   let outputs := lowering.outputs.map (·.2) ++ lowering.checkpoints.flatMap fun checkpoint => checkpoint.2.map (·.2)
   ((lowering.layout.map (·.2) ++ outputs ++ lowering.flags.flatMap (fun flag => [flag.1, flag.2]) ++ control).map UInt64.ofNat).toArray
 
+/-- What a lowering of an entry is, as far as what was compiled of one fits another: a block and a range start at the same address, of the
+same bytes, and are lowered differently, with their slots, their entries and their variables. -/
+private def optimizedOf (entry : CachedBlock) (lowering : Lowering) : List (Nat × Nat) × Nat × List Nat × Nat :=
+  (entry.coverage, lowering.nextSlot, entry.entryLabels, lowering.layout.length)
+
 /-- What is native and has run that many times, compiled again with optimization, if this is such a thing: on another thread, while the
 run goes on with what there is, and in its place once that is done, as HotSpot compiles. -/
 private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Option CachedBlock) := do
@@ -1462,9 +1467,9 @@ private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Optio
   | .interpreted _ => return none
   | .native lowering _ fallback =>
     match (← engine.optimizing.get)[entry.address]? with
-    | some (code, task) =>
-      -- What was compiled of other bytes than these is for nothing.
-      if !sameBytes code entry.code then
+    | some (code, of, task) =>
+      -- What was compiled of other bytes than these, or for another lowering of them, is for nothing.
+      if !sameBytes code entry.code || of != optimizedOf entry lowering then
         engine.optimizing.modify (·.erase entry.address)
         return none
       if !(← IO.hasFinished task) then
@@ -1492,7 +1497,7 @@ private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Optio
             Jit.compileOptimized lowering.ops kept ((lowering.budget.map UInt64.ofNat).getD (UInt64.ofNat (2 ^ 64 - 1))) variables
           else Jit.compileEntries lowering.ops entryLabels lowering.nextSlot true (kept.push (UInt64.ofNat lowering.nextSlot)) variables
         pure (program, (← IO.monoMsNow) - started)
-      engine.optimizing.modify (·.insert entry.address (entry.code, task))
+      engine.optimizing.modify (·.insert entry.address (entry.code, optimizedOf entry lowering, task))
       Jit.chainOptimizing engine.chain (UInt64.ofNat entry.address) (UInt64.ofNat optimizeCheck)
       return none
 
