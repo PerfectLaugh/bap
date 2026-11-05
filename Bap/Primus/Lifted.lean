@@ -1429,6 +1429,13 @@ private def restoreBlockVersion (engine : Engine) (address : Nat) (code : ByteAr
 /-- How many runs make it worth compiling something again, with what that takes: as long as the runs themselves take by then. -/
 private def optimizeFrom : Nat := 65536
 
+/-- The slots that are read after a run (obligation 1 of `Bap.Jit`): of the variables, which outputs and checkpoints are of, the flags
+of outputs, and the effect, budget and observed slots. The rest are temporaries of expressions, which nothing reads after. -/
+private def keptSlots (lowering : Lowering) : Array UInt64 :=
+  let control := [lowering.effectSlot, lowering.budget, lowering.observed].filterMap id
+  let outputs := lowering.outputs.map (·.2) ++ lowering.checkpoints.flatMap fun checkpoint => checkpoint.2.map (·.2)
+  ((lowering.layout.map (·.2) ++ outputs ++ lowering.flags.flatMap (fun flag => [flag.1, flag.2]) ++ control).map UInt64.ofNat).toArray
+
 /-- What is native and has run that many times, compiled again with optimization, if this is such a thing. -/
 private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Option CachedBlock) := do
   if entry.optimized || (← entry.executions.get) < optimizeFrom then return none
@@ -1436,8 +1443,9 @@ private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Optio
   | .interpreted _ => return none
   | .native lowering _ fallback =>
     let started ← IO.monoMsNow
-    let program ← if entry.entryLabels.isEmpty then Jit.compileOptimized lowering.ops
-      else Jit.compileEntries lowering.ops entry.entryLabels lowering.nextSlot true
+    let kept := keptSlots lowering
+    let program ← if entry.entryLabels.isEmpty then Jit.compileOptimized lowering.ops kept
+      else Jit.compileEntries lowering.ops entry.entryLabels lowering.nextSlot true (kept.push (UInt64.ofNat lowering.nextSlot))
     let elapsed := (← IO.monoMsNow) - started
     engine.statistics.modify fun stats =>
       { stats with nativeCompilations := stats.nativeCompilations + 1, compileMs := stats.compileMs + elapsed
@@ -1604,7 +1612,7 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
                 else none
               let labels := points.map (·.2.1)
               let program ← if labels.isEmpty then Jit.compile lowering.ops
-                else Jit.compileEntries lowering.ops labels lowering.nextSlot false
+                else Jit.compileEntries lowering.ops labels lowering.nextSlot false #[]
               let elapsed := (← IO.monoMsNow) - started
               engine.nativeLive.modify (· + 1)
               engine.statistics.modify fun stats =>

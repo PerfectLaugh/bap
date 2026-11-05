@@ -418,7 +418,10 @@ bool getSlot(lean_obj_arg value, size_t &slot) {
 
 // With ENTRIES, a list of labels, the program starts at the label that the slot ENTRY_SLOT says, as one more than it, and where
 // it would otherwise when that holds zero.
-static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg entries = nullptr, size_t entrySlot = 0) {
+// `kept`, for what is optimized, is the slots that what runs it reads afterwards, as obligation 1 says: only those are left in the
+// state, so that the rest, the temporaries of expressions, live as long as they are used and not to the end of the run.
+static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg entries = nullptr, size_t entrySlot = 0,
+                               lean_obj_arg kept = nullptr) {
   try {
     std::string initializationError;
     if (!initialize(initializationError))
@@ -941,6 +944,16 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
       llvm::BasicBlock *leave = llvm::BasicBlock::Create(*context, "leave", function);
       builder.SetInsertPoint(leave);
       llvm::PHINode *result = builder.CreatePHI(word, static_cast<unsigned>(returns.size()));
+      if (kept != nullptr) {
+        std::vector<bool> keep(slotCount, false);
+        for (size_t index = 0; index != lean_array_size(kept); ++index) {
+          uint64_t slot = lean_unbox_uint64(lean_array_get_core(kept, index));
+          if (slot < slotCount)
+            keep[slot] = true;
+        }
+        for (size_t index = 0; index != slotCount; ++index)
+          written[index] = written[index] && keep[index];
+      }
       for (size_t index = 0; index != slotCount; ++index)
         if (written[index])
           builder.CreateStore(builder.CreateLoad(word, copies[index]), builder.CreateConstGEP1_64(word, state, index));
@@ -1007,13 +1020,16 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
 
 extern "C" lean_obj_res bap_jit_compile(lean_obj_arg ops, lean_obj_arg) { return compileOps(ops, false); }
 
-extern "C" lean_obj_res bap_jit_compile_optimized(lean_obj_arg ops, lean_obj_arg) { return compileOps(ops, true); }
+extern "C" lean_obj_res bap_jit_compile_optimized(lean_obj_arg ops, lean_obj_arg kept, lean_obj_arg) {
+  return compileOps(ops, true, nullptr, 0, kept);
+}
 
-extern "C" lean_obj_res bap_jit_compile_entries(lean_obj_arg ops, lean_obj_arg entries, lean_obj_arg slot, uint8_t optimized, lean_obj_arg) {
+extern "C" lean_obj_res bap_jit_compile_entries(lean_obj_arg ops, lean_obj_arg entries, lean_obj_arg slot, uint8_t optimized,
+                                                 lean_obj_arg kept, lean_obj_arg) {
   size_t entrySlot;
   if (!getSlot(slot, entrySlot))
     return ioError("invalid JIT entry slot");
-  return compileOps(ops, optimized != 0, entries, entrySlot);
+  return compileOps(ops, optimized != 0, entries, entrySlot, optimized != 0 ? kept : nullptr);
 }
 
 extern "C" lean_obj_res bap_jit_run(lean_obj_arg programObject,

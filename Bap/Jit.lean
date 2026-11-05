@@ -7,7 +7,9 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
 **Compiled programs** (`compile`, `runWithMemoryObservedCode`, `runWithPersistentMemoryObservedCode`)
 1. Each `Op` computes what `Bap.Proofs.Primus.step` says on 64-bit slots, `label`, `goto` and `branch` go where
    `Bap.Proofs.Jit.nextCfg` says, and a program leaves its slots as the array it returns, and returns the value of
-   the `jump` that ended it. `lowerStatements_run` and `lowerExp_correct` are proved against that model.
+   the `jump` that ended it. What `compileOptimized` and `compileEntries` optimize leaves only the slots of `kept` so, and
+   the others as they may be: `Bap.Primus.Lifted` keeps those that it reads afterwards, of the variables, the flags, the
+   effect, the budget and where a run was entered (`keptSlots`). `lowerStatements_run` and `lowerExp_correct` are proved against that model.
 2. `memLoad` and `memStore` first call the memory observer, once, with the base address, the size, and, for a
    store, the whole value, and then access `size` consecutive bytes (at most 8) in the order of `bigEndian`, at
    the base plus 0 and so on in 64 bits, as one instruction of the host where obligation 10 says. They do not wrap at the end of a narrower address space. Lowering does not
@@ -131,12 +133,13 @@ opaque compile (ops : @& List Op) : IO Program
 
 /-- Compiled with the optimizations of LLVM, which takes longer and is worth it for what runs a lot. -/
 @[extern "bap_jit_compile_optimized"]
-opaque compileOptimized (ops : @& List Op) : IO Program
+opaque compileOptimized (ops : @& List Op) (kept : @& Array UInt64) : IO Program
 
 /-- A program that starts at the label that the slot `entrySlot` of its state says, as one more than it, of those that are
 `entries`, and where it would otherwise when that holds zero. It takes a state that has that slot. -/
 @[extern "bap_jit_compile_entries"]
-opaque compileEntries (ops : @& List Op) (entries : @& List Nat) (entrySlot : @& Nat) (optimized : Bool) : IO Program
+opaque compileEntries (ops : @& List Op) (entries : @& List Nat) (entrySlot : @& Nat) (optimized : Bool) (kept : @& Array UInt64) :
+    IO Program
 
 /-- What hears of each load and store before it happens, as obligation 2 says: whether it is a store, the address, the size and what is
 stored. It throws to stop the program, as for a fault. -/
