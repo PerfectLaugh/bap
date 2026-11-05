@@ -2096,10 +2096,14 @@ private def heapModelId : String := "bap.heap"
 /-- What a checkpoint knows what `Machine.loadLibrary` has loaded by. -/
 private def libraryModelId : String := "bap.libraries"
 
+/-- What a checkpoint has of the trace of instructions and accesses, all of it, as the machine of it is to go on with it. -/
+private def traceModelId : String := "bap.trace"
+
 /-- The models that every machine has, with the versions of what they keep: of ptrace, 2 has the stops that tracees have yet to make
 and those that stopped for their end. -/
 private def builtinModels : List (String × Nat) :=
-  [(Signals.modelId, 1), (Ptrace.modelId, 2), (Seccomp.modelId, 1), (Timers.modelId, 1), (Ring.modelId, 1), (heapModelId, 1), (libraryModelId, 1)]
+  [(Signals.modelId, 1), (Ptrace.modelId, 2), (Seccomp.modelId, 1), (Timers.modelId, 1), (Ring.modelId, 1), (heapModelId, 1), (libraryModelId, 1),
+    (traceModelId, 1)]
 
 private def builtinVersion (id : String) : Nat := (builtinModels.lookup id).getD 1
 
@@ -2199,6 +2203,10 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
         let table ← emu.taskTable.get
         pure (GuestHeap.encode ((← machine.heaps.get).filter fun space _ => table.tasks.any (·.space == space)))
       load := fun data => do machine.heaps.set (← IO.ofExcept (GuestHeap.decode data)) } }])
+  -- And the trace, whose pcs and accesses a machine of a checkpoint has as the one it was of did, rather than none.
+  machine.models.modify (· ++ [{
+    id := traceModelId, version := builtinVersion traceModelId,
+    state := { save := traceSave emu, load := traceLoad emu } }])
   machine.models.modify (· ++ [{
     id := libraryModelId, version := builtinVersion libraryModelId,
     state := {

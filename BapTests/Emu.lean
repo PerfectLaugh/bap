@@ -1094,6 +1094,35 @@ private def testThumbItFlags : IO Unit := do
   let _ ← Bap.Emu.step emu
   assertBits "Emu orrs.w in an IT block sets Z" (BitVec.ofNat 1 1) (.ok (← Bap.Emu.reg emu (flag "ZF")))
 
+/-- A checkpoint has the trace of instructions and accesses, all of it: a machine of it has the pcs, what was dropped of them and the
+accesses that the machine it was of had, saves as that did, and goes on to the trace of a run that never stopped. -/
+def testCheckpointTrace (triple : String) : IO Unit := do
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-threads"
+  let start (begin : Bap.Emu.Emu → IO Unit) : IO Bap.Linux.Machine := do
+    let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+    begin machine.emu
+    pure machine
+  let traceOf (machine : Bap.Linux.Machine) : IO (List Nat × Nat × List Bap.Emu.TraceAccess × Nat) := do
+    pure (← Bap.Emu.tracePcs machine.emu, ← Bap.Emu.traceDroppedPcs machine.emu, ← Bap.Emu.traceAccesses machine.emu,
+      ← Bap.Emu.traceAccessesCount machine.emu)
+  let setups : List (String × (Bap.Emu.Emu → IO Unit)) :=
+    [("all pcs", Bap.Emu.traceStart), ("a ring of 500 pcs", fun emu => Bap.Emu.traceStartCapacity emu 500),
+     ("accesses", fun emu => Bap.Emu.traceStartAccesses emu 64)]
+  for (label, begin) in setups do
+    let whole ← start begin
+    let _ ← whole.run fun _ => pure ()
+    let first ← start begin
+    let outcome ← first.run (fuel := 12000) fun _ => pure ()
+    assertEqual s!"Linux {triple} trace of {label} stops for its checkpoint" Bap.Tasks.ScheduleOutcome.outOfFuel outcome
+    let data ← first.checkpoint
+    let second ← Bap.Linux.Machine.ofCheckpoint data
+    let (pcs, dropped, accesses, accessCount) ← traceOf first
+    assertTrue s!"Linux {triple} trace of {label} has pcs to keep" (!pcs.isEmpty)
+    assertEqual s!"Linux {triple} trace of {label} is in its checkpoint" (pcs, dropped, accesses, accessCount) (← traceOf second)
+    assertEqual s!"Linux {triple} trace of {label} saves again as it was" true (data == (← second.checkpoint))
+    let _ ← second.run fun _ => pure ()
+    assertEqual s!"Linux {triple} trace of {label} goes on as one that never stopped" (← traceOf whole) (← traceOf second)
+
 /-- A machine stopped anywhere and saved goes on from the bytes alone, in a new machine, to the same end. -/
 def testLinuxCheckpoints (triple : String) (cuts : List Nat := [12000]) : IO Unit := do
   let start (name : String) : IO Bap.Linux.Machine := do

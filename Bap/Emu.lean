@@ -1078,6 +1078,84 @@ def traceDroppedAccesses (emu : Emu) : IO Nat := do
   let state := current.getD {}
   pure (state.accessCount - min state.accessRetained state.accessCapacity)
 
+/-- All of the trace as bytes, for a checkpoint: its pcs in order, its accesses, and what it counts and keeps of each, which
+`traceLoad` makes the same again, so that a machine of a checkpoint has the trace that the one it was of had. -/
+def traceSave (emu : Emu) : IO ByteArray := do
+  let word (value : Nat) : ByteArray := ByteArray.mk ((List.range 8).map fun index => UInt8.ofNat (value / 256 ^ index % 256)).toArray
+  match ← emu.trace.get with
+  | none => pure (ByteArray.mk #[0])
+  | some state =>
+    let pcs := pcList state
+    let accesses := state.accesses.reverse
+    let mut out := (ByteArray.mk #[1]) ++ word pcs.length
+    for pc in pcs do out := out ++ word pc
+    out := out ++ word state.pcRetained ++ word state.pcCount ++ word state.droppedPcs ++ word state.pcCapacity
+    out := out ++ word accesses.length
+    for access in accesses do
+      out := out ++ word access.insn ++ word access.pc ++ word access.address ++ word access.size
+        ++ ByteArray.mk #[if access.write then 1 else 0]
+        ++ (match access.value with | some value => ByteArray.mk #[1] ++ word value | none => ByteArray.mk #[0])
+        ++ word access.thread
+    out := out ++ word state.accessCount ++ word state.accessRetained ++ word state.accessCapacity
+    out := out ++ (match state.watch with | some (low, high) => ByteArray.mk #[1] ++ word low ++ word high | none => ByteArray.mk #[0])
+    pure out
+
+/-- The trace that `traceSave` gave the bytes of. -/
+def traceLoad (emu : Emu) (data : ByteArray) : IO Unit := do
+  let at_ ← IO.mkRef 0
+  let byte : IO Nat := do
+    let index ← at_.get
+    if index ≥ data.size then throw <| IO.userError "the trace of a checkpoint ends too soon"
+    at_.set (index + 1)
+    pure data[index]!.toNat
+  let word : IO Nat := do
+    let mut value := 0
+    for index in List.range 8 do value := value + (← byte) * 256 ^ index
+    pure value
+  let list {α : Type} (item : IO α) : IO (List α) := do
+    let count ← word
+    let mut items := #[]
+    for _ in List.range count do items := items.push (← item)
+    pure items.toList
+  let trace ← match ← byte with
+    | 0 => pure none
+    | 1 => do
+      let pcs ← list word
+      let pcRetained ← word
+      let pcCount ← word
+      let droppedPcs ← word
+      let pcCapacity ← word
+      let accesses ← list do
+        let insn ← word
+        let pc ← word
+        let address ← word
+        let size ← word
+        let write := (← byte) == 1
+        let value ← if (← byte) == 1 then some <$> word else pure none
+        let thread ← word
+        pure ({ insn, pc, address, size, write, value, thread } : TraceAccess)
+      let accessCount ← word
+      let accessRetained ← word
+      let accessCapacity ← word
+      let watch ← if (← byte) == 1 then do let low ← word; pure (some (low, ← word)) else pure none
+      let state : TraceState := {
+        pcsFront := pcs
+        pcRetained := pcRetained
+        pcCount := pcCount
+        droppedPcs := droppedPcs
+        pcCapacity := pcCapacity
+        accesses := accesses.reverse
+        accessCount := accessCount
+        accessRetained := accessRetained
+        accessCapacity := accessCapacity
+        watch := watch
+      }
+      pure (some state)
+    | _ => throw <| IO.userError "the trace of a checkpoint is of no kind there is"
+  if (← at_.get) != data.size then throw <| IO.userError "the trace of a checkpoint has bytes after it"
+  forgetMemoryFilter emu
+  emu.trace.set trace
+
 /-- Runs a hook that is in the middle of an instruction, as a checkpoint then couldn't be of anything whole. -/
 private def serve (emu : Emu) (action : IO α) : IO α := do
   let before ← emu.serving.get
