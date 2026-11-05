@@ -456,9 +456,10 @@ def main : IO Unit := do
   Bap.Tests.Lifted.invalidationScales
   Bap.Tests.Emu.scaling
   -- More tests than the pool has threads would wait for each other, with processors to spare.
-  let tasks ← tests.mapM fun test => liftM <| IO.asTask (prio := .dedicated) do
+  -- A failure says which test it is, by its place in the list, as one that fails now and then says nothing else of where it was.
+  let tasks ← tests.zipIdx.mapM fun (test, index) => liftM <| IO.asTask (prio := .dedicated) do
     try test catch error =>
-      IO.eprintln s!"FAILED: {error}"
+      IO.eprintln s!"FAILED (test {index} of the list in BapTests/Main.lean): {error}"
       throw error
   tasks.forM fun task =>
     match task.get with
