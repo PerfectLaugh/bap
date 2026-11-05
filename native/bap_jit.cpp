@@ -158,6 +158,9 @@ struct BapCells {
   StoreLog *changes;
   lean_object *codeObserver;
   const MemoryFilter *filter = nullptr;
+  // The variables of a chain, by their numbers, which what is optimized with numbers for its variables reads and writes in place of
+  // their slots, so that going from range to range copies nothing: none for a run of its own (obligation 17).
+  uint64_t *registers = nullptr;
   // A run whose code sites would only set the pc, as nothing observes it and no Lean code has run in it: the site of the last block
   // waits here, for the memory observer to be called, as it reads the pc (obligation 16).
   bool quietSites = false;
@@ -312,6 +315,8 @@ struct Program {
   llvm::orc::ResourceTrackerSP resources;
   uint64_t (*function)(uint64_t *, BapCells *) = nullptr;
   size_t maxSlot = 0;
+  // Whether its variables are the chain's registers when it has them.
+  bool direct = false;
   size_t memoryStores = 0;
 
   ~Program() {
@@ -420,8 +425,10 @@ bool getSlot(lean_obj_arg value, size_t &slot) {
 // it would otherwise when that holds zero.
 // `kept`, for what is optimized, is the slots that what runs it reads afterwards, as obligation 1 says: only those are left in the
 // state, so that the rest, the temporaries of expressions, live as long as they are used and not to the end of the run.
+// `variables`, for what is optimized, is pairs of a slot of a variable and the variable's number among the registers of a chain.
 static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg entries = nullptr, size_t entrySlot = 0,
-                               lean_obj_arg kept = nullptr, uint64_t budgetSlot = ~uint64_t{0}) {
+                               lean_obj_arg kept = nullptr, uint64_t budgetSlot = ~uint64_t{0},
+                               lean_obj_arg variables = nullptr) {
   try {
     std::string initializationError;
     if (!initialize(initializationError))
@@ -1053,8 +1060,22 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
         address->replaceAllUsesWith(copies[slot]);
         address->eraseFromParent();
       }
+      // Where each slot is between runs: a variable's is the chain's register of it when there are registers, and the state's
+      // otherwise, as for every other slot.
+      std::vector<llvm::Value *> homes(slotCount);
+      llvm::Value *registers = builder.CreateLoad(pointer, builder.CreateConstGEP1_64(byte, memory, offsetof(BapCells, registers)));
+      llvm::Value *chained = builder.CreateIsNotNull(registers);
       for (size_t index = 0; index != slotCount; ++index)
-        builder.CreateStore(builder.CreateLoad(word, builder.CreateConstGEP1_64(word, state, index)), copies[index]);
+        homes[index] = builder.CreateConstGEP1_64(word, state, index);
+      if (variables != nullptr)
+        for (size_t at = 0; at + 1 < lean_array_size(variables); at += 2) {
+          uint64_t slot = lean_unbox_uint64(lean_array_get_core(variables, at));
+          uint64_t number = lean_unbox_uint64(lean_array_get_core(variables, at + 1));
+          if (slot < slotCount)
+            homes[slot] = builder.CreateSelect(chained, builder.CreateConstGEP1_64(word, registers, number), homes[slot]);
+        }
+      for (size_t index = 0; index != slotCount; ++index)
+        builder.CreateStore(builder.CreateLoad(word, homes[index]), copies[index]);
       builder.CreateBr(first);
       // One way out, which leaves the slots in the state once, rather than at each return.
       std::vector<llvm::ReturnInst *> returns;
@@ -1076,7 +1097,7 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
       }
       for (size_t index = 0; index != slotCount; ++index)
         if (written[index])
-          builder.CreateStore(builder.CreateLoad(word, copies[index]), builder.CreateConstGEP1_64(word, state, index));
+          builder.CreateStore(builder.CreateLoad(word, copies[index]), homes[index]);
       builder.CreateRet(result);
       for (llvm::ReturnInst *ret : returns) {
         llvm::BasicBlock *block = ret->getParent();
@@ -1129,6 +1150,7 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
         address->toPtr<uint64_t(uint64_t *, BapCells *)>();
     program->shared = shared;
     program->resources = resources;
+    program->direct = optimized && variables != nullptr && hasSlots;
     program->maxSlot = entries != nullptr ? std::max(hasSlots ? maxSlot + 1 : 0, entrySlot + 1) : (hasSlots ? maxSlot + 1 : 0);
     program->memoryStores = memoryStores;
     return lean_io_result_mk_ok(
@@ -1140,16 +1162,18 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
 
 extern "C" lean_obj_res bap_jit_compile(lean_obj_arg ops, lean_obj_arg) { return compileOps(ops, false); }
 
-extern "C" lean_obj_res bap_jit_compile_optimized(lean_obj_arg ops, lean_obj_arg kept, uint64_t budgetSlot, lean_obj_arg) {
-  return compileOps(ops, true, nullptr, 0, kept, budgetSlot);
+extern "C" lean_obj_res bap_jit_compile_optimized(lean_obj_arg ops, lean_obj_arg kept, uint64_t budgetSlot, lean_obj_arg variables,
+                                                   lean_obj_arg) {
+  return compileOps(ops, true, nullptr, 0, kept, budgetSlot, variables);
 }
 
 extern "C" lean_obj_res bap_jit_compile_entries(lean_obj_arg ops, lean_obj_arg entries, lean_obj_arg slot, uint8_t optimized,
-                                                 lean_obj_arg kept, lean_obj_arg) {
+                                                 lean_obj_arg kept, lean_obj_arg variables, lean_obj_arg) {
   size_t entrySlot;
   if (!getSlot(slot, entrySlot))
     return ioError("invalid JIT entry slot");
-  return compileOps(ops, optimized != 0, entries, entrySlot, optimized != 0 ? kept : nullptr);
+  return compileOps(ops, optimized != 0, entries, entrySlot, optimized != 0 ? kept : nullptr, ~uint64_t{0},
+                    optimized != 0 ? variables : nullptr);
 }
 
 extern "C" lean_obj_res bap_jit_run(lean_obj_arg programObject,
@@ -1607,6 +1631,8 @@ struct ChainEntry {
   // Where it went last and what is there, so that a jump that goes where it went needs no search, as QEMU patches its jumps.
   uint64_t lastNext = none;
   ChainEntry *lastTarget = nullptr;
+  // Whether its program reads and writes its variables in the registers of the chain.
+  bool direct = false;
   // What a run of the chain did of it, to say at its end.
   bool touched = false;
   uint64_t runs = 0, executed = 0;
@@ -1710,6 +1736,7 @@ extern "C" lean_obj_res bap_jit_chain_add(lean_obj_arg chainObject, uint64_t pc,
   }
   lean_inc_ref(programObject);
   entry.program = programObject;
+  entry.direct = program->direct;
   chain->entries.emplace(pc, std::move(entry));
   return lean_io_result_mk_ok(lean_box(0));
 }
@@ -1722,7 +1749,7 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
                                             lean_obj_arg filterObject, uint8_t quietSites, lean_obj_arg observerObject,
                                             lean_obj_arg codeObserverObject, lean_obj_arg chainObject, uint64_t firstId,
                                             uint64_t firstPc, uint64_t firstBudget, lean_obj_arg variablesObject,
-                                            lean_obj_arg valuesObject, lean_obj_arg) {
+                                            lean_obj_arg valuesObject, uint64_t variableCount, lean_obj_arg) {
   try {
     auto *chain = static_cast<Chain *>(lean_get_external_data(chainObject));
     auto *persistent = static_cast<PagedMemory *>(lean_get_external_data(memoryObject));
@@ -1736,6 +1763,8 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
     auto ensure = [&](uint64_t variable) {
       if (variable >= registers.size()) { registers.resize(variable + 1, 0); bound.resize(variable + 1, 0); }
     };
+    // All the numbers there are, so that the registers stay where they are while a program has them.
+    if (variableCount != 0) ensure(variableCount - 1);
     for (size_t index = 0; index != lean_array_size(variablesObject); ++index) {
       uint64_t variable = lean_unbox_uint64(lean_array_get_core(variablesObject, index));
       ensure(variable);
@@ -1767,11 +1796,33 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
     BapCells memory{nullptr, 0, 0, observer, nullptr, persistent, &changes, codeObserver};
     memory.filter = filter;
     memory.quietSites = quietSites != 0;
+    // That a run left these variables written, which those with registers did there in place of their slots.
+    auto written = [&](const std::vector<ChainEntry::Output> &outputs, bool copy) {
+      for (const auto &output : outputs) {
+        if (output.flag != ChainEntry::none && state[output.flag] == 0)
+          continue;
+        ensure(output.variable);
+        if (copy) {
+          uint64_t value = state[output.slot];
+          if (output.width < 64) value &= (uint64_t{1} << output.width) - 1;
+          registers[output.variable] = value;
+        }
+        if (bound[output.variable] != 2) dirty.push_back(output.variable);
+        bound[output.variable] = 2;
+      }
+    };
+    auto outputsAt = [&](const ChainEntry *entry, uint64_t pc) -> const std::vector<ChainEntry::Output> & {
+      auto checkpoint = entry->checkpoints.empty() ? entry->checkpoints.end() : entry->checkpoints.find(pc);
+      return checkpoint != entry->checkpoints.end() ? checkpoint->second : entry->outputs;
+    };
     for (;;) {
       auto *program = static_cast<Program *>(lean_get_external_data(current->program));
       memory.pendingSite = false;
+      memory.registers = current->direct ? registers.data() : nullptr;
       next = program->function(state.data(), &memory);
       if (memory.error != nullptr) { error = memory.error; break; }
+      if (current->direct)
+        written(outputsAt(current, next), false);
       uint64_t effect = current->effectSlot == ChainEntry::none ? 0 : state[current->effectSlot];
       uint64_t left = current->budgetSlot == ChainEntry::none ? budget : state[current->budgetSlot];
       uint64_t ranChained = budget >= left ? budget - left : 0;
@@ -1797,18 +1848,8 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
         break;
       // What the run wrote, as Lean takes it: the outputs of the checkpoint where it went if it is one, each if its flag says so. If
       // the next can't run after all, Lean takes them again from the last run, the same.
-      auto checkpoint = current->checkpoints.empty() ? current->checkpoints.end() : current->checkpoints.find(next);
-      const std::vector<ChainEntry::Output> &outputs = checkpoint != current->checkpoints.end() ? checkpoint->second : current->outputs;
-      for (const auto &output : outputs) {
-        if (output.flag != ChainEntry::none && state[output.flag] == 0)
-          continue;
-        uint64_t value = state[output.slot];
-        if (output.width < 64) value &= (uint64_t{1} << output.width) - 1;
-        ensure(output.variable);
-        if (bound[output.variable] != 2) dirty.push_back(output.variable);
-        registers[output.variable] = value;
-        bound[output.variable] = 2;
-      }
+      if (!current->direct)
+        written(outputsAt(current, next), true);
       bool ready = true;
       for (uint64_t variable : target->required)
         if (variable >= bound.size() || bound[variable] == 0) { ready = false; break; }
@@ -1823,9 +1864,10 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
       // What isn't written before it is read, and the rest as the last range left them, which nothing reads.
       spare.resize(target->slotCount);
       for (uint64_t slot : target->zeroed) spare[slot] = 0;
-      for (const auto &binding : target->layout)
-        if (binding.first < bound.size() && bound[binding.first] != 0)
-          spare[binding.second] = registers[binding.first];
+      if (!target->direct)
+        for (const auto &binding : target->layout)
+          if (binding.first < bound.size() && bound[binding.first] != 0)
+            spare[binding.second] = registers[binding.first];
       if (target->budgetSlot != ChainEntry::none) spare[target->budgetSlot] = budget;
       if (target->observedSlot != ChainEntry::none) spare[target->observedSlot] = 0;
       std::swap(state, spare);
@@ -1857,8 +1899,9 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
       lean_array_set_core(resultValues, index, lean_box(value));
       ++index;
     });
-    // The last range, the blocks entered after the first of all, the variables written before the last range, and the runs of each.
-    std::vector<uint64_t> info{current->id, chained, dirty.size()};
+    // The last range, the blocks entered after the first of all, whether the last range's variables are with the others rather than in
+    // its slots, the variables written before it (and by it, if so), and the runs of each.
+    std::vector<uint64_t> info{current->id, chained, current->direct ? 1u : 0u, dirty.size()};
     for (uint64_t variable : dirty) { info.push_back(variable); info.push_back(registers[variable]); }
     info.push_back(touched.size());
     for (ChainEntry *entry : touched) {

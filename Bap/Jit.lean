@@ -63,7 +63,9 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
     variables now hold, which with those given at first (`variables`, `values`) are its slots of the layout, unless one that it needs
     isn't bound, which ends the run there; the slots it has for 0 are 0, and the others, which it writes before it reads, as may be; its budget is what the last left less one, and its observed slot 0. A range that isn't
     optimized is gone on to as `Bap.Primus.Lifted` counts its executions: not once they come to when it is to be optimized, and with its
-    budget no more than what they have left until then. It gives back what the
+    budget no more than what they have left until then. What is optimized with numbers for its variables (`variables` of
+    `compileOptimized`, pairs of a slot and a number) reads and writes them as the chain's registers, rather than in its slots, which
+    then hold nothing of them, and the chain takes what such a range writes as what it reached of its outputs. It gives back what the
     run of the last range gives, with: that range's number, the blocks entered after the first of all, the variables that the ranges
     before it wrote with what they hold last, and the number of runs of each range. A failed run fails it all, as in obligation 4.
 13. After `beginMemoryStep`, `memoryStepWrites` holds every address that a `writeMemory` or a program wrote to this memory
@@ -133,13 +135,13 @@ opaque compile (ops : @& List Op) : IO Program
 
 /-- Compiled with the optimizations of LLVM, which takes longer and is worth it for what runs a lot. -/
 @[extern "bap_jit_compile_optimized"]
-opaque compileOptimized (ops : @& List Op) (kept : @& Array UInt64) (budgetSlot : UInt64) : IO Program
+opaque compileOptimized (ops : @& List Op) (kept : @& Array UInt64) (budgetSlot : UInt64) (variables : @& Array UInt64) : IO Program
 
 /-- A program that starts at the label that the slot `entrySlot` of its state says, as one more than it, of those that are
 `entries`, and where it would otherwise when that holds zero. It takes a state that has that slot. -/
 @[extern "bap_jit_compile_entries"]
-opaque compileEntries (ops : @& List Op) (entries : @& List Nat) (entrySlot : @& Nat) (optimized : Bool) (kept : @& Array UInt64) :
-    IO Program
+opaque compileEntries (ops : @& List Op) (entries : @& List Nat) (entrySlot : @& Nat) (optimized : Bool) (kept : @& Array UInt64)
+    (variables : @& Array UInt64) : IO Program
 
 /-- What hears of each load and store before it happens, as obligation 2 says: whether it is a store, the address, the size and what is
 stored. It throws to stop the program, as for a fault. -/
@@ -231,12 +233,13 @@ its layout, the variables it needs, its outputs, its flags and its checkpoints, 
 opaque addToChain (chain : @& Chain) (pc id : UInt64) (program : @& Program) (data : @& Array UInt64) : IO Unit
 
 /-- A run that goes on from range to range of a chain in native code (obligation 17): where it went, the slots and the changed cells of
-the last range, and then that range's number, the blocks entered after the first, the count and pairs of the variables written before
-it, and the count and triples of each range, its runs and its executions. -/
+the last range, and then that range's number, the blocks entered after the first, whether the last range's variables are among those
+written rather than in its slots, the count and pairs of the variables written, and the count and triples of each range, its runs and
+its executions. -/
 @[extern "bap_jit_run_chain"]
 opaque runChain (program : @& Program) (state : @& Array UInt64) (memory : @& Memory) (filter : @& MemoryFilter) (quietSites : Bool)
     (observer : @& Option MemoryObserver) (codeObserver : @& Option CodeObserver) (chain : @& Chain) (firstId firstPc firstBudget : UInt64)
-    (variables values : @& Array UInt64) : IO (Nat × Array UInt64 × Array UInt64 × Array UInt8 × Array UInt64)
+    (variables values : @& Array UInt64) (variableCount : UInt64) : IO (Nat × Array UInt64 × Array UInt64 × Array UInt8 × Array UInt64)
 
 /-- What isn't zero of a memory, as its cells by address (obligation 8). -/
 @[extern "bap_jit_memory_dump"]

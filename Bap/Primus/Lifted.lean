@@ -1429,6 +1429,16 @@ private def restoreBlockVersion (engine : Engine) (address : Nat) (code : ByteAr
 /-- How many runs make it worth compiling something again, with what that takes: as long as the runs themselves take by then. -/
 private def optimizeFrom : Nat := 65536
 
+/-- The number of a variable for the chain. -/
+private def variableId (engine : Engine) (var : Bap.Var) : IO Nat := do
+  match (← engine.variableIds.get)[var]? with
+  | some id => pure id
+  | none =>
+    let id := (← engine.variables.get).size
+    engine.variables.modify (·.push var)
+    engine.variableIds.modify (·.insert var id)
+    pure id
+
 /-- The slots that are read after a run (obligation 1 of `Bap.Jit`): of the variables, which outputs and checkpoints are of, the flags
 of outputs, and the effect, budget and observed slots. The rest are temporaries of expressions, which nothing reads after. -/
 private def keptSlots (lowering : Lowering) : Array UInt64 :=
@@ -1444,9 +1454,13 @@ private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Optio
   | .native lowering _ fallback =>
     let started ← IO.monoMsNow
     let kept := keptSlots lowering
+    -- Its variables by their numbers in the chain, whose registers it uses for them there (obligation 17 of `Bap.Jit`).
+    let mut variables : Array UInt64 := #[]
+    for (var, slot) in lowering.layout do
+      variables := variables ++ #[UInt64.ofNat slot, UInt64.ofNat (← variableId engine var)]
     let program ← if entry.entryLabels.isEmpty then
-        Jit.compileOptimized lowering.ops kept ((lowering.budget.map UInt64.ofNat).getD (UInt64.ofNat (2 ^ 64 - 1)))
-      else Jit.compileEntries lowering.ops entry.entryLabels lowering.nextSlot true (kept.push (UInt64.ofNat lowering.nextSlot))
+        Jit.compileOptimized lowering.ops kept ((lowering.budget.map UInt64.ofNat).getD (UInt64.ofNat (2 ^ 64 - 1))) variables
+      else Jit.compileEntries lowering.ops entry.entryLabels lowering.nextSlot true (kept.push (UInt64.ofNat lowering.nextSlot)) (variables := variables)
     let elapsed := (← IO.monoMsNow) - started
     engine.statistics.modify fun stats =>
       { stats with nativeCompilations := stats.nativeCompilations + 1, compileMs := stats.compileMs + elapsed
@@ -1613,7 +1627,7 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
                 else none
               let labels := points.map (·.2.1)
               let program ← if labels.isEmpty then Jit.compile lowering.ops
-                else Jit.compileEntries lowering.ops labels lowering.nextSlot false #[]
+                else Jit.compileEntries lowering.ops labels lowering.nextSlot false #[] #[]
               let elapsed := (← IO.monoMsNow) - started
               engine.nativeLive.modify (· + 1)
               engine.statistics.modify fun stats =>
@@ -1949,16 +1963,6 @@ private def runPersistent (engine : Engine) (executions : IO.Ref Nat) (lowering 
     else syncMemoryDelta completed (syncState completed state slots) addresses values
   nativeResult lowering following next state slots
 
-/-- The number of a variable for the chain. -/
-private def variableId (engine : Engine) (var : Bap.Var) : IO Nat := do
-  match (← engine.variableIds.get)[var]? with
-  | some id => pure id
-  | none =>
-    let id := (← engine.variables.get).size
-    engine.variables.modify (·.push var)
-    engine.variableIds.modify (·.insert var id)
-    pure id
-
 /-- Puts a range, or a block that won't be in one, in the chain where it starts, as `Jit.addToChain` takes it: a block that may yet be
 in a range, which counting its runs decides, stays out, and what isn't optimized comes back to the dispatcher by when it has run
 enough to be, as the chain counts its runs as `prepareGraph` and `recordChained` do. -/
@@ -2041,17 +2045,19 @@ private def runChained (engine : Engine) (pc : Nat) (entry : CachedBlock) (state
   recordNative engine
   let (next, slots, addresses, cells, info) ← Jit.runChain program slots memory filter quietSites observer codeObserver
     engine.chain (UInt64.ofNat id) (UInt64.ofNat pc) (UInt64.ofNat budget) variables values
+    (UInt64.ofNat (← engine.variables.get).size)
   let entries ← engine.chainEntries.get
   let at_ (index : Nat) : Nat := (info.getD index 0).toNat
   let some last := entries[at_ 0]? | throw <| IO.userError "native chain ended at no range of it"
   let .native lowering _ _ := last.plan | throw <| IO.userError "native chain ended at what isn't native"
   engine.chained.set (at_ 1)
+  let direct := at_ 2 == 1
   let all ← engine.variables.get
-  let written := at_ 2
+  let written := at_ 3
   let updates : List (Bap.Var × Value) := (List.range written).filterMap fun index =>
-    (all[at_ (3 + 2 * index)]?).bind fun var =>
-      (widthOf var).map fun width => (var, Value.bits (slotBits width (info.getD (4 + 2 * index) 0)))
-  let runsAt := 3 + 2 * written
+    (all[at_ (4 + 2 * index)]?).bind fun var =>
+      (widthOf var).map fun width => (var, Value.bits (slotBits width (info.getD (5 + 2 * index) 0)))
+  let runsAt := 4 + 2 * written
   for index in List.range (at_ runsAt) do
     if let some ran := entries[at_ (runsAt + 1 + 3 * index)]? then
       ran.executions.modify (· + at_ (runsAt + 3 + 3 * index))
@@ -2060,7 +2066,9 @@ private def runChained (engine : Engine) (pc : Nat) (entry : CachedBlock) (state
   let state : Bil.State := { env := updates ++ withoutBindings (updates.map Prod.fst) state.env }
   let completed := atCodeStop lowering next
   let memoryVar ← engine.persistentVariable.get
-  let state := syncMemoryDelta { completed with memory := memoryVar } (syncState completed state slots) addresses cells
+  -- What the last range wrote is among the variables written if it wrote them in the chain's registers, and in its slots otherwise.
+  let state := syncMemoryDelta { completed with memory := memoryVar } (if direct then state else syncState completed state slots)
+    addresses cells
   some <$> nativeResult lowering last.next next state slots
 
 private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bil.State) (pc : Nat)
