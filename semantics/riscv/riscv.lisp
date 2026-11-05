@@ -369,18 +369,21 @@
 
 (defun MULH (rd r1 r2)
   (let ((w (word-width)))
-    (set$ rd (cast-high w (* (cast-signed (* 2 w) r1)
-                             (cast-signed (* 2 w) r2))))))
+    (if (= w 64) (set$ rd (smul-high64 r1 r2))
+      (set$ rd (cast-high w (* (cast-signed (* 2 w) r1)
+                               (cast-signed (* 2 w) r2)))))))
 
 (defun MULHU (rd r1 r2)
   (let ((w (word-width)))
-    (set$ rd (cast-high w (* (cast-unsigned (* 2 w) r1)
-                             (cast-unsigned (* 2 w) r2))))))
+    (if (= w 64) (set$ rd (umul-high64 r1 r2))
+      (set$ rd (cast-high w (* (cast-unsigned (* 2 w) r1)
+                               (cast-unsigned (* 2 w) r2)))))))
 
 (defun MULHSU (rd r1 r2)
   (let ((w (word-width)))
-    (set$ rd (cast-high w (* (cast-signed (* 2 w) r1)
-                             (cast-unsigned (* 2 w) r2))))))
+    (if (= w 64) (set$ rd (sumul-high64 r1 r2))
+      (set$ rd (cast-high w (* (cast-signed (* 2 w) r1)
+                               (cast-unsigned (* 2 w) r2)))))))
 
 ;; the quotients and the remainders are selected without a branch, and
 ;; the divisor of the selected one is never zero, as Primus evaluates

@@ -134,15 +134,16 @@
   (let ((p (* (cast 64 (low32 rs)) (cast 64 (low32 rt)))))
     (set-hilo (cast-high 32 p) (cast-low 32 p))))
 
-(defmacro dmult (cast rs rt)
-  (let ((p (* (cast 128 rs) (cast 128 rt))))
-    (set HI (cast-high 64 p))
-    (set LO (cast-low 64 p))))
+(defmacro dmult (high rs rt)
+  (let ((hi (high rs rt))
+        (lo (* rs rt)))
+    (set HI hi)
+    (set LO lo)))
 
 (defun MULT (rs rt) (mult cast-signed rs rt))
 (defun MULTu (rs rt) (mult cast-unsigned rs rt))
-(defun DMULT (rs rt) (dmult cast-signed rs rt))
-(defun DMULTu (rs rt) (dmult cast-unsigned rs rt))
+(defun DMULT (rs rt) (dmult smul-high64 rs rt))
+(defun DMULTu (rs rt) (dmult umul-high64 rs rt))
 
 ;; the quotient is rounded toward zero and the remainder has the sign of
 ;; the dividend, the results of a division by zero, and of the overflow

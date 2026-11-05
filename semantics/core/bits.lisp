@@ -25,6 +25,30 @@
   (logor (logand (msb rn) (msb rm) (lnot (msb rd)))
          (logand (lnot (msb rn)) (lnot (msb rm)) (msb rd))))
 
+;; The high half of a product of words of 64 bits, of their halves of 32
+;; bits, none of whose partial products and sums carries out of 64 bits, as
+;; Hacker's Delight has it, so that nothing of 128 bits is made, which native
+;; code has no slot for. That of a signed operand is that unsigned less the
+;; other operand where it is negative.
+(defun umul-high64 (x y)
+  "(umul-high64 X Y) is the high 64 bits of the unsigned product of X and Y."
+  (let ((x0 (logand x 0xffffffff:64))
+        (x1 (rshift x 32:64))
+        (y0 (logand y 0xffffffff:64))
+        (y1 (rshift y 32:64))
+        (low (* x0 y0))
+        (m1 (+ (* x1 y0) (rshift low 32:64)))
+        (m2 (+ (* x0 y1) (logand m1 0xffffffff:64))))
+    (+ (* x1 y1) (+ (rshift m1 32:64) (rshift m2 32:64)))))
+
+(defun smul-high64 (x y)
+  "(smul-high64 X Y) is the high 64 bits of the signed product of X and Y."
+  (- (- (umul-high64 x y) (if (msb x) y 0:64)) (if (msb y) x 0:64)))
+
+(defun sumul-high64 (x y)
+  "(sumul-high64 X Y) is the high 64 bits of the product of X signed and Y unsigned."
+  (- (umul-high64 x y) (if (msb x) y 0:64)))
+
 (defun replicate (bitv n)
   "(replicate bitv n) returns a bitvector with bitv repeated n times."
   (let ((output bitv))

@@ -192,6 +192,6 @@
 (defun UMSUBLrrr (rd rn rm ra)
   (set$ rd (- ra (* (cast-unsigned 64 rn) (cast-unsigned 64 rm)))))
 (defun SMULHrr (rd rn rm)
-  (set$ rd (cast-high 64 (* (cast-signed 128 rn) (cast-signed 128 rm)))))
+  (set$ rd (smul-high64 rn rm)))
 (defun UMULHrr (rd rn rm)
-  (set$ rd (cast-high 64 (* (cast-unsigned 128 rn) (cast-unsigned 128 rm)))))
+  (set$ rd (umul-high64 rn rm)))
