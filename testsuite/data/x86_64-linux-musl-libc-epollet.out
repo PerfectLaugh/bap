@@ -5,3 +5,5 @@ socketpair with more 1
 eventfd 1 1 0
 eventfd with more 1
 pipe to write 1 0
+rotation of 1 123123
+rotation of 2 123123123123

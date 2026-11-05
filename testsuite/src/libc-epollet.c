@@ -1,6 +1,7 @@
 // epoll with EPOLLET: what is ready is told of again each time that more comes, whether or not the reader took all that was there
 // before, and not when nothing came; of a pipe, a pair of sockets and an eventfd, and of a pipe that has room to write. It says what it
-// found, the same on each target. The libc of the tests has no epoll, eventfd or socketpair, so they are called by number.
+// found, the same on each target. Without EPOLLET, waits that take fewer items than are ready go round all of them in turn. The libc
+// of the tests has no epoll, eventfd or socketpair, so they are called by number.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -74,6 +75,27 @@ static void edges(const char *label, const char *more_, int fd, void (*put)(void
   close(epoll);
 }
 
+// What six waits of `limit` items each tell of, as the data of each item in turn, of three pipes that are ready without
+// EPOLLET: the items that a wait told of go after the others, so the next waits tell of the others first.
+static void rotation(const char *label, int limit) {
+  int epoll = (int)call(SYS_epoll_create1, 0, 0, 0, 0);
+  for (int index = 1; index <= 3; index++) {
+    int ends[2];
+    pipe(ends);
+    write(ends[1], "x", 1);
+    struct event watch = { EPOLLIN, (uint64_t)index };
+    call(SYS_epoll_ctl, epoll, 1, ends[0], (long)&watch);
+  }
+  long order = 0;
+  for (int round = 0; round < 6; round++) {
+    struct event events[2];
+    long count = EPOLL_WAIT(epoll, events, limit, 0);
+    for (long index = 0; index < count; index++) order = order * 10 + (long)events[index].data;
+  }
+  say(label, 1, order, 0, 0);
+  close(epoll);
+}
+
 static int pipeFds[2], pair[2], counter;
 
 static void putPipe(void) { write(pipeFds[1], "ab", 2); }
@@ -115,5 +137,8 @@ int main(void) {
   call(SYS_epoll_ctl, epoll, 1, other[1], (long)&watch);
   long once_ = ready(epoll);
   say("pipe to write", 2, once_, ready(epoll), 0);
+
+  rotation("rotation of 1", 1);
+  rotation("rotation of 2", 2);
   return 0;
 }

@@ -262,6 +262,9 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     let due ← deadline timeout
     let open_ := referenced kernel live
     let mut kept : List EpollItem := []
+    -- What is told of without EPOLLET or EPOLLONESHOT goes after the rest, as Linux puts it at the end of what is ready, so that
+    -- waits that take fewer than are ready go round all of them.
+    let mut reported : List EpollItem := []
     let mut events : List (Nat × Nat) := []
     for item in items do
       if !open_.contains item.file then continue
@@ -276,10 +279,12 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         | some (told, before) => edge && !once && (revents ||| told != told || seen != before)
       if revents != 0 && fresh && events.length < limit then
         events := events ++ [(revents, item.data)]
-        kept := kept ++ [{ item with told := if edge || once then some (revents, seen) else none }]
+        if edge || once then kept := kept ++ [{ item with told := some (revents, seen) }]
+        else reported := reported ++ [{ item with told := none }]
       else
         -- What isn't ready is told of again once it is, of EPOLLET.
         kept := kept ++ [if revents == 0 && edge && !once then { item with told := none } else item]
+    kept := kept ++ reported
     poller.kernel.modify (·.setContent number_ (.epoll kept))
     if !events.isEmpty || timeout == some 0 || due.any (· ≤ now) then
       timers.finish tid
