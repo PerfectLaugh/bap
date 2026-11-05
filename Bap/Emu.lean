@@ -108,14 +108,45 @@ private structure TraceRing where
   /-- The bytes that each pc had the last time that it ran, which also say how long the instruction there is, while they stay. -/
   known : Std.HashMap Nat ByteArray := {}
 
+/-- What a trace keeps: of which threads, if not all, and whether each has a ring of its own, so that what one does isn't lost among what
+the others do. -/
+structure TraceOptions where
+  /-- How many pcs a ring keeps, the last of them, or all if 0. -/
+  pcCapacity : Nat := 0
+  /-- How many accesses to memory are kept, the last of them. -/
+  accessCapacity : Nat := 0
+  /-- Only the accesses that touch this range, if there is one. -/
+  watch : Option (Nat × Nat) := none
+  /-- Only what these threads do, if they are given. -/
+  threads : Option (List ThreadId) := none
+  /-- Each thread with a ring of its own, of `pcCapacity` each. -/
+  perThread : Bool := false
+  deriving DecidableEq, Repr
+
+/-- What a trace says of a thread: how many of its instructions it saw, how many of them it keeps, and how many it let go of. -/
+structure TraceThread where
+  thread : ThreadId
+  count : Nat
+  kept : Nat
+  dropped : Nat
+  deriving DecidableEq, Repr
+
 private structure TraceState where
+  options : TraceOptions := {}
+  /-- How many instructions it saw, of all threads that it keeps. -/
+  count : Nat := 0
+  /-- The ring of all threads, or of each. -/
   ring : TraceRing := {}
+  rings : Std.HashMap ThreadId TraceRing := {}
   accesses : List TraceAccess := []
   accessCount : Nat := 0
   /-- How many there are of `accesses`, which are let go of when they are twice what is kept. -/
   accessRetained : Nat := 0
-  accessCapacity : Nat := 0
-  watch : Option (Nat × Nat) := none
+
+
+/-- Whether a trace keeps what a thread does. -/
+private def TraceState.keeps (state : TraceState) (thread : ThreadId) : Bool :=
+  state.options.threads.all (·.contains thread)
 
 private structure CodeHookContext where
   engine : Primus.Lifted.Engine
@@ -1034,33 +1065,36 @@ def breakpoints (emu : Emu) : IO (List Nat) := do
   let current ← emu.breakpointsRef.get
   pure (current.map Prod.snd).reverse
 
-private def traceBeginPc (emu : Emu) (pcCapacity accessCapacity : Nat) (watch : Option (Nat × Nat)) : IO Unit := do
+/-- Starts a trace afresh, which keeps what `options` say. -/
+def traceStartWith (emu : Emu) (options : TraceOptions) : IO Unit := do
+  if let some range := options.watch then
+    if range.1 > range.2 then throw <| IO.userError "invalid Emu trace watch range"
   forgetMemoryFilter emu
-  emu.trace.set (some { ring := { capacity := pcCapacity }, accessCapacity, watch })
-
-private def traceBegin (emu : Emu) (capacity : Nat) (watch : Option (Nat × Nat)) : IO Unit :=
-  traceBeginPc emu 0 capacity watch
+  emu.trace.set (some { options, ring := { capacity := options.pcCapacity } })
 
 /-- Starts keeping each pc that runs, all of them. -/
-def traceStart (emu : Emu) : IO Unit := traceBegin emu 0 none
+def traceStart (emu : Emu) : IO Unit := traceStartWith emu {}
 
 /-- Starts keeping the last `capacity` pcs that run. -/
-def traceStartCapacity (emu : Emu) (capacity : Nat) : IO Unit := traceBeginPc emu capacity 0 none
+def traceStartCapacity (emu : Emu) (capacity : Nat) : IO Unit := traceStartWith emu { pcCapacity := capacity }
 
 /-- Starts keeping the pcs and the last `capacity` accesses to memory. -/
-def traceStartAccesses (emu : Emu) (capacity : Nat) : IO Unit := traceBegin emu capacity none
+def traceStartAccesses (emu : Emu) (capacity : Nat) : IO Unit := traceStartWith emu { accessCapacity := capacity }
 
 /-- Starts keeping the last `capacity` accesses to a range, and the pcs. -/
-def traceStartWatch (emu : Emu) (range : Nat × Nat) (capacity : Nat) : IO Unit := do
-  if range.1 > range.2 then
-    throw <| IO.userError "invalid Emu trace watch range"
-  traceBegin emu capacity (some range)
+def traceStartWatch (emu : Emu) (range : Nat × Nat) (capacity : Nat) : IO Unit :=
+  traceStartWith emu { accessCapacity := capacity, watch := some range }
 
 private def TraceRing.pcs (ring : TraceRing) : List Nat :=
   ring.front ++ ring.back.reverse
 
+/-- The rings of a trace by thread, in order of thread. -/
+private def TraceState.threadRings (state : TraceState) : List (ThreadId × TraceRing) :=
+  (state.rings.toArray.qsort fun left right => left.1 < right.1).toList
+
+/-- The pcs of a trace: of a ring for each thread, those of each thread in order of thread. -/
 private def pcList (state : TraceState) : List Nat :=
-  state.ring.pcs
+  if state.options.perThread then state.threadRings.flatMap (·.2.pcs) else state.ring.pcs
 
 /-- Each pc that a ring kept, with the bytes that it ran as: the last that were new at it by then. -/
 private def TraceRing.instructions (ring : TraceRing) : List (Nat × ByteArray) := Id.run do
@@ -1093,19 +1127,47 @@ def tracePcs (emu : Emu) : IO (List Nat) := do
 /-- Each pc that the trace kept so far, with the bytes of the instruction that ran there then, which may not be what is there now. Empty
 bytes are of an instruction that couldn't be fetched and decoded. -/
 def traceInstructions (emu : Emu) : IO (List (Nat × ByteArray)) := do
-  let current ← emu.trace.get
-  pure (current.getD {}).ring.instructions
+  let state := (← emu.trace.get).getD {}
+  pure (if state.options.perThread then state.threadRings.flatMap (·.2.instructions) else state.ring.instructions)
 
-/-- How many pcs the trace let go of for its capacity. -/
+/-- How many pcs the trace let go of for its capacity, of all threads. -/
 def traceDroppedPcs (emu : Emu) : IO Nat := do
-  let current ← emu.trace.get
-  pure (current.getD {}).ring.dropped
+  let state := (← emu.trace.get).getD {}
+  pure (if state.options.perThread then state.threadRings.foldl (· + ·.2.dropped) 0 else state.ring.dropped)
+
+/-- The ring of a thread, of a trace with one for each. -/
+private def threadRing (emu : Emu) (thread : ThreadId) : IO TraceRing := do
+  let state := (← emu.trace.get).getD {}
+  if !state.options.perThread then throw <| IO.userError "the trace has no ring of each thread: start it with perThread"
+  pure (state.rings.getD thread {})
+
+/-- The pcs that a thread ran, in order, of what its ring kept. -/
+def traceThreadPcs (emu : Emu) (thread : ThreadId) : IO (List Nat) := do
+  pure (← threadRing emu thread).pcs
+
+/-- Each pc that a thread ran, of what its ring kept, with the bytes that it ran as. -/
+def traceThreadInstructions (emu : Emu) (thread : ThreadId) : IO (List (Nat × ByteArray)) := do
+  pure (← threadRing emu thread).instructions
+
+/-- How many pcs a thread's ring let go of for its capacity. -/
+def traceThreadDroppedPcs (emu : Emu) (thread : ThreadId) : IO Nat := do
+  pure (← threadRing emu thread).dropped
+
+/-- What the trace says of each thread that it has a ring of, in order of thread: of a trace of one ring, nothing. -/
+def traceThreads (emu : Emu) : IO (List TraceThread) := do
+  let state := (← emu.trace.get).getD {}
+  pure (state.threadRings.map fun (thread, ring) =>
+    { thread, count := ring.count, kept := ring.count - ring.dropped, dropped := ring.dropped })
+
+/-- What the trace keeps. -/
+def traceOptions (emu : Emu) : IO (Option TraceOptions) := do
+  pure ((← emu.trace.get).map (·.options))
 
 /-- The accesses that the trace kept. -/
 def traceAccesses (emu : Emu) : IO (List TraceAccess) := do
   let current ← emu.trace.get
   let state := current.getD {}
-  pure (state.accesses.take state.accessCapacity).reverse
+  pure (state.accesses.take state.options.accessCapacity).reverse
 
 /-- How many accesses the trace saw, kept or not. -/
 def traceAccessesCount (emu : Emu) : IO Nat := do
@@ -1116,33 +1178,44 @@ def traceAccessesCount (emu : Emu) : IO Nat := do
 def traceDroppedAccesses (emu : Emu) : IO Nat := do
   let current ← emu.trace.get
   let state := current.getD {}
-  pure (state.accessCount - min state.accessRetained state.accessCapacity)
+  pure (state.accessCount - min state.accessRetained state.options.accessCapacity)
 
-/-- All of the trace as bytes, for a checkpoint: its pcs in order, its accesses, and what it counts and keeps of each, which
-`traceLoad` makes the same again, so that a machine of a checkpoint has the trace that the one it was of had. -/
+/-- All of the trace as bytes, for a checkpoint: what it keeps, its rings with their pcs in order and the bytes that they ran as, its
+accesses, and what it counts and keeps of each, which `traceLoad` makes the same again, so that a machine of a checkpoint has the trace
+that the one it was of had. -/
 def traceSave (emu : Emu) : IO ByteArray := do
   let word (value : Nat) : ByteArray := ByteArray.mk ((List.range 8).map fun index => UInt8.ofNat (value / 256 ^ index % 256)).toArray
-  match ← emu.trace.get with
-  | none => pure (ByteArray.mk #[0])
-  | some state =>
-    let ring := state.ring
+  let option (value : Option Nat) : ByteArray := match value with
+    | some value => ByteArray.mk #[1] ++ word value
+    | none => ByteArray.mk #[0]
+  let ringBytes (ring : TraceRing) : ByteArray := Id.run do
     let pcs := ring.pcs
-    let accesses := state.accesses.reverse
-    let mut out := (ByteArray.mk #[1]) ++ word pcs.length
+    let mut out := word pcs.length
     for pc in pcs do out := out ++ word pc
     out := out ++ word ring.retained ++ word ring.count ++ word ring.dropped ++ word ring.capacity
     let code := ring.code.reverse
     out := out ++ word code.length
     for (at_, pc, bytes) in code do out := out ++ word at_ ++ word pc ++ word bytes.size ++ bytes
+    pure out
+  match ← emu.trace.get with
+  | none => pure (ByteArray.mk #[0])
+  | some state =>
+    let options := state.options
+    let mut out := ByteArray.mk #[1] ++ word options.pcCapacity ++ word options.accessCapacity
+    out := out ++ (match options.watch with | some (low, high) => ByteArray.mk #[1] ++ word low ++ word high | none => ByteArray.mk #[0])
+    out := out ++ (match options.threads with
+      | some threads => threads.foldl (· ++ word ·) (ByteArray.mk #[1] ++ word threads.length)
+      | none => ByteArray.mk #[0])
+    out := out ++ ByteArray.mk #[if options.perThread then 1 else 0] ++ word state.count ++ ringBytes state.ring
+    let rings := state.threadRings
+    out := out ++ word rings.length
+    for (thread, ring) in rings do out := out ++ word thread ++ ringBytes ring
+    let accesses := state.accesses.reverse
     out := out ++ word accesses.length
     for access in accesses do
       out := out ++ word access.insn ++ word access.pc ++ word access.address ++ word access.size
-        ++ ByteArray.mk #[if access.write then 1 else 0]
-        ++ (match access.value with | some value => ByteArray.mk #[1] ++ word value | none => ByteArray.mk #[0])
-        ++ word access.thread
-    out := out ++ word state.accessCount ++ word state.accessRetained ++ word state.accessCapacity
-    out := out ++ (match state.watch with | some (low, high) => ByteArray.mk #[1] ++ word low ++ word high | none => ByteArray.mk #[0])
-    pure out
+        ++ ByteArray.mk #[if access.write then 1 else 0] ++ option access.value ++ word access.thread
+    pure (out ++ word state.accessCount ++ word state.accessRetained)
 
 /-- The trace that `traceSave` gave the bytes of. -/
 def traceLoad (emu : Emu) (data : ByteArray) : IO Unit := do
@@ -1167,18 +1240,32 @@ def traceLoad (emu : Emu) (data : ByteArray) : IO Unit := do
     let mut items := #[]
     for _ in List.range count do items := items.push (← item)
     pure items.toList
+  let ring : IO TraceRing := do
+    let pcs ← list word
+    let retained ← word
+    let count ← word
+    let dropped ← word
+    let capacity ← word
+    let code ← list do
+      let at_ ← word
+      let pc ← word
+      pure (at_, pc, ← bytes)
+    let known := code.foldl (init := {}) fun known (_, pc, bytes) => known.insert pc bytes
+    pure { front := pcs, retained, count, dropped, capacity, code := code.reverse, codeSize := code.length
+           codeLimit := 2 * code.length + 64, known }
   let trace ← match ← byte with
     | 0 => pure none
     | 1 => do
-      let pcs ← list word
-      let retained ← word
+      let pcCapacity ← word
+      let accessCapacity ← word
+      let watch ← if (← byte) == 1 then do let low ← word; pure (some (low, ← word)) else pure none
+      let threads ← if (← byte) == 1 then some <$> list word else pure none
+      let perThread := (← byte) == 1
       let count ← word
-      let dropped ← word
-      let capacity ← word
-      let code ← list do
-        let at_ ← word
-        let pc ← word
-        pure (at_, pc, ← bytes)
+      let shared ← ring
+      let rings ← list do
+        let thread ← word
+        pure (thread, ← ring)
       let accesses ← list do
         let insn ← word
         let pc ← word
@@ -1190,17 +1277,14 @@ def traceLoad (emu : Emu) (data : ByteArray) : IO Unit := do
         pure ({ insn, pc, address, size, write, value, thread } : TraceAccess)
       let accessCount ← word
       let accessRetained ← word
-      let accessCapacity ← word
-      let watch ← if (← byte) == 1 then do let low ← word; pure (some (low, ← word)) else pure none
-      let known := code.foldl (init := {}) fun known (_, pc, bytes) => known.insert pc bytes
       let state : TraceState := {
-        ring := { front := pcs, retained, count, dropped, capacity, code := code.reverse, codeSize := code.length
-                  codeLimit := 2 * code.length + 64, known }
+        options := { pcCapacity, accessCapacity, watch, threads, perThread }
+        count
+        ring := shared
+        rings := rings.foldl (init := {}) fun rings (thread, ring) => rings.insert thread ring
         accesses := accesses.reverse
-        accessCount := accessCount
-        accessRetained := accessRetained
-        accessCapacity := accessCapacity
-        watch := watch
+        accessCount
+        accessRetained
       }
       pure (some state)
     | _ => throw <| IO.userError "the trace of a checkpoint is of no kind there is"
@@ -1226,11 +1310,11 @@ private def recordAccess (emu : Emu) (write : Bool) (address size value : Nat) :
   let pc ← emu.pc.get
   let thread ← emu.currentThreadRef.get
   emu.trace.modify fun current => current.map fun state =>
-    if state.accessCapacity = 0 then state
-    else if state.watch.any fun range => !accessTouches range.1 range.2 address size then state
+    if state.options.accessCapacity = 0 || !state.keeps thread then state
+    else if state.options.watch.any fun range => !accessTouches range.1 range.2 address size then state
     else
       let access : TraceAccess := {
-        insn := state.ring.count - 1
+        insn := state.count - 1
         pc
         address
         size
@@ -1239,8 +1323,8 @@ private def recordAccess (emu : Emu) (write : Bool) (address size value : Nat) :
         thread
       }
       let (accesses, accessRetained) :=
-        if state.accessRetained + 1 ≥ 2 * state.accessCapacity then
-          ((access :: state.accesses).take state.accessCapacity, state.accessCapacity)
+        if state.accessRetained + 1 ≥ 2 * state.options.accessCapacity then
+          ((access :: state.accesses).take state.options.accessCapacity, state.options.accessCapacity)
         else (access :: state.accesses, state.accessRetained + 1)
       { state with accesses, accessRetained, accessCount := state.accessCount + 1 }
 
@@ -2113,11 +2197,20 @@ private def changedBytes (emu : Emu) (known : Option ByteArray) (address : Nat) 
 
 private def recordTrace (emu : Emu) (address : Nat) : IO Unit := do
   let some state ← emu.trace.get | return
-  let changed ← changedBytes emu (state.ring.known.get? address) address
+  let thread ← emu.currentThreadRef.get
+  if !state.keeps thread then return
+  let ringOf (state : TraceState) : TraceRing :=
+    if state.options.perThread then state.rings.getD thread { capacity := state.options.pcCapacity } else state.ring
+  let changed ← changedBytes emu ((ringOf state).known.get? address) address
+  let note (ring : TraceRing) : TraceRing := match changed with
+    | some bytes => ring.push address bytes
+    | none => ring.advance address
   serialize emu <| emu.trace.modify fun current => current.map fun state =>
-    { state with ring := match changed with
-      | some bytes => state.ring.push address bytes
-      | none => state.ring.advance address }
+    let state := { state with count := state.count + 1 }
+    if state.options.perThread then
+      let fresh : TraceRing := { capacity := state.options.pcCapacity }
+      { state with rings := state.rings.alter thread fun ring => some (note (ring.getD fresh)) }
+    else { state with ring := note state.ring }
 
 /-- The code site of a block inside a compiled range, whose first block is the step's. A block with hooks ends the range, with
 the block not entered and its hooks not fired: they are the next step's, which has the state that they read. -/

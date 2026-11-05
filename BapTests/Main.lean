@@ -70,6 +70,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testChainCalls,
     Bap.Tests.Emu.testCheckpointTrace "aarch64",
     Bap.Tests.Emu.testCheckpointTrace "x86_64",
+    Bap.Tests.Emu.testTraceThreads "aarch64",
+    Bap.Tests.Emu.testTraceThreads "x86_64",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-raises",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-controls",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-tbi",

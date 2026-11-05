@@ -1094,6 +1094,49 @@ private def testThumbItFlags : IO Unit := do
   let _ ← Bap.Emu.step emu
   assertBits "Emu orrs.w in an IT block sets Z" (BitVec.ofNat 1 1) (.ok (← Bap.Emu.reg emu (flag "ZF")))
 
+/-- A trace of each thread by itself: what one thread ran is what a trace of it alone has, a ring of each keeps the last of that thread's
+own and says how many it let go of, accesses are of the threads that are kept, and a checkpoint keeps it all. -/
+def testTraceThreads (triple : String) : IO Unit := do
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-threads"
+  let traced (options : Bap.Emu.TraceOptions) : IO Bap.Linux.Machine := do
+    let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+    Bap.Emu.traceStartWith machine.emu options
+    let _ ← machine.run fun _ => pure ()
+    pure machine
+  let whole ← traced { perThread := true }
+  let threads ← Bap.Emu.traceThreads whole.emu
+  assertTrue s!"{triple} threads each have a ring: {repr threads}" (threads.length ≥ 2)
+  assertTrue s!"{triple} an unbounded ring keeps all and lets go of nothing" (threads.all fun thread => thread.dropped == 0 && thread.kept == thread.count)
+  let (some main, some other) := (threads.head?, threads.getLast?) | throw <| IO.userError "no thread"
+  let mainPcs ← Bap.Emu.traceThreadPcs whole.emu main.thread
+  let alone ← traced { threads := some [main.thread], accessCapacity := 100000 }
+  assertTrue s!"{triple} what a thread ran is what a trace of it alone has" (mainPcs == (← Bap.Emu.tracePcs alone.emu))
+  assertTrue s!"{triple} a trace of a thread has only its accesses"
+    ((← Bap.Emu.traceAccesses alone.emu).all (·.thread == main.thread) && !(← Bap.Emu.traceAccesses alone.emu).isEmpty)
+  assertEqual s!"{triple} of all of them, as many as each ran" (threads.foldl (· + ·.count) 0) (← Bap.Emu.tracePcs whole.emu).length
+  -- Rings of 200: the last of each thread's own.
+  let bounded ← traced { perThread := true, pcCapacity := 200 }
+  let mainKept ← Bap.Emu.traceThreadPcs bounded.emu main.thread
+  assertTrue s!"{triple} a ring of a thread keeps its last" (mainKept == mainPcs.drop (mainPcs.length - 200))
+  assertEqual s!"{triple} and says how many of its own it let go of" (mainPcs.length - 200) (← Bap.Emu.traceThreadDroppedPcs bounded.emu main.thread)
+  let otherPcs ← Bap.Emu.traceThreadPcs whole.emu other.thread
+  assertTrue s!"{triple} another thread's ring isn't what the first ran"
+    ((← Bap.Emu.traceThreadPcs bounded.emu other.thread) == otherPcs.drop (otherPcs.length - min 200 otherPcs.length))
+  assertEqual s!"{triple} the dropped of all is those of each"
+    ((← Bap.Emu.traceThreads bounded.emu).foldl (· + ·.dropped) 0) (← Bap.Emu.traceDroppedPcs bounded.emu)
+  assertTrue s!"{triple} each instruction kept has its bytes"
+    ((← Bap.Emu.traceThreadInstructions bounded.emu main.thread).all fun (_, bytes) => !bytes.isEmpty)
+  -- Put back as it was.
+  let saved ← Bap.Emu.traceSave bounded.emu
+  let summary ← Bap.Emu.traceThreads bounded.emu
+  let _ ← Bap.Emu.traceStop bounded.emu
+  Bap.Emu.traceLoad bounded.emu saved
+  assertEqual s!"{triple} a trace put back has the same threads" summary (← Bap.Emu.traceThreads bounded.emu)
+  assertTrue s!"{triple} and the same rings" (mainKept == (← Bap.Emu.traceThreadPcs bounded.emu main.thread))
+  assertEqual s!"{triple} and keeps what it kept" (some { perThread := true, pcCapacity := 200 : Bap.Emu.TraceOptions })
+    (← Bap.Emu.traceOptions bounded.emu)
+  expectThrow s!"{triple} a trace of one ring has no ring of a thread" (Bap.Emu.traceThreadPcs alone.emu main.thread)
+
 /-- A checkpoint has the trace of instructions and accesses, all of it: a machine of it has the pcs, what was dropped of them and the
 accesses that the machine it was of had, saves as that did, and goes on to the trace of a run that never stopped. -/
 def testCheckpointTrace (triple : String) : IO Unit := do
