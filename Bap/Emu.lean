@@ -200,8 +200,12 @@ structure Emu where
   journal : Option (IO.Ref (List (Nat × Nat))) := none
   /-- How many blocks the last step could chain, which says whether its failure is the fault itself. -/
   lastBudget : IO.Ref Nat
-  /-- Whether the compiled range that runs started with nothing to observe it. -/
+  /-- Whether the compiled range that runs started with nothing to observe it: no trace, and no code hook in what it has. -/
   rangeQuiet : IO.Ref Bool
+  /-- How many times the code hooks changed, and how many it was when the range that runs started, so that a hook that comes
+  while it runs unobserved ends it. -/
+  hookChanges : IO.Ref Nat
+  rangeHooks : IO.Ref Nat
   /-- How many instructions the next step may run after its first, for `run`: a step on its own runs one. -/
   budget : IO.Ref Nat
   /-- Whether the step that just failed did so to run again as one instruction, at a hook of an access. -/
@@ -371,6 +375,8 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     sharedMemory := ← IO.mkRef none
     lastBudget := ← IO.mkRef 0
     rangeQuiet := ← IO.mkRef false
+    hookChanges := ← IO.mkRef 0
+    rangeHooks := ← IO.mkRef 0
     budget := ← IO.mkRef 0
     restarting := ← IO.mkRef false
     rangeStart := ← IO.mkRef none
@@ -867,6 +873,7 @@ def onCode (emu : Emu) (range : Nat × Nat) (action : Emu → Nat → IO Unit) (
   let before ← emu.hooks.get
   emu.hooks.modify (· ++ [⟨id, range.1, range.2, fun context => action (withContext emu context)⟩])
   emu.hooksByPage.set {}
+  emu.hookChanges.modify (· + 1)
   let inside (address : Nat) : Bool := range.1 ≤ address && address ≤ range.2
   if !late then
     emu.suppressed.modify (·.map fun (thread, address, ids) => (thread, address, if inside address then id :: ids else ids))
@@ -923,6 +930,7 @@ def onIntrinsic (emu : Emu) (name : String) (action : Emu → Nat → IO Intrins
 def removeHook (emu : Emu) (id : HookId) : IO Unit := do
   emu.hooks.modify fun hooks => hooks.filter fun hook => hook.id != id
   emu.hooksByPage.set {}
+  emu.hookChanges.modify (· + 1)
   emu.readHooks.modify fun hooks => hooks.filter fun hook => hook.id != id
   emu.writeHooks.modify fun hooks => hooks.filter fun hook => hook.id != id
   emu.watchedSteps.set {}
@@ -934,6 +942,7 @@ def removeHook (emu : Emu) (id : HookId) : IO Unit := do
 def clearHooks (emu : Emu) : IO Unit := do
   emu.hooks.set []
   emu.hooksByPage.set {}
+  emu.hookChanges.modify (· + 1)
   emu.readHooks.set []
   emu.writeHooks.set []
   emu.watchedSteps.set {}
@@ -1111,7 +1120,8 @@ the block not entered and its hooks not fired: they are the next step's, which h
 private def observeRangeCode (emu : Emu) (address : Nat) : IO Bool := do
   emu.pc.set address
   let dirty := (← emu.engine.dirtyCode.get).isSome
-  let late := (← emu.rangeQuiet.get) && !(← rangeIsQuiet emu)
+  let late := (← emu.rangeQuiet.get) &&
+    ((← emu.hookChanges.get) != (← emu.rangeHooks.get) || (← emu.trace.get).isSome)
   let hooked := (← hooksNear emu address).any fun hook => hook.first ≤ address && address ≤ hook.last
   -- A range that ends at its first site has done no good: where it starts, the step runs its one instruction by itself.
   match ← emu.rangeStart.get with
@@ -2104,9 +2114,18 @@ private def runRange (emu : Emu) (address budget : Nat) : IO (Nat × Bil.Effect)
   let state ← emu.state.get
   let quiet ← rangeIsQuiet emu
   emu.rangeQuiet.set quiet
+  emu.rangeHooks.set (← emu.hookChanges.get)
   emu.rangeStart.set (some address)
+  -- A range is observed if a trace is kept, or a code hook is in what it has: one elsewhere is for a step that goes there, as
+  -- Unicorn has a hook cost what runs where it is.
+  let observedIn (spans : List (Nat × Nat)) : IO Bool := do
+    if (← emu.trace.get).isSome then return true
+    let hooks ← emu.hooks.get
+    let observed := hooks.any fun hook => spans.any fun (low, high) => hook.first ≤ max low high && min low high ≤ hook.last
+    emu.rangeQuiet.set !observed
+    pure observed
   let result ← Primus.Lifted.runBlockObserved emu.engine (fetch emu) (fun target code => lift emu (isThumb state) target code) state address
-    (some (notifyMemory emu)) (some (observeRangeCode emu)) (!quiet) budget
+    (some (notifyMemory emu)) (some (observeRangeCode emu)) (!quiet) budget observedIn
   Primus.Lifted.flushDirtyRange emu.engine
   emu.state.set result.state
   emu.lastFault.set none
@@ -2275,6 +2294,8 @@ private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared :
     journal := some (← IO.mkRef [])
     lastBudget := ← IO.mkRef 0
     rangeQuiet := ← IO.mkRef false
+    hookChanges := ← IO.mkRef 0
+    rangeHooks := ← IO.mkRef 0
     budget := ← IO.mkRef 0
     restarting := ← IO.mkRef false
     rangeStart := ← IO.mkRef none

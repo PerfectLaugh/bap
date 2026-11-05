@@ -1902,7 +1902,8 @@ private def runPersistent (engine : Engine) (executions : IO.Ref Nat) (lowering 
 
 private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bil.State) (pc : Nat)
     (observer : Option Jit.MemoryObserver) (codeObserver : Option Jit.CodeObserver := none)
-    (observed : Bool := true) (budget : Nat := engine.rangeLimit) : IO Result := do
+    (observed : Bool := true) (budget : Nat := engine.rangeLimit)
+    (observedIn : List (Nat × Nat) → IO Bool := fun _ => pure true) : IO Result := do
   -- A run cannot chain more than the slot that counts them holds.
   let budget := min budget (2 ^ 64 - 2)
   engine.nativeCooldown.modify fun cooldown => if cooldown = 0 then 0 else cooldown - 1
@@ -1924,6 +1925,8 @@ private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (
     match encodeState lowering state.env, bound with
     | .error _, _ | _, false => runInterpreted engine entry.firstNext pc fallback state observer
     | .ok slots, true => do
+      -- The code sites of a range are only observed if what observes them may care about what the range has.
+      let observed := observed && (← observedIn (if entry.coverage.isEmpty then [(entry.address, entry.last)] else entry.coverage))
       -- Going in at a label is entering a block, which is out of the budget, and is no more than the block that a run starts at.
       let slots := withControl lowering slots (if entry.entered == 0 then budget else budget + 1) observed
       let slots := if entry.entryLabels.isEmpty then slots else slots.push (UInt64.ofNat entry.entered)
@@ -1981,12 +1984,13 @@ private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (
 /-- A run of the block at `pc`, or of the range that starts there, which a profile counts if one is kept. -/
 def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bil.State) (pc : Nat)
     (observer : Option Jit.MemoryObserver) (codeObserver : Option Jit.CodeObserver := none)
-    (observed : Bool := true) (budget : Nat := engine.rangeLimit) : IO Result := do
+    (observed : Bool := true) (budget : Nat := engine.rangeLimit)
+    (observedIn : List (Nat × Nat) → IO Bool := fun _ => pure true) : IO Result := do
   if (← engine.profile.get).isNone then
-    return ← runBlockUnprofiled engine fetch lift state pc observer codeObserver observed budget
+    return ← runBlockUnprofiled engine fetch lift state pc observer codeObserver observed budget observedIn
   let before ← engine.statistics.get
   let started ← IO.monoNanosNow
-  let result ← runBlockUnprofiled engine fetch lift state pc observer codeObserver observed budget
+  let result ← runBlockUnprofiled engine fetch lift state pc observer codeObserver observed budget observedIn
   let took := (← IO.monoNanosNow) - started
   let after ← engine.statistics.get
   let compiled := after.compileMs - before.compileMs

@@ -833,6 +833,17 @@ def testRangeLoopsAArch64 : IO Unit := do
   | _ => throw <| IO.userError "no x1"
   let stats ← Bap.Primus.Lifted.stats emu.engine
   assertTrue s!"An AArch64 loop goes round in its range: {stats.nativeRuns} native runs" (stats.nativeRuns < 10)
+  -- A breakpoint where the range doesn't go leaves it unobserved, and one in it that comes while it is hot stops it there.
+  let emu ← Bap.Emu.aarch64 code 0 0
+  for name in ["X0", "X1"] do
+    Bap.Emu.setReg emu ⟨name, .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 (if name == "X0" then 3000 else 0)))
+  let _ ← Bap.Emu.addBreakpoint emu 0x1000
+  let _ ← Bap.Emu.run emu 300
+  assertEqual "A breakpoint elsewhere doesn't stop a loop" 100 (match ← Bap.Emu.reg emu ⟨"X1", .imm 64, 0, false⟩ with
+    | .bits bits => bits.toNat | _ => 0)
+  let _ ← Bap.Emu.addBreakpoint emu 4
+  let _ ← Bap.Emu.run emu 3000
+  assertEqual "A breakpoint that comes in a hot loop stops it there" 4 (← Bap.Emu.pc emu)
 
 /-- Native code past `nativeLimit` makes room for itself: forty blocks of a loop, each hot, with room for four pieces of native code,
 come to what they do, and what is kept stays within it while what is hot goes on being compiled. -/
