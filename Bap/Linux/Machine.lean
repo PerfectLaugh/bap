@@ -1324,8 +1324,9 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       let identity : Identity := { architecture, kernel := machine.kernel }
       pure ((← identity.serve emu call args).getD (errorOf Errno.enosys))
     | .getrandom =>
-      -- A fixed sequence, as a run is the same each time.
-      returning emu (arg 0) (Kernel.randomBytes 0 (arg 1)) (arg 1)
+      -- A fixed sequence, as a run is the same each time, of which each call has what comes after what the last one had.
+      let given ← machine.kernel.modifyGet fun kernel => (kernel.randomGiven, { kernel with randomGiven := kernel.randomGiven + arg 1 })
+      returning emu (arg 0) (Kernel.randomBytes given (arg 1)) (arg 1)
     | .sigaltstack => returning emu (arg 1) (ByteArray.mk (Array.replicate (3 * wordSize) 0))
     | .schedGetaffinity => returning emu (arg 2) (cell wordSize 1) wordSize
     | .succeeds => pure (.returnValue 0)
@@ -2586,7 +2587,7 @@ def Machine.realloc (machine : Machine) (address size : Nat) (pid : Option Nat :
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 
 /-- What the bytes after the magic mean. -/
-def checkpointFormat : Nat := 10
+def checkpointFormat : Nat := 11
 
 /-- What this BAP does with a guest, which goes up when the same state could go on differently. A checkpoint is refused by a BAP
 of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/

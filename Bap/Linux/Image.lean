@@ -49,6 +49,8 @@ structure Image where
   mounts : ByteArray := ByteArray.empty
   /-- What SysV IPC has: see `ipcBytes`. -/
   ipc : ByteArray := ByteArray.empty
+  /-- How many bytes `getrandom` has given. -/
+  randomGiven : Nat := 0
   deriving DecidableEq
 
 private def sorted (items : List (Nat × α)) : List (Nat × α) :=
@@ -307,6 +309,7 @@ def Kernel.image (kernel : Kernel) : Image where
   cycles := kernel.cycles
   mounts := mountsBytes kernel.mounts
   ipc := ipcBytes kernel.ipc
+  randomGiven := kernel.randomGiven
 
 /-- The kernel of an image, or why there can't be one. -/
 def Image.kernel (image : Image) : Except String Kernel := do
@@ -390,7 +393,8 @@ def Image.kernel (image : Image) : Except String Kernel := do
     clock := image.clock
     cycles := image.cycles
     mounts := ← mountsOfBytes image.mounts
-    ipc := ← ipcOfBytes image.ipc }
+    ipc := ← ipcOfBytes image.ipc
+    randomGiven := image.randomGiven }
 
 namespace Image
 
@@ -517,7 +521,8 @@ def encode (out : ByteArray) (image : Image) : ByteArray :=
   let out := putNat out image.nextOpenFile
   let out := putList putProcess out image.processes
   let out := putBytes out image.output
-  putBytes (putBytes (putNat (putNat out image.clock) image.cycles) image.mounts) image.ipc
+  let out := putBytes (putBytes (putNat (putNat out image.clock) image.cycles) image.mounts) image.ipc
+  putNat out image.randomGiven
 
 /-- An image from bytes, and where they end. -/
 def decode : Decoder Image := fun data at_ => do
@@ -532,7 +537,8 @@ def decode : Decoder Image := fun data at_ => do
   let (cycles, at_) ← getNat data at_
   let (mounts, at_) ← getBytes data at_
   let (ipc, at_) ← getBytes data at_
-  .ok ({ paths, inodes, nextInode, openFiles, nextOpenFile, processes, output, clock, cycles, mounts, ipc }, at_)
+  let (randomGiven, at_) ← getNat data at_
+  .ok ({ paths, inodes, nextInode, openFiles, nextOpenFile, processes, output, clock, cycles, mounts, ipc, randomGiven }, at_)
 
 end Image
 

@@ -468,6 +468,8 @@ structure Kernel where
   clock : Nat := 1700000000 * 1000000000
   /-- What the time stamp counter of the processor reads, which is kept here so that it is part of what a checkpoint holds. -/
   cycles : Nat := 1000000
+  /-- How many bytes `getrandom` has given, which is where the next of them are in `randomBytes`. -/
+  randomGiven : Nat := 0
   /-- What makes the generated files that aren't those of `/proc`, by name. A function can't go in a checkpoint: only the names do,
   and these are given again to go on from it. -/
   generators : Std.HashMap String Generator := {}
