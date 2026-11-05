@@ -463,6 +463,14 @@ private def slotsOf : Architecture → Option (List Slot)
   | .arm => some (((List.range 13).map fun index => .register s!"R{index}") ++ [.register "SP", .register "LR", .pc, .flags, .callArgument])
   | _ => none
 
+/-- How big the kernel's `struct user` of a target is, which `PTRACE_PEEKUSER` and `PTRACE_POKEUSER` go into: none of a target that has
+neither, as AArch64 and RISC-V don't. -/
+private def userSize : Architecture → Option Nat
+  | .x86_64 => some 912
+  | .i686 => some 284
+  | .arm => some 296
+  | _ => none
+
 /-- The flags of a target, as its status word has them, by where each is. -/
 private def flagBits : Architecture → List (String × Nat)
   | .x86_64 | .i686 => [("CF", 0), ("PF", 2), ("AF", 4), ("ZF", 6), ("SF", 7), ("DF", 10), ("OF", 11)]
@@ -839,8 +847,12 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
     | .ok () => ok
     | .error _ => fail eio
   | 3 | 6 =>
-    -- PTRACE_PEEKUSER and PTRACE_POKEUSER, of the registers at the start of the user area, and nothing after.
+    -- PTRACE_PEEKUSER and PTRACE_POKEUSER, of the registers at the start of the user area, and nothing after them, which reads as 0
+    -- and takes nothing, up to its end: past it, or not at a word, there is nothing.
     withRegisters fun slots => do
+      match userSize ptrace.architecture with
+      | some size => if address % word != 0 || address ≥ size then return ← fail eio
+      | none => return ← fail eio
       let index := address / word
       let values ← readSlots ptrace emu pid slots
       if request == 3 then

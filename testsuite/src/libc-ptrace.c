@@ -96,6 +96,14 @@ int main(void) {
   memset(registers, 0, sizeof registers);
   struct iovec vector = {registers, sizeof registers};
   say("regs", 2, trace(PTRACE_GETREGSET, child, 1, (long)&vector), vector.iov_len > 0 && vector.iov_len < sizeof registers, 0);
+  // The user area: a word in it, and nothing at what isn't a word or past it; AArch64 has none.
+  long user = 0;
+  long first = trace(3, child, 0, (long)&user), unaligned = trace(3, child, 1, (long)&user), past = trace(3, child, 4096, (long)&user);
+#if defined(__aarch64__)
+  say("user", 3, first == -EIO, unaligned == -EIO, past == -EIO);
+#else
+  say("user", 3, first == 0, unaligned == -EIO, past == -EIO);
+#endif
 #if defined(__x86_64__)
   unsigned long before = registers[16];
 #elif defined(__aarch64__)

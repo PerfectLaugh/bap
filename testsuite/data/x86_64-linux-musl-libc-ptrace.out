@@ -11,6 +11,7 @@ exited 1 1 7
 attach 0
 attached 1 1 1
 regs 0 1
+user 1 1 1
 step 0
 stepped 1 1 1
 moved 1
