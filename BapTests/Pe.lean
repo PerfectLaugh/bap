@@ -165,9 +165,16 @@ def run : IO Unit := do
   let path := "native/build/bap-lean-fixture.exe"
   IO.FS.writeBinFile path fixture
   let loaded ← Image.load path
-  let cli ← IO.Process.output { cmd := ".lake/build/bin/bap", args := #["image", path] }
   IO.FS.removeFile path
   assertEqual "PE common filesystem load" 0x401000 loaded.entryPoint
+
+/-- The command line finds that the fixture is PE by itself. It runs `bap` as a process of its own, which is for before the other tests:
+once they have taken memory, making a process can fail with `ENOMEM`, as the host may not let the copy that it starts as have as much. -/
+def cli : IO Unit := do
+  let path := "native/build/bap-lean-fixture-cli.exe"
+  IO.FS.writeBinFile path fixture
+  let cli ← IO.Process.output { cmd := ".lake/build/bin/bap", args := #["image", path] }
+  IO.FS.removeFile path
   assertEqual "PE CLI auto-detection" 0 cli.exitCode
 
 end Bap.Tests.Pe

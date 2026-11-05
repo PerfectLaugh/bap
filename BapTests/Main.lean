@@ -31,6 +31,8 @@ import BapTests.Parity
 import BapTests.Theorems
 
 def main : IO Unit := do
+  -- What runs another process, first, while this one is small.
+  Bap.Tests.Pe.cli
   let tests : List (IO Unit) := [
     Bap.Tests.Core.run,
     Bap.Tests.Bil.run,
