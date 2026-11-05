@@ -165,14 +165,25 @@ def processFiles : List String :=
 def install (kernel : Kernel) : Kernel :=
   systemFiles.foldl (init := kernel) fun kernel entry => kernel.addBuiltin entry.1 entry.2
 
-/-- What a descriptor is, as `/proc/PID/fd/N` says: where its file is, or a terminal. -/
-private def linkOfDescriptor (kernel : Kernel) (number : Nat) : String :=
+/-- What a descriptor of a process is, as `/proc/PID/fd/N` says: its path as the process sees it, what it was before it was removed,
+or of what has no path, what it is. -/
+private def linkOfDescriptor (kernel : Kernel) (group number : Nat) : String :=
   match kernel.inodes.get? number with
-  | some { content := .console _, .. } => "/dev/console"
-  | _ =>
-    match kernel.paths.toList.find? (·.2 == number) with
-    | some entry => entry.1
-    | none => s!"anon_inode:[{number}]"
+  | none => s!"anon_inode:[{number}]"
+  | some inode =>
+    match inode.content with
+    | .pipe .. => s!"pipe:[{number}]"
+    | .socket _ => s!"socket:[{number}]"
+    | .eventfd .. => "anon_inode:[eventfd]"
+    | .epoll _ => "anon_inode:[eventpoll]"
+    | .timerfd .. => "anon_inode:[timerfd]"
+    | .signalfd _ => "anon_inode:[signalfd]"
+    | .inotify .. => "anon_inode:inotify"
+    | .ptyMaster _ => "/dev/ptmx"
+    | _ =>
+      match kernel.pathOfInode number with
+      | some path => kernel.shownPath group path
+      | none => if inode.details.name.isEmpty then s!"anon_inode:[{number}]" else inode.details.name
 
 /-- `/proc` as it has to be for `group` and its task `thread` to look at it, with `/proc/self` being it, for these processes. -/
 def refresh (kernel : Kernel) (group thread : Nat) (live : List Nat) (threadsOf : Nat → List Nat) : Kernel :=
@@ -213,7 +224,7 @@ def refresh (kernel : Kernel) (group thread : Nat) (live : List Nat) (threadsOf 
     let kernel := kernel.setSymlink s!"{directory}/root" "/"
     (kernel.process pid).descriptors.toList.foldl (init := kernel) fun kernel entry =>
       let link := match kernel.openFiles.get? entry.2.openFile with
-        | some file => linkOfDescriptor kernel file.inode
+        | some file => linkOfDescriptor kernel pid file.inode
         | none => s!"anon_inode:[{entry.1}]"
       kernel.setSymlink s!"{directory}/fd/{entry.1}" link
 

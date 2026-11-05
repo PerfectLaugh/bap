@@ -1,0 +1,21 @@
+open /dev/stdout 0
+by /dev/stdout
+open /dev/stderr 0
+by /dev/stderr
+open /dev/stdin of a pipe 0
+read it 6 1
+open a removed file 0
+read it from its start 4 1
+its link ends with (deleted) 1
+a pipe's link starts with pipe:[ 1
+open a pipe to write through /dev/fd 0
+write to it 7
+read what it wrote 7 1
+open a socket -6
+its link starts with socket:[ 1
+read two through its link 2 1
+where each is 1 2
+its link is its path 1
+read a file in a directory through its link 6 1
+write to a directory through its link -21
+a descriptor that isn't open -2

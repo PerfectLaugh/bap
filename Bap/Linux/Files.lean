@@ -290,12 +290,13 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       -- `MFD_CLOEXEC`, `MFD_ALLOW_SEALING`, `MFD_HUGETLB`, and `MFD_NOEXEC_SEAL` or `MFD_EXEC`, of which the first seals that it
       -- runs nothing, and so has seals.
       let flags := arg 1
-      if flags ≥ 0x20 || flags &&& 0x18 == 0x18 || (← readString emu (arg 0)).utf8ByteSize > 249 then
+      let name ← readString emu (arg 0)
+      if flags ≥ 0x20 || flags &&& 0x18 == 0x18 || name.utf8ByteSize > 249 then
         return ← fail Errno.einval
       let noexec := flags &&& 8 != 0
       let seals := sealable ||| (if noexec then 0x20 else if flags &&& 2 != 0 then 0 else 1)
       let (next, fd) := kernel.addObject group (.file ByteArray.empty) (if flags &&& 1 != 0 then Kernel.oCloexec else 0)
-        (if noexec then 0o100666 else 0o100777) seals
+        (if noexec then 0o100666 else 0o100777) seals (name := s!"/memfd:{name} (deleted)")
       poller.kernel.set next
       succeed fd
     | .sendfile | .sendfile64 =>

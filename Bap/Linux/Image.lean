@@ -128,17 +128,18 @@ def withIdentity (process : Process) (data : ByteArray) : Except String Process 
                       credentials := { uid := id 0, euid := id 1, suid := id 2, fsuid := id 3, gid := id 4, egid := id 5, sgid := id 6
                                        fsgid := id 7, groups } }
 
-/-- Of an inode, its times, owner, extended attributes, seals and changes, as bytes. -/
+/-- Of an inode, its times, owner, extended attributes, seals, changes, locks and name, as bytes. -/
 def metaBytes (details : Meta) : ByteArray :=
   let out := Wire.putList Wire.putNat ByteArray.empty [details.accessed, details.modified, details.changed, details.uid, details.gid, details.seals,
     details.changes]
   let out := Wire.putList (fun out (name, value) => Wire.putBytes (Wire.putText out name) value) out details.attributes
-  Wire.putList (Wire.putList Wire.putNat) out (details.locks.map fun lock =>
+  let out := Wire.putList (Wire.putList Wire.putNat) out (details.locks.map fun lock =>
     let (kind, owner) := match lock.owner with
       | .process group => (0, group)
       | .openFile id => (1, id)
       | .flock id => (2, id)
     [kind, owner, lock.start, lock.stop, if lock.exclusive then 1 else 0])
+  Wire.putText out details.name
 
 /-- What `metaBytes` made; nothing at all is what an inode starts with. -/
 def metaOfBytes (data : ByteArray) : Except String Meta := do
@@ -149,6 +150,7 @@ def metaOfBytes (data : ByteArray) : Except String Meta := do
     let (value, at_) ← Wire.getBytes data at_
     .ok ((name, value), at_)) data at_
   let (locks, at_) ← Wire.getList (Wire.getList Wire.getNat) data at_
+  let (name, at_) ← Wire.getText data at_
   Wire.expectEnd data at_
   let locks ← locks.mapM fun fields => do
     let field (index : Nat) : Nat := fields.getD index 0
@@ -160,7 +162,7 @@ def metaOfBytes (data : ByteArray) : Except String Meta := do
     pure { owner, start := field 2, stop := field 3, exclusive := field 4 == 1 : FileLock }
   let number (index : Nat) : Nat := numbers.getD index 0
   pure { accessed := number 0, modified := number 1, changed := number 2, uid := number 3, gid := number 4, seals := number 5
-         changes := number 6, attributes, locks }
+         changes := number 6, attributes, locks, name }
 
 /-- What is mounted, as bytes. -/
 def mountsBytes (mounts : List Mount) : ByteArray :=

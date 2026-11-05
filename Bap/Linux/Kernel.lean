@@ -151,7 +151,8 @@ def lockEnd : Nat := 2 ^ 63
 
 /-- What an inode has of itself besides what it holds: when it was last read, written and changed, by the kernel's clock, whose it is,
 its extended attributes, the seals of `memfd_create`, its locks, of which those whose owner is gone are let go of as it is locked
-again, and how many times what it holds was set by `Kernel.setContent`, which an item of epoll with `EPOLLET` goes by. -/
+again, how many times what it holds was set by `Kernel.setContent`, which an item of epoll with `EPOLLET` goes by, and what
+`/proc/PID/fd` says it is while it has no path: the path that it was removed from, or what made it, with ` (deleted)`. -/
 structure Meta where
   accessed : Nat := 1700000000 * 1000000000
   modified : Nat := 1700000000 * 1000000000
@@ -162,6 +163,7 @@ structure Meta where
   seals : Nat := 0
   locks : List FileLock := []
   changes : Nat := 0
+  name : String := ""
 
 /-- A watch of `inotify_add_watch`: its number, the inode that it watches, and what it is to hear of. -/
 structure Watch where
@@ -520,8 +522,20 @@ private def addInode (kernel : Kernel) (path : String) (content : Content) (mode
         { number, content, mode, details := { accessed := kernel.clock, modified := kernel.clock, changed := kernel.clock } }
       nextInode := number + 1 }, number)
 
+/-- The path of what is open, for a directory, or of what `/proc/PID/fd/N` is of. -/
+def pathOfInode (kernel : Kernel) (number : Nat) : Option String :=
+  (kernel.paths.toList.find? fun entry => entry.2 == number && entry.1.startsWith "/").map (·.1)
+
+/-- The inode that a descriptor is open on, by the parts of its path in `/proc`, `proc`, `PID`, `fd` and `N`, if there is one. -/
+private def inodeOfDescriptorPath (kernel : Kernel) : List String → Option Nat
+  | ["proc", pid, "fd", fd] => do
+    let descriptor ← (← kernel.processes.get? (← pid.toNat?)).descriptors.get? (← fd.toNat?)
+    pure (← kernel.openFiles.get? descriptor.openFile).inode
+  | _ => none
+
 /-- Follows a path, and its last part if `follow`, up to 40 links as Linux does. Each part before the last must be a directory,
-and the last doesn't have to be there: the result says whether it is. -/
+and the last doesn't have to be there: the result says whether it is. A link of `/proc/PID/fd` leads to what the descriptor is open on
+itself, as Linux has it, whether that has a path or not: a file that was removed, or a pipe. -/
 def resolve (kernel : Kernel) (base path : String) (follow : Bool := true) (links : Nat := 40) (mounted : Bool := true) :
     Result (String × Option Nat) :=
   let rec walk (done : List String) (todo : List String) : Nat → Nat → Result (String × Option Nat)
@@ -547,9 +561,15 @@ def resolve (kernel : Kernel) (base path : String) (follow : Bool := true) (link
             | .symlink target =>
               if rest.isEmpty && !follow then .ok (path, some number)
               else if links == 0 then .error Errno.eloop
-              else
-                let from_ := if target.startsWith "/" then [] else done.reverse
-                walk [] (Path.parts (Path.ofParts from_) target ++ rest) fuel (links - 1)
+              else match kernel.inodeOfDescriptorPath (part :: done).reverse with
+                | some number =>
+                  match rest, kernel.pathOfInode number, kernel.inodes.get? number with
+                  | [], at_, _ => .ok (at_.getD path, some number)
+                  | _, some at_, some { content := .directory, .. } => walk (Path.parts "/" at_).reverse rest fuel (links - 1)
+                  | _, _, _ => .error Errno.enotdir
+                | none =>
+                  let from_ := if target.startsWith "/" then [] else done.reverse
+                  walk [] (Path.parts (Path.ofParts from_) target ++ rest) fuel (links - 1)
             | .directory => walk (part :: done) rest fuel links
             | _ => if rest.isEmpty then .ok (path, some number) else .error Errno.enotdir
   walk [] (Path.parts base path) (links * 256 + 4096) links
@@ -833,8 +853,11 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
       .ok kernel
     -- `/dev/pts/N`: `Bap.Linux.Tty` says whether it may be opened.
     | .ptySlave _ | .device _ => if has flags oDirectory then .error Errno.enotdir else .ok kernel
-    -- It has no path.
-    | .pipe .. | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .inotify .. | .mqueue .. => .error Errno.einval
+    -- What has no path is opened through `/proc/PID/fd/N`: a pipe to read or write it, as a FIFO is.
+    | .pipe .. => if has flags oDirectory then .error Errno.enotdir else .ok kernel
+    -- An anonymous inode lets no one open it.
+    | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .inotify .. => .error Errno.eacces
+    | .ptyMaster _ | .mqueue .. => .error Errno.einval
     -- What is bound to a path is connected to, not opened.
     | .socket _ => .error Errno.enxio
   let openFile := kernel.nextOpenFile
@@ -1052,14 +1075,14 @@ def pipe (kernel : Kernel) (group flags : Nat) : Kernel × Nat × Nat :=
   (kernel, readFd, writeFd)
 
 /-- A descriptor of something that has no path, as `eventfd` and `epoll_create` make: on a new inode of `content`, opened to read and
-write with `flags` of `O_NONBLOCK` and `O_CLOEXEC`. -/
-def addObject (kernel : Kernel) (group : Nat) (content : Content) (flags : Nat) (mode : Nat := 0o600) (seals : Nat := 0) (access : Nat := 2) :
-    Kernel × Nat :=
+write with `flags` of `O_NONBLOCK` and `O_CLOEXEC`, which `/proc/PID/fd` says is `name` if it is a file. -/
+def addObject (kernel : Kernel) (group : Nat) (content : Content) (flags : Nat) (mode : Nat := 0o600) (seals : Nat := 0) (access : Nat := 2)
+    (name : String := "") : Kernel × Nat :=
   let number := kernel.nextInode
   let openFile := kernel.nextOpenFile
   let clock := kernel.clock
   let kernel := { kernel with
-    inodes := kernel.inodes.insert number { number, content, mode, details := { accessed := clock, modified := clock, changed := clock, seals } }
+    inodes := kernel.inodes.insert number { number, content, mode, details := { accessed := clock, modified := clock, changed := clock, seals, name } }
     nextInode := number + 1
     openFiles := kernel.openFiles.insert openFile { inode := number, flags := access ||| (flags &&& oNonblock) }
     nextOpenFile := openFile + 1 }
@@ -1194,10 +1217,6 @@ def statDescriptor (kernel : Kernel) (group fd : Nat) : Result Stat := do
   let (_, file) ← openFileOf kernel group fd
   .ok (statOf (← inodeOf kernel file.inode))
 
-/-- The path of what is open, for a directory. -/
-def pathOfInode (kernel : Kernel) (number : Nat) : Option String :=
-  (kernel.paths.toList.find? fun entry => entry.2 == number && entry.1.startsWith "/").map (·.1)
-
 /-- The base that a path of the `*at` calls is relative to: the working directory for `AT_FDCWD`, or that directory. -/
 def baseOf (kernel : Kernel) (group directory : Nat) (atCwd : Bool) : Result String := do
   if atCwd then .ok (kernel.process group).cwd
@@ -1282,7 +1301,9 @@ def remove (kernel : Kernel) (base path : String) (directory : Bool) : Result Ke
     | _, true => .error Errno.enotdir
     | _, false => pure ()
     if kernel.readOnly normal then .error erofs
-    .ok { kernel with paths := kernel.paths.erase normal }
+    .ok { kernel with
+      paths := kernel.paths.erase normal
+      inodes := kernel.inodes.insert number { inode with details := { inode.details with name := normal ++ " (deleted)" } } }
 
 /-- `rename`: what was at the target is replaced, and all under a directory moves with it. -/
 def rename (kernel : Kernel) (base source target : String) : Result Kernel := do
@@ -1349,13 +1370,17 @@ def renameWith (kernel : Kernel) (base source target : String) (flags : Nat) : R
     else path
   .ok { kernel with paths := kernel.paths.fold (init := {}) fun paths path number => paths.insert (swap path) number }
 
-/-- The devices of `/dev` and what is around them: `null`, `zero`, `full`, `random`, `urandom`, `tty` and `ptmx`, the directories
-`pts` and `shm`, and `stdin`, `stdout`, `stderr` and `fd` of `/proc/self/fd`. Nothing replaces what is already there. -/
+/-- The devices of `/dev` and what is around them: `null`, `zero`, `full`, `random`, `urandom`, `tty` and `ptmx`, `console` for the
+console if there is one, the directories `pts` and `shm`, and `stdin`, `stdout`, `stderr` and `fd` of `/proc/self/fd`. Nothing replaces
+what is already there. -/
 def installDevices (kernel : Kernel) : Kernel :=
   let kernel := [("/dev/null", 0), ("/dev/zero", 1), ("/dev/full", 2), ("/dev/random", 3), ("/dev/urandom", 3), ("/dev/tty", 4),
       ("/dev/ptmx", 5)].foldl (init := kernel) fun kernel (path, kind) =>
     if kernel.paths.contains path then kernel else (addInode (addDirectories kernel "/dev") path (.device kind) 0o20666).1
   let kernel := addDirectories (addDirectories kernel "/dev/pts") "/dev/shm"
+  let kernel := match kernel.inodes.toList.find? (·.2.content matches .console _) with
+    | some (number, _) => if kernel.paths.contains "/dev/console" then kernel else { kernel with paths := kernel.paths.insert "/dev/console" number }
+    | none => kernel
   [("/dev/stdin", "/proc/self/fd/0"), ("/dev/stdout", "/proc/self/fd/1"), ("/dev/stderr", "/proc/self/fd/2"),
     ("/dev/fd", "/proc/self/fd")].foldl (init := kernel) fun kernel (path, target) =>
     if kernel.paths.contains path then kernel else kernel.addSymlink path target
@@ -1599,11 +1624,12 @@ def addSeals (kernel : Kernel) (group fd seals : Nat) : Result Kernel := do
 /-- `open` with `O_TMPFILE`: a file of no name in a directory, which only `linkat` gives one, to write. -/
 def openTmpfile (kernel : Kernel) (group : Nat) (base path : String) (flags mode : Nat) : Result (Kernel × Nat) := do
   if !writable flags then .error Errno.einval
-  let some number := (← kernel.resolve base path).2 | .error Errno.enoent
+  let (normal, some number) ← kernel.resolve base path | .error Errno.enoent
   let .directory := (← inodeOf kernel number).content | .error Errno.enotdir
   let umask := (kernel.process group).umask
   .ok (kernel.addObject group (.file ByteArray.empty) flags
-    (0o100000 ||| (mode &&& 0o7777 &&& (0o7777 - umask))) (access := flags &&& 3))
+    (0o100000 ||| (mode &&& 0o7777 &&& (0o7777 - umask))) (access := flags &&& 3)
+    (name := s!"{if normal == "/" then "" else normal}/#{kernel.nextInode} (deleted)"))
 
 /-- `chmod`. -/
 def chmod (kernel : Kernel) (base path : String) (mode : Nat) : Result Kernel := do

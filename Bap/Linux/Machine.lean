@@ -1426,11 +1426,12 @@ private def refreshProc (machine : Machine) (emu : Emu) (call : Call) (args : Li
     | .ok path =>
       let group := (← currentTask emu).group
       let kernel ← machine.kernel.get
-      let relative := !path.startsWith "/"
       -- What the second argument is relative to is the first, which may be in there.
       let base := if index == 1 && !atCwd (args.getD 0 0) then (kernel.baseOf group (args.getD 0 0) false).toOption.getD ""
         else (kernel.process group).cwd
-      if path.startsWith "/proc" || (relative && base.startsWith "/proc") then
+      -- `/dev/stdin`, `/dev/stdout`, `/dev/stderr` and `/dev/fd` are links to `/proc/self/fd`.
+      let absolute := Path.ofParts (Path.parts base path)
+      if ["/proc", "/dev/std", "/dev/fd"].any (absolute.startsWith ·) then
         let self ← thread emu
         let live ← liveProcesses emu
         let tasks := (← emu.taskTable.get).tasks.filter (·.status.isNone)
@@ -2587,7 +2588,7 @@ def Machine.realloc (machine : Machine) (address size : Nat) (pid : Option Nat :
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 
 /-- What the bytes after the magic mean. -/
-def checkpointFormat : Nat := 12
+def checkpointFormat : Nat := 13
 
 /-- What this BAP does with a guest, which goes up when the same state could go on differently. A checkpoint is refused by a BAP
 of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/
