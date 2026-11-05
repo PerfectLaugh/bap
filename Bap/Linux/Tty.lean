@@ -117,11 +117,6 @@ private def numberBytes (big : Bool) (size value : Nat) : ByteArray :=
   let little := (List.range size).map fun index => (value >>> (8 * index)).toUInt8
   ByteArray.mk (if big then little.reverse else little).toArray
 
-/-- Whether a live process has a descriptor of an inode. -/
-private def held (kernel : Kernel) (live : List Nat) (number : Nat) : Bool :=
-  live.any fun group => (kernel.process group).descriptors.toList.any fun (_, entry) =>
-    (kernel.openFiles.get? entry.openFile).any (·.inode == number)
-
 /-- The terminal of an inode of a pseudo-terminal, with the inode of its master. -/
 def terminalOf (kernel : Kernel) (number : Nat) : Option (Nat × Terminal) :=
   match kernel.inodes.get? number with
@@ -212,8 +207,8 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     else pure (some (← poller.timers.waitUntil emu readySpace 0 none true))
   -- Whether the other end is open: the master always until it isn't, and the slave once it was opened. They go through each descriptor
   -- of each process, which is only when a read has nothing or of what is written.
-  let slaveHeld : Unit → Bool := fun _ => held kernel live (kernel.paths.getD s!"/dev/pts/{terminal.index}" 0)
-  let masterHeld : Unit → Bool := fun _ => held kernel live master
+  let slaveHeld : Unit → Bool := fun _ => kernel.inodeHeld live (kernel.paths.getD s!"/dev/pts/{terminal.index}" 0)
+  let masterHeld : Unit → Bool := fun _ => kernel.inodeHeld live master
   let (tstp, ttin, ttou) := if mips then (24, 26, 27) else (20, 21, 22)
   try
     match call, isMaster with

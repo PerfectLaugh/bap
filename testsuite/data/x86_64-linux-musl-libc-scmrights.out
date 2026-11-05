@@ -1,0 +1,17 @@
+hand over write end 1
+read end polls, writer in flight 0
+read end reads, writer in flight -11
+received 1
+write through received 1
+read end reads it 1
+read end polls, writer closed 16
+read end reads, writer closed 0
+hand over socket 1
+peer writes, other end in flight 1
+peer polls, other end in flight 4
+received socket reads 1
+peer writes, other end closed -32
+hand over write end again 1
+read end polls, writer in flight 0
+read end polls, receiver closed 16
+read end reads, receiver closed 0

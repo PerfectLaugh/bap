@@ -153,11 +153,9 @@ def after (notifier : Notifier) (kernelRef : IO.Ref Kernel) (group : Nat) (call 
   let after ← kernelRef.get
   let instances ← instancesOf notifier after
   if instances.isEmpty then return false
-  -- An instance that no descriptor has is gone, with its watches.
+  -- An instance that nothing holds, as `heldFiles` has it, is gone, with its watches.
   let instances ← if [Call.close, .dup2, .dup3, .execve].contains call then do
-      let held := instances.filter fun listener => live.any fun owner =>
-        (after.process owner).descriptors.toList.any fun (_, descriptor) =>
-          (after.openFiles.get? descriptor.openFile).any (·.inode == listener)
+      let held := instances.filter (after.inodeHeld live)
       notifier.instances.set (some held)
       pure held
     else pure instances
@@ -177,7 +175,7 @@ def after (notifier : Notifier) (kernelRef : IO.Ref Kernel) (group : Nat) (call 
       if count == 0 then none else (after.openFileOf group (arg 0)).toOption.map fun (_, file) => (file.inode, inAccess)
     | .close, some _ =>
       (before.openFileOf group (arg 0)).toOption.bind fun (id, file) =>
-        let open_ := live.any fun owner => (after.process owner).descriptors.toList.any (·.2.openFile == id)
+        let open_ := (after.heldFiles live).contains id
         if open_ then none else some (file.inode, if file.flags &&& 3 != 0 then inCloseWrite else inCloseNowrite)
     | _, _ => none
   if !pathsChanged && !inodesChanged && ofCall.isNone then return false

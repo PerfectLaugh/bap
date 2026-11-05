@@ -80,6 +80,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-tbi",
     Bap.Tests.Emu.testSocketImage,
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-unix",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-scmrights",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-scmrights",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-sigpipe",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-sigpipe",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-fdlinks",

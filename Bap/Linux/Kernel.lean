@@ -1114,13 +1114,40 @@ def pipeOf (kernel : Kernel) (group fd : Nat) : Option Nat :=
     | _ => none
   | .error _ => none
 
-/-- Whether a descriptor of one of these processes reads a pipe, or writes it. -/
+/-- The open files that these processes hold, which are open yet as Linux has it: those of their descriptors, and those that a message
+waiting in a socket that they hold hands over, or in a connection that such a socket listens with and has to accept, as far as that goes.
+A file that is only in a message to a socket that nothing holds is closed, as Linux closes it with that socket. -/
+def heldFiles (kernel : Kernel) (groups : List Nat) : Std.HashSet Nat := Id.run do
+  let mut files : Std.HashSet Nat := {}
+  let mut sockets : Std.HashSet Nat := {}
+  let mut fileWork : List Nat := groups.flatMap fun group => (kernel.process group).descriptors.toList.map (·.2.openFile)
+  let mut socketWork : List Nat := []
+  -- As far as what is held holds more, each once.
+  for _ in [0:kernel.openFiles.size + kernel.inodes.size + 1] do
+    if fileWork.isEmpty && socketWork.isEmpty then break
+    for id in fileWork do
+      if !files.contains id then
+        files := files.insert id
+        if let some file := kernel.openFiles.get? id then socketWork := file.inode :: socketWork
+    fileWork := []
+    let pending := socketWork
+    socketWork := []
+    for number in pending do
+      if sockets.contains number then continue
+      sockets := sockets.insert number
+      if let some { content := .socket socket, .. } := kernel.inodes.get? number then
+        socketWork := socket.pending ++ socketWork
+        for message in socket.incoming do fileWork := message.rights ++ fileWork
+  pure files
+
+/-- Whether one of these processes holds an open file of an inode, as `heldFiles` has it, and that opened to write, or not. -/
 def pipeHeld (kernel : Kernel) (number : Nat) (groups : List Nat) (toWrite : Bool) : Bool :=
-  groups.any fun group =>
-    (kernel.process group).descriptors.toList.any fun (_, descriptor) =>
-      match kernel.openFiles.get? descriptor.openFile with
-      | some file => file.inode == number && writable file.flags == toWrite
-      | none => false
+  (kernel.heldFiles groups).fold (init := false) fun found id =>
+    found || (kernel.openFiles.get? id).any fun file => file.inode == number && writable file.flags == toWrite
+
+/-- Whether one of these processes holds an open file of an inode, as `heldFiles` has it. -/
+def inodeHeld (kernel : Kernel) (groups : List Nat) (number : Nat) : Bool :=
+  (kernel.heldFiles groups).fold (init := false) fun found id => found || (kernel.openFiles.get? id).any (·.inode == number)
 
 /-- Whether a descriptor was opened not to wait. -/
 def nonblocking (kernel : Kernel) (group fd : Nat) : Bool :=
@@ -1547,13 +1574,13 @@ def truncatePath (kernel : Kernel) (base path : String) (size : Nat) : Result Ke
   | (normal, some number) => if kernel.readOnly normal then .error erofs else kernel.truncateInode number size
 
 /-- Whether the owner of a lock of the inode `number` is there yet, of the processes `live`: a process that has it open, or an open
-file that one of them has a descriptor of. -/
+file that they hold, as `heldFiles` has it. -/
 def lockHeld (kernel : Kernel) (live : List Nat) (number : Nat) (lock : FileLock) : Bool :=
   match lock.owner with
   | .process group =>
     live.contains group && (kernel.process group).descriptors.toList.any fun (_, descriptor) =>
       (kernel.openFiles.get? descriptor.openFile).any (·.inode == number)
-  | .openFile id | .flock id => live.any fun group => (kernel.process group).descriptors.toList.any (·.2.openFile == id)
+  | .openFile id | .flock id => (kernel.heldFiles live).contains id
 
 /-- The locks of an inode whose owners are there yet. -/
 def locksOf (kernel : Kernel) (live : List Nat) (number : Nat) : List FileLock :=

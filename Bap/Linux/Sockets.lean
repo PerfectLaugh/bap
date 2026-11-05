@@ -38,7 +38,7 @@ def isSocket (kernel : Kernel) (group fd : Nat) : Bool :=
   | .ok _ => true
   | .error _ => false
 
-/-- Whether a socket is there for the other end: a descriptor of a live process has it, or a listener has it to accept. -/
+/-- Whether a socket is there for the other end: a live process holds it, as `heldFiles` has it, or a listener has it to accept. -/
 def socketAlive (kernel : Kernel) (number : Nat) (groups : List Nat) : Bool :=
   kernel.pipeHeld number groups true || (kernel.socketAt number |>.any (·.waiting))
 
