@@ -2166,7 +2166,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
                              failures := ← IO.mkRef #[], skipIgnoredFaults := ← IO.mkRef false
                              intercept := ← IO.mkRef fun _ _ _ => pure false, tracer := ← IO.mkRef fun _ => pure none
                              jobControl := ← IO.mkRef fun _ _ _ => pure (), interrupted := ← IO.mkRef fun _ _ _ _ => pure ()
-                             sent := ← IO.mkRef fun _ => pure (), pgidOf := ← IO.mkRef pure, members := ← IO.mkRef fun _ => pure [] }
+                             sent := ← IO.mkRef fun _ => pure (), taken := ← IO.mkRef fun _ _ => pure (), pgidOf := ← IO.mkRef pure, members := ← IO.mkRef fun _ => pure [] }
   let ptrace ← Ptrace.make architecture signals
   let kernelRef ← IO.mkRef kernel
   let timers ← Timers.make architecture kernelRef signals
@@ -2220,6 +2220,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
     let live := (((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group)).eraseDups
     pure (Identity.members (← kernelRef.get) live pgid)
   signals.interrupted.set (timers.interrupted)
+  signals.taken.set timers.taken
   emu.betweenTurns.modify (· ++ [do let _ ← resumingCurrent (do timers.tick emu; pure true)])
   let timeState : ModelState := { save := timers.save, load := timers.load }
   machine.models.modify (· ++ [{ id := Timers.modelId, version := builtinVersion Timers.modelId, state := timeState }])

@@ -1,5 +1,5 @@
 // Time that goes on: sleeps that take their time, in order between processes, a signal that ends one, a futex that times out, and
-// the timers of setitimer, alarm and timer_create. It says what it found, the same on each target, of what doesn't depend on how fast
+// the timers of setitimer, alarm and timer_create, and how many times one expired that its signal didn't say. It says what it found, the same on each target, of what doesn't depend on how fast
 // it runs. The libc of the tests has no timer_create, so it is called by number.
 #define _GNU_SOURCE
 #include <errno.h>
@@ -55,6 +55,31 @@ static void sleepMs(long ms) {
 
 static volatile int alarms = 0;
 static void onAlarm(int signal) { (void)signal; alarms++; }
+
+static volatile int ticks = 0, missed = 0;
+static void onTick(int signal, siginfo_t *info, void *context) { (void)signal; (void)context; ticks++; missed += info->si_overrun; }
+
+// A timer of 50 ms, of the process or of this thread, whose signal is blocked for 520 ms: one signal is pending, which says that it
+// expired 9 times more, as timer_getoverrun does once it is taken and not before.
+static void blockedTimer(const char *label, int notify) {
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, SIGRTMIN);
+  struct { long value; int signal; int notify; int thread; int pad[15]; } event = { 42, SIGRTMIN, notify, (int)syscall(SYS_gettid) };
+  int id = -1;
+  syscall(SYS_timer_create, CLOCK_MONOTONIC, &event, &id);
+  struct itimerspec every = { {0, 50000000}, {0, 50000000} };
+  syscall(TIMER_SETTIME, id, 0, &every, 0);
+  sleepMs(520);
+  long before = syscall(SYS_timer_getoverrun, id);
+  struct timespec zero = { 0, 0 };
+  siginfo_t info;
+  int count = 0, overrun = -1, value = 0;
+  while (sigtimedwait(&set, &info, &zero) == SIGRTMIN) { count++; overrun = info.si_overrun; value = info.si_value.sival_int; }
+  say(label, 3, count, overrun, value);
+  say("timer_getoverrun", 2, before, syscall(SYS_timer_getoverrun, id), 0);
+  syscall(SYS_timer_delete, id);
+}
 
 int main(void) {
   long long start = nowNs();
@@ -134,5 +159,25 @@ int main(void) {
   syscall(TIMER_GETTIME, id, &now_);
   say("it signalled", 2, seen, now_.it_interval.tv_nsec, 0);
   say("timer_delete", 2, syscall(SYS_timer_delete, id), syscall(SYS_timer_delete, id) == -1 && errno == EINVAL, 0);
+
+  struct sigaction tick = {0};
+  tick.sa_sigaction = onTick;
+  tick.sa_flags = SA_SIGINFO;
+  sigaction(SIGRTMIN, &tick, 0);
+  sigset_t realTime;
+  sigemptyset(&realTime);
+  sigaddset(&realTime, SIGRTMIN);
+  sigprocmask(SIG_BLOCK, &realTime, 0);
+  blockedTimer("a blocked timer of the process", SIGEV_SIGNAL);
+  blockedTimer("a blocked timer of the thread", 4);
+  // One that is handled is heard each time that it expires.
+  event.signal = SIGRTMIN;
+  syscall(SYS_timer_create, CLOCK_MONOTONIC, &event, &id);
+  sigprocmask(SIG_UNBLOCK, &realTime, 0);
+  struct itimerspec often = { {0, 30000000}, {0, 30000000} };
+  syscall(TIMER_SETTIME, id, 0, &often, 0);
+  while (ticks < 4) sleepMs(1000);
+  syscall(SYS_timer_delete, id);
+  say("a handled timer", 2, ticks, missed, 0);
   return 0;
 }

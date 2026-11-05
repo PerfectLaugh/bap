@@ -12,3 +12,8 @@ timer_create 0
 timer_settime 0
 it signalled 3 10000000
 timer_delete 0 1
+a blocked timer of the process 1 9 42
+timer_getoverrun 0 9
+a blocked timer of the thread 1 9 42
+timer_getoverrun 0 9
+a handled timer 4 0

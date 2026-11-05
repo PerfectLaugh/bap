@@ -447,6 +447,9 @@ structure Signals where
   interrupted : IO.Ref (Emu → Nat → Bool → List Nat → IO Unit)
   /-- A signal was sent, as what waits to read one, as of `signalfd`, has to look again. -/
   sent : IO.Ref (Emu → IO Unit)
+  /-- A signal of a process was taken from what was pending, as delivery or a wait takes it, as a timer of `timer_create` has to hear
+  of what its signal said. -/
+  taken : IO.Ref (Nat → SignalInfo → IO Unit)
   /-- The process group of a process, and the live processes of a process group, as the kernel has them, for `kill` of a group. -/
   pgidOf : IO.Ref (Nat → IO Nat)
   members : IO.Ref (Nat → IO (List Nat))
@@ -709,6 +712,7 @@ private def nextSignal (signals : Signals) (tid group : Nat) : IO (Option Signal
       modifyThread signals tid fun thread => { thread with pending := remove thread.pending }
     else
       signals.table.modify fun table => { table with groupPending := table.groupPending.insert group (remove shared) }
+    (← signals.taken.get) group lowest
     pure (some lowest)
 
 /-- The thread that runs takes what it has. `inCall` is whether a system call of its own is ending, which decides where it goes. -/
@@ -859,6 +863,25 @@ def send (signals : Signals) (emu : Emu) (tid : Option Nat) (group : Nat) (info 
   | none => sendToGroup signals emu group info
   (← signals.sent.get) emu
 
+/-- A timer of `timer_create` of a process expired `more` times again: if its signal is still pending, for the process or a thread of
+it, that signal says so, as Linux has one signal of a timer pending at most. Whether it was pending. -/
+def addOverrun (signals : Signals) (emu : Emu) (group signal id more : Nat) : IO Bool := do
+  let ofTimer (info : SignalInfo) : Bool := info.signal == signal && match info.detail with
+    | .timer which _ _ => which == id
+    | _ => false
+  let add (info : SignalInfo) : SignalInfo := match info.detail with
+    | .timer which overrun value => if ofTimer info then { info with detail := .timer which (overrun + more) value } else info
+    | _ => info
+  let table ← signals.table.get
+  let shared := table.groupPending.getD group []
+  if shared.any ofTimer then
+    signals.table.modify fun table => { table with groupPending := table.groupPending.insert group (shared.map add) }
+    return true
+  let tids := ((← emu.taskTable.get).tasks.filter fun task => task.group == group && task.status.isNone).map (·.tid)
+  let some tid := tids.find? fun tid => (table.threads.getD tid {}).pending.any ofTimer | return false
+  modifyThread signals tid fun state => { state with pending := state.pending.map add }
+  pure true
+
 /-- The signals that are pending for a thread, of its own and of its process, as bits. -/
 def pendingBits (signals : Signals) (tid group : Nat) : IO Nat := do
   let table ← signals.table.get
@@ -879,9 +902,11 @@ def takePending (signals : Signals) (tid group mask : Nat) : IO (Option SignalIn
   match lowest own, lowest shared with
   | some info, _ =>
     modifyThread signals tid fun state => { state with pending := state.pending.eraseP (·.signal == info.signal) }
+    (← signals.taken.get) group info
     pure (some info)
   | none, some info =>
     signals.table.modify fun table => { table with groupPending := table.groupPending.insert group (shared.eraseP (·.signal == info.signal)) }
+    (← signals.taken.get) group info
     pure (some info)
   | none, none => pure none
 

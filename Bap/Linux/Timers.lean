@@ -21,7 +21,8 @@ namespace Bap.Linux
 open Bap.Emu Bap.Tasks
 
 /-- An interval timer of `setitimer`, or a timer of `timer_create`: the process and thread that hear of it, by what signal and with
-what, when it next expires, if it is armed, and every how long after, and how many times it expired that its last signal didn't say. -/
+what, when it next expires, if it is armed, and every how long after, and how many times it expired that the last of its signals
+that was taken didn't say, or, of `SIGEV_NONE`, that it didn't count. -/
 structure Timer where
   group : Nat
   thread : Option Nat := none
@@ -92,8 +93,9 @@ private def itimerSignal (timers : Timers) (which : Nat) : Nat :=
   | _, false => 27
   | _, true => 29
 
-/-- The timers that are due: each signals, once for however many times it expired, and is armed again by its interval. Whether any
-was due. -/
+/-- The timers that are due: each signals, once for however many times it expired, and is armed again by its interval. A timer of
+`timer_create` whose signal is still pending has that signal say that it expired again, rather than send another. Whether any was
+due. -/
 private def fire (timers : Timers) (emu : Emu) : IO Bool := do
   let now ← timers.now
   let state ← timers.state.get
@@ -109,12 +111,19 @@ private def fire (timers : Timers) (emu : Emu) : IO Bool := do
       continue
     timers.state.modify fun state => { state with timers := state.timers.insert key { timer with
       expiry := if timer.interval > 0 then some (expiry + periods * timer.interval) else none
-      overrun := periods - 1 } }
+      overrun := if timer.signal.isNone then periods - 1 else timer.overrun } }
     if let some signal := timer.signal then
+      if key.2 ≥ 3 && (← timers.signals.addOverrun emu timer.group signal timer.id periods) then continue
       let detail : SignalDetail := if key.2 < 3 then .sent 0 0 0 else .timer timer.id (periods - 1) timer.value
       let thread := timer.thread.filter fun tid => table.tasks.any fun task => task.tid == tid && task.status.isNone
       timers.signals.send emu thread timer.group ⟨signal, timer.code, detail⟩
   pure true
+
+/-- A signal of a process was taken: of a timer of `timer_create`, what it said that the timer expired and it didn't say is what
+`timer_getoverrun` gives, until the next is taken. -/
+def taken (timers : Timers) (group : Nat) (info : SignalInfo) : IO Unit := do
+  let .timer id overrun _ := info.detail | return
+  timers.state.modify fun state => { state with timers := state.timers.modify (group, 3 + id) ({ · with overrun }) }
 
 /-- What waits until a time that has come goes on: a call that runs again, which finds that its time has come, and a futex, which
 gives `ETIMEDOUT`. Whether anything did. -/
