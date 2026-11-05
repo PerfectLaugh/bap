@@ -1950,15 +1950,17 @@ private def variableId (engine : Engine) (var : Bap.Var) : IO Nat := do
     engine.variableIds.modify (·.insert var id)
     pure id
 
-/-- Puts what is optimized and starts where it is entered in the chain, as `Jit.addToChain` takes it: what isn't optimized yet comes
-back to the dispatcher to be, and a block that may yet be in a range, which counting its runs decides, stays out. -/
+/-- Puts a range, or a block that won't be in one, in the chain where it starts, as `Jit.addToChain` takes it: a block that may yet be
+in a range, which counting its runs decides, stays out, and what isn't optimized comes back to the dispatcher by when it has run
+enough to be, as the chain counts its runs as `prepareGraph` and `recordChained` do. -/
 private def registerChain (engine : Engine) (pc : Nat) (entry : CachedBlock) (slotCount : Nat) : IO Unit := do
   let .native lowering program _ := entry.plan | return
   -- What is there may be what Lean had there before, as one that was optimized since.
   if (← engine.chainAt.get).contains pc then
     if Jit.chainHolds engine.chain (UInt64.ofNat pc) program then return
     engine.chainAt.modify (·.erase pc)
-  if entry.entered != 0 || !entry.optimized || lowering.budget.isNone || lowering.effectSlot.isNone then return
+  if entry.entered != 0 || !(entry.settled || !entry.coverage.isEmpty) || lowering.budget.isNone || lowering.effectSlot.isNone then
+    return
   if !(lowering.layout.all fun binding => (widthOf binding.1).isSome) then return
   let none : UInt64 := UInt64.ofNat (2 ^ 64 - 1)
   let slot (option : Option Nat) : UInt64 := (option.map UInt64.ofNat).getD none
@@ -1968,6 +1970,7 @@ private def registerChain (engine : Engine) (pc : Nat) (entry : CachedBlock) (sl
       data := data ++ #[UInt64.ofNat (← variableId engine var), UInt64.ofNat at_, UInt64.ofNat ((widthOf var).getD 64)]
     pure data
   let mut data := #[UInt64.ofNat slotCount, slot lowering.effectSlot, slot lowering.budget, slot lowering.observed,
+    UInt64.ofNat (← entry.executions.get), if entry.optimized then none else UInt64.ofNat optimizeFrom,
     UInt64.ofNat lowering.layout.length]
   for (var, at_) in lowering.layout do
     data := data ++ #[UInt64.ofNat (← variableId engine var), UInt64.ofNat at_]
@@ -2037,9 +2040,9 @@ private def runChained (engine : Engine) (pc : Nat) (entry : CachedBlock) (state
       (widthOf var).map fun width => (var, Value.bits (slotBits width (info.getD (4 + 2 * index) 0)))
   let runsAt := 3 + 2 * written
   for index in List.range (at_ runsAt) do
-    if let some ran := entries[at_ (runsAt + 1 + 2 * index)]? then
-      ran.executions.modify (· + at_ (runsAt + 2 + 2 * index))
-  let runs := (List.range (at_ runsAt)).foldl (fun total index => total + at_ (runsAt + 2 + 2 * index)) 0
+    if let some ran := entries[at_ (runsAt + 1 + 3 * index)]? then
+      ran.executions.modify (· + at_ (runsAt + 3 + 3 * index))
+  let runs := (List.range (at_ runsAt)).foldl (fun total index => total + at_ (runsAt + 2 + 3 * index)) 0
   engine.statistics.modify fun stats => { stats with nativeRuns := stats.nativeRuns + runs - 1 }
   let state : Bil.State := { env := updates ++ withoutBindings (updates.map Prod.fst) state.env }
   let completed := atCodeStop lowering next

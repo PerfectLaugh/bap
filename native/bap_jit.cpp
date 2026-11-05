@@ -6,6 +6,12 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/Passes/PassBuilder.h>
+#include <llvm/Transforms/InstCombine/InstCombine.h>
+#include <llvm/Transforms/Scalar/ADCE.h>
+#include <llvm/Transforms/Scalar/DeadStoreElimination.h>
+#include <llvm/Transforms/Scalar/EarlyCSE.h>
+#include <llvm/Transforms/Scalar/SROA.h>
+#include <llvm/Transforms/Scalar/SimplifyCFG.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -956,7 +962,16 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
       passes.registerFunctionAnalyses(functions);
       passes.registerLoopAnalyses(loops);
       passes.crossRegisterProxies(loops, functions, calls, modules);
-      passes.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O1).run(*module, modules);
+      // What makes the slots registers and drops what nothing reads, which is most of what any pipeline of LLVM does for this code,
+      // for less than its O1 takes to compile.
+      llvm::FunctionPassManager pipeline;
+      pipeline.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
+      pipeline.addPass(llvm::EarlyCSEPass(true));
+      pipeline.addPass(llvm::InstCombinePass());
+      pipeline.addPass(llvm::SimplifyCFGPass());
+      pipeline.addPass(llvm::DSEPass());
+      pipeline.addPass(llvm::ADCEPass());
+      pipeline.run(*function, functions);
       if (llvm::verifyModule(*module, &verificationStream))
         return ioError("invalid optimized LLVM JIT module: " + verificationErrors);
     }
@@ -1440,6 +1455,9 @@ struct ChainEntry {
   size_t slotCount = 0;
   static constexpr uint64_t none = ~uint64_t{0};
   uint64_t effectSlot = none, budgetSlot = none, observedSlot = none;
+  // How many times what it starts at ran, as Lean counts them, and how many make it worth optimizing, none if it is: a run that gets
+  // there goes back to Lean, which compiles it again.
+  uint64_t executions = 0, optimizeAt = none;
   std::vector<std::pair<uint64_t, uint64_t>> layout;   // variable, slot
   std::vector<uint64_t> required;                      // what has to be bound
   struct Output { uint64_t variable, slot, width; };
@@ -1502,6 +1520,8 @@ extern "C" lean_obj_res bap_jit_chain_add(lean_obj_arg chainObject, uint64_t pc,
   entry.effectSlot = next();
   entry.budgetSlot = next();
   entry.observedSlot = next();
+  entry.executions = next();
+  entry.optimizeAt = next();
   for (uint64_t count = next(); count != 0 && !bad; --count) { uint64_t v = next(); entry.layout.push_back({v, next()}); }
   for (uint64_t count = next(); count != 0 && !bad; --count) entry.required.push_back(next());
   auto outputs = [&](std::vector<ChainEntry::Output> &into) {
@@ -1565,8 +1585,10 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
       registers[variable] = lean_unbox_uint64(lean_array_get_core(valuesObject, index));
       bound[variable] = 1;
     }
-    std::unordered_map<uint64_t, uint64_t> runs;
-    const ChainEntry *current = nullptr;
+    // By range: how many runs, and how many executions as Lean counts them, a run and the blocks it chained.
+    std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> runs;
+    ChainEntry *current = nullptr;
+    bool first = true;
     {
       auto found = chain->entries.find(firstPc);
       if (found == chain->entries.end() || found->second.id != firstId || found->second.program != programObject)
@@ -1590,17 +1612,24 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
       memory.filter = filter;
       memory.quietSites = quietSites != 0;
       next = program->function(state.data(), &memory);
-      runs[current->id] += 1;
       if (memory.error != nullptr) { error = memory.error; break; }
       uint64_t effect = current->effectSlot == ChainEntry::none ? 0 : state[current->effectSlot];
       uint64_t left = current->budgetSlot == ChainEntry::none ? budget : state[current->budgetSlot];
       uint64_t ranChained = budget >= left ? budget - left : 0;
+      // Lean counted the entry of the first already.
+      uint64_t executed = (first ? 0 : 1) + ranChained;
+      current->executions += executed;
+      runs[current->id].first += 1;
+      runs[current->id].second += executed;
+      first = false;
       if (effect != 1 || memory.leanRan || current->budgetSlot == ChainEntry::none || budget - ranChained < 1)
         break;
       auto found = chain->entries.find(next);
       if (found == chain->entries.end())
         break;
-      const ChainEntry &target = found->second;
+      ChainEntry &target = found->second;
+      if (target.optimizeAt != ChainEntry::none && target.executions + 1 >= target.optimizeAt)
+        break;
       // What the run wrote, as Lean takes it: the outputs of the checkpoint where it went if it is one, each if its flag says so.
       auto checkpoint = current->checkpoints.find(next);
       const std::vector<ChainEntry::Output> &outputs = checkpoint != current->checkpoints.end() ? checkpoint->second : current->outputs;
@@ -1634,6 +1663,9 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
       uint64_t remaining = budget - ranChained;
       chained += ranChained + 1;
       budget = remaining - 1;
+      // What isn't optimized yet comes back by when it has run enough to be, as `runBlockUnprofiled` has it.
+      if (target.optimizeAt != ChainEntry::none)
+        budget = std::min(budget, target.optimizeAt - (target.executions + 1));
       std::vector<uint64_t> following(target.slotCount, 0);
       for (const auto &binding : target.layout)
         if (binding.first < bound.size() && bound[binding.first] != 0)
@@ -1665,7 +1697,7 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
     std::vector<uint64_t> info{current->id, chained, dirty.size()};
     for (uint64_t variable : dirty) { info.push_back(variable); info.push_back(registers[variable]); }
     info.push_back(runs.size());
-    for (const auto &run : runs) { info.push_back(run.first); info.push_back(run.second); }
+    for (const auto &run : runs) { info.push_back(run.first); info.push_back(run.second.first); info.push_back(run.second.second); }
     lean_obj_res resultInfo = lean_alloc_array(info.size(), info.size());
     for (size_t at = 0; at != info.size(); ++at)
       lean_array_set_core(resultInfo, at, lean_box_uint64(info[at]));

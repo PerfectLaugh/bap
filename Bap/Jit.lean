@@ -59,7 +59,9 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
     Lean code, with budget left and with a range of the chain where it went, by that range, as `Bap.Primus.Lifted` would run it next:
     the outputs that the last run reached, by its flags, or those of its checkpoint where it went, each cut to its width, are what the
     variables now hold, which with those given at first (`variables`, `values`) are its slots of the layout, unless one that it needs
-    isn't bound, which ends the run there; its budget is what the last left less one, and its observed slot 0. It gives back what the
+    isn't bound, which ends the run there; its budget is what the last left less one, and its observed slot 0. A range that isn't
+    optimized is gone on to as `Bap.Primus.Lifted` counts its executions: not once they come to when it is to be optimized, and with its
+    budget no more than what they have left until then. It gives back what the
     run of the last range gives, with: that range's number, the blocks entered after the first of all, the variables that the ranges
     before it wrote with what they hold last, and the number of runs of each range. A failed run fails it all, as in obligation 4.
 13. After `beginMemoryStep`, `memoryStepWrites` holds every address that a `writeMemory` or a program wrote to this memory
@@ -220,13 +222,13 @@ opaque clearChain (chain : @& Chain) : IO Unit
 opaque chainHolds (chain : @& Chain) (pc : UInt64) (program : @& Program) : Bool
 
 /-- Puts a range in a chain at `pc`, numbered `id`: `data` is the number of its slots, its effect, budget and observed slots (all ones
-for none), and its layout, the variables it needs, its outputs, its flags and its checkpoints, each as a count and what it counts. -/
+for none), its executions and the executions at which it is to be optimized (all ones if it is), and its layout, the variables it needs, its outputs, its flags and its checkpoints, each as a count and what it counts. -/
 @[extern "bap_jit_chain_add"]
 opaque addToChain (chain : @& Chain) (pc id : UInt64) (program : @& Program) (data : @& Array UInt64) : IO Unit
 
 /-- A run that goes on from range to range of a chain in native code (obligation 17): where it went, the slots and the changed cells of
 the last range, and then that range's number, the blocks entered after the first, the count and pairs of the variables written before
-it, and the count and pairs of the runs of each range. -/
+it, and the count and triples of each range, its runs and its executions. -/
 @[extern "bap_jit_run_chain"]
 opaque runChain (program : @& Program) (state : @& Array UInt64) (memory : @& Memory) (filter : @& MemoryFilter) (quietSites : Bool)
     (observer : @& Option MemoryObserver) (codeObserver : @& Option CodeObserver) (chain : @& Chain) (firstId firstPc firstBudget : UInt64)
