@@ -35,6 +35,7 @@ def eisdir : Nat := 21
 def einval : Nat := 22
 def emfile : Nat := 24
 def enotty : Nat := 25
+def efbig : Nat := 27
 def espipe : Nat := 29
 def eagain : Nat := 11
 def epipe : Nat := 32
@@ -229,6 +230,22 @@ def sealable : Nat := 2 ^ 31
 def Inode.sealedAgainst (inode : Inode) (size offset count : Nat) : Option Nat :=
   let seals := inode.details.seals
   if seals &&& 0x18 != 0 || (seals &&& 4 != 0 && offset + count > size) then some 1 else none
+
+/-- The most bytes that a file can have here, 1 GiB. Linux has files of up to 2^63 bytes, with nothing where nothing was written, but
+a file here is all of its bytes in the memory of the host, so a program could have it make as many zeros as it liked before an offset
+that it gives. This is more than programs run here have in a file, and few enough to make: what would go past it is `EFBIG`. -/
+def maximumFileSize : Nat := 2 ^ 30
+
+/-- Whether an offset that a call gives, of 64 bits, is negative, which is `EINVAL`. -/
+def negativeOffset (offset : Nat) : Bool := offset ≥ 2 ^ 63
+
+/-- Why `count` bytes can't be written to a file at `offset`, if they can't: that they would end past 2^63 bytes, which is `EINVAL`, its
+seals, as `Inode.sealedAgainst` has them, or that it would be more than `maximumFileSize`. -/
+def Inode.writeRefused (inode : Inode) (size offset count : Nat) : Option Nat :=
+  if negativeOffset (offset + count) then some Errno.einval
+  else if let some errno := inode.sealedAgainst size offset count then some errno
+  else if offset + count > maximumFileSize then some Errno.efbig
+  else none
 
 /-- What `open` makes: `dup` and `fork` share it, and with it the offset. -/
 structure OpenFile where
@@ -855,8 +872,9 @@ def read (kernel : Kernel) (group fd count : Nat) : Result (Kernel × ByteArray)
   let bytes := readAt data file.offset count
   .ok ({ kernel with openFiles := kernel.openFiles.insert id { file with offset := file.offset + bytes.size } }, bytes)
 
-/-- `pread`, which leaves the offset. -/
+/-- `pread`, which leaves the offset: what would end past 2^63 bytes is `EINVAL`. -/
 def readFrom (kernel : Kernel) (group fd count offset : Nat) : Result ByteArray := do
+  if negativeOffset (offset + count) then .error Errno.einval
   let (_, file) ← openFileOf kernel group fd
   if file.flags &&& 3 == 1 then .error Errno.ebadf
   let inode ← inodeOf kernel file.inode
@@ -880,7 +898,7 @@ def write (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Result (Kerne
     .ok ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content := .pipe (buffer ++ bytes) head consumed } }, bytes.size)
   | .file data =>
     let offset := if has file.flags oAppend then data.size else file.offset
-    if let some errno := inode.sealedAgainst data.size offset bytes.size then .error errno
+    if let some errno := inode.writeRefused data.size offset bytes.size then .error errno
     .ok ({ kernel with
       inodes := kernel.inodes.insert file.inode ({ inode with content := .file (writeAt data offset bytes) }.written kernel.clock)
       openFiles := kernel.openFiles.insert id { file with offset := offset + bytes.size } }, bytes.size)
@@ -907,7 +925,7 @@ def writeError (kernel : Kernel) (group fd count : Nat) : Option Nat :=
       -- `/dev/full` has no room.
       | some { content := .device 2, .. } => some 28
       | some inode@{ content := .file data, .. } =>
-        inode.sealedAgainst data.size (if has file.flags oAppend then data.size else file.offset) count
+        inode.writeRefused data.size (if has file.flags oAppend then data.size else file.offset) count
       -- What `Kernel.write` doesn't take: these have calls of their own, and the rest nothing.
       | some { content := .timerfd .., .. } | some { content := .signalfd _, .. } | some { content := .epoll _, .. }
       | some { content := .inotify .., .. } | some { content := .mqueue .., .. } | some { content := .eventfd .., .. }
@@ -940,13 +958,14 @@ def writeKnown (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Kernel :
 
 /-- Why `pwrite` of `count` bytes at `offset` can't go ahead, if it can't, for `writeKnownAt`: only a file is written where a call says. -/
 def writeAtError (kernel : Kernel) (group fd count offset : Nat) : Option Nat :=
+  if negativeOffset offset then some Errno.einval else
   match kernel.openFileOf group fd with
   | .error errno => some errno
   | .ok (_, file) =>
     if !writable file.flags then some Errno.ebadf
     else
       match kernel.inodes.get? file.inode with
-      | some inode@{ content := .file data, .. } => inode.sealedAgainst data.size offset count
+      | some inode@{ content := .file data, .. } => inode.writeRefused data.size offset count
       | some { content := .directory, .. } => some Errno.eisdir
       | some { content := .symlink _, .. } | some { content := .generated _, .. } => some Errno.einval
       | some _ => some Errno.espipe
@@ -965,12 +984,13 @@ def writeKnownAt (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset 
 
 /-- `pwrite`, which leaves the offset. -/
 def writeTo (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Nat) : Result (Kernel × Nat) := do
+  if negativeOffset offset then .error Errno.einval
   let (_, file) ← openFileOf kernel group fd
   if !writable file.flags then .error Errno.ebadf
   let inode ← inodeOf kernel file.inode
   match inode.content with
   | .file data =>
-    if let some errno := inode.sealedAgainst data.size offset bytes.size then .error errno
+    if let some errno := inode.writeRefused data.size offset bytes.size then .error errno
     .ok ({ kernel with inodes := kernel.inodes.insert file.inode ({ inode with content := .file (writeAt data offset bytes) }.written kernel.clock) },
       bytes.size)
   | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ | .inotify .. | .mqueue .. => .error Errno.espipe
@@ -993,6 +1013,7 @@ def seek (kernel : Kernel) (group fd : Nat) (negative : Bool) (distance whence :
     | _ => .error Errno.einval
   if negative && distance > start then .error Errno.einval
   let offset := if negative then start - distance else start + distance
+  if negativeOffset offset then .error Errno.einval
   .ok ({ kernel with openFiles := kernel.openFiles.insert id { file with offset } }, offset)
 
 /-- What a process had locked of the file of an open file, which closing any descriptor of that file lets go of. Nothing else changes. -/
@@ -1467,13 +1488,14 @@ def chdir (kernel : Kernel) (group : Nat) (path : String) : Result Kernel := do
     | .directory => .ok (kernel.setProcess group { process with cwd := normal })
     | _ => .error Errno.enotdir
 
-/-- `truncate` of a file at its inode: cut, or filled with zeros. -/
+/-- `truncate` of a file at its inode: cut, or filled with zeros up to `maximumFileSize` at most. -/
 def truncateInode (kernel : Kernel) (number size : Nat) : Result Kernel := do
   let inode ← inodeOf kernel number
   match inode.content with
   | .file data =>
     -- `F_SEAL_SHRINK` and `F_SEAL_GROW`.
     if inode.details.seals &&& (if size < data.size then 2 else if size > data.size then 4 else 0) != 0 then .error Errno.eperm
+    if size > maximumFileSize then .error Errno.efbig
     let data := if size ≤ data.size then data.extract 0 size
       else data ++ Bap.zeroBytes (size - data.size)
     .ok { kernel with inodes := kernel.inodes.insert number ({ inode with content := .file data }.written kernel.clock) }
@@ -1482,12 +1504,14 @@ def truncateInode (kernel : Kernel) (number size : Nat) : Result Kernel := do
 
 /-- `ftruncate`. -/
 def truncateDescriptor (kernel : Kernel) (group fd size : Nat) : Result Kernel := do
+  if negativeOffset size then .error Errno.einval
   let (_, file) ← openFileOf kernel group fd
   if !writable file.flags then .error Errno.einval
   kernel.truncateInode file.inode size
 
 /-- `truncate`. -/
 def truncatePath (kernel : Kernel) (base path : String) (size : Nat) : Result Kernel := do
+  if negativeOffset size then .error Errno.einval
   match ← kernel.resolve base path with
   | (_, none) => .error Errno.enoent
   | (normal, some number) => if kernel.readOnly normal then .error erofs else kernel.truncateInode number size

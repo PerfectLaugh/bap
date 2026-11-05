@@ -1,0 +1,30 @@
+write 4
+pwrite negative -22
+pwrite most negative -22
+pwrite past the end of 63 bits -22
+pread negative -22
+pread past the end of 63 bits -22
+ftruncate negative -22
+truncate negative -22
+size 4
+lseek negative -22
+lseek to 2 2
+lseek before start -22
+lseek before end -22
+lseek stays 2
+sendfile negative -22
+sendfile offset -1
+splice negative -22
+copy_file_range negative in -75
+copy_file_range negative out -75
+copy_file_range farther in -22
+copy_file_range farther out -22
+other size 0
+pwrite past end 1
+size 4097
+pread hole 7 0 122
+ftruncate longer 0
+size 10000
+pread zeros 4 0
+truncate shorter 0
+size 3

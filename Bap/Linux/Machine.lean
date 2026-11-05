@@ -839,6 +839,10 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       high * 2 ^ 32 + low
     let offset64 (index : Nat) : Nat := if wide == 64 then args.getD index 0 else pair architecture.pairBase
     let arg (index : Nat) : Nat := args.getD index 0
+    -- An `off_t` of a word, as the 64 bits that the kernel has it in, which on 32 bits it is the sign of.
+    let offsetWord (index : Nat) : Nat :=
+      let value := arg index % 2 ^ wide
+      if value ≥ 2 ^ (wide - 1) then value + 2 ^ 64 - 2 ^ wide else value
     let group := (← currentTask emu).group
     let kernel ← machine.kernel.get
     let cwd := (kernel.process group).cwd
@@ -1223,8 +1227,8 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
           returning emu out bytes bytes.size
     | .chmod => at_ here (arg 0) fun from_ path => apply machine (·.chmod from_ path (arg 1))
     | .fchmodat => at_ (arg 0) (arg 1) fun from_ path => apply machine (·.chmod from_ path (arg 2))
-    | .truncate => at_ here (arg 0) fun from_ path => apply machine (·.truncatePath from_ path (arg 1))
-    | .ftruncate => apply machine (·.truncateDescriptor group (arg 0) (arg 1))
+    | .truncate => at_ here (arg 0) fun from_ path => apply machine (·.truncatePath from_ path (offsetWord 1))
+    | .ftruncate => apply machine (·.truncateDescriptor group (arg 0) (offsetWord 1))
     | .truncate64 => at_ here (arg 0) fun from_ path => apply machine (·.truncatePath from_ path (pair (architecture.pairBase - 2)))
     | .ftruncate64 => apply machine (·.truncateDescriptor group (arg 0) (pair (architecture.pairBase - 2)))
     | .umask =>

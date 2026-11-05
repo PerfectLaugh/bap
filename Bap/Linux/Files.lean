@@ -184,9 +184,12 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         { details with attributes := details.attributes.filter (·.1 != name), changed := now })
       succeed
   let here := 2 ^ 64 - 100
-  -- An offset of `size` bytes that a call is given the address of, if it is, and that address with how far it went.
+  -- An offset of `size` bytes that a call is given the address of, if it is, as 64 bits with its sign, and that address with how far it
+  -- went.
   let offsetAt (address size : Nat) : IO (Option Nat) := do
-    if address == 0 then pure none else pure (some (numberOf big (← read emu address size)))
+    if address == 0 then return none
+    let value := numberOf big (← read emu address size)
+    pure (some (if value ≥ 2 ^ (8 * size - 1) then value + 2 ^ 64 - 2 ^ (8 * size) else value))
   let moveOffset (address size : Nat) (start : Option Nat) (count : Nat) : IO Unit := do
     if let some start := start then write emu address (Abi.field big size (start + count))
   -- Of `sendfile`, `splice` and `copy_file_range`: what goes from one to the other, at most 1 MiB at a time, from and to the offsets
@@ -337,6 +340,8 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       | .ok (source, input), .ok (target, output) =>
         if input.flags &&& 3 == 1 || output.flags &&& 3 == 0 || output.flags &&& Kernel.oAppend != 0 then return ← fail Errno.ebadf
         let (from_, to) := (← offsetAt (arg 1) 8, ← offsetAt (arg 3) 8)
+        -- An offset that the count takes past the end of 64 bits is `EOVERFLOW`, and another negative one `EINVAL`, as `transfer` has it.
+        if [from_, to].any (·.any (· + arg 4 ≥ 2 ^ 64)) then return ← fail 75
         let (first, second) := (from_.getD input.offset, to.getD output.offset)
         if source == target && first < second + arg 4 && second < first + arg 4 then return ← fail Errno.einval
         transfer (arg 0) (arg 2) (arg 4) from_ to false fun count => do
