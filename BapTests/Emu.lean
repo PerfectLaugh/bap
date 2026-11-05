@@ -807,6 +807,28 @@ def testLinuxRaises (name : String) : IO Unit := do
   assertEqual s!"Linux {name} is what qemu does" (String.fromUTF8! (← IO.FS.readBinFile s!"testsuite/data/{name}.out"))
     (String.fromUTF8! (← written.get))
 
+/-- `libc-ptrace` says the same when a checkpoint is made where it has said `marker`, and the machine of it goes on: after `attach 0`,
+the tracer waits and the tracee stops, with the tracer's memory in its states, as it has no native memory yet, which a wait writes to;
+after `step 0`, the tracee was let step and hasn't yet. -/
+def testPtraceCheckpoint (triple marker : String) : IO Unit := do
+  let name := s!"{triple}-linux-musl-libc-ptrace"
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{name}"
+  let written ← IO.mkRef ""
+  let print (data : ByteArray) : IO Unit := written.modify (· ++ String.fromUTF8! data)
+  let mut machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let mut reached := false
+  for _ in List.range 1000000 do
+    let _ ← machine.run (fuel := 5) print
+    if ((← written.get).splitOn s!"\n{marker}\n").length > 1 then
+      reached := true
+      break
+  assertTrue s!"{name} says {marker}" reached
+  machine ← Bap.Linux.Machine.ofCheckpoint (← machine.checkpoint)
+  let outcome ← machine.run print
+  assertEqual s!"{name} from a checkpoint after {marker} ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual s!"{name} from a checkpoint after {marker} is what it is in one piece"
+    (String.fromUTF8! (← IO.FS.readBinFile s!"testsuite/data/{name}.out")) (← written.get)
+
 /-- Threads that race on the atomics of AArch64, exclusive loads and stores and each LSE instruction (`libc-atomics.c`), lose nothing
 and see what they left, whether the switches between them are few or come every few instructions, into the middle of what is atomic. -/
 def testLinuxAtomics (quanta : List Nat := [100000, 7]) : IO Unit := do

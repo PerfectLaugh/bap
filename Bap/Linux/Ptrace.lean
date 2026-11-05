@@ -502,6 +502,17 @@ private def spaceMemory (emu : Emu) (tid : Nat) : IO (Option (Option Jit.Memory 
   let native := native.or (← emu.sharedMemory.get)
   pure (some (native, (← emu.parkedRegions.get).getD space []))
 
+/-- The memory of a thread's address space as its threads' states have it, which is what it is while it has no native memory: as a
+process has after a checkpoint is restored, until it runs compiled code. -/
+private def stateMemory (emu : Emu) (tid : Nat) : IO (Option (Nat → Nat → ByteArray)) := do
+  let table ← emu.taskTable.get
+  let space := table.spaceOf tid
+  pure ((← emu.threadsRef.get).findSome? fun context =>
+    if table.spaceOf context.id != space then none
+    else match Bil.lookup context.state.env emu.config.memory with
+      | .ok (.memory memory) => some (Bap.Memory.readRegion memory)
+      | _ => none)
+
 private def readTracee (emu : Emu) (tid address size : Nat) : IO ByteArray := do
   match ← spaceMemory emu tid with
   | none => read emu address size
@@ -510,7 +521,10 @@ private def readTracee (emu : Emu) (tid address size : Nat) : IO ByteArray := do
       throw <| IO.userError s!"unmapped address {address} of thread {tid}"
     match native with
     | some memory => Jit.readMemoryRange memory (UInt64.ofNat address) size
-    | none => throw <| IO.userError s!"no memory of thread {tid}"
+    | none =>
+      match ← stateMemory emu tid with
+      | some readRegion => pure (readRegion address size)
+      | none => throw <| IO.userError s!"no memory of thread {tid}"
 
 /-- Writes to a tracee as a debugger does, whatever it may do with its memory there, as a breakpoint is written to its code. -/
 private def writeTracee (emu : Emu) (tid address : Nat) (data : ByteArray) (asProgram : Bool := false) : IO Unit := do
@@ -520,10 +534,10 @@ private def writeTracee (emu : Emu) (tid address : Nat) (data : ByteArray) (asPr
     if !(regions.any fun region => region.contains address && region.contains (address + data.size - 1)) then
       throw <| IO.userError s!"unmapped address {address} of thread {tid}"
     match native with
-    | some memory =>
-      Jit.writeMemory memory ((Array.range data.size).map fun offset => UInt64.ofNat (address + offset)) data.data
-      invalidateCode emu address (address + data.size - 1)
-    | none => throw <| IO.userError s!"no memory of thread {tid}"
+    | some memory => Jit.writeMemory memory ((Array.range data.size).map fun offset => UInt64.ofNat (address + offset)) data.data
+    -- Without native memory, the states have all of it, which is what it is made of when it is next needed.
+    | none => if (← stateMemory emu tid).isNone then throw <| IO.userError s!"no memory of thread {tid}"
+    invalidateCode emu address (address + data.size - 1)
     -- And the memory of the state of each thread there, which is what it has when it runs in the interpreter.
     let table ← emu.taskTable.get
     let space := table.spaceOf tid
