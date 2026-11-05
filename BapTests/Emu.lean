@@ -1094,6 +1094,49 @@ private def testThumbItFlags : IO Unit := do
   let _ ← Bap.Emu.step emu
   assertBits "Emu orrs.w in an IT block sets Z" (BitVec.ofNat 1 1) (.ok (← Bap.Emu.reg emu (flag "ZF")))
 
+/-- Traces of sessions: what a session captures is its own, which a hook that starts and stops the default trace at each instruction leaves
+as it is, and which no one else can close or start again; a scoped one is gone when it is done, however that is; and a checkpoint keeps
+them, for the session that opened them. -/
+def testTraceSessions : IO Unit := do
+  let program ← IO.FS.readBinFile "testsuite/bin/aarch64-linux-musl-libc-memory"
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let emu := machine.emu
+  let session ← Bap.Emu.traceOpen emu "capture" { pcCapacity := 100000 }
+  let started ← emu.executed.get
+  -- Instrumentation that knows nothing of it, and restarts the default trace each time.
+  let hook ← Bap.Emu.onCode emu (0, 2 ^ 64 - 1) fun current _ => Bap.Emu.traceStart current
+  let _ ← machine.run (fuel := 3000) fun _ => pure ()
+  Bap.Emu.removeHook emu hook
+  let _ ← Bap.Emu.traceStop emu
+  let ran := (← emu.executed.get) - started
+  let captured ← Bap.Emu.tracePcs emu "capture"
+  assertEqual "a session's trace has all that ran, whatever the default trace does" ran captured.length
+  assertTrue "it ran something" (ran > 0)
+  expectThrow "a name that is open is someone else's" (Bap.Emu.traceOpen emu "capture")
+  expectThrow "the empty name is the default trace's" (Bap.Emu.traceOpen emu "")
+  let other : Bap.Emu.TraceSession := { session with token := session.token + 100 }
+  expectThrow "another session can't close it" (Bap.Emu.traceClose emu other)
+  expectThrow "or start it again" (Bap.Emu.traceRestart emu other)
+  assertEqual "and it is as it was" captured (← Bap.Emu.tracePcs emu "capture")
+  -- Scoped: open while it runs, and closed when it is done.
+  let inside ← Bap.Emu.withTrace emu "scoped" { perThread := true } fun _ => do
+    let _ ← machine.run (fuel := 500) fun _ => pure ()
+    pure (← Bap.Emu.traceThreads emu "scoped")
+  assertTrue "a scoped trace has what ran in it" (inside.any (·.count > 0))
+  assertEqual "and is gone after" ["capture"] (← Bap.Emu.traceNames emu)
+  expectThrow "a scoped trace whose action fails" (Bap.Emu.withTrace emu "failing" {} fun _ => (throw (IO.userError "no") : IO Unit))
+  assertEqual "is gone too" ["capture"] (← Bap.Emu.traceNames emu)
+  -- A checkpoint keeps it, and the session that opened it still owns it.
+  let captured ← Bap.Emu.tracePcs emu "capture"
+  let restored ← Bap.Linux.Machine.ofCheckpoint (← machine.checkpoint)
+  assertEqual "a checkpoint keeps the traces of sessions" ["capture"] (← Bap.Emu.traceNames restored.emu)
+  assertEqual "with what they captured" captured (← Bap.Emu.tracePcs restored.emu "capture")
+  expectThrow "and still no one else's" (Bap.Emu.traceClose restored.emu other)
+  Bap.Emu.traceRestart restored.emu session (some { pcCapacity := 10 })
+  let _ ← restored.run (fuel := 100) fun _ => pure ()
+  assertEqual "its session starts it again as it says" 10 (← Bap.Emu.traceClose restored.emu session).length
+  assertEqual "and closes it" [] (← Bap.Emu.traceNames restored.emu)
+
 /-- A trace of each thread by itself: what one thread ran is what a trace of it alone has, a ring of each keeps the last of that thread's
 own and says how many it let go of, accesses are of the threads that are kept, and a checkpoint keeps it all. -/
 def testTraceThreads (triple : String) : IO Unit := do

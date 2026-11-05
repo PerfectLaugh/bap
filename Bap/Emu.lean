@@ -148,13 +148,33 @@ private structure TraceState where
 private def TraceState.keeps (state : TraceState) (thread : ThreadId) : Bool :=
   state.options.threads.all (·.contains thread)
 
+/-- The traces of an emulator: the one of `traceStart` and `traceStop`, which is anyone's, and each that a `TraceSession` opened, by its
+name, which only that session stops or starts again, so that one piece of instrumentation can't undo what another captures. -/
+private structure TraceSet where
+  default : Option TraceState := none
+  /-- Each by its name, with the token of the session that owns it. -/
+  named : List (String × Nat × TraceState) := []
+  nextToken : Nat := 0
+
+/-- Whether anything is traced. -/
+private def TraceSet.active (set : TraceSet) : Bool :=
+  set.default.isSome || !set.named.isEmpty
+
+/-- The trace of a name, or the default one of the empty name. -/
+private def TraceSet.find? (set : TraceSet) (name : String) : Option TraceState :=
+  if name.isEmpty then set.default else (set.named.find? (·.1 == name)).map (·.2.2)
+
+/-- Each trace changed by `change`. -/
+private def TraceSet.mapStates (set : TraceSet) (change : TraceState → TraceState) : TraceSet :=
+  { set with default := set.default.map change, named := set.named.map fun (name, token, state) => (name, token, change state) }
+
 private structure CodeHookContext where
   engine : Primus.Lifted.Engine
   state : IO.Ref Bil.State
   pc : IO.Ref Nat
   stopped : IO.Ref Bool
   currentThreadRef : IO.Ref ThreadId
-  trace : IO.Ref (Option TraceState)
+  trace : IO.Ref TraceSet
   lastFault : IO.Ref (Option MemoryFault)
   skipCode : IO.Ref (Option Nat)
   pendingRef : IO.Ref (Option PendingBranch)
@@ -220,7 +240,7 @@ structure Emu where
   syscallHooks : IO.Ref (List SyscallHook)
   intrinsicHooks : IO.Ref (List IntrinsicHook)
   nextHook : IO.Ref HookId
-  trace : IO.Ref (Option TraceState)
+  trace : IO.Ref TraceSet
   lastFault : IO.Ref (Option MemoryFault)
   skipCode : IO.Ref (Option Nat)
   /-- Of a thread that stopped where hooks fired, and that a hook came to afterwards: where, and the hooks that fired there, which don't
@@ -407,7 +427,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     syscallHooks := ← IO.mkRef []
     intrinsicHooks := ← IO.mkRef []
     nextHook := ← IO.mkRef 0
-    trace := ← IO.mkRef none
+    trace := ← IO.mkRef {}
     lastFault := ← IO.mkRef none
     skipCode := ← IO.mkRef none
     suppressed := ← IO.mkRef []
@@ -651,7 +671,7 @@ of the regions, the hooks of accesses, the trace and the journal, as obligation 
 private def ensureMemoryFilter (emu : Emu) : IO Unit := do
   if !(← emu.memoryFilterStale.get) then return
   emu.memoryFilterStale.set false
-  let traced := (← emu.trace.get).isSome
+  let traced := (← emu.trace.get).active
   let readsHeard := traced || !(← emu.readHooks.get).isEmpty
   let writesHeard := traced || !(← emu.writeHooks.get).isEmpty || emu.journal.isSome
   emu.memoryFilterHeard.set (readsHeard, writesHeard)
@@ -1065,12 +1085,17 @@ def breakpoints (emu : Emu) : IO (List Nat) := do
   let current ← emu.breakpointsRef.get
   pure (current.map Prod.snd).reverse
 
-/-- Starts a trace afresh, which keeps what `options` say. -/
-def traceStartWith (emu : Emu) (options : TraceOptions) : IO Unit := do
+/-- A trace that has nothing yet, which keeps what `options` say. -/
+private def freshTrace (options : TraceOptions) : IO TraceState := do
   if let some range := options.watch then
     if range.1 > range.2 then throw <| IO.userError "invalid Emu trace watch range"
+  pure { options, ring := { capacity := options.pcCapacity } }
+
+/-- Starts the default trace afresh, which keeps what `options` say. -/
+def traceStartWith (emu : Emu) (options : TraceOptions) : IO Unit := do
+  let state ← freshTrace options
   forgetMemoryFilter emu
-  emu.trace.set (some { options, ring := { capacity := options.pcCapacity } })
+  emu.trace.modify ({ · with default := some state })
 
 /-- Starts keeping each pc that runs, all of them. -/
 def traceStart (emu : Emu) : IO Unit := traceStartWith emu {}
@@ -1112,72 +1137,125 @@ private def TraceRing.instructions (ring : TraceRing) : List (Nat × ByteArray) 
     out := out.push (pc, current.getD pc ByteArray.empty)
   pure out.toList
 
-/-- Stops the trace, and gives the pcs that it kept. -/
+/-- Stops the default trace, and gives the pcs that it kept. -/
 def traceStop (emu : Emu) : IO (List Nat) := do
   let current ← emu.trace.get
   forgetMemoryFilter emu
-  emu.trace.set none
-  pure (pcList (current.getD {}))
+  emu.trace.set { current with default := none }
+  pure (pcList (current.default.getD {}))
 
-/-- The pcs that the trace kept so far. -/
-def tracePcs (emu : Emu) : IO (List Nat) := do
-  let current ← emu.trace.get
-  pure (pcList (current.getD {}))
+/-- A trace that a session opened, which only that session stops or starts again: its name, and what says that it is the one that
+opened it. -/
+structure TraceSession where
+  name : String
+  token : Nat
+  deriving DecidableEq, Repr
+
+/-- Opens a trace of a name of its own, which keeps what `options` say, for whoever is given the session. A name that is open already is
+someone else's, and the empty name is that of the default trace. -/
+def traceOpen (emu : Emu) (name : String) (options : TraceOptions := {}) : IO TraceSession := do
+  if name.isEmpty then throw <| IO.userError "a trace of a session has a name, and the empty name is the default trace's"
+  let state ← freshTrace options
+  let set ← emu.trace.get
+  if set.named.any (·.1 == name) then
+    throw <| IO.userError s!"the trace {name} is open already, and is the session's that opened it"
+  forgetMemoryFilter emu
+  emu.trace.set { set with named := set.named ++ [(name, set.nextToken, state)], nextToken := set.nextToken + 1 }
+  pure { name, token := set.nextToken }
+
+/-- The trace of a session, which has to be the one that opened it. -/
+private def ownedTrace (emu : Emu) (session : TraceSession) : IO TraceSet := do
+  let set ← emu.trace.get
+  match set.named.find? (·.1 == session.name) with
+  | some (_, token, _) =>
+    if token != session.token then throw <| IO.userError s!"the trace {session.name} is another session's"
+    pure set
+  | none => throw <| IO.userError s!"there is no trace {session.name} open"
+
+/-- Closes a session's trace, and gives the pcs that it kept. -/
+def traceClose (emu : Emu) (session : TraceSession) : IO (List Nat) := do
+  let set ← ownedTrace emu session
+  forgetMemoryFilter emu
+  emu.trace.set { set with named := set.named.filter (·.1 != session.name) }
+  pure (pcList ((set.find? session.name).getD {}))
+
+/-- Starts a session's trace afresh, with what it keeps, or with `options` if they are given. -/
+def traceRestart (emu : Emu) (session : TraceSession) (options : Option TraceOptions := none) : IO Unit := do
+  let set ← ownedTrace emu session
+  let state ← freshTrace (options.getD ((set.find? session.name).getD {}).options)
+  forgetMemoryFilter emu
+  emu.trace.set { set with named := set.named.map fun (name, token, current) =>
+    if name == session.name then (name, token, state) else (name, token, current) }
+
+/-- Runs `action` with a trace of its own, of a name, which is closed when it is done, however it ends. -/
+def withTrace (emu : Emu) (name : String) (options : TraceOptions) (action : TraceSession → IO α) : IO α := do
+  let session ← traceOpen emu name options
+  try action session finally
+    try let _ ← traceClose emu session catch _ => pure ()
+
+/-- The names of the traces that sessions have open, in the order they were opened. -/
+def traceNames (emu : Emu) : IO (List String) := do
+  pure ((← emu.trace.get).named.map (·.1))
+
+/-- A trace by its name, the default one of the empty name, or one with nothing if there is none. -/
+private def traceState (emu : Emu) (trace : String) : IO TraceState := do
+  pure (((← emu.trace.get).find? trace).getD {})
+
+/-- The pcs that a trace kept so far, of the default trace unless a name is given. -/
+def tracePcs (emu : Emu) (trace : String := "") : IO (List Nat) := do
+  pure (pcList (← traceState emu trace))
 
 /-- Each pc that the trace kept so far, with the bytes of the instruction that ran there then, which may not be what is there now. Empty
 bytes are of an instruction that couldn't be fetched and decoded. -/
-def traceInstructions (emu : Emu) : IO (List (Nat × ByteArray)) := do
-  let state := (← emu.trace.get).getD {}
+def traceInstructions (emu : Emu) (trace : String := "") : IO (List (Nat × ByteArray)) := do
+  let state ← traceState emu trace
   pure (if state.options.perThread then state.threadRings.flatMap (·.2.instructions) else state.ring.instructions)
 
 /-- How many pcs the trace let go of for its capacity, of all threads. -/
-def traceDroppedPcs (emu : Emu) : IO Nat := do
-  let state := (← emu.trace.get).getD {}
+def traceDroppedPcs (emu : Emu) (trace : String := "") : IO Nat := do
+  let state ← traceState emu trace
   pure (if state.options.perThread then state.threadRings.foldl (· + ·.2.dropped) 0 else state.ring.dropped)
 
 /-- The ring of a thread, of a trace with one for each. -/
-private def threadRing (emu : Emu) (thread : ThreadId) : IO TraceRing := do
-  let state := (← emu.trace.get).getD {}
+private def threadRing (emu : Emu) (thread : ThreadId) (trace : String) : IO TraceRing := do
+  let state ← traceState emu trace
   if !state.options.perThread then throw <| IO.userError "the trace has no ring of each thread: start it with perThread"
   pure (state.rings.getD thread {})
 
 /-- The pcs that a thread ran, in order, of what its ring kept. -/
-def traceThreadPcs (emu : Emu) (thread : ThreadId) : IO (List Nat) := do
-  pure (← threadRing emu thread).pcs
+def traceThreadPcs (emu : Emu) (thread : ThreadId) (trace : String := "") : IO (List Nat) := do
+  pure (← threadRing emu thread trace).pcs
 
 /-- Each pc that a thread ran, of what its ring kept, with the bytes that it ran as. -/
-def traceThreadInstructions (emu : Emu) (thread : ThreadId) : IO (List (Nat × ByteArray)) := do
-  pure (← threadRing emu thread).instructions
+def traceThreadInstructions (emu : Emu) (thread : ThreadId) (trace : String := "") : IO (List (Nat × ByteArray)) := do
+  pure (← threadRing emu thread trace).instructions
 
 /-- How many pcs a thread's ring let go of for its capacity. -/
-def traceThreadDroppedPcs (emu : Emu) (thread : ThreadId) : IO Nat := do
-  pure (← threadRing emu thread).dropped
+def traceThreadDroppedPcs (emu : Emu) (thread : ThreadId) (trace : String := "") : IO Nat := do
+  pure (← threadRing emu thread trace).dropped
 
 /-- What the trace says of each thread that it has a ring of, in order of thread: of a trace of one ring, nothing. -/
-def traceThreads (emu : Emu) : IO (List TraceThread) := do
-  let state := (← emu.trace.get).getD {}
+def traceThreads (emu : Emu) (trace : String := "") : IO (List TraceThread) := do
+  let state ← traceState emu trace
   pure (state.threadRings.map fun (thread, ring) =>
     { thread, count := ring.count, kept := ring.count - ring.dropped, dropped := ring.dropped })
 
 /-- What the trace keeps. -/
-def traceOptions (emu : Emu) : IO (Option TraceOptions) := do
-  pure ((← emu.trace.get).map (·.options))
+def traceOptions (emu : Emu) (trace : String := "") : IO (Option TraceOptions) := do
+  pure (((← emu.trace.get).find? trace).map (·.options))
 
 /-- The accesses that the trace kept. -/
-def traceAccesses (emu : Emu) : IO (List TraceAccess) := do
-  let current ← emu.trace.get
-  let state := current.getD {}
+def traceAccesses (emu : Emu) (trace : String := "") : IO (List TraceAccess) := do
+  let state ← traceState emu trace
   pure (state.accesses.take state.options.accessCapacity).reverse
 
 /-- How many accesses the trace saw, kept or not. -/
-def traceAccessesCount (emu : Emu) : IO Nat := do
-  let current ← emu.trace.get
-  pure (current.getD {}).accessCount
+def traceAccessesCount (emu : Emu) (trace : String := "") : IO Nat := do
+  pure (← traceState emu trace).accessCount
 
 /-- How many accesses the trace let go of for its capacity. -/
-def traceDroppedAccesses (emu : Emu) : IO Nat := do
-  let current ← emu.trace.get
-  let state := current.getD {}
+def traceDroppedAccesses (emu : Emu) (trace : String := "") : IO Nat := do
+  let state ← traceState emu trace
   pure (state.accessCount - min state.accessRetained state.options.accessCapacity)
 
 /-- All of the trace as bytes, for a checkpoint: what it keeps, its rings with their pcs in order and the bytes that they ran as, its
@@ -1197,25 +1275,31 @@ def traceSave (emu : Emu) : IO ByteArray := do
     out := out ++ word code.length
     for (at_, pc, bytes) in code do out := out ++ word at_ ++ word pc ++ word bytes.size ++ bytes
     pure out
-  match ← emu.trace.get with
-  | none => pure (ByteArray.mk #[0])
-  | some state =>
-    let options := state.options
-    let mut out := ByteArray.mk #[1] ++ word options.pcCapacity ++ word options.accessCapacity
-    out := out ++ (match options.watch with | some (low, high) => ByteArray.mk #[1] ++ word low ++ word high | none => ByteArray.mk #[0])
-    out := out ++ (match options.threads with
-      | some threads => threads.foldl (· ++ word ·) (ByteArray.mk #[1] ++ word threads.length)
-      | none => ByteArray.mk #[0])
-    out := out ++ ByteArray.mk #[if options.perThread then 1 else 0] ++ word state.count ++ ringBytes state.ring
-    let rings := state.threadRings
-    out := out ++ word rings.length
-    for (thread, ring) in rings do out := out ++ word thread ++ ringBytes ring
-    let accesses := state.accesses.reverse
-    out := out ++ word accesses.length
-    for access in accesses do
-      out := out ++ word access.insn ++ word access.pc ++ word access.address ++ word access.size
-        ++ ByteArray.mk #[if access.write then 1 else 0] ++ option access.value ++ word access.thread
-    pure (out ++ word state.accessCount ++ word state.accessRetained)
+  let stateBytes (state : Option TraceState) : ByteArray := Id.run do
+    match state with
+    | none => pure (ByteArray.mk #[0])
+    | some state =>
+      let options := state.options
+      let mut out := ByteArray.mk #[1] ++ word options.pcCapacity ++ word options.accessCapacity
+      out := out ++ (match options.watch with | some (low, high) => ByteArray.mk #[1] ++ word low ++ word high | none => ByteArray.mk #[0])
+      out := out ++ (match options.threads with
+        | some threads => threads.foldl (· ++ word ·) (ByteArray.mk #[1] ++ word threads.length)
+        | none => ByteArray.mk #[0])
+      out := out ++ ByteArray.mk #[if options.perThread then 1 else 0] ++ word state.count ++ ringBytes state.ring
+      let rings := state.threadRings
+      out := out ++ word rings.length
+      for (thread, ring) in rings do out := out ++ word thread ++ ringBytes ring
+      let accesses := state.accesses.reverse
+      out := out ++ word accesses.length
+      for access in accesses do
+        out := out ++ word access.insn ++ word access.pc ++ word access.address ++ word access.size
+          ++ ByteArray.mk #[if access.write then 1 else 0] ++ option access.value ++ word access.thread
+      pure (out ++ word state.accessCount ++ word state.accessRetained)
+  let set ← emu.trace.get
+  let mut out := stateBytes set.default ++ word set.nextToken ++ word set.named.length
+  for (name, token, state) in set.named do
+    out := out ++ word name.utf8ByteSize ++ name.toUTF8 ++ word token ++ stateBytes (some state)
+  pure out
 
 /-- The trace that `traceSave` gave the bytes of. -/
 def traceLoad (emu : Emu) (data : ByteArray) : IO Unit := do
@@ -1253,7 +1337,7 @@ def traceLoad (emu : Emu) (data : ByteArray) : IO Unit := do
     let known := code.foldl (init := {}) fun known (_, pc, bytes) => known.insert pc bytes
     pure { front := pcs, retained, count, dropped, capacity, code := code.reverse, codeSize := code.length
            codeLimit := 2 * code.length + 64, known }
-  let trace ← match ← byte with
+  let trace : IO (Option TraceState) := do match ← byte with
     | 0 => pure none
     | 1 => do
       let pcCapacity ← word
@@ -1288,9 +1372,18 @@ def traceLoad (emu : Emu) (data : ByteArray) : IO Unit := do
       }
       pure (some state)
     | _ => throw <| IO.userError "the trace of a checkpoint is of no kind there is"
+  let default ← trace
+  let nextToken ← word
+  let named ← list do
+    let name ← match String.fromUTF8? (← bytes) with
+      | some name => pure name
+      | none => throw <| IO.userError "the trace of a checkpoint has a name that isn't text"
+    let token ← word
+    let some state ← trace | throw <| IO.userError "the trace of a checkpoint has a session with no trace"
+    pure (name, token, state)
   if (← at_.get) != data.size then throw <| IO.userError "the trace of a checkpoint has bytes after it"
   forgetMemoryFilter emu
-  emu.trace.set trace
+  emu.trace.set { default, named, nextToken }
 
 /-- Runs a hook that is in the middle of an instruction, as a checkpoint then couldn't be of anything whole. -/
 private def serve (emu : Emu) (action : IO α) : IO α := do
@@ -1306,10 +1399,10 @@ private def serialize (emu : Emu) (action : IO α) : IO α := do
   | none => action
 
 private def recordAccess (emu : Emu) (write : Bool) (address size value : Nat) : IO Unit := do
-  if (← emu.trace.get).isNone then return
+  if !(← emu.trace.get).active then return
   let pc ← emu.pc.get
   let thread ← emu.currentThreadRef.get
-  emu.trace.modify fun current => current.map fun state =>
+  emu.trace.modify fun set => set.mapStates fun state =>
     if state.options.accessCapacity = 0 || !state.keeps thread then state
     else if state.options.watch.any fun range => !accessTouches range.1 range.2 address size then state
     else
@@ -1355,7 +1448,7 @@ private def notifyCode (emu : Emu) (address : Nat) : IO Unit := do
 
 /-- Whether nothing watches the code that runs. -/
 private def rangeIsQuiet (emu : Emu) : IO Bool := do
-  pure ((← emu.hooks.get).isEmpty && (← emu.trace.get).isNone)
+  pure ((← emu.hooks.get).isEmpty && !(← emu.trace.get).active)
 
 /-- The last access that faulted. -/
 def failure (emu : Emu) : IO (Option MemoryFault) := emu.lastFault.get
@@ -2195,22 +2288,37 @@ private def changedBytes (emu : Emu) (known : Option ByteArray) (address : Nat) 
     emu.faultFresh.set fresh
     pure (some ByteArray.empty)
 
-private def recordTrace (emu : Emu) (address : Nat) : IO Unit := do
-  let some state ← emu.trace.get | return
-  let thread ← emu.currentThreadRef.get
-  if !state.keeps thread then return
-  let ringOf (state : TraceState) : TraceRing :=
-    if state.options.perThread then state.rings.getD thread { capacity := state.options.pcCapacity } else state.ring
-  let changed ← changedBytes emu ((ringOf state).known.get? address) address
+/-- A trace with a pc of a thread noted, with what `changedBytes` said of it. -/
+private def TraceState.record (state : TraceState) (thread : ThreadId) (address : Nat) (changed : Option ByteArray) : TraceState :=
+  if !state.keeps thread then state else
   let note (ring : TraceRing) : TraceRing := match changed with
     | some bytes => ring.push address bytes
     | none => ring.advance address
-  serialize emu <| emu.trace.modify fun current => current.map fun state =>
-    let state := { state with count := state.count + 1 }
-    if state.options.perThread then
-      let fresh : TraceRing := { capacity := state.options.pcCapacity }
-      { state with rings := state.rings.alter thread fun ring => some (note (ring.getD fresh)) }
-    else { state with ring := note state.ring }
+  let state := { state with count := state.count + 1 }
+  if state.options.perThread then
+    let fresh : TraceRing := { capacity := state.options.pcCapacity }
+    { state with rings := state.rings.alter thread fun ring => some (note (ring.getD fresh)) }
+  else { state with ring := note state.ring }
+
+/-- The ring that a pc of a thread goes in, of a trace that keeps it. -/
+private def TraceState.ringOf (state : TraceState) (thread : ThreadId) : TraceRing :=
+  if state.options.perThread then state.rings.getD thread { capacity := state.options.pcCapacity } else state.ring
+
+private def recordTrace (emu : Emu) (address : Nat) : IO Unit := do
+  let set ← emu.trace.get
+  if !set.active then return
+  let thread ← emu.currentThreadRef.get
+  -- What is new at the pc, for each trace, as each knows what it was by its own ring.
+  let changedFor (state : TraceState) : IO (Option ByteArray) :=
+    if state.keeps thread then changedBytes emu ((state.ringOf thread).known.get? address) address else pure none
+  let first ← match set.default with
+    | some state => changedFor state
+    | none => pure none
+  let others ← set.named.mapM fun (_, _, state) => changedFor state
+  serialize emu <| emu.trace.modify fun set =>
+    { set with
+      default := set.default.map (·.record thread address first)
+      named := (set.named.zip others).map fun ((name, token, state), changed) => (name, token, state.record thread address changed) }
 
 /-- The code site of a block inside a compiled range, whose first block is the step's. A block with hooks ends the range, with
 the block not entered and its hooks not fired: they are the next step's, which has the state that they read. -/
@@ -2218,7 +2326,7 @@ private def observeRangeCode (emu : Emu) (address : Nat) : IO Bool := do
   emu.pc.set address
   let dirty := (← emu.engine.dirtyCode.get).isSome
   let late := (← emu.rangeQuiet.get) &&
-    ((← emu.hookChanges.get) != (← emu.rangeHooks.get) || (← emu.trace.get).isSome)
+    ((← emu.hookChanges.get) != (← emu.rangeHooks.get) || (← emu.trace.get).active)
   let hooked := (← hooksNear emu address).any fun hook => hook.first ≤ address && address ≤ hook.last
   -- A range that ends at its first site has done no good: where it starts, the step runs its one instruction by itself.
   match ← emu.rangeStart.get with
@@ -2440,7 +2548,7 @@ private def runRange (emu : Emu) (address budget : Nat) : IO (Nat × Bil.Effect)
   -- A range is observed if a trace is kept, or a code hook is in what it has: one elsewhere is for a step that goes there, as
   -- Unicorn has a hook cost what runs where it is.
   let observedIn (spans : List (Nat × Nat)) : IO Bool := do
-    if (← emu.trace.get).isSome then return true
+    if (← emu.trace.get).active then return true
     let hooks ← emu.hooks.get
     let observed := hooks.any fun hook => spans.any fun (low, high) => hook.first ≤ max low high && min low high ≤ hook.last
     emu.rangeQuiet.set !observed
@@ -2505,7 +2613,7 @@ private def gateAtomic (emu : Emu) (address : Nat) : IO Unit := do
     emu.lastFault.set none
 
 /-- The references of the emulator as the environment of `stepM`. -/
-@[inline] private def stepOps (emu : Emu) : StepOps IO (Snapshot × Option TraceState) :=
+@[inline] private def stepOps (emu : Emu) : StepOps IO (Snapshot × TraceSet) :=
   stepOpsOf (controlCells emu) (fun address => do notifyCode emu address; gateAtomic emu address)
     (do
       beginStepMemory emu
@@ -2611,7 +2719,7 @@ private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared :
     pc := ← IO.mkRef context.pc
     stopped := ← IO.mkRef context.stopped
     currentThreadRef := ← IO.mkRef context.id
-    trace := ← IO.mkRef none
+    trace := ← IO.mkRef {}
     lastFault := ← IO.mkRef none
     skipCode := ← IO.mkRef context.skip
     suppressed := ← IO.mkRef []
