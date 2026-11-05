@@ -2100,9 +2100,9 @@ private def libraryModelId : String := "bap.libraries"
 private def traceModelId : String := "bap.trace"
 
 /-- The models that every machine has, with the versions of what they keep: of ptrace, 2 has the stops that tracees have yet to make
-and those that stopped for their end, and 3 the exits that tracers that aren't parents have yet to hear of. -/
+and those that stopped for their end, 3 the exits that tracers that aren't parents have yet to hear of, and 4 the steps that tracees have yet to make. -/
 private def builtinModels : List (String × Nat) :=
-  [(Signals.modelId, 1), (Ptrace.modelId, 3), (Seccomp.modelId, 1), (Timers.modelId, 1), (Ring.modelId, 1), (heapModelId, 1), (libraryModelId, 1),
+  [(Signals.modelId, 1), (Ptrace.modelId, 4), (Seccomp.modelId, 1), (Timers.modelId, 1), (Ring.modelId, 1), (heapModelId, 1), (libraryModelId, 1),
     (traceModelId, 4)]
 
 private def builtinVersion (id : String) : Nat := (builtinModels.lookup id).getD 1
@@ -2149,7 +2149,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   machine.models.modify (· ++ [{ id := Signals.modelId, version := builtinVersion Signals.modelId, state := { save := signals.save, load := signals.load } }])
   -- So is what is traced and stopped, which serves the waits, and so is before the signals.
   ptrace.install emu
-  machine.models.modify (· ++ [{ id := Ptrace.modelId, version := builtinVersion Ptrace.modelId, state := { save := ptrace.save, load := ptrace.load } }])
+  machine.models.modify (· ++ [{ id := Ptrace.modelId, version := builtinVersion Ptrace.modelId, state := { save := ptrace.save, load := ptrace.load emu } }])
   -- And what a thread may call, which ptrace asks of each call once a tracer saw it start.
   let seccomp ← Seccomp.attach architecture signals ptrace emu
   machine.models.modify (· ++ [{ id := Seccomp.modelId, version := builtinVersion Seccomp.modelId, state := seccomp.modelState emu }])

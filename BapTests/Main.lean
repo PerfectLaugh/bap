@@ -82,6 +82,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-ptrace",
     Bap.Tests.Emu.testPtraceCheckpoint "x86_64" "attach 0",
     Bap.Tests.Emu.testPtraceCheckpoint "aarch64" "attach 0",
+    Bap.Tests.Emu.testPtraceCheckpoint "x86_64" "step 0",
+    Bap.Tests.Emu.testPtraceCheckpoint "aarch64" "step 0",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-ptrace-events",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-ptrace-events",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-ptrace-events",

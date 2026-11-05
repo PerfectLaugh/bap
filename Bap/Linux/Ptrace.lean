@@ -648,10 +648,8 @@ private def serveWaitid (ptrace : Ptrace) (emu : Emu) (kind id info options : Na
 
 /-! ### ptrace -/
 
-/-- Stops a thread after it runs one instruction from where it is. -/
-private def armStep (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Unit := do
-  let from_ ← pcOf emu tid
-  ptrace.table.modify fun table => { table with stepping := table.stepping.insert tid from_ }
+/-- The hook of a thread that `stepping` says steps, which stops it once it ran one instruction. -/
+private def hookStep (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Unit := do
   let width ← wordWidth emu
   let hook ← onCode emu (0, 2 ^ width - 1) fun current address => do
     if (← thread current) != tid then return
@@ -667,6 +665,12 @@ private def armStep (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Unit := do
         stopThread ptrace current tid { status := stoppedStatus ptrace.numbers.trap, traced := true, signal := ptrace.numbers.trap, code := 2 }
     | none => pure ()
   ptrace.stepHooks.modify (·.insert tid hook)
+
+/-- Stops a thread after it runs one instruction from where it is. -/
+private def armStep (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Unit := do
+  let from_ ← pcOf emu tid
+  ptrace.table.modify fun table => { table with stepping := table.stepping.insert tid from_ }
+  hookStep ptrace emu tid
 
 /-- `ptrace`, for what serves the system call of the thread that runs, as `serveWait` is. -/
 def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) : IO SyscallAction := do
@@ -1033,10 +1037,11 @@ def save (ptrace : Ptrace) : IO ByteArray := do
   let out := putList (fun out (tracer, tid, status) => putNat (putPair out (tracer, tid)) status) out table.untold
   let out := putSorted (fun out (tid, stops) => putList (fun out stop => putStop out (tid, stop)) (putNat out tid) stops) out
     table.pending.toList
-  pure (putList putNat out table.exiting)
+  let out := putList putNat out table.exiting
+  pure (putSorted putPair out table.stepping.toList)
 
 open Wire in
-def load (ptrace : Ptrace) (data : ByteArray) : IO Unit := do
+def load (ptrace : Ptrace) (emu : Emu) (data : ByteArray) : IO Unit := do
   let decoded : Except String PtraceTable := do
     let (waiting, at_) ← getList getWait data 0
     let (tracees, at_) ← getList getTracee data at_
@@ -1053,10 +1058,17 @@ def load (ptrace : Ptrace) (data : ByteArray) : IO Unit := do
       let (stops, at_) ← getList getStop data at_
       .ok ((tid, stops.map (·.2)), at_)) data at_
     let (exiting, at_) ← getList getNat data at_
+    let (stepping, at_) ← getList getPair data at_
     expectEnd data at_
     .ok { waiting := Std.HashMap.ofList waiting, tracees := Std.HashMap.ofList tracees, stops := Std.HashMap.ofList stops, continued, injected := Std.HashMap.ofList injected
-          messages := Std.HashMap.ofList messages, untold, pending := Std.HashMap.ofList pending, exiting }
-  ptrace.table.set (← IO.ofExcept decoded)
+          messages := Std.HashMap.ofList messages, untold, pending := Std.HashMap.ofList pending, exiting
+          stepping := Std.HashMap.ofList stepping }
+  let table ← IO.ofExcept decoded
+  -- The steps that were armed are those of the table, each with its hook, which isn't in the bytes.
+  for (_, hook) in (← ptrace.stepHooks.get).toList do removeHook emu hook
+  ptrace.stepHooks.set {}
+  ptrace.table.set table
+  for (tid, _) in table.stepping.toList do hookStep ptrace emu tid
   -- What waits may have what it waits for already.
   ptrace.changed.set true
 
