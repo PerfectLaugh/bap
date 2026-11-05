@@ -863,6 +863,27 @@ def testRangeLoopsX86 : IO Unit := do
     ((List.range 3000).foldl (fun value _ => (value * 0x5851 + 7) % 2 ^ 64) 1)
   run "addb" "loop:\naddb $7, %al\naddb %al, %dl\ndecq %rcx\njnz loop\nend:\njmp end" ((1 + 7 * 3000) % 256)
 
+/-- A loop of calls and returns, which leaves each range at its return, goes on in native code from range to range once its ranges are
+optimized (obligation 17 of `Bap.Jit`), and comes to what the interpreter does, at the same instruction. -/
+def testChainCalls : IO Unit := do
+  let code ← LLVM.assemble "aarch64"
+    "loop:\nbl f\nsubs x0, x0, #1\nb.ne loop\nend:\nb end\nf:\nand x9, x0, #3\ncbz x9, other\nadd x1, x1, #1\nret\nother:\nsub x1, x1, #2\nret"
+  let run (interpret : Bool) : IO (Nat × Nat × Nat) := do
+    let emu ← Bap.Emu.aarch64 code 0 0
+    for index in List.range 31 do
+      Bap.Emu.setReg emu ⟨s!"X{index}", .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 (if index == 0 then 200000 else 0)))
+    if interpret then emu.engine.interpretOnly.set true
+    let _ ← Bap.Emu.run emu 1000003
+    let value ← match ← Bap.Emu.reg emu ⟨"X1", .imm 64, 0, false⟩ with
+      | .bits bits => pure bits.toNat
+      | _ => throw <| IO.userError "no x1"
+    pure (← Bap.Emu.pc emu, value, (← emu.engine.chainEntries.get).size)
+  let (chainedPc, chainedValue, entries) ← run false
+  let (interpretedPc, interpretedValue, _) ← run true
+  assertTrue s!"A loop of calls goes on in native code: {entries} ranges in the chain" (entries > 0)
+  assertEqual "A loop of calls in native code comes to what the interpreter does" (interpretedPc, interpretedValue)
+    (chainedPc, chainedValue)
+
 /-- Native code past `nativeLimit` makes room for itself: forty blocks of a loop, each hot, with room for four pieces of native code,
 come to what they do, and what is kept stays within it while what is hot goes on being compiled. -/
 def testNativeLimit : IO Unit := do

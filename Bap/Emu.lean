@@ -596,6 +596,9 @@ private def snapshotBlock (emu : Emu) : IO Snapshot := do
 private def forgetMemoryFilter (emu : Emu) : IO Unit := do
   emu.memoryFilterStale.set true
   emu.engine.memoryFilter.set none
+  -- What the chain goes on to was compiled of bytes that a change of where the regions are, or of what may be done there, may have
+  -- let change unseen.
+  Primus.Lifted.clearChain emu.engine
 
 /-- Makes the filter of the native memory again if it is stale: what the memory observer, `notifyMemory`, lets through doing nothing,
 of the regions, the hooks of accesses, the trace and the journal, as obligation 16 of `Bap.Jit` asks. -/
@@ -651,6 +654,7 @@ def regionsTouching (emu : Emu) (address size : Nat) : IO (List Region) := do
 
 /-- All the regions but those in a range are as they were, and those have been replaced by these. -/
 private def replaceRegions (emu : Emu) (regions : List Region) (touched replaced : List Region) : IO Unit := do
+  Primus.Lifted.clearChain emu.engine
   -- The filter changes where the regions did, as the index does, rather than being made again of all of them.
   match ← emu.engine.memoryFilter.get, ← emu.memoryFilterStale.get with
   | some filter, false =>
@@ -2173,8 +2177,11 @@ private def runRange (emu : Emu) (address budget : Nat) : IO (Nat × Bil.Effect)
     let observed := hooks.any fun hook => spans.any fun (low, high) => hook.first ≤ max low high && min low high ≤ hook.last
     emu.rangeQuiet.set !observed
     pure observed
+  -- What only Lean's bookkeeping would come between goes on in native code from range to range: nothing observes code, no address is
+  -- one to step at alone, and no branch waits for its delay slot.
+  let chainable := quiet && (← emu.watchedSteps.get).isEmpty && (← emu.pendingRef.get).isNone
   let result ← Primus.Lifted.runBlockObserved emu.engine (fetch emu) (fun target code => lift emu (isThumb state) target code) state address
-    (some (notifyMemory emu)) (some (observeRangeCode emu)) (!quiet) budget observedIn
+    (some (notifyMemory emu)) (some (observeRangeCode emu)) (!quiet) budget observedIn chainable
   Primus.Lifted.flushDirtyRange emu.engine
   emu.state.set result.state
   emu.lastFault.set none

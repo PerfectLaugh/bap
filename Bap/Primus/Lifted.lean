@@ -235,6 +235,13 @@ structure Engine where
   profile : IO.Ref (Option (Std.HashMap Nat Profile))
   /-- Where an access to the native memory needs no observer, which its owner keeps to what the observer does. -/
   memoryFilter : IO.Ref (Option Jit.MemoryFilter)
+  /-- The ranges that native code goes on to from one to the next (obligation 17 of `Bap.Jit`), what they are by their numbers, the number of
+  the one at each address, and the numbers of the variables that the chain holds between them. -/
+  chain : Jit.Chain
+  chainEntries : IO.Ref (Array CachedBlock)
+  chainAt : IO.Ref (Std.HashMap Nat Nat)
+  variableIds : IO.Ref (Std.HashMap Bap.Var Nat)
+  variables : IO.Ref (Array Bap.Var)
 
 /-- What a run of a block or a range comes to: the state after it, where it went, where the instruction after the last that it ran
 is, and how it ended. -/
@@ -281,6 +288,11 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimi
     interpretOnly := ← IO.mkRef false
     profile := ← IO.mkRef none
     memoryFilter := ← IO.mkRef none
+    chain := ← Jit.createChain
+    chainEntries := ← IO.mkRef #[]
+    chainAt := ← IO.mkRef {}
+    variableIds := ← IO.mkRef {}
+    variables := ← IO.mkRef #[]
   }
 
 /-- What it has done so far. -/
@@ -313,8 +325,16 @@ private def indexRange (engine : Engine) (address : Nat) (entry : CachedBlock) :
   engine.rangeIndex.modify fun index =>
     spans.foldl (init := index) fun index (lo, hi) => CodeIndex.add index address (min lo hi) (max lo hi)
 
+/-- Forgets the ranges of the chain, for what was compiled of the code may not be what is there now, or is to be let go of. -/
+def clearChain (engine : Engine) : IO Unit := do
+  if (← engine.chainEntries.get).isEmpty then return
+  Jit.clearChain engine.chain
+  engine.chainEntries.set #[]
+  engine.chainAt.set {}
+
 /-- Forgets all that was lifted and compiled, and every version of it. -/
 def clearCache (engine : Engine) : IO Unit := do
+  clearChain engine
   engine.cache.set {}
   engine.ranges.set {}
   engine.cacheVersions.set {}
@@ -327,6 +347,7 @@ def clearCache (engine : Engine) : IO Unit := do
 
 /-- Drops the compiled ranges, which go by the code they were compiled from only when it is written to. -/
 def forgetRanges (engine : Engine) : IO Unit := do
+  clearChain engine
   (← engine.ranges.get).toList.forM fun (_, entry) => rememberVersion engine engine.rangeVersions entry
   engine.ranges.set {}
   engine.rangeIndex.set {}
@@ -335,6 +356,7 @@ def forgetRanges (engine : Engine) : IO Unit := do
 a version. It looks at what `CodeIndex` says may be there, which is all of it (`CodeIndex.candidates_complete`), so that it costs
 what is on the pages of the write, however much else is cached. -/
 def discardRange (engine : Engine) (first last : Nat) : IO Unit := do
+  clearChain engine
   engine.statistics.modify fun stats => { stats with invalidations := stats.invalidations + 1 }
   let (lo, hi) := (min first last, max first last)
   -- A block is where it starts, so that for a small write those addresses are all that there is to look at, which is less than what is
@@ -362,6 +384,7 @@ runs there next is lifted and compiled again, as if it had never run, and the by
 is for what changes what code does without writing it, such as a hook that is to see what was compiled past it, or semantics that
 changed. It looks at all that is cached, as it isn't what a program does all the time. -/
 def invalidateCode (engine : Engine) (first last : Nat) : IO Unit := do
+  clearChain engine
   engine.statistics.modify fun stats => { stats with invalidations := stats.invalidations + 1 }
   let (lo, hi) := (min first last, max first last)
   let touches (entry : CachedBlock) : Bool :=
@@ -1341,6 +1364,7 @@ then the native blocks and ranges that ran least, down to 7/8 of it, so that thi
 stays compiled. A version is the same code as a block that has it, so what is counted is never less than what is held. -/
 private def makeRoom (engine : Engine) : IO Bool := do
   if (← engine.nativeLive.get) < engine.nativeLimit then return true
+  clearChain engine
   engine.cacheVersions.set {}
   engine.rangeVersions.set {}
   let target := engine.nativeLimit - max 1 (engine.nativeLimit / 8)
@@ -1379,6 +1403,7 @@ table costs is paid once in many misses, which a table of tens of thousands woul
 private def evictColdest (engine : Engine)
     (versions : IO.Ref (Std.HashMap Nat (List CachedBlock)))
     (entries : Std.HashMap Nat CachedBlock) : IO (Std.HashMap Nat CachedBlock) := do
+  clearChain engine
   let ranked ← entries.foldM (init := (#[] : Array (Nat × Nat))) fun found address entry => do
     pure (found.push (← entry.executions.get, address))
   let coldest := (ranked.qsort fun left right => left.1 < right.1 || (left.1 == right.1 && left.2 < right.2)).extract 0
@@ -1915,10 +1940,117 @@ private def runPersistent (engine : Engine) (executions : IO.Ref Nat) (lowering 
     else syncMemoryDelta completed (syncState completed state slots) addresses values
   nativeResult lowering following next state slots
 
+/-- The number of a variable for the chain. -/
+private def variableId (engine : Engine) (var : Bap.Var) : IO Nat := do
+  match (← engine.variableIds.get)[var]? with
+  | some id => pure id
+  | none =>
+    let id := (← engine.variables.get).size
+    engine.variables.modify (·.push var)
+    engine.variableIds.modify (·.insert var id)
+    pure id
+
+/-- Puts what is optimized and starts where it is entered in the chain, as `Jit.addToChain` takes it: what isn't optimized yet comes
+back to the dispatcher to be, and a block that may yet be in a range, which counting its runs decides, stays out. -/
+private def registerChain (engine : Engine) (pc : Nat) (entry : CachedBlock) (slotCount : Nat) : IO Unit := do
+  let .native lowering program _ := entry.plan | return
+  -- What is there may be what Lean had there before, as one that was optimized since.
+  if (← engine.chainAt.get).contains pc then
+    if Jit.chainHolds engine.chain (UInt64.ofNat pc) program then return
+    engine.chainAt.modify (·.erase pc)
+  if entry.entered != 0 || !entry.optimized || lowering.budget.isNone || lowering.effectSlot.isNone then return
+  if !(lowering.layout.all fun binding => (widthOf binding.1).isSome) then return
+  let none : UInt64 := UInt64.ofNat (2 ^ 64 - 1)
+  let slot (option : Option Nat) : UInt64 := (option.map UInt64.ofNat).getD none
+  let outputs (list : List (Bap.Var × Nat)) : IO (Array UInt64) := do
+    let mut data := #[UInt64.ofNat list.length]
+    for (var, at_) in list do
+      data := data ++ #[UInt64.ofNat (← variableId engine var), UInt64.ofNat at_, UInt64.ofNat ((widthOf var).getD 64)]
+    pure data
+  let mut data := #[UInt64.ofNat slotCount, slot lowering.effectSlot, slot lowering.budget, slot lowering.observed,
+    UInt64.ofNat lowering.layout.length]
+  for (var, at_) in lowering.layout do
+    data := data ++ #[UInt64.ofNat (← variableId engine var), UInt64.ofNat at_]
+  data := data.push (UInt64.ofNat lowering.inputs.length)
+  for var in lowering.inputs do data := data.push (UInt64.ofNat (← variableId engine var))
+  data := data ++ (← outputs lowering.outputs)
+  data := data.push (UInt64.ofNat lowering.flags.length)
+  for (output, flag) in lowering.flags do data := data ++ #[UInt64.ofNat output, UInt64.ofNat flag]
+  data := data.push (UInt64.ofNat lowering.checkpoints.length)
+  for (at_, list) in lowering.checkpoints do data := (data.push (UInt64.ofNat at_)) ++ (← outputs list)
+  let id := (← engine.chainEntries.get).size
+  Jit.addToChain engine.chain (UInt64.ofNat pc) (UInt64.ofNat id) program data
+  engine.chainEntries.modify (·.push entry)
+  engine.chainAt.modify (·.insert pc id)
+
+/-- A run of what is at `pc` that goes on in native code to the ranges of the chain after it (obligation 17 of `Bap.Jit`), then is what Lean
+makes of the run of the last of them, with what those before it wrote: none if it can't be, and it is then run as ever. -/
+private def runChained (engine : Engine) (pc : Nat) (entry : CachedBlock) (state : Bil.State) (slots : Array UInt64)
+    (observer : Option Jit.MemoryObserver) (codeObserver : Option Jit.CodeObserver) (budget : Nat) (quietSites : Bool) :
+    IO (Option Result) := do
+  let .native _ program _ := entry.plan | return none
+  let some filter ← engine.memoryFilter.get | return none
+  -- A chain goes on in the native memory, which a range that touches none hasn't made yet: it is made as the first that does would.
+  let memory ← match ← engine.persistentMemory.get with
+    | some memory => pure memory
+    | none =>
+      if engine.persistentFrom != 0 then return none
+      match state.env.find? fun binding => binding.2 matches .memory _ with
+      | some (var, .memory cells) =>
+        let memory ← nativeOfMemory cells
+        unless engine.deferMemorySync do Jit.beginMemoryStep memory
+        engine.persistentMemory.set (some memory)
+        engine.persistentVariable.set (some var)
+        pure memory
+      | _ => return none
+  registerChain engine pc entry slots.size
+  let some id := (← engine.chainAt.get)[pc]? | return none
+  -- The variables that the chain knows of, as the state has them: one of the wrong kind is for Lean, as `encodeState` says.
+  let ids ← engine.variableIds.get
+  let mut seen : Std.HashSet Nat := {}
+  let mut variables : Array UInt64 := #[]
+  let mut values : Array UInt64 := #[]
+  for (var, value) in state.env do
+    match ids[var]? with
+    | none => pure ()
+    | some number =>
+      if !seen.contains number then
+        seen := seen.insert number
+        match value, widthOf var with
+        | @Value.bits width bits, some expected =>
+          if width != expected then return none
+          variables := variables.push (UInt64.ofNat number)
+          values := values.push (immediate bits)
+        | _, _ => return none
+  recordNative engine
+  let (next, slots, addresses, cells, info) ← Jit.runChain program slots memory filter quietSites observer codeObserver
+    engine.chain (UInt64.ofNat id) (UInt64.ofNat pc) (UInt64.ofNat budget) variables values
+  let entries ← engine.chainEntries.get
+  let at_ (index : Nat) : Nat := (info.getD index 0).toNat
+  let some last := entries[at_ 0]? | throw <| IO.userError "native chain ended at no range of it"
+  let .native lowering _ _ := last.plan | throw <| IO.userError "native chain ended at what isn't native"
+  engine.chained.set (at_ 1)
+  let all ← engine.variables.get
+  let written := at_ 2
+  let updates : List (Bap.Var × Value) := (List.range written).filterMap fun index =>
+    (all[at_ (3 + 2 * index)]?).bind fun var =>
+      (widthOf var).map fun width => (var, Value.bits (slotBits width (info.getD (4 + 2 * index) 0)))
+  let runsAt := 3 + 2 * written
+  for index in List.range (at_ runsAt) do
+    if let some ran := entries[at_ (runsAt + 1 + 2 * index)]? then
+      ran.executions.modify (· + at_ (runsAt + 2 + 2 * index))
+  let runs := (List.range (at_ runsAt)).foldl (fun total index => total + at_ (runsAt + 2 + 2 * index)) 0
+  engine.statistics.modify fun stats => { stats with nativeRuns := stats.nativeRuns + runs - 1 }
+  let state : Bil.State := { env := updates ++ withoutBindings (updates.map Prod.fst) state.env }
+  let completed := atCodeStop lowering next
+  let memoryVar ← engine.persistentVariable.get
+  let state := syncMemoryDelta { completed with memory := memoryVar } (syncState completed state slots) addresses cells
+  some <$> nativeResult lowering last.next next state slots
+
 private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bil.State) (pc : Nat)
     (observer : Option Jit.MemoryObserver) (codeObserver : Option Jit.CodeObserver := none)
     (observed : Bool := true) (budget : Nat := engine.rangeLimit)
-    (observedIn : List (Nat × Nat) → IO Bool := fun _ => pure true) : IO Result := do
+    (observedIn : List (Nat × Nat) → IO Bool := fun _ => pure true) (chainable : Bool := false) : IO Result := do
   -- A run cannot chain more than the slot that counts them holds.
   let budget := min budget (2 ^ 64 - 2)
   engine.nativeCooldown.modify fun cooldown => if cooldown = 0 then 0 else cooldown - 1
@@ -1951,6 +2083,10 @@ private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (
       let quietSites := !observed && (← engine.dirtyCode.get).isNone
       let slots := withControl lowering slots (if entry.entered == 0 then budget else budget + 1) observed
       let slots := if entry.entryLabels.isEmpty then slots else slots.push (UInt64.ofNat entry.entered)
+      -- What nothing observes, that only Lean's bookkeeping would come between, goes on in native code, as Unicorn chains its blocks.
+      if chainable && quietSites && !engine.deferMemorySync && entry.entered == 0 then
+        if let some result ← runChained engine pc entry state slots observer codeObserver budget quietSites then
+          return result
       -- The site of the block that a run goes in at is the step's, which has been, as a run that starts at a block has none.
       let codeObserver ← if entry.entered == 0 then pure codeObserver else
         match codeObserver with
@@ -2006,9 +2142,9 @@ private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (
 def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bil.State) (pc : Nat)
     (observer : Option Jit.MemoryObserver) (codeObserver : Option Jit.CodeObserver := none)
     (observed : Bool := true) (budget : Nat := engine.rangeLimit)
-    (observedIn : List (Nat × Nat) → IO Bool := fun _ => pure true) : IO Result := do
+    (observedIn : List (Nat × Nat) → IO Bool := fun _ => pure true) (chainable : Bool := false) : IO Result := do
   if (← engine.profile.get).isNone then
-    return ← runBlockUnprofiled engine fetch lift state pc observer codeObserver observed budget observedIn
+    return ← runBlockUnprofiled engine fetch lift state pc observer codeObserver observed budget observedIn chainable
   let before ← engine.statistics.get
   let started ← IO.monoNanosNow
   let result ← runBlockUnprofiled engine fetch lift state pc observer codeObserver observed budget observedIn

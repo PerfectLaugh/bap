@@ -31,6 +31,11 @@ are about the flows on the model, and Lean sees no more of `IO`, `Task` and `@[e
    slots along as that theorem says; that a chained block had no hooks (`chains`, which `observeRangeCode` sees to with the proved `rangeSiteStops`); that an access only takes back what may chain
    (`no_restart`, which `notifyMemory` sees to with the proved `accessRestarts`); that hooks leave the skip marker (`hook_skip`). A worker of a parallel round is outside of them
    (`deferred`), and leaves faults to the rollback of its round. The model has no delay slots, as `rangeLimitOf` has no ranges with them.
+   A run that nothing observes may go on in native code to the ranges of `Lifted`'s chain after it (obligation 17 of `Bap.Jit`), which is
+   `NativeRange` of those ranges one after another, with between them what Lean would make of the state, by reading `runChained` and
+   `registerChain`: it chains with no hooks of code, no trace, no address to step at alone and no delay slot, its budget is what the
+   steps would have had, and the chain is emptied wherever what it ran may no longer be the code (`clearChain`), so that what a code site
+   or a check of the bytes would have stopped it for doesn't come between.
 4. **The parallel round.** `roundM` is proved on the model. `IO.asTask` runs the workers, `IO.wait` waits for them all,
    and the mutex of `serialize` gives hooks one at a time. Between the workers only the native memory is shared, by
    obligation 10 of `Bap.Jit`. What has to be atomic, by `Primus.Lifted.atomicProgram`, stops a worker, and runs when all of them have

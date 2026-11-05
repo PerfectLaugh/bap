@@ -54,6 +54,14 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
     waits, and the code observer is called once with it just before the first memory observer is, after which obligation 3 holds of
     each. If that call returns `true` the run fails, as for an observer that throws (obligation 4). `Bap.Emu` asks for it where its code
     observer would only have set the pc, as nothing observes the range and nothing is dirty when it starts.
+17. `runChain` is `runWithPersistentMemoryFilteredCode` of the range of the chain that starts at `firstPc`, which has to be the one
+    numbered `firstId` and to be `program`, followed, while each ends with a jump (1 in its effect slot), with no observer having run
+    Lean code, with budget left and with a range of the chain where it went, by that range, as `Bap.Primus.Lifted` would run it next:
+    the outputs that the last run reached, by its flags, or those of its checkpoint where it went, each cut to its width, are what the
+    variables now hold, which with those given at first (`variables`, `values`) are its slots of the layout, unless one that it needs
+    isn't bound, which ends the run there; its budget is what the last left less one, and its observed slot 0. It gives back what the
+    run of the last range gives, with: that range's number, the blocks entered after the first of all, the variables that the ranges
+    before it wrote with what they hold last, and the number of runs of each range. A failed run fails it all, as in obligation 4.
 13. After `beginMemoryStep`, `memoryStepWrites` holds every address that a `writeMemory` or a program wrote to this memory
     since, once each, by ascending address, also for a program that failed: `some`, or `none` when it was too many or
     no step began. It may hold addresses that were written the same as they were. `endMemoryStep` stops it.
@@ -196,6 +204,33 @@ opaque updateMemoryFilter (filter : @& MemoryFilter) (removed firsts lasts : @& 
 opaque runWithPersistentMemoryFilteredCode (program : @& Program) (state : @& Array UInt64) (memory : @& Memory)
     (filter : @& MemoryFilter) (quietSites : Bool) (observer : @& Option MemoryObserver) (codeObserver : @& Option CodeObserver) :
     IO (Nat × Array UInt64 × Array UInt64 × Array UInt8)
+
+/-- Ranges that native code goes on to from one to the next (obligation 17), by where they start. -/
+opaque Chain : Type
+
+@[extern "bap_jit_chain_create"]
+opaque createChain : IO Chain
+
+/-- Forgets every range of a chain, as one may have changed. -/
+@[extern "bap_jit_chain_clear"]
+opaque clearChain (chain : @& Chain) : IO Unit
+
+/-- Whether the range of a chain at `pc` is `program`. -/
+@[extern "bap_jit_chain_holds"]
+opaque chainHolds (chain : @& Chain) (pc : UInt64) (program : @& Program) : Bool
+
+/-- Puts a range in a chain at `pc`, numbered `id`: `data` is the number of its slots, its effect, budget and observed slots (all ones
+for none), and its layout, the variables it needs, its outputs, its flags and its checkpoints, each as a count and what it counts. -/
+@[extern "bap_jit_chain_add"]
+opaque addToChain (chain : @& Chain) (pc id : UInt64) (program : @& Program) (data : @& Array UInt64) : IO Unit
+
+/-- A run that goes on from range to range of a chain in native code (obligation 17): where it went, the slots and the changed cells of
+the last range, and then that range's number, the blocks entered after the first, the count and pairs of the variables written before
+it, and the count and pairs of the runs of each range. -/
+@[extern "bap_jit_run_chain"]
+opaque runChain (program : @& Program) (state : @& Array UInt64) (memory : @& Memory) (filter : @& MemoryFilter) (quietSites : Bool)
+    (observer : @& Option MemoryObserver) (codeObserver : @& Option CodeObserver) (chain : @& Chain) (firstId firstPc firstBudget : UInt64)
+    (variables values : @& Array UInt64) : IO (Nat × Array UInt64 × Array UInt64 × Array UInt8 × Array UInt64)
 
 /-- What isn't zero of a memory, as its cells by address (obligation 8). -/
 @[extern "bap_jit_memory_dump"]
