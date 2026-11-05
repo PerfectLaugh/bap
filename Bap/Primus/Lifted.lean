@@ -1431,8 +1431,8 @@ private def restoreBlockVersion (engine : Engine) (address : Nat) (code : ByteAr
   let versions ← engine.cacheVersions.get
   pure ((versions.getD address []).find? fun entry => entry.code = code)
 
-/-- How many runs make it worth compiling something again, with what that takes: as long as the runs themselves take by then. -/
-private def optimizeFrom : Nat := 65536
+/-- How many runs make it worth compiling something again, which another thread does while they go on: as long as it takes. -/
+private def optimizeFrom : Nat := 4096
 
 /-- How many runs of what is being optimized go by before it comes back to see whether that is done. -/
 private def optimizeCheck : Nat := 65536
