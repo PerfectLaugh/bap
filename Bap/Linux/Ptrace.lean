@@ -760,8 +760,10 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
     let madeCall := stop.any fun stop => afterCall (stop.status >>> 16 % 256)
     if data != 0 && !event then
       ptrace.table.modify fun table => { table with injected := table.injected.insert pid data }
-      -- A fault comes again by itself, and anything else is sent again, to go through.
-      unless stop.any (·.fault) do ptrace.signals.send emu (some pid) (← groupOf emu pid) ⟨data, 0, .sent group 0 0⟩
+      -- A fault comes again by itself, with its own signal; anything else, as another signal that a fault goes on with, is sent, to go
+      -- through, and the fault comes again after it.
+      unless stop.any (fun stop => stop.fault && stop.signal == data) do
+        ptrace.signals.send emu (some pid) (← groupOf emu pid) ⟨data, 0, .sent group 0 0⟩
     -- What it has yet to stop for, it stops for now: the next of an event, and then the end of the call that the event was in.
     match table.pending.getD pid [] with
     | next :: rest =>

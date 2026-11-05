@@ -55,6 +55,10 @@ static void spin(void) {
   for (;;) shared = shared;
 }
 
+static volatile int heardUsr1;
+static void heard(int number) { heardUsr1 = number == SIGUSR1; }
+static void faulted(int number) { _exit(heardUsr1 ? 5 : 6); }
+
 int main(void) {
   int status = 0;
 
@@ -240,6 +244,23 @@ int main(void) {
 #else
   say("rewritten", 1, 3, 0, 0);
 #endif
+
+  // A fault that its tracer goes on from with another signal: that one is delivered, and the fault comes again, which then goes through.
+  child = fork();
+  if (child == 0) {
+    signal(SIGUSR1, heard);
+    signal(SIGSEGV, faulted);
+    trace(PTRACE_TRACEME, 0, 0, 0);
+    *(volatile int *)0 = 1;
+    _exit(0);
+  }
+  int faults = 0;
+  if (waitpid(child, &status, 0) == child && WIFSTOPPED(status) && WSTOPSIG(status) == SIGSEGV) faults++;
+  trace(PTRACE_CONT, child, 0, SIGUSR1);
+  if (waitpid(child, &status, 0) == child && WIFSTOPPED(status) && WSTOPSIG(status) == SIGSEGV) faults++;
+  trace(PTRACE_CONT, child, 0, SIGSEGV);
+  waitpid(child, &status, 0);
+  say("refaulted", 2, faults, WIFEXITED(status) ? WEXITSTATUS(status) : 0, 0);
 
   // What isn't there.
   say("no child", 1, waitpid(12345, &status, 0) == -1 && errno == ECHILD, 0, 0);

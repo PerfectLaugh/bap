@@ -24,5 +24,6 @@ step detached 1 3
 orig at exit 1
 entry 2
 rewritten 3
+refaulted 2 5
 no child 1
 not traced -3
