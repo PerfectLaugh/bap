@@ -233,6 +233,8 @@ structure Engine where
   interpretOnly : IO.Ref Bool
   /-- What runs from each address, while one is kept. -/
   profile : IO.Ref (Option (Std.HashMap Nat Profile))
+  /-- Where an access to the native memory needs no observer, which its owner keeps to what the observer does. -/
+  memoryFilter : IO.Ref (Option Jit.MemoryFilter)
 
 /-- What a run of a block or a range comes to: the state after it, where it went, where the instruction after the last that it ran
 is, and how it ended. -/
@@ -278,6 +280,7 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimi
     chained := ← IO.mkRef 0
     interpretOnly := ← IO.mkRef false
     profile := ← IO.mkRef none
+    memoryFilter := ← IO.mkRef none
   }
 
 /-- What it has done so far. -/
@@ -1901,10 +1904,11 @@ private def recordChained (engine : Engine) (executions : IO.Ref Nat) (lowering 
 private def runPersistent (engine : Engine) (executions : IO.Ref Nat) (lowering : Lowering) (following : Nat)
     (program : Jit.Program) (state : Bil.State) (slots : Array UInt64)
     (memory : Jit.Memory) (observer : Option Jit.MemoryObserver)
-    (codeObserver : Option Jit.CodeObserver) (budget : Nat) : IO Result := do
+    (codeObserver : Option Jit.CodeObserver) (budget : Nat) (quietSites : Bool := false) : IO Result := do
   recordNative engine
-  let (next, slots, addresses, values) ←
-    Jit.runWithPersistentMemoryObservedCode program slots memory observer codeObserver
+  let (next, slots, addresses, values) ← match ← engine.memoryFilter.get with
+    | some filter => Jit.runWithPersistentMemoryFilteredCode program slots memory filter quietSites observer codeObserver
+    | none => Jit.runWithPersistentMemoryObservedCode program slots memory observer codeObserver
   recordChained engine executions lowering budget slots
   let completed := atCodeStop lowering next
   let state := if engine.deferMemorySync then syncState completed state slots
@@ -1939,6 +1943,12 @@ private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (
       -- The code sites of a range are only observed if what observes them may care about what the range has.
       let observed := observed && (← observedIn (if entry.coverage.isEmpty then [(entry.address, entry.last)] else entry.coverage))
       -- Going in at a label is entering a block, which is out of the budget, and is no more than the block that a run starts at.
+      -- What isn't optimized yet goes back to the dispatcher by when it has run enough to be, so that a loop that never leaves its range
+      -- is compiled again with optimization, as it is then entered again.
+      let executions ← entry.executions.get
+      let budget := if entry.optimized then budget else min budget (optimizeFrom - min optimizeFrom executions)
+      -- Code sites that would only set the pc wait in native code for something to read it (obligation 16 of `Bap.Jit`).
+      let quietSites := !observed && (← engine.dirtyCode.get).isNone
       let slots := withControl lowering slots (if entry.entered == 0 then budget else budget + 1) observed
       let slots := if entry.entryLabels.isEmpty then slots else slots.push (UInt64.ofNat entry.entered)
       -- The site of the block that a run goes in at is the step's, which has been, as a run that starts at a block has none.
@@ -1957,7 +1967,7 @@ private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (
       let persistent ← engine.persistentMemory.get
       match persistent, lowering.memory with
       | some memory, some _ =>
-        runPersistent engine entry.executions lowering entry.next program state slots memory observer codeObserver budget
+        runPersistent engine entry.executions lowering entry.next program state slots memory observer codeObserver budget quietSites
       | _, _ =>
         -- A memory of its own from the start, which needs nothing of what `memoryInput` makes of the state.
         let direct ← if engine.persistentFrom == 0 then
@@ -1972,7 +1982,7 @@ private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (
           unless engine.deferMemorySync do Jit.beginMemoryStep memory
           engine.persistentMemory.set (some memory)
           engine.persistentVariable.set lowering.memory
-          return ← runPersistent engine entry.executions lowering entry.next program state slots memory observer codeObserver budget
+          return ← runPersistent engine entry.executions lowering entry.next program state slots memory observer codeObserver budget quietSites
         match memoryInput lowering state with
         | .error _ => runInterpreted engine entry.firstNext pc fallback state observer
         | .ok (addresses, values) =>
@@ -1982,7 +1992,7 @@ private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (
             unless engine.deferMemorySync do Jit.beginMemoryStep memory
             engine.persistentMemory.set (some memory)
             engine.persistentVariable.set lowering.memory
-            runPersistent engine entry.executions lowering entry.next program state slots memory observer codeObserver budget
+            runPersistent engine entry.executions lowering entry.next program state slots memory observer codeObserver budget quietSites
           else do
             recordNative engine
             let (next, slots, addresses, values) ←

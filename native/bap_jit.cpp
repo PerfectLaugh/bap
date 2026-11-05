@@ -4,6 +4,8 @@
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/Passes/PassBuilder.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -22,6 +24,7 @@
 #include <cstring>
 #include <limits>
 #include <malloc.h>
+#include <map>
 #include <memory>
 #include <new>
 #include <mutex>
@@ -35,89 +38,60 @@
 
 #include "paged_memory.h"
 
-class CellMap {
-  struct Slot {
-    uint64_t address = 0;
-    uint8_t value = 0;
-    bool occupied = false;
-  };
-
-  std::vector<Slot> slots;
-  size_t count = 0;
-
-  static uint64_t hash(uint64_t value) {
-    return (value * 0x9e3779b97f4a7c15ULL) ^ (value >> 29);
-  }
-
-  void rehash(size_t capacity) {
-    size_t size = 16;
-    while (size < capacity)
-      size *= 2;
-    std::vector<Slot> previous = std::move(slots);
-    slots.clear();
-    slots.resize(size);
-    count = 0;
-    for (const auto &slot : previous)
-      if (slot.occupied)
-        set(slot.address, slot.value);
-  }
-
-public:
-  uint8_t get(uint64_t address) const {
-    if (slots.empty())
-      return 0;
-    size_t index = hash(address) & (slots.size() - 1);
-    while (slots[index].occupied) {
-      if (slots[index].address == address)
-        return slots[index].value;
-      index = (index + 1) & (slots.size() - 1);
-    }
-    return 0;
-  }
-
-  void set(uint64_t address, uint8_t value) {
-    if (slots.empty())
-      rehash(16);
-    if ((count + 1) * 10 >= slots.size() * 7)
-      rehash(slots.size() * 2);
-    size_t index = hash(address) & (slots.size() - 1);
-    while (slots[index].occupied) {
-      if (slots[index].address == address) {
-        slots[index].value = value;
-        return;
-      }
-      index = (index + 1) & (slots.size() - 1);
-    }
-    slots[index] = Slot{address, value, true};
-    ++count;
-  }
-
-  void reserve(size_t capacity) {
-    if (capacity * 2 > slots.size())
-      rehash(capacity * 2);
-  }
-
-  size_t size() const { return count; }
-
-  template <typename F> void forEach(F &&action) const {
-    for (const auto &slot : slots)
-      if (slot.occupied)
-        action(slot.address, slot.value);
-  }
-};
-
 struct BapCell {
   uint64_t address;
   uint8_t value;
 };
 
-// A store that a run made, to say at its end what it changed. Keeping these and not a table of bytes is what lets a store be one
-// instruction and one call.
-struct StoreRecord {
-  uint64_t address;
-  uint64_t value;
-  uint8_t size;
-  uint8_t bigEndian;
+// The bytes that the stores of a run wrote, each once with the last value written to it, by the page of 4096: a store marks its bytes
+// in the page that the last one was on, most often, and what a run changed costs what it changed and not how many stores it made.
+class StoreLog {
+  struct Page {
+    uint64_t written[64] = {};
+    uint8_t values[4096];
+  };
+  std::unordered_map<uint64_t, std::unique_ptr<Page>> pages;
+  uint64_t lastNumber = ~uint64_t{0};
+  Page *last = nullptr;
+  size_t count = 0;
+
+  Page *pageOf(uint64_t number) {
+    if (number == lastNumber)
+      return last;
+    std::unique_ptr<Page> &slot = pages[number];
+    if (!slot)
+      slot = std::make_unique<Page>();
+    lastNumber = number;
+    last = slot.get();
+    return last;
+  }
+
+public:
+  void note(uint64_t address, uint64_t size, bool bigEndian, uint64_t value) {
+    for (uint64_t index = 0; index != size; ++index) {
+      uint64_t at = address + index;
+      Page *page = pageOf(at >> 12);
+      size_t offset = static_cast<size_t>(at & 4095);
+      uint64_t bit = uint64_t{1} << (offset & 63);
+      if ((page->written[offset >> 6] & bit) == 0) {
+        page->written[offset >> 6] |= bit;
+        ++count;
+      }
+      page->values[offset] = static_cast<uint8_t>(value >> ((bigEndian ? size - 1 - index : index) * 8));
+    }
+  }
+
+  size_t size() const { return count; }
+
+  // Each byte written, with its value, in no particular order.
+  template <typename F> void forEach(F &&action) const {
+    for (const auto &entry : pages)
+      for (size_t word = 0; word != 64; ++word)
+        for (uint64_t bits = entry.second->written[word]; bits != 0; bits &= bits - 1) {
+          size_t offset = word * 64 + static_cast<size_t>(__builtin_ctzll(bits));
+          action((entry.first << 12) + offset, entry.second->values[offset]);
+        }
+  }
 };
 
 // Where a run last found the pages. A tag is one more than the number of a page, so that 0 is an entry that holds nothing. A run has
@@ -129,6 +103,45 @@ struct BapPageEntry {
 constexpr size_t pageEntryCount = 64;
 static_assert(sizeof(BapPageEntry) == 16, "compiled code goes through these by index");
 
+// The ranges of addresses where the memory observer would do nothing, by its first address, none overlapping: an access that lies
+// within one of them, of the kind it lets through, needs no call of the observer, which is what costs most of an access otherwise.
+struct MemoryFilter {
+  struct Range {
+    uint64_t first;
+    uint64_t last;
+    bool readQuiet;
+    bool writeQuiet;
+  };
+  // By the first address, so that what a mapping changes is changed where it is, without making all of it again.
+  std::map<uint64_t, Range> ranges;
+
+  bool quiet(uint64_t address, uint64_t size, bool write) const {
+    if (size == 0)
+      return false;
+    uint64_t last = address + size - 1;
+    if (last < address)
+      return false;
+    auto after = ranges.upper_bound(address);
+    if (after == ranges.begin())
+      return false;
+    const Range &range = std::prev(after)->second;
+    return last <= range.last && (write ? range.writeQuiet : range.readQuiet);
+  }
+
+  // Whether a range goes in apart from those there, which it does if so.
+  bool insert(const Range &range) {
+    if (range.last < range.first)
+      return false;
+    auto after = ranges.upper_bound(range.first);
+    if (after != ranges.end() && after->second.first <= range.last)
+      return false;
+    if (after != ranges.begin() && std::prev(after)->second.last >= range.first)
+      return false;
+    ranges.emplace(range.first, range);
+    return true;
+  }
+};
+
 struct BapCells {
   BapCell *items;
   size_t size;
@@ -136,8 +149,15 @@ struct BapCells {
   lean_object *observer;
   lean_object *error;
   PagedMemory *pages;
-  std::vector<StoreRecord> *changes;
+  StoreLog *changes;
   lean_object *codeObserver;
+  const MemoryFilter *filter = nullptr;
+  // A run whose code sites would only set the pc, as nothing observes it and no Lean code has run in it: the site of the last block
+  // waits here, for the memory observer to be called, as it reads the pc (obligation 16).
+  bool quietSites = false;
+  bool leanRan = false;
+  bool pendingSite = false;
+  uint64_t pendingPc = 0;
   BapPageEntry pageEntries[pageEntryCount] = {};
 };
 
@@ -148,11 +168,43 @@ static void failCells(BapCells *cells, lean_object *error) {
   std::memset(cells->pageEntries, 0, sizeof(cells->pageEntries));
 }
 
+static uint64_t callCodeObserver(BapCells *cells, uint64_t pc) {
+  lean_inc_ref(cells->codeObserver);
+  lean_object *action = lean_apply_1(cells->codeObserver, lean_uint64_to_nat(pc));
+  lean_object *result = lean_apply_1(action, lean_io_mk_world());
+  uint64_t stop = 0;
+  if (lean_io_result_is_error(result)) {
+    failCells(cells, lean_io_result_get_error(result));
+    stop = 1;
+  } else {
+    stop = lean_unbox(lean_io_result_get_value(result));
+  }
+  lean_dec_ref(result);
+  return stop;
+}
+
 extern "C" void bap_jit_memory_notify(BapCells *cells, uint8_t write,
                                       uint64_t address, uint64_t size,
                                       uint64_t value) {
   if (cells->observer == nullptr || cells->error != nullptr)
     return;
+  if (cells->filter != nullptr && cells->filter->quiet(address, size, write != 0))
+    return;
+  // The site that waited is the observer's first, now that Lean code is to run. Had it stopped the run, the run fails, to be run
+  // again a step at a time.
+  if (cells->pendingSite) {
+    cells->pendingSite = false;
+    cells->leanRan = true;
+    if (callCodeObserver(cells, cells->pendingPc) != 0) {
+      if (cells->error == nullptr) {
+        lean_object *error = lean_mk_io_user_error(lean_mk_string("a code site that waited stops the run"));
+        failCells(cells, error);
+        lean_dec_ref(error);
+      }
+      return;
+    }
+  }
+  cells->leanRan = true;
   lean_inc_ref(cells->observer);
   lean_object *action = lean_apply_1(cells->observer, lean_box(write));
   action = lean_apply_1(action, lean_uint64_to_nat(address));
@@ -167,18 +219,12 @@ extern "C" void bap_jit_memory_notify(BapCells *cells, uint8_t write,
 extern "C" uint64_t bap_jit_code_notify(BapCells *cells, uint64_t pc) {
   if (cells->codeObserver == nullptr || cells->error != nullptr)
     return cells->error == nullptr ? 0 : 1;
-  lean_inc_ref(cells->codeObserver);
-  lean_object *action = lean_apply_1(cells->codeObserver, lean_uint64_to_nat(pc));
-  lean_object *result = lean_apply_1(action, lean_io_mk_world());
-  uint64_t stop = 0;
-  if (lean_io_result_is_error(result)) {
-    failCells(cells, lean_io_result_get_error(result));
-    stop = 1;
-  } else {
-    stop = lean_unbox(lean_io_result_get_value(result));
+  if (cells->quietSites && !cells->leanRan) {
+    cells->pendingSite = true;
+    cells->pendingPc = pc;
+    return 0;
   }
-  lean_dec_ref(result);
-  return stop;
+  return callCodeObserver(cells, pc);
 }
 
 static uint8_t loadByte(BapCells *cells, uint64_t address) {
@@ -218,7 +264,7 @@ extern "C" uint64_t bap_jit_memory_load_bytes(BapCells *cells, uint64_t address,
 
 extern "C" void bap_jit_memory_note(BapCells *cells, uint64_t address, uint64_t size, uint8_t bigEndian, uint64_t value) {
   if (cells->changes != nullptr)
-    cells->changes->push_back(StoreRecord{address, value, static_cast<uint8_t>(size), bigEndian});
+    cells->changes->note(address, size, bigEndian != 0, value);
 }
 
 extern "C" void bap_jit_memory_store_bytes(BapCells *cells, uint64_t address, uint64_t size, uint8_t bigEndian, uint64_t value) {
@@ -286,8 +332,9 @@ std::shared_ptr<SharedJit> sharedJit(bool optimized) {
     throw std::runtime_error("LLVM ORC JIT host detection failed: " +
                              llvm::toString(machine.takeError()));
   // Most of a program runs few times, and what compiling takes is what that comes to: without optimizing it is a ninth. What
-  // then runs a lot is compiled again with it.
-  machine->setCodeGenOptLevel(optimized ? llvm::CodeGenOptLevel::Default : llvm::CodeGenOptLevel::None);
+  // then runs a lot is compiled again with it, by the passes of LLVM and then a code generator a level below the default, which
+  // makes about the same of what the passes leave in less than two thirds of the time.
+  machine->setCodeGenOptLevel(optimized ? llvm::CodeGenOptLevel::Less : llvm::CodeGenOptLevel::None);
   auto jit = llvm::orc::LLJITBuilder().setJITTargetMachineBuilder(std::move(*machine)).create();
   if (!jit)
     throw std::runtime_error("LLVM ORC JIT creation failed: " +
@@ -849,6 +896,71 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
     if (llvm::verifyModule(*module, &verificationStream))
       return ioError("invalid LLVM JIT module: " + verificationErrors);
 
+    // What is optimized works on a copy of the slots on the stack, which LLVM keeps in registers, and leaves those it wrote in the
+    // state at each return, as obligation 1 says: then a value isn't stored and loaded again for each operation, and what is
+    // overwritten before anything reads it, such as most flags, isn't worked out at all.
+    if (optimized && hasSlots) {
+      const size_t slotCount = entries != nullptr ? std::max(maxSlot + 1, entrySlot + 1) : maxSlot + 1;
+      llvm::BasicBlock *first = &function->getEntryBlock();
+      llvm::BasicBlock *promote = llvm::BasicBlock::Create(*context, "promote", function, first);
+      builder.SetInsertPoint(promote);
+      std::vector<llvm::AllocaInst *> copies(slotCount);
+      for (size_t index = 0; index != slotCount; ++index)
+        copies[index] = builder.CreateAlloca(word);
+      std::vector<bool> written(slotCount, false);
+      std::vector<llvm::GetElementPtrInst *> addresses;
+      for (llvm::User *user : state->users())
+        if (auto *address = llvm::dyn_cast<llvm::GetElementPtrInst>(user))
+          addresses.push_back(address);
+      for (llvm::GetElementPtrInst *address : addresses) {
+        auto *index = llvm::dyn_cast<llvm::ConstantInt>(address->getOperand(1));
+        if (address->getNumOperands() != 2 || index == nullptr || index->getZExtValue() >= slotCount)
+          return ioError("a JIT slot address that isn't a constant slot");
+        size_t slot = static_cast<size_t>(index->getZExtValue());
+        for (llvm::User *user : address->users())
+          if (auto *store = llvm::dyn_cast<llvm::StoreInst>(user))
+            if (store->getPointerOperand() == address)
+              written[slot] = true;
+        address->replaceAllUsesWith(copies[slot]);
+        address->eraseFromParent();
+      }
+      for (size_t index = 0; index != slotCount; ++index)
+        builder.CreateStore(builder.CreateLoad(word, builder.CreateConstGEP1_64(word, state, index)), copies[index]);
+      builder.CreateBr(first);
+      // One way out, which leaves the slots in the state once, rather than at each return.
+      std::vector<llvm::ReturnInst *> returns;
+      for (llvm::BasicBlock &block : *function)
+        if (auto *ret = llvm::dyn_cast<llvm::ReturnInst>(block.getTerminator()))
+          returns.push_back(ret);
+      llvm::BasicBlock *leave = llvm::BasicBlock::Create(*context, "leave", function);
+      builder.SetInsertPoint(leave);
+      llvm::PHINode *result = builder.CreatePHI(word, static_cast<unsigned>(returns.size()));
+      for (size_t index = 0; index != slotCount; ++index)
+        if (written[index])
+          builder.CreateStore(builder.CreateLoad(word, copies[index]), builder.CreateConstGEP1_64(word, state, index));
+      builder.CreateRet(result);
+      for (llvm::ReturnInst *ret : returns) {
+        llvm::BasicBlock *block = ret->getParent();
+        result->addIncoming(ret->getReturnValue(), block);
+        ret->eraseFromParent();
+        builder.SetInsertPoint(block);
+        builder.CreateBr(leave);
+      }
+      llvm::LoopAnalysisManager loops;
+      llvm::FunctionAnalysisManager functions;
+      llvm::CGSCCAnalysisManager calls;
+      llvm::ModuleAnalysisManager modules;
+      llvm::PassBuilder passes;
+      passes.registerModuleAnalyses(modules);
+      passes.registerCGSCCAnalyses(calls);
+      passes.registerFunctionAnalyses(functions);
+      passes.registerLoopAnalyses(loops);
+      passes.crossRegisterProxies(loops, functions, calls, modules);
+      passes.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O1).run(*module, modules);
+      if (llvm::verifyModule(*module, &verificationStream))
+        return ioError("invalid optimized LLVM JIT module: " + verificationErrors);
+    }
+
     auto shared = sharedJit(optimized);
     std::lock_guard<std::mutex> lock(shared->mutex);
     auto resources = shared->jit->getMainJITDylib().createResourceTracker();
@@ -1215,10 +1327,62 @@ extern "C" lean_obj_res bap_jit_memory_clone(lean_obj_arg memoryObject, lean_obj
   return lean_io_result_mk_ok(lean_alloc_external(memoryClass(), copy));
 }
 
-extern "C" lean_obj_res bap_jit_run_memory_object_code(
-    lean_obj_arg programObject, lean_obj_arg stateObject,
-    lean_obj_arg memoryObject, lean_obj_arg observerObject,
-    lean_obj_arg codeObserverObject, lean_obj_arg) {
+namespace {
+void finalizeFilter(void *data) { delete static_cast<MemoryFilter *>(data); }
+void foreachFilter(void *, b_lean_obj_arg) {}
+
+lean_external_class *filterClass() {
+  static lean_external_class *cls = lean_register_external_class(finalizeFilter, foreachFilter);
+  return cls;
+}
+}
+
+extern "C" lean_obj_res bap_jit_memory_filter_create(lean_obj_arg firstsObject, lean_obj_arg lastsObject,
+                                                       lean_obj_arg quietObject, lean_obj_arg) {
+  try {
+    const size_t count = lean_array_size(firstsObject);
+    if (lean_array_size(lastsObject) != count || lean_array_size(quietObject) != count)
+      return ioError("JIT memory filter ranges have different lengths");
+    auto *filter = new MemoryFilter;
+    for (size_t index = 0; index != count; ++index) {
+      uint64_t first = lean_unbox_uint64(lean_array_get_core(firstsObject, index));
+      uint64_t last = lean_unbox_uint64(lean_array_get_core(lastsObject, index));
+      uint8_t quiet = static_cast<uint8_t>(lean_unbox(lean_array_get_core(quietObject, index)));
+      if (!filter->insert(MemoryFilter::Range{first, last, (quiet & 1) != 0, (quiet & 2) != 0})) {
+        delete filter;
+        return ioError("JIT memory filter ranges are not apart");
+      }
+    }
+    return lean_io_result_mk_ok(lean_alloc_external(filterClass(), filter));
+  } catch (const std::exception &error) {
+    return ioError(std::string("JIT memory filter creation failed: ") + error.what());
+  }
+}
+
+// Takes out the ranges that start at `removed`, then puts in those given: true if they are all apart, and false, with the filter as
+// it may then be, otherwise, which is not to be used again.
+extern "C" lean_obj_res bap_jit_memory_filter_update(lean_obj_arg filterObject, lean_obj_arg removedObject,
+                                                       lean_obj_arg firstsObject, lean_obj_arg lastsObject,
+                                                       lean_obj_arg quietObject, lean_obj_arg) {
+  auto *filter = static_cast<MemoryFilter *>(lean_get_external_data(filterObject));
+  for (size_t index = 0; index != lean_array_size(removedObject); ++index)
+    filter->ranges.erase(lean_unbox_uint64(lean_array_get_core(removedObject, index)));
+  const size_t count = lean_array_size(firstsObject);
+  if (lean_array_size(lastsObject) != count || lean_array_size(quietObject) != count)
+    return lean_io_result_mk_ok(lean_box(0));
+  for (size_t index = 0; index != count; ++index) {
+    uint64_t first = lean_unbox_uint64(lean_array_get_core(firstsObject, index));
+    uint64_t last = lean_unbox_uint64(lean_array_get_core(lastsObject, index));
+    uint8_t quiet = static_cast<uint8_t>(lean_unbox(lean_array_get_core(quietObject, index)));
+    if (!filter->insert(MemoryFilter::Range{first, last, (quiet & 1) != 0, (quiet & 2) != 0}))
+      return lean_io_result_mk_ok(lean_box(0));
+  }
+  return lean_io_result_mk_ok(lean_box(1));
+}
+
+static lean_obj_res runMemoryObject(lean_obj_arg programObject, lean_obj_arg stateObject, lean_obj_arg memoryObject,
+                                    const MemoryFilter *filter, bool quietSites, lean_obj_arg observerObject,
+                                    lean_obj_arg codeObserverObject) {
   try {
     auto *program = static_cast<Program *>(lean_get_external_data(programObject));
     auto *persistent = static_cast<PagedMemory *>(lean_get_external_data(memoryObject));
@@ -1232,23 +1396,16 @@ extern "C" lean_obj_res bap_jit_run_memory_object_code(
         ? nullptr : lean_ctor_get(observerObject, 0);
     lean_object *codeObserver = lean_is_scalar(codeObserverObject)
         ? nullptr : lean_ctor_get(codeObserverObject, 0);
-    std::vector<StoreRecord> records;
-    BapCells memory{nullptr, 0, 0, observer, nullptr, persistent, &records, codeObserver};
+    StoreLog changes;
+    BapCells memory{nullptr, 0, 0, observer, nullptr, persistent, &changes, codeObserver};
+    memory.filter = filter;
+    memory.quietSites = quietSites;
     uint64_t next = program->function(state.data(), &memory);
     // Before anything else, as this is what a run that failed leaves to be taken back.
     if (persistent->stepActive())
-      for (const StoreRecord &record : records)
-        persistent->noteStep(record.address, record.size);
+      changes.forEach([&](uint64_t address, uint8_t) { persistent->noteStep(address, 1); });
     if (memory.error != nullptr)
       return lean_io_result_mk_error(memory.error);
-    // What the stores came to, each byte once, the last that was written to it.
-    CellMap changes;
-    changes.reserve(records.size());
-    for (const StoreRecord &record : records)
-      for (uint64_t index = 0; index != record.size; ++index) {
-        uint64_t shift = (record.bigEndian != 0 ? record.size - 1 - index : index) * 8;
-        changes.set(record.address + index, static_cast<uint8_t>(record.value >> shift));
-      }
     lean_obj_res resultState = lean_alloc_array(stateSize, stateSize);
     for (size_t index = 0; index != stateSize; ++index)
       lean_array_set_core(resultState, index, lean_box_uint64(state[index]));
@@ -1273,6 +1430,21 @@ extern "C" lean_obj_res bap_jit_run_memory_object_code(
   } catch (const std::exception &error) {
     return ioError(std::string("LLVM JIT persistent memory execution failed: ") + error.what());
   }
+}
+
+extern "C" lean_obj_res bap_jit_run_memory_object_code(
+    lean_obj_arg programObject, lean_obj_arg stateObject,
+    lean_obj_arg memoryObject, lean_obj_arg observerObject,
+    lean_obj_arg codeObserverObject, lean_obj_arg) {
+  return runMemoryObject(programObject, stateObject, memoryObject, nullptr, false, observerObject, codeObserverObject);
+}
+
+extern "C" lean_obj_res bap_jit_run_memory_object_filtered_code(
+    lean_obj_arg programObject, lean_obj_arg stateObject, lean_obj_arg memoryObject, lean_obj_arg filterObject,
+    uint8_t quietSites, lean_obj_arg observerObject, lean_obj_arg codeObserverObject, lean_obj_arg) {
+  auto *filter = static_cast<MemoryFilter *>(lean_get_external_data(filterObject));
+  return runMemoryObject(programObject, stateObject, memoryObject, filter, quietSites != 0, observerObject,
+                         codeObserverObject);
 }
 
 extern "C" lean_obj_res bap_jit_run_memory_object(

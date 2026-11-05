@@ -434,6 +434,24 @@ def writesCode (regions : List Region) (address size : Nat) : Bool :=
     region.protection.executable && region.address < address + size &&
       address < region.address + region.data.size
 
+/-- Where `notifyAccess` does nothing, for the filter of the native memory, of a region's protection (`quietBits`) and of all of them: in each region that has data, a read if it is readable and
+nothing hears of reads, and a write if it is writable, not executable, and nothing hears of writes. By where the regions start, with 1
+for reads and 2 for writes, and none if two overlap, as an access is then not in one region only. -/
+def quietBits (protection : Primus.Protection) (readsHeard writesHeard : Bool) : UInt8 :=
+  let read : UInt8 := if protection.readable && !readsHeard then 1 else 0
+  let write : UInt8 := if protection.writable && !protection.executable && !writesHeard then 2 else 0
+  read ||| write
+
+def quietRanges (regions : List Region) (readsHeard writesHeard : Bool) : Option (Array (Nat × Nat × UInt8)) :=
+  let sorted := ((regions.filter (0 < ·.data.size)).toArray.qsort fun left right => left.address < right.address)
+  let ranges := sorted.map fun region =>
+    (region.address, region.address + region.data.size - 1, quietBits region.protection readsHeard writesHeard)
+  let apart := (List.range (ranges.size - 1)).all fun index =>
+    match ranges[index]?, ranges[index + 1]? with
+    | some left, some right => left.2.1 < right.1
+    | _, _ => true
+  if apart && ranges.all (·.2.1 < 2 ^ 64) then some ranges else none
+
 /-- An access as the emulator handles it: permissions first, and a forbidden access does nothing else. -/
 @[specialize] def notifyAccess {m : Type → Type} [Monad m] (regions : List Region) (write : Bool) (address size : Nat)
     (fault : Nat → m Unit) (dirty : m Unit) (record : m Unit) (hooks : m Unit) : m Unit :=

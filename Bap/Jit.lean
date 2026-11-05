@@ -45,6 +45,15 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
 14. `createMemoryChunks bases chunks` is `createMemory` of each byte of each chunk at its base plus its offset, in that order,
     without going past the end of the address space. `zeroMemory memory first last` is `writeMemory` of zeros at the
     addresses from `first` to `last`, as obligation 13 knows of them, but that it needn't say those that were already zero.
+16. `runWithPersistentMemoryFilteredCode` is `runWithPersistentMemoryObservedCode`, but for a `memLoad` or `memStore` that lies
+    wholly within one range of its filter that lets that kind through (bit 1 a load, bit 2 a store), which calls no memory observer.
+    That is the same run where the observer would have done nothing for such an access, as `Bap.Emu` keeps its filters
+    (`Emu.Core.quietRanges`, `Emu.Core.quietBits`): the ranges of `createMemoryFilter`, and what `updateMemoryFilter` makes of them when
+    it says `true`, are apart, and are those where `notifyAccess` does nothing.
+    With `quietSites`, a `code` op calls no code observer while no memory observer has been called in the run: the pc of the last such op
+    waits, and the code observer is called once with it just before the first memory observer is, after which obligation 3 holds of
+    each. If that call returns `true` the run fails, as for an observer that throws (obligation 4). `Bap.Emu` asks for it where its code
+    observer would only have set the pc, as nothing observes the range and nothing is dirty when it starts.
 13. After `beginMemoryStep`, `memoryStepWrites` holds every address that a `writeMemory` or a program wrote to this memory
     since, once each, by ascending address, also for a program that failed: `some`, or `none` when it was too many or
     no step began. It may hold addresses that were written the same as they were. `endMemoryStep` stops it.
@@ -169,6 +178,24 @@ opaque runWithPersistentMemoryObservedCode (program : @& Program) (state : @& Ar
 def runWithPersistentMemory (program : Program) (state : Array UInt64) (memory : Memory)
     (observer : Option MemoryObserver) : IO (Nat × Array UInt64 × Array UInt64 × Array UInt8) :=
   runWithPersistentMemoryObservedCode program state memory observer none
+
+/-- The ranges of addresses, in order and apart, where an access of a kind needs no memory observer (obligation 16): from `firsts` to
+`lasts`, with `quiet` 1 for loads, 2 for stores and 3 for both. -/
+opaque MemoryFilter : Type
+
+@[extern "bap_jit_memory_filter_create"]
+opaque createMemoryFilter (firsts lasts : @& Array UInt64) (quiet : @& Array UInt8) : IO MemoryFilter
+
+/-- Takes the ranges that start at `removed` out of a filter and puts those given in: `true` if they are apart from all that are there,
+and `false` otherwise, after which the filter is not to be used. -/
+@[extern "bap_jit_memory_filter_update"]
+opaque updateMemoryFilter (filter : @& MemoryFilter) (removed firsts lasts : @& Array UInt64) (quiet : @& Array UInt8) : IO Bool
+
+/-- `runWithPersistentMemoryObservedCode` that calls the observer only for what the filter doesn't let through (obligation 16). -/
+@[extern "bap_jit_run_memory_object_filtered_code"]
+opaque runWithPersistentMemoryFilteredCode (program : @& Program) (state : @& Array UInt64) (memory : @& Memory)
+    (filter : @& MemoryFilter) (quietSites : Bool) (observer : @& Option MemoryObserver) (codeObserver : @& Option CodeObserver) :
+    IO (Nat × Array UInt64 × Array UInt64 × Array UInt8)
 
 /-- What isn't zero of a memory, as its cells by address (obligation 8). -/
 @[extern "bap_jit_memory_dump"]

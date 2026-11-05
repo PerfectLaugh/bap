@@ -206,6 +206,10 @@ structure Emu where
   while it runs unobserved ends it. -/
   hookChanges : IO.Ref Nat
   rangeHooks : IO.Ref Nat
+  /-- Whether the filter of the native memory is to be made again, as what it lets through has changed, and whether reads and writes
+  were heard of when it was made, which a change of the regions alone keeps to. -/
+  memoryFilterStale : IO.Ref Bool
+  memoryFilterHeard : IO.Ref (Bool × Bool)
   /-- How many instructions the next step may run after its first, for `run`: a step on its own runs one. -/
   budget : IO.Ref Nat
   /-- Whether the step that just failed did so to run again as one instruction, at a hook of an access. -/
@@ -377,6 +381,8 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     rangeQuiet := ← IO.mkRef false
     hookChanges := ← IO.mkRef 0
     rangeHooks := ← IO.mkRef 0
+    memoryFilterStale := ← IO.mkRef true
+    memoryFilterHeard := ← IO.mkRef (true, true)
     budget := ← IO.mkRef 0
     restarting := ← IO.mkRef false
     rangeStart := ← IO.mkRef none
@@ -586,8 +592,33 @@ private def snapshotBlock (emu : Emu) : IO Snapshot := do
     table := ← emu.taskTable.get
   }
 
-/-- Changes what is mapped. -/
+/-- Lets go of the filter of the native memory, which no run uses from now on, until it is made again of what is so then. -/
+private def forgetMemoryFilter (emu : Emu) : IO Unit := do
+  emu.memoryFilterStale.set true
+  emu.engine.memoryFilter.set none
+
+/-- Makes the filter of the native memory again if it is stale: what the memory observer, `notifyMemory`, lets through doing nothing,
+of the regions, the hooks of accesses, the trace and the journal, as obligation 16 of `Bap.Jit` asks. -/
+private def ensureMemoryFilter (emu : Emu) : IO Unit := do
+  if !(← emu.memoryFilterStale.get) then return
+  emu.memoryFilterStale.set false
+  let traced := (← emu.trace.get).isSome
+  let readsHeard := traced || !(← emu.readHooks.get).isEmpty
+  let writesHeard := traced || !(← emu.writeHooks.get).isEmpty || emu.journal.isSome
+  emu.memoryFilterHeard.set (readsHeard, writesHeard)
+  match quietRanges (← emu.regions.get) readsHeard writesHeard with
+  | some ranges =>
+    let filter ← Jit.createMemoryFilter (ranges.map (UInt64.ofNat ·.1)) (ranges.map (UInt64.ofNat ·.2.1)) (ranges.map (·.2.2))
+    emu.engine.memoryFilter.set (some filter)
+  | none => emu.engine.memoryFilter.set none
+
+/-- What the filter of the native memory has of a region. -/
+private def regionShape (region : Region) : Nat × Nat × Primus.Protection := (region.address, region.data.size, region.protection)
+
+/-- Changes what is mapped. Only where the regions are and their protection are of the filter of the native memory, which most changes,
+of the bytes that the regions hold, keep. -/
 def setRegions (emu : Emu) (regions : List Region) : IO Unit := do
+  if (← emu.regions.get).map regionShape != regions.map regionShape then forgetMemoryFilter emu
   emu.regions.set regions
   emu.fetchPages.set {}
   emu.regionIndex.set none
@@ -620,6 +651,17 @@ def regionsTouching (emu : Emu) (address size : Nat) : IO (List Region) := do
 
 /-- All the regions but those in a range are as they were, and those have been replaced by these. -/
 private def replaceRegions (emu : Emu) (regions : List Region) (touched replaced : List Region) : IO Unit := do
+  -- The filter changes where the regions did, as the index does, rather than being made again of all of them.
+  match ← emu.engine.memoryFilter.get, ← emu.memoryFilterStale.get with
+  | some filter, false =>
+    let (readsHeard, writesHeard) ← emu.memoryFilterHeard.get
+    let removed := ((touched.filter (0 < ·.data.size)).map (UInt64.ofNat ·.address)).toArray
+    let added := (replaced.filter (0 < ·.data.size)).toArray
+    let apart ← Jit.updateMemoryFilter filter removed (added.map (UInt64.ofNat ·.address))
+      (added.map fun region => UInt64.ofNat (region.address + region.data.size - 1))
+      (added.map (quietBits ·.protection readsHeard writesHeard))
+    if !apart then forgetMemoryFilter emu
+  | _, _ => forgetMemoryFilter emu
   emu.regions.set regions
   emu.fetchPages.set {}
   emu.regionIndex.modify (·.map fun tree =>
@@ -901,6 +943,7 @@ def onRead (emu : Emu) (range : Nat × Nat) (action : Emu → Nat → Nat → IO
   if range.1 > range.2 then
     throw <| IO.userError "invalid Emu read-hook range"
   let id ← nextHookId emu
+  forgetMemoryFilter emu
   emu.readHooks.modify (· ++ [⟨id, range.1, range.2, fun context => action (withContext emu context)⟩])
   pure id
 
@@ -909,6 +952,7 @@ def onWrite (emu : Emu) (range : Nat × Nat) (action : Emu → Nat → Nat → N
   if range.1 > range.2 then
     throw <| IO.userError "invalid Emu write-hook range"
   let id ← nextHookId emu
+  forgetMemoryFilter emu
   emu.writeHooks.modify (· ++ [⟨id, range.1, range.2, fun context => action (withContext emu context)⟩])
   pure id
 
@@ -931,6 +975,7 @@ def removeHook (emu : Emu) (id : HookId) : IO Unit := do
   emu.hooks.modify fun hooks => hooks.filter fun hook => hook.id != id
   emu.hooksByPage.set {}
   emu.hookChanges.modify (· + 1)
+  forgetMemoryFilter emu
   emu.readHooks.modify fun hooks => hooks.filter fun hook => hook.id != id
   emu.writeHooks.modify fun hooks => hooks.filter fun hook => hook.id != id
   emu.watchedSteps.set {}
@@ -943,6 +988,7 @@ def clearHooks (emu : Emu) : IO Unit := do
   emu.hooks.set []
   emu.hooksByPage.set {}
   emu.hookChanges.modify (· + 1)
+  forgetMemoryFilter emu
   emu.readHooks.set []
   emu.writeHooks.set []
   emu.watchedSteps.set {}
@@ -969,7 +1015,8 @@ def breakpoints (emu : Emu) : IO (List Nat) := do
   let current ← emu.breakpointsRef.get
   pure (current.map Prod.snd).reverse
 
-private def traceBeginPc (emu : Emu) (pcCapacity accessCapacity : Nat) (watch : Option (Nat × Nat)) : IO Unit :=
+private def traceBeginPc (emu : Emu) (pcCapacity accessCapacity : Nat) (watch : Option (Nat × Nat)) : IO Unit := do
+  forgetMemoryFilter emu
   emu.trace.set (some { pcCapacity, accessCapacity, watch })
 
 private def traceBegin (emu : Emu) (capacity : Nat) (watch : Option (Nat × Nat)) : IO Unit :=
@@ -996,6 +1043,7 @@ private def pcList (state : TraceState) : List Nat :=
 /-- Stops the trace, and gives the pcs that it kept. -/
 def traceStop (emu : Emu) : IO (List Nat) := do
   let current ← emu.trace.get
+  forgetMemoryFilter emu
   emu.trace.set none
   pure (pcList (current.getD {}))
 
@@ -2111,6 +2159,7 @@ private def dispatchSpecial (emu : Emu) (name : String) : IO Bool := do
 
 /-- A run of the instruction at `address` that may chain as many as `budget` after it, on the state of the emulator. -/
 private def runRange (emu : Emu) (address budget : Nat) : IO (Nat × Bil.Effect) := do
+  ensureMemoryFilter emu
   let state ← emu.state.get
   let quiet ← rangeIsQuiet emu
   emu.rangeQuiet.set quiet
@@ -2194,6 +2243,7 @@ private def gateAtomic (emu : Emu) (address : Nat) : IO Unit := do
     (dispatchSpecial emu)
     (fun before => do
       rollbackBlock emu before.1
+      forgetMemoryFilter emu
       emu.trace.set before.2)
     (fun pc => do
       match ← emu.lastFault.get with
@@ -2296,6 +2346,8 @@ private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared :
     rangeQuiet := ← IO.mkRef false
     hookChanges := ← IO.mkRef 0
     rangeHooks := ← IO.mkRef 0
+    memoryFilterStale := ← IO.mkRef true
+    memoryFilterHeard := ← IO.mkRef (true, true)
     budget := ← IO.mkRef 0
     restarting := ← IO.mkRef false
     rangeStart := ← IO.mkRef none
