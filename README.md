@@ -51,6 +51,10 @@ lake build
 `build-static.py` generates the libc++ headers it needs from the LLVM sources, unless
 `BAP_LIBCXX_INCLUDE` names a directory that has them. CI builds and tests on Linux and Windows.
 
+With [just](https://github.com/casey/just), `just setup` is that first build, and `just` lists the rest: `just build`,
+`just test`, and `just native` after a change to the C++ in `native/`, which compiles only that again, in seconds, and links it
+into every executable, as Lake doesn't see it change (`build-static.py --objects`).
+
 ## Using it
 
 ```sh
@@ -75,7 +79,7 @@ the modules without the proofs.
 ## Testing
 
 ```sh
-lake exe bap-tests
+lake exe bap-tests      # or: just test
 ```
 
 Two more tools are in `tools/`, and neither is part of the default build:

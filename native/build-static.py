@@ -110,21 +110,8 @@ def copy_import_libraries(cxx, lean_prefix):
         shutil.copy2(found, BUILD / library)
 
 
-def main():
-    BUILD.mkdir(parents=True, exist_ok=True)
-    (DEPS / "src").mkdir(parents=True, exist_ok=True)
-    lean = tool("LEAN", "lean")
-    lake = tool("LAKE", "lake")
-    cmake = tool("CMAKE", "cmake")
-    cxx = tool("CXX", "clang++")
-    ar = os.environ.get("AR") or shutil.which("llvm-ar") or shutil.which("ar")
-    if not ar:
-        raise RuntimeError("required tool not found: llvm-ar or ar")
-    lean_prefix = Path(subprocess.check_output(
-        [lean, "--print-prefix"], text=True).strip())
-    cxx_include = Path(os.environ.get(
-        "BAP_LIBCXX_INCLUDE", DEPS / "sysroot" / "usr" / "include" / "c++" / "v1"))
-
+def build_dependencies(cmake, cxx_include):
+    """Fetches LLVM and Z3, and builds them into `_deps`, which takes a while the first time."""
     fetch_source(
         f"https://github.com/llvm/llvm-project/archive/refs/tags/llvmorg-{LLVM_VERSION}.tar.gz",
         DEPS / f"llvmorg-{LLVM_VERSION}.tar.gz", LLVM_SOURCE,
@@ -175,6 +162,32 @@ def main():
          *llvm_options], env=cmake_env)
     run([cmake, "--build", LLVM_BUILD, "-j", str(JOBS)])
 
+
+def main():
+    BUILD.mkdir(parents=True, exist_ok=True)
+    (DEPS / "src").mkdir(parents=True, exist_ok=True)
+    lean = tool("LEAN", "lean")
+    lake = tool("LAKE", "lake")
+    cmake = tool("CMAKE", "cmake")
+    cxx = tool("CXX", "clang++")
+    ar = os.environ.get("AR") or shutil.which("llvm-ar") or shutil.which("ar")
+    if not ar:
+        raise RuntimeError("required tool not found: llvm-ar or ar")
+    lean_prefix = Path(subprocess.check_output(
+        [lean, "--print-prefix"], text=True).strip())
+    cxx_include = Path(os.environ.get(
+        "BAP_LIBCXX_INCLUDE", DEPS / "sysroot" / "usr" / "include" / "c++" / "v1"))
+
+    if "--objects" in sys.argv[1:]:
+        # Only the C++ of the project again, with LLVM and Z3 as they were built: what a change to it needs, in seconds rather
+        # than the minutes that configuring LLVM again takes.
+        missing = [path for path in [LLVM_BUILD / "include", Z3_INSTALL / "include", cxx_include] if not path.exists()]
+        if missing:
+            raise RuntimeError("--objects needs LLVM and Z3 built first, by this script without it; missing: "
+                               + ", ".join(str(path) for path in missing))
+    else:
+        build_dependencies(cmake, cxx_include)
+
     native_flags = ["-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror"]
     if not WINDOWS:
         native_flags += ["-fPIC", "-nostdinc++", f"-I{cxx_include}"]
@@ -216,7 +229,8 @@ def main():
     (NATIVE / "static-link.rsp").write_text("\n".join(link_args) + "\n")
 
     executable_suffix = ".exe" if WINDOWS else ""
-    for name in ["bap", "bap-tests"]:
+    # Lake doesn't take the archives for inputs of the executables, and links each again only if it isn't there.
+    for name in ["bap", "bap-tests", "bap-difftest", "bap-smoke"]:
         (ROOT / ".lake" / "build" / "bin" / f"{name}{executable_suffix}").unlink(missing_ok=True)
     lean_env = os.environ.copy()
     lean_env["LEAN_NUM_THREADS"] = str(JOBS)
