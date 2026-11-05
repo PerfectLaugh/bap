@@ -145,6 +145,11 @@ def exitGroup (table : TaskTable) (group status init : Nat) : TaskTable :=
 def reap (table : TaskTable) (pid : Nat) : TaskTable :=
   { table with tasks := table.tasks.filter (·.group != pid) }
 
+/-- The tasks that a signal can be sent to: those that run, and the leaders that are zombies until they are reaped, which take
+nothing that is sent. -/
+def present (table : TaskTable) : List Entry :=
+  table.tasks.filter fun task => task.tid == task.group || task.status.isNone
+
 /-- Without the tasks that have exited, other than leaders and the one that runs. -/
 def sweep (table : TaskTable) (running : Nat) : TaskTable :=
   { table with tasks := table.tasks.filter fun task =>

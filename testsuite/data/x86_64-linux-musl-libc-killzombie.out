@@ -1,0 +1,20 @@
+zombie 3
+kill 0 0
+kill SIGTERM 0
+kill SIGKILL 0
+tkill SIGUSR1 0
+tgkill SIGUSR1 0
+tgkill 0 of another process -3
+rt_sigqueueinfo SIGUSR2 0
+still zombie 3
+reaped 1
+exited 3
+reaped kill 0 -3
+reaped tgkill 0 -3
+reaped rt_sigqueueinfo SIGUSR2 -3
+group zombie 4
+group kill 0 0
+group kill SIGTERM 0
+group reaped 1
+group exited 4
+group reaped kill 0 -3

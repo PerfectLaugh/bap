@@ -450,7 +450,7 @@ structure Signals where
   /-- A signal of a process was taken from what was pending, as delivery or a wait takes it, as a timer of `timer_create` has to hear
   of what its signal said. -/
   taken : IO.Ref (Nat → SignalInfo → IO Unit)
-  /-- The process group of a process, and the live processes of a process group, as the kernel has them, for `kill` of a group. -/
+  /-- The process group of a process, and the processes of a process group that aren't reaped, as the kernel has them, for `kill` of a group. -/
   pgidOf : IO.Ref (Nat → IO Nat)
   members : IO.Ref (Nat → IO (List Nat))
 
@@ -836,9 +836,11 @@ private def sendToThread (signals : Signals) (emu : Emu) (tid group : Nat) (info
     -- to it would.
     if (← thread emu) != tid || (← emu.taskTable.get).blocked tid then interrupt signals emu tid (hasFlag action.flags saRestart)
 
-/-- A signal is sent to a process: to a thread of it that doesn't block it, its first if that one doesn't. -/
+/-- A signal is sent to a process: to a thread of it that doesn't block it, its first if that one doesn't. A process that has exited, a
+zombie, takes nothing. -/
 private def sendToGroup (signals : Signals) (emu : Emu) (group : Nat) (info : SignalInfo) : IO Unit := do
   let tasks := (← emu.taskTable.get).tasks.filter fun task => task.group == group && task.status.isNone
+  if tasks.isEmpty then return
   let bit := bitOf info.signal
   let leaderFirst := (tasks.filter (·.tid == group)) ++ tasks.filter (·.tid != group)
   let table ← signals.table.get
@@ -1245,12 +1247,13 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
       let target := arg 0 % 2 ^ 32
       let signal := arg 1 % 2 ^ 32
       if signal != 0 && !valid signal then return ← fail current numbers.einval
-      let live := (← current.taskTable.get).tasks.filter (·.status.isNone)
+      -- A process that has exited is there until it is reaped, a zombie, which takes nothing that is sent.
+      let present := (← current.taskTable.get).present
       let groups ← if target == 0 then (← signals.members.get) ((← (← signals.pgidOf.get) task.group))
-        else if target == 2 ^ 32 - 1 then pure (((live.map (·.group)).eraseDups).filter fun group => group != task.group && group != 1)
+        else if target == 2 ^ 32 - 1 then pure (((present.map (·.group)).eraseDups).filter fun group => group != task.group && group != 1)
         else if target ≥ 2 ^ 31 then (← signals.members.get) (2 ^ 32 - target)
         -- A thread's id is its process's, as Linux has it.
-        else pure ((live.find? (·.tid == target)).map (·.group)).toList
+        else pure ((present.find? (·.tid == target)).map (·.group)).toList
       if groups.isEmpty then return ← fail current numbers.esrch
       if signal != 0 then
         for group in groups do sendToGroup signals current group (← selfInfo current signal 0 0)
@@ -1258,12 +1261,13 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
     else if number == calls.tkill || number == calls.tgkill then
       let (expected, target, signal) := if number == calls.tkill then (none, arg 0, arg 1) else (some (arg 0), arg 1, arg 2)
       if signal != 0 && !valid signal then return ← fail current numbers.einval
-      match (← current.taskTable.get).find? target with
-      | some { status := none, group, .. } =>
+      -- A leader that has exited is there until it is reaped, and takes nothing that is sent.
+      match (← current.taskTable.get).present.find? (·.tid == target) with
+      | some { status, group, .. } =>
         if expected.isSome && expected != some group then return ← fail current numbers.esrch
-        if signal != 0 then sendToThread signals current target group (← selfInfo current signal (signedCode 6) 0)
+        if signal != 0 && status.isNone then sendToThread signals current target group (← selfInfo current signal (signedCode 6) 0)
         syscallReturn current (.ok 0)
-      | _ => fail current numbers.esrch
+      | none => fail current numbers.esrch
     else if number == calls.queueinfo then
       let (target, signal, address) := (arg 0, arg 1, arg 2)
       if !valid signal then return ← fail current numbers.einval
@@ -1272,11 +1276,11 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
       try
         let code ← readNumber current (address + (if isMipsArchitecture architecture then 4 else 8)) 4
         let value ← readNumber current (address + base + 8) word
-        match (← current.taskTable.get).find? target with
-        | some { status := none, group, .. } =>
+        match (← current.taskTable.get).present.find? (·.tid == target) with
+        | some { group, .. } =>
           sendToGroup signals current group ⟨signal, code, .sent task.group 0 value⟩
           syscallReturn current (.ok 0)
-        | _ => fail current numbers.esrch
+        | none => fail current numbers.esrch
       catch _ => fail current numbers.efault
     else if number == calls.pending then
       let state ← threadOf signals tid

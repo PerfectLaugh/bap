@@ -2217,8 +2217,8 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   signals.sent.set wakePipeReaders
   signals.pgidOf.set fun group => do pure ((← kernelRef.get).pgidOf group)
   signals.members.set fun pgid => do
-    let live := (((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group)).eraseDups
-    pure (Identity.members (← kernelRef.get) live pgid)
+    let present := ((← emu.taskTable.get).present.map (·.group)).eraseDups
+    pure (Identity.members (← kernelRef.get) present pgid)
   signals.interrupted.set (timers.interrupted)
   signals.taken.set timers.taken
   emu.betweenTurns.modify (· ++ [do let _ ← resumingCurrent (do timers.tick emu; pure true)])
