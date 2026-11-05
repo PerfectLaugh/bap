@@ -1,0 +1,14 @@
+child back from the handler it was forked in
+fork in a handler: exited, code 1 7
+sigaltstack 0
+child of fork: same alternate stack, flags 1 0
+fork: exited, code 1 0
+vfork: exited, code (3 if the same alternate stack) 1 3
+new thread: alternate stack disabled 1
+main thread after it: same alternate stack, flags 1 0
+child in a handler on the alternate stack: same alternate stack, flags 1 1
+child back from the handler on the alternate stack
+fork in a handler on the alternate stack: exited, code 1 9
+parent back from it: same alternate stack, flags 1 0
+child: SIGUSR1 pending, blocked 0 1
+fork with SIGUSR1 pending: exited, code 1 0

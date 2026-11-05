@@ -1035,14 +1035,21 @@ def processExited (signals : Signals) (emu : Emu) (group status : Nat) : IO Unit
     | none => pure ()
   else sendToGroup signals emu task.parent info
 
-/-- A new process has what its parent has, with nothing pending. -/
+/-- A new process has what its parent has, and its thread what the thread that made it has, with nothing pending: in a copy of the memory
+it goes back from the handlers that thread is in. As Linux has it, one that shares the memory has no alternate stack, which would be
+that of its parent, unless it is a child of `vfork`, which runs on the stacks of its parent until it runs a program. -/
 def forked (signals : Signals) (emu : Emu) (parent child : Nat) : IO Unit := do
-  let mask := (← threadOf signals (← thread emu)).mask
+  let tid ← thread emu
+  let state ← threadOf signals tid
+  let table ← emu.taskTable.get
+  let shared := (table.tasks.find? (·.tid == child)).map (·.space) == some (← currentTask emu).space
+  let vforked := table.futexes.any fun waiter => waiter.thread == tid && waiter.space == vforkSpace && waiter.address == child
+  let alternate := if shared && !vforked then (0, 0, true) else state.alternate
   signals.table.modify fun table =>
     { table with
       actions := table.actions.fold (init := table.actions) fun actions key action =>
         if key.1 == parent then actions.insert (child, key.2) action else actions
-      threads := table.threads.insert child { mask } }
+      threads := table.threads.insert child { state with pending := [], alternate, waiting := none, waitingChild := none } }
 
 /-- `execve`: what had a handler goes back to the default, as the handler isn't there any more, and what was ignored stays so. -/
 def executed (signals : Signals) (group tid : Nat) : IO Unit := do

@@ -22,6 +22,11 @@ def tasks (emu : Emu) : IO (List Entry) := do pure (← emu.taskTable.get).tasks
 own, as the other bits do. -/
 private def errorBit : Bap.Var := wordVar 1 "CR0UN"
 
+/-- Where a thread waits that only what it waits for lets go on, and not a signal: a stop that its tracer made, and the parent of
+`vfork` until its child runs a program or ends. -/
+def stopSpace : Nat := 2 ^ 58
+def vforkSpace : Nat := 2 ^ 59
+
 /-- What a new task shares, as the flags of `clone(2)` say it. -/
 structure CloneOptions where
   start : Nat
@@ -33,6 +38,9 @@ structure CloneOptions where
   shareMemory : Bool := false
   /-- `CLONE_THREAD`: a thread of the same process, and otherwise a process of its own. -/
   sameGroup : Bool := false
+  /-- `CLONE_VFORK`: the parent waits until its child runs a program or ends, as that has its memory and, without a stack of its own,
+  its stack: see `releaseVfork`. -/
+  vfork : Bool := false
 
 /-- A new task, which runs at once with a copy of the registers and sees 0 in the result register. A thread and a process
 are this, with different options. -/
@@ -59,17 +67,16 @@ def clone (emu : Emu) (options : CloneOptions) : IO ThreadId := do
   let env := if emu.config.syscallAbi == .powerpc || emu.config.syscallAbi == .powerpc64 then Bil.bind env errorBit (wordOf 1 0) else env
   emu.threadsRef.modify (spawnContext id { env } (wordVar width result) (wordOf width 0) options.start :: ·)
   if !options.shareMemory then cloneProcessMemory emu id
+  -- Before what hears of a new process, which tells a child of `vfork` by its parent that waits for it.
+  if options.vfork then
+    emu.taskTable.modify (·.futexWait { thread := ← thread emu, space := vforkSpace, address := id, bitset := 2 ^ 32 - 1 })
+    emu.stopped.set true
   if !options.sameGroup then
     for hook in ← emu.processHooks.get do hook task.group id
   pure id
 
 /-- A new process at `childPc`, with a copy of the memory. -/
 def fork (emu : Emu) (childPc : Nat) : IO ThreadId := clone emu { start := childPc }
-
-/-- Where a thread waits that only what it waits for lets go on, and not a signal: a stop that its tracer made, and the parent of
-`vfork` until its child runs a program or ends. -/
-def stopSpace : Nat := 2 ^ 58
-def vforkSpace : Nat := 2 ^ 59
 
 def uninterruptible (space : Nat) : Bool := space == stopSpace || space == vforkSpace
 
@@ -376,7 +383,8 @@ private def serveClone (emu : Emu) (flags stack parentTid threadPointer childTid
       stack := if stack != 0 then some stack else none
       threadPointer := if has setTls then some threadBase else none
       shareMemory := has cloneVm
-      sameGroup := has cloneThreadFlag }
+      sameGroup := has cloneThreadFlag
+      vfork := has cloneVfork }
     let id ← if has cloneVm || !has setChildTid then do
         let id ← clone emu options
         if has setChildTid then write emu childTid (word32 emu id)
@@ -390,11 +398,6 @@ private def serveClone (emu : Emu) (flags stack parentTid threadPointer childTid
         pure id
     if has setParentTid then write emu parentTid (word32 emu id)
     if has clearChildTid then emu.taskTable.modify (·.setClearTid id childTid)
-    -- The parent of `vfork` waits until its child runs a program or ends, as that has its memory and, without a stack of its own, its
-    -- stack: see `releaseVfork`.
-    if has cloneVfork then
-      emu.taskTable.modify (·.futexWait { thread := ← thread emu, space := vforkSpace, address := id, bitset := 2 ^ 32 - 1 })
-      emu.stopped.set true
     syscallReturn emu (.ok id)
 
 /-- `futex`, for the word at `address` of the space of the thread that runs, or, without `FUTEX_PRIVATE_FLAG`, of what `futexKey` says

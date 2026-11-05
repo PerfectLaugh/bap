@@ -98,6 +98,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-vfork",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-vfork",
     Bap.Tests.Emu.testLinuxRaises "riscv64-linux-musl-libc-vfork",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-sigfork",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-sigfork",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-seccomp",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-seccomp",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-seccomp",
