@@ -408,6 +408,42 @@ def materializeState (memoryVar : Bap.Var) (width : Nat) (snapshot : Snapshot) :
       { thread with state := { env := Bil.bind thread.state.env memoryVar (memoryOf thread.id) } }
   }
 
+/-- The memory of each address space, made once when a thread of it first asks, for all its threads: a process of many threads has one
+memory of its own, and not one for each. -/
+private def spaceMemories (width : Nat) (snapshot : Snapshot) : List (Nat × Thunk Value) × Thunk Value :=
+  (snapshot.processMemory.map fun (id, regions) => (id, Thunk.mk fun _ => .memory (regionsMemory width regions)),
+   Thunk.mk fun _ => .memory (regionsMemory width snapshot.regions))
+
+private theorem lookup_spaceMemories (width : Nat) (processes : List (Nat × List Region)) (space : Nat) :
+    (processes.map fun (id, regions) => (id, Thunk.mk fun _ => Value.memory (regionsMemory width regions))).lookup space =
+      (processes.lookup space).map fun regions => Thunk.mk fun _ => Value.memory (regionsMemory width regions) := by
+  induction processes with
+  | nil => rfl
+  | cons head rest ih =>
+    obtain ⟨id, regions⟩ := head
+    by_cases h : space = id
+    · simp [List.lookup, h]
+    · have : (space == id) = false := by simpa using h
+      simp [List.lookup, this, ih]
+
+/-- `materializeState`, with the memory of each address space made once. -/
+private def materializeStateShared (memoryVar : Bap.Var) (width : Nat) (snapshot : Snapshot) : Snapshot :=
+  let (processes, shared) := spaceMemories width snapshot
+  let memoryOf (id : ThreadId) : Value := ((processes.lookup (snapshot.table.spaceOf id)).getD shared).get
+  { snapshot with
+    state := { env := (memoryVar, memoryOf snapshot.currentThread) :: snapshot.state.env }
+    threads := snapshot.threads.map fun thread =>
+      { thread with state := { env := Bil.bind thread.state.env memoryVar (memoryOf thread.id) } }
+  }
+
+@[csimp] private theorem materializeState_csimp : @materializeState = @materializeStateShared := by
+  funext memoryVar width snapshot
+  have memory (id : ThreadId) : (((spaceMemories width snapshot).1.lookup (snapshot.table.spaceOf id)).getD (spaceMemories width snapshot).2).get =
+      Value.memory (regionsMemory width (spaceRegions snapshot id)) := by
+    simp only [spaceMemories, lookup_spaceMemories, spaceRegions]
+    cases snapshot.processMemory.lookup (snapshot.table.spaceOf id) <;> rfl
+  simp only [materializeState, materializeStateShared, memory]
+
 /-- A decoded snapshot with the memory that `withoutMemory` left out, for an emulator to restore: see `materializeState`. -/
 def materializeSnapshot (emu : Emu) (snapshot : Snapshot) : IO Snapshot := do
   if snapshot.state.env.any fun binding => binding.1 == emu.config.memory then
