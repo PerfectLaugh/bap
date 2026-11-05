@@ -1680,6 +1680,16 @@ extern "C" uint8_t bap_jit_chain_holds(lean_obj_arg chainObject, uint64_t pc, le
   return found != chain->entries.end() && found->second.program == programObject;
 }
 
+// That the range of a chain at `pc` is being optimized: it is gone on to for `executions` more, and then comes back to Lean to see if
+// what was compiled is there.
+extern "C" lean_obj_res bap_jit_chain_optimizing(lean_obj_arg chainObject, uint64_t pc, uint64_t executions, lean_obj_arg) {
+  auto *chain = static_cast<Chain *>(lean_get_external_data(chainObject));
+  auto found = chain->entries.find(pc);
+  if (found != chain->entries.end())
+    found->second.optimizeAt = found->second.executions + executions;
+  return lean_io_result_mk_ok(lean_box(0));
+}
+
 // What a range is, in one array: the number of slots, the effect, budget and observed slots (all ones for none), the layout as its
 // length and pairs, the variables that have to be bound, the outputs as triples, the flags as pairs, and the checkpoints, each a pc
 // and its outputs.

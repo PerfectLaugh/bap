@@ -242,6 +242,9 @@ structure Engine where
   chainAt : IO.Ref (Std.HashMap Nat Nat)
   variableIds : IO.Ref (Std.HashMap Bap.Var Nat)
   variables : IO.Ref (Array Bap.Var)
+  /-- What is being optimized on another thread, by where it starts, with the bytes it was compiled from: the run goes on with what
+  there is until it is done. -/
+  optimizing : IO.Ref (Std.HashMap Nat (ByteArray × Task (Except IO.Error (Jit.Program × Nat))))
 
 /-- What a run of a block or a range comes to: the state after it, where it went, where the instruction after the last that it ran
 is, and how it ended. -/
@@ -293,6 +296,7 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimi
     chainAt := ← IO.mkRef {}
     variableIds := ← IO.mkRef {}
     variables := ← IO.mkRef #[]
+    optimizing := ← IO.mkRef {}
   }
 
 /-- What it has done so far. -/
@@ -335,6 +339,7 @@ def clearChain (engine : Engine) : IO Unit := do
 /-- Forgets all that was lifted and compiled, and every version of it. -/
 def clearCache (engine : Engine) : IO Unit := do
   clearChain engine
+  engine.optimizing.set {}
   engine.cache.set {}
   engine.ranges.set {}
   engine.cacheVersions.set {}
@@ -1429,6 +1434,9 @@ private def restoreBlockVersion (engine : Engine) (address : Nat) (code : ByteAr
 /-- How many runs make it worth compiling something again, with what that takes: as long as the runs themselves take by then. -/
 private def optimizeFrom : Nat := 65536
 
+/-- How many runs of what is being optimized go by before it comes back to see whether that is done. -/
+private def optimizeCheck : Nat := 65536
+
 /-- The number of a variable for the chain. -/
 private def variableId (engine : Engine) (var : Bap.Var) : IO Nat := do
   match (← engine.variableIds.get)[var]? with
@@ -1446,26 +1454,47 @@ private def keptSlots (lowering : Lowering) : Array UInt64 :=
   let outputs := lowering.outputs.map (·.2) ++ lowering.checkpoints.flatMap fun checkpoint => checkpoint.2.map (·.2)
   ((lowering.layout.map (·.2) ++ outputs ++ lowering.flags.flatMap (fun flag => [flag.1, flag.2]) ++ control).map UInt64.ofNat).toArray
 
-/-- What is native and has run that many times, compiled again with optimization, if this is such a thing. -/
+/-- What is native and has run that many times, compiled again with optimization, if this is such a thing: on another thread, while the
+run goes on with what there is, and in its place once that is done, as HotSpot compiles. -/
 private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Option CachedBlock) := do
   if entry.optimized || (← entry.executions.get) < optimizeFrom then return none
   match entry.plan with
   | .interpreted _ => return none
   | .native lowering _ fallback =>
-    let started ← IO.monoMsNow
-    let kept := keptSlots lowering
-    -- Its variables by their numbers in the chain, whose registers it uses for them there (obligation 17 of `Bap.Jit`).
-    let mut variables : Array UInt64 := #[]
-    for (var, slot) in lowering.layout do
-      variables := variables ++ #[UInt64.ofNat slot, UInt64.ofNat (← variableId engine var)]
-    let program ← if entry.entryLabels.isEmpty then
-        Jit.compileOptimized lowering.ops kept ((lowering.budget.map UInt64.ofNat).getD (UInt64.ofNat (2 ^ 64 - 1))) variables
-      else Jit.compileEntries lowering.ops entry.entryLabels lowering.nextSlot true (kept.push (UInt64.ofNat lowering.nextSlot)) (variables := variables)
-    let elapsed := (← IO.monoMsNow) - started
-    engine.statistics.modify fun stats =>
-      { stats with nativeCompilations := stats.nativeCompilations + 1, compileMs := stats.compileMs + elapsed
-                   optimized := stats.optimized + 1 }
-    return some { entry with plan := .native lowering program fallback, optimized := true }
+    match (← engine.optimizing.get)[entry.address]? with
+    | some (code, task) =>
+      -- What was compiled of other bytes than these is for nothing.
+      if !sameBytes code entry.code then
+        engine.optimizing.modify (·.erase entry.address)
+        return none
+      if !(← IO.hasFinished task) then
+        Jit.chainOptimizing engine.chain (UInt64.ofNat entry.address) (UInt64.ofNat optimizeCheck)
+        return none
+      engine.optimizing.modify (·.erase entry.address)
+      match task.get with
+      | .ok (program, elapsed) =>
+        engine.statistics.modify fun stats =>
+          { stats with nativeCompilations := stats.nativeCompilations + 1, compileMs := stats.compileMs + elapsed
+                       optimized := stats.optimized + 1 }
+        return some { entry with plan := .native lowering program fallback, optimized := true }
+      -- What can't be optimized runs as it was, and isn't tried again.
+      | .error _ => return some { entry with optimized := true }
+    | none =>
+      let kept := keptSlots lowering
+      -- Its variables by their numbers in the chain, whose registers it uses for them there (obligation 17 of `Bap.Jit`).
+      let mut variables : Array UInt64 := #[]
+      for (var, slot) in lowering.layout do
+        variables := variables ++ #[UInt64.ofNat slot, UInt64.ofNat (← variableId engine var)]
+      let entryLabels := entry.entryLabels
+      let task ← IO.asTask do
+        let started ← IO.monoMsNow
+        let program ← if entryLabels.isEmpty then
+            Jit.compileOptimized lowering.ops kept ((lowering.budget.map UInt64.ofNat).getD (UInt64.ofNat (2 ^ 64 - 1))) variables
+          else Jit.compileEntries lowering.ops entryLabels lowering.nextSlot true (kept.push (UInt64.ofNat lowering.nextSlot)) variables
+        pure (program, (← IO.monoMsNow) - started)
+      engine.optimizing.modify (·.insert entry.address (entry.code, task))
+      Jit.chainOptimizing engine.chain (UInt64.ofNat entry.address) (UInt64.ofNat optimizeCheck)
+      return none
 
 private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : ByteArray)
     (compileSingle : Bool := true) : IO CachedBlock := do
@@ -1982,8 +2011,11 @@ private def registerChain (engine : Engine) (pc : Nat) (entry : CachedBlock) (sl
     for (var, at_) in list do
       data := data ++ #[UInt64.ofNat (← variableId engine var), UInt64.ofNat at_, UInt64.ofNat ((widthOf var).getD 64)]
     pure data
+  let executions ← entry.executions.get
+  let optimizing := (← engine.optimizing.get).contains pc
   let mut data := #[UInt64.ofNat slotCount, slot lowering.effectSlot, slot lowering.budget, slot lowering.observed,
-    UInt64.ofNat (← entry.executions.get), if entry.optimized then none else UInt64.ofNat optimizeFrom]
+    UInt64.ofNat executions,
+    if entry.optimized then none else if optimizing then UInt64.ofNat (executions + optimizeCheck) else UInt64.ofNat optimizeFrom]
   -- What a run reads before it writes that isn't a variable or for control, and is 0 at its start as `encodeState` makes it: the
   -- effect, the flags of outputs, and the slot that says where a range with entries starts.
   let zeroed := lowering.effectSlot.toList ++ lowering.flags.map (·.2) ++ (if slotCount > lowering.nextSlot then [lowering.nextSlot] else [])
@@ -2102,7 +2134,11 @@ private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (
       -- What isn't optimized yet goes back to the dispatcher by when it has run enough to be, so that a loop that never leaves its range
       -- is compiled again with optimization, as it is then entered again.
       let executions ← entry.executions.get
-      let budget := if entry.optimized then budget else min budget (optimizeFrom - min optimizeFrom executions)
+      -- And what is being optimized comes back now and then, to be put in its place once it is.
+      let optimizing := (← engine.optimizing.get).contains entry.address
+      let budget := if entry.optimized then budget
+        else if optimizing then min budget optimizeCheck
+        else min budget (optimizeFrom - min optimizeFrom executions)
       -- Code sites that would only set the pc wait in native code for something to read it (obligation 16 of `Bap.Jit`).
       let quietSites := !observed && (← engine.dirtyCode.get).isNone
       let slots := withControl lowering slots (if entry.entered == 0 then budget else budget + 1) observed

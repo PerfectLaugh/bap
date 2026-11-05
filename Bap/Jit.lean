@@ -226,6 +226,11 @@ opaque clearChain (chain : @& Chain) : IO Unit
 @[extern "bap_jit_chain_holds"]
 opaque chainHolds (chain : @& Chain) (pc : UInt64) (program : @& Program) : Bool
 
+/-- That the range of a chain at `pc` is being optimized: it is gone on to for that many executions more, and then not, so that Lean
+sees whether it is done. -/
+@[extern "bap_jit_chain_optimizing"]
+opaque chainOptimizing (chain : @& Chain) (pc executions : UInt64) : IO Unit
+
 /-- Puts a range in a chain at `pc`, numbered `id`: `data` is the number of its slots, its effect, budget and observed slots (all ones
 for none), its executions and the executions at which it is to be optimized (all ones if it is), the slots that are 0 at its start, and
 its layout, the variables it needs, its outputs, its flags and its checkpoints, each as a count and what it counts. -/
