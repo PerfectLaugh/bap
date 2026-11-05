@@ -1,0 +1,5 @@
+headers 3
+entry size 1
+first is PT_PHDR 1
+PT_PHDR is where they are 1
+loads 2

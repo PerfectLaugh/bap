@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Builds a program of testsuite/src against a static musl, from the sources of it that zig has, with clang and ld.lld, for what zig itself doesn't run on:
-#   build.py TARGET SOURCE OUTPUT
+#   build.py TARGET SOURCE OUTPUT [LINK FLAGS...]
+# where what follows the output goes to the linker, such as -T and a linker script.
 # What it compiles of musl stays in $BAP_MUSL_BUILD, or else under the temporary directory, as it takes a while.
 import os,subprocess,sys,glob,tempfile,concurrent.futures as cf
 Z="/usr/lib/zig/libc"; M=Z+"/musl"; I=Z+"/include"
@@ -19,7 +20,7 @@ T={ "x86_64":("x86_64","x86_64-linux-musl","x86_64",[]),
     "powerpc64":("powerpc64","powerpc64-linux-musl","powerpc64",["-mabi=elfv2"]),
     "powerpc64le":("powerpc64","powerpc64le-linux-musl","powerpc64",["-mabi=elfv2"]),
 }
-name=sys.argv[1]; src=sys.argv[2]; out=sys.argv[3]
+name=sys.argv[1]; src=sys.argv[2]; out=sys.argv[3]; link=sys.argv[4:]
 A,triple,inc,extra=T[name]
 B=os.path.join(os.environ.get("BAP_MUSL_BUILD",os.path.join(tempfile.gettempdir(),"bap-musl")),name); os.makedirs(B,exist_ok=True)
 open(B+"/version.h","w").write('#define VERSION "1.2.5"\n')
@@ -53,6 +54,6 @@ subprocess.run(["clang"]+flags+["-c",os.path.dirname(os.path.abspath(__file__))+
 t=B+"/test.o"
 r=subprocess.run(["clang",f"--target={triple}","-nostdinc","-fno-builtin","-O1",pic,"-w","-fno-stack-protector","-I"+I+"/"+inc+"-linux-musl","-I"+I+"/generic-musl"]+extra+["-c",src,"-o",t],capture_output=True,text=True)
 if r.returncode: print("test compile:",r.stderr[-600:]); sys.exit(1)
-r=subprocess.run(["ld.lld","-static","--gc-sections","-z","noexecstack","-o",out]+[c for c in crt[:2] if os.path.exists(c)]+[t,lib,b]+[c for c in crt[2:] if os.path.exists(c)],capture_output=True,text=True)
+r=subprocess.run(["ld.lld","-static","--gc-sections","-z","noexecstack"]+link+["-o",out]+[c for c in crt[:2] if os.path.exists(c)]+[t,lib,b]+[c for c in crt[2:] if os.path.exists(c)],capture_output=True,text=True)
 if r.returncode: print("link:",r.stderr[:900]); sys.exit(1)
 print("built",out)

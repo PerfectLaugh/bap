@@ -1754,22 +1754,35 @@ private def resetRegisters (emu : Emu) : Architecture → IO Unit
   setReg emu ⟨"FPU_TAG", .imm 16, 0, false⟩ (bits 16 0xffff)
   setReg emu ⟨"MXCSR", .imm 32, 0, false⟩ (bits 32 0x1f80)
 
-/-- The segments of a file in pages at `base`, as the kernel maps them, with zeros after what is in the file. Returns where they
-end. A page that two segments share has the bytes of both, and the protection of the first. -/
+/-- The segments of a file in pages at `base`, as the kernel maps them, one after the other over what is there: the pages of
+a segment hold the file, and zeros after what of it is in the file when it is larger in memory. Returns where they end. A
+page that two segments share is that of the later one, with its bytes of the file and its protection. -/
 private def mapProgram (emu : Emu) (data : ByteArray) (program : Elf.Program) (base : Nat) : IO Nat := do
   let sorted := program.segments.toArray.qsort fun left right => left.address < right.address
-  let mut mappedTo := 0
+  let mut regions : Array Region := #[]
+  let mut top := 0
   for segment in sorted do
     let first := base + segment.address
-    let start := max mappedTo (pageDown first)
+    let start := pageDown first
     let stop := pageUp (first + segment.memorySize)
     if start < stop then
-      let bytes := ByteArray.mk ((List.range (stop - start)).toArray.map fun offset =>
-        let address := start + offset
-        if first ≤ address && address < first + segment.fileSize then data.get! (segment.offset + address - first) else 0)
-      map emu ⟨start, bytes, ⟨segment.flags &&& 4 != 0, segment.flags &&& 2 != 0, segment.flags &&& 1 != 0⟩⟩
-      mappedTo := stop
-  pure mappedTo
+      let fileStop := if segment.memorySize > segment.fileSize then first + segment.fileSize
+        else pageUp (first + segment.fileSize)
+      let from_ := segment.offset - (first - start)
+      let bytes := data.extract from_ (from_ + (fileStop - start))
+      let bytes := bytes ++ Bap.zeroBytes (stop - start - bytes.size)
+      -- What it covers of those before it is its own.
+      regions := regions.flatMap fun region =>
+        let finish := region.address + region.data.size
+        if finish ≤ start || stop ≤ region.address then #[region]
+        else (if region.address < start then #[{ region with data := region.data.extract 0 (start - region.address) }] else #[]) ++
+          (if stop < finish then #[{ region with address := stop, data := region.data.extract (stop - region.address) region.data.size }]
+            else #[])
+      regions := regions.push ⟨start, bytes, ⟨segment.flags &&& 4 != 0, segment.flags &&& 2 != 0, segment.flags &&& 1 != 0⟩⟩
+      top := max top stop
+  for region in regions do
+    map emu region
+  pure top
 
 /-- Where a program goes that can go anywhere, and an interpreter. Those of Linux, without the randomness. -/
 private def programBase (architecture : Architecture) : Nat := if architecture.bits == 32 then 0x400000 else 0x555555554000
@@ -1835,7 +1848,11 @@ private def loadProgram (emu : Emu) (architecture : Architecture) (path : String
   let base := if program.relocatable then base.getD (programBase architecture) else 0
   resetRegisters emu architecture
   let top ← mapProgram emu data program base
-  let lowest := program.segments.foldl (fun lowest segment => min lowest segment.address) (2 ^ 63)
+  -- Where the program headers are: in the segment that has them of the file, as Linux finds them.
+  let headers := program.segments.foldl (init := 0) fun found segment =>
+    if segment.offset ≤ program.headerOffset && program.headerOffset < segment.offset + segment.fileSize then
+      program.headerOffset - segment.offset + segment.address
+    else found
   let entry ← match interpreter with
     | some (bytes, loaded) =>
       let _ ← mapProgram emu bytes loaded (interpreterBase architecture)
@@ -1865,7 +1882,7 @@ private def loadProgram (emu : Emu) (architecture : Architecture) (path : String
     -- A 32-bit or a 64-bit machine, with floating point, AltiVec and VSX.
     | .powerpc wide _ => (if wide == 64 then 0xc0000000 else 0x80000000) + 0x18000080
   -- AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_FLAGS, AT_ENTRY, the ids of root, AT_HWCAP, AT_CLKTCK, AT_SECURE, AT_HWCAP2
-  let auxiliary := [(3, base + lowest + program.headerOffset), (4, program.headerSize), (5, program.headerCount), (6, 4096),
+  let auxiliary := [(3, base + headers), (4, program.headerSize), (5, program.headerCount), (6, 4096),
     (7, if interpreter.isSome then interpreterBase architecture else 0), (8, 0), (9, base + program.entry), (11, 0), (12, 0), (13, 0), (14, 0),
     (16, capabilities), (17, 100), (23, 0), (26, 0)]
   mapStack emu architecture (if arguments.isEmpty then [path] else arguments) environment auxiliary
