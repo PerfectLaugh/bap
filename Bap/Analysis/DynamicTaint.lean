@@ -93,7 +93,8 @@ structure Node where
   space : Nat
   kind : NodeKind
   place : Place
-  /-- What it is, by the byte: of a register from the least significant, and of memory from its address up. Empty when it can't be known. -/
+  /-- What it is, by the byte: of a register from the least significant, and of memory from its address up, and of a branch, what it was
+  decided by, which is where a jump went or what a condition was. Empty when it can't be known. -/
   values : ByteArray
   inputs : Array (List Input)
   guard : Option Tag := none
@@ -587,6 +588,12 @@ private def valueBytes (bits : Option (Σ width, BitVec width)) (size : Nat) : B
   | some value => (List.range size).foldl (fun out index => out.push (UInt8.ofNat (byteOfValue value index))) (ByteArray.emptyWithCapacity size)
   | none => ByteArray.empty
 
+/-- What is known of a value, by the byte from the least significant, as many as its width has. -/
+private def bitsBytes (bits : Option (Σ width, BitVec width)) : ByteArray :=
+  match bits with
+  | some ⟨width, _⟩ => valueBytes bits (bytesOf width)
+  | none => ByteArray.empty
+
 private def constantly (exp : Bil.Exp) : Option (Σ width, BitVec width) :=
   match Bil.evalExp [] exp with
   | .ok value => (Bap.Value.asBits value).toOption
@@ -760,7 +767,7 @@ private partial def perform (tracker : Tracker) (frame : Frame) : Nat → Bil.Pr
     | .jmp target =>
       let (bits, shade) ← evaluate tracker frame target
       let inputs := allInputs shade
-      if !inputs.isEmpty then branchNode frame inputs (bitsValue bits)
+      if !inputs.isEmpty then branchNode frame inputs (bitsValue bits) (bitsBytes bits)
       frame.scratch.jumped.set true
       pure false
     | .special name =>
@@ -776,7 +783,7 @@ private partial def perform (tracker : Tracker) (frame : Frame) : Nat → Bil.Pr
     | .ifElse condition yes no =>
       let (bits, shade) ← evaluate tracker frame condition
       let inputs := allInputs shade
-      if !inputs.isEmpty then branchNode frame inputs none
+      if !inputs.isEmpty then branchNode frame inputs none (bitsBytes bits)
       match bitsValue bits with
       | some value =>
         let go ← perform tracker frame fuel (if value != 0 then yes else no)
@@ -789,7 +796,7 @@ private partial def perform (tracker : Tracker) (frame : Frame) : Nat → Bil.Pr
     | .while condition body =>
       let (bits, shade) ← evaluate tracker frame condition
       let inputs := allInputs shade
-      if !inputs.isEmpty then branchNode frame inputs none
+      if !inputs.isEmpty then branchNode frame inputs none (bitsBytes bits)
       match bitsValue bits with
       | some 0 => perform tracker frame fuel rest
       | some _ =>
@@ -799,11 +806,12 @@ private partial def perform (tracker : Tracker) (frame : Frame) : Nat → Bil.Pr
         frame.scratch.incomplete.set true
         perform tracker frame fuel rest
 
-private partial def branchNode (frame : Frame) (inputs : List Input) (target : Option Nat) : IO Unit := do
+/-- A branch on what is marked, with what it was decided by as it ran: where a jump went, or what a condition was. -/
+private partial def branchNode (frame : Frame) (inputs : List Input) (target : Option Nat) (values : ByteArray) : IO Unit := do
   let id ← nodeIdOf frame
   frame.scratch.newNodes.modify (·.push {
     id, insn := frame.insn, pc := frame.pc, thread := frame.thread, space := frame.space, kind := .branch target
-    place := .control, values := ByteArray.empty, inputs := #[inputs.map fun input => { input with edge := .condition }] })
+    place := .control, values, inputs := #[inputs.map fun input => { input with edge := .condition }] })
   frame.scratch.newGuard.set (some (nodeTag id 0))
 
 end

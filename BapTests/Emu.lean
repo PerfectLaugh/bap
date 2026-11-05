@@ -2096,7 +2096,11 @@ private def cffAddresses (triple : String) : IO (Nat × Nat × Nat × Nat × Nat
 thread and process each instruction was of, and what decided the round that a byte of a file chose. -/
 def testCff (triple : String) : IO Unit := do
   let (dispatcher, state, _, _, _) ← cffAddresses triple
-  let profile : Bap.Analysis.Cff.Profile := { dispatcher, state := .memory state 4, names := [(3, "asks"), (6, "ends")] }
+  let stack := match triple with
+    | "x86_64" => ("RSP", 64)
+    | "mips" => ("R29", 32)
+    | _ => ("SP", 64)
+  let profile : Bap.Analysis.Cff.Profile := { dispatcher, state := .memory state 4, names := [(3, "asks"), (6, "ends")], registers := [stack] }
   let run (key : Char) : IO (Bap.Analysis.Cff.Dispatcher × Nat × Bap.Analysis.Journal.Journal.Record) := do
     let machine ← Bap.Linux.start (← cffKernel triple key) "/test" ["/test"]
     let main ← Bap.Emu.thread machine.emu
@@ -2141,8 +2145,20 @@ def testCff (triple : String) : IO Unit := do
     assertTrue s!"Cff {triple} a state chosen by a condition is known to be: {repr (chose.head?.bind (·.assignment))}"
       (!chose.isEmpty && chose.all fun transition => transition.assignment.any fun assignment =>
         assignment.conditional && !assignment.condition.isEmpty)
+  -- What the registers were, with each round, and how what decided a round was decided as it ran.
+  assertTrue s!"Cff {triple} each round has the registers it started with"
+    (taken.transitions.all fun transition => transition.registers.map (·.1) == [stack.1])
+  let pairs := taken.transitions.zip (taken.transitions.drop 1)
+  assertTrue s!"Cff {triple} and those it ended with, which the next round starts with"
+    (pairs.all fun (round, next) => round.thread != next.thread || round.registersAfter == some next.registers)
+  let decided (dispatcher : Bap.Analysis.Cff.Dispatcher) :=
+    (dispatcher.transitions.find? fun transition => transition.state == 2).bind (·.predicate)
+  assertTrue s!"Cff {triple} what decided a round has what it read, as it was: {repr (decided taken)}"
+    ((decided taken).any fun predicate => predicate.value.isSome && predicate.reads.any (!·.bytes.isEmpty))
   let (other, _, _) ← run 'D'
   assertTrue s!"Cff {triple} another byte chooses 4" (other.graph.any fun (from_, to, _) => from_ == 2 && to == 4)
+  assertTrue s!"Cff {triple} and was decided otherwise as it ran"
+    ((decided other).map (·.value) != (decided taken).map (·.value) || (decided other).map (·.reads) != (decided taken).map (·.reads))
 
 /-- A verdict, and why: what it is, from the byte of the file that decided it; what of it no one wrote, which says that it was there when
 the machine was put back from a checkpoint; and a round that went the wrong way, sliced back from where the dispatcher read its state. -/
