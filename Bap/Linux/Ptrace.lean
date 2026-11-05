@@ -297,6 +297,13 @@ def vforkReleased (ptrace : Ptrace) (emu : Emu) (tid child : Nat) : IO Unit := d
     let signal := numbers.trap ||| (if tracee.options &&& 1 != 0 then 0x80 else 0)
     stopThread ptrace emu tid { status := stoppedStatus signal, traced := true, signal := numbers.trap }
 
+/-- A thread that was let step doesn't stop after its next instruction after all: its tracer let it go, or it is gone. -/
+private def disarmStep (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Unit := do
+  ptrace.table.modify fun table => { table with stepping := table.stepping.erase tid }
+  if let some hook := (← ptrace.stepHooks.get).get? tid then
+    ptrace.stepHooks.modify (·.erase tid)
+    removeHook emu hook
+
 /-- A process is over, which ended with `status`: what it traced goes on, or is killed if it asked for that; a tracer of its that isn't
 its parent hears of it, by `SIGCHLD` and a wait; and what waits asks again. -/
 def processExited (ptrace : Ptrace) (emu : Emu) (group status : Nat) : IO Unit := do
@@ -318,11 +325,13 @@ def processExited (ptrace : Ptrace) (emu : Emu) (group status : Nat) : IO Unit :
   for (tid, tracee) in table.tracees.toList do
     if tracee.tracer == group then
       ptrace.table.modify fun table => { table with tracees := table.tracees.erase tid }
+      disarmStep ptrace emu tid
       if tracee.options &&& 0x100000 != 0 then
         match (← emu.taskTable.get).find? tid with
         | some { status := none, .. } => kill emu tid ptrace.numbers.kill
         | _ => pure ()
       else if (table.stops.get? tid).any (·.traced) then release ptrace emu tid
+  for tid in gone do disarmStep ptrace emu tid
   ptrace.table.modify fun table =>
     { table with
       tracees := table.tracees.filter fun tid _ => !gone.contains tid
@@ -640,9 +649,7 @@ private def armStep (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Unit := do
         ptrace.table.modify fun table => { table with stepping := table.stepping.insert tid (2 ^ width) }
       else
         ptrace.table.modify fun table => { table with stepping := table.stepping.erase tid }
-        if let some hook := (← ptrace.stepHooks.get).get? tid then
-          ptrace.stepHooks.modify (·.erase tid)
-          removeHook current hook
+        disarmStep ptrace current tid
         stopThread ptrace current tid { status := stoppedStatus ptrace.numbers.trap, traced := true, signal := ptrace.numbers.trap, code := 2 }
     | none => pure ()
   ptrace.stepHooks.modify (·.insert tid hook)
@@ -666,6 +673,8 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
     let some tracee := mine | return ← fail esrch
     if !stoppedHere then return ← fail esrch
     let stop := table.stops.get? pid
+    -- A step that a stop of something else came before is over: it steps again only if it is told to now.
+    disarmStep ptrace emu pid
     ptrace.table.modify fun table => { table with tracees := table.tracees.insert pid { tracee with syscalls } }
     -- A stop of an event has no signal to go on with, as Linux has it.
     let event := stop.any (·.status >>> 16 % 256 != 0)
@@ -690,6 +699,8 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
     release ptrace emu pid
     if step then armStep ptrace emu pid
     ok
+  -- All but these are of a tracee that is stopped for its tracer, as Linux has it: of one that runs, there is none.
+  if ![0, 16, 0x4206, 0x4207, 8].contains request && mine.isSome && !stoppedHere then return ← fail esrch
   let withRegisters (action : List Slot → IO SyscallAction) : IO SyscallAction := do
     if mine.isNone then return ← fail esrch
     match slotsOf ptrace.architecture with
@@ -725,9 +736,9 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
     -- PTRACE_DETACH, with a signal to go on with.
     if mine.isNone then return ← fail esrch
     ptrace.table.modify fun table => { table with tracees := table.tracees.erase pid, pending := table.pending.erase pid }
-    if stoppedHere then
-      if data != 0 then ptrace.signals.send emu (some pid) (← groupOf emu pid) ⟨data, 0, .sent group 0 0⟩
-      release ptrace emu pid
+    disarmStep ptrace emu pid
+    if data != 0 then ptrace.signals.send emu (some pid) (← groupOf emu pid) ⟨data, 0, .sent group 0 0⟩
+    release ptrace emu pid
     ok
   | 7 => goOn false false
   | 24 => goOn true false
@@ -735,6 +746,7 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
   | 8 =>
     -- PTRACE_KILL
     if mine.isNone then return ← fail esrch
+    disarmStep ptrace emu pid
     kill emu pid numbers.kill
     ok
   | 1 | 2 =>

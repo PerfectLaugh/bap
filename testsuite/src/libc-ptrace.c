@@ -142,6 +142,32 @@ int main(void) {
   waitpid(tracer, &status, 0);
   say("reaped", 2, waitpid(target, &status, 0) == target, WIFEXITED(status) ? WEXITSTATUS(status) : 0, 0);
 
+  // A tracee let step and detached before or after it stopped goes on and ends, and one that runs can't be read.
+  int held[2];
+  pipe(held);
+  child = fork();
+  if (child == 0) {
+    char go;
+    trace(PTRACE_TRACEME, 0, 0, 0);
+    raise(SIGSTOP);
+    read(held[0], &go, 1);
+    _exit(3);
+  }
+  waitpid(child, &status, 0);
+  trace(PTRACE_CONT, child, 0, 0);
+  long peeked = 0;
+  say("running", 1, trace(PTRACE_PEEKDATA, child, (long)&shared, (long)&peeked) == -ESRCH, 0, 0);
+  kill(child, SIGSTOP);
+  waitpid(child, &status, 0);
+  // What it waits for is there before it steps, which may be into the call that reads it.
+  write(held[1], "g", 1);
+  trace(PTRACE_SINGLESTEP, child, 0, 0);
+  if (trace(PTRACE_DETACH, child, 0, 0) != 0) {
+    waitpid(child, &status, 0);
+    trace(PTRACE_DETACH, child, 0, 0);
+  }
+  say("step detached", 2, waitpid(child, &status, 0) == child, WIFEXITED(status) ? WEXITSTATUS(status) : 0, 0);
+
   // What isn't there.
   say("no child", 1, waitpid(12345, &status, 0) == -1 && errno == ECHILD, 0, 0);
   say("not traced", 1, trace(PTRACE_CONT, 12345, 0, 0), 0, 0);
