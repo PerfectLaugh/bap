@@ -7,6 +7,8 @@ errno -77
 of an argument -55 1
 trace without a tracer 1
 trap 1 1 1 66
+trap with SIGSYS blocked 1
+trap with SIGSYS ignored 1
 what it makes has it 77
 kill thread 1
 kill process 1

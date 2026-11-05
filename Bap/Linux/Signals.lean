@@ -863,6 +863,15 @@ def send (signals : Signals) (emu : Emu) (tid : Option Nat) (group : Nat) (info 
   | none => sendToGroup signals emu group info
   (← signals.sent.get) emu
 
+/-- Sends a signal to a thread that it can't keep from itself, as Linux has `force_sig_info_to_task` do for `SECCOMP_RET_TRAP`: if the
+thread blocks it or its process ignores it, the thread no longer blocks it and the process has the default action for it. -/
+def force (signals : Signals) (emu : Emu) (tid group : Nat) (info : SignalInfo) : IO Unit := do
+  let blocked := bitOf info.signal &&& (← threadOf signals tid).mask != 0
+  if blocked || (← actionOf signals group info.signal).handler == 1 then
+    signals.table.modify fun table => { table with actions := table.actions.erase (group, info.signal) }
+    if blocked then modifyThread signals tid fun state => { state with mask := state.mask ^^^ bitOf info.signal }
+  signals.send emu (some tid) group info
+
 /-- A timer of `timer_create` of a process expired `more` times again: if its signal is still pending, for the process or a thread of
 it, that signal says so, as Linux has one signal of a timer pending at most. Whether it was pending. -/
 def addOverrun (signals : Signals) (emu : Emu) (group signal id more : Nat) : IO Bool := do

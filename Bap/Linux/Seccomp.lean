@@ -312,7 +312,7 @@ def screen (seccomp : Seccomp) (emu : Emu) (tid number : Nat) (args : List Nat) 
     | 0x00050000 => return some (← syscallReturn emu (if value == 0 then .ok 0 else .error (min value 4095)))
     | 0x00030000 =>
       let group := ((← emu.taskTable.get).find? tid).map (·.group) |>.getD tid
-      seccomp.signals.send emu (some tid) group ⟨seccomp.sigsys, 1, .seccomp (← emu.nextPc.get) number (auditArch architecture) value⟩
+      seccomp.signals.force emu tid group ⟨seccomp.sigsys, 1, .seccomp (← emu.nextPc.get) number (auditArch architecture) value⟩
       return some (← Ptrace.unmade emu)
     | 0x7ff00000 =>
       -- Once its tracer let it go on, the call goes through.

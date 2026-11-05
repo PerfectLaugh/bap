@@ -123,7 +123,25 @@ int main(void) {
     say("trace without a tracer", 1, call(SYS_gettid, 0, 0, 0) == -ENOSYS, 0, 0, 0);
     call(SYS_getuid, 0, 0, 0);
     say("trap", 4, trapped[0], trapped[1], trapped[2], trapped[3]);
+    // SIGSYS of a trap can't be blocked or ignored: the process ends by it.
     pid_t made = fork();
+    if (made == 0) {
+      sigset_t set;
+      sigemptyset(&set);
+      sigaddset(&set, SIGSYS);
+      sigprocmask(SIG_BLOCK, &set, 0);
+      call(SYS_getuid, 0, 0, 0);
+      _exit(0);
+    }
+    say("trap with SIGSYS blocked", 1, endOf(made) == -SIGSYS, 0, 0, 0);
+    made = fork();
+    if (made == 0) {
+      signal(SIGSYS, SIG_IGN);
+      call(SYS_getuid, 0, 0, 0);
+      _exit(0);
+    }
+    say("trap with SIGSYS ignored", 1, endOf(made) == -SIGSYS, 0, 0, 0);
+    made = fork();
     if (made == 0) _exit((int)-call(SYS_getppid, 0, 0, 0));
     say("what it makes has it", 1, endOf(made), 0, 0, 0);
     made = fork();
