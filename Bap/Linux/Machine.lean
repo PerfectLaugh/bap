@@ -2100,9 +2100,9 @@ private def libraryModelId : String := "bap.libraries"
 private def traceModelId : String := "bap.trace"
 
 /-- The models that every machine has, with the versions of what they keep: of ptrace, 2 has the stops that tracees have yet to make
-and those that stopped for their end. -/
+and those that stopped for their end, and 3 the exits that tracers that aren't parents have yet to hear of. -/
 private def builtinModels : List (String × Nat) :=
-  [(Signals.modelId, 1), (Ptrace.modelId, 2), (Seccomp.modelId, 1), (Timers.modelId, 1), (Ring.modelId, 1), (heapModelId, 1), (libraryModelId, 1),
+  [(Signals.modelId, 1), (Ptrace.modelId, 3), (Seccomp.modelId, 1), (Timers.modelId, 1), (Ring.modelId, 1), (heapModelId, 1), (libraryModelId, 1),
     (traceModelId, 4)]
 
 private def builtinVersion (id : String) : Nat := (builtinModels.lookup id).getD 1
@@ -2193,7 +2193,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
     Notify.forget machine.notifier
     released machine
     wakePipeReaders emu
-    ptrace.processExited emu group)
+    ptrace.processExited emu group status)
   -- So is what was allocated in it, as what has an address has to go on having it.
   machine.models.modify (· ++ [{
     id := heapModelId, version := builtinVersion heapModelId,

@@ -64,8 +64,9 @@ structure PtraceTable where
   injected : Std.HashMap Nat Nat := {}
   /-- What `PTRACE_GETEVENTMSG` says of a thread. -/
   messages : Std.HashMap Nat Nat := {}
-  /-- Exits of tracees that a tracer that isn't their parent was told of, by tracer and tracee. -/
-  toldExits : List (Nat × Nat) := []
+  /-- Exits of tracees that a tracer that isn't their parent has yet to be told of, oldest first: by tracer, tracee and how it ended.
+  They are kept here, as the tracee is gone from what is traced when its process is. -/
+  untold : List (Nat × Nat × Nat) := []
   /-- Where a thread that steps went on from, which it stops after running. -/
   stepping : Std.HashMap Nat Nat := {}
   /-- The stops that a thread has yet to make, one each time that its tracer lets it go on: `PTRACE_EVENT_VFORK_DONE` after
@@ -296,10 +297,24 @@ def vforkReleased (ptrace : Ptrace) (emu : Emu) (tid child : Nat) : IO Unit := d
     let signal := numbers.trap ||| (if tracee.options &&& 1 != 0 then 0x80 else 0)
     stopThread ptrace emu tid { status := stoppedStatus signal, traced := true, signal := numbers.trap }
 
-/-- A process is over: what it traced goes on, or is killed if it asked for that, and what waits asks again. -/
-def processExited (ptrace : Ptrace) (emu : Emu) (group : Nat) : IO Unit := do
+/-- A process is over, which ended with `status`: what it traced goes on, or is killed if it asked for that; a tracer of its that isn't
+its parent hears of it, by `SIGCHLD` and a wait; and what waits asks again. -/
+def processExited (ptrace : Ptrace) (emu : Emu) (group status : Nat) : IO Unit := do
   let table ← ptrace.table.get
-  let gone := ((← emu.taskTable.get).tasks.filter (·.group == group)).map (·.tid)
+  let tasks ← emu.taskTable.get
+  let gone := (tasks.tasks.filter (·.group == group)).map (·.tid)
+  -- Its tracers that live on, other than its parent, which hears of it as a parent does.
+  let parent := ((tasks.find? group).map (·.parent)).getD 0
+  let alive (process : Nat) : Bool := (tasks.find? process).any (·.status.isNone)
+  let told := gone.filterMap fun tid => match table.tracees.get? tid with
+    | some tracee => if tracee.tracer != group && tracee.tracer != parent && alive tracee.tracer then some (tracee.tracer, tid, status) else none
+    | none => none
+  unless told.isEmpty do
+    ptrace.table.modify fun table => { table with untold := table.untold ++ told }
+    let signaled := status % 128 != 0
+    for tracer in (told.map (·.1)).eraseDups do
+      ptrace.signals.send emu none tracer
+        ⟨ptrace.numbers.chld, if signaled then 2 else 1, .child group 0 (if signaled then status % 128 else status / 256 % 256)⟩
   for (tid, tracee) in table.tracees.toList do
     if tracee.tracer == group then
       ptrace.table.modify fun table => { table with tracees := table.tracees.erase tid }
@@ -314,7 +329,9 @@ def processExited (ptrace : Ptrace) (emu : Emu) (group : Nat) : IO Unit := do
       stops := table.stops.filter fun tid _ => !gone.contains tid
       injected := table.injected.filter fun tid _ => !gone.contains tid
       pending := table.pending.filter fun tid _ => !gone.contains tid
-      exiting := table.exiting.filter (!gone.contains ·) }
+      exiting := table.exiting.filter (!gone.contains ·)
+      -- What it was to be told is no one's to hear now.
+      untold := table.untold.filter (·.1 != group) }
   wakeWaits ptrace
 
 /-! ### Waiting -/
@@ -343,7 +360,8 @@ private def find (ptrace : Ptrace) (emu : Emu) (group : Nat) (target : Option Na
     | some wantedTarget => if wantedTarget ≥ 2 ^ 32 then pure ((← pgidOf tid) == wantedTarget - 2 ^ 32) else pure (tid == wantedTarget)
   let children ← (tasks.tasks.filter fun task => task.tid == task.group && task.parent == group).filterM fun task => wanted task.tid
   let tracees ← (table.tracees.toList.filter fun (_, tracee) => tracee.tracer == group).filterM fun (tid, _) => wanted tid
-  if children.isEmpty && tracees.isEmpty then return none
+  let untold ← (table.untold.filter (·.1 == group)).filterM fun (_, tid, _) => wanted tid
+  if children.isEmpty && tracees.isEmpty && untold.isEmpty then return none
   -- A tracee that stopped, to its tracer.
   for (tid, _) in tracees do
     if let some stop := table.stops.get? tid then
@@ -377,12 +395,9 @@ private def find (ptrace : Ptrace) (emu : Emu) (group : Nat) (target : Option Na
       return some (some (ofStatus child status))
     | _ => pure ()
     -- A tracee that isn't a child is told of to its tracer once.
-    for (tid, _) in tracees do
-      if let some task := tasks.find? tid then
-        if let some status := task.status then
-          if task.parent != group && !table.toldExits.contains (group, tid) then
-            unless keep do ptrace.table.modify fun table => { table with toldExits := (group, tid) :: table.toldExits }
-            return some (some (ofStatus tid status))
+    if let some (_, tid, status) := untold.head? then
+      unless keep do ptrace.table.modify fun table => { table with untold := table.untold.erase (group, tid, status) }
+      return some (some (ofStatus tid status))
   pure (some none)
 
 private def numberBytes (big : Bool) (size value : Nat) : ByteArray :=
@@ -989,7 +1004,7 @@ def save (ptrace : Ptrace) : IO ByteArray := do
   let out := putList putNat out table.continued
   let out := putSorted putPair out table.injected.toList
   let out := putSorted putPair out table.messages.toList
-  let out := putList putPair out table.toldExits
+  let out := putList (fun out (tracer, tid, status) => putNat (putPair out (tracer, tid)) status) out table.untold
   let out := putSorted (fun out (tid, stops) => putList (fun out stop => putStop out (tid, stop)) (putNat out tid) stops) out
     table.pending.toList
   pure (putList putNat out table.exiting)
@@ -1003,7 +1018,10 @@ def load (ptrace : Ptrace) (data : ByteArray) : IO Unit := do
     let (continued, at_) ← getList getNat data at_
     let (injected, at_) ← getList getPair data at_
     let (messages, at_) ← getList getPair data at_
-    let (toldExits, at_) ← getList getPair data at_
+    let (untold, at_) ← getList (fun data at_ => do
+      let ((tracer, tid), at_) ← getPair data at_
+      let (status, at_) ← getNat data at_
+      .ok ((tracer, tid, status), at_)) data at_
     let (pending, at_) ← getList (fun data at_ => do
       let (tid, at_) ← getNat data at_
       let (stops, at_) ← getList getStop data at_
@@ -1011,7 +1029,7 @@ def load (ptrace : Ptrace) (data : ByteArray) : IO Unit := do
     let (exiting, at_) ← getList getNat data at_
     expectEnd data at_
     .ok { waiting := Std.HashMap.ofList waiting, tracees := Std.HashMap.ofList tracees, stops := Std.HashMap.ofList stops, continued, injected := Std.HashMap.ofList injected
-          messages := Std.HashMap.ofList messages, toldExits, pending := Std.HashMap.ofList pending, exiting }
+          messages := Std.HashMap.ofList messages, untold, pending := Std.HashMap.ofList pending, exiting }
   ptrace.table.set (← IO.ofExcept decoded)
   -- What waits may have what it waits for already.
   ptrace.changed.set true

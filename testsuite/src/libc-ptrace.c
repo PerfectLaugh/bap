@@ -116,6 +116,32 @@ int main(void) {
   kill(child, SIGKILL);
   say("gone", 2, waitpid(child, &status, 0) == child, WIFSIGNALED(status), 0);
 
+  // A tracer that isn't the parent hears of its tracee's exit, as a parent would, and the parent reaps it after. The tracee waits on a
+  // pipe until it is traced, as nothing else says when it may end.
+  int gate[2];
+  pipe(gate);
+  pid_t target = fork();
+  if (target == 0) {
+    char go;
+    close(gate[1]);
+    read(gate[0], &go, 1);
+    _exit(7);
+  }
+  pid_t tracer = fork();
+  if (tracer == 0) {
+    long attached = trace(PTRACE_ATTACH, target, 0, 0);
+    int seen = waitpid(target, &status, 0) == target && WIFSTOPPED(status);
+    write(gate[1], "g", 1);
+    trace(PTRACE_CONT, target, 0, 0);
+    int ended = waitpid(target, &status, 0) == target && WIFEXITED(status);
+    say("sibling", 3, attached == 0 && seen, ended, ended ? WEXITSTATUS(status) : 0);
+    _exit(0);
+  }
+  close(gate[0]);
+  close(gate[1]);
+  waitpid(tracer, &status, 0);
+  say("reaped", 2, waitpid(target, &status, 0) == target, WIFEXITED(status) ? WEXITSTATUS(status) : 0, 0);
+
   // What isn't there.
   say("no child", 1, waitpid(12345, &status, 0) == -1 && errno == ECHILD, 0, 0);
   say("not traced", 1, trace(PTRACE_CONT, 12345, 0, 0), 0, 0);
