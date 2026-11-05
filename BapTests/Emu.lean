@@ -476,9 +476,11 @@ private def testProcesses : IO Unit := do
     assertBits s!"Emu clone returns the thread, quantum {quantum}" (BitVec.ofNat 64 2) (.ok (← Bap.Emu.reg pthreads (reg "X18")))
     assertBits s!"Emu join sees what the thread wrote, quantum {quantum}" (BitVec.ofNat 64 77) (.ok (← Bap.Emu.reg pthreads (reg "X19")))
     assertBits s!"Emu the exit of a thread clears its id, quantum {quantum}" (BitVec.ofNat 64 0) (.ok (← Bap.Emu.reg pthreads (reg "X20")))
-  -- A word that isn't what the caller thinks is EAGAIN, and a wait that nothing can end is a deadlock unless it has a timeout.
+  -- A word that isn't what the caller thinks is EAGAIN, and a wait that nothing can end is a deadlock unless it has a timeout, which is
+  -- a timespec of zeros that far past the word, or none.
   let futexing (timeout : Nat) (expected : Nat) : IO ByteArray := asm [
-    "lui a0, 1", "addi a1, zero, 128", s!"addi a2, zero, {expected}", s!"addi a3, zero, {timeout}", "addi a7, zero, 98", "ecall",
+    "lui a0, 1", "addi a1, zero, 128", s!"addi a2, zero, {expected}",
+    if timeout == 0 then "addi a3, zero, 0" else s!"addi a3, a0, {timeout}", "addi a7, zero, 98", "ecall",
     "addi s1, a0, 0", "addi a0, zero, 0", "addi a7, zero, 94", "ecall"]
   let oneFutex (timeout expected : Nat) : IO (Bap.Emu.Emu × Bap.Tasks.ScheduleOutcome) := do
     let emu ← clean (← Tuned.riscv64 (← futexing timeout expected) 0 0)

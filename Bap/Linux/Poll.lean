@@ -168,7 +168,6 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     match span with
     | none => pure none
     | some span => pure (some (← timers.deadlineOf tid (pure (now + span))))
-  let span (address field : Nat) : IO Nat := do pure ((← number address field) * 1000000000 + (← number (address + field) field))
   -- What has nothing ready waits: until something changes, its deadline, or a `timerfd` that it watches expires.
   let wait (due : Option Nat) (files : List Nat) : IO (Option SyscallAction) := do
     let deadlines := due.toList ++ expiries (← poller.kernel.get) now files
@@ -297,21 +296,29 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
   -- A timeout in milliseconds, of which less than 0 is none.
   let millis (value : Nat) : Option Nat :=
     if value % 2 ^ 32 ≥ 2 ^ 31 then none else some (value % 2 ^ 32 * 1000000)
-  let timespec (address field : Nat) : IO (Option Nat) := do
-    if address == 0 then pure none else pure (some (← span address field))
+  -- A timeout of a `timespec`, of which none is none, or none at all of one that Linux doesn't take, which fails with `EINVAL`.
+  let timespec (address field : Nat) : IO (Option (Option Nat)) := do
+    if address == 0 then return some none
+    pure ((← readSpan emu address field).map some)
   try
     match call with
     | .poll => poll (arg 0) (arg 1) (millis (arg 2))
     | .ppoll | .ppoll64 =>
+      let some timeout ← timespec (arg 2) (if call == .ppoll64 then 8 else word) | fail einval
       if ← mask (arg 3) (arg 4) then return ← fail eintr
-      poll (arg 0) (arg 1) (← timespec (arg 2) (if call == .ppoll64 then 8 else word))
+      poll (arg 0) (arg 1) timeout
     | .select =>
-      let timeout ← if arg 4 == 0 then pure none else pure (some ((← number (arg 4) word) * 1000000000 + (← number (arg 4 + word) word) * 1000))
+      -- Microseconds of a second or more are seconds, and of a negative time, `EINVAL`.
+      let timeout ← if arg 4 == 0 then pure none else do
+        let (seconds, micros) ← readTime emu (arg 4) word
+        let some span := timeSpan (seconds + micros.tdiv 1000000, micros.tmod 1000000) 1000 | return ← fail einval
+        pure (some span)
       select (arg 0) [arg 1, arg 2, arg 3] timeout
     | .pselect6 | .pselect664 =>
+      let some timeout ← timespec (arg 4) (if call == .pselect664 then 8 else word) | fail einval
       if arg 5 != 0 then
         if ← mask (← number (arg 5) word) (← number (arg 5 + word) word) then return ← fail eintr
-      select (arg 0) [arg 1, arg 2, arg 3] (← timespec (arg 4) (if call == .pselect664 then 8 else word))
+      select (arg 0) [arg 1, arg 2, arg 3] timeout
     | .epollCreate =>
       if arg 0 == 0 || arg 0 ≥ 2 ^ 31 then return ← fail einval
       let (kernel, fd) := (← poller.kernel.get).addObject group (.epoll []) 0
@@ -352,8 +359,9 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       if ← mask (arg 4) (arg 5) then return ← fail eintr
       epollWait (arg 0) (arg 1) (arg 2) (millis (arg 3))
     | .epollPwait2 =>
+      let some timeout ← timespec (arg 3) 8 | fail einval
       if ← mask (arg 4) (arg 5) then return ← fail eintr
-      epollWait (arg 0) (arg 1) (arg 2) (← timespec (arg 3) 8)
+      epollWait (arg 0) (arg 1) (arg 2) timeout
     | .eventfd | .eventfd2 =>
       let given := if call == .eventfd then 0 else arg 1
       let semaphore := given &&& 1 != 0
@@ -370,18 +378,20 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       succeed fd
     | .timerfdSettime | .timerfdSettime64 | .timerfdGettime | .timerfdGettime64 =>
       let field := if call == .timerfdSettime64 || call == .timerfdGettime64 then 8 else word
+      let setting := call == .timerfdSettime || call == .timerfdSettime64
+      -- What it sets, which fails with `EINVAL` before its descriptor is looked at, of a time that Linux doesn't take.
+      let (some every, some value) ← if setting then pure (← readSpan emu (arg 2) field, ← readSpan emu (arg 2 + 2 * field) field)
+        else pure (some 0, some 0) | fail einval
       let kernel ← poller.kernel.get
       let .ok (number_, _, inode) := kernel.objectOf group (arg 0) | return ← fail ebadf
       let .timerfd expiry interval := inode.content | return ← fail einval
       let spanBytes (nanoseconds : Nat) : ByteArray :=
         numberBytes big field (nanoseconds / 1000000000) ++ numberBytes big field (nanoseconds % 1000000000)
       let current := spanBytes interval ++ spanBytes ((expiry.map fun at_ => at_ - min at_ now).getD 0)
-      if call == .timerfdGettime || call == .timerfdGettime64 then
+      if !setting then
         write emu (arg 1) current
         return ← succeed
       if arg 3 != 0 then write emu (arg 3) current
-      let value ← span (arg 2 + 2 * field) field
-      let every ← span (arg 2) field
       let expiry := if value == 0 then none else some (if arg 1 &&& 1 != 0 then value else now + value)
       poller.kernel.set (kernel.setContent number_ (.timerfd expiry every))
       poller.wake emu

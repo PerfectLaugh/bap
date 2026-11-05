@@ -37,7 +37,7 @@ static long call(long number, long a, long b, long c, long d) {
 }
 
 static void sleepMs(long ms) {
-  struct timespec span = { 0, ms * 1000000 };
+  struct timespec span = { ms / 1000, ms % 1000 * 1000000 };
   nanosleep(&span, 0);
 }
 

@@ -103,19 +103,25 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       | .error errno => pure (.error errno)
   let ofFd (fd : Nat) : Result Nat := (kernel.openFileOf group fd).map (·.2.inode)
   let credentials := (kernel.process group).credentials
-  -- Times of `timespec`, or of `timeval` of `scale` 1000, two of them, of which `UTIME_NOW` and `UTIME_OMIT` are now and none.
-  let times (address field scale : Nat) : IO (Option Nat × Option Nat) := do
-    if address == 0 then return (some now, some now)
-    let one (at_ : Nat) : IO (Option Nat) := do
-      let seconds ← do pure (numberOf big (← read emu at_ field))
-      let fraction ← do pure (numberOf big (← read emu (at_ + field) field))
-      pure (if scale == 1 && fraction == 0x3fffffff then some now else if scale == 1 && fraction == 0x3ffffffe then none
-        else some (seconds * 1000000000 + fraction * scale))
-    pure (← one address, ← one (address + 2 * field))
-  let setTimes (number : Result Nat) (given : Option Nat × Option Nat) : IO (Option SyscallAction) := do
-    match number with
-    | .error errno => fail errno
-    | .ok number =>
+  -- Times of `timespec`, or of `timeval` of `scale` 1000, two of them, of which `UTIME_NOW` and `UTIME_OMIT` are now and none, or
+  -- `EINVAL` of a fraction that is negative or of a second or more.
+  let times (address field scale : Nat) : IO (Result (Option Nat × Option Nat)) := do
+    if address == 0 then return .ok (some now, some now)
+    let one (at_ : Nat) : IO (Result (Option Nat)) := do
+      let seconds := numberOf big (← read emu at_ field)
+      let (_, fraction) ← readTime emu at_ field
+      if scale == 1 && fraction == 0x3fffffff then return .ok (some now)
+      if scale == 1 && fraction == 0x3ffffffe then return .ok none
+      if fraction < 0 || fraction * scale ≥ 1000000000 then return .error Errno.einval
+      pure (.ok (some (seconds * 1000000000 + fraction.toNat * scale)))
+    let first ← one address
+    let second ← one (address + 2 * field)
+    pure (do pure (← first, ← second))
+  -- Of the file, or why there is none, and then of the times.
+  let setTimes (number : Result Nat) (given : Result (Option Nat × Option Nat)) : IO (Option SyscallAction) := do
+    match number, given with
+    | .error errno, _ | _, .error errno => fail errno
+    | .ok number, .ok given =>
       poller.kernel.set (alter kernel number fun details =>
         { details with accessed := given.1.getD details.accessed, modified := given.2.getD details.modified, changed := now })
       succeed
@@ -249,12 +255,16 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       let field := if call == .utimensat64 then 8 else word
       let number ← if arg 1 == 0 then pure (ofFd (arg 0)) else inodeAt (arg 0) (arg 1) (arg 3 &&& 0x100 == 0) (arg 3 &&& 0x1000 != 0)
       setTimes number (← times (arg 2) field 1)
-    | .utimes => setTimes (← inodeAt here (arg 0) true false) (← times (arg 1) word 1000)
-    | .futimesat => setTimes (← inodeAt (arg 0) (arg 1) true false) (← times (arg 2) word 1000)
+    -- Of a `timeval`, `EINVAL` is before the file is looked for.
+    | .utimes | .futimesat =>
+      let (directory, path, address) := if call == .utimes then (here, arg 0, arg 1) else (arg 0, arg 1, arg 2)
+      let given ← times address word 1000
+      if let .error errno := given then return ← fail errno
+      setTimes (← inodeAt directory path true false) given
     | .utime =>
       let given ← if arg 1 == 0 then pure (some now, some now) else do
         pure (some ((numberOf big (← read emu (arg 1) word)) * 1000000000), some ((numberOf big (← read emu (arg 1 + word) word)) * 1000000000))
-      setTimes (← inodeAt here (arg 0) true false) given
+      setTimes (← inodeAt here (arg 0) true false) (.ok given)
     | .chown => chown (← inodeAt here (arg 0) true false) (arg 1) (arg 2)
     | .lchown => chown (← inodeAt here (arg 0) false false) (arg 1) (arg 2)
     | .fchown => chown (ofFd (arg 0)) (arg 1) (arg 2)

@@ -125,6 +125,31 @@ private def readWord32 (emu : Emu) (address : Nat) : IO Nat := do
   let bytes := if emu.config.endian == .big then bytes.toList.reverse else bytes.toList
   pure (bytes.foldr (fun byte value => value * 256 + byte.toNat) 0)
 
+/-- A `timespec` or a `timeval` at `address`, of fields of `size` bytes: its seconds and its fraction of a second, signed, as Linux
+reads them. Of fields of 64 bits of a 32-bit machine, the fraction is the lower half of its field, unsigned, as a 64-bit kernel has
+it. -/
+def readTime (emu : Emu) (address size : Nat) : IO (Int × Int) := do
+  let bytes ← read emu address (2 * size)
+  let number (at_ : Nat) : Nat :=
+    let field := (bytes.extract at_ (at_ + size)).toList
+    (if emu.config.endian == .big then field else field.reverse).foldl (fun value byte => value * 256 + byte.toNat) 0
+  let signed (value bits : Nat) : Int :=
+    let value := value % 2 ^ bits
+    if value ≥ 2 ^ (bits - 1) then (value : Int) - 2 ^ bits else value
+  let width ← wordWidth emu
+  pure (signed (number 0) (8 * size), if 8 * size > width then number size % 2 ^ width else signed (number size) (8 * size))
+
+/-- A time of seconds and of a fraction of which a second has `1000000000 / scale`, in nanoseconds, if Linux takes it: not of
+negative seconds or fraction, or of a fraction of a second or more, which a call fails with `EINVAL`. -/
+def timeSpan (time : Int × Int) (scale : Nat := 1) : Option Nat :=
+  let (seconds, fraction) := time
+  if seconds < 0 || fraction < 0 || fraction * scale ≥ 1000000000 then none
+  else some (seconds.toNat * 1000000000 + fraction.toNat * scale)
+
+/-- A `timespec`, or a `timeval` of `scale` 1000, at `address`, of fields of `size` bytes, in nanoseconds, if Linux takes it. -/
+def readSpan (emu : Emu) (address size : Nat) (scale : Nat := 1) : IO (Option Nat) := do
+  pure (timeSpan (← readTime emu address size) scale)
+
 /-- The threads go on, each where it stopped. -/
 private def wakeThreads (emu : Emu) (threads : List ThreadId) : IO Unit :=
   threads.forM (wakeThread emu)
@@ -414,7 +439,14 @@ private def serveFutex (emu : Emu) (address operation value timeout target compa
   -- Without FUTEX_PRIVATE_FLAG and FUTEX_CLOCK_REALTIME.
   let command := operation &&& 0x7f
   let all := 2 ^ 32 - 1
+  let field := if wideTime then 8 else 4
   let wait (bitset : Nat) : IO SyscallAction := do
+    -- A timeout that Linux doesn't take fails before anything else.
+    let span ← if timeout == 0 then pure none else
+      match ← (readSpan emu timeout field).toBaseIO with
+      | .error _ => return ← syscallReturn emu (.error efault)
+      | .ok none => return ← syscallReturn emu (.error einval)
+      | .ok span => pure span
     if bitset == 0 then return ← syscallReturn emu (.error einval)
     match ← (readWord32 emu address).toBaseIO with
     | .error _ => syscallReturn emu (.error efault)
@@ -423,20 +455,11 @@ private def serveFutex (emu : Emu) (address operation value timeout target compa
       else
         let (space, word) ← keyOf address
         -- A timeout is a span of `FUTEX_WAIT` and a time of `FUTEX_WAIT_BITSET`, by the clock of the machine if it has one.
-        let deadline ← if timeout == 0 then pure none else
-          match ← emu.now.get with
-          | none => pure none
-          | some now =>
-            let field := if wideTime then 8 else 4
-            let number (at_ : Nat) : IO Nat := do
-              let bytes ← read emu at_ field
-              let ordered := if emu.config.endian == .big then bytes.toList else bytes.toList.reverse
-              pure (ordered.foldl (fun value byte => value * 256 + byte.toNat) 0)
-            match ← (do pure ((← number timeout) * 1000000000 + (← number (timeout + field)))).toBaseIO with
-            | .error _ => pure none
-            | .ok span =>
-              let start ← now
-              pure (some (if command == 9 then span else start + span))
+        let deadline ← match span, ← emu.now.get with
+          | some span, some now => do
+            let start ← now
+            pure (some (if command == 9 then span else start + span))
+          | _, _ => pure none
         let waiter : FutexWaiter := { thread := ← thread emu, space, address := word, bitset, timed := timeout != 0, deadline }
         emu.taskTable.modify (·.futexWait waiter)
         emu.stopped.set true

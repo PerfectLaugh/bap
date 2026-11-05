@@ -91,11 +91,11 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
   let setPerm (address : Nat) (perm : IpcPerm) : IO IpcPerm := do
     let mode ← number (address + 20) (if wide then 4 else 2)
     pure { perm with uid := ← number (address + 4) 4, gid := ← number (address + 8) 4, mode := mode &&& 0o777 }
-  let timeout (address : Nat) (size : Nat := word) : IO (Option Nat) := do
-    if address == 0 then return none
-    let seconds ← number address size
-    let nanoseconds ← number (address + size) size
-    pure (some (← poller.timers.deadlineOf tid (pure (now + seconds * 1000000000 + nanoseconds))))
+  -- A timeout of a `timespec`, of which none is none, or none at all of one that Linux doesn't take.
+  let timeout (address : Nat) (size : Nat := word) : IO (Option (Option Nat)) := do
+    if address == 0 then return some none
+    let some span ← readSpan emu address size | return none
+    pure (some (some (← poller.timers.deadlineOf tid (pure (now + span)))))
   let wait (due : Option Nat) : IO (Option SyscallAction) := do
     pure (some (← poller.timers.waitUntil emu readySpace 0 due false))
   -- What isn't there any more, to a call that waited for it, was taken away: `EIDRM`.
@@ -178,11 +178,13 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
                                              ctime := seconds }]
                       made := (ipc.made.1, id + 1, ipc.made.2.2) }
       succeed id
-  let semop (id address count : Nat) (due : Option Nat) : IO (Option SyscallAction) := do
-    let some set := ipc.sets.find? (·.id == id) | gone
+  -- Of a timeout that Linux doesn't take, `EINVAL`, once the operations are read and before the set is looked for.
+  let semop (id address count : Nat) (due : Option (Option Nat)) : IO (Option SyscallAction) := do
     if count == 0 then return ← fail Errno.einval
     if count > 500 then return ← fail 7
     let bytes ← read emu address (6 * count)
+    let some due := due | fail Errno.einval
+    let some set := ipc.sets.find? (·.id == id) | gone
     let operations := (List.range count).map fun index =>
       let at_ := 6 * index
       let signed (value : Nat) : Int := if value ≥ 2 ^ 15 then (value : Int) - 2 ^ 16 else value
@@ -355,7 +357,7 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
     | .shmdt => shmdt (arg 0)
     | .shmctl => shmctl (arg 0) (arg 1) (arg 2)
     | .semget => semget (arg 0) (arg 1) (arg 2)
-    | .semop => semop (arg 0) (arg 1) (arg 2) none
+    | .semop => semop (arg 0) (arg 1) (arg 2) (some none)
     | .semtimedop => semop (arg 0) (arg 1) (arg 2) (← timeout (arg 3))
     | .semtimedop64 => semop (arg 0) (arg 1) (arg 2) (← timeout (arg 3) 8)
     | .semctl => semctl (arg 0) (arg 1) (arg 2) (arg 3)
@@ -368,7 +370,7 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
       -- version 0, which are in memory, and `shmat`, which gives where it attached in memory.
       let (first, second, third, pointer, fifth) := (arg 1, arg 2, arg 3, arg 4, arg 5)
       match arg 0 % 2 ^ 16 with
-      | 1 => semop first pointer second none
+      | 1 => semop first pointer second (some none)
       | 2 => semget first second third
       | 3 => semctl first second third (← number pointer word)
       | 4 => semop first pointer second (← timeout fifth)

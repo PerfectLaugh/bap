@@ -459,11 +459,14 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
       let entry ← read emu (ring.sqes + 64 * (slot % ring.entries)) 64
       let item : Pending := if entry[0]! == 11 then { entry, count := numberOf big (entry.extract 8 16), start := ring.posted } else { entry }
       submitted := submitted ++ [item]
-    -- Of a timeout, its time, absolute with `IORING_TIMEOUT_ABS`.
+    -- Of a timeout, its time, absolute with `IORING_TIMEOUT_ABS`. One of negative seconds or nanoseconds, which Linux doesn't take,
+    -- is as an entry of no operation, which fails with `EINVAL`; nanoseconds of a second or more are seconds.
     submitted ← submitted.mapM fun item => do
       if item.entry[0]! != 11 then return item
       let address := numberOf big (item.entry.extract 16 24)
-      let span := (← number address 8) * 1000000000 + (← number (address + 8) 8)
+      let (seconds, nanoseconds) ← readTime emu address 8
+      if seconds < 0 || nanoseconds < 0 then return { item with entry := item.entry.set! 0 255 }
+      let span := seconds.toNat * 1000000000 + nanoseconds.toNat
       let absolute := numberOf big (item.entry.extract 28 32) &&& 1 != 0
       pure { item with deadline := some (if absolute then span else now + span) }
     ring := { ring with head := (ring.head + count) % 2 ^ 32 }

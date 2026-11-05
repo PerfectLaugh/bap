@@ -1,0 +1,62 @@
+nanosleep a second of nanoseconds -22
+nanosleep negative -22
+nanosleep negative nanoseconds -22
+nanosleep nothing 0
+clock_nanosleep a second of nanoseconds -22
+clock_nanosleep negative -22
+clock_nanosleep until negative -22
+clock_nanosleep until a second of nanoseconds -22
+clock_nanosleep nothing 0
+clock_nanosleep until the start 0
+clock_nanosleep no clock -22
+clock_nanosleep no clock negative -22
+clock_nanosleep thread clock -95
+clock_nanosleep coarse clock -95
+clock_nanosleep clock 10 -22
+clock_nanosleep thread clock negative -95
+clock_nanosleep process clock 0
+clock_nanosleep raw clock -95
+sigtimedwait a second of nanoseconds -22
+sigtimedwait nothing -11
+sigtimedwait pending negative -22
+sigtimedwait pending nothing 1
+timer_create 0
+timer_settime a second of nanoseconds -22
+timer_settime negative interval -22
+timer_settime no timer -22
+timer_settime nothing 0
+timerfd_settime a second of nanoseconds -22
+timerfd_settime negative interval -22
+timerfd_settime no descriptor -22
+timerfd_settime nothing 0
+setitimer a second of microseconds -22
+setitimer negative interval -22
+setitimer nothing 0
+ppoll a second of nanoseconds -22
+ppoll negative -22
+ppoll nothing 0
+pselect6 a second of nanoseconds -22
+pselect6 negative -22
+pselect6 nothing 0
+epoll_pwait2 a second of nanoseconds -22
+epoll_pwait2 nothing 0
+futex a second of nanoseconds -22
+futex other negative -22
+futex nothing -110
+semtimedop a second of nanoseconds -22
+semtimedop nothing 0
+semtimedop waits for nothing -11
+mq_timedreceive empty negative -22
+mq_timedreceive empty nothing -110
+mq_timedsend room negative -22
+mq_timedsend room nothing 0
+mq_timedsend full a second of nanoseconds -22
+mq_timedsend full nothing -110
+mq_timedreceive one negative -22
+utimensat a second of nanoseconds -22
+utimensat negative nanoseconds -22
+utimensat now 0
+utimensat nothing 0
+io_uring timeout negative -22
+io_uring timeout negative nanoseconds -22
+io_uring timeout nothing -62

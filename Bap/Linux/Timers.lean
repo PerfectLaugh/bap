@@ -261,8 +261,6 @@ def serve (timers : Timers) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
   let einval : Nat := 22
   let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (.returnValue (2 ^ 64 - errno)))
   let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (.returnValue value))
-  -- A `timespec` or a `timeval`, of fields of `field` bytes, in nanoseconds, of which the second field has `scale` of them each.
-  let span (address field scale : Nat) : IO Nat := do pure ((← number address field) * 1000000000 + (← number (address + field) field) * scale)
   let spanBytes (nanoseconds field scale : Nat) : ByteArray :=
     numberBytes big field (nanoseconds / 1000000000) ++ numberBytes big field (nanoseconds % 1000000000 / scale)
   let now ← timers.now
@@ -289,19 +287,26 @@ def serve (timers : Timers) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
   let itimer (which : Nat) : Timer := { group, signal := some (timers.itimerSignal which), code := 0x80 }
   try
     match call with
-    | .nanosleep => sleep (now + (← span (arg 0) word 1)) (some (arg 1, word))
+    | .nanosleep =>
+      let some given ← readSpan emu (arg 0) word | fail einval
+      sleep (now + given) (some (arg 1, word))
     | .clockNanosleep | .clockNanosleep64 =>
-      if arg 0 > 11 then return ← fail einval
+      if arg 0 > 11 || arg 0 == 10 then return ← fail einval
+      -- Of the thread's time and of the clocks that are coarse or raw, there is no sleep.
+      if 3 ≤ arg 0 && arg 0 ≤ 6 then return ← fail Errno.eopnotsupp
       let field := if call == .clockNanosleep64 then 8 else word
-      let given ← span (arg 2) field 1
+      let some given ← readSpan emu (arg 2) field | fail einval
       -- What is left of a sleep until a time is nothing to say.
       sleep (if arg 1 &&& 1 != 0 then given else now + given) (if arg 1 &&& 1 != 0 then none else some (arg 3, field))
     | .setitimer =>
+      let given ← if arg 1 == 0 then pure none else do
+        let (some interval, some value) := (← readSpan emu (arg 1) word 1000, ← readSpan emu (arg 1 + 2 * word) word 1000)
+          | return ← fail einval
+        pure (some (interval, value))
       if arg 0 > 2 then return ← fail einval
       let key := (group, arg 0)
       if arg 2 != 0 then write emu (arg 2) (current ((← timers.state.get).timers.get? key) word 1000)
-      if arg 1 != 0 then
-        setTimer key (itimer (arg 0)) (← span (arg 1 + 2 * word) word 1000) (← span (arg 1) word 1000) false
+      if let some (interval, value) := given then setTimer key (itimer (arg 0)) value interval false
       succeed
     | .getitimer =>
       if arg 0 > 2 then return ← fail einval
@@ -329,10 +334,11 @@ def serve (timers : Timers) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       succeed
     | .timerSettime | .timerSettime64 =>
       let field := if call == .timerSettime64 then 8 else word
+      let (some interval, some value) := (← readSpan emu (arg 2) field, ← readSpan emu (arg 2 + 2 * field) field) | fail einval
       let key := (group, 3 + arg 0)
       let some timer := (← timers.state.get).timers.get? key | return ← fail einval
       if arg 3 != 0 then write emu (arg 3) (current (some timer) field 1)
-      setTimer key timer (← span (arg 2 + 2 * field) field 1) (← span (arg 2) field 1) (arg 1 &&& 1 != 0)
+      setTimer key timer value interval (arg 1 &&& 1 != 0)
       succeed
     | .timerGettime | .timerGettime64 =>
       let field := if call == .timerGettime64 then 8 else word

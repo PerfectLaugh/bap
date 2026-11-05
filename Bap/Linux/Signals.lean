@@ -1295,6 +1295,12 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
       if size != maskBytes architecture then return ← fail current numbers.einval
       try
         let wanted := blockable signals (← readMask signals current set size)
+        -- The size of the fields of its timeout is that of a word, or 64 bits by the numbers of time64. One that Linux doesn't take
+        -- fails before what is pending is looked at.
+        let span ← if timeout == 0 then pure none else do
+          let some span ← readSpan current timeout (if number == 421 || number == 4421 then 8 else width / 8)
+            | return ← fail current numbers.einval
+          pure (some span)
         modifyThread signals tid fun state => { state with waiting := some (wanted, infoAddress) }
         let state ← threadOf signals tid
         let shared := (← signals.table.get).groupPending.getD task.group []
@@ -1302,12 +1308,6 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
           finishWait signals current
           pure (.returnValue (← registerValue current width resultRegister))
         else
-          let span ← if timeout == 0 then pure none else do
-            -- The size of its fields is that of a word, or 64 bits by the numbers of time64.
-            let fieldSize := if number == 421 || number == 4421 then 8 else width / 8
-            let seconds ← readNumber current timeout fieldSize
-            let nanoseconds ← readNumber current (timeout + fieldSize) fieldSize
-            pure (some (seconds * 1000000000 + nanoseconds))
           if span == some 0 then
             modifyThread signals tid fun state => { state with waiting := none }
             fail current numbers.eagain

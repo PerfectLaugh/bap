@@ -47,26 +47,23 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     match kernel.objectOf group fd with
     | .ok (number, file, { content := .mqueue messages capacity size notify, .. }) => .ok (number, file, messages, capacity, size, notify)
     | _ => .error Errno.ebadf
-  -- A deadline of an absolute `timespec` of fields of `size` bytes, or why there can't be one.
-  let deadlineAt (address size : Nat) : IO (Except Nat (Option Nat)) := do
-    if address == 0 then return .ok none
-    let seconds ← number address size
-    let nanoseconds ← number (address + size) size
-    if nanoseconds ≥ 1000000000 || seconds ≥ 2 ^ (8 * size - 1) then return .error Errno.einval
-    pure (.ok (some (seconds * 1000000000 + nanoseconds)))
+  -- A deadline of an absolute `timespec` of fields of `size` bytes, or none of one that Linux doesn't take, which a call fails with
+  -- before anything else, whether it would wait or not.
+  let deadlineAt (address size : Nat) : IO (Option (Option Nat)) := do
+    if address == 0 then return some none
+    pure ((← readSpan emu address size).map some)
   let wait (due : Option Nat) : IO (Option SyscallAction) := do
     if due.any (· ≤ now) then fail etimedout
     else pure (some (← poller.timers.waitUntil emu readySpace 0 due true))
   let send (fd address size priority timeout timeSize : Nat) : IO (Option SyscallAction) := do
+    let some due ← deadlineAt timeout timeSize | fail Errno.einval
     let .ok (number_, file, messages, capacity, limit, notify) := queueOf fd | fail Errno.ebadf
     if file.flags &&& 3 == 0 then return ← fail Errno.ebadf
     if size > limit then return ← fail emsgsize
     if priority ≥ 32768 then return ← fail Errno.einval
     if messages.length ≥ capacity then
       if file.flags &&& Kernel.oNonblock != 0 then return ← fail Errno.eagain
-      match ← deadlineAt timeout timeSize with
-      | .error errno => return ← fail errno
-      | .ok due => return ← wait due
+      return ← wait due
     let text ← read emu address size
     let (before, after) := messages.span (·.1 ≥ priority)
     -- A message to the queue empty is what `mq_notify` asked to hear of, once.
@@ -77,15 +74,14 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     poller.wake emu
     succeed
   let receive (fd address size priorityAt timeout timeSize : Nat) : IO (Option SyscallAction) := do
+    let some due ← deadlineAt timeout timeSize | fail Errno.einval
     let .ok (number_, file, messages, capacity, limit, notify) := queueOf fd | fail Errno.ebadf
     if file.flags &&& 3 == 1 then return ← fail Errno.ebadf
     if size < limit then return ← fail emsgsize
     match messages with
     | [] =>
       if file.flags &&& Kernel.oNonblock != 0 then return ← fail Errno.eagain
-      match ← deadlineAt timeout timeSize with
-      | .error errno => fail errno
-      | .ok due => wait due
+      wait due
     | (priority, text) :: rest =>
       write emu address text
       if priorityAt != 0 then write emu priorityAt (Abi.field big 4 priority)
