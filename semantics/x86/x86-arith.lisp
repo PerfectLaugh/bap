@@ -459,6 +459,28 @@
 ;; the product of the multiplication, as the halves are its operands
 (defmacro mul-high (cast n x y) (cast-high n (product cast n x y)))
 
+;; The high half of a product of 64 bits, of its halves of 32 bits, none of
+;; whose partial products and sums carries out of 64 bits, as Hacker's
+;; Delight has it, so that nothing of 128 bits is made. That signed is that
+;; unsigned less each operand where the other is negative.
+(defun umul-high64 (x y)
+  (let ((x0 (logand x 0xffffffff:64))
+        (x1 (rshift x 32:64))
+        (y0 (logand y 0xffffffff:64))
+        (y1 (rshift y 32:64))
+        (low (* x0 y0))
+        (m1 (+ (* x1 y0) (rshift low 32:64)))
+        (m2 (+ (* x0 y1) (logand m1 0xffffffff:64))))
+    (+ (* x1 y1) (+ (rshift m1 32:64) (rshift m2 32:64)))))
+
+(defun smul-high64 (x y)
+  (- (- (umul-high64 x y) (if (msb x) y 0:64)) (if (msb y) x 0:64)))
+
+;; the signed product of 64 bits overflows if its high half isn't the sign
+;; of its low half
+(defun imul-overflow64 (lo hi)
+  (/= hi (arshift lo 63:64)))
+
 (defun mul8 (y)
   (let ((p (product cast-unsigned 8 AL y)))
     (set-mul-flags (not (is-zero (cast-high 8 p))))
@@ -478,10 +500,11 @@
 
 (defun mul64 (y)
   (declare (context (bits 64)))
-  (let ((p (product cast-unsigned 64 RAX y)))
-    (set-mul-flags (not (is-zero (cast-high 64 p))))
-    (set RDX (cast-high 64 p))
-    (set RAX (cast-low 64 p))))
+  (let ((hi (umul-high64 RAX y))
+        (lo (* RAX y)))
+    (set-mul-flags (not (is-zero hi)))
+    (set RDX hi)
+    (set RAX lo)))
 
 (defun imul8 (y)
   (let ((p (product cast-signed 8 AL y)))
@@ -502,10 +525,11 @@
 
 (defun imul64 (y)
   (declare (context (bits 64)))
-  (let ((p (product cast-signed 64 RAX y)))
-    (set-mul-flags (imul-overflow p 64))
-    (set RDX (cast-high 64 p))
-    (set RAX (cast-low 64 p))))
+  (let ((hi (smul-high64 RAX y))
+        (lo (* RAX y)))
+    (set-mul-flags (imul-overflow64 lo hi))
+    (set RDX hi)
+    (set RAX lo)))
 
 ;; the quotient and the remainder of X by Y, the dividend is twice as
 ;; wide as the divisor
@@ -599,10 +623,15 @@
 ;; the two- and three-operand IMUL truncate the product to the size of
 ;; the operands
 (defun imul-op (x y)
-  (let ((n (word-width x))
-        (p (product cast-signed n x (cast-low n y))))
-    (set-mul-flags (imul-overflow p n))
-    (cast-low n p)))
+  (let ((n (word-width x)))
+    (if (= n 64)
+        (let ((z (cast-low 64 y))
+              (lo (* x z)))
+          (set-mul-flags (imul-overflow64 lo (smul-high64 x z)))
+          lo)
+      (let ((p (product cast-signed n x (cast-low n y))))
+        (set-mul-flags (imul-overflow p n))
+        (cast-low n p)))))
 
 (defun IMUL16rr (rd x y) (binop-rr imul-op rd x y))
 (defun IMUL16rm (rd x base scale index off seg) (binop-rm imul-op rd x base scale index off seg))
