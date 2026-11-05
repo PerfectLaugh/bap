@@ -1,0 +1,6 @@
+write 1 1 -1
+writev 1 1 -1
+send 1 1 -1
+send with MSG_NOSIGNAL 0 0 1
+write with SIGPIPE ignored 0 0 1
+write with a handler 0 0 3

@@ -1522,6 +1522,29 @@ private def descriptorLimit (machine : Machine) (group : Nat) (call : Call) (arg
       else if free (arg 2 % 2 ^ 32) ≥ limit then some (errorOf Errno.emfile) else none
     | _ => none
 
+/-- A write that finds that nothing reads what it writes to any more, a pipe or a socket of a stream, sends `SIGPIPE`, which is 13 on
+every architecture, to the thread that made it, as `write`, `writev`, `send`, `sendto`, `sendmsg`, `sendfile`, `splice` and `tee` do
+that give `EPIPE`, unless a send says `MSG_NOSIGNAL`. The call gives `EPIPE` all the same, if the signal doesn't end the process. -/
+private def brokenPipe (machine : Machine) (emu : Emu) (group : Nat) (call : Call) (args : List Nat) (action : SyscallAction) :
+    IO Unit := do
+  let .returnValue value := action | return
+  if value != 2 ^ 64 - Errno.epipe then return
+  let arg (index : Nat) : Nat := args.getD index 0
+  let quiet (flags : Nat) : Bool := flags &&& 0x4000 != 0
+  let fd? := match call with
+    | .write | .writev | .sendfile | .sendfile64 => some (arg 0)
+    | .send | .sendto => if quiet (arg 3) then none else some (arg 0)
+    | .sendmsg => if quiet (arg 2) then none else some (arg 0)
+    | .splice => some (arg 2)
+    | .tee => some (arg 1)
+    | _ => none
+  let some fd := fd? | return
+  let kernel ← machine.kernel.get
+  -- A socket of datagrams or of packets that can't send says so and no more.
+  if let .ok (_, socket) := kernel.socketOf group fd then
+    if socket.type != 1 then return
+  machine.signals.send emu (some (← thread emu)) group ⟨13, 0, .sent group (kernel.process group).credentials.uid 0⟩
+
 private def serveKernelCalls (machine : Machine) : IO HookId :=
   onSyscall machine.emu fun emu number args => do
     match machine.architecture.call number with
@@ -1556,9 +1579,9 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
         | _ => false)
       -- And while `inotify` watches, what a write changes is found out from what it was before.
       let watching := !(← Notify.instancesOf machine.notifier (← machine.kernel.get)).isEmpty
-      match call, shared || socket || watching with
-      | .write, false => handOver machine emu (← writeDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0))
-      | .writev, false => handOver machine emu (← writeVectorDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0))
+      let action ← match call, shared || socket || watching with
+      | .write, false => writeDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0)
+      | .writev, false => writeVectorDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0)
       | .pwrite, false =>
         -- Its offset, which on 32 bits is in two arguments in the order of the guest.
         let architecture := machine.architecture
@@ -1566,8 +1589,8 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
           let (low, high) := if architecture.big then (args.getD (architecture.pairBase + 1) 0, args.getD architecture.pairBase 0)
             else (args.getD architecture.pairBase 0, args.getD (architecture.pairBase + 1) 0)
           high * 2 ^ 32 + low
-        handOver machine emu (← writeDirectAt machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0) offset)
-      | _, _ =>
+        writeDirectAt machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0) offset
+      | _, _ => do
         let before ← machine.kernel.get
         let action ← kernelCall machine emu call args
         -- A call that is over, rather than waiting to run again, has no site nor deadline left, which another at the same place,
@@ -1578,7 +1601,9 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
         if watching then
           let live := ((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups
           if ← Notify.after machine.notifier machine.kernel group call args before action live then wakePipeReaders emu
-        handOver machine emu action
+        pure action
+      brokenPipe machine emu group call args action
+      handOver machine emu action
 
 /-- What is left: nothing else serves it, and it isn't there. -/
 private def serveRest (machine : Machine) : IO HookId :=
