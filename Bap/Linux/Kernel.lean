@@ -468,6 +468,9 @@ is bound to a name of its own, or to an address of the Internet, has that name a
 structure Kernel where
   /-- From an absolute path without `.`, `..` or a trailing slash to its inode. -/
   paths : Std.HashMap String Nat := {}
+  /-- How many names each inode has in the tree of `paths`, and of a directory, as many more as the directories that are in it: what
+  `stat` says of its links, which this keeps as `paths` changes. An inode that has none isn't here. -/
+  links : Std.HashMap Nat Nat := {}
   inodes : Std.HashMap Nat Inode := {}
   nextInode : Nat := 2
   openFiles : Std.HashMap Nat OpenFile := {}
@@ -533,15 +536,50 @@ namespace Kernel
 /-- A kernel with an empty root directory. -/
 def empty : Kernel :=
   { paths := ({} : Std.HashMap String Nat).insert "/" 1
+    links := ({} : Std.HashMap Nat Nat).insert 1 1
     inodes := ({} : Std.HashMap Nat Inode).insert 1 { number := 1, content := .directory, mode := 0o40755 } }
+
+/-- `links` with one more name at a path of an inode, or of `more` false, one less: of the inode, and of the directory that the name is
+in if the inode is a directory, as `paths` has that now. A name of a socket of its own isn't in the tree, nor does a directory where
+mounts keep their own count in its directory. -/
+def countName (kernel : Kernel) (path : String) (number : Nat) (more : Bool) : Kernel :=
+  if !path.startsWith "/" then kernel
+  else
+    let change (links : Std.HashMap Nat Nat) (number : Nat) : Std.HashMap Nat Nat :=
+      match links.getD number 0, more with
+      | count, true => links.insert number (count + 1)
+      | 0, false | 1, false => links.erase number
+      | count + 1, false => links.insert number count
+    let links := change kernel.links number
+    let inDirectory := kernel.inodes.get? number matches some { content := .directory, .. } && path != "/" &&
+      !(Path.name path).startsWith "\x01"
+    { kernel with links := match if inDirectory then kernel.paths.get? (Path.parent path) else none with
+      | some parent => change links parent
+      | none => links }
+
+/-- With a name at a path of an inode, in place of what was there. -/
+def bindPath (kernel : Kernel) (path : String) (number : Nat) : Kernel :=
+  let kernel := match kernel.paths.get? path with
+    | some other => kernel.countName path other false
+    | none => kernel
+  { kernel.countName path number true with paths := kernel.paths.insert path number }
+
+/-- Without the name at a path. -/
+def unbindPath (kernel : Kernel) (path : String) : Kernel :=
+  match kernel.paths.get? path with
+  | some number => { kernel.countName path number false with paths := kernel.paths.erase path }
+  | none => kernel
+
+/-- With `links` as the names of `paths` have them, as a checkpoint leaves them out. -/
+def countLinks (kernel : Kernel) : Kernel :=
+  kernel.paths.fold (init := { kernel with links := {} }) fun kernel path number => kernel.countName path number true
 
 private def addInode (kernel : Kernel) (path : String) (content : Content) (mode : Nat) : Kernel × Nat :=
   let number := kernel.nextInode
-  ({ kernel with
-      paths := kernel.paths.insert path number
+  (({ kernel with
       inodes := kernel.inodes.insert number
         { number, content, mode, details := { accessed := kernel.clock, modified := kernel.clock, changed := kernel.clock } }
-      nextInode := number + 1 }, number)
+      nextInode := number + 1 }.bindPath path number), number)
 
 /-- The path of what is open, for a directory, or of what `/proc/PID/fd/N` is of. -/
 def pathOfInode (kernel : Kernel) (number : Nat) : Option String :=
@@ -667,9 +705,12 @@ def addBuiltin (kernel : Kernel) (path name : String) (mode : Nat := 0o100444) :
 def removeUnder (kernel : Kernel) (directory : String) : Kernel :=
   let inside := directory ++ "/"
   let gone := kernel.paths.toList.filter fun entry => entry.1.startsWith inside
+  -- Each is counted out while all of them are there, to find the directory that it is in.
+  let kernel := gone.foldl (init := kernel) fun kernel entry => kernel.countName entry.1 entry.2 false
   gone.foldl (init := kernel) fun kernel entry =>
     { kernel with
       paths := kernel.paths.erase entry.1
+      links := kernel.links.erase entry.2
       inodes := kernel.inodes.erase entry.2 }
 
 /-- A link at a path, whatever was there. -/
@@ -1277,11 +1318,14 @@ structure Stat where
   gid : Nat := 0
   deriving DecidableEq, Repr
 
-private def statOf (inode : Inode) : Stat :=
+/-- What `stat` says of an inode. Its links are its names, as `links` counts them; a directory has one more, for itself, unless it was
+removed; and what isn't a file, a directory or a symbolic link has one, as Linux has it, with a name or without. -/
+private def statOf (kernel : Kernel) (inode : Inode) : Stat :=
+  let names := kernel.links.getD inode.number 0
   let (size, links) := match inode.content with
-    | .file data => (data.size, 1)
-    | .directory => (4096, 2)
-    | .symlink target => (target.utf8ByteSize, 1)
+    | .file data => (data.size, names)
+    | .directory => (4096, if names == 0 then 0 else names + 1)
+    | .symlink target => (target.utf8ByteSize, names)
     | .console _ | .generated _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ | .inotify .. | .mqueue .. => (0, 1)
   { inode := inode.number, mode := inode.mode, size, links, accessed := inode.details.accessed, modified := inode.details.modified
     changed := inode.details.changed, uid := inode.details.uid, gid := inode.details.gid }
@@ -1292,12 +1336,12 @@ def statPath (kernel : Kernel) (base path : String) (follow : Bool := true) : Re
   let (_, found) ← kernel.resolve base path follow
   match found with
   | none => .error Errno.enoent
-  | some number => .ok (statOf (← inodeOf kernel number))
+  | some number => .ok (statOf kernel (← inodeOf kernel number))
 
 /-- `fstat`. -/
 def statDescriptor (kernel : Kernel) (group fd : Nat) : Result Stat := do
   let (_, file) ← openFileOf kernel group fd
-  .ok (statOf (← inodeOf kernel file.inode))
+  .ok (statOf kernel (← inodeOf kernel file.inode))
 
 /-- The base of the paths that a process gives relative to its working directory. -/
 def cwdOf (kernel : Kernel) (group : Nat) : String := kernel.baseIn (kernel.process group).cwd
@@ -1393,8 +1437,7 @@ def remove (kernel : Kernel) (base path : String) (directory : Bool) : Result Ke
     | _, true => .error Errno.enotdir
     | _, false => if Path.ending path == .slash then .error Errno.enotdir
     if kernel.readOnly normal then .error erofs
-    .ok { kernel with
-      paths := kernel.paths.erase normal
+    .ok { kernel.unbindPath normal with
       inodes := kernel.inodes.insert number { inode with details := { inode.details with name := normal ++ " (deleted)" } } }
 
 /-- The working directories and roots of the processes, after `move` gave the paths of the tree new ones: those that were there are
@@ -1429,7 +1472,7 @@ def rename (kernel : Kernel) (base source target : String) : Result Kernel := do
   if kernel.readOnly from_ || kernel.readOnly to_ then .error erofs
   -- What isn't a directory has nothing under it: its own path is all that moves.
   if !((← inodeOf kernel number).content matches .directory) then
-    return { kernel with paths := (kernel.paths.erase from_).insert to_ number }
+    return (kernel.unbindPath from_).bindPath to_ number
   let move (path : String) : String :=
     if path == from_ then to_
     else if path.startsWith (from_ ++ "/") then to_ ++ (path.drop from_.length).toString
@@ -1437,7 +1480,11 @@ def rename (kernel : Kernel) (base source target : String) : Result Kernel := do
   let moved := kernel.paths.toList.foldl (init := kernel.paths.erase to_) fun paths entry =>
     if entry.1 == from_ || entry.1.startsWith (from_ ++ "/") then (paths.erase entry.1).insert (move entry.1) entry.2
     else paths
-  .ok { kernel.movePlaces move with paths := moved }
+  -- Of all that moves, only the directory itself changes what is counted: it leaves one directory for another, in place of what was there.
+  let kernel := match existing with
+    | some other => kernel.countName to_ other false
+    | none => kernel
+  .ok { ((kernel.countName from_ number false).countName to_ number true).movePlaces move with paths := moved }
 
 /-- Another path of an inode, as `linkat` of `AT_EMPTY_PATH` gives one to what a descriptor is open on. -/
 def linkInode (kernel : Kernel) (number : Nat) (base target : String) : Result Kernel := do
@@ -1448,8 +1495,7 @@ def linkInode (kernel : Kernel) (number : Nat) (base target : String) : Result K
   if Path.ending target == .slash then .error Errno.enoent
   if !parentIsDirectory kernel normal then .error Errno.enoent
   if kernel.readOnly normal then .error erofs
-  .ok { kernel with
-    paths := kernel.paths.insert normal number
+  .ok { kernel.bindPath normal number with
     inodes := kernel.inodes.insert number { inode with details := { inode.details with changed := kernel.clock } } }
 
 /-- `link`: another path of the inode of `source`, which isn't a directory, followed through a link at its end if `follow`. -/
@@ -1462,12 +1508,12 @@ def link (kernel : Kernel) (base source target : String) (follow : Bool) : Resul
 def renameWith (kernel : Kernel) (base source target : String) (flags : Nat) : Result Kernel := do
   if flags &&& 3 == 3 || flags &&& 4 != 0 && flags &&& 2 != 0 then .error Errno.einval
   let (from_, found) ← kernel.resolve base source (follow := false) (mounted := false) (exact := true)
-  let some _ := found | .error Errno.enoent
+  let some number := found | .error Errno.enoent
   let (to_, existing) ← kernel.resolve base target (follow := false) (mounted := false) (exact := true)
   if flags &&& 1 != 0 && existing.isSome then .error Errno.eexist
   if flags &&& 2 == 0 then return ← kernel.rename base source target
   if kernel.mountedAt from_ || kernel.mountedAt to_ then .error ebusy
-  let some _ := existing | .error Errno.enoent
+  let some other := existing | .error Errno.enoent
   if (to_ ++ "/").startsWith (from_ ++ "/") || (from_ ++ "/").startsWith (to_ ++ "/") then .error Errno.einval
   if kernel.readOnly from_ || kernel.readOnly to_ then .error erofs
   let swap (path : String) : String :=
@@ -1475,6 +1521,7 @@ def renameWith (kernel : Kernel) (base source target : String) (flags : Nat) : R
     else if path.startsWith (from_ ++ "/") then to_ ++ (path.drop from_.length).toString
     else if path.startsWith (to_ ++ "/") then from_ ++ (path.drop to_.length).toString
     else path
+  let kernel := (((kernel.countName from_ number false).countName to_ other false).countName from_ other true).countName to_ number true
   .ok { kernel.movePlaces swap with paths := kernel.paths.fold (init := {}) fun paths path number => paths.insert (swap path) number }
 
 /-- The devices of `/dev` and what is around them: `null`, `zero`, `full`, `random`, `urandom`, `tty` and `ptmx`, `console` for the
@@ -1486,7 +1533,7 @@ def installDevices (kernel : Kernel) : Kernel :=
     if kernel.paths.contains path then kernel else (addInode (addDirectories kernel "/dev") path (.device kind) 0o20666).1
   let kernel := addDirectories (addDirectories kernel "/dev/pts") "/dev/shm"
   let kernel := match kernel.inodes.toList.find? (·.2.content matches .console _) with
-    | some (number, _) => if kernel.paths.contains "/dev/console" then kernel else { kernel with paths := kernel.paths.insert "/dev/console" number }
+    | some (number, _) => if kernel.paths.contains "/dev/console" then kernel else kernel.bindPath "/dev/console" number
     | none => kernel
   [("/dev/stdin", "/proc/self/fd/0"), ("/dev/stdout", "/proc/self/fd/1"), ("/dev/stderr", "/proc/self/fd/2"),
     ("/dev/fd", "/proc/self/fd")].foldl (init := kernel) fun kernel (path, target) =>
@@ -1590,6 +1637,8 @@ def unmount (kernel : Kernel) (group : Nat) (base target : String) (flags : Nat)
   -- What a process is in keeps it, unless `MNT_DETACH` lets it go later, which here is now.
   if flags &&& 2 == 0 && kernel.processes.fold (fun busy _ process => busy || (!process.ended && (within process.cwd.path || within process.root.path))) false then
     .error 16
+  let kernel := kernel.paths.fold (init := kernel) fun kernel path number =>
+    if within path then kernel.countName path number false else kernel
   .ok { kernel with mounts, paths := kernel.paths.filter fun path _ => !within path }
 
 /-- `chroot`: what a process has as `/` is a directory of the tree. -/

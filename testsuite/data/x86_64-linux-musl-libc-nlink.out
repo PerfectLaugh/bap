@@ -1,0 +1,60 @@
+mkdir 0
+directory 2
+open 1
+file 1
+directory with a file 2
+link 0
+file 2
+other name 2
+rename over nothing 0
+file 2
+unlink one 0
+file 1
+moved name 1
+unlink the other 0
+open file without a name 0
+symlink 0
+symlink 1
+unlink symlink 0
+mkdir sub 0
+directory with a directory 3
+sub 2
+mkdir sub/deeper 0
+sub with a directory 3
+directory 3
+mkdir other 0
+directory with two 4
+rename sub/deeper to other 0
+sub 2
+other 3
+deeper 2
+directory 4
+mkdir sub/empty 0
+sub 3
+rename other/deeper over sub/empty 0
+sub 3
+other 2
+open 1
+exchange sub/empty and other/file 0
+sub 2
+other 3
+file 1
+unlink file 0
+rmdir other/file 0
+other 2
+open other 1
+rmdir other 0
+removed directory 0
+directory 3
+rmdir sub 0
+directory 2
+O_TMPFILE 1
+file of O_TMPFILE 0
+pipe 0
+pipe 1
+socketpair 0
+socket 1
+eventfd 1
+memfd 0
+/dev/null 1
+rmdir 0

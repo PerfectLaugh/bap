@@ -119,7 +119,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       | .error errno => fail errno
       | .ok path =>
         if !kernel.paths.contains path then return ← fail Errno.enoent
-        poller.kernel.set { kernel with paths := kernel.paths.erase path }
+        poller.kernel.set (kernel.unbindPath path)
         succeed
     | .mqTimedsend => send (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) word
     | .mqTimedsend64 => send (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) 8

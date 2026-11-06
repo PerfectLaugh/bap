@@ -405,7 +405,7 @@ def Image.kernel (image : Image) : Except String Kernel := do
     cycles := image.cycles
     mounts := ← mountsOfBytes image.mounts
     ipc := ← ipcOfBytes image.ipc
-    randomGiven := image.randomGiven }
+    randomGiven := image.randomGiven : Kernel }.countLinks
 
 namespace Image
 

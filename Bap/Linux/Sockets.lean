@@ -92,7 +92,7 @@ def bind (kernel : Kernel) (group fd : Nat) (base name : String) (alive : Nat â†
         | some { content := .directory, .. } => .ok normal
         | _ => .error Errno.enoent
       | none => .error Errno.enoent
-  .ok ({ kernel with paths := kernel.paths.insert key number }.setSocket number { socket with name := some name })
+  .ok ((kernel.bindPath key number).setSocket number { socket with name := some name })
 
 /-- The socket that a name is bound to. A path that isn't there is `ENOENT`, and one that isn't a socket can't be connected to. -/
 def socketNamed (kernel : Kernel) (base name : String) : Result Nat := do

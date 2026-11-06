@@ -223,6 +223,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-killzombie",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-fchmod",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-fchmod",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-nlink",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-nlink",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-fchmod",
     Bap.Tests.Emu.testLinuxRaises "i686-linux-musl-libc-fchmod",
     Bap.Tests.Emu.testLinuxRaises "mips-linux-musl-libc-fchmod",

@@ -199,7 +199,7 @@ def refresh (kernel : Kernel) (group thread : Nat) (live : List Nat) (threadsOf 
     let directory := s!"/proc/{pid}"
     let kernel := kernel.removeUnder directory
     match kernel.paths.get? directory with
-    | some number => { kernel with paths := kernel.paths.erase directory, inodes := kernel.inodes.erase number }
+    | some number => { kernel.unbindPath directory with inodes := kernel.inodes.erase number }
     | none => kernel
   let kernel := kernel.setSymlink "/proc/self" (toString group)
   let kernel := kernel.setSymlink "/proc/thread-self" s!"{group}/task/{thread}"
