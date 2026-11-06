@@ -1225,12 +1225,21 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
           let bytes := target.toUTF8
           let bytes := bytes.extract 0 room
           returning emu out bytes bytes.size
-    | .chmod => at_ here (arg 0) fun from_ path => apply machine (·.chmod from_ path (arg 1))
-    | .fchmodat => at_ (arg 0) (arg 1) fun from_ path => apply machine (·.chmod from_ path (arg 2))
+    | .chmod => at_ here (arg 0) fun from_ path => apply machine (·.chmod group from_ path (arg 1))
+    | .fchmod => apply machine (·.fchmod group (arg 0) (arg 1))
+    | .fchmodat => at_ (arg 0) (arg 1) fun from_ path => apply machine (·.chmod group from_ path (arg 2))
     | .truncate => at_ here (arg 0) fun from_ path => apply machine (·.truncatePath from_ path (offsetWord 1))
     | .ftruncate => apply machine (·.truncateDescriptor group (arg 0) (offsetWord 1))
     | .truncate64 => at_ here (arg 0) fun from_ path => apply machine (·.truncatePath from_ path (pair (architecture.pairBase - 2)))
     | .ftruncate64 => apply machine (·.truncateDescriptor group (arg 0) (pair (architecture.pairBase - 2)))
+    | .fsync | .fdatasync =>
+      match kernel.syncDescriptor group (arg 0) with
+      | .ok () => pure (.returnValue 0)
+      | .error errno => pure (errorOf errno)
+    -- Of `syncfs` there is no disk to write to, whatever a descriptor is open on.
+    | .syncfs => pure (match kernel.openFileOf group (arg 0) with
+      | .ok _ => .returnValue 0
+      | .error errno => errorOf errno)
     | .umask =>
       let process := kernel.process group
       machine.kernel.set (kernel.setProcess group { process with umask := arg 0 &&& 0o777 })

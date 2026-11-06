@@ -58,8 +58,8 @@ def Architecture.big : Architecture → Bool
 inductive Call where
   | read | write | open_ | openat | close | stat | lstat | fstat | fstatat | statx | lseek | pread | pwrite | readv | writev
   | access | faccessat | dup | dup2 | dup3 | fcntl | ioctl | getdents | getcwd | chdir | fchdir | mkdir | mkdirat | rmdir
-  | unlink | unlinkat | rename | renameat | symlink | symlinkat | readlink | readlinkat | chmod | fchmodat | truncate
-  | ftruncate | umask | pipe | pipe2 | mmap | munmap | mprotect | madvise | mremap | brk | gettimeofday | time | clockGettime | clockGetres | uname | getrlimit | prlimit
+  | unlink | unlinkat | rename | renameat | symlink | symlinkat | readlink | readlinkat | chmod | fchmod | fchmodat | truncate
+  | ftruncate | fsync | fdatasync | syncfs | umask | pipe | pipe2 | mmap | munmap | mprotect | madvise | mremap | brk | gettimeofday | time | clockGettime | clockGetres | uname | getrlimit | prlimit
   | getrandom | sigaltstack | schedGetaffinity | statfs | fstatfs | sysinfo | execve
   /-- `statfs` and `fstatfs` with the size of the structure in the middle, as 32-bit systems and PowerPC have them. -/
   | statfs64 | fstatfs64
@@ -87,7 +87,7 @@ inductive Call where
   | mqOpen | mqUnlink | mqTimedsend | mqTimedsend64 | mqTimedreceive | mqTimedreceive64 | mqNotify | mqGetsetattr
   | msync | mlock | munlock | mlock2 | mlockall | munlockall | mincore | membarrier
   | ioSetup | ioDestroy | ioSubmit | ioCancel | ioGetevents | ioPgetevents | ioPgetevents64 | ioUringSetup | ioUringEnter | ioUringRegister
-  /-- What has nothing to do here: everyone is root and nothing has to reach a disk. -/
+  /-- What has nothing to do here, which is `cacheflush` of ARM. -/
   | succeeds
   deriving DecidableEq, Repr
 
@@ -115,8 +115,8 @@ def x86_64Calls : List (Nat × Call) :=
    (264, .renameat), (316, .renameat2), (88, .symlink), (266, .symlinkat), (89, .readlink), (267, .readlinkat), (90, .chmod),
    (268, .fchmodat), (76, .truncate), (77, .ftruncate), (95, .umask), (9, .mmap), (25, .mremap), (12, .brk),
    (96, .gettimeofday), (201, .time), (228, .clockGettime), (229, .clockGetres), (63, .uname), (97, .getrlimit),
-   (302, .prlimit), (318, .getrandom), (131, .sigaltstack), (204, .schedGetaffinity), (74, .succeeds), (75, .succeeds),
-   (91, .succeeds),    ]
+   (302, .prlimit), (318, .getrandom), (131, .sigaltstack), (204, .schedGetaffinity), (74, .fsync), (75, .fdatasync),
+   (91, .fchmod), (306, .syncfs),    ]
 
 /-- The numbers of the architectures that came after the old calls went: `asm-generic/unistd.h`. -/
 def genericCalls : List (Nat × Call) :=
@@ -141,7 +141,7 @@ def genericCalls : List (Nat × Call) :=
    (38, .renameat), (276, .renameat2), (36, .symlinkat), (78, .readlinkat), (53, .fchmodat), (45, .truncate), (46, .ftruncate),
    (166, .umask), (222, .mmap), (216, .mremap), (214, .brk), (169, .gettimeofday), (113, .clockGettime), (114, .clockGetres),
    (160, .uname), (163, .getrlimit), (261, .prlimit), (278, .getrandom), (132, .sigaltstack), (123, .schedGetaffinity),
-   (82, .succeeds), (83, .succeeds), (52, .succeeds),    ]
+   (82, .fsync), (83, .fdatasync), (52, .fchmod), (267, .syncfs),    ]
 
 /-- The numbers of `asm-generic` on 32 bits, where whatever has a time or an offset in a word has gone. -/
 def generic32Calls : List (Nat × Call) :=
@@ -166,7 +166,7 @@ def generic32Calls : List (Nat × Call) :=
    (38, .renameat), (276, .renameat2), (36, .symlinkat), (78, .readlinkat), (53, .fchmodat), (45, .truncate64), (46, .ftruncate64),
    (166, .umask), (222, .mmap2), (216, .mremap), (214, .brk), (403, .clockGettime64), (406, .clockGetres64),
    (160, .uname), (261, .prlimit), (278, .getrandom), (132, .sigaltstack), (123, .schedGetaffinity),
-   (82, .succeeds), (83, .succeeds), (52, .succeeds),    ]
+   (82, .fsync), (83, .fdatasync), (52, .fchmod), (267, .syncfs),    ]
 
 /-- The numbers of the o32 ABI of MIPS, without their 4000. -/
 def o32Calls : List (Nat × Call) :=
@@ -194,7 +194,7 @@ def o32Calls : List (Nat × Call) :=
    (299, .fchmodat), (92, .truncate), (93, .ftruncate), (211, .truncate64), (212, .ftruncate64), (60, .umask), (210, .mmap2),
    (167, .mremap), (45, .brk), (78, .gettimeofday), (263, .clockGettime), (264, .clockGetres), (403, .clockGettime64),
    (406, .clockGetres64), (122, .uname), (76, .getrlimit), (338, .prlimit), (353, .getrandom), (206, .sigaltstack),
-   (240, .schedGetaffinity), (283, .setThreadArea), (118, .succeeds), (152, .succeeds), (94, .succeeds),       ]
+   (240, .schedGetaffinity), (283, .setThreadArea), (118, .fsync), (152, .fdatasync), (94, .fchmod), (342, .syncfs),       ]
 
 /-- The numbers of the n64 ABI of MIPS, without their 5000. -/
 def n64Calls : List (Nat × Call) :=
@@ -220,8 +220,8 @@ def n64Calls : List (Nat × Call) :=
    (254, .renameat), (311, .renameat2), (86, .symlink), (256, .symlinkat), (87, .readlink), (257, .readlinkat), (88, .chmod),
    (258, .fchmodat), (74, .truncate), (75, .ftruncate), (93, .umask), (9, .mmap), (24, .mremap), (12, .brk),
    (94, .gettimeofday), (222, .clockGettime), (223, .clockGetres), (61, .uname), (95, .getrlimit), (297, .prlimit),
-   (313, .getrandom), (129, .sigaltstack), (196, .schedGetaffinity), (195, .schedSetaffinity), (242, .setThreadArea), (72, .succeeds), (73, .succeeds),
-   (89, .succeeds),    ]
+   (313, .getrandom), (129, .sigaltstack), (196, .schedGetaffinity), (195, .schedSetaffinity), (242, .setThreadArea), (72, .fsync), (73, .fdatasync),
+   (89, .fchmod), (301, .syncfs),    ]
 
 /-- The numbers of 32-bit ARM, with EABI, and two of its own: `set_tls` and `cacheflush`. -/
 def armCalls : List (Nat × Call) :=
@@ -250,7 +250,7 @@ def armCalls : List (Nat × Call) :=
    (92, .truncate), (93, .ftruncate), (193, .truncate64), (194, .ftruncate64), (60, .umask), (192, .mmap2), (163, .mremap),
    (45, .brk), (78, .gettimeofday), (263, .clockGettime), (264, .clockGetres), (403, .clockGettime64), (406, .clockGetres64),
    (122, .uname), (191, .getrlimit), (369, .prlimit), (384, .getrandom), (186, .sigaltstack), (242, .schedGetaffinity),
-   (0xf0005, .setThreadArea), (0xf0002, .succeeds), (118, .succeeds), (148, .succeeds), (94, .succeeds),       ]
+   (0xf0005, .setThreadArea), (0xf0002, .succeeds), (118, .fsync), (148, .fdatasync), (94, .fchmod), (373, .syncfs),       ]
 
 /-- The numbers of i686. -/
 def i686Calls : List (Nat × Call) :=
@@ -279,7 +279,7 @@ def i686Calls : List (Nat × Call) :=
    (92, .truncate), (93, .ftruncate), (193, .truncate64), (194, .ftruncate64), (60, .umask), (192, .mmap2), (163, .mremap),
    (45, .brk), (78, .gettimeofday), (265, .clockGettime), (266, .clockGetres), (403, .clockGettime64), (406, .clockGetres64),
    (122, .uname), (191, .getrlimit), (340, .prlimit), (355, .getrandom), (186, .sigaltstack), (242, .schedGetaffinity),
-   (243, .setThreadArea), (118, .succeeds), (148, .succeeds), (94, .succeeds),       ]
+   (243, .setThreadArea), (118, .fsync), (148, .fdatasync), (94, .fchmod), (344, .syncfs),       ]
 
 /-- The numbers of PowerPC, where those of each width that the other doesn't have are left to it not asking for them. -/
 def powerpcCalls : List (Nat × Call) :=
@@ -307,8 +307,8 @@ def powerpcCalls : List (Nat × Call) :=
    (296, .readlinkat), (15, .chmod), (297, .fchmodat), (92, .truncate), (93, .ftruncate), (193, .truncate64), (194, .ftruncate64),
    (60, .umask), (90, .mmap), (192, .mmap2), (163, .mremap), (45, .brk), (78, .gettimeofday), (246, .clockGettime),
    (247, .clockGetres), (403, .clockGettime64), (406, .clockGetres64), (122, .uname), (76, .getrlimit), (190, .getrlimit),
-   (325, .prlimit), (359, .getrandom), (185, .sigaltstack), (223, .schedGetaffinity), (118, .succeeds), (148, .succeeds),
-   (94, .succeeds),    ]
+   (325, .prlimit), (359, .getrandom), (185, .sigaltstack), (223, .schedGetaffinity), (118, .fsync), (148, .fdatasync),
+   (94, .fchmod), (348, .syncfs),    ]
 
 /-- The calls that the kernel serves, by their numbers on it. What isn't here is for `serveTaskCalls`, or isn't there. -/
 def Architecture.calls : Architecture → List (Nat × Call)

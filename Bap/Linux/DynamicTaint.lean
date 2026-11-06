@@ -18,7 +18,8 @@ private def callName (call : Call) : String :=
 /-- Where memory went, what became of a descriptor and the like: nothing that a program finds out about the world by. -/
 private def saysNothing : Call → Bool
   | .mmap | .mmap2 | .munmap | .mprotect | .madvise | .mremap | .brk | .succeeds | .close | .setThreadArea | .sigaltstack
-  | .lseek | .llseek | .write | .pwrite | .writev | .fcntl | .dup | .dup2 | .dup3 | .umask | .pipe | .pipe2 => true
+  | .lseek | .llseek | .write | .pwrite | .writev | .fcntl | .dup | .dup2 | .dup3 | .umask | .pipe | .pipe2
+  | .fchmod | .fsync | .fdatasync | .syncfs => true
   | _ => false
 
 /-- What was opened, by open file, as what it was opened as. A path says the same of most, and nothing of what `/proc` makes. -/

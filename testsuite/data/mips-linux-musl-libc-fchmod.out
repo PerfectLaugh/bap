@@ -1,0 +1,50 @@
+mkdir 0
+open 1
+file mode 0644
+fchmod 0600 0
+file mode 0600
+fchmod 0104751 0
+file mode 04751
+path is a file 1
+path mode 04751
+fchmod closed -9
+fchmod read-only 0640 0
+file mode 0640
+fchmodat 0604 0
+file mode 0604
+fchmodat missing -2
+fsync file 0
+fdatasync file 0
+syncfs file 0
+fchmod directory 0700 0
+directory mode 0700
+fchmod directory 0755 0
+fsync directory 0
+fdatasync directory 0
+syncfs directory 0
+pipe 0
+fchmod pipe 0640 0
+pipe mode 0640
+other end mode 0640
+fsync pipe -22
+fdatasync pipe -22
+syncfs pipe 0
+socketpair 0
+fsync socket -22
+fdatasync socket -22
+syncfs socket 0
+eventfd 1
+fsync eventfd -22
+fdatasync eventfd -22
+syncfs eventfd 0
+memfd 1
+fchmod memfd 0600 0
+memfd mode 0600
+fsync memfd 0
+fdatasync memfd 0
+syncfs memfd 0
+fsync closed -9
+fdatasync closed -9
+syncfs closed -9
+unlink 0
+rmdir 0

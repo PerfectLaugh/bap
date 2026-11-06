@@ -1658,15 +1658,38 @@ def openTmpfile (kernel : Kernel) (group : Nat) (base path : String) (flags mode
     (0o100000 ||| (mode &&& 0o7777 &&& (0o7777 - umask))) (access := flags &&& 3)
     (name := s!"{if normal == "/" then "" else normal}/#{kernel.nextInode} (deleted)"))
 
+/-- Of `chmod` and `fchmod`, the permissions of an inode, as a process of `group` sets them: only its owner or root may, which is
+`EPERM` to anyone else, and `S_ISGID` goes from what one sets who isn't root and isn't in the group of the inode. -/
+def chmodInode (kernel : Kernel) (group number mode : Nat) : Result Kernel := do
+  let inode ← inodeOf kernel number
+  let credentials := (kernel.process group).credentials
+  let root := credentials.fsuid == 0
+  if !root && credentials.fsuid != inode.details.uid then .error Errno.eperm
+  let gid := inode.details.gid
+  let mode := if root || gid == credentials.fsgid || credentials.groups.contains gid then mode &&& 0o7777 else mode &&& 0o5777
+  let kept := inode.mode - (inode.mode &&& 0o7777)
+  .ok { kernel with inodes := kernel.inodes.insert number { inode with mode := kept ||| mode, details := { inode.details with changed := kernel.clock } } }
+
 /-- `chmod`. -/
-def chmod (kernel : Kernel) (base path : String) (mode : Nat) : Result Kernel := do
+def chmod (kernel : Kernel) (group : Nat) (base path : String) (mode : Nat) : Result Kernel := do
   match ← kernel.resolve base path with
   | (_, none) => .error Errno.enoent
   | (normal, some number) =>
     if kernel.readOnly normal then .error erofs
-    let inode ← inodeOf kernel number
-    let kept := inode.mode - (inode.mode &&& 0o7777)
-    .ok { kernel with inodes := kernel.inodes.insert number { inode with mode := kept ||| (mode &&& 0o7777), details := { inode.details with changed := kernel.clock } } }
+    kernel.chmodInode group number mode
+
+/-- `fchmod`, of what a descriptor has open, whatever it is. -/
+def fchmod (kernel : Kernel) (group fd mode : Nat) : Result Kernel := do
+  let (_, file) ← openFileOf kernel group fd
+  kernel.chmodInode group file.inode mode
+
+/-- `fsync` and `fdatasync`: nothing has to reach a disk, so of a file or a directory it is done, but what isn't on one, a pipe, a
+socket, a device or what the kernel makes of its own, is `EINVAL`. -/
+def syncDescriptor (kernel : Kernel) (group fd : Nat) : Result Unit := do
+  let (_, file) ← openFileOf kernel group fd
+  match (← inodeOf kernel file.inode).content with
+  | .file _ | .directory => .ok ()
+  | _ => .error Errno.einval
 
 /-- Where a byte of an inode is, to what goes by address spaces, of which there are as many as tasks: this and the inode, and its offset. -/
 def fileSpace : Nat := 2 ^ 62
