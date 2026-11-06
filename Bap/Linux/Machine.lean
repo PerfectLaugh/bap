@@ -1218,6 +1218,8 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
         | .ok target => apply machine (·.symlink from_ target path)
     | .readlink | .readlinkat =>
       let (directory, address, out, room) := if call == .readlink then (here, arg 0, arg 1, arg 2) else (arg 0, arg 1, arg 2, arg 3)
+      -- Its room is an `int`: none, or less, is `EINVAL`, before the path is looked at.
+      if room % 2 ^ 32 == 0 || room % 2 ^ 32 ≥ 2 ^ 31 then pure (errorOf Errno.einval) else
       at_ directory address fun from_ path =>
         match kernel.readlink from_ path with
         | .error errno => pure (errorOf errno)
@@ -2616,7 +2618,7 @@ def Machine.realloc (machine : Machine) (address size : Nat) (pid : Option Nat :
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 
 /-- What the bytes after the magic mean. -/
-def checkpointFormat : Nat := 14
+def checkpointFormat : Nat := 15
 
 /-- What this BAP does with a guest, which goes up when the same state could go on differently. A checkpoint is refused by a BAP
 of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/

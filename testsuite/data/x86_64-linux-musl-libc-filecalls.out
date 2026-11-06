@@ -1,0 +1,51 @@
+excl dangling link -17
+excl made target -2
+creat dangling link 1
+creat made target 0
+rdonly trunc 1
+rdonly trunc size 0
+append pwrite 2
+append pwrite offset 0
+append pwrite content 36612250393
+data 0 0
+data 2 2
+data offset 2
+data 5 -6
+data 9 -6
+data -1 -6
+hole 0 5
+hole 2 5
+hole offset 5
+hole 5 -6
+hole 9 -6
+hole -1 -6
+empty data 0 -6
+empty hole 0 -6
+directory data 0 -22
+renameat2 flag 8 -22
+renameat2 noreplace exchange -22
+renameat2 left it 5
+symlink of nothing -2
+symlink made -2
+link unlinked empty path -2
+link unlinked proc -2
+link tmpfile 0
+tmpfile kept 0
+link tmpfile again 0
+link tmpfile once unlinked -2
+link excl tmpfile -2
+readlink 0 -22
+readlink 0 of file -22
+readlink 0 of missing -22
+readlink -1 -22
+readlink 3 3
+readlink 0 of old call -22
+rdev null 259
+rdev zero 261
+rdev full 263
+rdev random 264
+rdev urandom 265
+rdev tty 1280
+rdev ptmx 1282
+rdev file 0
+all gone 0

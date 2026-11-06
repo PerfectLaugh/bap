@@ -132,10 +132,10 @@ def withIdentity (process : Process) (data : ByteArray) : Except String Process 
                       credentials := { uid := id 0, euid := id 1, suid := id 2, fsuid := id 3, gid := id 4, egid := id 5, sgid := id 6
                                        fsgid := id 7, groups } }
 
-/-- Of an inode, its times, owner, extended attributes, seals, changes, locks and name, as bytes. -/
+/-- Of an inode, its times, owner, extended attributes, seals, changes, whether it may be linked, locks and name, as bytes. -/
 def metaBytes (details : Meta) : ByteArray :=
   let out := Wire.putList Wire.putNat ByteArray.empty [details.accessed, details.modified, details.changed, details.uid, details.gid, details.seals,
-    details.changes]
+    details.changes, if details.linkable then 1 else 0]
   let out := Wire.putList (fun out (name, value) => Wire.putBytes (Wire.putText out name) value) out details.attributes
   let out := Wire.putList (Wire.putList Wire.putNat) out (details.locks.map fun lock =>
     let (kind, owner) := match lock.owner with
@@ -166,7 +166,7 @@ def metaOfBytes (data : ByteArray) : Except String Meta := do
     pure { owner, start := field 2, stop := field 3, exclusive := field 4 == 1 : FileLock }
   let number (index : Nat) : Nat := numbers.getD index 0
   pure { accessed := number 0, modified := number 1, changed := number 2, uid := number 3, gid := number 4, seals := number 5
-         changes := number 6, attributes, locks, name }
+         changes := number 6, linkable := number 7 == 1, attributes, locks, name }
 
 /-- What is mounted, as bytes. -/
 def mountsBytes (mounts : List Mount) : ByteArray :=
