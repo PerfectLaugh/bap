@@ -1454,6 +1454,16 @@ private def keptSlots (lowering : Lowering) : Array UInt64 :=
   let outputs := lowering.outputs.map (·.2) ++ lowering.checkpoints.flatMap fun checkpoint => checkpoint.2.map (·.2)
   ((lowering.layout.map (·.2) ++ outputs ++ lowering.flags.flatMap (fun flag => [flag.1, flag.2]) ++ control).map UInt64.ofNat).toArray
 
+/-- What is being compiled on other threads, of every engine, until it is done, whether or not an engine still wants it: a process
+that ends while LLVM compiles ends in the middle of it, as its static parts are torn down under it. -/
+initialize backgroundCompiles : IO.Ref (Array (Task (Except IO.Error (Jit.Program × Nat)))) ← IO.mkRef #[]
+
+/-- Waits for what is being compiled on other threads, for a process that is about to end. -/
+def finishBackgroundCompiles : IO Unit := do
+  for task in ← backgroundCompiles.get do
+    let _ ← IO.wait task
+  backgroundCompiles.set #[]
+
 /-- What a lowering of an entry is, as far as what was compiled of one fits another: a block and a range start at the same address, of the
 same bytes, and are lowered differently, with their slots, their entries and their variables. -/
 private def optimizedOf (entry : CachedBlock) (lowering : Lowering) : List (Nat × Nat) × Nat × List Nat × Nat :=
@@ -1497,6 +1507,9 @@ private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Optio
             Jit.compileOptimized lowering.ops kept ((lowering.budget.map UInt64.ofNat).getD (UInt64.ofNat (2 ^ 64 - 1))) variables
           else Jit.compileEntries lowering.ops entryLabels lowering.nextSlot true (kept.push (UInt64.ofNat lowering.nextSlot)) variables
         pure (program, (← IO.monoMsNow) - started)
+      -- Of those that were, only those that are still compiling are kept.
+      let running ← (← backgroundCompiles.get).filterM fun task => do pure !(← IO.hasFinished task)
+      backgroundCompiles.set (running.push task)
       engine.optimizing.modify (·.insert entry.address (entry.code, optimizedOf entry lowering, task))
       Jit.chainOptimizing engine.chain (UInt64.ofNat entry.address) (UInt64.ofNat optimizeCheck)
       return none

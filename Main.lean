@@ -123,6 +123,8 @@ private def runMachine (machine : Linux.Machine) (stop : Option (Nat × String))
   if stats then
     let rollbacks ← Emu.rollbackStats machine.emu
     (← IO.getStderr).putStrLn s!"rollbacks: {rollbacks.faults} faults, {rollbacks.restarts} restarts, {rollbacks.others} others; {rollbacks.patched} patched ({rollbacks.bytesRestored} bytes), {rollbacks.rebuilt} rebuilt"
+  -- What is still compiling is done before the process ends, which would otherwise end it in the middle of LLVM.
+  Primus.Lifted.finishBackgroundCompiles
   match outcome with
   | .finished status =>
     IO.Process.exit (if status % 128 != 0 then 128 + (status % 128).toUInt8 else (status / 256).toUInt8)
@@ -206,4 +208,5 @@ private def run (args : List String) : IO Unit := do
 def main (args : List String) : IO Unit := do
   run args
   (← IO.getStdout).flush
+  Primus.Lifted.finishBackgroundCompiles
   IO.Process.exit 0

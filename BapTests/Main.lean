@@ -529,3 +529,5 @@ def main : IO Unit := do
     | .ok _ => pure ()
     | .error error => throw error
   IO.println "all BAP Lean tests passed"
+  -- What is still compiling is done before the process ends, which would otherwise end it in the middle of LLVM.
+  Bap.Primus.Lifted.finishBackgroundCompiles
