@@ -48,6 +48,8 @@ structure Poller where
   signals : Signals
   live : IO (List Nat)
   wake : Emu → IO Unit
+  /-- The io_urings of the process that runs, by their inodes, that have completions for it to take. -/
+  completed : Emu → IO (List Nat)
 
 /-- How many bytes the slave of a terminal has to read. -/
 def Terminal.waiting (terminal : Terminal) : Nat := terminal.input.foldl (· + ·.size) 0
@@ -62,8 +64,9 @@ def Terminal.readable (terminal : Terminal) : Bool :=
 
 namespace Poller
 
-/-- What is ready of an open file, with what is pending for the thread that asks as bits, of a `signalfd`. -/
-def readiness (kernel : Kernel) (live : List Nat) (now pending file : Nat) : Nat → Ready
+/-- What is ready of an open file, with the io_urings that have completions to take, by their inodes, and what is pending for the
+thread that asks as bits, of a `signalfd`. -/
+def readiness (kernel : Kernel) (live completed : List Nat) (now pending file : Nat) : Nat → Ready
   | 0 => {}
   | depth + 1 =>
     match kernel.openFiles.get? file with
@@ -73,6 +76,8 @@ def readiness (kernel : Kernel) (live : List Nat) (now pending file : Nat) : Nat
       | none => { error := true }
       | some inode =>
         match inode.content with
+        -- An io_uring is to be read when its ring of completions has some.
+        | .generated "io_uring" => { read := completed.contains opened.inode, write := true }
         | .file _ | .directory | .symlink _ | .generated _ | .console _ | .device _ => { read := true, write := true }
         | .pipe .. =>
           if opened.flags &&& 3 == 0 then
@@ -114,7 +119,7 @@ def readiness (kernel : Kernel) (live : List Nat) (now pending file : Nat) : Nat
           | _ => { read := true, write := true, error := true, hangup := true }
         | .epoll items =>
           { read := items.any fun item =>
-              let ready := readiness kernel live now pending item.file depth
+              let ready := readiness kernel live completed now pending item.file depth
               (ready.read && item.events &&& 1 != 0) || (ready.write && item.events &&& 4 != 0) || ready.error || ready.hangup }
 
 /-- How many times what an open file is ready of has changed, which `EPOLLET` goes by: of the end of a pipe that reads, all that was
@@ -190,8 +195,9 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     pure (some (← timers.waitUntil emu readySpace 0 deadlines.min? false))
   -- What is alive and pending is the same for each descriptor of a call.
   let live ← poller.live
+  let completed ← poller.completed emu
   let pending ← poller.signals.pendingBits tid group
-  let ready (file : Nat) : IO Ready := do pure (readiness (← poller.kernel.get) live now pending file 4)
+  let ready (file : Nat) : IO Ready := do pure (readiness (← poller.kernel.get) live completed now pending file 4)
   let fileOf (fd : Nat) : IO (Option Nat) := do
     match (← poller.kernel.get).openFileOf group fd with
     | .ok (id, _) => pure (some id)

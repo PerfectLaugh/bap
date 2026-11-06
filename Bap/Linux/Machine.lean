@@ -556,6 +556,30 @@ private def writeVectorPipe (machine : Machine) (emu : Emu) (group fd number add
   | .error _ => pure (errorOf Errno.efault)
   | .ok bytes => writePipe machine emu group fd number bytes.size (fun at_ size => pure (bytes.extract at_ (at_ + size))) wait
 
+/-- A write that finds that nothing reads what it writes to any more, a pipe or a socket of a stream, sends `SIGPIPE` to the thread that
+made it, as `write`, `writev`, `pwritev2` at the offset of the file, `send`, `sendto`, `sendmsg`,
+`sendfile`, `splice` and `tee` do that give `EPIPE`, unless a send says `MSG_NOSIGNAL`. The call gives `EPIPE` all the same, if the
+signal doesn't end the process. -/
+private def brokenPipe (machine : Machine) (emu : Emu) (group : Nat) (call : Call) (args : List Nat) (action : SyscallAction) :
+    IO Unit := do
+  let .returnValue value := action | return
+  if value != 2 ^ 64 - Errno.epipe then return
+  let arg (index : Nat) : Nat := args.getD index 0
+  let quiet (flags : Nat) : Bool := flags &&& 0x4000 != 0
+  let fd? := match call with
+    | .write | .writev | .pwritev2 | .sendfile | .sendfile64 => some (arg 0)
+    | .send | .sendto => if quiet (arg 3) then none else some (arg 0)
+    | .sendmsg => if quiet (arg 2) then none else some (arg 0)
+    | .splice => some (arg 2)
+    | .tee => some (arg 1)
+    | _ => none
+  let some fd := fd? | return
+  let kernel ← machine.kernel.get
+  -- A socket of datagrams or of packets that can't send says so and no more.
+  if let .ok (_, socket) := kernel.socketOf group fd then
+    if socket.type != 1 then return
+  sendBrokenPipe machine emu group
+
 /-- The name in a `struct sockaddr` of `size` bytes. Of `sockaddr_un`, a path, to its first zero, or a name of its own, which starts with
 one, and of `sockaddr_in` and `sockaddr_in6`, an address of the Internet as a socket has it as its name. -/
 private def socketName (emu : Emu) (big : Bool) (address size : Nat) : IO (Result String) := do
@@ -884,6 +908,28 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
       | some bytes => if ← giveName emu big (arg 3) (arg 4) bytes then pure (.returnValue 0) else pure (errorOf Errno.efault)
   | _ => pure (errorOf Errno.enosys)
 
+/-- What the calls of `Poller` need of a machine. -/
+private def pollerOf (machine : Machine) : Poller :=
+  let emu := machine.emu
+  { architecture := machine.architecture, kernel := machine.kernel, timers := machine.timers, signals := machine.signals
+    live := do pure (((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups)
+    wake := wakePipeReaders, completed := Ring.completed machine.rings machine.architecture.big }
+
+/-- What AIO and io_uring need of a machine, of the process `group`, whose entries do what `call` does. What an io_uring writes to a
+pipe doesn't wait: it is what there is room for; and a write that finds that nothing reads it any more sends `SIGPIPE`, as `write` does,
+where a send doesn't, as io_uring sends with `MSG_NOSIGNAL`. -/
+private def ringsOf (machine : Machine) (poller : Poller) (group : Nat) (call : Call → List Nat → IO SyscallAction) : Ring.Rings :=
+  let emu := machine.emu
+  let perform (operation : Call) (args : List Nat) : IO SyscallAction := do
+    let fd := args.getD 0 0
+    let action ← match operation, (← machine.kernel.get).pipeOf group fd with
+      | .write, some number => writePipe machine emu group fd number (args.getD 2 0) (fun at_ size => read emu (args.getD 1 0 + at_) size) false
+      | .writev, some number => writeVectorPipe machine emu group fd number (args.getD 1 0) (args.getD 2 0) false
+      | _, _ => call operation args
+    if operation == .write || operation == .writev then brokenPipe machine emu group operation args action
+    pure action
+  { poller, state := machine.rings, perform }
+
 /-- The system calls of files, memory that files are mapped into, time and what a process asks of itself. -/
 private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (args : List Nat) : IO SyscallAction := do
     -- The ranges that these change may have a tag, as a program may give what it got from an allocator that tags them.
@@ -912,9 +958,7 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
     let group := (← currentTask emu).group
     let kernel ← machine.kernel.get
     let cwd := kernel.cwdOf group
-    let poller : Poller := { architecture, kernel := machine.kernel, timers := machine.timers, signals := machine.signals
-                             live := do pure (((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups)
-                             wake := wakePipeReaders }
+    let poller := pollerOf machine
     -- `path` from an address, in the directory that the call says.
     let at_ (directory address : Nat) (action : String → String → IO SyscallAction) : IO SyscallAction := do
       match kernel.baseOf group directory (atCwd directory) with
@@ -998,14 +1042,7 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       machine.kernel.set next
       returning emu out (Abi.time now scale big wordSize)
     -- Anonymous and private is for `serveTaskCalls`, once what it takes the place of isn't mapped.
-    -- What an io_uring writes to a pipe doesn't wait: it is what there is room for.
-    let perform (call : Call) (args : List Nat) : IO SyscallAction := do
-      let fd := args.getD 0 0
-      match call, (← machine.kernel.get).pipeOf group fd with
-      | .write, some number => writePipe machine emu group fd number (args.getD 2 0) (fun at_ size => read emu (args.getD 1 0 + at_) size) false
-      | .writev, some number => writeVectorPipe machine emu group fd number (args.getD 1 0) (args.getD 2 0) false
-      | _, _ => kernelCall machine emu call args
-    let rings : Ring.Rings := { poller, state := machine.rings, perform }
+    let rings := ringsOf machine poller group (kernelCall machine emu)
     let mapMemory (offset : Nat) : IO SyscallAction := do
       -- The rings of an io_uring.
       if arg 3 &&& architecture.mapAnonymous == 0 then
@@ -1670,29 +1707,11 @@ private def descriptorLimit (machine : Machine) (group : Nat) (call : Call) (arg
       else if free (arg 2 % 2 ^ 32) ≥ limit then some (errorOf Errno.emfile) else none
     | _ => none
 
-/-- A write that finds that nothing reads what it writes to any more, a pipe or a socket of a stream, sends `SIGPIPE` to the thread that
-made it, as `write`, `writev`, `pwritev2` at the offset of the file, `send`, `sendto`, `sendmsg`,
-`sendfile`, `splice` and `tee` do that give `EPIPE`, unless a send says `MSG_NOSIGNAL`. The call gives `EPIPE` all the same, if the
-signal doesn't end the process. -/
-private def brokenPipe (machine : Machine) (emu : Emu) (group : Nat) (call : Call) (args : List Nat) (action : SyscallAction) :
-    IO Unit := do
-  let .returnValue value := action | return
-  if value != 2 ^ 64 - Errno.epipe then return
-  let arg (index : Nat) : Nat := args.getD index 0
-  let quiet (flags : Nat) : Bool := flags &&& 0x4000 != 0
-  let fd? := match call with
-    | .write | .writev | .pwritev2 | .sendfile | .sendfile64 => some (arg 0)
-    | .send | .sendto => if quiet (arg 3) then none else some (arg 0)
-    | .sendmsg => if quiet (arg 2) then none else some (arg 0)
-    | .splice => some (arg 2)
-    | .tee => some (arg 1)
-    | _ => none
-  let some fd := fd? | return
-  let kernel ← machine.kernel.get
-  -- A socket of datagrams or of packets that can't send says so and no more.
-  if let .ok (_, socket) := kernel.socketOf group fd then
-    if socket.type != 1 then return
-  sendBrokenPipe machine emu group
+/-- What the io_urings of the process that runs have pending is done as far as it can be, as Linux does it without a call. -/
+private def settleRings (machine : Machine) (emu : Emu) : IO Unit := do
+  let machine := { machine with emu }
+  let some task := (← emu.taskTable.get).find? (← thread emu) | return
+  if task.status.isNone then Ring.settle (ringsOf machine (pollerOf machine) task.group (kernelCall machine emu)) emu task.group
 
 private def serveKernelCalls (machine : Machine) : IO HookId :=
   onSyscall machine.emu fun emu number args => do
@@ -1752,6 +1771,8 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
           if ← Notify.after machine.notifier machine.kernel group call args before action live then wakePipeReaders emu
         pure action
       brokenPipe machine emu group call args action
+      -- What an io_uring of the process has pending may be done now, as it is in Linux as soon as it can be.
+      settleRings machine emu
       handOver machine emu action
 
 /-- What is left: nothing else serves it, and it isn't there. -/
@@ -2321,7 +2342,7 @@ and those that stopped for their end, 3 the exits that tracers that aren't paren
 each tracee last started, 6 what a tracer said a call that a tracee is stopped at the start of is to be, and 7 the processes that are
 over that no one waits for. -/
 private def builtinModels : List (String × Nat) :=
-  [(Signals.modelId, 2), (Ptrace.modelId, 7), (Seccomp.modelId, 1), (Timers.modelId, 2), (Ring.modelId, 1), (heapModelId, 1), (libraryModelId, 1),
+  [(Signals.modelId, 2), (Ptrace.modelId, 7), (Seccomp.modelId, 1), (Timers.modelId, 2), (Ring.modelId, 2), (heapModelId, 1), (libraryModelId, 1),
     (traceModelId, 4)]
 
 private def builtinVersion (id : String) : Nat := (builtinModels.lookup id).getD 1
@@ -2417,6 +2438,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   signals.interrupted.set (timers.interrupted)
   signals.taken.set timers.taken
   emu.betweenTurns.modify (· ++ [do let _ ← resumingCurrent (do timers.tick emu; pure true)])
+  emu.betweenTurns.modify (· ++ [settleRings machine emu])
   let timeState : ModelState := { save := timers.save, load := timers.load }
   machine.models.modify (· ++ [{ id := Timers.modelId, version := builtinVersion Timers.modelId, state := timeState }])
   -- And what AIO and io_uring have.

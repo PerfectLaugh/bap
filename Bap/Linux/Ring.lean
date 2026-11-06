@@ -11,8 +11,11 @@ its id says, so that a libc that reads events from there finds none of its own a
 memory that `mmap` of its descriptor gives, as Linux has them, without `IORING_FEAT_SINGLE_MMAP`. `io_uring_enter` does what was
 submitted in order, by the system calls of the machine, each as it can: one that would wait for a descriptor waits among those
 pending, and is tried again at each `io_uring_enter`, as a timeout of `IORING_OP_TIMEOUT` is looked at, until it is done. A chain of
-`IOSQE_IO_LINK` ends with what fails, the rest of it `ECANCELED`. A call that waits for completions waits for something to change,
-or for the first timeout. Without a thread of the kernel, `IORING_SETUP_SQPOLL` isn't there. -/
+`IOSQE_IO_LINK` ends with what fails, the rest of it `ECANCELED`. What is pending is also done, as it can be, after each call of the
+process that made the io_uring and between turns, as Linux does it without `io_uring_enter`: its completions are posted then, and an
+`eventfd` that was registered counts them. Its descriptor is ready to read while its ring of completions has some. A call that waits
+for completions waits for something to change, or for the first timeout. Without a thread of the kernel, `IORING_SETUP_SQPOLL` isn't
+there. -/
 
 namespace Bap.Linux
 
@@ -35,11 +38,12 @@ structure Pending where
   count : Nat := 0
   start : Nat := 0
 
-/-- An io_uring: its inode, the sizes of its rings, where `mmap` put them, the head of its submissions and the tail of its
-completions as the kernel has them, how many completions it has made, those that don't fit yet, what is pending, and what
-`io_uring_register` gave it: buffers, files and an `eventfd`. -/
+/-- An io_uring: its inode, the process that made it, the sizes of its rings, where `mmap` put them, the head of its submissions and
+the tail of its completions as the kernel has them, how many completions it has made, those that don't fit yet, what is pending, and
+what `io_uring_register` gave it: buffers, files and an `eventfd`. -/
 structure Uring where
   inode : Nat
+  group : Nat := 0
   entries : Nat
   completions : Nat
   sq : Nat := 0
@@ -77,7 +81,8 @@ def save (state : IO.Ref State) : IO ByteArray := do
     putList (fun out (data, object, result) => numbers out [data, object, result]) (numbers out [context.group, context.id, context.capacity])
       context.events) ByteArray.empty state.contexts
   let out := putList (fun out (ring : Uring) =>
-    let out := numbers out [ring.inode, ring.entries, ring.completions, ring.sq, ring.cq, ring.sqes, ring.head, ring.tail, ring.posted]
+    let out := numbers out [ring.inode, ring.entries, ring.completions, ring.sq, ring.cq, ring.sqes, ring.head, ring.tail, ring.posted,
+      ring.group]
     let out := putList (fun out (data, result) => numbers out [data, result]) out ring.overflow
     let out := putList (fun out (pending : Pending) =>
       numbers (putOption putNat (putBytes out pending.entry) pending.deadline) [pending.count, pending.start]) out ring.pending
@@ -112,7 +117,7 @@ def load (state : IO.Ref State) (data : ByteArray) : IO Unit := do
       let (eventfd, at_) ← getOption getNat data at_
       let field (index : Nat) : Nat := fields.getD index 0
       .ok ({ inode := field 0, entries := field 1, completions := field 2, sq := field 3, cq := field 4, sqes := field 5, head := field 6
-             tail := field 7, posted := field 8, overflow, pending, buffers, files, eventfd : Uring }, at_)) data at_
+             tail := field 7, posted := field 8, group := field 9, overflow, pending, buffers, files, eventfd : Uring }, at_)) data at_
     let (submitted, at_) ← getList (fun data at_ => do
       let (fields, at_) ← numbers data at_
       .ok ((fields.getD 0 0, fields.getD 1 0, fields.getD 2 0), at_)) data at_
@@ -159,6 +164,208 @@ def map (rings : Rings) (emu : Emu) (group address size bits flags fd offset : N
 /-- The operations of io_uring that are here, by their numbers. -/
 def operations : List Nat := [0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26, 27, 34, 35, 36, 37, 38, 39]
 
+private def negative (errno : Nat) : Nat := 2 ^ 64 - errno
+
+/-- A number of `size` bytes at `address` of the memory of the process that runs. -/
+private def numberAt (rings : Rings) (emu : Emu) (address size : Nat) : IO Nat := do
+  pure (numberOf rings.poller.architecture.big (← read emu address size))
+
+/-- The pieces that `count` `iovec`s at `address` say. -/
+private def iovecs (rings : Rings) (emu : Emu) (address count : Nat) : IO (List (Nat × Nat)) := do
+  let word := rings.poller.architecture.bits / 8
+  (List.range count).mapM fun index => do
+    pure (← numberAt rings emu (address + 2 * word * index) word, ← numberAt rings emu (address + 2 * word * index + word) word)
+
+/-- What a read or a write at an offset of a file of the process `group` gives, of pieces of memory, as a result of 64 bits. -/
+private def atOffset (rings : Rings) (emu : Emu) (group fd : Nat) (pieces : List (Nat × Nat)) (offset : Nat) (writing : Bool) :
+    IO Nat := do
+  let poller := rings.poller
+  let mut done := 0
+  for (address, length) in pieces do
+    let kernel ← poller.kernel.get
+    if writing then
+      match kernel.writeTo group fd (← read emu address length) (offset + done) with
+      | .ok (next, count) =>
+        poller.kernel.set next
+        done := done + count
+      | .error errno => return if done > 0 then done else negative errno
+    else
+      match kernel.readFrom group fd length (offset + done) with
+      | .ok bytes =>
+        write emu address bytes
+        done := done + bytes.size
+        if bytes.size < length then return done
+      | .error errno => return if done > 0 then done else negative errno
+  pure done
+
+/-- The io_urings of the process that runs, by their inodes, that have completions for it to take: those whose ring of completions
+isn't empty at the head that it has, or that have more than fit. -/
+def completed (state : IO.Ref State) (big : Bool) (emu : Emu) : IO (List Nat) := do
+  let group := (← currentTask emu).group
+  (← state.get).rings.filterMapM fun ring => do
+    if ring.group != group || ring.cq == 0 then return none
+    if !ring.overflow.isEmpty then return some ring.inode
+    try
+      let head := numberOf big (← read emu ring.cq 4)
+      pure (if head != ring.tail then some ring.inode else none)
+    catch _ => pure none
+
+/-- What is ready of a descriptor of the process `group`, as `poll` says it. -/
+private def readiness (rings : Rings) (emu : Emu) (group fd : Nat) : IO (Option Ready) := do
+  let poller := rings.poller
+  let kernel ← poller.kernel.get
+  match kernel.openFileOf group fd with
+  | .error _ => pure none
+  | .ok (id, _) => pure (some (Poller.readiness kernel (← poller.live) (← poller.completed emu) kernel.clock 0 id 4))
+
+/-- Whether a descriptor of the process `group` is ready to be read or written, so that a call doesn't wait. -/
+private def ready (rings : Rings) (emu : Emu) (group fd : Nat) (writing : Bool) : IO Bool := do
+  match ← readiness rings emu group fd with
+  | none => pure true
+  | some state =>
+    pure (if writing then state.write || state.error || state.hangup else state.read || state.error || state.hangup || state.readHangup)
+
+/-- An io_uring with a completion of the entry of `data`, whose result a completion has as 32 bits: of an error, the guest's own number
+of it, negative. -/
+private def complete (architecture : Architecture) (ring : Uring) (data result : Nat) : Uring :=
+  let result := if result ≥ 2 ^ 63 then 2 ^ 32 - architecture.errno (2 ^ 64 - result) % 2 ^ 32 else result % 2 ^ 32
+  { ring with overflow := ring.overflow ++ [(data, result)], posted := ring.posted + 1 }
+
+/-- What an entry of an io_uring does, of the process `group`: its result, or none if it would wait. A read or a write at an offset of
+what has none, as a pipe, is as one at none; of a socket, only at 0, as Linux has it. -/
+private def perform (rings : Rings) (emu : Emu) (group : Nat) (ring : Uring) (entry : ByteArray) : IO (Option Nat) := do
+  let poller := rings.poller
+  let take (offset size : Nat) : Nat := numberOf poller.architecture.big (entry.extract offset (offset + size))
+  let (opcode, entryFlags, fd, offset, address, length, opFlags) :=
+    (take 0 1, take 1 1, take 4 4, take 8 8, take 16 8, take 24 4, take 28 4)
+  -- `IOSQE_FIXED_FILE`: the descriptor of what was registered at that place.
+  let fd := if entryFlags &&& 1 != 0 then ring.files.getD fd (2 ^ 32 - 1) else fd
+  let fd := if fd ≥ 2 ^ 31 then 2 ^ 64 - (2 ^ 32 - fd) else fd
+  let (positional, socket) := match (← poller.kernel.get).objectOf group fd with
+    | .ok (_, _, { content := .file _, .. }) | .ok (_, _, { content := .directory, .. }) | .ok (_, _, { content := .symlink _, .. })
+    | .ok (_, _, { content := .generated _, .. }) | .error _ => (true, false)
+    | .ok (_, _, { content := .socket _, .. }) => (false, true)
+    | .ok _ => (false, false)
+  let sequential := offset == 2 ^ 64 - 1 || !positional
+  let system (call : Call) (args : List Nat) : IO (Option Nat) := do pure (some (resultOf (← rings.perform call args)))
+  let whenReady (writing : Bool) (action : IO (Option Nat)) : IO (Option Nat) := do
+    if ← ready rings emu group fd writing then action else pure none
+  match opcode with
+  | 0 => pure (some 0)
+  | 1 | 2 | 22 | 23 | 4 | 5 =>
+    let writing := opcode == 2 || opcode == 23 || opcode == 5
+    let vectored := opcode == 1 || opcode == 2
+    if socket && offset != 0 && offset != 2 ^ 64 - 1 then pure (some (negative Errno.espipe))
+    else if sequential then
+      whenReady writing (system (match vectored, writing with
+        | true, true => .writev | true, false => .readv | false, true => .write | false, false => .read) [fd, address, length])
+    else
+      let pieces ← if vectored then iovecs rings emu address length else pure [(address, length)]
+      pure (some (← atOffset rings emu group fd pieces offset writing))
+  | 3 | 17 | 24 | 25 =>
+    let known := ((← poller.kernel.get).openFileOf group fd).toOption.isSome
+    pure (some (if known || opcode == 25 then 0 else negative Errno.ebadf))
+  | 6 =>
+    -- What of the events asked for is ready, as `poll` says it.
+    match ← readiness rings emu group fd with
+    | none => pure (some (negative Errno.ebadf))
+    | some state =>
+      let revents := Poller.bits state 0x100 &&& (opFlags % 2 ^ 16 ||| 0x18)
+      pure (if revents == 0 then none else some revents)
+  | 9 => whenReady true (system .sendmsg [fd, address, opFlags])
+  | 10 => whenReady false (system .recvmsg [fd, address, opFlags])
+  | 13 => whenReady false (system .accept4 [fd, address, offset, opFlags])
+  | 16 => system .connect [fd, address, offset]
+  | 18 => system .openat [fd, address, opFlags, length]
+  | 19 => system .close [fd]
+  | 21 => system .statx [fd, address, opFlags, length, offset]
+  | 26 => whenReady true (system .sendto [fd, address, length, opFlags, 0, 0])
+  | 27 => whenReady false (system .recvfrom [fd, address, length, opFlags, 0, 0])
+  | 34 => system .shutdown [fd, length]
+  | 35 => system .renameat2 [fd, address, length, offset, opFlags]
+  | 36 => system .unlinkat [fd, address, opFlags]
+  | 37 => system .mkdirat [fd, address, length]
+  | 38 => system .symlinkat [address, fd, offset]
+  | 39 => system .linkat [fd, address, length, offset, opFlags]
+  | _ => pure (some (negative Errno.einval))
+
+/-- What is pending of an io_uring, in order, done as far as it can be: a chain that one of them is in waits behind it. -/
+private def attempt (rings : Rings) (emu : Emu) (group : Nat) (ring : Uring) (pending : List Pending) : IO Uring := do
+  let architecture := rings.poller.architecture
+  let big := architecture.big
+  let now := (← rings.poller.kernel.get).clock
+  let mut ring := { ring with pending := [] }
+  let mut blocked := false
+  let mut cancelling := false
+  for item in pending do
+    let data := numberOf big (item.entry.extract 32 40)
+    let linked := item.entry[1]! &&& 4 != 0
+    if cancelling then
+      ring := complete architecture ring data (negative 125)
+      cancelling := linked
+      continue
+    if blocked then
+      ring := { ring with pending := ring.pending ++ [item] }
+      continue
+    if item.entry[0]! == 11 then
+      -- A timeout: done with its count of completions, or, at its time, with `ETIME`.
+      if item.count > 0 && ring.posted - item.start ≥ item.count then ring := complete architecture ring data 0
+      else if item.deadline.any (· ≤ now) then ring := complete architecture ring data (negative 62)
+      else ring := { ring with pending := ring.pending ++ [item] }
+      continue
+    if item.entry[0]! == 14 then
+      -- What `IORING_OP_ASYNC_CANCEL` cancels: what is pending of that number.
+      let target := numberOf big (item.entry.extract 16 24)
+      let found := ring.pending.find? fun other => numberOf big (other.entry.extract 32 40) == target
+      match found with
+      | some other =>
+        ring := complete architecture { ring with pending := ring.pending.filter fun entry => entry.entry != other.entry } data 0
+        ring := complete architecture ring target (negative 125)
+      | none => ring := complete architecture ring data (negative Errno.enoent)
+      continue
+    match ← perform rings emu group ring item.entry with
+    | none =>
+      ring := { ring with pending := ring.pending ++ [item] }
+      blocked := linked
+    | some result =>
+      ring := complete architecture ring data result
+      cancelling := linked && result ≥ 2 ^ 63
+  pure ring
+
+/-- The completions of an io_uring go to its ring, as many as there is room for, which the `eventfd` of the process `group` that was
+registered counts; its descriptor has changed, and what waits looks again. -/
+private def post (rings : Rings) (emu : Emu) (group : Nat) (ring : Uring) : IO Uring := do
+  let poller := rings.poller
+  let field := Abi.field poller.architecture.big
+  let cqHead ← numberAt rings emu ring.cq 4
+  let room := ring.completions - (ring.tail + 2 ^ 32 - cqHead) % 2 ^ 32
+  let posting := ring.overflow.take room
+  let mut ring := ring
+  for (data, result) in posting do
+    write emu (ring.cq + 64 + 16 * (ring.tail % ring.completions)) (field 8 data ++ field 4 result ++ field 4 0)
+    ring := { ring with tail := (ring.tail + 1) % 2 ^ 32 }
+  ring := { ring with overflow := ring.overflow.drop posting.length }
+  write emu (ring.cq + 4) (field 4 ring.tail)
+  if !posting.isEmpty then
+    poller.kernel.modify (·.setContent ring.inode (.generated "io_uring"))
+    if let some fd := ring.eventfd then
+      let kernel ← poller.kernel.get
+      if let .ok (number_, _, { content := .eventfd value semaphore, .. }) := kernel.objectOf group fd then
+        poller.kernel.set (kernel.setContent number_ (.eventfd (value + posting.length) semaphore))
+    poller.wake emu
+  pure ring
+
+/-- What the io_urings of the process `group`, which runs, have pending is done as far as it can be, and their completions posted, as
+Linux does without a call of `io_uring_enter`. -/
+def settle (rings : Rings) (emu : Emu) (group : Nat) : IO Unit := do
+  for ring in (← rings.state.get).rings do
+    if ring.group != group || (ring.pending.isEmpty && ring.overflow.isEmpty) || ring.sq == 0 || ring.cq == 0 || ring.sqes == 0 then
+      continue
+    try
+      let ring ← post rings emu group (← attempt rings emu group ring ring.pending)
+      rings.state.modify fun state => { state with rings := state.rings.map fun other => if other.inode == ring.inode then ring else other }
+    catch _ => pure ()
+
 /-- The calls of AIO and io_uring, if the call is one of them. -/
 partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : IO (Option SyscallAction) := do
   let poller := rings.poller
@@ -170,40 +377,9 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
   let group := (← currentTask emu).group
   let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (.returnValue (2 ^ 64 - errno)))
   let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (.returnValue value))
-  let number (address size : Nat) : IO Nat := do pure (numberOf big (← read emu address size))
+  let number := numberAt rings emu
   let field := Abi.field big
-  let negative (errno : Nat) : Nat := 2 ^ 64 - errno
   let now := (← poller.kernel.get).clock
-  -- What a read or a write at an offset of a file gives, of `iovecs` or of a buffer, as a result of 64 bits.
-  let atOffset (fd : Nat) (pieces : List (Nat × Nat)) (offset : Nat) (writing : Bool) : IO Nat := do
-    let mut done := 0
-    for (address, length) in pieces do
-      let kernel ← poller.kernel.get
-      if writing then
-        match kernel.writeTo group fd (← read emu address length) (offset + done) with
-        | .ok (next, count) =>
-          poller.kernel.set next
-          done := done + count
-        | .error errno => return if done > 0 then done else negative errno
-      else
-        match kernel.readFrom group fd length (offset + done) with
-        | .ok bytes =>
-          write emu address bytes
-          done := done + bytes.size
-          if bytes.size < length then return done
-        | .error errno => return if done > 0 then done else negative errno
-    pure done
-  let iovecs (address count : Nat) : IO (List (Nat × Nat)) := do
-    (List.range count).mapM fun index => do
-      pure (← number (address + 2 * word * index) word, ← number (address + 2 * word * index + word) word)
-  -- Whether a descriptor is ready to be read or written, so that the call doesn't wait.
-  let ready (fd : Nat) (writing : Bool) : IO Bool := do
-    let kernel ← poller.kernel.get
-    match kernel.openFileOf group fd with
-    | .error _ => pure true
-    | .ok (id, _) =>
-      let state := Poller.readiness kernel (← poller.live) now 0 id 4
-      pure (if writing then state.write || state.error || state.hangup else state.read || state.error || state.hangup || state.readHangup)
   -- What is of processes that are gone, or of an io_uring that no descriptor has, goes as something new is made.
   let forget : IO Unit := do
     let kernel ← poller.kernel.get
@@ -253,11 +429,11 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
       if ((← poller.kernel.get).openFileOf group fd).toOption.isNone then
         if done == 0 then return ← fail Errno.ebadf else break
       let result ← match opcode with
-        | 0 => atOffset fd [(buffer, length)] offset false
-        | 1 => atOffset fd [(buffer, length)] offset true
+        | 0 => atOffset rings emu group fd [(buffer, length)] offset false
+        | 1 => atOffset rings emu group fd [(buffer, length)] offset true
         | 2 | 3 | 6 => pure 0
-        | 7 => atOffset fd (← iovecs buffer length) offset false
-        | 8 => atOffset fd (← iovecs buffer length) offset true
+        | 7 => atOffset rings emu group fd (← iovecs rings emu buffer length) offset false
+        | 8 => atOffset rings emu group fd (← iovecs rings emu buffer length) offset true
         | _ => if done == 0 then return ← fail Errno.einval else break
       -- An error is the guest's own number of it, negative.
       let result := if result ≥ 2 ^ 63 then 2 ^ 64 - architecture.errno (2 ^ 64 - result) else result
@@ -307,7 +483,7 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
     let (kernel, fd) := kernel.addObject group (.generated "io_uring") Kernel.oCloexec
     poller.kernel.set kernel
     let inode := kernel.nextInode - 1
-    rings.state.modify fun state => { state with rings := state.rings ++ [{ inode, entries, completions }] }
+    rings.state.modify fun state => { state with rings := state.rings ++ [{ inode, group, entries, completions }] }
     -- `struct io_uring_params`: the sizes, what it has, and where in its rings each part of them is.
     let features := 2 ||| 4 ||| 8
     write emu (arg 1) (field 4 entries ++ field 4 completions)
@@ -326,7 +502,7 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
     | 0 =>
       if !ring.buffers.isEmpty then return ← fail 16
       update fun other => { other with buffers := [] }
-      let buffers ← iovecs (arg 2) (arg 3)
+      let buffers ← iovecs rings emu (arg 2) (arg 3)
       update fun other => { other with buffers }
       succeed
     | 1 => if ring.buffers.isEmpty then fail Errno.enxio else do update fun other => { other with buffers := [] }; succeed
@@ -356,100 +532,7 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
     let flags := arg 3
     if flags &&& (8 ||| 16) != 0 then return ← fail Errno.einval
     if ring.sq == 0 || ring.cq == 0 || ring.sqes == 0 then return ← fail Errno.efault
-    let mut ring := ring
-    -- What it did and gives: by the number of the entry, its result as 32 bits, which a completion has.
-    let complete (ring : Uring) (data result : Nat) : Uring :=
-      -- An error is the guest's own number of it, negative.
-      let result := if result ≥ 2 ^ 63 then 2 ^ 32 - architecture.errno (2 ^ 64 - result) % 2 ^ 32 else result % 2 ^ 32
-      { ring with overflow := ring.overflow ++ [(data, result)], posted := ring.posted + 1 }
-    -- One entry: its result, or none if it would wait.
-    let perform (ring : Uring) (entry : ByteArray) : IO (Option Nat) := do
-      let take (offset size : Nat) : Nat := numberOf big (entry.extract offset (offset + size))
-      let (opcode, entryFlags, fd, offset, address, length, opFlags) :=
-        (take 0 1, take 1 1, take 4 4, take 8 8, take 16 8, take 24 4, take 28 4)
-      -- `IOSQE_FIXED_FILE`: the descriptor of what was registered at that place.
-      let fd := if entryFlags &&& 1 != 0 then ring.files.getD fd (2 ^ 32 - 1) else fd
-      let fd := if fd ≥ 2 ^ 31 then 2 ^ 64 - (2 ^ 32 - fd) else fd
-      let sequential := offset == 2 ^ 64 - 1
-      let system (call : Call) (args : List Nat) : IO (Option Nat) := do pure (some (resultOf (← rings.perform call args)))
-      let whenReady (writing : Bool) (action : IO (Option Nat)) : IO (Option Nat) := do
-        if ← ready fd writing then action else pure none
-      match opcode with
-      | 0 => pure (some 0)
-      | 1 | 2 =>
-        if sequential then whenReady (opcode == 2) (system (if opcode == 1 then .readv else .writev) [fd, address, length])
-        else pure (some (← atOffset fd (← iovecs address length) offset (opcode == 2)))
-      | 22 | 23 | 4 | 5 =>
-        let writing := opcode == 23 || opcode == 5
-        if sequential then whenReady writing (system (if writing then .write else .read) [fd, address, length])
-        else pure (some (← atOffset fd [(address, length)] offset writing))
-      | 3 | 17 | 24 | 25 =>
-        let known := ((← poller.kernel.get).openFileOf group fd).toOption.isSome
-        pure (some (if known || opcode == 25 then 0 else negative Errno.ebadf))
-      | 6 =>
-        -- What of the events asked for is ready, as `poll` says it.
-        let kernel ← poller.kernel.get
-        match kernel.openFileOf group fd with
-        | .error _ => pure (some (negative Errno.ebadf))
-        | .ok (id, _) =>
-          let revents := Poller.bits (Poller.readiness kernel (← poller.live) now 0 id 4) 0x100 &&& (opFlags % 2 ^ 16 ||| 0x18)
-          pure (if revents == 0 then none else some revents)
-      | 9 => whenReady true (system .sendmsg [fd, address, opFlags])
-      | 10 => whenReady false (system .recvmsg [fd, address, opFlags])
-      | 13 => whenReady false (system .accept4 [fd, address, offset, opFlags])
-      | 16 => system .connect [fd, address, offset]
-      | 18 => system .openat [fd, address, opFlags, length]
-      | 19 => system .close [fd]
-      | 21 => system .statx [fd, address, opFlags, length, offset]
-      | 26 => whenReady true (system .sendto [fd, address, length, opFlags, 0, 0])
-      | 27 => whenReady false (system .recvfrom [fd, address, length, opFlags, 0, 0])
-      | 34 => system .shutdown [fd, length]
-      | 35 => system .renameat2 [fd, address, length, offset, opFlags]
-      | 36 => system .unlinkat [fd, address, opFlags]
-      | 37 => system .mkdirat [fd, address, length]
-      | 38 => system .symlinkat [address, fd, offset]
-      | 39 => system .linkat [fd, address, length, offset, opFlags]
-      | _ => pure (some (negative Errno.einval))
-    -- What is pending, in order: a chain that one of them is in waits behind it.
-    let attempt (ring : Uring) (pending : List Pending) : IO Uring := do
-      let mut ring := { ring with pending := [] }
-      let mut blocked := false
-      let mut cancelling := false
-      for item in pending do
-        let data := numberOf big (item.entry.extract 32 40)
-        let linked := item.entry[1]! &&& 4 != 0
-        if cancelling then
-          ring := complete ring data (negative 125)
-          cancelling := linked
-          continue
-        if blocked then
-          ring := { ring with pending := ring.pending ++ [item] }
-          continue
-        if item.entry[0]! == 11 then
-          -- A timeout: done with its count of completions, or, at its time, with `ETIME`.
-          if item.count > 0 && ring.posted - item.start ≥ item.count then ring := complete ring data 0
-          else if item.deadline.any (· ≤ now) then ring := complete ring data (negative 62)
-          else ring := { ring with pending := ring.pending ++ [item] }
-          continue
-        if item.entry[0]! == 14 then
-          -- What `IORING_OP_ASYNC_CANCEL` cancels: what is pending of that number.
-          let target := numberOf big (item.entry.extract 16 24)
-          let found := ring.pending.find? fun other => numberOf big (other.entry.extract 32 40) == target
-          match found with
-          | some other =>
-            ring := complete { ring with pending := ring.pending.filter fun entry => entry.entry != other.entry } data 0
-            ring := complete ring target (negative 125)
-          | none => ring := complete ring data (negative Errno.enoent)
-          continue
-        match ← perform ring item.entry with
-        | none =>
-          ring := { ring with pending := ring.pending ++ [item] }
-          blocked := linked
-        | some result =>
-          ring := complete ring data result
-          cancelling := linked && result ≥ 2 ^ 63
-      pure ring
-    ring ← attempt ring ring.pending
+    let mut ring ← attempt rings emu group ring ring.pending
     -- What was submitted: from the head that the kernel has to the tail that the program wrote.
     let tail ← number (ring.sq + 4) 4
     let count := min (arg 1) ((tail + 2 ^ 32 - ring.head) % 2 ^ 32)
@@ -471,24 +554,8 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
       pure { item with deadline := some (if absolute then span else now + span) }
     ring := { ring with head := (ring.head + count) % 2 ^ 32 }
     write emu ring.sq (field 4 ring.head)
-    ring ← attempt ring (ring.pending ++ submitted)
-    -- Completions, as many as there is room for.
-    let cqHead ← number ring.cq 4
-    let room := ring.completions - (ring.tail + 2 ^ 32 - cqHead) % 2 ^ 32
-    let posting := ring.overflow.take room
-    for (data, result) in posting do
-      write emu (ring.cq + 64 + 16 * (ring.tail % ring.completions)) (field 8 data ++ field 4 result ++ field 4 0)
-      ring := { ring with tail := (ring.tail + 1) % 2 ^ 32 }
-    ring := { ring with overflow := ring.overflow.drop posting.length }
-    write emu (ring.cq + 4) (field 4 ring.tail)
-    -- The `eventfd` that was registered counts them.
-    if !posting.isEmpty then
-      if let some fd := ring.eventfd then
-        let kernel ← poller.kernel.get
-        if let .ok (number_, _, { content := .eventfd value semaphore, .. }) := kernel.objectOf group fd then
-          poller.kernel.set (kernel.setContent number_ (.eventfd (value + posting.length) semaphore))
-      poller.wake emu
-    let finished := ring
+    let finished ← post rings emu group (← attempt rings emu group ring (ring.pending ++ submitted))
+    let cqHead ← number finished.cq 4
     let state ← rings.state.get
     -- Of a thread that waited here, what it submitted before it did; one that a signal ended is of another call.
     let next ← emu.nextPc.get

@@ -1,9 +1,12 @@
 // Asynchronous I/O: AIO's reads and writes at offsets, with events that io_getevents takes and waits for, and an io_uring whose rings
 // the program drives itself: reads and writes, a nop, a chain that a failure cancels, a read of a pipe that waits for what is written,
+// which completes when it is written without another io_uring_enter, as the ring's descriptor and an eventfd that was registered say,
+// reads and writes at an offset of what has none, a pipe and a socket, a write to a pipe that nothing reads, which raises SIGPIPE,
 // a timeout, a cancel, and a probe. It says what it found, the same on each target.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <time.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -82,6 +85,20 @@ static long enter(unsigned count, unsigned wait) {
   return call(SYS_io_uring_enter, ring, count, wait, wait ? 1 : 0, 0, 0);
 }
 
+// How many completions there are to take.
+static long ready(void) { return (long)(__atomic_load_n(cqTail, __ATOMIC_ACQUIRE) - *cqHead); }
+
+// What poll says of the ring's descriptor, at once: whether it is ready to read, and what it has.
+static void polled(const char *label) {
+  struct { int fd; short events, revents; } watched = {ring, 1, 0};
+  struct timespec now = {0, 0};
+  long found = call(SYS_ppoll, (long)&watched, 1, (long)&now, 0, 8, 0);
+  say(label, 2, found, watched.revents, 0);
+}
+
+static volatile int pipeSignals;
+static void onPipe(int number) { pipeSignals += number == SIGPIPE; }
+
 // What completed, in order.
 static void reap(const char *label) {
   unsigned head = *cqHead;
@@ -94,8 +111,8 @@ static void reap(const char *label) {
 }
 
 int main(void) {
-  syscall(SYS_mkdirat, AT_FDCWD, "/tmp", 0777, 0, 0, 0);
-  int file = open("/tmp/ring-file", O_RDWR | O_CREAT | O_TRUNC, 0644);
+  syscall(SYS_mkdirat, AT_FDCWD, "ring.d", 0700, 0, 0, 0);
+  int file = open("ring.d/file", O_RDWR | O_CREAT | O_TRUNC, 0600);
   write(file, "0123456789", 10);
 
   // AIO.
@@ -166,6 +183,73 @@ int main(void) {
   say("written", 1, enter(0, 1), 0, 0);
   reap("piped");
   sayText("piped", piped, 4);
+
+  // What completes as it can, without io_uring_enter: the ring's descriptor is ready to read while its ring of completions has
+  // some, and an eventfd that was registered counts them.
+  int counter = (int)call(SYS_eventfd2, 0, O_NONBLOCK, 0, 0, 0, 0);
+  say("register eventfd", 1, call(SYS_io_uring_register, ring, 4, (long)&counter, 1, 0, 0), 0, 0);
+  unsigned long long counted = 0;
+  polled("ring empty");
+  submit(22, pipes[0], (unsigned long long)-1, piped, 8, 0, 11, 0);
+  say("submitted", 2, enter(1, 0), ready(), 0);
+  polled("ring still empty");
+  say("count before", 1, call(SYS_read, counter, (long)&counted, 8, 0, 0, 0), 0, 0);
+  write(pipes[1], "late", 4);
+  say("completed", 1, ready(), 0, 0);
+  polled("ring ready");
+  say("count", 2, call(SYS_read, counter, (long)&counted, 8, 0, 0, 0), (long)counted, 0);
+  reap("late");
+  sayText("late", piped, 4);
+  polled("ring taken");
+  say("unregister eventfd", 1, call(SYS_io_uring_register, ring, 5, 0, 0, 0, 0), 0, 0);
+  close(counter);
+
+  // At an offset of what has none: of 0, as at none.
+  char some[8] = {0};
+  submit(23, pipes[1], 0, "zero", 4, 0, 12, 4);
+  submit(22, pipes[0], 0, some, 8, 0, 13, 0);
+  say("pipe at 0", 1, enter(2, 2), 0, 0);
+  reap("pipe at 0");
+  sayText("pipe at 0", some, 4);
+  struct { void *base; unsigned long size; } piece = {some, 8};
+  write(pipes[1], "vect", 4);
+  submit(1, pipes[0], 0, &piece, 1, 0, 14, 0);
+  say("readv at 0", 1, enter(1, 1), 0, 0);
+  reap("readv at 0");
+  sayText("readv at 0", some, 4);
+  int pair[2];
+  say("socketpair", 1, call(SYS_socketpair, 1, 1, 0, (long)pair, 0, 0), 0, 0);
+  write(pair[1], "sock", 4);
+  submit(22, pair[0], 0, some, 8, 0, 15, 0);
+  say("socket at 0", 1, enter(1, 1), 0, 0);
+  reap("socket at 0");
+  sayText("socket at 0", some, 4);
+  // Of another offset, a pipe the same, and a socket ESPIPE.
+  submit(23, pipes[1], 5, "five", 4, 0, 16, 4);
+  submit(22, pipes[0], 5, some, 8, 0, 17, 0);
+  say("pipe at 5", 1, enter(2, 2), 0, 0);
+  reap("pipe at 5");
+  sayText("pipe at 5", some, 4);
+  submit(23, pair[1], 5, "five", 4, 0, 18, 0);
+  say("socket at 5", 1, enter(1, 1), 0, 0);
+  submit(22, pair[0], 5, some, 8, 0, 19, 0);
+  say("socket at 5", 1, enter(1, 1), 0, 0);
+  reap("socket at 5");
+  close(pair[0]);
+  close(pair[1]);
+
+  // A write to a pipe that nothing reads: EPIPE, and SIGPIPE, as of write.
+  signal(SIGPIPE, onPipe);
+  int broken[2];
+  pipe(broken);
+  close(broken[0]);
+  submit(23, broken[1], (unsigned long long)-1, "x", 1, 0, 20, 0);
+  submit(23, broken[1], 0, "x", 1, 0, 21, 0);
+  say("broken", 1, enter(2, 2), 0, 0);
+  reap("broken");
+  say("sigpipe", 1, pipeSignals, 0, 0);
+  signal(SIGPIPE, SIG_DFL);
+  close(broken[1]);
   struct { long long seconds, nanoseconds; } span = {0, 10000000};
   submit(11, -1, 0, &span, 1, 0, 8, 0);
   say("timeout", 1, enter(1, 1), 0, 0);
@@ -184,6 +268,7 @@ int main(void) {
   say("bad register", 1, call(SYS_io_uring_register, ring, 999, 0, 0, 0, 0), 0, 0);
   struct params wrong = {0};
   say("no entries", 1, call(SYS_io_uring_setup, 0, (long)&wrong, 0, 0, 0, 0), 0, 0);
-  unlink("/tmp/ring-file");
+  unlink("ring.d/file");
+  syscall(SYS_unlinkat, AT_FDCWD, "ring.d", AT_REMOVEDIR, 0, 0, 0);
   return 0;
 }

@@ -24,6 +24,41 @@ pending 1
 written 0
 piped 7 4
 piped pipe
+register eventfd 0
+ring empty 0 0
+submitted 1 0
+ring still empty 0 0
+count before -11
+completed 1
+ring ready 1 1
+count 8 1
+late 11 4
+late late
+ring taken 0 0
+unregister eventfd 0
+pipe at 0 2
+pipe at 0 12 4
+pipe at 0 13 4
+pipe at 0 zero
+readv at 0 1
+readv at 0 14 4
+readv at 0 vect
+socketpair 0
+socket at 0 1
+socket at 0 15 4
+socket at 0 sock
+pipe at 5 2
+pipe at 5 16 4
+pipe at 5 17 4
+pipe at 5 five
+socket at 5 1
+socket at 5 1
+socket at 5 18 -29
+socket at 5 19 -29
+broken 2
+broken 20 -32
+broken 21 -32
+sigpipe 1
 timeout 1
 timed 8 -62
 cancel 1
