@@ -125,7 +125,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       poller.kernel.set (alter kernel number fun details =>
         { details with accessed := given.1.getD details.accessed, modified := given.2.getD details.modified, changed := now })
       succeed
-  -- Of `chown`: -1 leaves either as it is, and only root gives a file to another, or to a group that it isn't in.
+  -- Of `chown`: -1 leaves either as it is, and only one with `CAP_CHOWN` gives a file to another, or to a group that it isn't in.
   let chown (number : Result Nat) (uid gid : Nat) : IO (Option SyscallAction) := do
     let unset := 2 ^ 32 - 1
     let (uid, gid) := (uid % 2 ^ 32, gid % 2 ^ 32)
@@ -133,7 +133,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     | .error errno => fail errno
     | .ok number =>
       let some inode := kernel.inodes.get? number | return ← fail Errno.enoent
-      let mayGive := credentials.euid == 0 ||
+      let mayGive := credentials.capable Capability.chown ||
         ((uid == unset || uid == inode.details.uid) && credentials.euid == inode.details.uid &&
           (gid == unset || gid == credentials.egid || credentials.groups.contains gid))
       if !mayGive then return ← fail 1

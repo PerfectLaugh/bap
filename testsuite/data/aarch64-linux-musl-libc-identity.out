@@ -1,0 +1,31 @@
+setfsuid -1 1
+setfsuid -1 again 1
+setfsgid -1 1
+setfsgid -1 again 1
+capget probe 0
+capget probe version 1
+capget bad version -22
+capget bad version written 1
+capget no data 0
+capget pid -1 -22
+capset bad version -22
+root setgroups sorts 1
+root capset drops 1
+root setuid capabilities 1
+root exec all capabilities 1
+exec suid is euid 1
+exec sgid is egid 1
+exec fsuid is euid 1
+exec fsgid is egid 1
+exec no capabilities 1
+exec 0
+no capabilities 1
+capset nothing 0
+capset raise -1
+capset effective beyond permitted -1
+capset inheritable -1
+capset of another -1
+setgroups -1
+getgroups -1 -22
+setfsuid -1 nobody 1
+setfsuid -1 nobody again 1

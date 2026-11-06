@@ -98,12 +98,14 @@ def socketOfBytes (data : ByteArray) : Except String Socket := do
   Wire.expectEnd data at_
   pure { type, name, peer, listening, pending, waiting, incoming := incoming.toArray, readShut, writeShut, owner, family, remote }
 
-/-- Of a process, its process group, session, terminal, credentials, limits and nice value, and whether it ended, as bytes. -/
+/-- Of a process, its process group, session, terminal, credentials and capabilities, limits and nice value, and whether it ended,
+as bytes. -/
 def identityBytes (process : Process) : ByteArray :=
   let out := Wire.putOption Wire.putNat (Wire.putNat (Wire.putNat ByteArray.empty process.pgid) process.sid) process.terminal
   let ids := process.credentials
   let out := Wire.putList Wire.putNat (Wire.putList Wire.putNat out
-    [ids.uid, ids.euid, ids.suid, ids.fsuid, ids.gid, ids.egid, ids.sgid, ids.fsgid]) ids.groups
+    [ids.uid, ids.euid, ids.suid, ids.fsuid, ids.gid, ids.egid, ids.sgid, ids.fsgid, ids.effective, ids.permitted, ids.inheritable,
+      ids.bounding]) ids.groups
   let out := Wire.putList (fun out (resource, soft, hard) => Wire.putNat (Wire.putNat (Wire.putNat out resource) soft) hard) out
     process.limits
   let out := Wire.putText (Wire.putNat (Wire.putFlag (Wire.putNat out process.nice) process.ended) process.root.inode) process.root.path
@@ -131,7 +133,8 @@ def withIdentity (process : Process) (data : ByteArray) : Except String Process 
   let id (index : Nat) : Nat := ids.getD index 0
   pure { process with pgid, sid, terminal, limits, nice, ended, root := { inode := rootInode, path := rootPath }, barriers
                       credentials := { uid := id 0, euid := id 1, suid := id 2, fsuid := id 3, gid := id 4, egid := id 5, sgid := id 6
-                                       fsgid := id 7, groups } }
+                                       fsgid := id 7, groups, effective := id 8, permitted := id 9, inheritable := id 10
+                                       bounding := id 11 } }
 
 /-- Of an inode, its times, owner, extended attributes, seals, changes, whether it may be linked, locks and name, as bytes. -/
 def metaBytes (details : Meta) : ByteArray :=

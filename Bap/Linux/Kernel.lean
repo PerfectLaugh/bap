@@ -293,8 +293,32 @@ def overlaps (mapping : FileMapping) (lower upper : Nat) : Bool :=
 
 end FileMapping
 
+/-! The capabilities, as Linux numbers them: a set of them is a number with the bit of each. -/
+
+namespace Capability
+def chown : Nat := 0
+def dacOverride : Nat := 1
+def dacReadSearch : Nat := 2
+def fowner : Nat := 3
+def fsetid : Nat := 4
+def setgid : Nat := 6
+def setuid : Nat := 7
+def setpcap : Nat := 8
+def sysChroot : Nat := 18
+def sysAdmin : Nat := 21
+def sysNice : Nat := 23
+def sysResource : Nat := 24
+/-- All of them, up to `CAP_CHECKPOINT_RESTORE`, the last. -/
+def all : Nat := 2 ^ 41 - 1
+/-- Those that go by the user of the filesystem: `CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_DAC_READ_SEARCH`, `CAP_FOWNER`, `CAP_FSETID`,
+`CAP_LINUX_IMMUTABLE`, `CAP_MKNOD` and `CAP_MAC_OVERRIDE`. -/
+def files : Nat := 0x1f ||| 2 ^ 9 ||| 2 ^ 27 ||| 2 ^ 32
+end Capability
+
 /-- Who a process is, as `setuid` and its kin have it: of users and of groups, the real, the effective, the saved and that of the
-filesystem, and the groups that it is in besides. Everyone starts as root. -/
+filesystem, and the groups that it is in besides, and its capabilities: the effective ones, which it may use, the permitted ones,
+which it may make effective, the inheritable ones, and those that its bounding set has, which a program that root runs gets. Everyone
+starts as root, with all of them but the inheritable. -/
 structure Credentials where
   uid : Nat := 0
   euid : Nat := 0
@@ -305,7 +329,46 @@ structure Credentials where
   sgid : Nat := 0
   fsgid : Nat := 0
   groups : List Nat := []
+  effective : Nat := Capability.all
+  permitted : Nat := Capability.all
+  inheritable : Nat := 0
+  bounding : Nat := Capability.all
   deriving DecidableEq, Repr
+
+namespace Credentials
+
+/-- Whether a process has a capability effective. -/
+def capable (credentials : Credentials) (capability : Nat) : Bool := credentials.effective.testBit capability
+
+/-- Credentials whose users `setuid` and its kin changed from those of `old`, with the capabilities that Linux leaves them: when none of
+the real, effective and saved users is root any more, there are none permitted or effective, when the effective one stops being root
+there are none effective, and when it becomes root, the permitted ones are effective. -/
+def ofUsers (next old : Credentials) : Credentials :=
+  let next := if (old.uid == 0 || old.euid == 0 || old.suid == 0) && next.uid != 0 && next.euid != 0 && next.suid != 0 then
+      { next with permitted := 0, effective := 0 }
+    else next
+  if old.euid == 0 && next.euid != 0 then { next with effective := 0 }
+  else if old.euid != 0 && next.euid == 0 then { next with effective := next.permitted }
+  else next
+
+/-- Credentials with `fsuid` as the user of the filesystem, as `setfsuid` sets it: when it stops being root, the capabilities of files
+aren't effective, and when it becomes root, those that are permitted are. -/
+def withFsuid (credentials : Credentials) (fsuid : Nat) : Credentials :=
+  let effective :=
+    if credentials.fsuid == 0 && fsuid != 0 then credentials.effective &&& (Capability.all - Capability.files)
+    else if credentials.fsuid != 0 && fsuid == 0 then credentials.effective ||| (credentials.permitted &&& Capability.files)
+    else credentials.effective
+  { credentials with fsuid, effective }
+
+/-- What `execve` of a program that isn't set-user-ID leaves: the saved and filesystem ids are the effective ones, and the
+capabilities are recomputed: when the real or the effective user is root, those of the bounding set and the inheritable ones are
+permitted, and effective too if it is the effective one; else there are none. -/
+def executed (credentials : Credentials) : Credentials :=
+  let permitted := if credentials.uid == 0 || credentials.euid == 0 then credentials.bounding ||| credentials.inheritable else 0
+  { credentials with suid := credentials.euid, fsuid := credentials.euid, sgid := credentials.egid, fsgid := credentials.egid
+                     permitted, effective := if credentials.euid == 0 then permitted else 0 }
+
+end Credentials
 
 /-- A directory that a process has, as its working directory or its root: its inode, and its path, which `rename` keeps up with. Once
 the tree has no longer got the inode there it was removed, and the path is where it was. -/
@@ -588,14 +651,15 @@ def madeBy (kernel : Kernel) (owner : Credentials) : Meta :=
 
 /-- The group of a new inode in a directory that a process of `owner` makes with `mode`, and the mode that it has then: that of the
 process's filesystem, but in a directory with `S_ISGID` that of the directory, and a directory made there has `S_ISGID` too. Something
-else keeps `S_ISGID` with `S_IXGRP` only if root makes it or one in its group, as Linux has it. -/
+else keeps `S_ISGID` with `S_IXGRP` only if one in its group makes it, or one with `CAP_FSETID`, as Linux has it. -/
 def newGroup (kernel : Kernel) (directory : String) (owner : Credentials) (mode : Nat) : Nat × Nat :=
   match (kernel.paths.get? directory).bind kernel.inodes.get? with
   | some parent =>
     let gid := parent.details.gid
     if parent.mode &&& 0o2000 == 0 then (owner.fsgid, mode)
     else if mode &&& 0o170000 == 0o40000 then (gid, mode ||| 0o2000)
-    else if mode &&& 0o2010 == 0o2010 && owner.fsuid != 0 && gid != owner.fsgid && !owner.groups.contains gid then (gid, mode - 0o2000)
+    else if mode &&& 0o2010 == 0o2010 && !owner.capable Capability.fsetid && gid != owner.fsgid && !owner.groups.contains gid then
+      (gid, mode - 0o2000)
     else (gid, mode)
   | none => (owner.fsgid, mode)
 
@@ -1405,15 +1469,19 @@ def statPath (kernel : Kernel) (base path : String) (follow : Bool := true) : Re
 
 /-- Whether a process may read, write and run an inode, as `want` asks of each with 4, 2 and 1, by the user and the group that it goes
 by on files, or of `real`, its real ones, as `access` has it: by the bits of the owner if it is that user, else by those of the group if
-it is in that, else by those of everyone. Root may read and write anything, search any directory and run what anyone may run. -/
+it is in that, else by those of everyone. With `CAP_DAC_OVERRIDE` it may read and write anything, search any directory and run what
+anyone may run, and with `CAP_DAC_READ_SEARCH` read anything and search any directory. Of its real ones, its capabilities are those
+permitted if that user is root, and none else. -/
 def permits (inode : Inode) (credentials : Credentials) (real : Bool) (want : Nat) : Bool :=
   let (uid, gid) := if real then (credentials.uid, credentials.gid) else (credentials.fsuid, credentials.fsgid)
-  if uid == 0 then want &&& 1 == 0 || inode.content matches .directory || inode.mode &&& 0o111 != 0
-  else
-    let shift := if uid == inode.details.uid then 6
-      else if gid == inode.details.gid || credentials.groups.contains inode.details.gid then 3
-      else 0
-    (inode.mode >>> shift) &&& want == want
+  let capabilities := if !real then credentials.effective else if uid == 0 then credentials.permitted else 0
+  let directory := inode.content matches .directory
+  let shift := if uid == inode.details.uid then 6
+    else if gid == inode.details.gid || credentials.groups.contains inode.details.gid then 3
+    else 0
+  (inode.mode >>> shift) &&& want == want ||
+    capabilities.testBit Capability.dacOverride && (want &&& 1 == 0 || directory || inode.mode &&& 0o111 != 0) ||
+    capabilities.testBit Capability.dacReadSearch && want &&& 2 == 0 && (want &&& 1 == 0 || directory)
 
 /-- Whether a process may search each directory that a path of the tree is in, as `permits` has it, which it has to to find what is
 there. -/
@@ -1704,7 +1772,7 @@ def shownPath (kernel : Kernel) (group : Nat) (path : String) : String :=
 of how mounts are shared, of a mount that is there. A file system of its own is an empty directory: `proc`, `sysfs` and `devtmpfs`
 are what the tree has of them. -/
 def mount (kernel : Kernel) (group : Nat) (base source target fstype : String) (flags : Nat) : Result Kernel := do
-  if (kernel.process group).credentials.euid != 0 then .error Errno.eperm
+  if !(kernel.process group).credentials.capable Capability.sysAdmin then .error Errno.eperm
   let (normal, found) ← kernel.resolve base target (mounted := false)
   let some number := found | .error Errno.enoent
   let here := kernel.mounts.find? (·.target == normal)
@@ -1745,7 +1813,7 @@ def mount (kernel : Kernel) (group : Nat) (base source target fstype : String) (
 
 /-- `umount2`: what was mounted last at `target` isn't. What a file system of its own had is gone once nothing mounts it. -/
 def unmount (kernel : Kernel) (group : Nat) (base target : String) (flags : Nat) : Result Kernel := do
-  if (kernel.process group).credentials.euid != 0 then .error Errno.eperm
+  if !(kernel.process group).credentials.capable Capability.sysAdmin then .error Errno.eperm
   if flags ≥ 16 then .error Errno.einval
   let (normal, _) ← kernel.resolve base target (follow := flags &&& 8 == 0) (mounted := false)
   let some mount := kernel.mounts.find? (·.target == normal) | .error Errno.einval
@@ -1762,7 +1830,7 @@ def unmount (kernel : Kernel) (group : Nat) (base target : String) (flags : Nat)
 /-- `chroot`: what a process has as `/` is a directory of the tree. -/
 def chroot (kernel : Kernel) (group : Nat) (base path : String) : Result Kernel := do
   let process := kernel.process group
-  if process.credentials.euid != 0 then .error Errno.eperm
+  if !process.credentials.capable Capability.sysChroot then .error Errno.eperm
   let (normal, found) ← kernel.resolve base path
   let some number := found | .error Errno.enoent
   let .directory := (← inodeOf kernel number).content | .error Errno.enotdir
@@ -1772,7 +1840,7 @@ def chroot (kernel : Kernel) (group : Nat) (base path : String) : Result Kernel 
 were there, and what was `/` is seen at `putOld`, which is within it. -/
 def pivotRoot (kernel : Kernel) (group : Nat) (base newRoot putOld : String) : Result Kernel := do
   let process := kernel.process group
-  if process.credentials.euid != 0 then .error Errno.eperm
+  if !process.credentials.capable Capability.sysAdmin then .error Errno.eperm
   if process.root != {} then .error Errno.einval
   let (target, found) ← kernel.resolve base newRoot (mounted := false)
   let some targetInode := found | .error Errno.enoent
@@ -1952,14 +2020,14 @@ def openTmpfile (kernel : Kernel) (group : Nat) (base path : String) (flags mode
   .ok (kernel, fd)
 
 /-- Of `chmod` and `fchmod`, the permissions of an inode, as a process of `group` sets them: only its owner or root may, which is
-`EPERM` to anyone else, and `S_ISGID` goes from what one sets who isn't root and isn't in the group of the inode. -/
+`EPERM` to anyone else, and `S_ISGID` goes from what one sets who isn't root and isn't in the group of the inode: what root may do
+here is of `CAP_FOWNER` and of `CAP_FSETID`. -/
 def chmodInode (kernel : Kernel) (group number mode : Nat) : Result Kernel := do
   let inode ← inodeOf kernel number
   let credentials := (kernel.process group).credentials
-  let root := credentials.fsuid == 0
-  if !root && credentials.fsuid != inode.details.uid then .error Errno.eperm
+  if !credentials.capable Capability.fowner && credentials.fsuid != inode.details.uid then .error Errno.eperm
   let gid := inode.details.gid
-  let mode := if root || gid == credentials.fsgid || credentials.groups.contains gid then mode &&& 0o7777 else mode &&& 0o5777
+  let mode := if credentials.capable Capability.fsetid || gid == credentials.fsgid || credentials.groups.contains gid then mode &&& 0o7777 else mode &&& 0o5777
   let kept := inode.mode - (inode.mode &&& 0o7777)
   .ok { kernel with inodes := kernel.inodes.insert number { inode with mode := kept ||| mode, details := { inode.details with changed := kernel.clock } } }
 

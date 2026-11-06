@@ -8,7 +8,8 @@ Process groups and sessions (`setpgid`, `getpgid`, `getpgrp`, `setsid`, `getsid`
 `getgroups`, `setgroups`, `capget`, `capset`), the limits of resources (`getrlimit`, `setrlimit`, `prlimit64`), and what a process asks
 of its accounting and scheduling (`getrusage`, `times`, `getpriority`, `setpriority`, the `sched_*` calls).
 
-Everyone starts as root, whose effective id 0 has every capability; a process that gives that up has none. The limits are kept as
+Everyone starts as root, with every capability. A process has those that it keeps when its ids change as Linux has it, those that
+`capset` leaves it, and those that `execve` gives a program: what root may do goes by them. The limits are kept as
 they are set, and `RLIMIT_NOFILE` is kept to by what makes a descriptor. Time that a process spent isn't counted: it is 0. There is
 one processor. -/
 
@@ -40,9 +41,6 @@ private def resourceOf (architecture : Architecture) (resource : Nat) : Nat :=
   | .mips .., 9 => 8
   | _, _ => resource
 
-/-- Whether a process may do what root may. -/
-private def privileged (kernel : Kernel) (group : Nat) : Bool := (kernel.process group).credentials.euid == 0
-
 /-- The processes of a process group that are alive. -/
 def members (kernel : Kernel) (live : List Nat) (pgid : Nat) : List Nat :=
   live.filter fun group => kernel.pgidOf group == pgid
@@ -56,7 +54,8 @@ def serve (identity : Identity) (emu : Emu) (call : Call) (args : List Nat) : IO
   let arg (index : Nat) : Nat := args.getD index 0
   let id32 (index : Nat) : Nat := arg index % 2 ^ 32
   let unset := 2 ^ 32 - 1
-  let group := (← currentTask emu).group
+  let task ← currentTask emu
+  let (group, tid) := (task.group, task.tid)
   let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (.returnValue (2 ^ 64 - errno)))
   let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (.returnValue value))
   let (esrch, eperm, einval, eacces) := (3, 1, 22, 13)
@@ -70,12 +69,13 @@ def serve (identity : Identity) (emu : Emu) (call : Call) (args : List Nat) : IO
   let update (target : Nat) (change : Process → Process) : IO Unit :=
     identity.kernel.modify fun kernel => kernel.setProcess target (change (kernel.process target))
   let credentials := (kernel.process group).credentials
-  let mayRoot := privileged kernel group
+  let (mayUsers, mayGroups) := (credentials.capable Capability.setuid, credentials.capable Capability.setgid)
   let setCredentials (next : Credentials) : IO (Option SyscallAction) := do
     update group fun process => { process with credentials := next }
     succeed
-  -- Of `setreuid` and its kin: what an unprivileged process may take of what it has.
-  let among (value : Nat) (allowed : List Nat) : Bool := value == unset || mayRoot || allowed.contains value
+  let setUsers (next : Credentials) : IO (Option SyscallAction) := setCredentials (next.ofUsers credentials)
+  -- Of `setreuid` and its kin: what a process without the capability may take of what it has.
+  let among (privileged : Bool) (value : Nat) (allowed : List Nat) : Bool := value == unset || privileged || allowed.contains value
   let words (address count : Nat) : IO (List Nat) := (List.range count).mapM fun index => do
     pure (numberOf big (← read emu (address + index * 4) 4))
   let writeWords (address : Nat) (values : List Nat) : IO Unit :=
@@ -86,7 +86,7 @@ def serve (identity : Identity) (emu : Emu) (call : Call) (args : List Nat) : IO
   let setLimit (target resource soft hard : Nat) : IO (Option SyscallAction) := do
     let (_, current) := kernel.limitOf target resource
     if soft > hard then return ← fail einval
-    if hard > current && !mayRoot then return ← fail eperm
+    if hard > current && !credentials.capable Capability.sysResource then return ← fail eperm
     update target fun process => { process with limits := (resource, soft, hard) :: process.limits.filter (·.1 != resource) }
     succeed
   try
@@ -121,26 +121,28 @@ def serve (identity : Identity) (emu : Emu) (call : Call) (args : List Nat) : IO
     | .setuid =>
       let uid := id32 0
       if uid == unset then return ← fail einval
-      if mayRoot then setCredentials { credentials with uid, euid := uid, suid := uid, fsuid := uid }
-      else if uid == credentials.uid || uid == credentials.suid then setCredentials { credentials with euid := uid, fsuid := uid }
+      if mayUsers then setUsers { credentials with uid, euid := uid, suid := uid, fsuid := uid }
+      else if uid == credentials.uid || uid == credentials.suid then setUsers { credentials with euid := uid, fsuid := uid }
       else fail eperm
     | .setgid =>
       let gid := id32 0
       if gid == unset then return ← fail einval
-      if mayRoot then setCredentials { credentials with gid, egid := gid, sgid := gid, fsgid := gid }
+      if mayGroups then setCredentials { credentials with gid, egid := gid, sgid := gid, fsgid := gid }
       else if gid == credentials.gid || gid == credentials.sgid then setCredentials { credentials with egid := gid, fsgid := gid }
       else fail eperm
     | .setreuid =>
       let (real, effective) := (id32 0, id32 1)
-      if !among real [credentials.uid, credentials.euid] || !among effective [credentials.uid, credentials.euid, credentials.suid] then
+      if !among mayUsers real [credentials.uid, credentials.euid] ||
+          !among mayUsers effective [credentials.uid, credentials.euid, credentials.suid] then
         return ← fail eperm
       let uid := if real == unset then credentials.uid else real
       let euid := if effective == unset then credentials.euid else effective
       let suid := if real != unset || (effective != unset && effective != credentials.uid) then euid else credentials.suid
-      setCredentials { credentials with uid, euid, suid, fsuid := euid }
+      setUsers { credentials with uid, euid, suid, fsuid := euid }
     | .setregid =>
       let (real, effective) := (id32 0, id32 1)
-      if !among real [credentials.gid, credentials.egid] || !among effective [credentials.gid, credentials.egid, credentials.sgid] then
+      if !among mayGroups real [credentials.gid, credentials.egid] ||
+          !among mayGroups effective [credentials.gid, credentials.egid, credentials.sgid] then
         return ← fail eperm
       let gid := if real == unset then credentials.gid else real
       let egid := if effective == unset then credentials.egid else effective
@@ -148,13 +150,13 @@ def serve (identity : Identity) (emu : Emu) (call : Call) (args : List Nat) : IO
       setCredentials { credentials with gid, egid, sgid, fsgid := egid }
     | .setresuid =>
       let held := [credentials.uid, credentials.euid, credentials.suid]
-      if ![id32 0, id32 1, id32 2].all (among · held) then return ← fail eperm
+      if ![id32 0, id32 1, id32 2].all (among mayUsers · held) then return ← fail eperm
       let pick (value old : Nat) : Nat := if value == unset then old else value
       let euid := pick (id32 1) credentials.euid
-      setCredentials { credentials with uid := pick (id32 0) credentials.uid, euid, suid := pick (id32 2) credentials.suid, fsuid := euid }
+      setUsers { credentials with uid := pick (id32 0) credentials.uid, euid, suid := pick (id32 2) credentials.suid, fsuid := euid }
     | .setresgid =>
       let held := [credentials.gid, credentials.egid, credentials.sgid]
-      if ![id32 0, id32 1, id32 2].all (among · held) then return ← fail eperm
+      if ![id32 0, id32 1, id32 2].all (among mayGroups · held) then return ← fail eperm
       let pick (value old : Nat) : Nat := if value == unset then old else value
       let egid := pick (id32 1) credentials.egid
       setCredentials { credentials with gid := pick (id32 0) credentials.gid, egid, sgid := pick (id32 2) credentials.sgid, fsgid := egid }
@@ -166,41 +168,59 @@ def serve (identity : Identity) (emu : Emu) (call : Call) (args : List Nat) : IO
       for (address, value) in [(arg 0, credentials.gid), (arg 1, credentials.egid), (arg 2, credentials.sgid)] do
         writeWords address [value]
       succeed
+    -- Of these, -1 isn't an id, and changes nothing: it is how one asks what there is.
     | .setfsuid =>
       let uid := id32 0
-      if mayRoot || [credentials.uid, credentials.euid, credentials.suid, credentials.fsuid].contains uid then
-        update group fun process => { process with credentials := { credentials with fsuid := uid } }
+      if uid != unset && (mayUsers || [credentials.uid, credentials.euid, credentials.suid, credentials.fsuid].contains uid) then
+        update group fun process => { process with credentials := credentials.withFsuid uid }
       succeed credentials.fsuid
     | .setfsgid =>
       let gid := id32 0
-      if mayRoot || [credentials.gid, credentials.egid, credentials.sgid, credentials.fsgid].contains gid then
+      if gid != unset && (mayGroups || [credentials.gid, credentials.egid, credentials.sgid, credentials.fsgid].contains gid) then
         update group fun process => { process with credentials := { credentials with fsgid := gid } }
       succeed credentials.fsgid
     | .getgroups =>
       let count := credentials.groups.length
+      if arg 0 % 2 ^ 32 ≥ 2 ^ 31 then return ← fail einval
       if arg 0 % 2 ^ 32 == 0 then return ← succeed count
       if arg 0 % 2 ^ 32 < count then return ← fail einval
       writeWords (arg 1) credentials.groups
       succeed count
     | .setgroups =>
-      if !mayRoot then return ← fail eperm
+      -- They are kept in order, as Linux sorts them.
+      if !mayGroups then return ← fail eperm
       if arg 0 % 2 ^ 32 > 65536 then return ← fail einval
-      setCredentials { credentials with groups := ← words (arg 1) (arg 0 % 2 ^ 32) }
+      setCredentials { credentials with groups := (← words (arg 1) (arg 0 % 2 ^ 32)).mergeSort }
     | .capget | .capset =>
-      -- `_LINUX_CAPABILITY_VERSION_1`, `_2` and `_3`, of which the first has one set of 32 and the others two.
+      -- `_LINUX_CAPABILITY_VERSION_1`, `_2` and `_3`, of which the first has one set of 32 and the others two: each of those has the
+      -- effective, the permitted and the inheritable capabilities. Another version is answered with the third, which `capget`
+      -- with no data is how a program asks for.
       let version := numberOf big (← read emu (arg 0) 4)
       let sets := if version == 0x19980330 then 1 else 2
       if version != 0x19980330 && version != 0x20071026 && version != 0x20080522 then
         writeWords (arg 0) [0x20080522]
-        return ← fail einval
-      if call == .capset then return ← if mayRoot then succeed else fail eperm
+        return ← if call == .capget && arg 1 == 0 then succeed else fail einval
+      if call == .capget && arg 1 == 0 then return ← succeed
       let pid := numberOf big (← read emu (arg 0 + 4) 4)
-      let some target := processOf pid | return ← fail esrch
-      if arg 1 != 0 then
-        let all := privileged kernel target
-        let capabilities := [if all then 2 ^ 32 - 1 else 0, if all then 0x1ff else 0]
-        writeWords (arg 1) ((List.range sets).flatMap fun index => [capabilities[index]!, capabilities[index]!, 0])
-      succeed
+      if call == .capget then
+        if pid ≥ 2 ^ 31 then return ← fail einval
+        let some target := processOf pid | return ← fail esrch
+        let ids := (kernel.process target).credentials
+        writeWords (arg 1) ((List.range sets).flatMap fun index =>
+          [ids.effective, ids.permitted, ids.inheritable].map fun set => (set >>> (32 * index)) % 2 ^ 32)
+        return ← succeed
+      -- Only those of the thread itself, and of what it has: it may not raise one.
+      if pid != 0 && pid != tid then return ← fail eperm
+      let given ← words (arg 1) (3 * sets)
+      let set (index : Nat) : Nat :=
+        (List.range sets).foldl (fun total part => total ||| given[3 * part + index]! <<< (32 * part)) 0 &&& Capability.all
+      let (effective, permitted, inheritable) := (set 0, set 1, set 2)
+      let within (part whole : Nat) : Bool := part &&& whole == part
+      if !credentials.capable Capability.setpcap && !within inheritable (credentials.inheritable ||| credentials.permitted) ||
+          !within inheritable (credentials.inheritable ||| credentials.bounding) || !within permitted credentials.permitted ||
+          !within effective permitted then
+        return ← fail eperm
+      setCredentials { credentials with effective, permitted, inheritable }
     | .getrlimit =>
       write emu (arg 1) (limitBytes word (kernel.limitOf group (resourceOf architecture (arg 0))))
       succeed
@@ -236,7 +256,8 @@ def serve (identity : Identity) (emu : Emu) (call : Call) (args : List Nat) : IO
       else
         let given : Int := if arg 2 % 2 ^ 32 ≥ 2 ^ 31 then Int.ofNat (arg 2 % 2 ^ 32) - 2 ^ 32 else Int.ofNat (arg 2 % 2 ^ 32)
         let nice := (max (-20) (min 19 given) + 20).toNat
-        if !mayRoot && targets.any fun target => nice < (kernel.process target).nice then return ← fail eacces
+        if !credentials.capable Capability.sysNice && targets.any fun target => nice < (kernel.process target).nice then
+          return ← fail eacces
         for target in targets do update target fun process => { process with nice }
         succeed
     | .schedSetaffinity =>

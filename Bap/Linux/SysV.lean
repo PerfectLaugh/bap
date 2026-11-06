@@ -336,7 +336,7 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
     | 1 =>
       let perm ← setPerm address queue.perm
       let qbytes ← number (address + permSize + (if wide then 40 else 32)) word
-      if qbytes > 16384 && credentials.euid != 0 then return ← fail Errno.eperm
+      if qbytes > 16384 && !credentials.capable Capability.sysResource then return ← fail Errno.eperm
       save { ipc with queues := ipc.queues.map fun other => if other.id == id then { other with perm, qbytes, ctime := seconds } else other }
       -- What waits for room may have it now.
       poller.wake emu

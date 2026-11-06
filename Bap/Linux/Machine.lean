@@ -2039,7 +2039,8 @@ private def readStrings (emu : Emu) (architecture : Architecture) (address : Nat
   go 65536 address []
 
 /-- `execve`: nothing of the process changes until the program is known to run, and then all its memory and its threads other
-than this one are gone, and its descriptors but for those that stay open over it, and this one goes on with the id of the process. -/
+than this one are gone, and its descriptors but for those that stay open over it, and this one goes on with the id of the process,
+with the credentials that `Credentials.executed` says. -/
 private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO SyscallAction := do
   let architecture := machine.architecture
   let kernel ← machine.kernel.get
@@ -2069,12 +2070,14 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
       for region in ← emu.regions.get do
         unmap emu region.address region.data.size
       let process := kernel.process group
-      let (top, auxiliary) ← loadProgram emu architecture process.credentials path data program interpreter arguments environment
+      let credentials := process.credentials.executed
+      let (top, auxiliary) ← loadProgram emu architecture credentials path data program interpreter arguments environment
       emu.redirect.set (some (← pc emu))
       wakePipeReaders emu
       machine.kernel.set (kernel.setProcess group { process with
         descriptors := process.descriptors.filter fun _ entry => !entry.closeOnExec
-        breakStart := top, breakEnd := top, command := arguments, environment, program := name, name := path, auxiliary, mappings := [] })
+        breakStart := top, breakEnd := top, command := arguments, environment, program := name, name := path, auxiliary, mappings := []
+        credentials })
       releaseVfork emu group
       machine.timers.executed group
       pure (.returnValue 0)
@@ -2702,7 +2705,7 @@ def Machine.realloc (machine : Machine) (address size : Nat) (pid : Option Nat :
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 
 /-- What the bytes after the magic mean. -/
-def checkpointFormat : Nat := 16
+def checkpointFormat : Nat := 17
 
 /-- What this BAP does with a guest, which goes up when the same state could go on differently. A checkpoint is refused by a BAP
 of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/

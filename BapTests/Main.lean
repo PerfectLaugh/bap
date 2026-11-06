@@ -229,6 +229,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-fchmod",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-perms",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-perms",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-identity",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-identity",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-nlink",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-nlink",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-filecalls",
