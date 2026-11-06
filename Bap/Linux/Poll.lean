@@ -49,6 +49,17 @@ structure Poller where
   live : IO (List Nat)
   wake : Emu → IO Unit
 
+/-- How many bytes the slave of a terminal has to read. -/
+def Terminal.waiting (terminal : Terminal) : Nat := terminal.input.foldl (· + ·.size) 0
+
+/-- Whether the slave of a terminal has something to read, of `poll`: a line or an end of file in canonical mode, and otherwise `VMIN`
+bytes, or one of `VMIN` of 0 or of `VTIME`, as Linux has it. -/
+def Terminal.readable (terminal : Terminal) : Bool :=
+  if terminal.lflag &&& 2 != 0 then !terminal.input.isEmpty || terminal.ends > 0
+  else
+    let least := terminal.cc.getD 6 1
+    terminal.waiting ≥ (if least == 0 || terminal.cc.getD 5 0 != 0 then 1 else least)
+
 namespace Poller
 
 /-- What is ready of an open file, with what is pending for the thread that asks as bits, of a `signalfd`. -/
@@ -88,15 +99,19 @@ def readiness (kernel : Kernel) (live : List Nat) (now pending file : Nat) : Nat
         | .eventfd count _ => { read := count > 0, write := count < 2 ^ 64 - 2 }
         | .timerfd expiry _ => { read := expiry.any (· ≤ now) }
         | .signalfd mask => { read := mask &&& pending != 0 }
-        | .ptyMaster terminal => { read := terminal.output.size > 0, write := true }
+        | .ptyMaster terminal =>
+          -- Once nothing has the slave open, after it was, it hangs up.
+          let slave := kernel.paths.getD s!"/dev/pts/{terminal.index}" 0
+          { read := terminal.output.size > 0, write := true, hangup := terminal.opened && !kernel.inodeHeld live slave }
         | .inotify _ notices _ _ => { read := !notices.isEmpty }
         | .mqueue messages capacity _ _ => { read := !messages.isEmpty, write := messages.length < capacity }
         | .ptySlave master =>
           match kernel.inodes.get? master with
           | some { content := .ptyMaster terminal, .. } =>
-            { read := !terminal.input.isEmpty || terminal.ends > 0 || (terminal.lflag &&& 2 == 0 && terminal.cc.getD 6 1 == 0)
-              write := true }
-          | _ => { hangup := true }
+            if kernel.inodeHeld live master then { read := terminal.readable, write := true }
+            -- Once nothing has the master open, it is hung up, which Linux has as all of these.
+            else { read := true, write := true, error := true, hangup := true }
+          | _ => { read := true, write := true, error := true, hangup := true }
         | .epoll items =>
           { read := items.any fun item =>
               let ready := readiness kernel live now pending item.file depth

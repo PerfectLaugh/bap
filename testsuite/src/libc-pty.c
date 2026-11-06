@@ -1,14 +1,17 @@
 // Pseudo-terminals: what /dev/ptmx makes, and its line discipline of canonical lines, editing, echo and what goes out, raw mode, an end
-// of file, the size of the window, a controlling terminal whose ^C reaches its foreground, a read of the background, and a hangup. It
-// says what it found, the same on each target with the termios of x86, ARM, AArch64 and RISC-V. The libc of the tests has no ioctl,
+// of file, the size of the window, a controlling terminal whose ^C reaches its foreground, a read of the background, a hangup of either
+// end as a read, poll and epoll see it, and raw reads of VMIN and VTIME. It says what it found, the same on each target with the termios of x86, ARM, AArch64 and RISC-V. The libc of the tests has no ioctl,
 // setsid or setpgid, so they are called by number.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <string.h>
+#include <poll.h>
+#include <sys/epoll.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 long syscall(long, ...);
@@ -61,6 +64,24 @@ static void text(const char *label, const char *bytes, long count) {
 static long control(int fd, unsigned long request, void *argument) {
   long result = syscall(SYS_ioctl, fd, request, argument);
   return result < 0 ? -errno : result;
+}
+
+// What poll says of a descriptor, without waiting.
+static long polled(int fd, short events) {
+  struct pollfd entry = { fd, events, 0 };
+  struct timespec now = { 0, 0 };
+  long found = syscall(SYS_ppoll, &entry, 1, &now, 0, 8);
+  return found < 0 ? -errno : entry.revents;
+}
+
+// Raw mode, without echo, of these VMIN and VTIME.
+static void raw(int slave, int min, int time) {
+  struct termios_ tio;
+  control(slave, TCGETS, &tio);
+  tio.lflag &= ~(0x2u | 0x8u);
+  tio.cc[6] = (unsigned char)min;
+  tio.cc[5] = (unsigned char)time;
+  control(slave, TCSETS, &tio);
 }
 
 static int openSlave(int master, int flags) {
@@ -167,5 +188,71 @@ int main(void) {
   close(master);
   long after = read(slave, buffer, sizeof buffer);
   say("a hangup", 2, after, after < 0 ? errno : 0, 0);
+  say("and poll sees it", 1, polled(slave, POLLIN | POLLOUT), 0, 0);
+  close(slave);
+
+  // Once nothing has the slave, after it was, the master hangs up, as poll and epoll see.
+  master = open("/dev/ptmx", O_RDWR | O_NOCTTY);
+  slave = openSlave(master, O_NOCTTY);
+  say("a master", 1, polled(master, POLLIN | POLLOUT), 0, 0);
+  close(slave);
+  say("of no slave", 1, polled(master, POLLIN | POLLOUT), 0, 0);
+  int epoll = (int)syscall(SYS_epoll_create1, 0);
+  struct epoll_event event = { EPOLLIN | EPOLLOUT, { 0 } }, events[2];
+  syscall(SYS_epoll_ctl, epoll, EPOLL_CTL_ADD, master, &event);
+  long count = syscall(SYS_epoll_pwait, epoll, events, 2, 0, 0, 8);
+  say("and epoll", 2, count, count > 0 ? (long)events[0].events : 0, 0);
+  after = read(master, buffer, sizeof buffer);
+  say("and a read", 2, after, after < 0 ? errno : 0, 0);
+  close(epoll);
+  close(master);
+
+  // VMIN: a read waits for as many bytes, or as it asks for, but of O_NONBLOCK, and poll says so.
+  master = open("/dev/ptmx", O_RDWR | O_NOCTTY);
+  slave = openSlave(master, O_NOCTTY);
+  raw(slave, 4, 0);
+  write(master, "ab", 2);
+  say("VMIN 4 of 2", 1, polled(slave, POLLIN), 0, 0);
+  write(master, "cd", 2);
+  say("and of 4", 1, polled(slave, POLLIN), 0, 0);
+  got = read(slave, buffer, sizeof buffer);
+  text("which a read takes", buffer, got);
+  write(master, "ef", 2);
+  pid_t writer = fork();
+  if (writer == 0) {
+    struct timespec pause = { 0, 50000000 };
+    nanosleep(&pause, 0);
+    write(master, "gh", 2);
+    _exit(0);
+  }
+  got = read(slave, buffer, sizeof buffer);
+  text("a read that waits", buffer, got);
+  waitpid(writer, &status, 0);
+  write(master, "ij", 2);
+  got = read(slave, buffer, 2);
+  text("a read of fewer", buffer, got);
+  write(master, "k", 1);
+  fcntl(slave, F_SETFL, O_NONBLOCK);
+  got = read(slave, buffer, sizeof buffer);
+  text("of O_NONBLOCK", buffer, got);
+  after = read(slave, buffer, sizeof buffer);
+  say("and of nothing", 2, after, after < 0 ? errno : 0, 0);
+  fcntl(slave, F_SETFL, 0);
+
+  // VMIN of 0: nothing is ready to poll, and a read of VTIME waits that long for a byte, or after one that came, as of VMIN.
+  raw(slave, 0, 0);
+  say("VMIN 0", 2, polled(slave, POLLIN), read(slave, buffer, sizeof buffer), 0);
+  raw(slave, 0, 1);
+  say("and VTIME 1", 2, polled(slave, POLLIN), read(slave, buffer, sizeof buffer), 0);
+  write(master, "l", 1);
+  got = read(slave, buffer, sizeof buffer);
+  text("of a byte", buffer, got);
+  raw(slave, 2, 1);
+  write(master, "m", 1);
+  say("VMIN 2 and VTIME 1 of 1", 1, polled(slave, POLLIN), 0, 0);
+  got = read(slave, buffer, sizeof buffer);
+  text("which a read takes", buffer, got);
+  close(slave);
+  close(master);
   return 0;
 }

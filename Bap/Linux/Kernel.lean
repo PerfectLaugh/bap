@@ -110,7 +110,8 @@ structure EpollItem where
 
 /-- A pseudo-terminal, as its master has it: its number under `/dev/pts`, its `termios` and window, what its slave has to read, as a
 line at a time in canonical mode, the line that is being edited, how many ends of file are to be read, what its master has to read,
-its foreground process group and its session, whether its slave is locked, as `unlockpt` undoes, and whether its slave was opened. -/
+its foreground process group and its session, whether its slave is locked, as `unlockpt` undoes, whether its slave was opened, and
+when what its slave reads last came in, which the timer of `VTIME` goes from. -/
 structure Terminal where
   index : Nat
   iflag : Nat := 0x500
@@ -130,6 +131,7 @@ structure Terminal where
   session : Nat := 0
   locked : Bool := true
   opened : Bool := false
+  arrived : Nat := 0
 
 /-- Whose a lock of a file is: a process's, that `F_SETLK` took, an open file's, that `F_OFD_SETLK` took, which the same ranges as
 those of a process are in the way of, or an open file's of `flock`, which only other such are in the way of. -/

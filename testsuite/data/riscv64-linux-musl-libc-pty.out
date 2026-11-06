@@ -13,3 +13,20 @@ its controlling terminal yy
 ^C ends it 1 2
 and is seen ^C
 a hangup 0 0
+and poll sees it 29
+a master 4
+of no slave 20
+and epoll 1 20
+and a read -1 5
+VMIN 4 of 2 0
+and of 4 1
+which a read takes abcd
+a read that waits efgh
+a read of fewer ij
+of O_NONBLOCK k
+and of nothing -1 11
+VMIN 0 0 0
+and VTIME 1 0 0
+of a byte l
+VMIN 2 and VTIME 1 of 1 1
+which a read takes m

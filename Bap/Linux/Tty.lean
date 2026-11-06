@@ -10,12 +10,14 @@ goes to what the master reads.
 The line discipline has what Linux has of the flags that programs set: `ICRNL`, `INLCR` and `IGNCR` of what comes in, `OPOST` and
 `ONLCR` of what goes out, `ECHO` with `ECHOE` and `ECHOCTL`, canonical lines with `VERASE`, `VKILL`, `VWERASE`, `VEOF`, `VEOL` and
 `VEOL2`, and of `ISIG`, `VINTR`, `VQUIT` and `VSUSP`, which send SIGINT, SIGQUIT and SIGTSTP to the foreground process group. A raw
-read takes what there is, and with `VMIN` and `VTIME` of 0 doesn't wait.
+read waits for `VMIN` bytes, or as many as it asks for, but of `VTIME` no longer than that after the last came in; of `VMIN` of 0 it
+waits as long as `VTIME` for a byte, and of `VTIME` of 0 too, or of `O_NONBLOCK`, it takes what there is.
 
 A session leader with no terminal takes as its controlling terminal the slave that it opens, without `O_NOCTTY`, or `TIOCSCTTY`;
 `/dev/tty` is that terminal. A process that isn't in the foreground of its controlling terminal and reads it is sent SIGTTIN, and of
 `TOSTOP` one that writes is sent SIGTTOU, or the call gives `EIO` if that signal doesn't come to it. Once nothing has the master open, the
-slave reads nothing more and can't be written; once nothing has the slave open, after it was, the master can't be read.
+slave reads nothing more and can't be written; once nothing has the slave open, after it was, the master can't be read. Either is hung
+up, then, as `poll` has it.
 
 The ioctls are those of the layout of `termios` that x86, ARM, AArch64 and RISC-V have; MIPS and PowerPC, whose numbers and layouts
 differ, have none of them, and their programs see no terminal. -/
@@ -86,9 +88,9 @@ def fromMaster (terminal : Terminal) (bytes : ByteArray) : Terminal × List Nat 
       terminal := { echo terminal (shown terminal byte) with input := terminal.input ++ [ByteArray.mk #[byte.toUInt8]] }
   pure (terminal, signals)
 
-/-- What the slave reads, of `count` bytes at most: a line at a time, or nothing of an end of file, in canonical mode, and what there
-is otherwise. None if it has to wait. -/
-def toSlave (terminal : Terminal) (count : Nat) : Option (Terminal × ByteArray) :=
+/-- What the slave reads, of `count` bytes at most: a line at a time, or nothing of an end of file, in canonical mode, and otherwise
+what there is, once that is `least` bytes. None if it has to wait. -/
+def toSlave (terminal : Terminal) (count least : Nat) : Option (Terminal × ByteArray) :=
   if terminal.lflag &&& 2 != 0 then
     match terminal.input with
     | first :: rest =>
@@ -98,16 +100,10 @@ def toSlave (terminal : Terminal) (count : Nat) : Option (Terminal × ByteArray)
     | [] => if terminal.ends > 0 then some ({ terminal with ends := terminal.ends - 1 }, ByteArray.empty) else none
   else
     let all := terminal.input.foldl (· ++ ·) ByteArray.empty
-    if all.size == 0 then
-      -- VMIN and VTIME of 0: it doesn't wait.
-      if terminal.cc.getD 6 1 == 0 && terminal.cc.getD 5 0 == 0 then some (terminal, ByteArray.empty) else none
+    if all.size < least then none
     else
       let left := all.extract count all.size
       some ({ terminal with input := if left.size == 0 then [] else [left] }, all.extract 0 count)
-
-/-- Whether the slave has something to read, of `poll`. -/
-def slaveReady (terminal : Terminal) : Bool :=
-  !terminal.input.isEmpty || terminal.ends > 0 || (terminal.lflag &&& 2 == 0 && terminal.cc.getD 6 1 == 0)
 
 private def numberOf (big : Bool) (bytes : ByteArray) : Nat :=
   let ordered := if big then bytes.toList else bytes.toList.reverse
@@ -199,12 +195,13 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     | .ptyMaster _ => true
     | _ => false
   let live ← poller.live
+  let now ← poller.timers.now
   let fail (errno : Nat) : IO (Option SyscallAction) := do pure (some (.returnValue (2 ^ 64 - errno)))
   let succeed (value : Nat := 0) : IO (Option SyscallAction) := do pure (some (.returnValue value))
   let save (terminal : Terminal) : IO Unit := poller.kernel.modify (·.setContent master (.ptyMaster terminal))
-  let wait : IO (Option SyscallAction) := do
-    if opened_.flags &&& Kernel.oNonblock != 0 then fail 11
-    else pure (some (← poller.timers.waitUntil emu readySpace 0 none true))
+  let nonblocking := opened_.flags &&& Kernel.oNonblock != 0
+  let wait (due : Option Nat) : IO (Option SyscallAction) := do
+    if nonblocking then fail 11 else pure (some (← poller.timers.waitUntil emu readySpace 0 due true))
   -- Whether the other end is open: the master always until it isn't, and the slave once it was opened. They go through each descriptor
   -- of each process, which is only when a read has nothing or of what is written.
   let slaveHeld : Unit → Bool := fun _ => kernel.inodeHeld live (kernel.paths.getD s!"/dev/pts/{terminal.index}" 0)
@@ -215,7 +212,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     | .read, true =>
       if terminal.output.size == 0 then
         if terminal.opened && !slaveHeld () then return ← fail 5
-        return ← wait
+        return ← wait none
       let taken := terminal.output.extract 0 (arg 2)
       write emu (arg 1) taken
       save { terminal with output := terminal.output.extract taken.size terminal.output.size }
@@ -224,7 +221,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     | .write, true =>
       let bytes ← read emu (arg 1) (arg 2)
       let (next, effects) := fromMaster terminal bytes
-      save next
+      save (if next.waiting > terminal.waiting then { next with arrived := now } else next)
       for effect in effects do
         let signal := match effect with
           | 0 => 2
@@ -236,13 +233,26 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       succeed bytes.size
     | .read, false =>
       if let some action ← background poller emu number terminal ttin then return some action
-      match toSlave terminal (arg 2) with
+      let tid ← thread emu
+      let least := terminal.cc.getD 6 1
+      let span := terminal.cc.getD 5 0 * 100000000
+      -- Of `VTIME`, a raw read waits that long from when it began, of `VMIN` of 0, and otherwise from when the last byte came in, once
+      -- one did.
+      let due ← if terminal.lflag &&& 2 != 0 || span == 0 || nonblocking then pure none
+        else if least == 0 then some <$> poller.timers.deadlineOf tid (pure (now + span))
+        else pure (if terminal.waiting > 0 then some (terminal.arrived + span) else none)
+      -- It takes `VMIN` bytes, or as many as it asks for, but one of `O_NONBLOCK` or `VMIN` of 0, and what there is of `VMIN` and `VTIME`
+      -- of 0 or once its time is over.
+      let wanted := if due.any (· ≤ now) || (least == 0 && span == 0) then 0
+        else if least == 0 || nonblocking then 1 else min least (arg 2)
+      match toSlave terminal (arg 2) wanted with
       | some (next, taken) =>
+        poller.timers.finish tid
         write emu (arg 1) taken
         save next
         poller.wake emu
         succeed taken.size
-      | none => if !masterHeld () then succeed 0 else wait
+      | none => if !masterHeld () then succeed 0 else wait due
     | .write, false =>
       if !masterHeld () then return ← fail 5
       if terminal.lflag &&& 0x100 != 0 then
@@ -308,7 +318,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         poller.kernel.modify fun kernel => kernel.setProcess group { kernel.process group with terminal := none }
         if kernel.sidOf group == group then save { terminal with session := 0, foreground := 0 }
         succeed
-      | 0x541B => int (if isSlave then (terminal.input.foldl (fun size line => size + line.size) 0) else terminal.output.size)
+      | 0x541B => int (if isSlave then terminal.waiting else terminal.output.size)
       | 0x5411 => int (if isSlave then terminal.output.size else 0)
       | 0x540B | 0x5409 | 0x540A | 0x5425 => succeed
       | 0x80045430 => if isSlave then fail 25 else int terminal.index

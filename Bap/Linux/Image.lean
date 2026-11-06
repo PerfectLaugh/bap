@@ -261,7 +261,7 @@ def ipcOfBytes (data : ByteArray) : Except String Ipc := do
 def terminalBytes (terminal : Terminal) : ByteArray :=
   let out := Wire.putList Wire.putNat ByteArray.empty
     [terminal.index, terminal.iflag, terminal.oflag, terminal.cflag, terminal.lflag, terminal.rows, terminal.cols, terminal.ends,
-     terminal.foreground, terminal.session]
+     terminal.foreground, terminal.session, terminal.arrived]
   let out := Wire.putList Wire.putNat out terminal.cc
   let out := Wire.putBytes (Wire.putList Wire.putBytes out terminal.input) terminal.line
   Wire.putFlag (Wire.putFlag (Wire.putBytes out terminal.output) terminal.locked) terminal.opened
@@ -278,7 +278,8 @@ def terminalOfBytes (data : ByteArray) : Except String Terminal := do
   Wire.expectEnd data at_
   let number (index : Nat) : Nat := numbers.getD index 0
   pure { index := number 0, iflag := number 1, oflag := number 2, cflag := number 3, lflag := number 4, rows := number 5
-         cols := number 6, ends := number 7, foreground := number 8, session := number 9, cc, input, line, output, locked, opened }
+         cols := number 6, ends := number 7, foreground := number 8, session := number 9, arrived := number 10, cc, input, line, output, locked
+         opened }
 
 /-- The image of a kernel. -/
 def Kernel.image (kernel : Kernel) : Image where
