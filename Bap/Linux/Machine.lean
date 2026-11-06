@@ -210,6 +210,23 @@ private def refreshMapping (emu : Emu) (kernel : Kernel) (mapping : FileMapping)
       if page != memory.extract first (first + 4096) then
         poke emu (mapping.start + first) page (known := true)
 
+/-- A private mapping has what the file has now in the pages that are as the file was, which are those that the process hasn't written,
+as Linux copies a page of one when it is written and until then has the file's. A page that was written with what was there is taken
+for one that wasn't. -/
+private def refreshUntouched (emu : Emu) (before after : Kernel) (mapping : FileMapping) : IO Unit := do
+  -- What is the same object as it was is unchanged, which is what most calls leave a file.
+  if let (some old, some new) := (before.inodes.get? mapping.inode, after.inodes.get? mapping.inode) then
+    if sameObject old.content new.content then return
+  let was := before.inodeBytes mapping.inode mapping.offset mapping.size
+  let now := after.inodeBytes mapping.inode mapping.offset mapping.size
+  if was == now then return
+  let memory ← peek emu mapping.start mapping.size
+  for index in List.range ((mapping.size + 4095) / 4096) do
+    let first := index * 4096
+    let old := was.extract first (first + 4096)
+    let page := now.extract first (first + 4096)
+    if page != old && memory.extract first (first + 4096) == old then poke emu (mapping.start + first) page
+
 /-- What a process wrote to its shared mappings goes to their files, which is how any other mapping or a `read` sees it. A running
 process is the only one that can have written since it came to run, and whatever else it has mapped of a file is as the file was, so
 that what differs from the file is what it wrote: it happens before any system call and when another process is to run. -/
@@ -228,10 +245,12 @@ private def flushShared (machine : Machine) (emu : Emu) : IO Unit := do
         if memory != before then
           machine.kernel.modify (·.writeChanges mapping.inode mapping.offset before memory)
           changed := true
-  -- Another mapping of the same file sees it.
+  -- Another mapping of the same file sees it, and a private one where the process hasn't written it.
   if changed then
     let flushed ← machine.kernel.get
     for mapping in shared do refreshMapping emu flushed mapping
+    for mapping in (start.process group).mappings do
+      if !mapping.shared then refreshUntouched emu start flushed mapping
 
 /-- What the files of a process's shared mappings hold, for when it comes to run. -/
 private def refreshShared (machine : Machine) (emu : Emu) : IO Unit := do
@@ -245,8 +264,8 @@ private def refreshChanged (machine : Machine) (emu : Emu) (before : Kernel) : I
   let some group ← runningGroup emu | return
   let kernel ← machine.kernel.get
   for mapping in (kernel.process group).mappings do
-    if mapping.shared &&
-        kernel.inodeBytes mapping.inode mapping.offset mapping.size != before.inodeBytes mapping.inode mapping.offset mapping.size then
+    if !mapping.shared then refreshUntouched emu before kernel mapping
+    else if kernel.inodeBytes mapping.inode mapping.offset mapping.size != before.inodeBytes mapping.inode mapping.offset mapping.size then
       refreshMapping emu kernel mapping
 
 /-- Where a thread that waits on a pipe waits, which is no address space, of which there are as many as tasks. -/
@@ -956,6 +975,11 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     match kernel.socketOf group (arg 0) with
     | .error errno => pure (errorOf errno)
     | .ok (_, socket) =>
+      -- The room for the value, which is no less than none.
+      let room ← match ← (read emu (arg 4) 4).toBaseIO with
+        | .ok bytes => pure (numberAt bytes 0 4 big)
+        | .error _ => return errorOf Errno.efault
+      if room ≥ 2 ^ 31 then return errorOf Errno.einval
       let name := arg 2
       let value : Option ByteArray :=
         -- What TCP and IP are asked of they have nothing to say of.
@@ -964,6 +988,11 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
         else if name == option 3 0x1008 then some (Abi.field big 4 (typeOf socket.type))
         else if name == option 4 0x1007 then some (Abi.field big 4 0)
         else if name == option 7 0x1001 || name == option 8 0x1002 then some (Abi.field big 4 212992)
+        else if name == option 13 0x80 then some (Bap.zeroBytes 8)
+        -- `SO_RCVTIMEO` and `SO_SNDTIMEO`, which are none, of a `struct timeval` of words or, as the new ones, of 64 bits.
+        else if name ∈ (match architecture with | .mips .. => [0x1006, 0x1005] | .powerpc .. => [18, 19] | _ => [20, 21]) then
+          some (Bap.zeroBytes (2 * wordSize))
+        else if name == 66 || name == 67 then some (Bap.zeroBytes 16)
         else if name == option 30 0x1009 then some (Abi.field big 4 (if socket.listening then 1 else 0))
         else if name == option 38 0x1028 then
           some (Abi.field big 4 (if socket.family == 1 then 0 else if socket.type == 1 then 6 else 17))
@@ -978,10 +1007,36 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
           | none => some (Abi.field big 4 0 ++ Abi.field big 4 (2 ^ 32 - 1) ++ Abi.field big 4 (2 ^ 32 - 1))
         -- The others that it can be asked, such as `SO_REUSEADDR` and `SO_KEEPALIVE`, are off.
         else some (Abi.field big 4 0)
+      -- As much of it as there is room for, and how much that is.
       match value with
       | none => pure (errorOf Errno.enoprotoopt)
-      | some bytes => if ← giveName emu big (arg 3) (arg 4) bytes then pure (.returnValue 0) else pure (errorOf Errno.efault)
+      | some bytes =>
+        let given := bytes.extract 0 room
+        try
+          writeGuest emu (arg 3) given
+          writeGuest emu (arg 4) (Abi.field big 4 given.size)
+          pure (.returnValue 0)
+        catch _ => pure (errorOf Errno.efault)
   | _ => pure (errorOf Errno.enosys)
+
+/-- Whether there is a clock of an id, to read (`clock_gettime`) or to say the resolution of (`clock_getres`): those that Linux numbers
+from 0 to 11 but `CLOCK_SGI_CYCLE`, and below 0 a clock of the CPU time of a process or of a thread of the process that asks, by its id
+or 0 for that one. A process is any of its threads to read, and its leader otherwise. What else is below 0 is a clock of a descriptor,
+such as of PTP, of which there are none. -/
+private def clockExists (emu : Emu) (clock : Nat) (reading : Bool) : IO Bool := do
+  let clock := clock % 2 ^ 32
+  if clock < 2 ^ 31 then return clock ≤ 11 && clock != 10
+  -- `~id << 3`, then 4 of a thread, and which of three clocks it is.
+  if clock % 4 == 3 then return false
+  let id := (2 ^ 32 - 1 - clock) / 8
+  if id == 0 then return true
+  let group := (← currentTask emu).group
+  pure <| match (← emu.taskTable.get).find? id with
+    | none => false
+    | some task =>
+      if clock &&& 4 != 0 then task.group == group && task.status.isNone
+      else if reading then task.status.isNone || task.tid == task.group
+      else task.tid == task.group
 
 /-- What the calls of `Poller` need of a machine. -/
 private def pollerOf (machine : Machine) : Poller :=
@@ -1322,9 +1377,7 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       let action ← applyNat machine (·.dupTo group (arg 0) (arg 1))
       wakePipeReaders emu
       pure action
-    | .dup3 =>
-      if arg 0 == arg 1 then pure (errorOf Errno.einval)
-      else applyNat machine (·.dupTo group (arg 0) (arg 1) (arg 2 &&& Kernel.oCloexec != 0))
+    | .dup3 => applyNat machine (·.dupTo group (arg 0) (arg 1) (arg 2 &&& Kernel.oCloexec != 0))
     | .fcntl =>
       match arg 1 with
       | 0 => applyNat machine (·.dup group (arg 0) (arg 2))
@@ -1550,13 +1603,15 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       let (next, now) := (← machine.kernel.get).tick
       machine.kernel.set next
       returning emu (arg 0) (cell wordSize (now / 1000000000)) (now / 1000000000)
-    | .clockGettime => clock (arg 1) 1
-    | .clockGetres => returning emu (arg 1) (Abi.time 1 1 big wordSize)
-    | .clockGettime64 =>
-      let (next, now) := (← machine.kernel.get).tick
-      machine.kernel.set next
-      returning emu (arg 1) (Abi.time now 1 big 8)
-    | .clockGetres64 => returning emu (arg 1) (Abi.time 1 1 big 8)
+    | .clockGettime | .clockGetres | .clockGettime64 | .clockGetres64 =>
+      let reading := call == .clockGettime || call == .clockGettime64
+      let size := if call == .clockGettime || call == .clockGetres then wordSize else 8
+      if !(← clockExists emu (arg 0) reading) then pure (errorOf Errno.einval)
+      else if !reading then returning emu (arg 1) (Abi.time 1 1 big size)
+      else
+        let (next, now) := (← machine.kernel.get).tick
+        machine.kernel.set next
+        returning emu (arg 1) (Abi.time now 1 big size)
     | .setThreadArea =>
       if architecture == .arm then
         setReg emu ⟨"TPIDRURO", .imm 32, 0, false⟩ (bits 32 (arg 0))
@@ -1781,7 +1836,8 @@ private def released (machine : Machine) : IO Unit := do
     machine.kernel.modify Kernel.collect
 
 /-- What makes a descriptor makes none at or past RLIMIT_NOFILE, which is known before the call does anything, as Linux takes the
-descriptor first: `EMFILE`, and of `dup2` and `dup3` to one past it `EBADF`, and of `F_DUPFD` from one past it `EINVAL`. -/
+descriptor first: `EMFILE`, and of `dup2` and `dup3` to one past it `EBADF`, and of `F_DUPFD` from one past it `EINVAL`. Before that,
+`dup3` takes no flag but `O_CLOEXEC`, nor a descriptor to itself: `EINVAL`. -/
 private def descriptorLimit (machine : Machine) (group : Nat) (call : Call) (args : List Nat) : IO (Option SyscallAction) := do
   let kernel ← machine.kernel.get
   let limit := (kernel.limitOf group 7).1
@@ -1798,7 +1854,10 @@ private def descriptorLimit (machine : Machine) (group : Nat) (call : Call) (arg
     | .signalfd | .signalfd4 => if none_ (arg 0) && full then some (errorOf Errno.emfile) else none
     -- Two of them.
     | .pipe | .pipe2 | .socketpair => if free (free 0 + 1) ≥ limit then some (errorOf Errno.emfile) else none
-    | .dup2 | .dup3 => if arg 1 % 2 ^ 32 < 2 ^ 31 && arg 1 % 2 ^ 32 ≥ limit then some (errorOf Errno.ebadf) else none
+    | .dup2 | .dup3 =>
+      let flags := arg 2 % 2 ^ 32
+      if call == .dup3 && (flags - (flags &&& Kernel.oCloexec) != 0 || arg 0 % 2 ^ 32 == arg 1 % 2 ^ 32) then some (errorOf Errno.einval)
+      else if arg 1 % 2 ^ 32 < 2 ^ 31 && arg 1 % 2 ^ 32 ≥ limit then some (errorOf Errno.ebadf) else none
     | .fcntl =>
       if arg 1 != 0 && arg 1 != 1030 then none
       else if arg 2 % 2 ^ 32 ≥ limit then some (errorOf Errno.einval)
@@ -1835,7 +1894,7 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
         if call == .getdents then
           if let .ok (_, file) := kernel.openFileOf group (args.getD 0 0) then
             if let some path := kernel.pathOfInode file.inode then fromHost machine path
-      let shared := ((← machine.kernel.get).process group).mappings.any (·.shared)
+      let mapped := !((← machine.kernel.get).process group).mappings.isEmpty
       -- A mapping of what is written has to hear of it. Otherwise a write is the only thing that a program does many of that gets longer with what it has done.
       let socket := (call == .write || call == .writev) && (← machine.kernel.get).isSocket group (args.getD 0 0)
       -- And what is written to an `eventfd` is counted, and to a terminal goes through it.
@@ -1845,7 +1904,7 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
         | _ => false)
       -- And while `inotify` watches, what a write changes is found out from what it was before.
       let watching := !(← Notify.instancesOf machine.notifier (← machine.kernel.get)).isEmpty
-      let action ← match call, shared || socket || watching with
+      let action ← match call, mapped || socket || watching with
       | .write, false => writeDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0)
       | .writev, false => writeVectorDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0)
       | .pwrite, false =>

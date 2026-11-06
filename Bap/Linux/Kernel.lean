@@ -2194,14 +2194,15 @@ def addMapping (kernel : Kernel) (group : Nat) (mapping : FileMapping) : Kernel 
   let process := kernel.process group
   kernel.setProcess group { process with mappings := mapping :: process.mappings }
 
-/-- The bytes that a file mapping of `fd` holds, whole pages at most, with zeros after the end of the file. -/
+/-- The bytes that a file mapping of `fd` holds, whole pages at most, with zeros after the end of the file. A directory can't be
+mapped, which Linux says is `EACCES`. -/
 def mappedBytes (kernel : Kernel) (group fd offset size : Nat) : Result ByteArray := do
   let (_, file) ← openFileOf kernel group fd
   match (← inodeOf kernel file.inode).content with
   | .file data =>
     let bytes := readAt data offset size
     .ok (bytes ++ Bap.zeroBytes (size - bytes.size))
-  | .directory => .error Errno.eisdir
+  | .directory => .error Errno.eacces
   | _ => .error Errno.einval
 
 /-- Now, and a tick: a program that waits for the time to change doesn't wait forever. -/
