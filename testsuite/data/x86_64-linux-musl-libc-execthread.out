@@ -1,0 +1,12 @@
+thread 0
+pid is tid 1
+same parent 1
+threads 1
+waited for the child 1
+exited 7
+first 0
+pid is tid 1
+same parent 1
+threads 1
+waited for the child 1
+exited 8

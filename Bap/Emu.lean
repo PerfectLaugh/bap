@@ -312,6 +312,9 @@ structure Emu where
   processHooks : IO.Ref (List (Nat → Nat → IO Unit))
   /-- What wants to know that the parent of `vfork` goes on, as its child runs a program or ends: of the parent, and of the child. -/
   vforkReleased : IO.Ref (List (Nat → Nat → IO Unit))
+  /-- What wants to know that a thread that runs a program took the id of its process, which was its leader's, which is over: of the
+  id that it had, and of that one. What is kept of a thread by its id is to go with it, and what was the leader's to go. -/
+  leaderTaken : IO.Ref (List (Nat → Nat → IO Unit))
   /-- The clock of the machine, in nanoseconds, which a wait with a timeout has its deadline by, if it has one. -/
   now : IO.Ref (Option (IO Nat))
   /-- What the scheduler asks when nothing can run: that time goes on to what happens next, as a deadline or a timer, which may let
@@ -465,6 +468,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     servedPrograms := ← IO.mkRef {}
     processHooks := ← IO.mkRef []
     vforkReleased := ← IO.mkRef []
+    leaderTaken := ← IO.mkRef []
     now := ← IO.mkRef none
     idle := ← IO.mkRef none
     nextPc := ← IO.mkRef 0

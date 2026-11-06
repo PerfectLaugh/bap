@@ -278,13 +278,14 @@ def jobControl (ptrace : Ptrace) (emu : Emu) (group signal : Nat) : IO Unit := d
     if parent != 0 then ptrace.signals.send emu none parent ⟨numbers.chld, 5, .child group 0 signal⟩
     wakeWaits ptrace
 
-/-- A tracee that `execve` went to a new program stops, as `PTRACE_TRACEME` and `PTRACE_O_TRACEEXEC` have it. -/
-def executed (ptrace : Ptrace) (emu : Emu) : IO Unit := do
+/-- A tracee that `execve` went to a new program stops, as `PTRACE_TRACEME` and `PTRACE_O_TRACEEXEC` have it, of which
+`PTRACE_GETEVENTMSG` says the id that it had before. -/
+def executed (ptrace : Ptrace) (emu : Emu) (former : Nat) : IO Unit := do
   let tid ← thread emu
   let some tracee := (← ptrace.table.get).tracees.get? tid | return
   let numbers := ptrace.numbers
   if tracee.options &&& 0x10 != 0 then
-    ptrace.table.modify fun table => { table with messages := table.messages.insert tid tid }
+    ptrace.table.modify fun table => { table with messages := table.messages.insert tid former }
     stopThread ptrace emu tid { status := stoppedStatus numbers.trap 4, traced := true, signal := numbers.trap }
   else if !tracee.seized then
     stopThread ptrace emu tid { status := stoppedStatus numbers.trap, traced := true, signal := numbers.trap }
@@ -1204,6 +1205,25 @@ def make (architecture : Architecture) (signals : Signals) : IO Ptrace := do
   ptrace.settle.set (settleWaits ptrace)
   pure ptrace
 
+/-- A thread that runs a program took the id of `leader`: what was traced and stopped of the leader is gone, and what was of the
+thread is of that id, with the step that it was let take. -/
+private def leaderTaken (ptrace : Ptrace) (emu : Emu) (former leader : Nat) : IO Unit := do
+  let stepping := (← ptrace.table.get).stepping.get? former
+  disarmStep ptrace emu leader
+  disarmStep ptrace emu former
+  ptrace.table.modify fun table =>
+    { table with
+      waiting := moveThread table.waiting former leader, tracees := moveThread table.tracees former leader
+      stops := moveThread table.stops former leader, injected := moveThread table.injected former leader
+      messages := moveThread table.messages former leader, pending := moveThread table.pending former leader
+      calls := moveThread table.calls former leader, entries := moveThread table.entries former leader
+      skipping := moveThread table.skipping former leader
+      exiting := (table.exiting.filter (· != leader)).map fun tid => if tid == former then leader else tid }
+  ptrace.cloning.modify (moveThread · former leader)
+  if let some from_ := stepping then
+    ptrace.table.modify fun table => { table with stepping := table.stepping.insert leader from_ }
+    hookStep ptrace emu leader
+
 /-- Puts what `make` made on the emulator: the hooks of its system calls, its waits between turns, and what the signals ask of it. -/
 def install (ptrace : Ptrace) (emu : Emu) : IO Unit := do
   let signals := ptrace.signals
@@ -1212,6 +1232,7 @@ def install (ptrace : Ptrace) (emu : Emu) : IO Unit := do
   signals.tracer.set (tracerOf ptrace)
   signals.jobControl.set (jobControl ptrace)
   emu.vforkReleased.modify (· ++ [vforkReleased ptrace emu])
+  emu.leaderTaken.modify (· ++ [leaderTaken ptrace emu])
   ptrace.serve emu
 
 end Ptrace

@@ -182,6 +182,17 @@ def blockedTasks (table : TaskTable) : List Nat :=
 def setClearTid (table : TaskTable) (tid address : Nat) : TaskTable :=
   { table with tasks := table.tasks.map fun task => if task.tid == tid then { task with clearTid := some address } else task }
 
+/-- `execve` of the task, once the others of its group are over: it has no `clearTid`, which was of the program that it ran, and if
+it isn't the leader, it takes the leader's id, which is the process's, and its place, and the leader is gone. -/
+def executed (table : TaskTable) (tid : Nat) : TaskTable :=
+  match table.find? tid with
+  | none => table
+  | some task =>
+    { table with tasks := table.tasks.filterMap fun other =>
+        if other.tid == task.group then some { task with tid := task.group, parent := other.parent, clearTid := none }
+        else if other.tid == tid then none
+        else some other }
+
 def futexWait (table : TaskTable) (waiter : FutexWaiter) : TaskTable :=
   { table with futexes := table.futexes ++ [waiter] }
 

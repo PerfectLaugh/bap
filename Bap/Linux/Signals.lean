@@ -1439,6 +1439,8 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
   emu.faultHandler.set (some (faulted signals emu))
   emu.processExited.set (some (processExited signals emu))
   emu.processHooks.modify ((fun parent child => forked signals emu parent child) :: ·)
+  emu.leaderTaken.modify (· ++ [fun former leader =>
+    signals.table.modify fun table => { table with threads := moveThread table.threads former leader }])
 
 /-- What a checkpoint knows it by. -/
 def modelId : String := "bap.signals"

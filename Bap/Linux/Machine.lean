@@ -2021,7 +2021,7 @@ private def readStrings (emu : Emu) (architecture : Architecture) (address : Nat
   go 65536 address []
 
 /-- `execve`: nothing of the process changes until the program is known to run, and then all its memory and its threads other
-than this one are gone, and its descriptors but for those that stay open over it. -/
+than this one are gone, and its descriptors but for those that stay open over it, and this one goes on with the id of the process. -/
 private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO SyscallAction := do
   let architecture := machine.architecture
   let kernel ← machine.kernel.get
@@ -2043,6 +2043,8 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
         if task.group == group && task.tid != current && task.status.isNone then
           emu.taskTable.modify (·.exitTask task.tid 0 group)
           emu.threadsRef.modify (setThreadStopped · task.tid true)
+      -- It goes on as the process, by its id.
+      executeAsLeader emu
       -- A child of `vfork` has its parent's memory, which the parent keeps: the program goes in memory of its own.
       let space := (← currentTask emu).space
       if table.tasks.any fun task => task.space == space && task.group != group && task.status.isNone then
@@ -2056,7 +2058,7 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
       machine.kernel.set (kernel.setProcess group { process with
         descriptors := process.descriptors.filter fun _ entry => !entry.closeOnExec
         breakStart := top, breakEnd := top, command := arguments, environment, program := name, auxiliary, mappings := [] })
-      releaseVfork emu current
+      releaseVfork emu group
       machine.timers.executed group
       pure (.returnValue 0)
 
@@ -2292,6 +2294,15 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   -- And what AIO and io_uring have.
   machine.models.modify (· ++ [{ id := Ring.modelId, version := builtinVersion Ring.modelId
                                  state := { save := Ring.save machine.rings, load := Ring.load machine.rings } }])
+  -- What the timers and the rings keep of a thread goes with it when it takes its leader's id.
+  emu.leaderTaken.modify (· ++ [fun (former leader : Nat) => do
+    timers.state.modify fun state =>
+      { state with
+        deadlines := moveThread state.deadlines former leader, sites := moveThread state.sites former leader
+        sleeps := moveThread state.sleeps former leader }
+    machine.rings.modify fun state =>
+      { state with submitted := state.submitted.filterMap fun (tid, at_, count) =>
+          if tid == leader then none else some (if tid == former then leader else tid, at_, count) }])
   signals.serve emu
   -- A thread that a switch has run again has what was left of a sleep that a signal ended.
   let arrived ← emu.switchedIn.get
@@ -2331,11 +2342,12 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
       load := fun data => do machine.libraries.set (← IO.ofExcept (LoadedLibrary.decode data)) } }])
   let _ ← onSyscall emu fun emu number args => do
     if machine.architecture.call number == some .execve then
+      let former ← thread emu
       let action ← handOver machine emu (← execute { machine with emu } emu args)
       -- It is a new program if it is going there, and nothing else sends it anywhere in the middle of a system call.
       if (← emu.redirect.get).isSome then
         signals.executed (← currentTask emu).group (← thread emu)
-        ptrace.executed emu
+        ptrace.executed emu former
         -- What it had is gone with its memory.
         let space := (← currentTask emu).space
         machine.heaps.modify (·.erase space)

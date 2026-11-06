@@ -93,6 +93,34 @@ def releaseVfork (emu : Emu) (child : ThreadId) : IO Unit := do
     wakeThread emu parent
     for heard in ← emu.vforkReleased.get do heard parent child
 
+/-- What is kept by thread, after the thread `former` took the id `leader`: what was of `leader` is gone, and what was of `former` is
+of `leader`. -/
+def moveThread {α : Type} (kept : Std.HashMap Nat α) (former leader : Nat) : Std.HashMap Nat α :=
+  match kept.get? former with
+  | some value => (kept.erase former).insert leader value
+  | none => kept.erase leader
+
+/-- `moveThread` of a set of threads. -/
+def moveThreadIn (kept : Std.HashSet Nat) (former leader : Nat) : Std.HashSet Nat :=
+  if kept.contains former then (kept.erase former).insert leader else kept.erase leader
+
+/-- `execve` of the thread that runs, once the others of its process are over: as Linux has it, it takes the id of the process, which
+was its leader's, and the leader is gone, and its `clearTid` goes, as it was of the program that it ran. What hears of a thread taking
+its leader's id hears of it. -/
+def executeAsLeader (emu : Emu) : IO Unit := do
+  let former ← thread emu
+  let some task := (← emu.taskTable.get).find? former | return
+  let leader := task.group
+  emu.taskTable.modify (·.executed former)
+  if former == leader then return
+  emu.threadsRef.modify (·.filterMap fun context =>
+    if context.id == leader then none else some (if context.id == former then { context with id := leader } else context))
+  emu.currentThreadRef.set leader
+  emu.threadControl.modify (moveThread · former leader)
+  emu.suppressed.modify (·.filterMap fun (owner, address, ids) =>
+    if owner == leader then none else some (if owner == former then leader else owner, address, ids))
+  for heard in ← emu.leaderTaken.get do heard former leader
+
 /-- The first task, which takes in the children of a process that is over. -/
 private def initTask (table : TaskTable) (fallback : Nat) : Nat :=
   match table.tasks.head? with

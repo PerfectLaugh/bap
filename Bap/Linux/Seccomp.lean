@@ -394,6 +394,12 @@ def attach (architecture : Architecture) (signals : Signals) (ptrace : Ptrace) (
                              spawning := ← IO.mkRef {} }
   ptrace.screen.set (seccomp.screen)
   emu.syscallEnds.modify ((fun _ => seccomp.spawned emu) :: ·)
+  emu.leaderTaken.modify (· ++ [fun (former leader : Nat) => do
+    seccomp.state.modify fun state =>
+      { state with
+        filters := moveThread state.filters former leader, strict := moveThreadIn state.strict former leader
+        noNewPrivs := moveThreadIn state.noNewPrivs former leader, traced := moveThreadIn state.traced former leader }
+    seccomp.spawning.modify (moveThread · former leader)])
   pure seccomp
 
 /-- What a checkpoint has of it. -/
