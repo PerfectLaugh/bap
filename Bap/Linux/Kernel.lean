@@ -304,10 +304,17 @@ structure Credentials where
   groups : List Nat := []
   deriving DecidableEq, Repr
 
+/-- A directory that a process has, as its working directory or its root: its inode, and its path, which `rename` keeps up with. Once
+the tree has no longer got the inode there it was removed, and the path is where it was. -/
+structure Place where
+  inode : Nat := 1
+  path : String := "/"
+  deriving DecidableEq, Repr
+
 /-- What belongs to a process. -/
 structure Process where
   descriptors : Std.HashMap Nat Descriptor := {}
-  cwd : String := "/"
+  cwd : Place := {}
   umask : Nat := 0o022
   /-- Where the heap starts and where it ends now. -/
   breakStart : Nat := 0
@@ -332,8 +339,8 @@ structure Process where
   nice : Nat := 20
   /-- That it is over: only its process group and session are kept, which a wait of a group goes by until it is reaped. -/
   ended : Bool := false
-  /-- What `chroot` made `/` of its paths, as a path of the tree. -/
-  root : String := "/"
+  /-- What `chroot` made `/` of its paths. -/
+  root : Place := {}
   /-- What `membarrier` it registered for, as the bits of the commands that register. -/
   barriers : Nat := 0
 
@@ -526,6 +533,21 @@ private def addInode (kernel : Kernel) (path : String) (content : Content) (mode
 def pathOfInode (kernel : Kernel) (number : Nat) : Option String :=
   (kernel.paths.toList.find? fun entry => entry.2 == number && entry.1.startsWith "/").map (·.1)
 
+/-- The path of a place, if it still has one. -/
+def pathOf (kernel : Kernel) (place : Place) : Option String :=
+  if kernel.paths.get? place.path == some place.inode then some place.path else none
+
+/-- The name that stands for a directory that was removed, which no path that a program gives has: `resolve` finds the directory as
+the last part of a path, and nothing in it. -/
+def removedName (number : Nat) : String := "\x00" ++ toString number
+
+/-- The base of relative paths in a place: its path, or once it was removed, a name in its parent that stands for it, so that nothing
+is found or made in it while `..` is still its parent, as Linux has it. -/
+def baseIn (kernel : Kernel) (place : Place) : String :=
+  match kernel.pathOf place with
+  | some path => path
+  | none => Path.parent place.path ++ "/" ++ removedName place.inode
+
 /-- The inode that a descriptor is open on, by the parts of its path in `/proc`, `proc`, `PID`, `fd` and `N`, if there is one. -/
 private def inodeOfDescriptorPath (kernel : Kernel) : List String → Option Nat
   | ["proc", pid, "fd", fd] => do
@@ -552,7 +574,10 @@ def resolve (kernel : Kernel) (base path : String) (follow : Bool := true) (link
         | some mount => walk (Path.parts "/" mount.source).reverse rest fuel links
         | none =>
         match kernel.paths.get? path with
-        | none => if rest.isEmpty then .ok (path, none) else .error Errno.enoent
+        | none =>
+          if !rest.isEmpty then .error Errno.enoent
+          else if part.startsWith "\x00" then .ok (path, (part.drop 1).toString.toNat?)
+          else .ok (path, none)
         | some number =>
           match kernel.inodes.get? number with
           | none => .error Errno.eio
@@ -1244,9 +1269,12 @@ def statDescriptor (kernel : Kernel) (group fd : Nat) : Result Stat := do
   let (_, file) ← openFileOf kernel group fd
   .ok (statOf (← inodeOf kernel file.inode))
 
+/-- The base of the paths that a process gives relative to its working directory. -/
+def cwdOf (kernel : Kernel) (group : Nat) : String := kernel.baseIn (kernel.process group).cwd
+
 /-- The base that a path of the `*at` calls is relative to: the working directory for `AT_FDCWD`, or that directory. -/
 def baseOf (kernel : Kernel) (group directory : Nat) (atCwd : Bool) : Result String := do
-  if atCwd then .ok (kernel.process group).cwd
+  if atCwd then .ok (kernel.cwdOf group)
   else
     let (_, file) ← openFileOf kernel group directory
     match pathOfInode kernel file.inode, (← inodeOf kernel file.inode).content with
@@ -1332,6 +1360,13 @@ def remove (kernel : Kernel) (base path : String) (directory : Bool) : Result Ke
       paths := kernel.paths.erase normal
       inodes := kernel.inodes.insert number { inode with details := { inode.details with name := normal ++ " (deleted)" } } }
 
+/-- The working directories and roots of the processes, after `move` gave the paths of the tree new ones: those that were there are
+where they were moved to. -/
+def movePlaces (kernel : Kernel) (move : String → String) : Kernel :=
+  let moved (place : Place) : Place :=
+    if kernel.paths.get? place.path == some place.inode then { place with path := move place.path } else place
+  { kernel with processes := kernel.processes.map fun _ process => { process with cwd := moved process.cwd, root := moved process.root } }
+
 /-- `rename`: what was at the target is replaced, and all under a directory moves with it. -/
 def rename (kernel : Kernel) (base source target : String) : Result Kernel := do
   let (from_, found) ← kernel.resolve base source (follow := false) (mounted := false)
@@ -1353,12 +1388,14 @@ def rename (kernel : Kernel) (base source target : String) : Result Kernel := do
   -- What isn't a directory has nothing under it: its own path is all that moves.
   if !((← inodeOf kernel number).content matches .directory) then
     return { kernel with paths := (kernel.paths.erase from_).insert to_ number }
+  let move (path : String) : String :=
+    if path == from_ then to_
+    else if path.startsWith (from_ ++ "/") then to_ ++ (path.drop from_.length).toString
+    else path
   let moved := kernel.paths.toList.foldl (init := kernel.paths.erase to_) fun paths entry =>
-    if entry.1 == from_ then (paths.erase entry.1).insert to_ entry.2
-    else if entry.1.startsWith (from_ ++ "/") then
-      (paths.erase entry.1).insert (to_ ++ (entry.1.drop from_.length).toString) entry.2
+    if entry.1 == from_ || entry.1.startsWith (from_ ++ "/") then (paths.erase entry.1).insert (move entry.1) entry.2
     else paths
-  .ok { kernel with paths := moved }
+  .ok { kernel.movePlaces move with paths := moved }
 
 /-- Another path of an inode, as `linkat` of `AT_EMPTY_PATH` gives one to what a descriptor is open on. -/
 def linkInode (kernel : Kernel) (number : Nat) (base target : String) : Result Kernel := do
@@ -1395,7 +1432,7 @@ def renameWith (kernel : Kernel) (base source target : String) (flags : Nat) : R
     else if path.startsWith (from_ ++ "/") then to_ ++ (path.drop from_.length).toString
     else if path.startsWith (to_ ++ "/") then from_ ++ (path.drop to_.length).toString
     else path
-  .ok { kernel with paths := kernel.paths.fold (init := {}) fun paths path number => paths.insert (swap path) number }
+  .ok { kernel.movePlaces swap with paths := kernel.paths.fold (init := {}) fun paths path number => paths.insert (swap path) number }
 
 /-- The devices of `/dev` and what is around them: `null`, `zero`, `full`, `random`, `urandom`, `tty` and `ptmx`, `console` for the
 console if there is one, the directories `pts` and `shm`, and `stdin`, `stdout`, `stderr` and `fd` of `/proc/self/fd`. Nothing replaces
@@ -1433,7 +1470,7 @@ def readlink (kernel : Kernel) (base path : String) : Result String := do
 /-- A path that a process gives, as the tree has it, with the base that a relative one is from: one from `/` is from its root, and `..`
 of its root stays there, as long as `base` is within it. -/
 def pathIn (kernel : Kernel) (group : Nat) (base path : String) : String × String :=
-  let root := (kernel.process group).root
+  let root := kernel.baseIn (kernel.process group).root
   if root == "/" then (base, path)
   else if path.startsWith "/" then ("/", root ++ Path.ofParts (Path.parts "/" path))
   else
@@ -1448,7 +1485,7 @@ def shownPath (kernel : Kernel) (group : Nat) (path : String) : String :=
     | some mount => Path.ofParts (Path.parts "/" (mount.target ++ "/" ++ (path.drop mount.source.length).toString))
     | none => path
   let path := mounted path
-  let root := mounted (kernel.process group).root
+  let root := mounted (kernel.baseIn (kernel.process group).root)
   if root == "/" || !within path root then path else Path.ofParts (Path.parts "/" (path.drop root.length).toString)
 
 /-- `mount` of a file system of `fstype` at `target`, or with `MS_BIND`, of what `source` is, or with `MS_REMOUNT`, `MS_MOVE` and those
@@ -1504,7 +1541,7 @@ def unmount (kernel : Kernel) (group : Nat) (base target : String) (flags : Nat)
   if !mount.source.startsWith hiddenRoot || mounts.any (·.source == mount.source) then return { kernel with mounts }
   let within (path : String) : Bool := path == mount.source || path.startsWith (mount.source ++ "/")
   -- What a process is in keeps it, unless `MNT_DETACH` lets it go later, which here is now.
-  if flags &&& 2 == 0 && kernel.processes.fold (fun busy _ process => busy || (!process.ended && (within process.cwd || within process.root))) false then
+  if flags &&& 2 == 0 && kernel.processes.fold (fun busy _ process => busy || (!process.ended && (within process.cwd.path || within process.root.path))) false then
     .error 16
   .ok { kernel with mounts, paths := kernel.paths.filter fun path _ => !within path }
 
@@ -1515,16 +1552,16 @@ def chroot (kernel : Kernel) (group : Nat) (base path : String) : Result Kernel 
   let (normal, found) ← kernel.resolve base path
   let some number := found | .error Errno.enoent
   let .directory := (← inodeOf kernel number).content | .error Errno.enotdir
-  .ok (kernel.setProcess group { process with root := normal })
+  .ok (kernel.setProcess group { process with root := { inode := number, path := normal } })
 
 /-- `pivot_root`: what is mounted at `newRoot` is `/` of the processes whose `/` was the tree's, and in their working directory if they
 were there, and what was `/` is seen at `putOld`, which is within it. -/
 def pivotRoot (kernel : Kernel) (group : Nat) (base newRoot putOld : String) : Result Kernel := do
   let process := kernel.process group
   if process.credentials.euid != 0 then .error Errno.eperm
-  if process.root != "/" then .error Errno.einval
+  if process.root != {} then .error Errno.einval
   let (target, found) ← kernel.resolve base newRoot (mounted := false)
-  let some _ := found | .error Errno.enoent
+  let some targetInode := found | .error Errno.enoent
   let some mount := kernel.mounts.find? (·.target == target) | .error Errno.einval
   let (old, found) ← kernel.resolve base putOld (mounted := false)
   let some number := found | .error Errno.enoent
@@ -1532,18 +1569,28 @@ def pivotRoot (kernel : Kernel) (group : Nat) (base newRoot putOld : String) : R
   if !(old == mount.source || old.startsWith (mount.source ++ "/")) then .error Errno.einval
   let kernel := { kernel with mounts := { target := old, source := "/", fstype := "rootfs", device := "rootfs", flags := 0 } :: kernel.mounts }
   .ok { kernel with processes := kernel.processes.map fun _ other =>
-    if other.root != "/" then other else { other with root := target, cwd := if other.cwd == "/" then target else other.cwd } }
+    if other.root != {} then other
+    else
+      let root : Place := { inode := targetInode, path := target }
+      { other with root, cwd := if other.cwd == {} then root else other.cwd } }
 
 /-- `chdir`. -/
 def chdir (kernel : Kernel) (group : Nat) (path : String) : Result Kernel := do
-  let process := kernel.process group
-  let (normal, found) ← kernel.resolve process.cwd path
+  let (normal, found) ← kernel.resolve (kernel.cwdOf group) path
   match found with
   | none => .error Errno.enoent
   | some number =>
     match (← inodeOf kernel number).content with
-    | .directory => .ok (kernel.setProcess group { process with cwd := normal })
+    | .directory => .ok (kernel.setProcess group { kernel.process group with cwd := { inode := number, path := normal } })
     | _ => .error Errno.enotdir
+
+/-- `fchdir`: into the directory that a descriptor has open, wherever it is now, or if it was removed, where it was. -/
+def fchdir (kernel : Kernel) (group fd : Nat) : Result Kernel := do
+  let (_, file) ← openFileOf kernel group fd
+  let inode ← inodeOf kernel file.inode
+  let .directory := inode.content | .error Errno.enotdir
+  let path := (kernel.pathOfInode file.inode).getD (inode.details.name.dropEnd " (deleted)".length).toString
+  .ok (kernel.setProcess group { kernel.process group with cwd := { inode := file.inode, path } })
 
 /-- `truncate` of a file at its inode: cut, or filled with zeros up to `maximumFileSize` at most. -/
 def truncateInode (kernel : Kernel) (number size : Nat) : Result Kernel := do

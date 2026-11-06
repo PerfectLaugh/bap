@@ -220,7 +220,7 @@ def refresh (kernel : Kernel) (group thread : Nat) (live : List Nat) (threadsOf 
       ["comm", "status", "stat"].foldl (init := kernel) fun kernel name =>
         kernel.addBuiltin s!"{directory}/task/{task}/{name}" name
     let kernel := kernel.setSymlink s!"{directory}/exe" process.program
-    let kernel := kernel.setSymlink s!"{directory}/cwd" process.cwd
+    let kernel := kernel.setSymlink s!"{directory}/cwd" ((kernel.pathOf process.cwd).getD s!"{process.cwd.path} (deleted)")
     let kernel := kernel.setSymlink s!"{directory}/root" "/"
     (kernel.process pid).descriptors.toList.foldl (init := kernel) fun kernel entry =>
       let link := match kernel.openFiles.get? entry.2.openFile with

@@ -1,0 +1,26 @@
+made 0 0
+in one 0 0
+renamed 0 1
+created 1 0
+not old -2 0
+proc cwd 1 1
+renamed again 0 1
+child 1 7
+up 0 1
+dir 0 0
+renamed open 0 0
+fchdir 0 1
+fchdir bad -9 0
+removed 0 0
+getcwd gone -2 0
+create gone -2 -2
+not made -2 -2
+stat here 0 1
+back up 0 1
+same name 0 0
+not in it -2 0
+dir 0 0
+child moved 7 1
+cleaned 0 0
+cleaned 0 0
+out 0 0

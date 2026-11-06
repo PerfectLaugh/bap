@@ -466,7 +466,7 @@ private def viewOf (machine : Machine) (emu : Emu) (group : Nat) : IO ProcessVie
     program := process.program
     auxiliary := process.auxiliary
     big := architecture.big
-    cwd := kernel.shownPath group process.cwd
+    cwd := kernel.shownPath group process.cwd.path
     mounts := kernel.mounts.map fun mount => (kernel.shownPath group mount.target, mount.fstype, mount.device, mount.flags)
     ranges := regions.map fun region =>
       { start := region.address, size := region.data.size, readable := region.protection.readable
@@ -562,7 +562,7 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
   let live := ((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups
   let kernel ← machine.kernel.get
   let alive (number : Nat) : Bool := kernel.socketAlive number live
-  let cwd := (kernel.process group).cwd
+  let cwd := kernel.cwdOf group
   -- MIPS has the numbers of streams and datagrams the other way round, and `SOL_SOCKET` and the options elsewhere.
   let typeOf (type : Nat) : Nat := if mips && (type == 1 || type == 2) then 3 - type else type
   let solSocket := if mips then 0xffff else 1
@@ -845,7 +845,7 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       if value ≥ 2 ^ (wide - 1) then value + 2 ^ 64 - 2 ^ wide else value
     let group := (← currentTask emu).group
     let kernel ← machine.kernel.get
-    let cwd := (kernel.process group).cwd
+    let cwd := kernel.cwdOf group
     let poller : Poller := { architecture, kernel := machine.kernel, timers := machine.timers, signals := machine.signals
                              live := do pure (((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups)
                              wake := wakePipeReaders }
@@ -1167,15 +1167,15 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
           machine.kernel.set (kernel.advance id count)
           returning emu (arg 1) bytes bytes.size
     | .getcwd =>
-      let text := (kernel.shownPath group cwd ++ "\x00").toUTF8
-      if text.size > arg 1 then pure (errorOf Errno.erange)
-      else returning emu (arg 0) text text.size
+      -- A directory that was removed has no path.
+      match kernel.pathOf (kernel.process group).cwd with
+      | none => pure (errorOf Errno.enoent)
+      | some path =>
+        let text := (kernel.shownPath group path ++ "\x00").toUTF8
+        if text.size > arg 1 then pure (errorOf Errno.erange)
+        else returning emu (arg 0) text text.size
     | .chdir => at_ here (arg 0) fun _ path => apply machine (·.chdir group path)
-    | .fchdir =>
-      match kernel.directoryEntries group (arg 0), kernel.baseOf group (arg 0) false with
-      | _, .ok path => apply machine (·.chdir group path)
-      | .error errno, _ => pure (errorOf errno)
-      | _, .error errno => pure (errorOf errno)
+    | .fchdir => apply machine (·.fchdir group (arg 0))
     | .mkdir => at_ here (arg 0) fun from_ path => apply machine (·.mkdir group from_ path (arg 1))
     | .mkdirat => at_ (arg 0) (arg 1) fun from_ path => apply machine (·.mkdir group from_ path (arg 2))
     | .rmdir => at_ here (arg 0) fun from_ path => apply machine (·.remove from_ path true)
@@ -1437,7 +1437,7 @@ private def refreshProc (machine : Machine) (emu : Emu) (call : Call) (args : Li
       let kernel ← machine.kernel.get
       -- What the second argument is relative to is the first, which may be in there.
       let base := if index == 1 && !atCwd (args.getD 0 0) then (kernel.baseOf group (args.getD 0 0) false).toOption.getD ""
-        else (kernel.process group).cwd
+        else kernel.cwdOf group
       -- `/dev/stdin`, `/dev/stdout`, `/dev/stderr` and `/dev/fd` are links to `/proc/self/fd`.
       let absolute := Path.ofParts (Path.parts base path)
       if ["/proc", "/dev/std", "/dev/fd"].any (absolute.startsWith ·) then
@@ -1569,7 +1569,7 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
       -- What it names of the directories of the host that the machine sees.
       if !(← machine.hostMounts.get).isEmpty then
         let kernel ← machine.kernel.get
-        let cwd := (kernel.process group).cwd
+        let cwd := kernel.cwdOf group
         for (index, relative) in pathArguments call do
           if let .ok path ← (readString emu (args.getD index 0)).toBaseIO then
             let base := if relative && !atCwd (args.getD (index - 1) 0) then
@@ -1975,7 +1975,7 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
       ← readStrings emu architecture (args.getD 2 0)) : IO _).toBaseIO with
   | .error _ => pure (errorOf Errno.efault)
   | .ok (path, arguments, environment) =>
-    let (base, relative) := kernel.pathIn group (kernel.process group).cwd path
+    let (base, relative) := kernel.pathIn group (kernel.cwdOf group) path
     let absolute := if relative.startsWith "/" then relative else base ++ "/" ++ relative
     programFromHost machine absolute
     let kernel ← machine.kernel.get
@@ -2616,7 +2616,7 @@ def Machine.realloc (machine : Machine) (address size : Nat) (pid : Option Nat :
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 
 /-- What the bytes after the magic mean. -/
-def checkpointFormat : Nat := 13
+def checkpointFormat : Nat := 14
 
 /-- What this BAP does with a guest, which goes up when the same state could go on differently. A checkpoint is refused by a BAP
 of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/

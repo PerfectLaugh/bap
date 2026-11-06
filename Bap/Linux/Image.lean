@@ -11,7 +11,9 @@ namespace Bap.Linux
 structure ProcessImage where
   group : Nat
   descriptors : List (Nat × Nat × Bool)
-  cwd : String
+  /-- Its working directory, by its inode and its path: see `Place`. -/
+  cwd : Nat
+  cwdPath : String
   umask : Nat
   breakStart : Nat
   breakEnd : Nat
@@ -103,7 +105,8 @@ def identityBytes (process : Process) : ByteArray :=
     [ids.uid, ids.euid, ids.suid, ids.fsuid, ids.gid, ids.egid, ids.sgid, ids.fsgid]) ids.groups
   let out := Wire.putList (fun out (resource, soft, hard) => Wire.putNat (Wire.putNat (Wire.putNat out resource) soft) hard) out
     process.limits
-  Wire.putNat (Wire.putText (Wire.putFlag (Wire.putNat out process.nice) process.ended) process.root) process.barriers
+  let out := Wire.putText (Wire.putNat (Wire.putFlag (Wire.putNat out process.nice) process.ended) process.root.inode) process.root.path
+  Wire.putNat out process.barriers
 
 /-- What `identityBytes` made, on a process that has the rest; nothing at all is what a process starts with. -/
 def withIdentity (process : Process) (data : ByteArray) : Except String Process := do
@@ -120,11 +123,12 @@ def withIdentity (process : Process) (data : ByteArray) : Except String Process 
     .ok ((resource, soft, hard), at_)) data at_
   let (nice, at_) ← Wire.getNat data at_
   let (ended, at_) ← Wire.getFlag data at_
-  let (root, at_) ← Wire.getText data at_
+  let (rootInode, at_) ← Wire.getNat data at_
+  let (rootPath, at_) ← Wire.getText data at_
   let (barriers, at_) ← Wire.getNat data at_
   Wire.expectEnd data at_
   let id (index : Nat) : Nat := ids.getD index 0
-  pure { process with pgid, sid, terminal, limits, nice, ended, root, barriers
+  pure { process with pgid, sid, terminal, limits, nice, ended, root := { inode := rootInode, path := rootPath }, barriers
                       credentials := { uid := id 0, euid := id 1, suid := id 2, fsuid := id 3, gid := id 4, egid := id 5, sgid := id 6
                                        fsgid := id 7, groups } }
 
@@ -303,7 +307,7 @@ def Kernel.image (kernel : Kernel) : Image where
   openFiles := (sorted kernel.openFiles.toList).map fun (id, file) => (id, file.inode, file.offset, file.flags)
   nextOpenFile := kernel.nextOpenFile
   processes := (sorted kernel.processes.toList).map fun (group, process) =>
-    { group, cwd := process.cwd, umask := process.umask, breakStart := process.breakStart, breakEnd := process.breakEnd
+    { group, cwd := process.cwd.inode, cwdPath := process.cwd.path, umask := process.umask, breakStart := process.breakStart, breakEnd := process.breakEnd
       command := process.command, environment := process.environment, program := process.program
       auxiliary := process.auxiliary, mappings := process.mappings
       descriptors := (sorted process.descriptors.toList).map fun (fd, entry) => (fd, entry.openFile, entry.closeOnExec)
@@ -390,7 +394,7 @@ def Image.kernel (image : Image) : Except String Kernel := do
     nextOpenFile := image.nextOpenFile
     processes := ← image.processes.foldlM (init := {}) fun processes process => do
       let made : Process :=
-        { cwd := process.cwd, umask := process.umask, breakStart := process.breakStart, breakEnd := process.breakEnd
+        { cwd := { inode := process.cwd, path := process.cwdPath }, umask := process.umask, breakStart := process.breakStart, breakEnd := process.breakEnd
           command := process.command, environment := process.environment, program := process.program
           auxiliary := process.auxiliary, mappings := process.mappings
           descriptors := process.descriptors.foldl (init := {}) fun descriptors (fd, openFile, closeOnExec) =>
@@ -442,7 +446,7 @@ def getMapping : Decoder FileMapping := fun data at_ => do
 def putProcess (out : ByteArray) (process : ProcessImage) : ByteArray :=
   let out := putNat out process.group
   let out := putList putDescriptor out process.descriptors
-  let out := putText out process.cwd
+  let out := putText (putNat out process.cwd) process.cwdPath
   let out := putNat out process.umask
   let out := putNat (putNat out process.breakStart) process.breakEnd
   let out := putList putText out process.command
@@ -455,7 +459,8 @@ def putProcess (out : ByteArray) (process : ProcessImage) : ByteArray :=
 def getProcess : Decoder ProcessImage := fun data at_ => do
   let (group, at_) ← getNat data at_
   let (descriptors, at_) ← getList getDescriptor data at_
-  let (cwd, at_) ← getText data at_
+  let (cwd, at_) ← getNat data at_
+  let (cwdPath, at_) ← getText data at_
   let (umask, at_) ← getNat data at_
   let (breakStart, at_) ← getNat data at_
   let (breakEnd, at_) ← getNat data at_
@@ -465,7 +470,7 @@ def getProcess : Decoder ProcessImage := fun data at_ => do
   let (auxiliary, at_) ← getList getNat data at_
   let (mappings, at_) ← getList getMapping data at_
   let (identity, at_) ← getBytes data at_
-  .ok ({ group, descriptors, cwd, umask, breakStart, breakEnd, command, environment, program, auxiliary, mappings, identity }, at_)
+  .ok ({ group, descriptors, cwd, cwdPath, umask, breakStart, breakEnd, command, environment, program, auxiliary, mappings, identity }, at_)
 
 def putPiece (out : ByteArray) (piece : Nat × ByteArray) : ByteArray := putBytes (putNat out piece.1) piece.2
 
