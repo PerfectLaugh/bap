@@ -14,20 +14,42 @@ private def hex (digits value : Nat) : String :=
   let shown := String.ofList (Nat.toDigits 16 value)
   String.ofList (List.replicate (digits - shown.length) '0') ++ shown
 
-/-- `/proc/PID/maps`, in order of address, with the names of the stack and the heap. -/
+/-- `/proc/PID/maps`, in order of address, as Linux has it: of each mapping where it is, what it may do and whether it is shared, from
+where in its file, the device and the inode of that, and then at a column of its own its path, or what it is of the heap, the stack
+and the page of helpers of 32-bit ARM. What is next to what it goes on with, as the same and with the same name, is one, and the heap
+is apart from what is before it. -/
 def maps (view : ProcessView) : ByteArray :=
-  let sorted := view.ranges.toArray.qsort fun left right => left.start < right.start
-  let digits := if view.bits == 64 then 12 else 8
-  text <| String.join (sorted.toList.map fun range =>
+  let heapEnd := (view.breakEnd + 4095) / 4096 * 4096
+  let nameOf (range : MappedRange) : String :=
+    if !range.path.isEmpty then range.path
+    else if view.breakStart ≤ range.start && range.start < heapEnd then "[heap]"
+    else if range.start == view.stackStart then "[stack]"
+    else if view.bits == 32 && view.machine.startsWith "arm" && range.start == 0xffff0000 then "[vectors]"
+    else ""
+  let pieces := view.ranges.flatMap fun range =>
+    let stop := range.start + range.size
+    let bounds := range.start :: ([view.breakStart, heapEnd].filter fun at_ => range.start < at_ && at_ < stop) ++ [stop]
+    (bounds.zip bounds.tail).map fun (first, last) =>
+      let offset := if range.inode == 0 then 0 else range.offset + (first - range.start)
+      let piece := { range with start := first, size := last - first, offset }
+      (piece, nameOf piece)
+  let sorted := pieces.toArray.qsort fun left right => left.1.start < right.1.start
+  let joined := sorted.foldl (init := (#[] : Array (MappedRange × String))) fun joined (range, name) =>
+    match joined.back? with
+    | some (last, lastName) =>
+      if last.start + last.size == range.start && lastName == name &&
+          { range with start := last.start, size := last.size, offset := last.offset } == last &&
+          (range.inode == 0 || last.offset + last.size == range.offset) then
+        joined.pop.push ({ last with size := last.size + range.size }, name)
+      else joined.push (range, name)
+    | none => joined.push (range, name)
+  -- Where the name starts, as `seq_pad` puts it after the width that `show_vma_header_prefix` sets.
+  let width := 25 + view.bits / 8 * 6 - 1
+  text <| String.join (joined.toList.map fun (range, name) =>
     let flag (on : Bool) (letter : Char) : String := String.singleton (if on then letter else '-')
-    let name :=
-      if range.start == view.stackStart then " [stack]"
-      else if view.breakStart ≤ range.start && range.start < view.breakEnd then " [heap]"
-      else ""
-    s!"{hex digits range.start}-{hex digits (range.start + range.size)} {flag range.readable 'r'}{flag range.writable 'w'}{flag range.executable 'x'}p 00000000 00:00 0{name}\n")
-
-/-- The last part of a path. -/
-private def baseName (path : String) : String := Path.name path
+    let device := if range.inode == 0 then "00:00" else "00:01"
+    let head := s!"{hex 8 range.start}-{hex 8 (range.start + range.size)} {flag range.readable 'r'}{flag range.writable 'w'}{flag range.executable 'x'}{if range.shared then "s" else "p"} {hex 8 range.offset} {device} {range.inode} "
+    if name.isEmpty then head ++ "\n" else head ++ String.ofList (List.replicate (width - head.length) ' ') ++ " " ++ name ++ "\n")
 
 /-- A number in octal of four digits, as `Umask` is. -/
 private def octal4 (value : Nat) : String :=
@@ -41,12 +63,12 @@ def status (view : ProcessView) : ByteArray :=
   let memory := view.ranges.foldl (fun total range => total + range.size) 0
   let ids := view.credentials
   let groups := " ".intercalate (ids.groups.map toString)
-  text s!"Name:\t{baseName view.name}\nUmask:\t{octal4 view.umask}\nState:\tR (running)\nTgid:\t{view.pid}\nNgid:\t0\nPid:\t{view.pid}\nPPid:\t{view.parent}\nTracerPid:\t0\nUid:\t{ids.uid}\t{ids.euid}\t{ids.suid}\t{ids.fsuid}\nGid:\t{ids.gid}\t{ids.egid}\t{ids.sgid}\t{ids.fsgid}\nFDSize:\t64\nGroups:\t{groups}\nVmSize:\t{memory / 1024} kB\nVmRSS:\t{memory / 1024} kB\nThreads:\t{view.threads.length}\nCpus_allowed:\t1\nCpus_allowed_list:\t0\n"
+  text s!"Name:\t{view.name}\nUmask:\t{octal4 view.umask}\nState:\tR (running)\nTgid:\t{view.pid}\nNgid:\t0\nPid:\t{view.pid}\nPPid:\t{view.parent}\nTracerPid:\t0\nUid:\t{ids.uid}\t{ids.euid}\t{ids.suid}\t{ids.fsuid}\nGid:\t{ids.gid}\t{ids.egid}\t{ids.sgid}\t{ids.fsgid}\nFDSize:\t64\nGroups:\t{groups}\nVmSize:\t{memory / 1024} kB\nVmRSS:\t{memory / 1024} kB\nThreads:\t{view.threads.length}\nCpus_allowed:\t1\nCpus_allowed_list:\t0\n"
 
 /-- `/proc/PID/stat`, with what isn't modelled at zero. -/
 def stat (view : ProcessView) : ByteArray :=
   let memory := view.ranges.foldl (fun total range => total + range.size) 0
-  text s!"{view.pid} ({baseName view.name}) R {view.parent} {view.pgid} {view.sid} 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 {view.threads.length} 0 0 {memory} {memory / 4096} 18446744073709551615 0 0 {view.stackStart} 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 {view.breakStart} 0 0 0 0 0\n"
+  text s!"{view.pid} ({view.name}) R {view.parent} {view.pgid} {view.sid} 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 {view.threads.length} 0 0 {memory} {memory / 4096} 18446744073709551615 0 0 {view.stackStart} 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 {view.breakStart} 0 0 0 0 0\n"
 
 def statm (view : ProcessView) : ByteArray :=
   let pages := view.ranges.foldl (fun total range => total + range.size) 0 / 4096
@@ -112,7 +134,7 @@ def builtin : String → Option Generator
       let word := (List.range size).map fun index => (word >>> (8 * index)).toUInt8
       bytes ++ ByteArray.mk (if view.big then word.reverse else word).toArray
   | "environ" => some fun view => zeroEnded view.environment
-  | "comm" => some fun view => text (baseName view.name ++ "\n")
+  | "comm" => some fun view => text (view.name ++ "\n")
   | "limits" => some limits
   | "mountinfo" => some mountinfo
   | "cgroup" => some fun _ => text "0::/\n"

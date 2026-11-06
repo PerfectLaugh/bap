@@ -400,6 +400,14 @@ structure Place where
   path : String := "/"
   deriving DecidableEq, Repr
 
+/-- How many bytes the name of a process has at most, which with the zero that ends it is Linux's `TASK_COMM_LEN`. -/
+def commLength : Nat := 15
+
+/-- A name of a process as Linux keeps it: what fits in `commLength` bytes, of whole characters. -/
+def commOf (name : String) : String :=
+  String.ofList ((name.toList.foldl (init := ([], 0)) fun (kept, size) char =>
+    if size + char.utf8Size ≤ commLength then (char :: kept, size + char.utf8Size) else (kept, commLength)).1.reverse)
+
 /-- What belongs to a process. -/
 structure Process where
   descriptors : Std.HashMap Nat Descriptor := {}
@@ -413,7 +421,8 @@ structure Process where
   environment : List String := []
   /-- The file that it runs, by its path, as `/proc/PID/exe` has it. -/
   program : String := ""
-  /-- The path that it was run by, as it was given, of which the last part is its name, as `/proc/PID/comm` has it. -/
+  /-- Its name, as `/proc/PID/comm` has it: the last part of the path that it was run by, or what `PR_SET_NAME` or a write to that file
+  gave it, of `commLength` bytes at most. -/
   name : String := ""
   /-- The auxiliary vector that it started with, as a type and a value by turns. -/
   auxiliary : List Nat := []
@@ -438,13 +447,18 @@ structure Process where
   /-- What `membarrier` it registered for, as the bits of the commands that register. -/
   barriers : Nat := 0
 
-/-- What a mapping of a process is: where, how much, and what it may do. -/
+/-- What a mapping of a process is: where, how much, and what it may do, and what it has behind it: whether it is shared, and the file,
+from where in it, by its inode and what `/proc/PID/maps` calls it, which are 0 and empty for what is anonymous. -/
 structure MappedRange where
   start : Nat
   size : Nat
   readable : Bool
   writable : Bool
   executable : Bool
+  shared : Bool := false
+  offset : Nat := 0
+  inode : Nat := 0
+  path : String := ""
   deriving DecidableEq, Repr
 
 /-- What a generator of a file sees: the process that it is about, and the machine. It is plain data, which comes from the kernel
@@ -457,6 +471,7 @@ structure ProcessView where
   command : List String := []
   environment : List String := []
   program : String := ""
+  /-- What `/proc/PID/comm` says. -/
   name : String := ""
   auxiliary : List Nat := []
   big : Bool := false

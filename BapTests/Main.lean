@@ -264,6 +264,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-procstat",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-procstat",
     Bap.Tests.Emu.testLinuxRaises "riscv64-linux-musl-libc-procstat",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-procfs",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-procfs",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-remain",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-remain",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-remain",

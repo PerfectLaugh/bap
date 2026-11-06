@@ -1,0 +1,32 @@
+fd after open and dup 4
+fd after close 2
+fd after all closed 0
+code perms "r-xp"
+code is the program 1
+code path column 1
+heap 1
+heap perms "rw-p"
+heap path "[heap]"
+heap path column 1
+shared perms "rw-s"
+shared offset "00000000"
+shared path "/dev/zero (deleted)"
+file perms "r--p"
+file offset "00001000"
+file path 1
+file path column 1
+removed file path 1
+anonymous "00000000 00:00 0 "
+stack 1
+run by a long name
+comm "a-long-program-"
+status "a-long-program-"
+stat "a-long-program-"
+prctl "a-long-program-"
+after PR_SET_NAME
+comm "another-long-na"
+status "another-long-na"
+stat "another-long-na"
+prctl "another-long-na"
+named 0
+exe 7

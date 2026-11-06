@@ -98,8 +98,8 @@ structure Machine where
   history : IO.Ref (Option Machine.History)
   /-- What hears that the machine was put back to what it was, by `restore`, `stepBack` or a checkpoint, with what put it back. -/
   restored : IO.Ref (List (String → IO Unit))
-  /-- The directory that was last read, for the next piece of it: all the paths that it is of, which it is good for as long as those are the same object, its inode and what it has. -/
-  listing : IO.Ref (Option (Std.HashMap String Nat × Nat × Array (Nat × Nat × String)))
+  /-- The directory that was last read, for the next piece of it: all the paths that it is of, which it is good for as long as those are the same object, its inode, what it has, and whether it is of `/proc`. -/
+  listing : IO.Ref (Option (Std.HashMap String Nat × Nat × Array (Nat × Nat × String) × Bool))
   /-- The hook that serves each stub of a host function, by its address, so that a handler given again takes the place of the one
   before. -/
   hostHooks : IO.Ref (Std.HashMap Nat HookId)
@@ -452,6 +452,63 @@ private def processOfPath (path : String) (group : Nat) : Nat :=
 private def liveProcesses (emu : Emu) : IO (List Nat) := do
   pure (((← emu.taskTable.get).tasks.filter fun task => task.status.isNone && task.tid == task.group).map (·.tid))
 
+/-- What `/proc/PID/maps` calls the file of a mapping of a process: its path as the process sees it, or what it was before it was
+removed, or `/SYSV` and the key of a segment of System V, or else what is behind memory that is shared and anonymous, as Linux has it.
+`paths` has the paths of the inodes that have one. -/
+private def mappedName (kernel : Kernel) (group : Nat) (paths : Std.HashMap Nat String) (inode : Nat) : String :=
+  match paths.get? inode with
+  | some path => kernel.shownPath group path
+  | none =>
+    match kernel.ipc.segments.find? (·.inode == inode), kernel.inodes.get? inode with
+    | some segment, _ =>
+      let key := String.ofList (Nat.toDigits 16 (segment.perm.key % 2 ^ 32))
+      s!"/SYSV{String.ofList (List.replicate (8 - key.length) '0')}{key} (deleted)"
+    | none, some { details := { name, .. }, .. } => if name.isEmpty then "/dev/zero (deleted)" else name
+    | none, none => "/dev/zero (deleted)"
+
+/-- Whether a path is of `/proc`. -/
+private def inProc (path : String) : Bool := path == "/proc" || path.startsWith "/proc/"
+
+/-- A path that a process gives, as a path of the tree from `/`: one that isn't from `/` is from its working directory. -/
+private def treePath (kernel : Kernel) (group : Nat) (path : String) : String :=
+  let (base, relative) := kernel.pathIn group (kernel.cwdOf group) path
+  if relative.startsWith "/" then relative else base ++ "/" ++ relative
+
+/-- What a program loaded at `base` has of its file `inode`, as Linux maps it: of each segment, the pages that the file has, privately,
+of which what a segment after it covers is that one's. -/
+private def segmentMappings (program : Elf.Program) (base inode : Nat) : List FileMapping :=
+  (program.segments.toArray.qsort fun left right => left.address < right.address).foldl (init := []) fun mappings segment =>
+    let first := base + segment.address
+    let start := pageDown first
+    let stop := pageUp (first + segment.fileSize)
+    if segment.fileSize == 0 || segment.memorySize == 0 then mappings
+    else mappings.flatMap (·.without start stop) ++
+      [{ start, size := stop - start, inode, offset := segment.offset - (first - start), shared := false, mayWrite := false }]
+
+/-- What of the memory of a process its program and its interpreter are behind, as `loadProgram` put them, which `/proc/PID/maps`
+shows as mappings of those files: where each went is in its auxiliary vector, the program by `AT_ENTRY` and the interpreter at
+`AT_BASE`. -/
+private def programMappings (kernel : Kernel) (group : Nat) (process : Process) : List FileMapping :=
+  let loaded (path : String) : Option (Nat × Elf.Program) :=
+    match kernel.resolve "/" path with
+    | .ok (_, some inode) =>
+      match kernel.inodes.get? inode with
+      | some { content := .file data, .. } => (Elf.parse data).toOption.map (inode, ·)
+      | _ => none
+    | _ => none
+  let auxiliary (type : Nat) : Option Nat :=
+    let rec find : List Nat → Option Nat
+      | key :: value :: rest => if key == type then some value else find rest
+      | _ => none
+    find process.auxiliary
+  match loaded process.program, auxiliary 9 with
+  | some (inode, program), some entry =>
+    let interpreter := match program.interpreter.bind (loaded <| treePath kernel group ·), auxiliary 7 with
+      | some (inode, interpreter), some base => segmentMappings interpreter base inode
+      | _, _ => []
+    segmentMappings program (entry - program.entry) inode ++ interpreter
+  | _, _ => []
+
 /-- What a generated file sees of a process. -/
 private def viewOf (machine : Machine) (emu : Emu) (group : Nat) : IO ProcessView := do
   let kernel ← machine.kernel.get
@@ -464,6 +521,14 @@ private def viewOf (machine : Machine) (emu : Emu) (group : Nat) : IO ProcessVie
   let architecture := machine.architecture
   let stackStart := stackTop architecture - stackSize
   let bootClock := (1700000000 : Nat) * 1000000000
+  -- Its mappings, with those of its program that nothing was mapped over, and the paths of their files, found in one pass.
+  let mappings := programMappings kernel group process |>.flatMap (fun segment =>
+    process.mappings.foldl (fun pieces mapping => pieces.flatMap (·.without mapping.start (mapping.start + mapping.size))) [segment])
+  let mappings := mappings ++ process.mappings
+  let inodes := mappings.map (·.inode)
+  let paths := kernel.paths.fold (init := ({} : Std.HashMap Nat String)) fun found path number =>
+    if inodes.contains number && path.startsWith "/" && !found.contains number then found.insert number path else found
+  let mappings := mappings.map fun mapping => (mapping, mappedName kernel group paths mapping.inode)
   pure {
     pid := group
     parent := match table.find? group with
@@ -478,9 +543,19 @@ private def viewOf (machine : Machine) (emu : Emu) (group : Nat) : IO ProcessVie
     big := architecture.big
     cwd := kernel.shownPath group process.cwd.path
     mounts := kernel.mounts.map fun mount => (kernel.shownPath group mount.target, mount.fstype, mount.device, mount.flags)
-    ranges := regions.map fun region =>
-      { start := region.address, size := region.data.size, readable := region.protection.readable
-        writable := region.protection.writable, executable := region.protection.executable }
+    -- Each region, in pieces where what has a file behind it starts and ends.
+    ranges := regions.flatMap fun region =>
+      let stop := region.address + region.data.size
+      let inside := mappings.filter (·.1.overlaps region.address stop)
+      let bounds := (region.address :: (inside.flatMap fun (mapping, _) => [mapping.start, mapping.start + mapping.size]).filter
+        (fun at_ => region.address < at_ && at_ < stop) ++ [stop]).mergeSort.eraseDups
+      (bounds.zip bounds.tail).map fun (first, last) =>
+        let range : MappedRange := { start := first, size := last - first, readable := region.protection.readable
+                                     writable := region.protection.writable, executable := region.protection.executable }
+        match inside.find? (·.1.overlaps first (first + 1)) with
+        | some (mapping, path) =>
+          { range with shared := mapping.shared, offset := mapping.offset + (first - mapping.start), inode := mapping.inode, path }
+        | none => range
     breakStart := process.breakStart
     umask := process.umask
     breakEnd := process.breakEnd
@@ -1290,7 +1365,7 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
         | .ok (id, file) =>
           let cached ← machine.listing.get
           match cached with
-          | some (paths, number, all) =>
+          | some (paths, number, all, _) =>
             if number == file.inode && sameObject paths kernel.paths then
               -- No entry is shorter than what its header takes.
               pure (.ok (id, file.offset, ((all.extract file.offset (file.offset + arg 2 / 24 + 1)).toList)))
@@ -1301,7 +1376,7 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
         | .error 0 =>
           match kernel.directoryListing group (arg 0), kernel.openFileOf group (arg 0) with
           | .ok all, .ok (id, file) =>
-            machine.listing.set (some (kernel.paths, file.inode, all))
+            machine.listing.set (some (kernel.paths, file.inode, all, (kernel.pathOfInode file.inode).any inProc))
             pure (.ok (id, file.offset, ((all.extract file.offset (file.offset + arg 2 / 24 + 1)).toList)))
           | .error errno, _ | _, .error errno => pure (.error errno)
         | other => pure other
@@ -1524,6 +1599,16 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
         pure (if arg 1 ≤ 1 && arg 2 == 0 && arg 3 == 0 && arg 4 == 0 then .returnValue 0 else errorOf Errno.einval)
       else if architecture == .aarch64 && arg 0 == 56 then
         pure (if arg 1 == 0 && arg 2 == 0 && arg 3 == 0 && arg 4 == 0 then .returnValue 1 else errorOf Errno.einval)
+      -- `PR_SET_NAME` and `PR_GET_NAME`, of the name of the process, which is given and taken with the zero that ends it.
+      else if arg 0 == 15 then
+        match ← (readString emu (arg 1)).toBaseIO with
+        | .error _ => pure (errorOf Errno.efault)
+        | .ok name =>
+          machine.kernel.set (kernel.setProcess group { kernel.process group with name := commOf name })
+          pure (.returnValue 0)
+      else if arg 0 == 16 then
+        let name := (kernel.process group).name.toUTF8
+        returning emu (arg 1) (name ++ Bap.zeroBytes (commLength + 1 - name.size)) 0
       else pure .default
     | .socket | .socketpair | .bind | .listen | .accept | .accept4 | .connect | .getsockname | .getpeername | .sendto | .recvfrom
     | .send | .recv | .setsockopt | .getsockopt | .shutdown | .sendmsg | .recvmsg => socketCall machine emu call args
@@ -1601,25 +1686,38 @@ private partial def fromHost (machine : Machine) (path : String) (links : Nat :=
     for entry in entries do
       let _ ← bring (child guest entry.fileName) (child host entry.fileName)
 
-/-- Makes `/proc` what it has to be for a call that may look at it, which only a path can tell. -/
-private def refreshProc (machine : Machine) (emu : Emu) (call : Call) (args : List Nat) : IO Unit := do
-  if let some index := pathArgument call then
-    match ← (readString emu (args.getD index 0)).toBaseIO with
-    | .error _ => pure ()
-    | .ok path =>
-      let group := (← currentTask emu).group
-      let kernel ← machine.kernel.get
-      -- What the second argument is relative to is the first, which may be in there.
-      let base := if index == 1 && !atCwd (args.getD 0 0) then (kernel.baseOf group (args.getD 0 0) false).toOption.getD ""
-        else kernel.cwdOf group
-      -- `/dev/stdin`, `/dev/stdout`, `/dev/stderr` and `/dev/fd` are links to `/proc/self/fd`.
-      let absolute := Path.ofParts (Path.parts base path)
-      if ["/proc", "/dev/std", "/dev/fd"].any (absolute.startsWith ·) then
-        let self ← thread emu
-        let live ← liveProcesses emu
-        let tasks := (← emu.taskTable.get).tasks.filter (·.status.isNone)
-        machine.kernel.modify (Proc.refresh · group self live fun pid =>
-          (tasks.filter (·.group == pid)).map (·.tid))
+/-- Makes `/proc` what it has to be for a call that may look at it, which a path tells, or of `getdents` the directory that it reads,
+which the directory that was read last says, if it is that one. -/
+private def refreshProc (machine : Machine) (emu : Emu) (group : Nat) (call : Call) (args : List Nat) : IO Unit := do
+  let kernel ← machine.kernel.get
+  let looks ← if call == .getdents then
+      match kernel.openFileOf group (args.getD 0 0) with
+      | .error _ => pure false
+      | .ok (_, file) =>
+        match ← machine.listing.get with
+        | some (_, number, _, proc) => if number == file.inode then pure proc else pure ((kernel.pathOfInode file.inode).any inProc)
+        | none => pure ((kernel.pathOfInode file.inode).any inProc)
+    else
+      match pathArgument call with
+      | none => pure false
+      | some index =>
+        match ← (readString emu (args.getD index 0)).toBaseIO with
+        | .error _ => pure false
+        | .ok path =>
+          -- What the second argument is relative to is the first, which may be in there.
+          let base := if index == 1 && !atCwd (args.getD 0 0) then (kernel.baseOf group (args.getD 0 0) false).toOption.getD ""
+            else kernel.cwdOf group
+          -- `/dev/stdin`, `/dev/stdout`, `/dev/stderr` and `/dev/fd` are links to `/proc/self/fd`.
+          let absolute := Path.ofParts (Path.parts base path)
+          pure (["/proc", "/dev/std", "/dev/fd"].any (absolute.startsWith ·))
+  if looks then
+    let self ← thread emu
+    let live ← liveProcesses emu
+    let tasks := (← emu.taskTable.get).tasks.filter (·.status.isNone)
+    machine.kernel.modify (Proc.refresh · group self live fun pid =>
+      (tasks.filter (·.group == pid)).map (·.tid))
+    -- What was read of a directory before is of what was there then.
+    if call == .getdents then machine.listing.set none
 
 /-- `write`, on its own: nothing here holds on to the kernel, so that a program that writes a little at a time doesn't have what it wrote before copied each time. -/
 private def writeDirect (machine : Machine) (emu : Emu) (group fd address count : Nat) : IO SyscallAction := do
@@ -1722,7 +1820,7 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
       machine.timers.entered emu
       let group := (← currentTask emu).group
       if let some refused ← descriptorLimit machine group call args then return ← handOver machine emu refused
-      refreshProc machine emu call args
+      refreshProc machine emu group call args
       -- What it names of the directories of the host that the machine sees.
       if !(← machine.hostMounts.get).isEmpty then
         let kernel ← machine.kernel.get
@@ -2074,11 +2172,6 @@ private def loadProgram (emu : Emu) (architecture : Architecture) (credentials :
     else setReg emu (word "R12") (bits 64 entry)
   pure (top, auxiliary.flatMap fun entry => [entry.1, entry.2])
 
-/-- A path that a process gives, as a path of the tree from `/`: one that isn't from `/` is from its working directory. -/
-private def treePath (kernel : Kernel) (group : Nat) (path : String) : String :=
-  let (base, relative) := kernel.pathIn group (kernel.cwdOf group) path
-  if relative.startsWith "/" then relative else base ++ "/" ++ relative
-
 /-- A program of a path that a process gives that it may run, as far as it can be told that it will run, with the path of its file
 and what its arguments come to: a script is run by what its first line names, with the path of the script as it was given after that,
 to a depth that Linux has too. What runs it, and the interpreter of a program of ELF, are to be run by the process too, as
@@ -2180,8 +2273,8 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
       wakePipeReaders emu
       machine.kernel.set (kernel.setProcess group { process with
         descriptors := process.descriptors.filter fun _ entry => !entry.closeOnExec
-        breakStart := top, breakEnd := top, command := arguments, environment, program := name, name := path, auxiliary, mappings := [], forkAdvice := []
-        credentials })
+        breakStart := top, breakEnd := top, command := arguments, environment, program := name, name := commOf (Path.name path), auxiliary
+        mappings := [], forkAdvice := [], credentials })
       releaseVfork emu group
       machine.timers.executed group
       pure (.returnValue 0)
@@ -2566,11 +2659,15 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   let emu ← emulatorOf architecture
   let first := (← currentTask emu).group
   let arguments := if arguments.isEmpty then [path] else arguments
+  -- The file, from `/` and by where the links lead, as `/proc/PID/exe` has it.
+  let file := match kernel.resolve "/" path with
+    | .ok (file, _) => file
+    | _ => path
   let (top, auxiliary) ← loadProgram emu architecture (kernel.process first).credentials path data program interpreter arguments
     environment base
   let kernel := kernel.withConsole first input
   let kernel := kernel.setProcess first { kernel.process first with
-    breakStart := top, breakEnd := top, command := arguments, environment, program := path, name := path, auxiliary }
+    breakStart := top, breakEnd := top, command := arguments, environment, program := file, name := commOf (Path.name path), auxiliary }
   let kernel := Proc.install kernel.installDevices
   machineOf architecture emu kernel watch handler (targetDigest architecture data) models
 
@@ -2827,7 +2924,7 @@ def Machine.realloc (machine : Machine) (address size : Nat) (pid : Option Nat :
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 
 /-- What the bytes after the magic mean. -/
-def checkpointFormat : Nat := 20
+def checkpointFormat : Nat := 21
 
 /-- What this BAP does with a guest, which goes up when the same state could go on differently. A checkpoint is refused by a BAP
 of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/
