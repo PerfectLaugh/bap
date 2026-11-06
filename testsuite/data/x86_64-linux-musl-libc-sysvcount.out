@@ -1,0 +1,16 @@
+shmget 1
+attached 1
+child exited 0 1
+rmid 0 1
+shmdt 0 1
+semget 1
+ncnt 1 0
+given 0 0
+taker 0 0
+zcnt 1 0
+zeroed 0 0
+zero waiter 0
+waits 1
+killed 1 0
+no such -22 -22
+sem rmid 0

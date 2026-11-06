@@ -32,8 +32,12 @@ def collect (kernel : Kernel) : Kernel :=
     let (gone, kept) := kernel.ipc.segments.partition fun segment => segment.removed && attached kernel segment == 0
     { kernel with ipc := { kernel.ipc with segments := kept }, inodes := gone.foldl (fun inodes segment => inodes.erase segment.inode) kernel.inodes }
 
-/-- What a process takes back of what `SEM_UNDO` did, as it ends. -/
+/-- What a process takes back of what `SEM_UNDO` did, as it ends, and the segments that it detaches. -/
 def exited (kernel : Kernel) (group : Nat) : Kernel :=
+  let process := kernel.process group
+  let segment (mapping : FileMapping) : Bool := kernel.ipc.segments.any (·.inode == mapping.inode)
+  let kernel := if !process.mappings.any segment then kernel
+    else kernel.setProcess group { process with mappings := process.mappings.filter (!segment ·) }
   let (mine, others) := kernel.ipc.undo.partition (·.1 == group)
   if mine.isEmpty then collect kernel
   else
@@ -96,8 +100,8 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
     if address == 0 then return some none
     let some span ← readSpan emu address size | return none
     pure (some (some (← poller.timers.deadlineOf tid (pure (now + span)))))
-  let wait (due : Option Nat) : IO (Option SyscallAction) := do
-    pure (some (← poller.timers.waitUntil emu readySpace 0 due false))
+  let wait (due : Option Nat) (semaphore : Option (Nat × Nat × Nat) := none) : IO (Option SyscallAction) := do
+    pure (some (← poller.timers.waitUntil emu readySpace 0 due false (semaphore := semaphore)))
   -- What isn't there any more, to a call that waited for it, was taken away: `EIDRM`.
   let gone : IO (Option SyscallAction) := do
     let removed ← poller.timers.again emu
@@ -191,9 +195,10 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
       (numberOf big (bytes.extract at_ (at_ + 2)), signed (numberOf big (bytes.extract (at_ + 2) (at_ + 4))),
         numberOf big (bytes.extract (at_ + 4) (at_ + 6)) % 2 ^ 16)
     if operations.any (·.1 ≥ set.values.length) then return ← fail 27
-    -- All of them, from the values that there are, or the first that has to wait, and whether it waits.
+    -- All of them, from the values that there are, or the first that has to wait: whether it waits, its semaphore and how much it takes
+    -- of that, or 0 to wait for it to be 0.
     let mut values := set.values
-    let mut blocked : Option Bool := none
+    let mut blocked : Option (Bool × Nat × Nat) := none
     for (which, change, flags) in operations do
       let value := values.getD which 0
       if change > 0 then
@@ -201,21 +206,21 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
         values := values.set which (value + change.toNat)
       else if change == 0 then
         if value != 0 then
-          blocked := some (flags &&& ipcNowait != 0)
+          blocked := some (flags &&& ipcNowait != 0, which, 0)
           break
       else if value ≥ change.natAbs then values := values.set which (value - change.natAbs)
       else
-        blocked := some (flags &&& ipcNowait != 0)
+        blocked := some (flags &&& ipcNowait != 0, which, change.natAbs)
         break
     match blocked with
-    | some true =>
+    | some (true, _) =>
       poller.timers.finish tid
       fail Errno.eagain
-    | some false =>
+    | some (false, which, amount) =>
       if due.any (· ≤ now) then
         poller.timers.finish tid
         fail Errno.eagain
-      else wait due
+      else wait due (some (id, which, amount))
     | none =>
       poller.timers.finish tid
       let touched := operations.map (·.1)
@@ -254,7 +259,18 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
     | 13 =>
       write emu value (set.values.foldl (fun out value => out ++ field 2 value) ByteArray.empty)
       succeed
-    | 14 | 15 => if ← single then succeed 0 else fail Errno.einval
+    | 14 | 15 =>
+      if !(← single) then return ← fail Errno.einval
+      -- The threads that wait in `semop` for it to grow or to be 0 and still have to, but for those that have it now and run again.
+      let value := set.values.getD which 0
+      let zero := command % 256 == 15
+      let waiting := (← poller.timers.state.get).sites.fold (init := 0) fun count _ site =>
+        match site.semaphore with
+        | some (setId, number, amount) =>
+          if setId == id && number == which && (amount == 0) == zero && (if zero then value != 0 else value < amount) then count + 1
+          else count
+        | none => count
+      succeed waiting
     | 16 =>
       if !(← single) then return ← fail Errno.einval
       let value := value % 2 ^ 32

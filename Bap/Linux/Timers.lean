@@ -47,6 +47,9 @@ structure Site where
   flag : Nat := 0
   /-- Of a write to a pipe that waits for room for the rest, how much of it it wrote, which it doesn't again and gives if it ends here. -/
   written : Nat := 0
+  /-- Of `semop`, the set, the semaphore and how much it waits to take of that, or 0 of one that waits for it to be 0, which `GETNCNT`
+  and `GETZCNT` count. -/
+  semaphore : Option (Nat × Nat × Nat) := none
   deriving Repr
 
 /-- The timers, by the process and which they are: 0 to 2 of `setitimer` and `3 + id` of `timer_create`, the next id of
@@ -190,8 +193,8 @@ def written (timers : Timers) (emu : Emu) : IO Nat := do
 /-- The thread that runs waits in `space`, for `address`, until something wakes it there or its deadline comes, if it has one, and
 then runs its call again, with its registers as they were, having `written` bytes of a write already. A signal that comes first has it
 run again or give `EINTR`, as `restartable` says of a handler of `SA_RESTART`, or give what it wrote: see `interrupted`. -/
-def waitUntil (timers : Timers) (emu : Emu) (space address : Nat) (deadline : Option Nat) (restartable : Bool) (written : Nat := 0) :
-    IO SyscallAction := do
+def waitUntil (timers : Timers) (emu : Emu) (space address : Nat) (deadline : Option Nat) (restartable : Bool) (written : Nat := 0)
+    (semaphore : Option (Nat × Nat × Nat) := none) : IO SyscallAction := do
   let tid ← thread emu
   let action ← Ptrace.again emu
   let result := match action with
@@ -203,7 +206,7 @@ def waitUntil (timers : Timers) (emu : Emu) (space address : Nat) (deadline : Op
       | .ok bits => pure bits.2.toNat
       | .error _ => pure 0
     else pure 0
-  timers.state.modify fun state => { state with sites := state.sites.insert tid { next, result, restartable, flag, written } }
+  timers.state.modify fun state => { state with sites := state.sites.insert tid { next, result, restartable, flag, written, semaphore } }
   emu.taskTable.modify (·.futexWait { thread := tid, space, address, bitset := 2 ^ 32 - 1, deadline })
   emu.stopped.set true
   pure action
@@ -414,9 +417,10 @@ def save (timers : Timers) : IO ByteArray := do
   let pair (out : ByteArray) (entry : Nat × Nat) : ByteArray := putNat (putNat out entry.1) entry.2
   let out := putSorted pair out state.nextTimer.toList
   let out := putSorted pair out state.deadlines.toList
+  let semaphore (out : ByteArray) (entry : Nat × Nat × Nat) : ByteArray := putNat (putNat (putNat out entry.1) entry.2.1) entry.2.2
   let out := putSorted (fun out (tid, site) =>
-    putNat (putNat (putFlag (putNat (putNat (putNat out tid) site.next) site.result) site.restartable) site.flag) site.written) out
-    state.sites.toList
+    putOption semaphore (putNat (putNat (putFlag (putNat (putNat (putNat out tid) site.next) site.result) site.restartable) site.flag)
+      site.written) site.semaphore) out state.sites.toList
   pure (putSorted (fun out (tid, deadline, address, field, scale, left) =>
     putOption putNat (putNat (putNat (putNat (putNat (putNat out tid) deadline) address) field) scale) left) out state.sleeps.toList)
 
@@ -437,7 +441,12 @@ def load (timers : Timers) (data : ByteArray) : IO Unit := do
       let (restartable, at_) ← getFlag data at_
       let (flag, at_) ← getNat data at_
       let (written, at_) ← getNat data at_
-      .ok ((tid, { next, result, restartable, flag, written }), at_)) data at_
+      let (semaphore, at_) ← getOption (fun data at_ => do
+        let (set, at_) ← getNat data at_
+        let (which, at_) ← getNat data at_
+        let (amount, at_) ← getNat data at_
+        .ok ((set, which, amount), at_)) data at_
+      .ok ((tid, { next, result, restartable, flag, written, semaphore }), at_)) data at_
     let (sleeps, at_) ← getList (fun data at_ => do
       let (tid, at_) ← getNat data at_
       let (deadline, at_) ← getNat data at_

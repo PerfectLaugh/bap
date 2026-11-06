@@ -177,6 +177,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-sysv",
     Bap.Tests.Emu.testLinuxRaises "riscv64-linux-musl-libc-sysv",
     Bap.Tests.Emu.testLinuxRaises "i686-linux-musl-libc-sysv",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-sysvcount",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-sysvcount",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-mqueue",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-mqueue",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-mqueue",
