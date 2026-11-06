@@ -275,6 +275,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-inet",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-inet",
     Bap.Tests.Emu.testLinuxRaises "mips-linux-musl-libc-inet",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-sockend",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-sockend",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-controls",
     Bap.Tests.Emu.testArmV8 "vrint",
     Bap.Tests.Emu.testArmV8 "v8fp",

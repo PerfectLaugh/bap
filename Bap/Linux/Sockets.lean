@@ -38,9 +38,30 @@ def isSocket (kernel : Kernel) (group fd : Nat) : Bool :=
   | .ok _ => true
   | .error _ => false
 
-/-- Whether a socket is there for the other end: a live process holds it, as `heldFiles` has it, or a listener has it to accept. -/
+/-- Whether a socket is there for the other end: a live process holds it, as `heldFiles` has it, or a listener that one holds has it to
+accept. A connection that its listener went with before it was accepted is gone, as Linux has it. -/
 def socketAlive (kernel : Kernel) (number : Nat) (groups : List Nat) : Bool :=
-  kernel.pipeHeld number groups true || (kernel.socketAt number |>.any (·.waiting))
+  kernel.pipeHeld number groups true || (kernel.socketAt number |>.any (·.waiting)) &&
+    kernel.inodes.fold (init := false) fun found listener inode =>
+      found || match inode.content with
+        | .socket socket => socket.pending.contains number && kernel.pipeHeld listener groups true
+        | _ => false
+
+/-- Whether the other end of a connection was reset, which a read that has nothing else to read tells once, as `ECONNRESET`: it is
+gone, and it went with what it hadn't read, or before it was accepted, as Linux has it. -/
+def wasReset (kernel : Kernel) (socket : Socket) (alive : Nat → Bool) : Bool :=
+  socket.type != 2 && match socket.peer with
+    | some peer => !alive peer && (kernel.socketAt peer |>.any fun other => other.waiting || !other.incoming.isEmpty)
+    | none => false
+
+/-- If the connection of a descriptor was reset and it has nothing to read, the kernel once that is told: the other end has nothing any
+more, as Linux throws away what it had. -/
+def tellReset (kernel : Kernel) (group fd : Nat) (alive : Nat → Bool) : Option Kernel := do
+  let (_, socket) ← (kernel.socketOf group fd).toOption
+  if !socket.incoming.isEmpty || !kernel.wasReset socket alive then none
+  let peer ← socket.peer
+  let other ← kernel.socketAt peer
+  some (kernel.setSocket peer { other with incoming := #[], waiting := false })
 
 /-- A new socket, of the user and the group of the filesystem of the process that it is of, as Linux has it. -/
 private def newSocket (kernel : Kernel) (socket : Socket) : Kernel × Nat :=
@@ -150,7 +171,7 @@ def accept (kernel : Kernel) (group fd flags : Nat) : Result (Kernel × Option (
 /-- `send` and its kin: a message to the other end, or of datagrams to `target` if it says. It is how many bytes went. -/
 def send (kernel : Kernel) (group fd : Nat) (message : Message) (target : Option Nat) (alive : Nat → Bool) :
     Result (Kernel × Nat) := do
-  let (_, socket) ← socketOf kernel group fd
+  let (number, socket) ← socketOf kernel group fd
   if socket.writeShut then .error Errno.epipe
   let message := { message with sender := socket.name }
   if socket.type == 2 then
@@ -161,6 +182,8 @@ def send (kernel : Kernel) (group fd : Nat) (message : Message) (target : Option
     let some receiver := kernel.socketAt destination | .error Errno.econnrefused
     if receiver.type != 2 then .error Errno.eprototype
     if !alive destination then .error Errno.econnrefused
+    -- A socket that is connected takes datagrams only from the one that it is connected to.
+    if receiver.peer.any (· != number) then .error Errno.eperm
     .ok (kernel.setSocket destination { receiver with incoming := receiver.incoming.push message }, message.data.size)
   else
     if target.isSome && socket.peer.isSome then .error Errno.eisconn
@@ -356,8 +379,8 @@ def listenInet (kernel : Kernel) (group fd : Nat) (alive : Nat → Bool) : Resul
   let (kernel, _) := kernel.autobind number socket alive
   kernel.listen group fd
 
-/-- A datagram of the Internet, to `endpoint` or to where the socket was connected. If nobody has that address, it is gone, and it
-went. -/
+/-- A datagram of the Internet, to `endpoint` or to where the socket was connected. If nobody has that address, or the socket there is
+connected to another, it is gone, and it went. -/
 def sendDatagram (kernel : Kernel) (group fd : Nat) (data : ByteArray) (endpoint : Option Endpoint) (alive : Nat → Bool) :
     Result (Kernel × Nat) := do
   let (number, socket) ← socketOf kernel group fd
@@ -369,12 +392,14 @@ def sendDatagram (kernel : Kernel) (group fd : Nat) (data : ByteArray) (endpoint
   if wanted.family != socket.family then .error Errno.eafnosupport
   let target ← destination wanted
   let (kernel, socket) := kernel.autobind number socket alive
-  match kernel.socketAtEndpoint 2 target alive with
+  -- Where it is from, with any address as the loopback, as a socket that is connected has where it is connected to.
+  let source := (socket.name.bind Endpoint.ofName?).map fun endpoint =>
+    { endpoint with address := if endpoint.address == 0 then Endpoint.loopback endpoint.family else endpoint.address }
+  match (kernel.socketAtEndpoint 2 target alive).bind fun receiver => (kernel.socketAt receiver).map (receiver, ·) with
+  | some (receiver, other) =>
+    if other.remote.isSome && other.remote != source.map (·.name) then .ok (kernel, data.size)
+    else .ok (kernel.setSocket receiver { other with incoming := other.incoming.push { data, sender := socket.name } }, data.size)
   | none => .ok (kernel, data.size)
-  | some receiver =>
-    match kernel.socketAt receiver with
-    | some other => .ok (kernel.setSocket receiver { other with incoming := other.incoming.push { data, sender := socket.name } }, data.size)
-    | none => .ok (kernel, data.size)
 
 end Kernel
 

@@ -87,15 +87,15 @@ def readiness (kernel : Kernel) (live : List Nat) (now pending file : Nat) : Nat
           if socket.listening then { read := !socket.pending.isEmpty }
           else if socket.type == 2 then { read := !socket.incoming.isEmpty, write := true }
           else
+            -- A connection is ready to be written to whatever its ends are, as Linux has it: what goes wrong is what the write says.
             match socket.peer with
-            | none => { hangup := true }
+            | none => { write := true, hangup := true }
             | some peer =>
               let other := kernel.socketAt peer
               let gone := !kernel.socketAlive peer live
               let ended := socket.readShut || gone || other.any (·.writeShut)
-              { read := !socket.incoming.isEmpty || ended, readHangup := ended
-                write := !gone && !socket.writeShut && !other.any (·.readShut)
-                hangup := gone || (ended && socket.writeShut) }
+              { read := !socket.incoming.isEmpty || ended, readHangup := ended, write := true
+                error := kernel.wasReset socket (kernel.socketAlive · live), hangup := gone || (ended && socket.writeShut) }
         | .eventfd count _ => { read := count > 0, write := count < 2 ^ 64 - 2 }
         | .timerfd expiry _ => { read := expiry.any (· ≤ now) }
         | .signalfd mask => { read := mask &&& pending != 0 }

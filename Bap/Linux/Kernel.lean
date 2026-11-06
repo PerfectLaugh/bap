@@ -2233,8 +2233,16 @@ def collect (kernel : Kernel) : Kernel := Id.run do
         for message in socket.incoming do fileWork := message.rights ++ fileWork
       | some { content := .ptySlave master, .. } => inodeWork := master :: inodeWork
       | _ => pure ()
-  pure { kernel with openFiles := kernel.openFiles.filter fun id _ => files.contains id
-                     inodes := kernel.inodes.filter fun number _ => inodes.contains number }
+  let mut kept := kernel.inodes.filter fun number _ => inodes.contains number
+  -- The other end of a connection that stays, that went with what it hadn't read or before it was accepted, stays for that to be
+  -- told, without the open files that it had to hand over, which are closed.
+  for (_, inode) in kept do
+    if let .socket { peer := some peer, type, .. } := inode.content then
+      if type != 2 && !kept.contains peer then
+        if let some dead@{ content := .socket other, .. } := kernel.inodes.get? peer then
+          if other.waiting || !other.incoming.isEmpty then
+            kept := kept.insert peer { dead with content := .socket { other with incoming := other.incoming.map ({ · with rights := [] }) } }
+  pure { kernel with openFiles := kernel.openFiles.filter fun id _ => files.contains id, inodes := kept }
 
 end Kernel
 

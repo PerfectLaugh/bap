@@ -682,6 +682,9 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
   let receiveInto (fd : Nat) (pieces : List (Nat × Nat)) (flags : Nat) (finish : Kernel.Received → IO SyscallAction) :
       IO SyscallAction := do
     let total := pieces.foldl (fun total piece => total + piece.2) 0
+    if let some next := kernel.tellReset group fd alive then
+      machine.kernel.set next
+      return errorOf Errno.econnreset
     match kernel.receive group fd total (flags &&& 2 != 0) alive with
     | .error errno => pure (errorOf errno)
     | .ok (_, none) =>
@@ -867,9 +870,13 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
           some (Abi.field big 4 (if socket.family == 1 then 0 else if socket.type == 1 then 6 else 17))
         else if name == option 39 0x1029 then some (Abi.field big 4 socket.family)
         else if name == peerCred then
-          -- `struct ucred` of the other end: its process, and root.
-          let owner := (socket.peer.bind kernel.socketAt).map (·.owner)
-          some (Abi.field big 4 (owner.getD 0) ++ Abi.field big 4 0 ++ Abi.field big 4 0)
+          -- `struct ucred` of the other end: its process, with the user and the group that it acts as, and of none, no process and
+          -- user and group -1.
+          match (socket.peer.bind kernel.socketAt).map (·.owner) with
+          | some owner =>
+            let credentials := (kernel.process owner).credentials
+            some (Abi.field big 4 owner ++ Abi.field big 4 credentials.euid ++ Abi.field big 4 credentials.egid)
+          | none => some (Abi.field big 4 0 ++ Abi.field big 4 (2 ^ 32 - 1) ++ Abi.field big 4 (2 ^ 32 - 1))
         -- The others that it can be asked, such as `SO_REUSEADDR` and `SO_KEEPALIVE`, are off.
         else some (Abi.field big 4 0)
       match value with

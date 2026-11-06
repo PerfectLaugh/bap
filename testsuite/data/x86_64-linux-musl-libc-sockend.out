@@ -1,0 +1,31 @@
+unconnected stream 20
+connect 0
+  sends before it is accepted 1
+  the listener closed 29 -104 0
+  and a write -32
+connect 0
+  sends before it is accepted 1
+  the listener closed 29 -104 0
+  and a write -32
+the other end closed with what it hadn't read 29 -104 0
+  and a write -32
+and with nothing 21 0 -32
+the other end closed with what it hadn't read 29 -104 0
+  and a write -32
+and with nothing 21 0 -32
+tcp connect 0
+  the other end closed with what it hadn't read 29 -104 0
+  and a write -32
+tcp connect 0
+  the listener closed 29 -104 0
+  and a write -32
+a datagram to one connected to another -1
+and from that other 1
+what it has 1 121 -11
+udp from another than it is connected to 1
+and from that one 1
+what it has 1 121 -11
+the other of a pair 0 1 1
+of one that isn't connected 0 0 -1
+the listener, to the one that connects 0 1 1
+the one that connected, to the listener 0 1 1
