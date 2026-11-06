@@ -229,6 +229,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-nlink",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-filecalls",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-filecalls",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-owner",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-owner",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-filealloc",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-filealloc",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-filealloc",

@@ -1,0 +1,44 @@
+mkdir 0
+first uid 1
+first gid 1
+first mode 420
+directory mode 493
+mkdir setgid 0
+chown setgid 0
+chmod setgid 0
+not root 1
+file uid 1
+file gid 1
+file mode 420
+mkdir directory 0
+directory uid 1
+directory gid 1
+subdirectory mode 493
+symlink 0
+link uid 1
+link gid 1
+tmpfile uid 1
+tmpfile gid 1
+memfd uid 1
+memfd gid 1
+pipe read uid 1
+pipe read gid 1
+pipe write uid 1
+pipe write gid 1
+socket uid 1
+socket gid 1
+bind 0
+bound uid 1
+bound gid 1
+socketpair uid 1
+socketpair gid 1
+setgid file group 1
+setgid file uid 1
+setgid file mode 420
+mkdir in setgid 0
+setgid directory group 1
+setgid directory mode 1517
+symlink in setgid 0
+setgid link group 1
+setgid tmpfile group 1
+removed 4

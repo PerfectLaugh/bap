@@ -1249,7 +1249,7 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       at_ directory address fun from_ path => do
         match ← (readString emu (arg 0)).toBaseIO with
         | .error _ => pure (errorOf Errno.efault)
-        | .ok target => apply machine (·.symlink from_ target path)
+        | .ok target => apply machine (·.symlink group from_ target path)
     | .readlink | .readlinkat =>
       let (directory, address, out, room) := if call == .readlink then (here, arg 0, arg 1, arg 2) else (arg 0, arg 1, arg 2, arg 3)
       -- Its room is an `int`: none, or less, is `EINVAL`, before the path is looked at.

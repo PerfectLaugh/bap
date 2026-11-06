@@ -305,8 +305,11 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         return ← fail Errno.einval
       let noexec := flags &&& 8 != 0
       let seals := sealable ||| (if noexec then 0x20 else if flags &&& 2 != 0 then 0 else 1)
+      -- It is of who makes it, as a file is.
+      let credentials := (kernel.process group).credentials
       let (next, fd) := kernel.addObject group (.file ByteArray.empty) (if flags &&& 1 != 0 then Kernel.oCloexec else 0)
-        (if noexec then 0o100666 else 0o100777) seals (name := s!"/memfd:{name} (deleted)")
+        (if noexec then 0o100666 else 0o100777) seals (name := s!"/memfd:{name} (deleted)") (uid := credentials.fsuid)
+        (gid := credentials.fsgid)
       poller.kernel.set next
       succeed fd
     | .sendfile | .sendfile64 =>

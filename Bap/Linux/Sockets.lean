@@ -42,10 +42,12 @@ def isSocket (kernel : Kernel) (group fd : Nat) : Bool :=
 def socketAlive (kernel : Kernel) (number : Nat) (groups : List Nat) : Bool :=
   kernel.pipeHeld number groups true || (kernel.socketAt number |>.any (·.waiting))
 
+/-- A new socket, of the user and the group of the filesystem of the process that it is of, as Linux has it. -/
 private def newSocket (kernel : Kernel) (socket : Socket) : Kernel × Nat :=
   let number := kernel.nextInode
   ({ kernel with
-      inodes := kernel.inodes.insert number { number, content := .socket socket, mode := 0o140777 }
+      inodes := kernel.inodes.insert number
+        { number, content := .socket socket, mode := 0o140777, details := kernel.madeBy (kernel.process socket.owner).credentials }
       nextInode := number + 1 }, number)
 
 /-- A descriptor of a socket, with `O_NONBLOCK` and `O_CLOEXEC` of `flags`. -/

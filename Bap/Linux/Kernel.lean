@@ -577,11 +577,30 @@ def unbindPath (kernel : Kernel) (path : String) : Kernel :=
 def countLinks (kernel : Kernel) : Kernel :=
   kernel.paths.fold (init := { kernel with links := {} }) fun kernel path number => kernel.countName path number true
 
-private def addInode (kernel : Kernel) (path : String) (content : Content) (mode : Nat) : Kernel × Nat :=
+/-- What a new inode that a process of `owner` makes has of itself: it was made now, and is of the user and the group of the process's
+filesystem. -/
+def madeBy (kernel : Kernel) (owner : Credentials) : Meta :=
+  { accessed := kernel.clock, modified := kernel.clock, changed := kernel.clock, uid := owner.fsuid, gid := owner.fsgid }
+
+/-- The group of a new inode in a directory that a process of `owner` makes with `mode`, and the mode that it has then: that of the
+process's filesystem, but in a directory with `S_ISGID` that of the directory, and a directory made there has `S_ISGID` too. Something
+else keeps `S_ISGID` with `S_IXGRP` only if root makes it or one in its group, as Linux has it. -/
+def newGroup (kernel : Kernel) (directory : String) (owner : Credentials) (mode : Nat) : Nat × Nat :=
+  match (kernel.paths.get? directory).bind kernel.inodes.get? with
+  | some parent =>
+    let gid := parent.details.gid
+    if parent.mode &&& 0o2000 == 0 then (owner.fsgid, mode)
+    else if mode &&& 0o170000 == 0o40000 then (gid, mode ||| 0o2000)
+    else if mode &&& 0o2010 == 0o2010 && owner.fsuid != 0 && gid != owner.fsgid && !owner.groups.contains gid then (gid, mode - 0o2000)
+    else (gid, mode)
+  | none => (owner.fsgid, mode)
+
+/-- A new inode at a path, which a process of `owner` makes, as `madeBy` and `newGroup` say: root, of what is set up. -/
+private def addInode (kernel : Kernel) (path : String) (content : Content) (mode : Nat) (owner : Credentials := {}) : Kernel × Nat :=
   let number := kernel.nextInode
+  let (gid, mode) := kernel.newGroup (Path.parent path) owner mode
   (({ kernel with
-      inodes := kernel.inodes.insert number
-        { number, content, mode, details := { accessed := kernel.clock, modified := kernel.clock, changed := kernel.clock } }
+      inodes := kernel.inodes.insert number { number, content, mode, details := { kernel.madeBy owner with gid } }
       nextInode := number + 1 }.bindPath path number), number)
 
 /-- The path of what is open, for a directory, or of what `/proc/PID/fd/N` is of. -/
@@ -933,8 +952,9 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
       if !has flags oCreat then .error Errno.enoent
       if !parentIsDirectory kernel normal then .error Errno.enoent
       if kernel.readOnly normal then .error erofs
-      let umask := (kernel.process group).umask
-      .ok (addInode kernel normal (.file ByteArray.empty) (0o100000 ||| (mode &&& 0o7777 &&& (0o7777 - umask))))
+      let process := kernel.process group
+      .ok (addInode kernel normal (.file ByteArray.empty) (0o100000 ||| (mode &&& 0o7777 &&& (0o7777 - process.umask)))
+        process.credentials)
   let inode ← inodeOf kernel number
   let kernel ← match inode.content with
     | .directory =>
@@ -1180,7 +1200,8 @@ def pipe (kernel : Kernel) (group flags : Nat) : Kernel × Nat × Nat :=
   let writing := reading + 1
   let kept := flags &&& oNonblock
   let kernel := { kernel with
-    inodes := kernel.inodes.insert number { number, content := .pipe ByteArray.empty 0 0, mode := 0o10600 }
+    inodes := kernel.inodes.insert number
+      { number, content := .pipe ByteArray.empty 0 0, mode := 0o10600, details := kernel.madeBy (kernel.process group).credentials }
     nextInode := number + 1
     openFiles := (kernel.openFiles.insert reading { inode := number, flags := kept }).insert writing { inode := number, flags := 1 ||| kept }
     nextOpenFile := writing + 1 }
@@ -1189,14 +1210,16 @@ def pipe (kernel : Kernel) (group flags : Nat) : Kernel × Nat × Nat :=
   (kernel, readFd, writeFd)
 
 /-- A descriptor of something that has no path, as `eventfd` and `epoll_create` make: on a new inode of `content`, opened to read and
-write with `flags` of `O_NONBLOCK` and `O_CLOEXEC`, which `/proc/PID/fd` says is `name` if it is a file. -/
+write with `flags` of `O_NONBLOCK` and `O_CLOEXEC`, which `/proc/PID/fd` says is `name` if it is a file. It is of `uid` and `gid`, or
+root's, as the inode that Linux has for all of what is anonymous is. -/
 def addObject (kernel : Kernel) (group : Nat) (content : Content) (flags : Nat) (mode : Nat := 0o600) (seals : Nat := 0) (access : Nat := 2)
-    (name : String := "") : Kernel × Nat :=
+    (name : String := "") (uid : Nat := 0) (gid : Nat := 0) : Kernel × Nat :=
   let number := kernel.nextInode
   let openFile := kernel.nextOpenFile
   let clock := kernel.clock
   let kernel := { kernel with
-    inodes := kernel.inodes.insert number { number, content, mode, details := { accessed := clock, modified := clock, changed := clock, seals, name } }
+    inodes := kernel.inodes.insert number
+      { number, content, mode, details := { accessed := clock, modified := clock, changed := clock, uid, gid, seals, name } }
     nextInode := number + 1
     openFiles := kernel.openFiles.insert openFile { inode := number, flags := access ||| (flags &&& oNonblock) }
     nextOpenFile := openFile + 1 }
@@ -1208,9 +1231,9 @@ def objectOf (kernel : Kernel) (group fd : Nat) : Result (Nat × OpenFile × Ino
   pure (file.inode, file, ← inodeOf kernel file.inode)
 
 /-- A file of a device at a path, with the directories that it needs, which `Bap.Linux.Tty` and the devices make as they are asked for. -/
-def addDevice (kernel : Kernel) (path : String) (content : Content) (mode : Nat) : Kernel × Nat :=
+def addDevice (kernel : Kernel) (path : String) (content : Content) (mode : Nat) (owner : Credentials := {}) : Kernel × Nat :=
   let kernel := addDirectories kernel (Path.parent path)
-  addInode kernel path content mode
+  addInode kernel path content mode owner
 
 /-- What an inode holds now, which is one more change of it. -/
 def setContent (kernel : Kernel) (number : Nat) (content : Content) : Kernel :=
@@ -1498,8 +1521,8 @@ def mkdir (kernel : Kernel) (group : Nat) (base path : String) (mode : Nat) : Re
   if found.isSome then .error Errno.eexist
   if !parentIsDirectory kernel normal then .error Errno.enoent
   if kernel.readOnly normal then .error erofs
-  let umask := (kernel.process group).umask
-  .ok (addInode kernel normal .directory (0o40000 ||| (mode &&& 0o7777 &&& (0o7777 - umask)))).1
+  let process := kernel.process group
+  .ok (addInode kernel normal .directory (0o40000 ||| (mode &&& 0o7777 &&& (0o7777 - process.umask))) process.credentials).1
 
 /-- `unlink`, and `rmdir` with `directory`. What is open stays open: its inode is still there. A slash at the end is of a directory,
 and the link that it may be isn't followed: `ENOTDIR` of anything else. Of a path that ends in `.`, `rmdir` is `EINVAL`, and in `..`,
@@ -1630,14 +1653,14 @@ def installDevices (kernel : Kernel) : Kernel :=
     if kernel.paths.contains path then kernel else kernel.addSymlink path target
 
 /-- `symlink`, to a target that is something: an empty one is `ENOENT`, as an empty path is. -/
-def symlink (kernel : Kernel) (base target path : String) : Result Kernel := do
+def symlink (kernel : Kernel) (group : Nat) (base target path : String) : Result Kernel := do
   if target.isEmpty then .error Errno.enoent
   let (normal, found) ← kernel.resolve base path (follow := false) (exact := true)
   if found.isSome then .error Errno.eexist
   if Path.ending path == .slash then .error Errno.enoent
   if !parentIsDirectory kernel normal then .error Errno.enoent
   if kernel.readOnly normal then .error erofs
-  .ok (addInode kernel normal (.symlink target) 0o120777).1
+  .ok (addInode kernel normal (.symlink target) 0o120777 (kernel.process group).credentials).1
 
 /-- `readlink`. -/
 def readlink (kernel : Kernel) (base path : String) : Result String := do
@@ -1915,10 +1938,10 @@ def openTmpfile (kernel : Kernel) (group : Nat) (base path : String) (flags mode
   let (normal, some number) ← kernel.resolve base path | .error Errno.enoent
   let .directory := (← inodeOf kernel number).content | .error Errno.enotdir
   let made := kernel.nextInode
-  let umask := (kernel.process group).umask
-  let (kernel, fd) := kernel.addObject group (.file ByteArray.empty) flags
-    (0o100000 ||| (mode &&& 0o7777 &&& (0o7777 - umask))) (access := flags &&& 3)
-    (name := s!"{if normal == "/" then "" else normal}/#{made} (deleted)")
+  let process := kernel.process group
+  let (gid, mode) := kernel.newGroup normal process.credentials (0o100000 ||| (mode &&& 0o7777 &&& (0o7777 - process.umask)))
+  let (kernel, fd) := kernel.addObject group (.file ByteArray.empty) flags mode (access := flags &&& 3)
+    (name := s!"{if normal == "/" then "" else normal}/#{made} (deleted)") (uid := process.credentials.fsuid) (gid := gid)
   -- Without `O_EXCL`, `linkat` may give it a name.
   let kernel := if has flags oExcl then kernel
     else { kernel with inodes := kernel.inodes.modify made fun inode => { inode with details := { inode.details with linkable := true } } }

@@ -105,8 +105,9 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
           let (capacity, size) ← if arg 3 == 0 then pure (10, 8192) else do
             pure (← number (arg 3 + word) word, ← number (arg 3 + 2 * word) word)
           if capacity == 0 || size == 0 || capacity > 65536 || size > 16777216 then return ← fail Errno.einval
-          let umask := (kernel.process group).umask
-          pure (kernel.addDevice path (.mqueue [] capacity size none) (0o100000 ||| (arg 2 &&& 0o777 &&& (0o7777 - umask))))
+          let process := kernel.process group
+          pure (kernel.addDevice path (.mqueue [] capacity size none) (0o100000 ||| (arg 2 &&& 0o777 &&& (0o7777 - process.umask)))
+            process.credentials)
       let openFile := kernel.nextOpenFile
       let kernel := { kernel with
         openFiles := kernel.openFiles.insert openFile { inode := number_, flags := flags &&& (3 ||| Kernel.oNonblock) }
