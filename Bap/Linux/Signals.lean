@@ -241,33 +241,33 @@ private structure SignalCalls where
 private def callsOf : Architecture → SignalCalls
   | .x86_64 =>
     { sigaction := 13, sigprocmask := 14, returns := [15], kill := 62, tkill := 200, tgkill := 234, pending := 127, timedwait := [128],
-      suspend := 130, queueinfo := 129, waitid := 247, altstack := 131, pause := some 34, creates := [56, 57, 58], restartable := [61, 202] }
+      suspend := 130, queueinfo := 129, waitid := 247, altstack := 131, pause := some 34, creates := [56, 57, 58], restartable := [61, 202, 247] }
   | .i686 =>
     { sigaction := 174, sigprocmask := 175, returns := [119, 173], kill := 37, tkill := 238, tgkill := 270, pending := 176,
       timedwait := [177, 421], suspend := 179, queueinfo := 178, waitid := 284, altstack := 186, pause := some 29, creates := [2, 120, 190],
-      restartable := [7, 114, 240, 422] }
+      restartable := [7, 114, 240, 284, 422] }
   | .aarch64 | .riscv64 | .riscv32 =>
     { sigaction := 134, sigprocmask := 135, returns := [139], kill := 129, tkill := 130, tgkill := 131, pending := 136, timedwait := [137, 421],
       suspend := 133, queueinfo := 138, waitid := 95, altstack := 132, creates := [220], restartable := [95, 98, 260, 422] }
   | .arm =>
     { sigaction := 174, sigprocmask := 175, returns := [119, 173], kill := 37, tkill := 238, tgkill := 268, pending := 176,
       timedwait := [177, 421], suspend := 179, queueinfo := 178, waitid := 280, altstack := 186, pause := some 29, creates := [2, 120, 190],
-      restartable := [114, 240, 422] }
+      restartable := [114, 240, 280, 422] }
   | .powerpc 32 _ =>
     { sigaction := 173, sigprocmask := 174, returns := [119, 172], kill := 37, tkill := 208, tgkill := 250, pending := 175,
       timedwait := [176, 421], suspend := 178, queueinfo := 177, waitid := 272, altstack := 185, pause := some 29, creates := [2, 120, 189],
-      restartable := [7, 114, 221, 422] }
+      restartable := [7, 114, 221, 272, 422] }
   | .powerpc _ _ =>
     { sigaction := 173, sigprocmask := 174, returns := [172], kill := 37, tkill := 208, tgkill := 250, pending := 175, timedwait := [176],
-      suspend := 178, queueinfo := 177, waitid := 272, altstack := 185, pause := some 29, creates := [2, 120, 189], restartable := [7, 114, 221] }
+      suspend := 178, queueinfo := 177, waitid := 272, altstack := 185, pause := some 29, creates := [2, 120, 189], restartable := [7, 114, 221, 272] }
   | .mips 32 _ _ =>
     { sigaction := 4194, sigprocmask := 4195, returns := [4119, 4193], kill := 4037, tkill := 4236, tgkill := 4266, pending := 4196,
       timedwait := [4197, 4421], suspend := 4199, queueinfo := 4198, waitid := 4278, altstack := 4206, pause := some 4029, creates := [4002, 4120],
-      restartable := [4007, 4114, 4238, 4422] }
+      restartable := [4007, 4114, 4238, 4278, 4422] }
   | .mips _ _ _ =>
     { sigaction := 5013, sigprocmask := 5014, returns := [5211], kill := 5060, tkill := 5192, tgkill := 5225, pending := 5125,
       timedwait := [5126], suspend := 5128, queueinfo := 5127, waitid := 5237, altstack := 5129, pause := some 5033, creates := [5055, 5056, 5057],
-      restartable := [5059, 5194] }
+      restartable := [5059, 5194, 5237] }
 
 /-- What a thread does to return from a handler that has no restorer, as a kernel keeps for it: the system call that ends one. It is
 in a page of its own that every process has if it needs it. -/

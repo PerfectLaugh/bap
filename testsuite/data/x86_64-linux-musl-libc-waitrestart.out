@@ -1,0 +1,4 @@
+waitid 0 5
+wait4 1 6
+waitpid 1 7
+alarms 3 0
