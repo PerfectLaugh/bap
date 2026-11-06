@@ -68,8 +68,8 @@ structure ThreadSignals where
   mask : Nat := 0
   pending : List SignalInfo := []
   frames : List SignalFrame := []
-  /-- `sigaltstack`: where, how much, and whether it is disabled. -/
-  alternate : Nat × Nat × Bool := (0, 0, true)
+  /-- `sigaltstack`: where, how much, and the flags it was given, which are `SS_DISABLE` for none, as it then has no size. -/
+  alternate : Nat × Nat × Nat := (0, 0, 2)
   /-- The mask to go back to after the handler of `sigsuspend`. -/
   suspended : Option Nat := none
   /-- What `sigtimedwait` waits for, where its information goes, and whether it may run out. -/
@@ -196,8 +196,26 @@ private def saNoDefer : Nat := 0x40000000
 private def saResetHand : Nat := 0x80000000
 private def ssOnStack : Nat := 1
 private def ssDisable : Nat := 2
+private def ssAutoDisarm : Nat := 2 ^ 31
 
 private def hasFlag (flags flag : Nat) : Bool := flags &&& flag != 0
+
+/-- No alternate stack. -/
+private def noAlternate : Nat × Nat × Nat := (0, 0, ssDisable)
+
+/-- Whether a stack pointer is on the alternate stack, which, as Linux has it, one that `SS_AUTODISARM` takes away in a handler never is. -/
+private def onAlternateStack (alternate : Nat × Nat × Nat) (sp : Nat) : Bool :=
+  let (base, size, flags) := alternate
+  !hasFlag flags ssAutoDisarm && base ≤ sp && sp < base + size
+
+/-- The alternate stack that a `stack_t` sets, if Linux takes its flags: `SS_DISABLE`, or 0 or `SS_ONSTACK`, which is an old way to say
+0, with `SS_AUTODISARM` or not. -/
+private def givenAlternate (base size flags : Nat) : Option (Nat × Nat × Nat) :=
+  let mode := flags &&& (ssAutoDisarm ^^^ (2 ^ 32 - 1))
+  if mode == ssDisable then some (0, 0, flags)
+  else if mode == 0 || mode == ssOnStack then some (base, size, flags)
+  else none
+
 private def bitOf (signal : Nat) : Nat := 1 <<< (signal - 1)
 
 /-- The system calls of signals of a target. -/
@@ -354,7 +372,7 @@ private def putThread (out : ByteArray) (entry : Nat × ThreadSignals) : ByteArr
   let out := putNat (putNat out tid) thread.mask
   let out := putList putInfo out thread.pending
   let out := putList putFrame out thread.frames
-  let out := putFlag (putNat (putNat out thread.alternate.1) thread.alternate.2.1) thread.alternate.2.2
+  let out := putNat (putNat (putNat out thread.alternate.1) thread.alternate.2.1) thread.alternate.2.2
   let out := putOption putNat out thread.suspended
   let out := putOption (fun out wait => putNat (putNat out wait.1) wait.2) out thread.waiting
   let out := putOption putNat out thread.waitingChild
@@ -367,7 +385,7 @@ private def getThread : Decoder (Nat × ThreadSignals) := fun data at_ => do
   let (frames, at_) ← getList getFrame data at_
   let (alternateStack, at_) ← getNat data at_
   let (alternateSize, at_) ← getNat data at_
-  let (alternateOff, at_) ← getFlag data at_
+  let (alternateFlags, at_) ← getNat data at_
   let (suspended, at_) ← getOption getNat data at_
   let (waiting, at_) ← getOption (fun data at_ => do
     let (set, at_) ← getNat data at_
@@ -375,7 +393,7 @@ private def getThread : Decoder (Nat × ThreadSignals) := fun data at_ => do
     .ok ((set, address), at_)) data at_
   let (waitingChild, at_) ← getOption getNat data at_
   let (last, at_) ← getOption getLast data at_
-  .ok ((tid, { mask, pending, frames, alternate := (alternateStack, alternateSize, alternateOff), suspended, waiting, waitingChild, last }), at_)
+  .ok ((tid, { mask, pending, frames, alternate := (alternateStack, alternateSize, alternateFlags), suspended, waiting, waitingChild, last }), at_)
 
 private def putAction (out : ByteArray) (entry : (Nat × Nat) × SignalAction) : ByteArray :=
   let ((group, signal), action) := entry
@@ -583,8 +601,9 @@ private def enterHandler (signals : Signals) (emu : Emu) (tid : Nat) (info : Sig
   let word := width / 8
   let thread ← threadOf signals tid
   let sp ← registerValue emu width (stackRegister architecture)
-  let (alternateBase, alternateSize, alternateOff) := thread.alternate
-  let inAlternate := !alternateOff && alternateBase ≤ sp && sp < alternateBase + alternateSize
+  let (alternateBase, alternateSize, alternateFlags) := thread.alternate
+  let alternateOff := alternateSize == 0
+  let inAlternate := onAlternateStack thread.alternate sp
   let top :=
     if hasFlag action.flags saOnStack && !alternateOff && !inAlternate then alternateBase + alternateSize
     else
@@ -614,8 +633,7 @@ private def enterHandler (signals : Signals) (emu : Emu) (tid : Nat) (info : Sig
     write emu (contextAddress + offset) (slot (← registerValue emu width name))
   write emu (contextAddress + layout.pc) (slot resume)
   write emu (contextAddress + layout.stack) (encodeNumber emu word alternateBase)
-  write emu (contextAddress + layout.stackFlags)
-    (encodeNumber emu 4 ((if alternateOff then ssDisable else 0) ||| (if inAlternate then ssOnStack else 0)))
+  write emu (contextAddress + layout.stackFlags) (encodeNumber emu 4 alternateFlags)
   write emu (contextAddress + layout.stackSize) (encodeNumber emu word alternateSize)
   write emu (contextAddress + layout.mask) (encodeMask signals emu oldMask (maskBytes architecture))
   if let some (at_, target) := layout.pointer then
@@ -632,6 +650,8 @@ private def enterHandler (signals : Signals) (emu : Emu) (tid : Nat) (info : Sig
     { thread with
       frames := frame :: withoutStale
       mask := blockable signals (oldMask ||| addedMask)
+      -- `SS_AUTODISARM` takes it away until `sigreturn` sets what the context has again.
+      alternate := if hasFlag alternateFlags ssAutoDisarm then noAlternate else thread.alternate
       suspended := none }
   if hasFlag action.flags saResetHand then
     let group := (← emu.taskTable.get).find? tid |>.map (·.group) |>.getD tid
@@ -1098,7 +1118,7 @@ def forked (signals : Signals) (emu : Emu) (parent child : Nat) : IO Unit := do
   let table ← emu.taskTable.get
   let shared := (table.tasks.find? (·.tid == child)).map (·.space) == some (← currentTask emu).space
   let vforked := table.futexes.any fun waiter => waiter.thread == tid && waiter.space == vforkSpace && waiter.address == child
-  let alternate := if shared && !vforked then (0, 0, true) else state.alternate
+  let alternate := if shared && !vforked then noAlternate else state.alternate
   signals.table.modify fun table =>
     { table with
       actions := table.actions.fold (init := table.actions) fun actions key action =>
@@ -1110,7 +1130,7 @@ def executed (signals : Signals) (group tid : Nat) : IO Unit := do
   signals.table.modify fun table =>
     { table with
       actions := table.actions.filter fun key action => key.1 != group || action.handler == 1 }
-  modifyThread signals tid fun state => { state with frames := [], alternate := (0, 0, true), suspended := none, waiting := none, waitingChild := none }
+  modifyThread signals tid fun state => { state with frames := [], alternate := noAlternate, suspended := none, waiting := none, waitingChild := none }
 
 private def readAction (signals : Signals) (emu : Emu) (address : Nat) : IO SignalAction := do
   let word := signals.architecture.bits / 8
@@ -1138,8 +1158,7 @@ private def sigreturn (signals : Signals) (emu : Emu) : IO SyscallAction := do
   let tid ← thread emu
   let state ← threadOf signals tid
   let sp ← registerValue emu width (stackRegister architecture)
-  let (alternateBase, alternateSize, alternateOff) := state.alternate
-  let inAlternate := !alternateOff && alternateBase ≤ sp && sp < alternateBase + alternateSize
+  let inAlternate := onAlternateStack state.alternate sp
   -- A handler that left by `longjmp` left its frame, which is further down this stack.
   let live := state.frames.dropWhile fun frame => frame.onAlternate == inAlternate && frame.entry + 64 < sp
   match live with
@@ -1163,7 +1182,18 @@ private def sigreturn (signals : Signals) (emu : Emu) : IO SyscallAction := do
         setReg emu ⟨"ISET", .imm 1, 0, false⟩ (wordOfWidth 1 ((cpsr >>> 5) &&& 1))
       let pc ← slotValue layout.pc
       let mask ← readMask signals emu (frame.context + layout.mask) (maskBytes architecture)
-      modifyThread signals tid fun state => { state with mask := blockable signals mask, frames := rest }
+      -- As Linux does, the alternate stack of the context, unless the stack it goes back to is on the one there is now, or its flags
+      -- aren't taken.
+      let word := width / 8
+      let given := givenAlternate (← readNumber emu (frame.context + layout.stack) word)
+        (← readNumber emu (frame.context + layout.stackSize) word) (← readNumber emu (frame.context + layout.stackFlags) 4)
+      let back ← registerValue emu width (stackRegister architecture)
+      modifyThread signals tid fun state =>
+        { state with
+          mask := blockable signals mask, frames := rest
+          alternate := match given with
+            | some alternate => if onAlternateStack state.alternate back then state.alternate else alternate
+            | none => state.alternate }
       emu.redirect.set (some (match architecture with | .arm => pc - pc % 2 | _ => pc))
       emu.skipCode.set frame.skip
     catch error =>
@@ -1374,21 +1404,22 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
       let word := width / 8
       let state ← threadOf signals tid
       let sp ← registerValue current width (stackRegister architecture)
-      let (base, size, off) := state.alternate
-      let inside := !off && base ≤ sp && sp < base + size
+      let (base, size, flags) := state.alternate
+      let inside := onAlternateStack state.alternate sp
       try
         if old != 0 then
           write current old (encodeNumber current word base)
-          write current (old + stackFlags) (encodeNumber current 4 ((if off then ssDisable else 0) ||| (if inside then ssOnStack else 0)))
+          let oldFlags := (if size == 0 then ssDisable else if inside then ssOnStack else 0) ||| flags &&& ssAutoDisarm
+          write current (old + stackFlags) (encodeNumber current 4 oldFlags)
           write current (old + stackSize) (encodeNumber current word size)
         if given != 0 then
           if inside then return ← fail current numbers.eperm
           let newBase ← readNumber current given word
-          let flags ← readNumber current (given + stackFlags) 4
+          let newFlags ← readNumber current (given + stackFlags) 4
           let newSize ← readNumber current (given + stackSize) word
-          if flags &&& (ssDisable ^^^ (2 ^ 32 - 1)) != 0 && flags != 0 then return ← fail current numbers.einval
-          modifyThread signals tid fun state =>
-            { state with alternate := if hasFlag flags ssDisable then (0, 0, true) else (newBase, newSize, false) }
+          match givenAlternate newBase newSize newFlags with
+          | some alternate => modifyThread signals tid fun state => { state with alternate }
+          | none => return ← fail current numbers.einval
         syscallReturn current (.ok 0)
       catch _ => fail current numbers.efault
     else

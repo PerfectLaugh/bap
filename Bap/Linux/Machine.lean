@@ -2151,7 +2151,7 @@ private def traceModelId : String := "bap.trace"
 and those that stopped for their end, 3 the exits that tracers that aren't parents have yet to hear of, 4 the steps that tracees have yet to make, 5 the system call that
 each tracee last started, and 6 what a tracer said a call that a tracee is stopped at the start of is to be. -/
 private def builtinModels : List (String × Nat) :=
-  [(Signals.modelId, 1), (Ptrace.modelId, 6), (Seccomp.modelId, 1), (Timers.modelId, 1), (Ring.modelId, 1), (heapModelId, 1), (libraryModelId, 1),
+  [(Signals.modelId, 2), (Ptrace.modelId, 6), (Seccomp.modelId, 1), (Timers.modelId, 1), (Ring.modelId, 1), (heapModelId, 1), (libraryModelId, 1),
     (traceModelId, 4)]
 
 private def builtinVersion (id : String) : Nat := (builtinModels.lookup id).getD 1

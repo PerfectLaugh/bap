@@ -12,3 +12,29 @@ fork in a handler on the alternate stack: exited, code 1 9
 parent back from it: same alternate stack, flags 1 0
 child: SIGUSR1 pending, blocked 0 1
 fork with SIGUSR1 pending: exited, code 1 0
+raw clone 1
+raw clone thread: SIGUSR1, SIGUSR2 blocked 1 1
+raw clone thread: SIGUSR1 pending, alternate stack disabled 0 1
+sigaltstack 0 0
+  then: same alternate stack, flags 1 0
+sigaltstack SS_ONSTACK 0
+  then: same alternate stack, flags 1 0
+sigaltstack SS_DISABLE 0
+  then: same alternate stack, flags 0 2
+sigaltstack SS_AUTODISARM 0
+  then: same alternate stack, flags 1 -2147483648
+sigaltstack SS_ONSTACK|SS_AUTODISARM 0
+  then: same alternate stack, flags 1 -2147483648
+sigaltstack 3 -22
+  then: same alternate stack, flags 0 2
+sigaltstack 4 -22
+  then: same alternate stack, flags 0 2
+handler on the alternate stack: it has the alternate stack, flags 1 1
+  its context: the alternate stack, flags 1 0
+  sigaltstack in it -1
+SS_AUTODISARM, in the handler: it has the alternate stack, flags 0 2
+  its context: the alternate stack, flags 1 -2147483648
+  sigaltstack in it 0
+SS_AUTODISARM, after the handler: same alternate stack, flags 1 -2147483648
+handler on the stack, which sets another alternate stack 0
+  after it: same alternate stack, flags 1 0
