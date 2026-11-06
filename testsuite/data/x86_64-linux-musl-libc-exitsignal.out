@@ -1,0 +1,28 @@
+usr1 clone 1
+usr1 waitpid any -10 -1
+usr1 waitpid child -10 -1
+usr1 waitpid wclone 1 7
+usr1 heard usr1 chld 1 0
+usr1 waitpid wclone again -10 -1
+mixed waitpid nohang 0 -1
+mixed waitpid wclone 1 8
+mixed waitpid fork 1 2
+mixed heard usr1 chld 2 1
+none waitpid any -10 -1
+none waitpid wall 1 4
+none heard usr1 chld 2 1
+clone3 signal in flags -22
+clone3 waitpid any -10 -1
+clone3 waitpid wclone 1 9
+clone3 heard usr1 chld 3 1
+ignored clone waitpid wclone 1 5
+ignored fork waitpid -10 -1
+ignored heard usr1 4
+traced attached 1
+traced exit seen by tracer 1
+traced waitpid nohang before 0 -1
+traced heard chld before 0
+traced tracer waited 3
+traced heard chld after 1
+traced waitpid 1 3
+tracer waitpid 1 0

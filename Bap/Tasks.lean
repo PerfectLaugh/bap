@@ -30,6 +30,9 @@ structure Entry where
   /-- Where its exit writes 0 and wakes a futex, as `set_tid_address` and `CLONE_CHILD_CLEARTID` say: this is what
   `pthread_join` waits on. -/
   clearTid : Option Nat := none
+  /-- The signal that its parent is sent when its process ends, if `clone` asked for one other than SIGCHLD, which `fork` has: 0 is
+  none. Such a process is a clone child, which a wait sees only if it asks for those, as Linux has it. -/
+  exitSignal : Option Nat := none
   deriving DecidableEq, Repr
 
 /-- A task blocked on a futex, which is the word at `address` of `space`. -/
@@ -105,10 +108,10 @@ def poll (table : TaskTable) (parent : Nat) (target : Option Nat) : WaitResult :
   | some (pid, status) => .exited pid status
   | none => if children.isEmpty then .noChild else .running
 
-/-- The children of a group that is over go to `init`, as it can't wait for them. -/
+/-- The children of a group that is over go to `init`, as it can't wait for them, and send it SIGCHLD. -/
 def reparent (table : TaskTable) (group init : Nat) : TaskTable :=
   { table with tasks := table.tasks.map fun task =>
-      if task.parent == group then { task with parent := init } else task }
+      if task.parent == group then { task with parent := init, exitSignal := none } else task }
 
 /-- The task has exited, and its group is over if it was the last. -/
 def exitTask (table : TaskTable) (tid status init : Nat) : TaskTable :=
@@ -126,7 +129,7 @@ def exitTask (table : TaskTable) (tid status init : Nat) : TaskTable :=
 /-- What `exitGroup` makes of a task. -/
 def exited (group status init : Nat) (task : Entry) : Entry :=
   if task.group == group then { task with status := some status }
-  else if task.parent == group then { task with parent := init }
+  else if task.parent == group then { task with parent := init, exitSignal := none }
   else task
 
 /-- All of a group has exited, its leader is a zombie and its children go to `init`. -/
@@ -183,13 +186,14 @@ def setClearTid (table : TaskTable) (tid address : Nat) : TaskTable :=
   { table with tasks := table.tasks.map fun task => if task.tid == tid then { task with clearTid := some address } else task }
 
 /-- `execve` of the task, once the others of its group are over: it has no `clearTid`, which was of the program that it ran, and if
-it isn't the leader, it takes the leader's id, which is the process's, and its place, and the leader is gone. -/
+it isn't the leader, it takes the leader's id, which is the process's, and its place, with SIGCHLD to send, and the leader is gone. -/
 def executed (table : TaskTable) (tid : Nat) : TaskTable :=
   match table.find? tid with
   | none => table
   | some task =>
+    let exitSignal := if tid == task.group then task.exitSignal else none
     { table with tasks := table.tasks.filterMap fun other =>
-        if other.tid == task.group then some { task with tid := task.group, parent := other.parent, clearTid := none }
+        if other.tid == task.group then some { task with tid := task.group, parent := other.parent, clearTid := none, exitSignal }
         else if other.tid == tid then none
         else some other }
 

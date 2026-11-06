@@ -1094,16 +1094,19 @@ def faulted (signals : Signals) (emu : Emu) (fault : MemoryFault) : IO Bool := d
   -- SIGSEGV doesn't stop by default.
   | .terminate | .stop => fail "nothing handles SIGSEGV"
 
-/-- A process is over, which its parent hears of. -/
-def processExited (signals : Signals) (emu : Emu) (group status : Nat) : IO Unit := do
+/-- The parent of a process that is over hears of it, as Linux's `do_notify_parent` has it: it is sent the exit signal of the process,
+which is SIGCHLD unless `clone` asked for another, or for none. -/
+def notifyParent (signals : Signals) (emu : Emu) (group status : Nat) : IO Unit := do
   let table ← emu.taskTable.get
   let some task := table.find? group | return
   if task.parent == 0 then return
-  -- A parent that ignores it isn't sent it, as Linux has it.
-  if (← actionOf signals task.parent (signals.numbers).chld).handler == 1 then return
+  let signal := task.exitSignal.getD (signals.numbers).chld
+  if signal == 0 || signal > (signals.numbers).count then return
+  -- A parent that ignores SIGCHLD isn't sent it, as Linux has it.
+  if signal == (signals.numbers).chld && (← actionOf signals task.parent signal).handler == 1 then return
   let signaled := status % 128 != 0
   let info : SignalInfo :=
-    ⟨(signals.numbers).chld, if signaled then 2 else 1, .child group 0 (if signaled then status % 128 else status / 256 % 256)⟩
+    ⟨signal, if signaled then 2 else 1, .child group 0 (if signaled then status % 128 else status / 256 % 256)⟩
   -- One that waits for it is woken by that, and hears of it when it runs.
   let parents := (table.tasks.filter fun other => other.group == task.parent && other.status.isNone)
   let waiting := parents.any fun other => table.waiters.any (·.thread == other.tid)
@@ -1112,6 +1115,13 @@ def processExited (signals : Signals) (emu : Emu) (group status : Nat) : IO Unit
     | some leader => modifyThread signals leader.tid fun state => { state with pending := state.pending ++ [info] }
     | none => pure ()
   else sendToGroup signals emu task.parent info
+
+/-- A process is over, which its parent hears of now, unless a process other than its parent traces it: that one hears of it first,
+and `Bap.Linux.Ptrace` tells the parent once it has waited for it. -/
+def processExited (signals : Signals) (emu : Emu) (group status : Nat) : IO Unit := do
+  if let some tracer := ← (← signals.tracer.get) group then
+    if ((← emu.taskTable.get).find? group).all (·.parent != tracer) then return
+  notifyParent signals emu group status
 
 /-- Whether a process doesn't wait for its children, which go as they end without a wait, as Linux has it: it ignores `SIGCHLD`, or its
 action has `SA_NOCLDWAIT`. What it does by default is to ignore it, which isn't this. -/

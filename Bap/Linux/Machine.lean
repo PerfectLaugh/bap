@@ -2495,7 +2495,7 @@ each tracee last started, 6 what a tracer said a call that a tracee is stopped a
 over that no one waits for; of the timers, 3 has the fraction of what is left of a wait that goes back as a `timespec` or a `timeval`,
 and 4 the semaphore that a call of `semop` waits for. -/
 private def builtinModels : List (String × Nat) :=
-  [(Signals.modelId, 2), (Ptrace.modelId, 7), (Seccomp.modelId, 1), (Timers.modelId, 4), (Ring.modelId, 2), (heapModelId, 1), (libraryModelId, 1),
+  [(Signals.modelId, 2), (Ptrace.modelId, 8), (Seccomp.modelId, 1), (Timers.modelId, 4), (Ring.modelId, 2), (heapModelId, 1), (libraryModelId, 1),
     (traceModelId, 4)]
 
 private def builtinVersion (id : String) : Nat := (builtinModels.lookup id).getD 1
@@ -2983,7 +2983,7 @@ def Machine.realloc (machine : Machine) (address size : Nat) (pid : Option Nat :
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 
 /-- What the bytes after the magic mean. -/
-def checkpointFormat : Nat := 21
+def checkpointFormat : Nat := 22
 
 /-- What this BAP does with a guest, which goes up when the same state could go on differently. A checkpoint is refused by a BAP
 of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/

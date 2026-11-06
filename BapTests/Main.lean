@@ -258,6 +258,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "mips-linux-musl-libc-fchmod",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-nocldwait",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-nocldwait",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-exitsignal",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-exitsignal",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-nested",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-nested",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-nested",

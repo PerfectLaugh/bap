@@ -41,6 +41,8 @@ structure CloneOptions where
   /-- `CLONE_VFORK`: the parent waits until its child runs a program or ends, as that has its memory and, without a stack of its own,
   its stack: see `releaseVfork`. -/
   vfork : Bool := false
+  /-- The signal that its parent is sent when its process ends, if it isn't SIGCHLD: see `Tasks.Entry.exitSignal`. -/
+  exitSignal : Option Nat := none
 
 /-- A new task, which runs at once with a copy of the registers and sees 0 in the result register. A thread and a process
 are this, with different options. -/
@@ -53,7 +55,7 @@ def clone (emu : Emu) (options : CloneOptions) : IO ThreadId := do
   emu.nextThreadRef.set (id + 1)
   let group := if options.sameGroup then task.group else id
   let parent := if options.sameGroup then task.parent else task.group
-  emu.taskTable.modify (·.addTask { tid := id, group, parent, space := task.space })
+  emu.taskTable.modify (·.addTask { tid := id, group, parent, space := task.space, exitSignal := options.exitSignal })
   let width ← wordWidth emu
   let (_, _, result) := syscallRegisters emu.config.syscallAbi
   let (stackRegister, threadRegister) := threadRegisters emu.config.syscallAbi
@@ -412,8 +414,11 @@ private def serveWait (emu : Emu) (target status options usage : Nat) : IO Sysca
         emu.stopped.set true
         syscallReturn emu (.ok 0)
 
-/-- `clone`. `CLONE_VFORK` isn't taken. -/
-private def serveClone (emu : Emu) (flags stack parentTid threadPointer childTid : Nat) : IO SyscallAction := do
+/-- SIGCHLD. -/
+private def sigchld (emu : Emu) : Nat := if emu.config.syscallAbi == .mips then 18 else 17
+
+/-- `clone`, of a process that sends `signal` to its parent when it ends, and of a thread, which sends none. -/
+private def serveClone (emu : Emu) (flags signal stack parentTid threadPointer childTid : Nat) : IO SyscallAction := do
   let cloneVm := 0x100
   let cloneThreadFlag := 0x10000
   let setTls := 0x80000
@@ -438,7 +443,8 @@ private def serveClone (emu : Emu) (flags stack parentTid threadPointer childTid
       threadPointer := if has setTls then some threadBase else none
       shareMemory := has cloneVm
       sameGroup := has cloneThreadFlag
-      vfork := has cloneVfork }
+      vfork := has cloneVfork
+      exitSignal := if has cloneThreadFlag || signal == sigchld emu then none else some signal }
     let id ← if has cloneVm || !has setChildTid then do
         let id ← clone emu options
         if has setChildTid then write emu childTid (word32 emu id)
@@ -647,9 +653,9 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
         syscallReturn current (.ok (← fork current (← current.nextPc.get)))
       else if isSome calls.vfork then
         -- `CLONE_VM | CLONE_VFORK | SIGCHLD`, as Linux has it.
-        serveClone current (0x4000 ||| 0x100 ||| (if current.config.syscallAbi == .mips then 18 else 17)) 0 0 0 0
+        serveClone current (0x4000 ||| 0x100) (sigchld current) 0 0 0 0
       else if is calls.clone then
-        serveClone current (arg 0) (arg 1) (arg 2) (if x86 then arg 4 else arg 3) (if x86 then arg 3 else arg 4)
+        serveClone current (arg 0) (arg 0 &&& 0xff) (arg 1) (arg 2) (if x86 then arg 4 else arg 3) (if x86 then arg 3 else arg 4)
       else if is calls.clone3 then
         -- `struct clone_args`, of 64 bytes at least: flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size and tls, of
         -- 8 bytes each, of which the stack is its lowest address.
@@ -660,9 +666,12 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
             pure (if current.config.endian == Endian.big then first * 2 ^ 32 + second else second * 2 ^ 32 + first)) |>.toBaseIO with
         | .error _ => syscallReturn current (.error efault)
         | .ok [flags, _, childTid, parentTid, exitSignal, stack, size, tls] =>
-          -- CLONE_PIDFD, which has no descriptor here, and a signal that isn't one.
-          if flags &&& 0x1000 != 0 || exitSignal > 255 then syscallReturn current (.error einval)
-          else serveClone current (flags ||| exitSignal) (if stack != 0 then stack + size else 0) parentTid tls childTid
+          -- CLONE_PIDFD, which has no descriptor here, a signal that isn't one, one in the flags, which is in `exit_signal`, and one of a
+          -- thread or of CLONE_PARENT, which sends none of its own.
+          if flags &&& 0x1000 != 0 || exitSignal > (if current.config.syscallAbi == .mips then 128 else 64) || flags &&& 0x7f != 0 ||
+              (flags &&& (0x10000 ||| 0x8000) != 0 && exitSignal != 0) then
+            syscallReturn current (.error einval)
+          else serveClone current flags exitSignal (if stack != 0 then stack + size else 0) parentTid tls childTid
         | .ok _ => syscallReturn current (.error einval)
       else if is calls.rseq then
         syscallReturn current (.error (enosys current))

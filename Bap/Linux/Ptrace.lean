@@ -49,6 +49,9 @@ structure WaitRequest where
   continued : Bool
   keep : Bool
   waitid : Bool
+  /-- `__WCLONE`, which has it see only clone children, and `__WALL`, which has it see all children: see `Tasks.Entry.exitSignal`. -/
+  clones : Bool := false
+  all : Bool := false
   status : Nat
   usage : Nat
   deriving DecidableEq, Repr
@@ -83,7 +86,7 @@ structure PtraceTable where
   /-- The threads whose next call is not made, as their tracer said, with what it gives. -/
   skipping : Std.HashMap Nat Nat := {}
   /-- Processes that are over whose parent doesn't wait for them, as it ignores `SIGCHLD` or has `SA_NOCLDWAIT`: no wait reports them,
-  and they go once they don't run and a tracer that isn't their parent has heard of them. -/
+  and they go once they don't run. -/
   reaping : List Nat := []
 
 /-- The ptrace and the stops of a machine. -/
@@ -219,6 +222,20 @@ private def reapUnwaited (ptrace : Ptrace) (emu : Emu) : IO Unit := do
   collectGone emu
   wakeWaits ptrace
 
+/-- A process that is over goes without a wait if it sends SIGCHLD to a parent that doesn't wait for its children, as Linux has it, once
+the parent has heard of it. -/
+private def markUnwaited (ptrace : Ptrace) (emu : Emu) (group : Nat) : IO Unit := do
+  let some task := (← emu.taskTable.get).find? group | return
+  if task.parent != 0 && task.exitSignal.isNone && (← ptrace.signals.reapsChildren task.parent) then
+    ptrace.table.modify fun table => { table with reaping := table.reaping ++ [group] }
+
+/-- The exit of a thread that a tracer that isn't its parent was to hear of is no longer for that one, as it waited for it or is over: if
+the thread is the leader of its process, its parent hears of it now, as Linux has it, and it may go without a wait. -/
+private def toldTracer (ptrace : Ptrace) (emu : Emu) (tid status : Nat) : IO Unit := do
+  if ((← emu.taskTable.get).find? tid).any (·.group == tid) then
+    ptrace.signals.notifyParent emu tid status
+    markUnwaited ptrace emu tid
+
 /-- A thread stops, which its tracer hears of, or its parent of a process that stopped. -/
 private def stopThread (ptrace : Ptrace) (emu : Emu) (tid : Nat) (stop : Stop) : IO Unit := do
   ptrace.table.modify fun table => { table with stops := table.stops.insert tid stop }
@@ -330,8 +347,8 @@ private def disarmStep (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Unit := do
     removeHook emu hook
 
 /-- A process is over, which ended with `status`: what it traced goes on, or is killed if it asked for that; a tracer of its that isn't
-its parent hears of it, by `SIGCHLD` and a wait, or it goes without a wait if its parent doesn't wait for its children and doesn't trace
-it, as Linux has it; and what waits asks again. -/
+its parent hears of it, by `SIGCHLD` and a wait, before its parent does, or it goes without a wait if it isn't traced and its parent
+doesn't wait for it, as Linux has it; the parents of what it was yet to hear of hear of that now; and what waits asks again. -/
 def processExited (ptrace : Ptrace) (emu : Emu) (group status : Nat) : IO Unit := do
   let table ← ptrace.table.get
   let tasks ← emu.taskTable.get
@@ -339,8 +356,7 @@ def processExited (ptrace : Ptrace) (emu : Emu) (group status : Nat) : IO Unit :
   -- Its tracers that live on, other than its parent, which hears of it as a parent does.
   let parent := ((tasks.find? group).map (·.parent)).getD 0
   let alive (process : Nat) : Bool := (tasks.find? process).any (·.status.isNone)
-  if parent != 0 && (table.tracees.get? group).all (·.tracer != parent) && (← ptrace.signals.reapsChildren parent) then
-    ptrace.table.modify fun table => { table with reaping := table.reaping ++ [group] }
+  if !table.tracees.contains group then markUnwaited ptrace emu group
   let told := gone.filterMap fun tid => match table.tracees.get? tid with
     | some tracee => if tracee.tracer != group && tracee.tracer != parent && alive tracee.tracer then some (tracee.tracer, tid, status) else none
     | none => none
@@ -373,8 +389,9 @@ def processExited (ptrace : Ptrace) (emu : Emu) (group status : Nat) : IO Unit :
       calls := table.calls.filter fun tid _ => !gone.contains tid
       entries := table.entries.filter fun tid _ => !gone.contains tid
       skipping := table.skipping.filter fun tid _ => !gone.contains tid
-      -- What it was to be told is no one's to hear now.
       untold := table.untold.filter (·.1 != group) }
+  for (tracer, tid, status) in table.untold do
+    if tracer == group then toldTracer ptrace emu tid status
   reapUnwaited ptrace emu
   wakeWaits ptrace
 
@@ -391,8 +408,8 @@ private structure Report where
 private def groupTarget (pgid : Nat) : Nat := 2 ^ 32 + pgid
 
 /-- What a wait in the process that runs finds, of `target` or of any, with these options of `waitid`: `WEXITED`, `WSTOPPED`,
-`WCONTINUED`, `WNOWAIT`. `none` is that there is nothing that it could ever find. -/
-private def find (ptrace : Ptrace) (emu : Emu) (group : Nat) (target : Option Nat) (exited stopped continued keep : Bool) :
+`WCONTINUED`, `WNOWAIT`, `__WCLONE` and `__WALL`. `none` is that there is nothing that it could ever find. -/
+private def find (ptrace : Ptrace) (emu : Emu) (group : Nat) (target : Option Nat) (exited stopped continued keep clones all : Bool) :
     IO (Option (Option Report)) := do
   let tasks ← emu.taskTable.get
   let table ← ptrace.table.get
@@ -402,7 +419,12 @@ private def find (ptrace : Ptrace) (emu : Emu) (group : Nat) (target : Option Na
     match target with
     | none => pure true
     | some wantedTarget => if wantedTarget ≥ 2 ^ 32 then pure ((← pgidOf tid) == wantedTarget - 2 ^ 32) else pure (tid == wantedTarget)
-  let children ← (tasks.tasks.filter fun task => task.tid == task.group && task.parent == group).filterM fun task => wanted task.tid
+  -- Of its children, the clone children or the others, as it asked, and those that it traces.
+  let eligible (task : Entry) : Bool := all || task.exitSignal.isSome == clones || (table.tracees.get? task.tid).any (·.tracer == group)
+  let children ← (tasks.tasks.filter fun task => task.tid == task.group && task.parent == group && eligible task).filterM fun task =>
+    wanted task.tid
+  -- What a tracer that isn't its parent is yet to hear the exit of hasn't exited to its parent.
+  let untoldExit (task : Entry) : Bool := table.untold.any (·.2.1 == task.tid)
   let tracees ← (table.tracees.toList.filter fun (_, tracee) => tracee.tracer == group).filterM fun (tid, _) => wanted tid
   let untold ← (table.untold.filter (·.1 == group)).filterM fun (_, tid, _) => wanted tid
   if children.isEmpty && tracees.isEmpty && untold.isEmpty then return none
@@ -428,11 +450,16 @@ private def find (ptrace : Ptrace) (emu : Emu) (group : Nat) (target : Option Na
     -- Of a process group, the first of its children that ended.
     let target := match target with
       | some wantedTarget => if wantedTarget ≥ 2 ^ 32 then
-          (children.find? fun child => child.status.isSome && !table.reaping.contains child.tid).map (·.tid) |>.orElse fun _ => children.head?.map (·.tid)
+          (children.find? fun child => child.status.isSome && !table.reaping.contains child.tid && !untoldExit child).map (·.tid)
+            |>.orElse fun _ => children.head?.map (·.tid)
         else some wantedTarget
       | none => none
-    -- Not of what goes without a wait.
-    match { tasks with tasks := tasks.tasks.filter (!table.reaping.contains ·.group) }.poll group target with
+    -- Not of what goes without a wait, nor of what it doesn't ask for.
+    let seen := tasks.tasks.filterMap fun task =>
+      if table.reaping.contains task.group || (task.parent == group && !eligible task) then none
+      else if untoldExit task then some { task with status := none }
+      else some task
+    match { tasks with tasks := seen }.poll group target with
     | .exited child status =>
       unless keep do
         emu.taskTable.set (tasks.reap child)
@@ -443,6 +470,7 @@ private def find (ptrace : Ptrace) (emu : Emu) (group : Nat) (target : Option Na
     if let some (_, tid, status) := untold.head? then
       unless keep do
         ptrace.table.modify fun table => { table with untold := table.untold.erase (group, tid, status) }
+        toldTracer ptrace emu tid status
         reapUnwaited ptrace emu
       return some (some (ofStatus tid status))
   pure (some none)
@@ -653,7 +681,8 @@ private def complete (ptrace : Ptrace) (emu : Emu) (tid : Nat) (request : WaitRe
       bytes := field bytes union report.pid
       bytes := field bytes (union + 8) report.value
     pure bytes
-  match ← find ptrace emu group request.target request.exited request.stopped request.continued request.keep with
+  match ← find ptrace emu group request.target request.exited request.stopped request.continued request.keep request.clones
+      request.all with
   | none => pure (some (.error echild))
   | some none => pure none
   | some (some report) =>
@@ -722,7 +751,8 @@ which the call is made again for, or given its result, when it goes on. -/
 def serveWait (ptrace : Ptrace) (emu : Emu) (target status options usage : Nat) : IO SyscallAction := do
   let own ← (← ptrace.signals.pgidOf.get) (← groupOf emu (← thread emu))
   serveRequest ptrace emu { target := targetOf target own, exited := true, stopped := options &&& 2 != 0, continued := options &&& 8 != 0
-                            keep := false, waitid := false, status, usage } (options &&& 1 != 0)
+                            keep := false, waitid := false, clones := options &&& 0x80000000 != 0, all := options &&& 0x40000000 != 0
+                            status, usage } (options &&& 1 != 0)
 
 /-- `waitid`, of all (0), a process (1) or a group (2), which is all, as there is one. -/
 private def serveWaitid (ptrace : Ptrace) (emu : Emu) (kind id info options : Nat) : IO SyscallAction := do
@@ -734,7 +764,8 @@ private def serveWaitid (ptrace : Ptrace) (emu : Emu) (kind id info options : Na
     | 2 => some (groupTarget (if id == 0 then own else id))
     | _ => none
   serveRequest ptrace emu { target, exited := options &&& 4 != 0, stopped := options &&& 2 != 0
-                            continued := options &&& 8 != 0, keep := options &&& 0x1000000 != 0, waitid := true, status := info, usage := 0 }
+                            continued := options &&& 8 != 0, keep := options &&& 0x1000000 != 0, waitid := true
+                            clones := options &&& 0x80000000 != 0, all := options &&& 0x40000000 != 0, status := info, usage := 0 }
     (options &&& 1 != 0)
 
 /-! ### ptrace -/
@@ -1120,6 +1151,7 @@ private def putWait (out : ByteArray) (entry : Nat × WaitRequest) : ByteArray :
   let (tid, request) := entry
   let out := putOption putNat (putNat out tid) request.target
   let out := putFlag (putFlag (putFlag (putFlag (putFlag out request.exited) request.stopped) request.continued) request.keep) request.waitid
+  let out := putFlag (putFlag out request.clones) request.all
   putNat (putNat out request.status) request.usage
 
 open Wire in
@@ -1131,9 +1163,11 @@ private def getWait : Decoder (Nat × WaitRequest) := fun data at_ => do
   let (continued, at_) ← getFlag data at_
   let (keep, at_) ← getFlag data at_
   let (waitid, at_) ← getFlag data at_
+  let (clones, at_) ← getFlag data at_
+  let (all, at_) ← getFlag data at_
   let (status, at_) ← getNat data at_
   let (usage, at_) ← getNat data at_
-  .ok ((tid, { target, exited, stopped, continued, keep, waitid, status, usage }), at_)
+  .ok ((tid, { target, exited, stopped, continued, keep, waitid, clones, all, status, usage }), at_)
 
 open Wire in
 def save (ptrace : Ptrace) : IO ByteArray := do

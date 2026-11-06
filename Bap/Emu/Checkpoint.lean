@@ -93,7 +93,7 @@ private def putTask (writer : Writer) (task : Tasks.Entry) : Writer :=
   let writer := putNat writer task.group
   let writer := putNat writer task.parent
   let writer := putNat writer task.space
-  putSkipBin (putSkipBin writer task.status) task.clearTid
+  putSkipBin (putSkipBin (putSkipBin writer task.status) task.clearTid) task.exitSignal
 
 private def putFutex (writer : Writer) (waiter : Tasks.FutexWaiter) : Writer :=
   let writer := putNat writer waiter.thread
@@ -250,14 +250,16 @@ private def getProcessBin (getRegion : Reader → Except String (Region × Reade
   let (regions, reader) ← getList reader getRegion
   .ok ((id, regions), reader)
 
-private def getTask (reader : Reader) : Except String (Tasks.Entry × Reader) := do
+/-- A task, with its exit signal if `signal` says the format has it: a task of a format before it sends SIGCHLD. -/
+private def getTask (signal : Bool) (reader : Reader) : Except String (Tasks.Entry × Reader) := do
   let (tid, reader) ← getNat reader
   let (group, reader) ← getNat reader
   let (parent, reader) ← getNat reader
   let (space, reader) ← getNat reader
   let (status, reader) ← getSkipBin reader
   let (clearTid, reader) ← getSkipBin reader
-  .ok (⟨tid, group, parent, space, status, clearTid⟩, reader)
+  let (exitSignal, reader) ← if signal then getSkipBin reader else .ok (none, reader)
+  .ok (⟨tid, group, parent, space, status, clearTid, exitSignal⟩, reader)
 
 private def getFutex (reader : Reader) : Except String (Tasks.FutexWaiter × Reader) := do
   let (thread, reader) ← getNat reader
@@ -274,7 +276,10 @@ private def getWaiter (reader : Reader) : Except String (Tasks.Waiter × Reader)
   let (statusAddress, reader) ← getSkipBin reader
   .ok (⟨thread, target, statusAddress⟩, reader)
 
-private def binaryMagic : ByteArray := "BAPCKPT6".toUTF8
+private def binaryMagic : ByteArray := "BAPCKPT7".toUTF8
+
+/-- What checkpoints were before tasks had their exit signal, which are still read. -/
+private def binaryMagicV6 : ByteArray := "BAPCKPT6".toUTF8
 
 /-- What checkpoints were before regions had only what isn't zeros, which are still read. -/
 private def binaryMagicV5 : ByteArray := "BAPCKPT5".toUTF8
@@ -335,7 +340,7 @@ private def processFits (process : ThreadId × List Region) : Bool :=
 
 private def taskFits (task : Tasks.Entry) : Bool :=
   fitsWord task.tid && fitsWord task.group && fitsWord task.parent && fitsWord task.space && skipFits task.status &&
-    skipFits task.clearTid
+    skipFits task.clearTid && skipFits task.exitSignal
 
 private def futexFits (waiter : Tasks.FutexWaiter) : Bool :=
   fitsWord waiter.thread && fitsWord waiter.space && fitsWord waiter.address && fitsWord waiter.bitset && skipFits waiter.deadline
@@ -362,8 +367,9 @@ def encodeBinarySnapshot (snapshot : Snapshot) : Except String ByteArray :=
 
 /-- The snapshot that `encodeBinarySnapshot` made, of either format that it has made, with its memory variable left out as it was. -/
 def decodeBinarySnapshot (data : ByteArray) : Except String Snapshot := do
-  let getRegion ← if data.extract 0 binaryMagic.size == binaryMagic then pure getRegionBin
-    else if data.extract 0 binaryMagicV5.size == binaryMagicV5 then pure getRegionV5
+  let (getRegion, signal) ← if data.extract 0 binaryMagic.size == binaryMagic then pure (getRegionBin, true)
+    else if data.extract 0 binaryMagicV6.size == binaryMagicV6 then pure (getRegionBin, false)
+    else if data.extract 0 binaryMagicV5.size == binaryMagicV5 then pure (getRegionV5, false)
     else .error "not a binary checkpoint"
   do
     let reader : Reader := { data, offset := binaryMagic.size }
@@ -377,7 +383,7 @@ def decodeBinarySnapshot (data : ByteArray) : Except String Snapshot := do
     let (pending, reader) ← getPendingBin reader
     let (processMemory, reader) ← getList reader (getProcessBin getRegion)
     let (skip, reader) ← getSkipBin reader
-    let (tasks, reader) ← getList reader getTask
+    let (tasks, reader) ← getList reader (getTask signal)
     let (waiters, reader) ← getList reader getWaiter
     let (futexes, reader) ← getList reader getFutex
     if reader.offset != data.size then
