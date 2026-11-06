@@ -171,7 +171,7 @@ def after (notifier : Notifier) (kernelRef : IO.Ref Kernel) (group : Nat) (call 
   let ofCall : Option (Nat × Nat) := match call, result with
     | .open_, some fd | .openat, some fd =>
       (after.openFileOf group fd).toOption.map fun (_, file) => (file.inode, inOpen)
-    | .read, some count | .readv, some count | .pread, some count =>
+    | .read, some count | .readv, some count | .pread, some count | .preadv, some count | .preadv2, some count =>
       if count == 0 then none else (after.openFileOf group (arg 0)).toOption.map fun (_, file) => (file.inode, inAccess)
     | .close, some _ =>
       (before.openFileOf group (arg 0)).toOption.bind fun (id, file) =>

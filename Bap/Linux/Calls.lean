@@ -59,13 +59,20 @@ inductive Call where
   | read | write | open_ | openat | close | stat | lstat | fstat | fstatat | statx | lseek | pread | pwrite | readv | writev
   | access | faccessat | dup | dup2 | dup3 | fcntl | ioctl | getdents | getcwd | chdir | fchdir | mkdir | mkdirat | rmdir
   | unlink | unlinkat | rename | renameat | symlink | symlinkat | readlink | readlinkat | chmod | fchmod | fchmodat | truncate
-  | ftruncate | fsync | fdatasync | syncfs | umask | pipe | pipe2 | mmap | munmap | mprotect | madvise | mremap | brk | gettimeofday | time | clockGettime | clockGetres | uname | getrlimit | prlimit
+  | ftruncate | fsync | fdatasync | syncfs | sync | umask | pipe | pipe2 | mmap | munmap | mprotect | madvise | mremap | brk | gettimeofday | time | clockGettime | clockGetres | uname | getrlimit | prlimit
   | getrandom | sigaltstack | schedGetaffinity | statfs | fstatfs | sysinfo | execve
   /-- `statfs` and `fstatfs` with the size of the structure in the middle, as 32-bit systems and PowerPC have them. -/
   | statfs64 | fstatfs64
   /-- What 32-bit systems have for numbers that don't fit a word: the offsets of `mmap2` are in pages and `truncate64`,
   `ftruncate64` and `_llseek` have them in two words. -/
   | mmap2 | truncate64 | ftruncate64 | llseek | clockGettime64 | clockGetres64
+  /-- What a file is to have room for and what is to come of it. On 32 bits the offsets of `fallocate` are in two words, and those of
+  `fadvise64` and the length of `fadvise64_64` too; `arm_fadvise64_64` of ARM and of 32-bit PowerPC has the advice second, so that
+  the pairs are in registers that line up. -/
+  | fallocate | fadvise64 | fadvise6464 | armFadvise6464
+  /-- `pread` and `pwrite` of vectors, and with flags `preadv2` and `pwritev2`, whose offset is in two words on 32 bits, the low one
+  first on every architecture. -/
+  | preadv | pwritev | preadv2 | pwritev2
   | setThreadArea
   /-- Sockets of the Unix domain. `send` and `recv` are `sendto` and `recvfrom` without an address, which some systems have of their
   own. -/
@@ -116,7 +123,7 @@ def x86_64Calls : List (Nat × Call) :=
    (268, .fchmodat), (76, .truncate), (77, .ftruncate), (95, .umask), (9, .mmap), (25, .mremap), (12, .brk),
    (96, .gettimeofday), (201, .time), (228, .clockGettime), (229, .clockGetres), (63, .uname), (97, .getrlimit),
    (302, .prlimit), (318, .getrandom), (131, .sigaltstack), (204, .schedGetaffinity), (74, .fsync), (75, .fdatasync),
-   (91, .fchmod), (306, .syncfs),    ]
+   (91, .fchmod), (306, .syncfs), (162, .sync), (285, .fallocate), (221, .fadvise64), (295, .preadv), (296, .pwritev), (327, .preadv2), (328, .pwritev2),    ]
 
 /-- The numbers of the architectures that came after the old calls went: `asm-generic/unistd.h`. -/
 def genericCalls : List (Nat × Call) :=
@@ -141,7 +148,7 @@ def genericCalls : List (Nat × Call) :=
    (38, .renameat), (276, .renameat2), (36, .symlinkat), (78, .readlinkat), (53, .fchmodat), (45, .truncate), (46, .ftruncate),
    (166, .umask), (222, .mmap), (216, .mremap), (214, .brk), (169, .gettimeofday), (113, .clockGettime), (114, .clockGetres),
    (160, .uname), (163, .getrlimit), (261, .prlimit), (278, .getrandom), (132, .sigaltstack), (123, .schedGetaffinity),
-   (82, .fsync), (83, .fdatasync), (52, .fchmod), (267, .syncfs),    ]
+   (82, .fsync), (83, .fdatasync), (52, .fchmod), (267, .syncfs), (81, .sync), (47, .fallocate), (223, .fadvise64), (69, .preadv), (70, .pwritev), (286, .preadv2), (287, .pwritev2),    ]
 
 /-- The numbers of `asm-generic` on 32 bits, where whatever has a time or an offset in a word has gone. -/
 def generic32Calls : List (Nat × Call) :=
@@ -166,7 +173,7 @@ def generic32Calls : List (Nat × Call) :=
    (38, .renameat), (276, .renameat2), (36, .symlinkat), (78, .readlinkat), (53, .fchmodat), (45, .truncate64), (46, .ftruncate64),
    (166, .umask), (222, .mmap2), (216, .mremap), (214, .brk), (403, .clockGettime64), (406, .clockGetres64),
    (160, .uname), (261, .prlimit), (278, .getrandom), (132, .sigaltstack), (123, .schedGetaffinity),
-   (82, .fsync), (83, .fdatasync), (52, .fchmod), (267, .syncfs),    ]
+   (82, .fsync), (83, .fdatasync), (52, .fchmod), (267, .syncfs), (81, .sync), (47, .fallocate), (223, .fadvise6464), (69, .preadv), (70, .pwritev), (286, .preadv2), (287, .pwritev2),    ]
 
 /-- The numbers of the o32 ABI of MIPS, without their 4000. -/
 def o32Calls : List (Nat × Call) :=
@@ -194,7 +201,7 @@ def o32Calls : List (Nat × Call) :=
    (299, .fchmodat), (92, .truncate), (93, .ftruncate), (211, .truncate64), (212, .ftruncate64), (60, .umask), (210, .mmap2),
    (167, .mremap), (45, .brk), (78, .gettimeofday), (263, .clockGettime), (264, .clockGetres), (403, .clockGettime64),
    (406, .clockGetres64), (122, .uname), (76, .getrlimit), (338, .prlimit), (353, .getrandom), (206, .sigaltstack),
-   (240, .schedGetaffinity), (283, .setThreadArea), (118, .fsync), (152, .fdatasync), (94, .fchmod), (342, .syncfs),       ]
+   (240, .schedGetaffinity), (283, .setThreadArea), (118, .fsync), (152, .fdatasync), (94, .fchmod), (342, .syncfs), (36, .sync), (320, .fallocate), (254, .fadvise6464), (330, .preadv), (331, .pwritev), (361, .preadv2), (362, .pwritev2),    ]
 
 /-- The numbers of the n64 ABI of MIPS, without their 5000. -/
 def n64Calls : List (Nat × Call) :=
@@ -221,7 +228,7 @@ def n64Calls : List (Nat × Call) :=
    (258, .fchmodat), (74, .truncate), (75, .ftruncate), (93, .umask), (9, .mmap), (24, .mremap), (12, .brk),
    (94, .gettimeofday), (222, .clockGettime), (223, .clockGetres), (61, .uname), (95, .getrlimit), (297, .prlimit),
    (313, .getrandom), (129, .sigaltstack), (196, .schedGetaffinity), (195, .schedSetaffinity), (242, .setThreadArea), (72, .fsync), (73, .fdatasync),
-   (89, .fchmod), (301, .syncfs),    ]
+   (89, .fchmod), (301, .syncfs), (157, .sync), (279, .fallocate), (215, .fadvise64), (289, .preadv), (290, .pwritev), (321, .preadv2), (322, .pwritev2),    ]
 
 /-- The numbers of 32-bit ARM, with EABI, and two of its own: `set_tls` and `cacheflush`. -/
 def armCalls : List (Nat × Call) :=
@@ -250,7 +257,7 @@ def armCalls : List (Nat × Call) :=
    (92, .truncate), (93, .ftruncate), (193, .truncate64), (194, .ftruncate64), (60, .umask), (192, .mmap2), (163, .mremap),
    (45, .brk), (78, .gettimeofday), (263, .clockGettime), (264, .clockGetres), (403, .clockGettime64), (406, .clockGetres64),
    (122, .uname), (191, .getrlimit), (369, .prlimit), (384, .getrandom), (186, .sigaltstack), (242, .schedGetaffinity),
-   (0xf0005, .setThreadArea), (0xf0002, .succeeds), (118, .fsync), (148, .fdatasync), (94, .fchmod), (373, .syncfs),       ]
+   (0xf0005, .setThreadArea), (0xf0002, .succeeds), (118, .fsync), (148, .fdatasync), (94, .fchmod), (373, .syncfs), (36, .sync), (352, .fallocate), (270, .armFadvise6464), (361, .preadv), (362, .pwritev), (392, .preadv2), (393, .pwritev2),    ]
 
 /-- The numbers of i686. -/
 def i686Calls : List (Nat × Call) :=
@@ -279,7 +286,7 @@ def i686Calls : List (Nat × Call) :=
    (92, .truncate), (93, .ftruncate), (193, .truncate64), (194, .ftruncate64), (60, .umask), (192, .mmap2), (163, .mremap),
    (45, .brk), (78, .gettimeofday), (265, .clockGettime), (266, .clockGetres), (403, .clockGettime64), (406, .clockGetres64),
    (122, .uname), (191, .getrlimit), (340, .prlimit), (355, .getrandom), (186, .sigaltstack), (242, .schedGetaffinity),
-   (243, .setThreadArea), (118, .fsync), (148, .fdatasync), (94, .fchmod), (344, .syncfs),       ]
+   (243, .setThreadArea), (118, .fsync), (148, .fdatasync), (94, .fchmod), (344, .syncfs), (36, .sync), (324, .fallocate), (250, .fadvise64), (272, .fadvise6464), (333, .preadv), (334, .pwritev), (378, .preadv2), (379, .pwritev2),    ]
 
 /-- The numbers of PowerPC, where those of each width that the other doesn't have are left to it not asking for them. -/
 def powerpcCalls : List (Nat × Call) :=
@@ -308,7 +315,7 @@ def powerpcCalls : List (Nat × Call) :=
    (60, .umask), (90, .mmap), (192, .mmap2), (163, .mremap), (45, .brk), (78, .gettimeofday), (246, .clockGettime),
    (247, .clockGetres), (403, .clockGettime64), (406, .clockGetres64), (122, .uname), (76, .getrlimit), (190, .getrlimit),
    (325, .prlimit), (359, .getrandom), (185, .sigaltstack), (223, .schedGetaffinity), (118, .fsync), (148, .fdatasync),
-   (94, .fchmod), (348, .syncfs),    ]
+   (94, .fchmod), (348, .syncfs), (36, .sync), (309, .fallocate), (233, .fadvise64), (320, .preadv), (321, .pwritev), (380, .preadv2), (381, .pwritev2),    ]
 
 /-- The calls that the kernel serves, by their numbers on it. What isn't here is for `serveTaskCalls`, or isn't there. -/
 def Architecture.calls : Architecture → List (Nat × Call)
@@ -321,7 +328,7 @@ def Architecture.calls : Architecture → List (Nat × Call)
   | .mips _ _ _ => n64Calls.map fun entry => (entry.1 + 5000, entry.2)
   -- The same numbers have the wide `struct stat` on 64-bit systems and `stat64` on the others.
   | .powerpc 32 _ =>
-    [(195, .stat), (196, .lstat), (197, .fstat), (252, .statfs64), (253, .fstatfs64)] ++
+    [(195, .stat), (196, .lstat), (197, .fstat), (252, .statfs64), (253, .fstatfs64), (254, .armFadvise6464)] ++
       powerpcCalls.filter fun entry => ![106, 107, 108].contains entry.1
   | .powerpc _ _ => [(99, .statfs), (100, .fstatfs), (252, .statfs64), (253, .fstatfs64)] ++ powerpcCalls
 

@@ -1,0 +1,68 @@
+fallocate 0
+size 8192
+fallocate keeping the size 0
+size 8192
+fallocate within 0
+size 8192
+fallocate past the end 0
+size 9100
+punch a hole 0
+bytes ab...fgh
+punch a hole past the end 0
+size 9100
+punch a hole without keeping the size EOPNOTSUPP
+unknown mode EOPNOTSUPP
+negative offset EINVAL
+no length EINVAL
+negative length EINVAL
+offset 0
+fallocate of what is open to read EBADF
+fallocate of a pipe ESPIPE
+fallocate of what reads a pipe EBADF
+fallocate of a socket ENODEV
+fallocate of no descriptor EBADF
+fadvise 0
+fadvise of all 0
+fadvise of a socket 0
+fadvise of no advice EINVAL
+fadvise of a negative length EINVAL
+fadvise of a pipe ESPIPE
+fadvise of no descriptor EBADF
+sync 0
+pwritev 11
+size 14
+bytes ...hello world
+preadv 8
+llo worl
+preadv past the end 2
+preadv at the end 0
+offset 0
+preadv negative EINVAL
+pwritev negative EINVAL
+preadv of a pipe ESPIPE
+pwritev of what is open to read EBADF
+preadv of no descriptor EBADF
+preadv2 at the offset 4
+hell
+offset 7
+pwritev2 at the offset 1
+offset 8
+bytes ...hell! world
+preadv2 at 9 4
+worl
+offset 8
+pwritev2 at 0 1
+bytes !..hell! world
+preadv2 negative EINVAL
+preadv2 of an unknown flag EOPNOTSUPP
+pwritev2 of an unknown flag EOPNOTSUPP
+pwritev2 of a pipe ESPIPE
+pwritev2 of a pipe at its offset 1
+preadv2 of a pipe at its offset 1
+pwritev of what appends 3
+size 6
+bytes abcdef
+unlink 0
+unlink 0
+unlink 0
+rmdir 0

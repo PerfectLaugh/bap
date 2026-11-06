@@ -839,6 +839,8 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       high * 2 ^ 32 + low
     let offset64 (index : Nat) : Nat := if wide == 64 then args.getD index 0 else pair architecture.pairBase
     let arg (index : Nat) : Nat := args.getD index 0
+    -- The offset of `preadv` and `pwritev` and of the second ones, which on 32 bits is in two words, the low one first on each.
+    let vectorOffset : Nat := if wide == 64 then arg 3 else arg 4 * 2 ^ 32 + arg 3
     -- An `off_t` of a word, as the 64 bits that the kernel has it in, which on 32 bits it is the sign of.
     let offsetWord (index : Nat) : Nat :=
       let value := arg index % 2 ^ wide
@@ -959,6 +961,26 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
           if value < field wordSize then return .returnValue total
         | other => return other
       pure (.returnValue total)
+    -- `preadv` and `pwritev`: `pread` and `pwrite` of each piece in turn, from where the one before ended, as `vectors` has them.
+    -- What the descriptor is open on is checked first, even of no pieces.
+    let atOffset (fd address count offset : Nat) (writing : Bool) : IO SyscallAction := do
+      let current ← machine.kernel.get
+      let checked := if writing then (current.writeTo group fd .empty offset).map (·.2) else (current.readFrom group fd 0 offset).map (·.size)
+      if let .error errno := checked then return errorOf errno
+      let done ← IO.mkRef 0
+      vectors fd address count fun fd base size => do
+        let at__ := offset + (← done.get)
+        let action ← if writing then
+            match ← (read emu base size).toBaseIO with
+            | .error _ => pure (errorOf Errno.efault)
+            | .ok bytes => applyNat machine (·.writeTo group fd bytes at__)
+          else
+            match (← machine.kernel.get).readFrom group fd size at__ with
+            | .error errno => pure (errorOf errno)
+            | .ok bytes => returning emu base bytes bytes.size
+        if let .returnValue value := action then
+          if value < 2 ^ 63 then done.modify (· + value)
+        pure action
     -- A path in the directory of the second, from another call of `at_`.
     let inDirectory (directory address : Nat) (action : String → IO SyscallAction) : IO SyscallAction :=
       at_ directory address fun from_ path => action (if path.startsWith "/" then path else from_ ++ "/" ++ path)
@@ -1097,6 +1119,13 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
     | .writev =>
       if isObject (arg 0) then vectors (arg 0) (arg 1) (arg 2) fun fd address count => kernelCall machine emu .write [fd, address, count]
       else vectors (arg 0) (arg 1) (arg 2) writeOut
+    | .preadv | .pwritev => atOffset (arg 0) (arg 1) (arg 2) vectorOffset (call == .pwritev)
+    | .preadv2 | .pwritev2 =>
+      -- Of the flags, `RWF_HIPRI`, `RWF_DSYNC` and `RWF_SYNC` are of a disk, which there is none of, and the others aren't here.
+      if arg 5 % 2 ^ 32 > 7 then pure (errorOf Errno.eopnotsupp)
+      -- An offset of -1 is that of the file.
+      else if vectorOffset == 2 ^ 64 - 1 then kernelCall machine emu (if call == .preadv2 then .readv else .writev) (args.take 3)
+      else atOffset (arg 0) (arg 1) (arg 2) vectorOffset (call == .pwritev2)
     | .access => accessAt here (arg 0)
     | .faccessat => accessAt (arg 0) (arg 1)
     | .dup => applyNat machine (·.dup group (arg 0))
@@ -1242,6 +1271,23 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
     | .syncfs => pure (match kernel.openFileOf group (arg 0) with
       | .ok _ => .returnValue 0
       | .error errno => errorOf errno)
+    -- Nor of `sync`.
+    | .sync => pure (.returnValue 0)
+    | .fallocate =>
+      let (offset, size) := if wide == 64 then (arg 2, arg 3) else (pair 2, pair 4)
+      apply machine (·.allocate group (arg 0) (arg 1 % 2 ^ 32) offset size)
+    -- What `posix_fadvise` says is to come has nothing to change, as all of a file is in memory, but what it is given is checked: the
+    -- length, which of `fadvise64` on 32 bits is a word, and the advice, after the offset where the pairs start.
+    | .fadvise64 | .fadvise6464 | .armFadvise6464 =>
+      let base := architecture.pairBase - 2
+      let (length, advice) := match call with
+        | .armFadvise6464 => (pair 4, arg 1)
+        | .fadvise6464 => (pair (base + 2), arg (base + 4))
+        | _ => if wide == 64 then (arg 2, arg 3) else (arg (base + 2), arg (base + 3))
+      pure (match kernel.objectOf group (arg 0) with
+        | .error errno => errorOf errno
+        | .ok (_, _, { content := .pipe .., .. }) => errorOf Errno.espipe
+        | .ok _ => if negativeOffset length || advice % 2 ^ 32 > 5 then errorOf Errno.einval else .returnValue 0)
     | .umask =>
       let process := kernel.process group
       machine.kernel.set (kernel.setProcess group { process with umask := arg 0 &&& 0o777 })
@@ -1536,8 +1582,9 @@ private def descriptorLimit (machine : Machine) (group : Nat) (call : Call) (arg
     | _ => none
 
 /-- A write that finds that nothing reads what it writes to any more, a pipe or a socket of a stream, sends `SIGPIPE`, which is 13 on
-every architecture, to the thread that made it, as `write`, `writev`, `send`, `sendto`, `sendmsg`, `sendfile`, `splice` and `tee` do
-that give `EPIPE`, unless a send says `MSG_NOSIGNAL`. The call gives `EPIPE` all the same, if the signal doesn't end the process. -/
+every architecture, to the thread that made it, as `write`, `writev`, `pwritev2` at the offset of the file, `send`, `sendto`, `sendmsg`,
+`sendfile`, `splice` and `tee` do that give `EPIPE`, unless a send says `MSG_NOSIGNAL`. The call gives `EPIPE` all the same, if the
+signal doesn't end the process. -/
 private def brokenPipe (machine : Machine) (emu : Emu) (group : Nat) (call : Call) (args : List Nat) (action : SyscallAction) :
     IO Unit := do
   let .returnValue value := action | return
@@ -1545,7 +1592,7 @@ private def brokenPipe (machine : Machine) (emu : Emu) (group : Nat) (call : Cal
   let arg (index : Nat) : Nat := args.getD index 0
   let quiet (flags : Nat) : Bool := flags &&& 0x4000 != 0
   let fd? := match call with
-    | .write | .writev | .sendfile | .sendfile64 => some (arg 0)
+    | .write | .writev | .pwritev2 | .sendfile | .sendfile64 => some (arg 0)
     | .send | .sendto => if quiet (arg 3) then none else some (arg 0)
     | .sendmsg => if quiet (arg 2) then none else some (arg 0)
     | .splice => some (arg 2)

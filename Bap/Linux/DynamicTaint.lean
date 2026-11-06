@@ -19,7 +19,7 @@ private def callName (call : Call) : String :=
 private def saysNothing : Call → Bool
   | .mmap | .mmap2 | .munmap | .mprotect | .madvise | .mremap | .brk | .succeeds | .close | .setThreadArea | .sigaltstack
   | .lseek | .llseek | .write | .pwrite | .writev | .fcntl | .dup | .dup2 | .dup3 | .umask | .pipe | .pipe2
-  | .fchmod | .fsync | .fdatasync | .syncfs => true
+  | .fchmod | .fsync | .fdatasync | .syncfs | .sync | .fallocate | .fadvise64 | .fadvise6464 | .armFadvise6464 | .pwritev | .pwritev2 => true
   | _ => false
 
 /-- What was opened, by open file, as what it was opened as. A path says the same of most, and nothing of what `/proc` makes. -/
@@ -57,10 +57,16 @@ private def callLabel (machine : Machine) (opened : Opened) (number : Nat) (args
   | none => pure s!"syscall {number}"
   | some call =>
     match call with
-    | .read | .readv | .pread | .write | .writev | .pwrite =>
+    | .read | .readv | .pread | .preadv | .preadv2 | .write | .writev | .pwrite | .pwritev | .pwritev2 =>
       let path ← pathOf machine opened group (args.getD 0 0)
       pure s!"{callName call} {path.getD s!"fd {args.getD 0 0}"}"
     | _ => pure (callName call)
+
+/-- The offset of `preadv` and `pwritev` and of the second ones, which on 32 bits is in two words, the low one first on each: none of -1
+to the second ones, which is the offset of the file. -/
+private def vectorOffset (architecture : Architecture) (call : Call) (args : List Nat) : Option Nat :=
+  let offset := if architecture.bits == 64 then args.getD 3 0 else args.getD 4 0 * 2 ^ 32 + args.getD 3 0
+  if offset == 2 ^ 64 - 1 && (call == .preadv2 || call == .pwritev2) then none else some offset
 
 /-- Where a call is a read from what keeps tags, what that is and where it reads from, which is what has been read of a pipe. -/
 private def readBacking (machine : Machine) (number : Nat) (args : List Nat) : IO (Option (Nat × Nat × Bool)) := do
@@ -73,10 +79,12 @@ private def readBacking (machine : Machine) (number : Nat) (args : List Nat) : I
         let base := machine.architecture.pairBase
         let (low, high) := if machine.architecture.big then (args.getD (base + 1) 0, args.getD base 0) else (args.getD base 0, args.getD (base + 1) 0)
         some (high * 2 ^ 32 + low)
+    | some .preadv => vectorOffset machine.architecture .preadv args
+    | some .preadv2 => vectorOffset machine.architecture .preadv2 args
     | some .read | some .readv => none
     | _ => some 0
   match machine.architecture.call number with
-  | some .read | some .readv | some .pread =>
+  | some .read | some .readv | some .pread | some .preadv | some .preadv2 =>
     match kernel.openFileOf group (args.getD 0 0) with
     | .error _ => pure none
     | .ok (_, file) =>
@@ -93,16 +101,17 @@ private def callSends (machine : Machine) (opened : Opened) (number : Nat) (args
   let architecture := machine.architecture
   let some call := architecture.call number | return []
   let fd := args.getD 0 0
-  let target : Option (Nat × Nat) ← match kernel.openFileOf group fd with
+  -- Where it writes, and whether that is the end, as `O_APPEND` has it.
+  let target : Option (Nat × Nat × Bool) ← match kernel.openFileOf group fd with
     | .error _ => pure none
     | .ok (_, file) =>
       match kernel.inodes.get? file.inode with
-      | some { content := .pipe buffer head consumed, .. } => pure (some (file.inode, consumed + (buffer.size - head)))
+      | some { content := .pipe buffer head consumed, .. } => pure (some (file.inode, consumed + (buffer.size - head), false))
       | some { content := .file data, .. } =>
-        -- `O_APPEND` writes at the end.
-        pure (some (file.inode, if file.flags &&& 0x400 != 0 then data.size else file.offset))
+        let appends := file.flags &&& 0x400 != 0
+        pure (some (file.inode, if appends then data.size else file.offset, appends))
       | _ => pure none
-  let some (inode, offset) := target | return []
+  let some (inode, offset, appends) := target | return []
   let label := s!"{callName call} {(← pathOf machine opened group fd).getD s!"fd {fd}"}"
   let send (address size at_ : Nat) : Send := { address, size, space := Kernel.fileSpace + inode, offset := at_, label }
   match call with
@@ -114,7 +123,7 @@ private def callSends (machine : Machine) (opened : Opened) (number : Nat) (args
         let (low, high) := if architecture.big then (args.getD (base + 1) 0, args.getD base 0) else (args.getD base 0, args.getD (base + 1) 0)
         high * 2 ^ 32 + low
     pure [send (args.getD 1 0) (args.getD 2 0) at_]
-  | .writev =>
+  | .writev | .pwritev | .pwritev2 =>
     let word := architecture.bits / 8
     let count := args.getD 2 0
     let vector := args.getD 1 0
@@ -123,7 +132,7 @@ private def callSends (machine : Machine) (opened : Opened) (number : Nat) (args
       let ordered := if architecture.big then bytes.toList else bytes.toList.reverse
       pure (ordered.foldl (fun value byte => value * 256 + byte.toNat) 0)
     let mut sends : List Send := []
-    let mut at_ := offset
+    let mut at_ := if call == .writev || appends then offset else (vectorOffset architecture call args).getD offset
     for index in List.range count do
       let base ← readWord (vector + 2 * word * index)
       let size ← readWord (vector + 2 * word * index + word)

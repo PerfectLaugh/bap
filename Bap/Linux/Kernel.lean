@@ -30,6 +30,7 @@ def ebadf : Nat := 9
 def enomem : Nat := 12
 def efault : Nat := 14
 def eexist : Nat := 17
+def enodev : Nat := 19
 def enotdir : Nat := 20
 def eisdir : Nat := 21
 def einval : Nat := 22
@@ -1749,6 +1750,33 @@ def truncateDescriptor (kernel : Kernel) (group fd size : Nat) : Result Kernel :
   let (_, file) ← openFileOf kernel group fd
   if !writable file.flags then .error Errno.einval
   kernel.truncateInode file.inode size
+
+/-- `fallocate`, of `mode` `FALLOC_FL_KEEP_SIZE` and `FALLOC_FL_PUNCH_HOLE`, which are all that tmpfs has: as there is no disk to have
+room on, a file grows to the end of what it is given room for, with zeros, unless it keeps its size, and a hole is zeros in what of it
+the file has. Its other modes are `EOPNOTSUPP`, and what isn't a file is `ESPIPE` of a pipe and otherwise `ENODEV`. -/
+def allocate (kernel : Kernel) (group fd mode offset size : Nat) : Result Kernel := do
+  let (_, file) ← openFileOf kernel group fd
+  if negativeOffset offset || size == 0 || negativeOffset size then .error Errno.einval
+  -- A hole has to keep the size.
+  if mode > 3 || mode == 2 then .error Errno.eopnotsupp
+  if !writable file.flags then .error Errno.ebadf
+  let inode ← inodeOf kernel file.inode
+  match inode.content with
+  | .file data =>
+    if offset + size > maximumFileSize then .error Errno.efbig
+    if mode == 3 then
+      if let some errno := inode.sealedAgainst data.size offset 0 then .error errno
+      let stop := min (offset + size) data.size
+      if stop ≤ offset then return kernel
+      let punched := { inode with content := .file (writeAt data offset (Bap.zeroBytes (stop - offset))) }.written kernel.clock
+      .ok { kernel with inodes := kernel.inodes.insert file.inode punched }
+    -- `F_SEAL_GROW` holds even of room that keeps the size.
+    else if inode.details.seals &&& 4 != 0 && offset + size > data.size then .error Errno.eperm
+    else if mode == 0 && offset + size > data.size then kernel.truncateInode file.inode (offset + size)
+    else .ok kernel
+  | .pipe .. => .error Errno.espipe
+  | .directory => .error Errno.eisdir
+  | _ => .error Errno.enodev
 
 /-- `truncate`. -/
 def truncatePath (kernel : Kernel) (base path : String) (size : Nat) : Result Kernel := do

@@ -2031,10 +2031,10 @@ private def dispatchSyscall (emu : Emu) : IO (Option Nat) := serialize emu <| do
     let (numberRegister, argumentRegisters, resultRegister) := syscallRegisters emu.config.syscallAbi
     let number ← readWord emu numberRegister
     let args ← argumentRegisters.mapM (readWord emu)
-    -- On o32, what is past the four registers of arguments is on the stack of the caller, at 16.
+    -- On o32, what is past the four registers of arguments is on the stack of the caller, at 16, as many as `fadvise64` has.
     let args ← if emu.config.syscallAbi == .mips && width == 32 then do
         let stack ← readWord emu "R29"
-        let onStack ← [16, 20].mapM fun offset => do
+        let onStack ← [16, 20, 24].mapM fun offset => do
           match ← (read emu (stack + offset) 4).toBaseIO with
           | .ok bytes =>
             let bytes := if emu.config.endian == .big then bytes.toList else bytes.toList.reverse
