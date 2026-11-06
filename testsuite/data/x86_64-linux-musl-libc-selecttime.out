@@ -1,0 +1,7 @@
+select of 30 ms runs out 0 0
+pselect6 of 30 ms runs out 0 0 0
+ppoll of 30 ms runs out 0 0 0
+ppoll of 5 s ready, more than 4 s and at most 5 s left 1 1 1
+select of 5 s ready, more than 4 s and at most 5 s left 1 1 1
+select of 5 s that SIGALRM ends, more than 4 s and less than 5 s left 1 1 1
+ppoll of 5 s that SIGALRM ends, more than 4 s and less than 5 s left 1 1 1

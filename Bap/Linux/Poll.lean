@@ -193,6 +193,12 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
   let wait (due : Option Nat) (files : List Nat) : IO (Option SyscallAction) := do
     let deadlines := due.toList ++ expiries (← poller.kernel.get) now files
     pure (some (← timers.waitUntil emu readySpace 0 deadlines.min? false))
+  -- What is left of a timeout goes back to where it was, at `address`, of fields of `field` bytes and a fraction of `scale`
+  -- nanoseconds, as the call ends or once a signal ends its wait, as Linux has it of `select`, `pselect6` and `ppoll`; nothing goes back
+  -- of a timeout of 0.
+  let giveBack (timeout due : Option Nat) (back : Option (Nat × Nat × Nat)) (waits : Bool) : IO Unit := do
+    let (some deadline, some (address, field, scale)) := (due, back) | return
+    if timeout != some 0 then timers.giveBack emu deadline address field scale waits
   -- What is alive and pending is the same for each descriptor of a call.
   let live ← poller.live
   let completed ← poller.completed emu
@@ -231,15 +237,17 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       write emu (at_ + 6) (numberBytes big 2 revents)
       if revents != 0 then readyCount := readyCount + 1
     pure (readyCount, files)
-  let poll (address count : Nat) (timeout : Option Nat) : IO (Option SyscallAction) := do
+  let poll (address count : Nat) (timeout : Option Nat) (back : Option (Nat × Nat × Nat) := none) : IO (Option SyscallAction) := do
     let due ← deadline timeout
     let (found, files) ← pollOnce address count
-    if found > 0 || timeout == some 0 || due.any (· ≤ now) then
+    let waits := !(found > 0 || timeout == some 0 || due.any (· ≤ now))
+    giveBack timeout due back waits
+    if waits then wait due files
+    else
       timers.finish tid
       succeed found
-    else wait due files
   -- The sets of `select`: what is ready of each, as sets that say only that, how many, and the files to watch.
-  let select (count : Nat) (sets : List Nat) (timeout : Option Nat) : IO (Option SyscallAction) := do
+  let select (count : Nat) (sets : List Nat) (timeout : Option Nat) (back : Option (Nat × Nat × Nat)) : IO (Option SyscallAction) := do
     let due ← deadline timeout
     let words := (count + width - 1) / width
     let readSet (address : Nat) : IO (List Nat) := do
@@ -267,13 +275,15 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
               found := found + 1
         out := out ++ [kept]
       results := results ++ [out]
-    if found > 0 || timeout == some 0 || due.any (· ≤ now) then
+    let waits := !(found > 0 || timeout == some 0 || due.any (· ≤ now))
+    giveBack timeout due back waits
+    if waits then wait due files
+    else
       timers.finish tid
       for (address, set) in sets.zip results do
         if address != 0 then
           for (value, index) in set.zipIdx do write emu (address + index * word) (numberBytes big word value)
       succeed found
-    else wait due files
   -- What an epoll instance has ready, up to `limit`, which goes to `address`, and its items as they are after.
   let epollWait (epfd address limit : Nat) (timeout : Option Nat) : IO (Option SyscallAction) := do
     let kernel ← poller.kernel.get
@@ -326,21 +336,23 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     match call with
     | .poll => poll (arg 0) (arg 1) (millis (arg 2))
     | .ppoll | .ppoll64 =>
-      let some timeout ← timespec (arg 2) (if call == .ppoll64 then 8 else word) | fail einval
+      let field := if call == .ppoll64 then 8 else word
+      let some timeout ← timespec (arg 2) field | fail einval
       if ← mask (arg 3) (arg 4) then return ← fail eintr
-      poll (arg 0) (arg 1) timeout
+      poll (arg 0) (arg 1) timeout (some (arg 2, field, 1))
     | .select =>
       -- Microseconds of a second or more are seconds, and of a negative time, `EINVAL`.
       let timeout ← if arg 4 == 0 then pure none else do
         let (seconds, micros) ← readTime emu (arg 4) word
         let some span := timeSpan (seconds + micros.tdiv 1000000, micros.tmod 1000000) 1000 | return ← fail einval
         pure (some span)
-      select (arg 0) [arg 1, arg 2, arg 3] timeout
+      select (arg 0) [arg 1, arg 2, arg 3] timeout (some (arg 4, word, 1000))
     | .pselect6 | .pselect664 =>
-      let some timeout ← timespec (arg 4) (if call == .pselect664 then 8 else word) | fail einval
+      let field := if call == .pselect664 then 8 else word
+      let some timeout ← timespec (arg 4) field | fail einval
       if arg 5 != 0 then
         if ← mask (← number (arg 5) word) (← number (arg 5 + word) word) then return ← fail eintr
-      select (arg 0) [arg 1, arg 2, arg 3] timeout
+      select (arg 0) [arg 1, arg 2, arg 3] timeout (some (arg 4, field, 1))
     | .epollCreate =>
       if arg 0 == 0 || arg 0 ≥ 2 ^ 31 then return ← fail einval
       let (kernel, fd) := (← poller.kernel.get).addObject group (.epoll []) 0

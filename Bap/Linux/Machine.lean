@@ -2340,9 +2340,9 @@ private def traceModelId : String := "bap.trace"
 /-- The models that every machine has, with the versions of what they keep: of ptrace, 2 has the stops that tracees have yet to make
 and those that stopped for their end, 3 the exits that tracers that aren't parents have yet to hear of, 4 the steps that tracees have yet to make, 5 the system call that
 each tracee last started, 6 what a tracer said a call that a tracee is stopped at the start of is to be, and 7 the processes that are
-over that no one waits for. -/
+over that no one waits for; of the timers, 3 has the fraction of what is left of a wait that goes back as a `timespec` or a `timeval`. -/
 private def builtinModels : List (String × Nat) :=
-  [(Signals.modelId, 2), (Ptrace.modelId, 7), (Seccomp.modelId, 1), (Timers.modelId, 2), (Ring.modelId, 2), (heapModelId, 1), (libraryModelId, 1),
+  [(Signals.modelId, 2), (Ptrace.modelId, 7), (Seccomp.modelId, 1), (Timers.modelId, 3), (Ring.modelId, 2), (heapModelId, 1), (libraryModelId, 1),
     (traceModelId, 4)]
 
 private def builtinVersion (id : String) : Nat := (builtinModels.lookup id).getD 1

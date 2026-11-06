@@ -132,6 +132,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "riscv64-linux-musl-libc-poll",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-epollet",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-epollet",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-selecttime",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-selecttime",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-process",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-process",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-process",

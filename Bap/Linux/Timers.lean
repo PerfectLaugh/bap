@@ -57,9 +57,10 @@ structure TimeState where
   nextTimer : Std.HashMap Nat Nat := {}
   deadlines : Std.HashMap Nat Nat := {}
   sites : Std.HashMap Nat Site := {}
-  /-- Of a thread that sleeps with a `timespec` for what is left: until when, where that is and of what size its fields are, and,
-  once a signal ended the sleep, how long was left then, which it gets when it runs again. -/
-  sleeps : Std.HashMap Nat (Nat × Nat × Nat × Option Nat) := {}
+  /-- Of a thread that sleeps, or waits with a timeout that `select`, `pselect6` and `ppoll` give back, with a `timespec` or a
+  `timeval` for what is left: until when, where that is, of what size its fields are and of how many nanoseconds its fraction is, and,
+  once a signal ended the wait, how long was left then, which it gets when it runs again. -/
+  sleeps : Std.HashMap Nat (Nat × Nat × Nat × Nat × Option Nat) := {}
 
 /-- Where a thread waits until its deadline, by its id. A signal ends that wait. -/
 def sleepSpace : Nat := 2 ^ 60
@@ -212,11 +213,11 @@ futexes: a write that wrote some of what it was given goes on past the call with
 that it had, of a handler of `SA_RESTART` and a call that it restarts, or goes on past the call with `EINTR`, which the signals gave it,
 and its deadline is gone either way. -/
 def interrupted (timers : Timers) (emu : Emu) (tid : Nat) (restart : Bool) (spaces : List Nat) : IO Unit := do
-  -- A sleep that a signal ended has what was left of it then.
-  if spaces.contains sleepSpace then
+  -- A sleep, or a wait with a timeout to give back, that a signal ended has what was left of it then.
+  if spaces.any hasResult then
     let now ← timers.now
-    timers.state.modify fun state => { state with sleeps := state.sleeps.modify tid fun (deadline, address, field, _) =>
-      (deadline, address, field, some (deadline - min deadline now)) }
+    timers.state.modify fun state => { state with sleeps := state.sleeps.modify tid fun (deadline, address, field, scale, _) =>
+      (deadline, address, field, scale, some (deadline - min deadline now)) }
   unless spaces.any fun space => 2 ^ 61 ≤ space && space < Kernel.fileSpace do return
   let some site := (← timers.state.get).sites.get? tid | return
   timers.finish tid
@@ -230,14 +231,28 @@ def interrupted (timers : Timers) (emu : Emu) (tid : Nat) (restart : Bool) (spac
     if timers.mips then setThreadReg emu tid ⟨"R7", .imm width, 0, false⟩ (.bits (BitVec.ofNat width site.flag))
   else setThreadPc emu tid site.next
 
-/-- The thread that runs again after a sleep: of one that a signal ended, what was left of it goes where the call said. -/
+/-- What is left, in nanoseconds, goes to `address` as a `timespec`, or a `timeval` of `scale` 1000, of fields of `field` bytes; a
+fault there leaves the call as it is, as Linux has it. -/
+private def writeLeft (timers : Timers) (emu : Emu) (address field scale left : Nat) : IO Unit := do
+  let big := timers.architecture.big
+  try write emu address (Abi.field big field (left / 1000000000) ++ Abi.field big field (left % 1000000000 / scale)) catch _ => pure ()
+
+/-- The thread that runs again after a sleep or a wait: of one that a signal ended, what was left of it goes where the call said. -/
 def resumed (timers : Timers) (emu : Emu) : IO Unit := do
   let tid ← thread emu
-  let some (_, address, field, left) := (← timers.state.get).sleeps.get? tid | return
+  let some (_, address, field, scale, left) := (← timers.state.get).sleeps.get? tid | return
   timers.state.modify fun state => { state with sleeps := state.sleeps.erase tid }
-  if let some left := left then
-    let big := timers.architecture.big
-    try write emu address (Abi.field big field (left / 1000000000) ++ Abi.field big field (left % 1000000000)) catch _ => pure ()
+  if let some left := left then timers.writeLeft emu address field scale left
+
+/-- What is left until `deadline` of the timeout of the call of the thread that runs goes to `address`, as `writeLeft` has it, as
+`select`, `pselect6` and `ppoll` give it back: now, as the call ends, or, of one that `waits`, once a signal ends the wait. -/
+def giveBack (timers : Timers) (emu : Emu) (deadline address field scale : Nat) (waits : Bool) : IO Unit := do
+  let tid ← thread emu
+  if waits then
+    timers.state.modify fun state => { state with sleeps := state.sleeps.insert tid (deadline, address, field, scale, none) }
+  else
+    timers.state.modify fun state => { state with sleeps := state.sleeps.erase tid }
+    timers.writeLeft emu address field scale (deadline - min deadline (← timers.now))
 
 /-- A process is over, and with it its timers, and what threads that are gone waited with. -/
 def exited (timers : Timers) (emu : Emu) (group : Nat) : IO Unit := do
@@ -284,7 +299,7 @@ def serve (timers : Timers) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       emu.taskTable.modify (·.futexWait { thread := tid, space := sleepSpace, address := tid, bitset := 2 ^ 32 - 1, deadline })
       emu.stopped.set true
       if let some (address, field) := remaining.filter (·.1 != 0) then
-        timers.state.modify fun state => { state with sleeps := state.sleeps.insert tid (deadline, address, field, none) }
+        timers.state.modify fun state => { state with sleeps := state.sleeps.insert tid (deadline, address, field, 1, none) }
     succeed
   -- What a timer is now, as `itimerval` or `itimerspec`: the interval, then what is left of it.
   let current (timer : Option Timer) (field scale : Nat) : ByteArray :=
@@ -402,8 +417,8 @@ def save (timers : Timers) : IO ByteArray := do
   let out := putSorted (fun out (tid, site) =>
     putNat (putNat (putFlag (putNat (putNat (putNat out tid) site.next) site.result) site.restartable) site.flag) site.written) out
     state.sites.toList
-  pure (putSorted (fun out (tid, deadline, address, field, left) =>
-    putOption putNat (putNat (putNat (putNat (putNat out tid) deadline) address) field) left) out state.sleeps.toList)
+  pure (putSorted (fun out (tid, deadline, address, field, scale, left) =>
+    putOption putNat (putNat (putNat (putNat (putNat (putNat out tid) deadline) address) field) scale) left) out state.sleeps.toList)
 
 open Wire in
 def load (timers : Timers) (data : ByteArray) : IO Unit := do
@@ -428,8 +443,9 @@ def load (timers : Timers) (data : ByteArray) : IO Unit := do
       let (deadline, at_) ← getNat data at_
       let (address, at_) ← getNat data at_
       let (field, at_) ← getNat data at_
+      let (scale, at_) ← getNat data at_
       let (left, at_) ← getOption getNat data at_
-      .ok ((tid, (deadline, address, field, left)), at_)) data at_
+      .ok ((tid, (deadline, address, field, scale, left)), at_)) data at_
     expectEnd data at_
     pure { timers := Std.HashMap.ofList entries, nextTimer := Std.HashMap.ofList nextTimer, deadlines := Std.HashMap.ofList deadlines
            sites := Std.HashMap.ofList sites, sleeps := Std.HashMap.ofList sleeps }
