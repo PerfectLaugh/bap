@@ -1,0 +1,56 @@
+open file/ -20
+open file/. -20
+open dir/ 0
+open dir/. 0
+open link to file/ -20
+open link to dir/ nofollow 0
+open missing/ -2
+create new/ -21
+stat new -2
+create new/. -2
+stat new -2
+create file/ -21
+create dir/ -21
+create dangling link/ -21
+stat file/ -20
+stat dir/ 1
+stat missing/ -2
+lstat link to dir 3
+lstat link to dir/ 1
+lstat link to file/ -20
+lstat dangling link/ -2
+access file/ -20
+truncate file/ -20
+unlink file/ -20
+stat file 2
+unlink dir/ -21
+unlink dir/. -21
+unlink link to dir/ -20
+unlink missing/ -2
+rmdir file/ -20
+rmdir link to dir/ -20
+rmdir dir/. -22
+rmdir dir/.. -39
+rmdir file/. -20
+rmdir missing/. -2
+rmdir dir/ 0
+stat dir -2
+mkdir new/ 0
+stat new 1
+mkdir file/ -17
+mkdir dangling link/ -17
+mkdir new/. -2
+mkdir dir/. -17
+rename file to new/ -20
+rename file/ to new -20
+rename dir/ to new/ 0
+stat moved 1
+rename dir/. to new -16
+rename dir to dir/. -16
+rename link to dir/ to new -20
+symlink to new/ -2
+symlink to file/ -17
+link to new/ -2
+link of file/ -20
+chdir file/ -20
+all gone 0

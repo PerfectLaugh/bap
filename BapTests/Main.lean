@@ -201,6 +201,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-paths",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-paths",
     Bap.Tests.Emu.testLinuxRaises "riscv64-linux-musl-libc-paths",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-slash",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-slash",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-dup",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-dup",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-dup",

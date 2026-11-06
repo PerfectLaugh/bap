@@ -503,6 +503,20 @@ def parts (base path : String) : List String :=
     else part :: kept
   kept.reverse
 
+/-- How a path ends: in a name, in a name and a slash, or in `.` or `..`. What ends in other than a name is of a directory, as Linux has
+it, and `parts` loses how it ends. -/
+inductive Ending where
+  | name | slash | dot | dotdot
+  deriving DecidableEq
+
+/-- How a path ends. The root ends in a name. -/
+def ending (path : String) : Ending :=
+  match ((path.splitOn "/").filter (· != "")).getLast? with
+  | some "." => .dot
+  | some ".." => .dotdot
+  | some _ => if path.endsWith "/" then .slash else .name
+  | none => .name
+
 /-- The absolute path of these parts. -/
 def ofParts (parts : List String) : String := "/" ++ "/".intercalate parts
 
@@ -557,9 +571,15 @@ private def inodeOfDescriptorPath (kernel : Kernel) : List String → Option Nat
 
 /-- Follows a path, and its last part if `follow`, up to 40 links as Linux does. Each part before the last must be a directory,
 and the last doesn't have to be there: the result says whether it is. A link of `/proc/PID/fd` leads to what the descriptor is open on
-itself, as Linux has it, whether that has a path or not: a file that was removed, or a pipe. -/
-def resolve (kernel : Kernel) (base path : String) (follow : Bool := true) (links : Nat := 40) (mounted : Bool := true) :
-    Result (String × Option Nat) :=
+itself, as Linux has it, whether that has a path or not: a file that was removed, or a pipe. A path that ends in a slash is of a
+directory, which the link at its end is followed to, and anything else there is `ENOTDIR`; but of `exact`, for the calls that make,
+remove or move what is there, which say themselves what a slash is, its last part is what is there. One that ends in `.` or `..` is of
+the directory before it, which must be there. -/
+def resolve (kernel : Kernel) (base path : String) (follow : Bool := true) (links : Nat := 40) (mounted : Bool := true)
+    (exact : Bool := false) : Result (String × Option Nat) :=
+  let ending := Path.ending path
+  let slash := ending == .slash && !exact
+  let follow := follow || slash
   let rec walk (done : List String) (todo : List String) : Nat → Nat → Result (String × Option Nat)
     | 0, _ => .error Errno.eloop
     | fuel + 1, links =>
@@ -597,7 +617,13 @@ def resolve (kernel : Kernel) (base path : String) (follow : Bool := true) (link
                   walk [] (Path.parts (Path.ofParts from_) target ++ rest) fuel (links - 1)
             | .directory => walk (part :: done) rest fuel links
             | _ => if rest.isEmpty then .ok (path, some number) else .error Errno.enotdir
-  walk [] (Path.parts base path) (links * 256 + 4096) links
+  match walk [] (Path.parts base path) (links * 256 + 4096) links with
+  | .ok (path, none) => if ending == .dot || ending == .dotdot then .error Errno.enoent else .ok (path, none)
+  | .ok (path, some number) =>
+    if (slash || ending == .dot || ending == .dotdot) && !(kernel.inodes.get? number matches some { content := .directory, .. }) then
+      .error Errno.enotdir
+    else .ok (path, some number)
+  | .error errno => .error errno
 
 /-- Makes the directories of a path. For setting up, and it replaces nothing. -/
 def addDirectories (kernel : Kernel) (path : String) : Kernel :=
@@ -848,6 +874,10 @@ private def ebusy : Nat := 16
 /-- `open`. -/
 def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : Nat) : Result (Kernel × Nat) := do
   if path == "" then .error Errno.enoent
+  -- What `O_CREAT` makes isn't a directory, whatever is there: once the parts before are found, a slash at the end is `EISDIR`.
+  if has flags oCreat && Path.ending path == .slash then
+    let _ ← kernel.resolve base path (follow := false) (exact := true)
+    .error Errno.eisdir
   let (normal, found) ← kernel.resolve base path (follow := !has flags oNofollow)
   let (kernel, number) ← match found with
     | some number =>
@@ -1333,19 +1363,26 @@ def advance (kernel : Kernel) (id count : Nat) : Kernel :=
 
 /-- `mkdir`. -/
 def mkdir (kernel : Kernel) (group : Nat) (base path : String) (mode : Nat) : Result Kernel := do
-  let (normal, found) ← kernel.resolve base path (follow := false)
+  let (normal, found) ← kernel.resolve base path (follow := false) (exact := true)
   if found.isSome then .error Errno.eexist
   if !parentIsDirectory kernel normal then .error Errno.enoent
   if kernel.readOnly normal then .error erofs
   let umask := (kernel.process group).umask
   .ok (addInode kernel normal .directory (0o40000 ||| (mode &&& 0o7777 &&& (0o7777 - umask)))).1
 
-/-- `unlink`, and `rmdir` with `directory`. What is open stays open: its inode is still there. -/
+/-- `unlink`, and `rmdir` with `directory`. What is open stays open: its inode is still there. A slash at the end is of a directory,
+and the link that it may be isn't followed: `ENOTDIR` of anything else. Of a path that ends in `.`, `rmdir` is `EINVAL`, and in `..`,
+`ENOTEMPTY`, and `unlink` of either `EISDIR`. -/
 def remove (kernel : Kernel) (base path : String) (directory : Bool) : Result Kernel := do
-  let (normal, found) ← kernel.resolve base path (follow := false) (mounted := false)
+  let (normal, found) ← kernel.resolve base path (follow := false) (mounted := false) (exact := true)
   match found with
   | none => .error Errno.enoent
   | some number =>
+    match Path.ending path, directory with
+    | .dot, true => .error Errno.einval
+    | .dotdot, true => .error Errno.enotempty
+    | .dot, false | .dotdot, false => .error Errno.eisdir
+    | _, _ => pure ()
     if kernel.mountedAt normal then .error ebusy
     let inode ← inodeOf kernel number
     match inode.content, directory with
@@ -1354,7 +1391,7 @@ def remove (kernel : Kernel) (base path : String) (directory : Bool) : Result Ke
       if !(children kernel normal).isEmpty then .error Errno.enotempty
     | .directory, false => .error Errno.eisdir
     | _, true => .error Errno.enotdir
-    | _, false => pure ()
+    | _, false => if Path.ending path == .slash then .error Errno.enotdir
     if kernel.readOnly normal then .error erofs
     .ok { kernel with
       paths := kernel.paths.erase normal
@@ -1367,11 +1404,16 @@ def movePlaces (kernel : Kernel) (move : String → String) : Kernel :=
     if kernel.paths.get? place.path == some place.inode then { place with path := move place.path } else place
   { kernel with processes := kernel.processes.map fun _ process => { process with cwd := moved process.cwd, root := moved process.root } }
 
-/-- `rename`: what was at the target is replaced, and all under a directory moves with it. -/
+/-- `rename`: what was at the target is replaced, and all under a directory moves with it. Neither path may end in `.` or `..`,
+which is `EBUSY`, and of a slash at the end of either, what moves must be a directory, which is `ENOTDIR` otherwise. -/
 def rename (kernel : Kernel) (base source target : String) : Result Kernel := do
-  let (from_, found) ← kernel.resolve base source (follow := false) (mounted := false)
+  let (from_, found) ← kernel.resolve base source (follow := false) (mounted := false) (exact := true)
+  let (to_, existing) ← kernel.resolve base target (follow := false) (mounted := false) (exact := true)
+  let dots (path : String) : Bool := Path.ending path matches .dot | .dotdot
+  if dots source || dots target then .error ebusy
   let some number := found | .error Errno.enoent
-  let (to_, existing) ← kernel.resolve base target (follow := false) (mounted := false)
+  if (Path.ending source == .slash || Path.ending target == .slash) && !((← inodeOf kernel number).content matches .directory) then
+    .error Errno.enotdir
   if !parentIsDirectory kernel to_ then .error Errno.enoent
   -- Two names of the same file stay as they are.
   if from_ == to_ || existing == some number then return kernel
@@ -1401,8 +1443,9 @@ def rename (kernel : Kernel) (base source target : String) : Result Kernel := do
 def linkInode (kernel : Kernel) (number : Nat) (base target : String) : Result Kernel := do
   let inode ← inodeOf kernel number
   if let .directory := inode.content then .error Errno.eperm
-  let (normal, existing) ← kernel.resolve base target (follow := false) (mounted := false)
+  let (normal, existing) ← kernel.resolve base target (follow := false) (mounted := false) (exact := true)
   if existing.isSome then .error Errno.eexist
+  if Path.ending target == .slash then .error Errno.enoent
   if !parentIsDirectory kernel normal then .error Errno.enoent
   if kernel.readOnly normal then .error erofs
   .ok { kernel with
@@ -1418,9 +1461,9 @@ def link (kernel : Kernel) (base source target : String) (follow : Bool) : Resul
 /-- `renameat2`: of `RENAME_NOREPLACE`, not over what is there, and of `RENAME_EXCHANGE`, the two trade places, with all under them. -/
 def renameWith (kernel : Kernel) (base source target : String) (flags : Nat) : Result Kernel := do
   if flags &&& 3 == 3 || flags &&& 4 != 0 && flags &&& 2 != 0 then .error Errno.einval
-  let (from_, found) ← kernel.resolve base source (follow := false) (mounted := false)
+  let (from_, found) ← kernel.resolve base source (follow := false) (mounted := false) (exact := true)
   let some _ := found | .error Errno.enoent
-  let (to_, existing) ← kernel.resolve base target (follow := false) (mounted := false)
+  let (to_, existing) ← kernel.resolve base target (follow := false) (mounted := false) (exact := true)
   if flags &&& 1 != 0 && existing.isSome then .error Errno.eexist
   if flags &&& 2 == 0 then return ← kernel.rename base source target
   if kernel.mountedAt from_ || kernel.mountedAt to_ then .error ebusy
@@ -1451,8 +1494,9 @@ def installDevices (kernel : Kernel) : Kernel :=
 
 /-- `symlink`. -/
 def symlink (kernel : Kernel) (base target path : String) : Result Kernel := do
-  let (normal, found) ← kernel.resolve base path (follow := false)
+  let (normal, found) ← kernel.resolve base path (follow := false) (exact := true)
   if found.isSome then .error Errno.eexist
+  if Path.ending path == .slash then .error Errno.enoent
   if !parentIsDirectory kernel normal then .error Errno.enoent
   if kernel.readOnly normal then .error erofs
   .ok (addInode kernel normal (.symlink target) 0o120777).1
@@ -1472,7 +1516,10 @@ of its root stays there, as long as `base` is within it. -/
 def pathIn (kernel : Kernel) (group : Nat) (base path : String) : String × String :=
   let root := kernel.baseIn (kernel.process group).root
   if root == "/" then (base, path)
-  else if path.startsWith "/" then ("/", root ++ Path.ofParts (Path.parts "/" path))
+  else if path.startsWith "/" then
+    -- Within the root, and ending as it did.
+    let ending := match Path.ending path with | .slash => "/" | .dot => "/." | _ => ""
+    ("/", root ++ Path.ofParts (Path.parts "/" path) ++ ending)
   else
     let inside (at_ : String) : Bool := at_ == root || at_.startsWith (root ++ "/")
     if inside base && !inside (Path.ofParts (Path.parts base path)) then ("/", root) else (base, path)
