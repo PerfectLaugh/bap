@@ -14,7 +14,7 @@ registers of floating point and the flags are, is kept here and comes back all t
 The offsets are those of the `ucontext_t` of musl, which are those of the kernel, as the compiler says them for each target, and what a
 program sees of all this agrees with qemu on `testsuite/src/libc-signals.c`. A signal that stops a process, as `SIGSTOP`, is ignored, as
 no process is ever stopped here. There are no timers, so nothing raises `SIGALRM`, and a fault of memory is the only exception that
-raises anything: not `SIGFPE` or `SIGILL`. `SIGCHLD` doesn't make a child go without a wait, whatever its action says. -/
+raises anything: not `SIGFPE` or `SIGILL`. -/
 
 namespace Bap.Linux
 
@@ -166,6 +166,8 @@ private structure SignalNumbers where
   ignored : List Nat
   /-- `SA_SIGINFO`, and for `rt_sigprocmask` what blocks, unblocks and sets. -/
   saInfo : Nat
+  /-- `SA_NOCLDWAIT`. -/
+  saNoCldWait : Nat
   howBlock : Nat
   howUnblock : Nat
   howSet : Nat
@@ -182,11 +184,11 @@ private structure SignalNumbers where
 
 private def numbersOf (architecture : Architecture) : SignalNumbers :=
   if isMipsArchitecture architecture then
-    { kill := 9, stop := 23, segv := 11, chld := 18, ignored := [18, 20, 21, 23, 24, 25, 26, 27], saInfo := 8, howBlock := 1, howUnblock := 2,
+    { kill := 9, stop := 23, segv := 11, chld := 18, ignored := [18, 20, 21, 23, 24, 25, 26, 27], saInfo := 8, saNoCldWait := 0x10000, howBlock := 1, howUnblock := 2,
       howSet := 3, eintr := 4, eagain := 11, einval := 22, esrch := 3, efault := 14, eperm := 1, count := 128, stops := [23, 24, 26, 27],
       cont := 25 }
   else
-    { kill := 9, stop := 19, segv := 11, chld := 17, ignored := [17, 18, 19, 20, 21, 22, 23, 28], saInfo := 4, howBlock := 0, howUnblock := 1,
+    { kill := 9, stop := 19, segv := 11, chld := 17, ignored := [17, 18, 19, 20, 21, 22, 23, 28], saInfo := 4, saNoCldWait := 2, howBlock := 0, howUnblock := 1,
       howSet := 2, eintr := 4, eagain := 11, einval := 22, esrch := 3, efault := 14, eperm := 1, count := 64, stops := [19, 20, 21, 22],
       cont := 18 }
 
@@ -1097,6 +1099,8 @@ def processExited (signals : Signals) (emu : Emu) (group status : Nat) : IO Unit
   let table ← emu.taskTable.get
   let some task := table.find? group | return
   if task.parent == 0 then return
+  -- A parent that ignores it isn't sent it, as Linux has it.
+  if (← actionOf signals task.parent (signals.numbers).chld).handler == 1 then return
   let signaled := status % 128 != 0
   let info : SignalInfo :=
     ⟨(signals.numbers).chld, if signaled then 2 else 1, .child group 0 (if signaled then status % 128 else status / 256 % 256)⟩
@@ -1108,6 +1112,12 @@ def processExited (signals : Signals) (emu : Emu) (group status : Nat) : IO Unit
     | some leader => modifyThread signals leader.tid fun state => { state with pending := state.pending ++ [info] }
     | none => pure ()
   else sendToGroup signals emu task.parent info
+
+/-- Whether a process doesn't wait for its children, which go as they end without a wait, as Linux has it: it ignores `SIGCHLD`, or its
+action has `SA_NOCLDWAIT`. What it does by default is to ignore it, which isn't this. -/
+def reapsChildren (signals : Signals) (group : Nat) : IO Bool := do
+  let action ← actionOf signals group (signals.numbers).chld
+  pure (action.handler == 1 || action.flags &&& (signals.numbers).saNoCldWait != 0)
 
 /-- A new process has what its parent has, and its thread what the thread that made it has, with nothing pending: in a copy of the memory
 it goes back from the handlers that thread is in. As Linux has it, one that shares the memory has no alternate stack, which would be

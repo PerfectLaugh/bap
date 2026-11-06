@@ -1,0 +1,15 @@
+ignored waitpid any -10
+ignored waitpid child -10
+ignored kill 0 -3
+ignored vfork waitpid -10
+ignored vfork kill 0 -3
+ignored waitpid two -10
+first kill 0 -3
+second kill 0 -3
+ignored waitid -10
+nocldwait waitpid -10
+nocldwait handler 1
+nocldwait kill 0 -3
+default waitpid 1
+default exited 3
+default kill 0 -3

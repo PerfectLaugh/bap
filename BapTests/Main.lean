@@ -217,6 +217,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "riscv64-linux-musl-libc-sigwait",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-killzombie",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-killzombie",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-nocldwait",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-nocldwait",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-nested",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-nested",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-nested",
