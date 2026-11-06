@@ -1,0 +1,41 @@
+mkdir 0
+copied 1
+symlink 0
+chmod 644 0
+access X 644 -13
+execve 644 -13
+script of 644 113
+chmod 007 0
+access X 007 -13
+execve 007 -13
+chmod 755 0
+access X 755 0
+access RX 755 0
+run 755 42
+script of 755 42
+chmod script 644 0
+script 644 113
+access X directory 0
+execve directory -13
+execve dot -13
+chmod 400 0
+access F 0
+access R 0
+access W -13
+access RW -13
+access X -13
+access R effective 0
+access W effective -13
+access W of link -13
+access W of link itself 0
+access mode 8 -22
+access bad flag -22
+access missing -2
+access W missing -2
+chmod directory 600 0
+access in unsearchable -13
+access missing in unsearchable -13
+execve in unsearchable -13
+chmod directory 755 0
+unlink 0
+rmdir 0

@@ -1376,6 +1376,55 @@ def statPath (kernel : Kernel) (base path : String) (follow : Bool := true) : Re
   | none => .error Errno.enoent
   | some number => .ok (statOf kernel (← inodeOf kernel number))
 
+/-- Whether a process may read, write and run an inode, as `want` asks of each with 4, 2 and 1, by the user and the group that it goes
+by on files, or of `real`, its real ones, as `access` has it: by the bits of the owner if it is that user, else by those of the group if
+it is in that, else by those of everyone. Root may read and write anything, search any directory and run what anyone may run. -/
+def permits (inode : Inode) (credentials : Credentials) (real : Bool) (want : Nat) : Bool :=
+  let (uid, gid) := if real then (credentials.uid, credentials.gid) else (credentials.fsuid, credentials.fsgid)
+  if uid == 0 then want &&& 1 == 0 || inode.content matches .directory || inode.mode &&& 0o111 != 0
+  else
+    let shift := if uid == inode.details.uid then 6
+      else if gid == inode.details.gid || credentials.groups.contains inode.details.gid then 3
+      else 0
+    (inode.mode >>> shift) &&& want == want
+
+/-- Whether a process may search each directory that a path of the tree is in, as `permits` has it, which it has to to find what is
+there. -/
+def searchable (kernel : Kernel) (credentials : Credentials) (real : Bool) (path : String) : Bool :=
+  let parts := Path.parts "/" path
+  (List.range parts.length).all fun count =>
+    match (kernel.paths.get? (Path.ofParts (parts.take count))).bind kernel.inodes.get? with
+    | some inode => permits inode credentials real 1
+    | none => true
+
+/-- `access`, `faccessat` and `faccessat2` of a process: that a path is there, of a `mode` of 0, or that the process may read, write and
+run it, as `mode` asks of each with `R_OK`, `W_OK` and `X_OK`, by its real user and group, or of `effective`, those that it goes by on
+files, and of the link at its end itself unless `follow`. What is in a directory that it may not search is `EACCES`, and to write what
+is on a read-only mount `EROFS`. -/
+def accessPath (kernel : Kernel) (group : Nat) (base path : String) (mode : Nat) (follow effective : Bool) : Result Unit := do
+  let credentials := (kernel.process group).credentials
+  let (normal, found) ← kernel.resolve base path follow
+  if !kernel.searchable credentials (!effective) normal then .error Errno.eacces
+  let some number := found | .error Errno.enoent
+  let inode ← inodeOf kernel number
+  let stored := match inode.content with
+    | .file _ | .directory | .symlink _ => true
+    | _ => false
+  if mode &&& 2 != 0 && stored && kernel.readOnly normal then .error erofs
+  if !permits inode credentials (!effective) mode then .error Errno.eacces
+
+/-- What a file holds that `execve` of a process runs, or runs a program with: one that the process may run, in directories that it may
+search. Anything else is `EACCES`. -/
+def executable (kernel : Kernel) (group : Nat) (path : String) : Result ByteArray := do
+  let credentials := (kernel.process group).credentials
+  let (normal, found) ← kernel.resolve "/" path
+  if !kernel.searchable credentials false normal then .error Errno.eacces
+  let some number := found | .error Errno.enoent
+  let inode ← inodeOf kernel number
+  match inode.content with
+  | .file data => if permits inode credentials false 1 then .ok data else .error Errno.eacces
+  | _ => .error Errno.eacces
+
 /-- `fstat`. -/
 def statDescriptor (kernel : Kernel) (group fd : Nat) : Result Stat := do
   let (_, file) ← openFileOf kernel group fd

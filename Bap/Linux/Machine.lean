@@ -886,11 +886,15 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
           match action with
           | .returnValue fd => if fd < 2 ^ 31 then pure ((← Tty.opened poller emu fd flags).getD action) else pure action
           | other => pure other
-    let accessAt (directory address : Nat) : IO SyscallAction :=
-      at_ directory address fun from_ path =>
-        pure (match kernel.statPath from_ path with
-          | .error errno => errorOf errno
-          | .ok _ => .returnValue 0)
+    -- Of the flags of `faccessat2`, `AT_SYMLINK_NOFOLLOW`, `AT_EACCESS` and `AT_EMPTY_PATH` are all there are, and of a mode,
+    -- `R_OK`, `W_OK` and `X_OK`.
+    let accessAt (directory address mode flags : Nat) : IO SyscallAction :=
+      if flags % 2 ^ 32 ||| 0x1300 != 0x1300 || mode % 2 ^ 32 > 7 then pure (errorOf Errno.einval)
+      else
+        at_ directory address fun from_ path =>
+          pure (match kernel.accessPath group from_ path (mode % 8) (flags &&& 0x100 == 0) (flags &&& 0x200 != 0) with
+            | .error errno => errorOf errno
+            | .ok _ => .returnValue 0)
     let liveGroups : IO (List Nat) := do
       pure (((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups)
     -- What is to read of a pipe, if the call has to wait for it: then it stops here and runs again when something changes, with its
@@ -1126,8 +1130,9 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       -- An offset of -1 is that of the file.
       else if vectorOffset == 2 ^ 64 - 1 then kernelCall machine emu (if call == .preadv2 then .readv else .writev) (args.take 3)
       else atOffset (arg 0) (arg 1) (arg 2) vectorOffset (call == .pwritev2)
-    | .access => accessAt here (arg 0)
-    | .faccessat => accessAt (arg 0) (arg 1)
+    | .access => accessAt here (arg 0) (arg 1) 0
+    | .faccessat => accessAt (arg 0) (arg 1) (arg 2) 0
+    | .faccessat2 => accessAt (arg 0) (arg 1) (arg 2) (arg 3)
     | .dup => applyNat machine (·.dup group (arg 0))
     | .dup2 =>
       let action ← applyNat machine (·.dupTo group (arg 0) (arg 1))
@@ -1405,7 +1410,7 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
 /-- The argument of a call that is a path, if it has one, and whether it is relative to a descriptor. -/
 private def pathArgument : Call → Option Nat
   | .open_ | .stat | .lstat | .access | .readlink | .chdir | .truncate | .truncate64 | .statfs | .statfs64 => some 0
-  | .openat | .fstatat | .statx | .faccessat | .readlinkat => some 1
+  | .openat | .fstatat | .statx | .faccessat | .faccessat2 | .readlinkat => some 1
   | _ => none
 
 /-- The paths that a call is given, by the index of each, and whether the argument before it is a directory that it is from. -/
@@ -1413,7 +1418,7 @@ private def pathArguments : Call → List (Nat × Bool)
   | .open_ | .stat | .lstat | .access | .readlink | .chdir | .truncate | .truncate64 | .statfs | .statfs64 | .execve | .mkdir | .rmdir
   | .unlink | .chmod | .chown | .lchown | .utimes | .utime | .setxattr | .lsetxattr | .getxattr | .lgetxattr | .listxattr
   | .llistxattr | .removexattr | .lremovexattr | .chroot | .umount2 => [(0, false)]
-  | .openat | .fstatat | .statx | .faccessat | .readlinkat | .mkdirat | .unlinkat | .fchmodat | .fchownat | .utimensat
+  | .openat | .fstatat | .statx | .faccessat | .faccessat2 | .readlinkat | .mkdirat | .unlinkat | .fchmodat | .fchownat | .utimensat
   | .utimensat64 | .futimesat => [(1, true)]
   | .rename | .link => [(0, false), (1, false)]
   | .renameat | .renameat2 | .linkat => [(1, true), (3, true)]
@@ -1957,13 +1962,14 @@ private def loadProgram (emu : Emu) (architecture : Architecture) (path : String
     else setReg emu (word "R12") (bits 64 entry)
   pure (top, auxiliary.flatMap fun entry => [entry.1, entry.2])
 
-/-- A program of a path of the kernel, as far as it can be told that it will run, and what its arguments come to: a script
-is run by what its first line names, with the script after that, to a depth that Linux has too. -/
-private def programOf (kernel : Kernel) (architecture : Architecture) : Nat → String → List String →
+/-- A program of a path of the kernel that a process may run, as far as it can be told that it will run, and what its arguments come
+to: a script is run by what its first line names, with the script after that, to a depth that Linux has too. What runs it, and the
+interpreter of a program of ELF, are to be run by the process too, as `Kernel.executable` has it. -/
+private def programOf (kernel : Kernel) (group : Nat) (architecture : Architecture) : Nat → String → List String →
     Result (String × ByteArray × Elf.Program × Option (ByteArray × Elf.Program) × List String)
   | 0, _, _ => .error Errno.enoexec
   | depth + 1, path, arguments => do
-    let data ← fileOf kernel path
+    let data ← kernel.executable group path
     if data.size ≥ 2 && data.get! 0 == 35 && data.get! 1 == 33 then
       let first := (String.fromUTF8? (data.extract 2 (min data.size 256))).getD ""
       let line := ((first.splitOn "\n").headD "").trimAscii.toString
@@ -1972,7 +1978,7 @@ private def programOf (kernel : Kernel) (architecture : Architecture) : Nat → 
       | [""] => .error Errno.enoexec
       | name :: rest =>
         let given := (" ".intercalate rest).trimAscii.toString
-        programOf kernel architecture depth name (name :: (if given.isEmpty then [] else [given]) ++ [path] ++ arguments.drop 1)
+        programOf kernel group architecture depth name (name :: (if given.isEmpty then [] else [given]) ++ [path] ++ arguments.drop 1)
       | [] => .error Errno.enoexec
     else
       let some program := (Elf.parse data).toOption | .error Errno.enoexec
@@ -1980,7 +1986,7 @@ private def programOf (kernel : Kernel) (architecture : Architecture) : Nat → 
       let interpreter ← match program.interpreter with
         | none => .ok none
         | some name => do
-          let bytes ← fileOf kernel name
+          let bytes ← kernel.executable group name
           let some loaded := (Elf.parse bytes).toOption | .error Errno.enoexec
           .ok (some (bytes, loaded))
       .ok (path, data, program, interpreter, arguments)
@@ -2028,7 +2034,7 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
     let absolute := if relative.startsWith "/" then relative else base ++ "/" ++ relative
     programFromHost machine absolute
     let kernel ← machine.kernel.get
-    match programOf kernel architecture 4 absolute (if arguments.isEmpty then [path] else arguments) with
+    match programOf kernel group architecture 4 absolute (if arguments.isEmpty then [path] else arguments) with
     | .error errno => pure (errorOf errno)
     | .ok (name, data, program, interpreter, arguments) =>
       let table ← emu.taskTable.get
