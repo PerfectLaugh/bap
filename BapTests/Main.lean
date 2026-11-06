@@ -92,6 +92,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-ptrace",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-execthread",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-execthread",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-execimage",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-execimage",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-random",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-random",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-elfpage",

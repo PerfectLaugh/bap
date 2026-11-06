@@ -417,16 +417,19 @@ theorem putProcess_extends : Extends putProcess := fun out _ =>
   (putNat_extends out _).trans ((putList_extends putDescriptor_extends _ _).trans ((putNat_extends _ _).trans ((putText_extends _ _).trans
     ((putNat_extends _ _).trans ((putNat_extends _ _).trans ((putNat_extends _ _).trans
       ((putList_extends putText_extends _ _).trans ((putList_extends putText_extends _ _).trans ((putText_extends _ _).trans
-        ((putList_extends putNat_extends _ _).trans ((putList_extends putMapping_extends _ _).trans (putBytes_extends _ _))))))))))))
+        ((putText_extends _ _).trans ((putList_extends putNat_extends _ _).trans ((putList_extends putMapping_extends _ _).trans
+          (putBytes_extends _ _)))))))))))))
 
 theorem putProcess_inverts : Inverts putProcess getProcess := by
-  rintro data out ⟨group, descriptors, cwd, cwdPath, umask, breakStart, breakEnd, command, environment, program, auxiliary, mappings, identity⟩ hp
+  rintro data out ⟨group, descriptors, cwd, cwdPath, umask, breakStart, breakEnd, command, environment, program, name, auxiliary, mappings, identity⟩ hp
   have h12 := putBytes_inverts data _ identity hp
   have p11 := (putBytes_extends _ identity).trans hp
   have h11 := putList_inverts putMapping_extends putMapping_inverts data _ mappings p11
   have p10 := (putList_extends putMapping_extends _ mappings).trans p11
   have h10 := putList_inverts putNat_extends putNat_inverts data _ auxiliary p10
-  have p9 := (putList_extends putNat_extends _ auxiliary).trans p10
+  have p14 := (putList_extends putNat_extends _ auxiliary).trans p10
+  have h14 := putText_inverts data _ name p14
+  have p9 := (putText_extends _ name).trans p14
   have h9 := putText_inverts data _ program p9
   have p8 := (putText_extends _ program).trans p9
   have h8 := putList_inverts putText_extends putText_inverts data _ environment p8
@@ -445,7 +448,7 @@ theorem putProcess_inverts : Inverts putProcess getProcess := by
   have p2 := (putNat_extends _ cwd).trans p13
   have h2 := putList_inverts putDescriptor_extends putDescriptor_inverts data _ descriptors p2
   have h1 := putNat_inverts data out group ((putList_extends putDescriptor_extends _ descriptors).trans p2)
-  simp [getProcess, putProcess, h1, h2, h3, h13, h4, h5, h6, h7, h8, h9, h10, h11, h12, bind, Except.bind]
+  simp [getProcess, putProcess, h1, h2, h3, h13, h4, h5, h6, h7, h8, h9, h14, h10, h11, h12, bind, Except.bind]
 
 /-- A checkpoint reads back as the image that it was made from, wherever in a file that is and whatever comes after it. -/
 theorem decode_encode (data out : ByteArray) (image : Image) (hp : Prefix (encode out image) data) :

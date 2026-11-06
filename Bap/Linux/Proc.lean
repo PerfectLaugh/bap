@@ -41,12 +41,12 @@ def status (view : ProcessView) : ByteArray :=
   let memory := view.ranges.foldl (fun total range => total + range.size) 0
   let ids := view.credentials
   let groups := " ".intercalate (ids.groups.map toString)
-  text s!"Name:\t{baseName view.program}\nUmask:\t{octal4 view.umask}\nState:\tR (running)\nTgid:\t{view.pid}\nNgid:\t0\nPid:\t{view.pid}\nPPid:\t{view.parent}\nTracerPid:\t0\nUid:\t{ids.uid}\t{ids.euid}\t{ids.suid}\t{ids.fsuid}\nGid:\t{ids.gid}\t{ids.egid}\t{ids.sgid}\t{ids.fsgid}\nFDSize:\t64\nGroups:\t{groups}\nVmSize:\t{memory / 1024} kB\nVmRSS:\t{memory / 1024} kB\nThreads:\t{view.threads.length}\nCpus_allowed:\t1\nCpus_allowed_list:\t0\n"
+  text s!"Name:\t{baseName view.name}\nUmask:\t{octal4 view.umask}\nState:\tR (running)\nTgid:\t{view.pid}\nNgid:\t0\nPid:\t{view.pid}\nPPid:\t{view.parent}\nTracerPid:\t0\nUid:\t{ids.uid}\t{ids.euid}\t{ids.suid}\t{ids.fsuid}\nGid:\t{ids.gid}\t{ids.egid}\t{ids.sgid}\t{ids.fsgid}\nFDSize:\t64\nGroups:\t{groups}\nVmSize:\t{memory / 1024} kB\nVmRSS:\t{memory / 1024} kB\nThreads:\t{view.threads.length}\nCpus_allowed:\t1\nCpus_allowed_list:\t0\n"
 
 /-- `/proc/PID/stat`, with what isn't modelled at zero. -/
 def stat (view : ProcessView) : ByteArray :=
   let memory := view.ranges.foldl (fun total range => total + range.size) 0
-  text s!"{view.pid} ({baseName view.program}) R {view.parent} {view.pgid} {view.sid} 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 {view.threads.length} 0 0 {memory} {memory / 4096} 18446744073709551615 0 0 {view.stackStart} 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 {view.breakStart} 0 0 0 0 0\n"
+  text s!"{view.pid} ({baseName view.name}) R {view.parent} {view.pgid} {view.sid} 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 {view.threads.length} 0 0 {memory} {memory / 4096} 18446744073709551615 0 0 {view.stackStart} 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 {view.breakStart} 0 0 0 0 0\n"
 
 def statm (view : ProcessView) : ByteArray :=
   let pages := view.ranges.foldl (fun total range => total + range.size) 0 / 4096
@@ -112,7 +112,7 @@ def builtin : String → Option Generator
       let word := (List.range size).map fun index => (word >>> (8 * index)).toUInt8
       bytes ++ ByteArray.mk (if view.big then word.reverse else word).toArray
   | "environ" => some fun view => zeroEnded view.environment
-  | "comm" => some fun view => text (baseName view.program ++ "\n")
+  | "comm" => some fun view => text (baseName view.name ++ "\n")
   | "limits" => some limits
   | "mountinfo" => some mountinfo
   | "cgroup" => some fun _ => text "0::/\n"

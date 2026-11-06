@@ -405,7 +405,7 @@ def Architecture.pairBase : Architecture → Nat
   | .mips _ _ _ | .powerpc _ _ | .arm => 4
   | _ => 3
 
-/-- What `uname` and `AT_PLATFORM` say. -/
+/-- What `uname` says. -/
 def Architecture.name : Architecture → String
   | .x86_64 => "x86_64"
   | .i686 => "i686"
@@ -418,5 +418,12 @@ def Architecture.name : Architecture → String
   | .powerpc 32 _ => "ppc"
   | .powerpc _ true => "ppc64"
   | .powerpc _ false => "ppc64le"
+
+/-- What `AT_PLATFORM` says, as `ELF_PLATFORM` of Linux has it: of 32-bit ARM, its version and its byte order, and of RISC-V and of
+MIPS, nothing, which leaves it out. -/
+def Architecture.platform : Architecture → Option String
+  | .arm => some "v7l"
+  | .riscv64 | .riscv32 | .mips _ _ _ => none
+  | architecture => some architecture.name
 
 end Bap.Linux

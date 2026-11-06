@@ -20,6 +20,7 @@ structure ProcessImage where
   command : List String
   environment : List String
   program : String
+  name : String
   auxiliary : List Nat
   mappings : List FileMapping
   /-- Its process group, session, terminal, credentials, limits and nice value, and whether it ended: see `identityBytes`. -/
@@ -308,7 +309,7 @@ def Kernel.image (kernel : Kernel) : Image where
   nextOpenFile := kernel.nextOpenFile
   processes := (sorted kernel.processes.toList).map fun (group, process) =>
     { group, cwd := process.cwd.inode, cwdPath := process.cwd.path, umask := process.umask, breakStart := process.breakStart, breakEnd := process.breakEnd
-      command := process.command, environment := process.environment, program := process.program
+      command := process.command, environment := process.environment, program := process.program, name := process.name
       auxiliary := process.auxiliary, mappings := process.mappings
       descriptors := (sorted process.descriptors.toList).map fun (fd, entry) => (fd, entry.openFile, entry.closeOnExec)
       identity := identityBytes process }
@@ -395,7 +396,7 @@ def Image.kernel (image : Image) : Except String Kernel := do
     processes := ← image.processes.foldlM (init := {}) fun processes process => do
       let made : Process :=
         { cwd := { inode := process.cwd, path := process.cwdPath }, umask := process.umask, breakStart := process.breakStart, breakEnd := process.breakEnd
-          command := process.command, environment := process.environment, program := process.program
+          command := process.command, environment := process.environment, program := process.program, name := process.name
           auxiliary := process.auxiliary, mappings := process.mappings
           descriptors := process.descriptors.foldl (init := {}) fun descriptors (fd, openFile, closeOnExec) =>
             descriptors.insert fd { openFile, closeOnExec } }
@@ -451,7 +452,7 @@ def putProcess (out : ByteArray) (process : ProcessImage) : ByteArray :=
   let out := putNat (putNat out process.breakStart) process.breakEnd
   let out := putList putText out process.command
   let out := putList putText out process.environment
-  let out := putText out process.program
+  let out := putText (putText out process.program) process.name
   let out := putList putNat out process.auxiliary
   let out := putList putMapping out process.mappings
   putBytes out process.identity
@@ -467,10 +468,11 @@ def getProcess : Decoder ProcessImage := fun data at_ => do
   let (command, at_) ← getList getText data at_
   let (environment, at_) ← getList getText data at_
   let (program, at_) ← getText data at_
+  let (name, at_) ← getText data at_
   let (auxiliary, at_) ← getList getNat data at_
   let (mappings, at_) ← getList getMapping data at_
   let (identity, at_) ← getBytes data at_
-  .ok ({ group, descriptors, cwd, cwdPath, umask, breakStart, breakEnd, command, environment, program, auxiliary, mappings, identity }, at_)
+  .ok ({ group, descriptors, cwd, cwdPath, umask, breakStart, breakEnd, command, environment, program, name, auxiliary, mappings, identity }, at_)
 
 def putPiece (out : ByteArray) (piece : Nat × ByteArray) : ByteArray := putBytes (putNat out piece.1) piece.2
 

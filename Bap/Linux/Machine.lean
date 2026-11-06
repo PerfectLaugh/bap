@@ -464,6 +464,7 @@ private def viewOf (machine : Machine) (emu : Emu) (group : Nat) : IO ProcessVie
     command := process.command
     environment := process.environment
     program := process.program
+    name := process.name
     auxiliary := process.auxiliary
     big := architecture.big
     cwd := kernel.shownPath group process.cwd.path
@@ -1409,7 +1410,7 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
 
 /-- The argument of a call that is a path, if it has one, and whether it is relative to a descriptor. -/
 private def pathArgument : Call → Option Nat
-  | .open_ | .stat | .lstat | .access | .readlink | .chdir | .truncate | .truncate64 | .statfs | .statfs64 => some 0
+  | .open_ | .stat | .lstat | .access | .readlink | .chdir | .truncate | .truncate64 | .statfs | .statfs64 | .execve => some 0
   | .openat | .fstatat | .statx | .faccessat | .faccessat2 | .readlinkat => some 1
   | _ => none
 
@@ -1873,41 +1874,45 @@ private def mapHelpers (emu : Emu) : IO Unit := do
   let page := words 0xffc [5] page
   map emu ⟨base, page, ⟨true, false, true⟩⟩
 
-/-- The stack that the kernel hands over: where the arguments, the environment and the auxiliary vector are. -/
-private def mapStack (emu : Emu) (architecture : Architecture) (arguments environment : List String) (auxiliary : List (Nat × Nat)) : IO Unit := do
+/-- The stack that the kernel hands over: where the arguments, the environment and the auxiliary vector are. As Linux lays it out, at
+its top is a copy of the path that the program was run by, which `AT_EXECFN` points at, and below that the strings of the arguments
+and then those of the environment, one after the other, with what `AT_PLATFORM` and `AT_RANDOM` point at below them. Linux leaves a
+word above the copy, and this 16 bytes: code that reads a string 16 bytes at a time, as `memchr` of musl does that clang 21 makes
+for 32 bits, faults on Linux reading past the top when a string that it looks at ends there. -/
+private def mapStack (emu : Emu) (architecture : Architecture) (path : String) (arguments environment : List String)
+    (auxiliary : List (Nat × Nat)) : IO Unit := do
   mapZeros emu (stackTop architecture - stackSize) stackSize ⟨true, true, false⟩
-  let mut cursor := stackTop architecture - 16
   let wordSize := architecture.bits / 8
   let place (cursor : Nat) (text : ByteArray) : IO Nat := do
     let at_ := cursor - text.size
     write emu at_ text
     pure at_
-  cursor ← place cursor (architecture.name ++ "\x00").toUTF8
-  let platform := cursor
-  cursor ← place cursor (ByteArray.mk ((List.range 16).map fun index => (index * 37 + 11).toUInt8).toArray)
-  let random := cursor
-  let mut argumentAddresses : List Nat := []
-  for text in arguments.reverse do
-    cursor ← place cursor (text ++ "\x00").toUTF8
-    argumentAddresses := cursor :: argumentAddresses
-  let mut environmentAddresses : List Nat := []
-  for text in environment.reverse do
-    cursor ← place cursor (text ++ "\x00").toUTF8
-    environmentAddresses := cursor :: environmentAddresses
-  let execfn := argumentAddresses.headD 0
-  let vector := auxiliary ++ [(15, platform), (25, random), (31, execfn), (0, 0)]
-  let cells := [argumentAddresses.length] ++ argumentAddresses ++ [0] ++ environmentAddresses ++ [0] ++
+  let execfn ← place (stackTop architecture - 16) (path ++ "\x00").toUTF8
+  let strings := (arguments ++ environment).map fun text => (text ++ "\x00").toUTF8
+  let start := execfn - strings.foldl (· + ·.size) 0
+  let _ ← place execfn (strings.foldl (· ++ ·) ByteArray.empty)
+  let addresses := (strings.foldl (init := ([], start)) fun (found, at_) text => (at_ :: found, at_ + text.size)).1.reverse
+  let (cursor, platform) ← match architecture.platform with
+    | some name => do
+      let at_ ← place (start / 16 * 16) (name ++ "\x00").toUTF8
+      pure (at_, [(15, at_)])
+    | none => pure (start / 16 * 16, [])
+  let random ← place cursor (ByteArray.mk ((List.range 16).map fun index => (index * 37 + 11).toUInt8).toArray)
+  let vector := auxiliary ++ platform ++ [(25, random), (31, execfn), (0, 0)]
+  let cells := [arguments.length] ++ addresses.take arguments.length ++ [0] ++ addresses.drop arguments.length ++ [0] ++
     vector.flatMap fun entry => [entry.1, entry.2]
   -- It is aligned to 16 where the program starts.
-  let pointer := (cursor - wordSize * cells.length) / 16 * 16
+  let pointer := (random - wordSize * cells.length) / 16 * 16
   for (cell, index) in cells.zipIdx do
     write emu (pointer + wordSize * index) (Abi.field architecture.big wordSize cell)
   setReg emu ⟨(threadRegisters emu.config.syscallAbi).1, .imm architecture.bits, 0, false⟩ (bits architecture.bits pointer)
 
-/-- A parsed program and what interprets it in an emulator that has nothing mapped: its registers, its memory, its stack and
-where it starts. It gives where its heap starts and its auxiliary vector, as a type and a value by turns. -/
-private def loadProgram (emu : Emu) (architecture : Architecture) (path : String) (data : ByteArray) (program : Elf.Program)
-    (interpreter : Option (ByteArray × Elf.Program)) (arguments environment : List String) (base : Option Nat := none) : IO (Nat × List Nat) := do
+/-- A parsed program and what interprets it in an emulator that has nothing mapped, for a process of `credentials` that ran it by
+`path`: its registers, its memory, its stack and where it starts. It gives where its heap starts and its auxiliary vector, as a type and
+a value by turns. -/
+private def loadProgram (emu : Emu) (architecture : Architecture) (credentials : Credentials) (path : String) (data : ByteArray)
+    (program : Elf.Program) (interpreter : Option (ByteArray × Elf.Program)) (arguments environment : List String)
+    (base : Option Nat := none) : IO (Nat × List Nat) := do
   let base := if program.relocatable then base.getD (programBase architecture) else 0
   resetRegisters emu architecture
   let top ← mapProgram emu data program base
@@ -1944,11 +1949,14 @@ private def loadProgram (emu : Emu) (architecture : Architecture) (path : String
     | .mips _ _ _ => 0
     -- A 32-bit or a 64-bit machine, with floating point, AltiVec and VSX.
     | .powerpc wide _ => (if wide == 64 then 0xc0000000 else 0x80000000) + 0x18000080
-  -- AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_FLAGS, AT_ENTRY, the ids of root, AT_HWCAP, AT_CLKTCK, AT_SECURE, AT_HWCAP2
+  -- AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_FLAGS, AT_ENTRY, AT_UID, AT_EUID, AT_GID, AT_EGID, AT_HWCAP, AT_CLKTCK,
+  -- AT_SECURE, which says that the program runs with ids other than the real ones, and AT_HWCAP2
+  let secure := credentials.euid != credentials.uid || credentials.egid != credentials.gid
   let auxiliary := [(3, base + headers), (4, program.headerSize), (5, program.headerCount), (6, 4096),
-    (7, if interpreter.isSome then interpreterBase architecture else 0), (8, 0), (9, base + program.entry), (11, 0), (12, 0), (13, 0), (14, 0),
-    (16, capabilities), (17, 100), (23, 0), (26, 0)]
-  mapStack emu architecture (if arguments.isEmpty then [path] else arguments) environment auxiliary
+    (7, if interpreter.isSome then interpreterBase architecture else 0), (8, 0), (9, base + program.entry), (11, credentials.uid),
+    (12, credentials.euid), (13, credentials.gid), (14, credentials.egid), (16, capabilities), (17, 100), (23, if secure then 1 else 0),
+    (26, 0)]
+  mapStack emu architecture path arguments environment auxiliary
   -- On ARM, the low bit of where a program starts says that it is in Thumb.
   let entry ← if architecture == .arm then do
       setReg emu ⟨"ISET", .imm 1, 0, false⟩ (bits 1 (entry % 2))
@@ -1962,14 +1970,20 @@ private def loadProgram (emu : Emu) (architecture : Architecture) (path : String
     else setReg emu (word "R12") (bits 64 entry)
   pure (top, auxiliary.flatMap fun entry => [entry.1, entry.2])
 
-/-- A program of a path of the kernel that a process may run, as far as it can be told that it will run, and what its arguments come
-to: a script is run by what its first line names, with the script after that, to a depth that Linux has too. What runs it, and the
-interpreter of a program of ELF, are to be run by the process too, as `Kernel.executable` has it. -/
+/-- A path that a process gives, as a path of the tree from `/`: one that isn't from `/` is from its working directory. -/
+private def treePath (kernel : Kernel) (group : Nat) (path : String) : String :=
+  let (base, relative) := kernel.pathIn group (kernel.cwdOf group) path
+  if relative.startsWith "/" then relative else base ++ "/" ++ relative
+
+/-- A program of a path that a process gives that it may run, as far as it can be told that it will run, with the path of its file
+and what its arguments come to: a script is run by what its first line names, with the path of the script as it was given after that,
+to a depth that Linux has too. What runs it, and the interpreter of a program of ELF, are to be run by the process too, as
+`Kernel.executable` has it, from its working directory. -/
 private def programOf (kernel : Kernel) (group : Nat) (architecture : Architecture) : Nat → String → List String →
     Result (String × ByteArray × Elf.Program × Option (ByteArray × Elf.Program) × List String)
   | 0, _, _ => .error Errno.enoexec
   | depth + 1, path, arguments => do
-    let data ← kernel.executable group path
+    let data ← kernel.executable group (treePath kernel group path)
     if data.size ≥ 2 && data.get! 0 == 35 && data.get! 1 == 33 then
       let first := (String.fromUTF8? (data.extract 2 (min data.size 256))).getD ""
       let line := ((first.splitOn "\n").headD "").trimAscii.toString
@@ -1986,24 +2000,28 @@ private def programOf (kernel : Kernel) (group : Nat) (architecture : Architectu
       let interpreter ← match program.interpreter with
         | none => .ok none
         | some name => do
-          let bytes ← kernel.executable group name
+          let bytes ← kernel.executable group (treePath kernel group name)
           let some loaded := (Elf.parse bytes).toOption | .error Errno.enoexec
           .ok (some (bytes, loaded))
-      .ok (path, data, program, interpreter, arguments)
+      -- The file, by where the links lead, as `/proc/PID/exe` has it.
+      let (file, _) ← kernel.resolve "/" (treePath kernel group path)
+      .ok (file, data, program, interpreter, arguments)
 
-/-- What `execve` runs, of the directories of the host that the machine sees: the program, what a script names to run it, and the
-interpreter of a program of ELF, as `programOf` looks for them. -/
-private def programFromHost (machine : Machine) (path : String) : IO Unit := do
+/-- What `execve` of a process runs, of the directories of the host that the machine sees: the program, what a script names to run it,
+and the interpreter of a program of ELF, as `programOf` looks for them. -/
+private def programFromHost (machine : Machine) (group : Nat) (path : String) : IO Unit := do
   if (← machine.hostMounts.get).isEmpty then return
   let mut path := path
   for _ in [0:4] do
+    let kernel ← machine.kernel.get
+    path := treePath kernel group path
     fromHost machine path
     let .ok data := fileOf (← machine.kernel.get) path | return
     if data.size ≥ 2 && data.get! 0 == 35 && data.get! 1 == 33 then
       let first := (String.fromUTF8? (data.extract 2 (min data.size 256))).getD ""
       path := ((((first.splitOn "\n").headD "").trimAscii.toString.splitOn " ").headD "")
     else
-      if let some name := (Elf.parse data).toOption.bind (·.interpreter) then fromHost machine name
+      if let some name := (Elf.parse data).toOption.bind (·.interpreter) then fromHost machine (treePath kernel group name)
       return
 
 /-- The strings of a list of pointers that a null ends, as `execve` is given them. -/
@@ -2030,11 +2048,10 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
       ← readStrings emu architecture (args.getD 2 0)) : IO _).toBaseIO with
   | .error _ => pure (errorOf Errno.efault)
   | .ok (path, arguments, environment) =>
-    let (base, relative) := kernel.pathIn group (kernel.cwdOf group) path
-    let absolute := if relative.startsWith "/" then relative else base ++ "/" ++ relative
-    programFromHost machine absolute
+    programFromHost machine group path
     let kernel ← machine.kernel.get
-    match programOf kernel group architecture 4 absolute (if arguments.isEmpty then [path] else arguments) with
+    -- With no arguments, a program has one that is empty, as Linux gives it since 5.18.
+    match programOf kernel group architecture 4 path (if arguments.isEmpty then [""] else arguments) with
     | .error errno => pure (errorOf errno)
     | .ok (name, data, program, interpreter, arguments) =>
       let table ← emu.taskTable.get
@@ -2051,13 +2068,13 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
         leaveSharedMemory emu
       for region in ← emu.regions.get do
         unmap emu region.address region.data.size
-      let (top, auxiliary) ← loadProgram emu architecture name data program interpreter arguments environment
+      let process := kernel.process group
+      let (top, auxiliary) ← loadProgram emu architecture process.credentials path data program interpreter arguments environment
       emu.redirect.set (some (← pc emu))
       wakePipeReaders emu
-      let process := kernel.process group
       machine.kernel.set (kernel.setProcess group { process with
         descriptors := process.descriptors.filter fun _ entry => !entry.closeOnExec
-        breakStart := top, breakEnd := top, command := arguments, environment, program := name, auxiliary, mappings := [] })
+        breakStart := top, breakEnd := top, command := arguments, environment, program := name, name := path, auxiliary, mappings := [] })
       releaseVfork emu group
       machine.timers.executed group
       pure (.returnValue 0)
@@ -2402,11 +2419,13 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   -- would be lifted each time it runs. Most of its code runs at its start, a few times, and compiling that takes longer than
   -- running it, up to about this threshold: at 16 a short program takes half as long again, and a long one no less.
   let emu ← emulatorOf architecture
-  let (top, auxiliary) ← loadProgram emu architecture path data program interpreter arguments environment base
   let first := (← currentTask emu).group
+  let arguments := if arguments.isEmpty then [path] else arguments
+  let (top, auxiliary) ← loadProgram emu architecture (kernel.process first).credentials path data program interpreter arguments
+    environment base
   let kernel := kernel.withConsole first input
   let kernel := kernel.setProcess first { kernel.process first with
-    breakStart := top, breakEnd := top, command := if arguments.isEmpty then [path] else arguments, environment, program := path, auxiliary }
+    breakStart := top, breakEnd := top, command := arguments, environment, program := path, name := path, auxiliary }
   let kernel := Proc.install kernel.installDevices
   machineOf architecture emu kernel watch handler (targetDigest architecture data) models
 
@@ -2683,7 +2702,7 @@ def Machine.realloc (machine : Machine) (address size : Nat) (pid : Option Nat :
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 
 /-- What the bytes after the magic mean. -/
-def checkpointFormat : Nat := 15
+def checkpointFormat : Nat := 16
 
 /-- What this BAP does with a guest, which goes up when the same state could go on differently. A checkpoint is refused by a BAP
 of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/

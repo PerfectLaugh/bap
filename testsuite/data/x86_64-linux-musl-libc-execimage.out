@@ -1,0 +1,68 @@
+mkdir 0
+copied 1
+layout "execimage/copy"
+uid 1
+euid 1
+gid 1
+egid 1
+secure 0
+argc 3
+argv "renamed"
+argv "x"
+argv "yy"
+argv ends 1
+comm "copy"
+arguments contiguous 1
+environment follows 1
+environment contiguous 1
+execfn above 1
+random below 1
+platform below 1
+exit 0
+empty "execimage/copy"
+uid 1
+euid 1
+gid 1
+egid 1
+secure 0
+argc 1
+argv ""
+argv ends 1
+comm "copy"
+exit 0
+script "./script"
+uid 1
+euid 1
+gid 1
+egid 1
+secure 0
+argc 3
+argv "./copy"
+argv "./script"
+argv "arg"
+argv ends 1
+comm "script"
+exit 0
+proc "/proc/self/exe"
+uid 1
+euid 1
+gid 1
+egid 1
+secure 0
+argc 1
+argv "proc"
+argv ends 1
+comm "exe"
+exe is the file 1
+again by the file 1
+uid 1
+euid 1
+gid 1
+egid 1
+secure 0
+argc 1
+argv "again"
+argv ends 1
+exit 0
+unlink 0
+rmdir 0

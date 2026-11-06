@@ -325,7 +325,10 @@ structure Process where
   /-- What it was started with, as `/proc` says. A child has what its parent has. -/
   command : List String := []
   environment : List String := []
+  /-- The file that it runs, by its path, as `/proc/PID/exe` has it. -/
   program : String := ""
+  /-- The path that it was run by, as it was given, of which the last part is its name, as `/proc/PID/comm` has it. -/
+  name : String := ""
   /-- The auxiliary vector that it started with, as a type and a value by turns. -/
   auxiliary : List Nat := []
   /-- What of its memory has a file behind it, which a child has too and `execve` ends. -/
@@ -366,6 +369,7 @@ structure ProcessView where
   command : List String := []
   environment : List String := []
   program : String := ""
+  name : String := ""
   auxiliary : List Nat := []
   big : Bool := false
   cwd : String := "/"
