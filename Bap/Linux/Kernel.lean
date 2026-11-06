@@ -293,6 +293,26 @@ def overlaps (mapping : FileMapping) (lower upper : Nat) : Bool :=
 
 end FileMapping
 
+/-- What `madvise` said of a range of a process's memory for a child of `fork`: that it is zeros there, of `MADV_WIPEONFORK`, or that it
+isn't there at all, of `MADV_DONTFORK`. It is of the mapping, as Linux has it, which `munmap` ends. -/
+structure ForkAdvice where
+  start : Nat
+  size : Nat
+  wipe : Bool
+  deriving DecidableEq, Repr
+
+namespace ForkAdvice
+
+/-- What is left of advice without `lower`..`upper`. -/
+def without (advice : ForkAdvice) (lower upper : Nat) : List ForkAdvice :=
+  let stop := advice.start + advice.size
+  if stop ≤ lower || upper ≤ advice.start then [advice]
+  else
+    (if advice.start < lower then [{ advice with size := lower - advice.start }] else []) ++
+    (if upper < stop then [{ advice with start := upper, size := stop - upper }] else [])
+
+end ForkAdvice
+
 /-! The capabilities, as Linux numbers them: a set of them is a number with the bit of each. -/
 
 namespace Capability
@@ -396,6 +416,8 @@ structure Process where
   auxiliary : List Nat := []
   /-- What of its memory has a file behind it, which a child has too and `execve` ends. -/
   mappings : List FileMapping := []
+  /-- What `madvise` said of its memory for a child, which a child of `fork` has too, but for what it left out, and `execve` ends. -/
+  forkAdvice : List ForkAdvice := []
   /-- Its process group and its session, of which 0 is its own id: see `pgidOf` and `sidOf`. -/
   pgid : Nat := 0
   sid : Nat := 0
@@ -2093,11 +2115,26 @@ def mappingSource (kernel : Kernel) (group fd : Nat) : Result (Nat × Bool × Bo
   let (_, file) ← openFileOf kernel group fd
   .ok (file.inode, file.flags &&& 3 != 1, file.flags &&& 3 == 2)
 
-/-- A process without what it had mapped in `lower`..`upper`. -/
+/-- A process without what it had mapped in `lower`..`upper`, and what it advised of it for a child. -/
 def dropMappings (kernel : Kernel) (group lower upper : Nat) : Kernel :=
   let process := kernel.process group
-  if process.mappings.isEmpty then kernel
-  else kernel.setProcess group { process with mappings := process.mappings.flatMap (·.without lower upper) }
+  if process.mappings.isEmpty && process.forkAdvice.isEmpty then kernel
+  else kernel.setProcess group { process with mappings := process.mappings.flatMap (·.without lower upper)
+                                              forkAdvice := process.forkAdvice.flatMap (·.without lower upper) }
+
+/-- A process has `MADV_WIPEONFORK` or `MADV_DONTFORK`, as `wipe` says, in `lower`..`upper` if `on`, and otherwise hasn't, of
+`MADV_KEEPONFORK` and `MADV_DOFORK`. -/
+def adviseFork (kernel : Kernel) (group lower upper : Nat) (wipe on : Bool) : Kernel :=
+  let process := kernel.process group
+  let kept := process.forkAdvice.flatMap fun advice => if advice.wipe == wipe then advice.without lower upper else [advice]
+  kernel.setProcess group { process with forkAdvice := if on && lower < upper then { start := lower, size := upper - lower, wipe } :: kept else kept }
+
+/-- What a process advised of `lower`..`lower + size` for a child, at `start` instead, as `mremap` moves it. -/
+def movedAdvice (kernel : Kernel) (group lower size start : Nat) : List ForkAdvice :=
+  (kernel.process group).forkAdvice.filterMap fun advice =>
+    let first := max advice.start lower
+    let stop := min (advice.start + advice.size) (lower + size)
+    if first < stop then some { advice with start := start + (first - lower), size := stop - first } else none
 
 /-- A process has a mapping of a file now. -/
 def addMapping (kernel : Kernel) (group : Nat) (mapping : FileMapping) : Kernel :=

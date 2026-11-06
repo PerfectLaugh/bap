@@ -379,9 +379,14 @@ private def serveRemap (machine : Machine) (group old oldSize newSize flags targ
     match mapping with
     | some mapping => kernel.inodeBytes mapping.inode (offset + oldPages) (newPages - oldPages)
     | none => Jit.zeros (newPages - oldPages)
+  -- What was advised for a child goes with the pages, and stays where they were if they are kept there.
   let note (start : Nat) : IO Unit :=
     machine.kernel.modify fun kernel =>
-      let kernel := (kernel.dropMappings group old (old + oldPages)).dropMappings group start (start + newPages)
+      let advice := kernel.movedAdvice group old (min oldPages newPages) start
+      let kernel := if keep then kernel else kernel.dropMappings group old (old + oldPages)
+      let kernel := kernel.dropMappings group start (start + newPages)
+      let process := kernel.process group
+      let kernel := kernel.setProcess group { process with forkAdvice := advice ++ process.forkAdvice }
       match mapping with
       | some mapping => kernel.addMapping group (placed start mapping offset)
       | none => kernel
@@ -1321,6 +1326,13 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       if arg 0 % 4096 != 0 || !(advice ≤ 4 || (8 ≤ advice && advice ≤ 25) || advice == 100 || advice == 101) then
         pure (errorOf Errno.einval)
       else if !coversRange (← emu.regions.get) (arg 0) (arg 0 + pageUp (arg 1)) then pure (errorOf Errno.enomem)
+      -- `MADV_DONTFORK`, `MADV_DOFORK`, `MADV_WIPEONFORK` and `MADV_KEEPONFORK`, which a child of `fork` goes by. Only what is private
+      -- and anonymous can be wiped.
+      else if advice == 18 && (kernel.process group).mappings.any (·.overlaps (arg 0) (arg 0 + pageUp (arg 1))) then
+        pure (errorOf Errno.einval)
+      else if advice ∈ [10, 11, 18, 19] then
+        machine.kernel.set (kernel.adviseFork group (arg 0) (arg 0 + pageUp (arg 1)) (advice ≥ 18) (advice % 2 == 0))
+        pure (.returnValue 0)
       else serveAdvice machine group (arg 0) (arg 1) advice
     | .msync =>
       -- `MS_ASYNC`, `MS_INVALIDATE` and `MS_SYNC`, but not the first and the last. What a shared mapping wrote is in its file already.
@@ -2081,7 +2093,7 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
       wakePipeReaders emu
       machine.kernel.set (kernel.setProcess group { process with
         descriptors := process.descriptors.filter fun _ entry => !entry.closeOnExec
-        breakStart := top, breakEnd := top, command := arguments, environment, program := name, name := path, auxiliary, mappings := []
+        breakStart := top, breakEnd := top, command := arguments, environment, program := name, name := path, auxiliary, mappings := [], forkAdvice := []
         credentials })
       releaseVfork emu group
       machine.timers.executed group
@@ -2251,6 +2263,31 @@ private def builtinVersion (id : String) : Nat := (builtinModels.lookup id).getD
 /-- Where a word is to `futex` that is in the file of a shared mapping, which is no address space, of which there are as many as tasks. -/
 private def sharedFutexSpace : Nat := Kernel.fileSpace
 
+/-- Runs this as another thread, and comes back. Going there and back is a switch of threads to the emulator, which takes what threads
+hold exclusively and what is left of a turn, and nothing runs for it, so that those stay. -/
+private def inThread (emu : Emu) (target : ThreadId) (action : IO α) : IO α := do
+  let home ← thread emu
+  let width ← wordWidth emu
+  let monitorVar := exclusiveMonitor width
+  let monitorOf (id : ThreadId) : IO (Option Bap.Value) := do
+    match ← (threadReg emu id monitorVar).toBaseIO with
+    | .ok value => pure (some value)
+    | .error _ => pure none
+  let turn ← emu.turnUsed.get
+  let homeMonitor ← monitorOf home
+  let targetMonitor ← monitorOf target
+  let arrived ← emu.switchedIn.get
+  emu.switchedIn.set none
+  try
+    switchThread emu target
+    try action
+    finally switchThread emu home
+  finally
+    emu.switchedIn.set arrived
+    if let some value := homeMonitor then setThreadReg emu home monitorVar value
+    if let some value := targetMonitor then setThreadReg emu target monitorVar value
+    emu.turnUsed.set turn
+
 /-- What makes an emulator a machine: its kernel behind its system calls. None of it is in a checkpoint. -/
 private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel) (watch : Option (Nat → List Nat → IO Unit))
     (handler : Option SyscallHandler) (target : Nat) (models : List RuntimeModel) : IO Machine := do
@@ -2383,6 +2420,17 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   let _ ← serveTaskCalls emu
   let _ ← serveRest machine
   if architecture == .x86_64 || architecture == .i686 then serveCpu emu machine.kernel architecture.bits
+  -- What was advised for a child of `fork`: what it leaves out isn't mapped there, and what it wipes is zeros, but a child that has its
+  -- parent's memory, of `vfork`, has it as it is. This comes once the child is a process of the kernel.
+  emu.processHooks.modify ((fun _ child => do
+    let table ← emu.taskTable.get
+    let advice := ((← machine.kernel.get).process child).forkAdvice
+    if advice.isEmpty || table.spaceOf child == table.spaceOf (← thread emu) then return
+    machine.kernel.modify fun kernel =>
+      advice.foldl (fun kernel advice => if advice.wipe then kernel else kernel.dropMappings child advice.start (advice.start + advice.size)) kernel
+    inThread emu child do
+      for advice in advice do
+        if advice.wipe then clearMapped emu advice.start advice.size else unmap emu advice.start advice.size) :: ·)
   emu.processHooks.modify ((fun parent child => machine.kernel.modify (·.fork parent child)) :: ·)
   -- A new process has its own copy of the memory, and what is allocated in it.
   emu.processHooks.modify ((fun _ child => do
@@ -2570,9 +2618,8 @@ def Machine.stepBack (machine : Machine) (count : Nat := 1) : IO Unit := do
 
 /-! Memory of a guest for who runs it. -/
 
-/-- Runs this in the address space of a process, which is that of the thread that runs if it is of that process. Going there and back is
-a switch of threads to the emulator, which takes what threads hold exclusively and what is left of a turn, and a look at memory isn't
-to change what a guest does, so that those stay. It can't be done in the middle of an instruction. -/
+/-- Runs this in the address space of a process, which is that of the thread that runs if it is of that process, as `inThread` does, as a
+look at memory isn't to change what a guest does. It can't be done in the middle of an instruction. -/
 private def Machine.inProcess (machine : Machine) (pid : Option Nat) (action : IO α) : IO α := do
   let emu := machine.emu
   let home ← thread emu
@@ -2583,26 +2630,7 @@ private def Machine.inProcess (machine : Machine) (pid : Option Nat) (action : I
     | throw <| IO.userError s!"no running process {wanted}"
   if ← emu.serving.get then
     throw <| IO.userError "the memory of another process can't be reached in the middle of an instruction: stop the thread, and do it once the run returns"
-  let width ← wordWidth emu
-  let monitorVar := exclusiveMonitor width
-  let monitorOf (id : ThreadId) : IO (Option Bap.Value) := do
-    match ← (threadReg emu id monitorVar).toBaseIO with
-    | .ok value => pure (some value)
-    | .error _ => pure none
-  let turn ← emu.turnUsed.get
-  let homeMonitor ← monitorOf home
-  let targetMonitor ← monitorOf target.tid
-  let arrived ← emu.switchedIn.get
-  emu.switchedIn.set none
-  try
-    switchThread emu target.tid
-    try action
-    finally switchThread emu home
-  finally
-    emu.switchedIn.set arrived
-    if let some value := homeMonitor then setThreadReg emu home monitorVar value
-    if let some value := targetMonitor then setThreadReg emu target.tid monitorVar value
-    emu.turnUsed.set turn
+  inThread emu target.tid action
 
 /-- The bytes at a virtual address, of the process that runs or of the one given, as the program itself could read them: what isn't
 mapped or readable is an error. -/
@@ -2710,7 +2738,7 @@ def Machine.realloc (machine : Machine) (address size : Nat) (pid : Option Nat :
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 
 /-- What the bytes after the magic mean. -/
-def checkpointFormat : Nat := 17
+def checkpointFormat : Nat := 18
 
 /-- What this BAP does with a guest, which goes up when the same state could go on differently. A checkpoint is refused by a BAP
 of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/

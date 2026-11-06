@@ -98,8 +98,8 @@ def socketOfBytes (data : ByteArray) : Except String Socket := do
   Wire.expectEnd data at_
   pure { type, name, peer, listening, pending, waiting, incoming := incoming.toArray, readShut, writeShut, owner, family, remote }
 
-/-- Of a process, its process group, session, terminal, credentials and capabilities, limits and nice value, and whether it ended,
-as bytes. -/
+/-- Of a process, its process group, session, terminal, credentials and capabilities, limits and nice value, whether it ended, its root,
+the barriers it registered for and what it advised of its memory for a child, as bytes. -/
 def identityBytes (process : Process) : ByteArray :=
   let out := Wire.putOption Wire.putNat (Wire.putNat (Wire.putNat ByteArray.empty process.pgid) process.sid) process.terminal
   let ids := process.credentials
@@ -109,7 +109,8 @@ def identityBytes (process : Process) : ByteArray :=
   let out := Wire.putList (fun out (resource, soft, hard) => Wire.putNat (Wire.putNat (Wire.putNat out resource) soft) hard) out
     process.limits
   let out := Wire.putText (Wire.putNat (Wire.putFlag (Wire.putNat out process.nice) process.ended) process.root.inode) process.root.path
-  Wire.putNat out process.barriers
+  let out := Wire.putNat out process.barriers
+  Wire.putList (fun out advice => Wire.putFlag (Wire.putNat (Wire.putNat out advice.start) advice.size) advice.wipe) out process.forkAdvice
 
 /-- What `identityBytes` made, on a process that has the rest; nothing at all is what a process starts with. -/
 def withIdentity (process : Process) (data : ByteArray) : Except String Process := do
@@ -129,9 +130,14 @@ def withIdentity (process : Process) (data : ByteArray) : Except String Process 
   let (rootInode, at_) ← Wire.getNat data at_
   let (rootPath, at_) ← Wire.getText data at_
   let (barriers, at_) ← Wire.getNat data at_
+  let (forkAdvice, at_) ← Wire.getList (fun data at_ => do
+    let (start, at_) ← Wire.getNat data at_
+    let (size, at_) ← Wire.getNat data at_
+    let (wipe, at_) ← Wire.getFlag data at_
+    .ok ({ start, size, wipe : ForkAdvice }, at_)) data at_
   Wire.expectEnd data at_
   let id (index : Nat) : Nat := ids.getD index 0
-  pure { process with pgid, sid, terminal, limits, nice, ended, root := { inode := rootInode, path := rootPath }, barriers
+  pure { process with pgid, sid, terminal, limits, nice, ended, root := { inode := rootInode, path := rootPath }, barriers, forkAdvice
                       credentials := { uid := id 0, euid := id 1, suid := id 2, fsuid := id 3, gid := id 4, egid := id 5, sgid := id 6
                                        fsgid := id 7, groups, effective := id 8, permitted := id 9, inheritable := id 10
                                        bounding := id 11 } }

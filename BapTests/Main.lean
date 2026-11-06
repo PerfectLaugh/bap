@@ -187,6 +187,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "riscv64-linux-musl-libc-memcalls",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-mmaphint",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-mmaphint",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-forkmadv",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-forkmadv",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-ring",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-ring",
     Bap.Tests.Emu.testLinuxRaises "arm-linux-musl-libc-ring",

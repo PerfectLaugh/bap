@@ -1,0 +1,25 @@
+wipeonfork 0
+the child reads 0
+the parent still has 9
+the next page isn't wiped 9
+a grandchild reads, and the child has 0 5
+a child of vfork reads 9
+after mprotect the child reads 0
+moved, the parent has 9
+and the child reads 0
+keeponfork 0
+the child reads 9
+mapped again, the child reads 9
+wipeonfork of a shared mapping is EINVAL 1
+a file is mapped 1
+wipeonfork of a file mapping is EINVAL 1
+dontfork 0
+the child finds it unmapped 1
+the parent still has 9
+the next page is in the child 9
+dofork 0
+the child reads 9
+dontfork of a shared mapping 0
+the child finds it unmapped 1
+a program that runs doesn't wipe 9
+and it ended with 0
