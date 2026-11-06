@@ -192,8 +192,9 @@ inductive Content where
   | console (input : ByteArray)
   /-- What a generator of this name makes when it is opened, as the files of `/proc` are: see `addGenerated`. -/
   | generated (name : String)
-  /-- What has been written to a pipe, from where it hasn't been read yet, and how much has been read of all that was ever written. It lets go of what is read once that is half of it. -/
-  | pipe (buffer : ByteArray) (head consumed : Nat)
+  /-- What has been written to a pipe, from where it hasn't been read yet, how much has been read of all that was ever written, and how
+  many bytes it holds at most, which `F_SETPIPE_SZ` sets. It lets go of what is read once that is half of it. -/
+  | pipe (buffer : ByteArray) (head consumed capacity : Nat)
   /-- A socket, with all that it holds: see `Bap.Linux.Sockets`. -/
   | socket (socket : Socket)
   /-- Of `eventfd`: its count, and whether a read takes one of it, as `EFD_SEMAPHORE` has it, rather than all of it. -/
@@ -1091,11 +1092,11 @@ def read (kernel : Kernel) (group fd count : Nat) : Result (Kernel × ByteArray)
   let (id, file) ← openFileOf kernel group fd
   if file.flags &&& 3 == 1 then .error Errno.ebadf
   let inode ← inodeOf kernel file.inode
-  if let .pipe buffer head consumed := inode.content then
+  if let .pipe buffer head consumed capacity := inode.content then
     let bytes := buffer.extract head (head + count)
     let next := head + bytes.size
-    let content := if next * 2 ≥ buffer.size then Content.pipe (buffer.extract next buffer.size) 0 (consumed + bytes.size)
-      else .pipe buffer next (consumed + bytes.size)
+    let content := if next * 2 ≥ buffer.size then Content.pipe (buffer.extract next buffer.size) 0 (consumed + bytes.size) capacity
+      else .pipe buffer next (consumed + bytes.size) capacity
     return ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content } }, bytes)
   -- What a device gives: nothing of `null`, zeros of `zero` and `full`, and of `random`, bytes that are the same each time.
   if let .device kind := inode.content then
@@ -1123,7 +1124,7 @@ def readFrom (kernel : Kernel) (group fd count offset : Nat) : Result ByteArray 
   | .directory => .error Errno.eisdir
   | .symlink _ | .generated _ => .error Errno.einval
 
-/-- `write`, at the offset of the file, or at its end if it was opened to append. -/
+/-- `write`, at the offset of the file, or at its end if it was opened to append, and to a pipe, as much as it has room for. -/
 def write (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Result (Kernel × Nat) := do
   let (id, file) ← openFileOf kernel group fd
   if !writable file.flags then .error Errno.ebadf
@@ -1133,8 +1134,10 @@ def write (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Result (Kerne
   -- `full` has no room, and the others take all of it.
   | .device 2 => .error 28
   | .device _ => .ok (kernel, bytes.size)
-  | .pipe buffer head consumed =>
-    .ok ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content := .pipe (buffer ++ bytes) head consumed } }, bytes.size)
+  | .pipe buffer head consumed capacity =>
+    let bytes := bytes.extract 0 (capacity - (buffer.size - head))
+    .ok ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content := .pipe (buffer ++ bytes) head consumed capacity } },
+      bytes.size)
   | .file data =>
     let offset := if has file.flags oAppend then data.size else file.offset
     if let some errno := inode.writeRefused data.size offset bytes.size then .error errno
@@ -1192,7 +1195,7 @@ def writeKnown (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Kernel :
         inodes := kernel.inodes.alter number (·.map fun inode =>
           match inode with
           | inode@{ content := .file data, .. } => { inode with content := .file (writeInto data offset bytes) }.written clock
-          | inode@{ content := .pipe buffer head consumed, .. } => { inode with content := .pipe (buffer ++ bytes) head consumed }
+          | inode@{ content := .pipe buffer head consumed capacity, .. } => { inode with content := .pipe (buffer ++ bytes) head consumed capacity }
           | other => other) }
 
 /-- Where `pwrite` writes in a file of `size` bytes: at `offset`, or at its end if it was opened to append, as Linux has it, which
@@ -1283,6 +1286,12 @@ def close (kernel : Kernel) (group fd : Nat) : Result Kernel := do
   let some descriptor := process.descriptors.get? fd | .error Errno.ebadf
   .ok ((kernel.setProcess group { process with descriptors := process.descriptors.erase fd }).releaseLocks group descriptor.openFile)
 
+/-- How many bytes a new pipe holds at most, as Linux has it: 16 pages. -/
+def pipeCapacity : Nat := 65536
+
+/-- `PIPE_BUF`: a write to a pipe of at most this many bytes goes in all at once or not at all. -/
+def pipeBuf : Nat := 4096
+
 /-- `pipe2`: a pipe, and its descriptors, to read and to write. -/
 def pipe (kernel : Kernel) (group flags : Nat) : Kernel × Nat × Nat :=
   let number := kernel.nextInode
@@ -1291,7 +1300,7 @@ def pipe (kernel : Kernel) (group flags : Nat) : Kernel × Nat × Nat :=
   let kept := flags &&& oNonblock
   let kernel := { kernel with
     inodes := kernel.inodes.insert number
-      { number, content := .pipe ByteArray.empty 0 0, mode := 0o10600, details := kernel.madeBy (kernel.process group).credentials }
+      { number, content := .pipe ByteArray.empty 0 0 pipeCapacity, mode := 0o10600, details := kernel.madeBy (kernel.process group).credentials }
     nextInode := number + 1
     openFiles := (kernel.openFiles.insert reading { inode := number, flags := kept }).insert writing { inode := number, flags := 1 ||| kept }
     nextOpenFile := writing + 1 }
@@ -1385,8 +1394,35 @@ def nonblocking (kernel : Kernel) (group fd : Nat) : Bool :=
 /-- How much a pipe has to read. -/
 def pipeWaiting (kernel : Kernel) (number : Nat) : Nat :=
   match kernel.inodes.get? number with
-  | some { content := .pipe buffer head _, .. } => buffer.size - head
+  | some { content := .pipe buffer head _ _, .. } => buffer.size - head
   | _ => 0
+
+/-- How much more a pipe has room for. -/
+def pipeRoom (kernel : Kernel) (number : Nat) : Nat :=
+  match kernel.inodes.get? number with
+  | some { content := .pipe buffer head _ capacity, .. } => capacity - (buffer.size - head)
+  | _ => 0
+
+/-- `fcntl` with `F_GETPIPE_SZ`: how many bytes the pipe of a descriptor holds at most. What isn't a pipe is `EBADF`. -/
+def pipeSize (kernel : Kernel) (group fd : Nat) : Result Nat := do
+  let (_, file) ← openFileOf kernel group fd
+  match (← inodeOf kernel file.inode).content with
+  | .pipe _ _ _ capacity => .ok capacity
+  | _ => .error Errno.ebadf
+
+/-- `fcntl` with `F_SETPIPE_SZ`: the pipe of a descriptor holds at most `size` bytes, made a power of two of pages, as Linux has it, and
+gives that. More than 2^31 is `EINVAL`, more than `/proc/sys/fs/pipe-max-size`, 1 MiB, `EPERM` without `CAP_SYS_RESOURCE`, and less than
+what it holds `EBUSY`. -/
+def setPipeSize (kernel : Kernel) (group fd size : Nat) (privileged : Bool) : Result (Kernel × Nat) := do
+  let (_, file) ← openFileOf kernel group fd
+  let inode ← inodeOf kernel file.inode
+  let .pipe buffer head consumed _ := inode.content | .error Errno.ebadf
+  let size := size % 2 ^ 32
+  if size > 2 ^ 31 then .error Errno.einval
+  let size := (max size 4096).nextPowerOfTwo
+  if size > 1048576 && !privileged then .error Errno.eperm
+  if buffer.size - head > size then .error ebusy
+  .ok ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content := .pipe buffer head consumed size } }, size)
 
 /-- `dup`, and `fcntl` with `F_DUPFD`: the lowest free from `from_`, on the same open file. -/
 def dup (kernel : Kernel) (group fd : Nat) (from_ : Nat := 0) (closeOnExec : Bool := false) : Result (Kernel × Nat) := do

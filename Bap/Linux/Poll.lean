@@ -70,7 +70,8 @@ def readiness (kernel : Kernel) (live : List Nat) (now pending file : Nat) : Nat
             { read := kernel.pipeWaiting opened.inode > 0, hangup := !writers }
           else
             let readers := kernel.pipeHeld opened.inode live false
-            { write := readers, error := !readers }
+            -- It has room once a page of it is free, which Linux, which keeps a pipe in pages, has as a free one.
+            { write := readers && kernel.pipeRoom opened.inode ≥ Kernel.pipeBuf, error := !readers }
         | .socket socket =>
           if socket.listening then { read := !socket.pending.isEmpty }
           else if socket.type == 2 then { read := !socket.incoming.isEmpty, write := true }
@@ -109,7 +110,7 @@ def changes (kernel : Kernel) (file : Nat) : Nat :=
   | none => 0
   | some opened =>
     match kernel.inodes.get? opened.inode with
-    | some { content := .pipe buffer head consumed, .. } => if opened.flags &&& 3 == 0 then consumed + (buffer.size - head) else consumed
+    | some { content := .pipe buffer head consumed _, .. } => if opened.flags &&& 3 == 0 then consumed + (buffer.size - head) else consumed
     | some { content := .ptySlave master, .. } => ((kernel.inodes.get? master).map (·.details.changes)).getD 0
     | some inode => inode.details.changes
     | none => 0

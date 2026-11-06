@@ -1,0 +1,32 @@
+F_GETPIPE_SZ 65536
+write of 1 MiB 65536
+write to a full pipe -11
+POLLOUT of a full pipe 0
+F_SETPIPE_SZ smaller than what it holds -16
+read 4000
+POLLOUT with 4000 bytes free 0
+write of PIPE_BUF with 4000 bytes free -11
+read 96
+POLLOUT with a page free 1
+write of 5000 with a page free 4096
+read 4096
+write of PIPE_BUF with a page free 4096
+F_SETPIPE_SZ of 1 4096
+F_GETPIPE_SZ 4096
+tee to it 4096
+tee to it full -11
+F_SETPIPE_SZ of 8192 8192
+F_SETPIPE_SZ of 5000 8192
+F_SETPIPE_SZ of 65536 65536
+F_GETPIPE_SZ of what isn't a pipe -9
+writev of 80000 65536
+sendfile of 100000 65536
+sendfile to a full pipe -11
+splice with a page free 4096
+splice to a full pipe -11
+child wrote 200000
+parent read 200000 1
+write that a signal ends 65536 1
+write that a signal of SA_RESTART ends 4096 2
+broken writer 1 1 1
+broken writer ended 1

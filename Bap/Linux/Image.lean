@@ -290,7 +290,8 @@ def Kernel.image (kernel : Kernel) : Image where
       | .symlink target => (2, target.toUTF8)
       | .console input => (3, input)
       | .generated name => (4, name.toUTF8)
-      | .pipe buffer head consumed => (5, Wire.putBytes (Wire.putNat ByteArray.empty consumed) (buffer.extract head buffer.size))
+      | .pipe buffer head consumed capacity =>
+        (5, Wire.putNat (Wire.putBytes (Wire.putNat ByteArray.empty consumed) (buffer.extract head buffer.size)) capacity)
       | .socket socket => (6, socketBytes socket)
       | .eventfd count semaphore => (7, Wire.putFlag (Wire.putNat ByteArray.empty count) semaphore)
       | .timerfd expiry interval => (8, Wire.putNat (Wire.putOption Wire.putNat ByteArray.empty expiry) interval)
@@ -346,8 +347,9 @@ def Image.kernel (image : Image) : Except String Kernel := do
         | none => .error "a Linux checkpoint with a generator that isn't text"
       | 5 =>
         let (consumed, at_) ← Wire.getNat entry.data 0
-        let (buffer, _) ← Wire.getBytes entry.data at_
-        pure (Content.pipe buffer 0 consumed)
+        let (buffer, at_) ← Wire.getBytes entry.data at_
+        let (capacity, _) ← Wire.getNat entry.data at_
+        pure (Content.pipe buffer 0 consumed capacity)
       | 6 => pure (Content.socket (← socketOfBytes entry.data))
       | 7 =>
         let (count, at_) ← Wire.getNat entry.data 0

@@ -2516,7 +2516,7 @@ def scaling : IO Unit := do
     let second ← time mode ["2000", toString (small * 16)]
     assertTrue s!"{name} takes no longer for what is already there: {first} ms and {second} ms" (second ≤ 3 * max first 100 + 400)
   holds "writing to a file" "g" 1000000
-  holds "reading a pipe" "q" 1000000
+  holds "reading a pipe" "q" 60000
   -- What analyses a record does: it goes through the rounds, instructions and events of it a few times.
   let profile : Bap.Analysis.Cff.Profile := { dispatcher := 0x1000, state := .memory 0 4 }
   let recovering (rounds : Nat) : IO Nat := do

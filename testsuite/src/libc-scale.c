@@ -85,8 +85,9 @@ int main(int c, char **v) {
       for (int i = 0; i < n; i++) write(fd, &b, 1);
       break;
     }
-    case 'q': /* reads from a pipe that has this much */
+    case 'q': /* reads from a pipe that has this much, which it can hold up to a MiB of */
       pipe(ends);
+      fcntl(ends[1], 1031 /* F_SETPIPE_SZ */, 1 << 20);
       fill(ends[1], size);
       for (int i = 0; i < n; i++) read(ends[0], &b, 1);
       break;

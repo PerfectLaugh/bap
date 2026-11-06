@@ -56,7 +56,7 @@ private def take (kernel : Kernel) (group fd count : Nat) (offset : Option Nat) 
   pure (kernel, some bytes)
 
 /-- Bytes to a descriptor, as `sendfile` and `splice` give them: at `offset` if it says, and otherwise where the file is, or to the
-other end of a socket, or to a pipe that something reads. -/
+other end of a socket, or to a pipe that something reads, as much as it has room for. -/
 private def put (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Option Nat) (live : List Nat) : Result (Kernel × Nat) := do
   if let some at_ := offset then return ← kernel.writeTo group fd bytes at_
   if kernel.isSocket group fd then return ← kernel.send group fd { data := bytes } none (kernel.socketAlive · live)
@@ -198,12 +198,22 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     pure (some (if value ≥ 2 ^ (8 * size - 1) then value + 2 ^ 64 - 2 ^ (8 * size) else value))
   let moveOffset (address size : Nat) (start : Option Nat) (count : Nat) : IO Unit := do
     if let some start := start then write emu address (Abi.field big size (start + count))
-  -- Of `sendfile`, `splice` and `copy_file_range`: what goes from one to the other, at most 1 MiB at a time, from and to the offsets
-  -- that the call gives, which then move; or, while there is nothing yet, `EAGAIN` or a wait.
+  -- Of a pipe that a call writes to, whether it is full, as it then gives `EAGAIN` or waits: not one that nothing reads, which is
+  -- `EPIPE` of `put`.
+  let full (number : Nat) (live : List Nat) : Bool := kernel.pipeRoom number == 0 && kernel.pipeHeld number live false
+  -- Of `sendfile`, `splice` and `copy_file_range`: what goes from one to the other, at most 1 MiB at a time and what a pipe has room
+  -- for, from and to the offsets that the call gives, which then move; or, while there is nothing yet or no room, `EAGAIN` or a wait.
   let transfer (source target count : Nat) (from_ to : Option Nat) (nonblocking : Bool) (moved : Nat → IO Unit) :
       IO (Option SyscallAction) := do
     let live ← poller.live
-    match take kernel group source (min count 0x100000) from_ live with
+    let room ← match to, kernel.pipeOf group target with
+      | none, some number =>
+        if full number live then
+          if nonblocking || kernel.nonblocking group target then return ← fail Errno.eagain
+          return some (← poller.timers.waitUntil emu readySpace 0 none true)
+        pure (kernel.pipeRoom number)
+      | _, _ => pure 0x100000
+    match take kernel group source (min count (min room 0x100000)) from_ live with
     | .error errno => fail errno
     | .ok (_, none) => if nonblocking then fail Errno.eagain else pure (some (← poller.timers.waitUntil emu readySpace 0 none true))
     | .ok (taken, some bytes) =>
@@ -334,7 +344,10 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         if !kernel.pipeHeld input live true then return ← succeed
         if arg 3 &&& 2 != 0 || kernel.nonblocking group (arg 0) then return ← fail Errno.eagain
         return some (← poller.timers.waitUntil emu readySpace 0 none true)
-      let .some { content := .pipe buffer head _, .. } := kernel.inodes.get? input | fail Errno.einval
+      if full output live then
+        if arg 3 &&& 2 != 0 || kernel.nonblocking group (arg 0) || kernel.nonblocking group (arg 1) then return ← fail Errno.eagain
+        return some (← poller.timers.waitUntil emu readySpace 0 none true)
+      let .some { content := .pipe buffer head _ _, .. } := kernel.inodes.get? input | fail Errno.einval
       match put kernel group (arg 1) (buffer.extract head (head + min (arg 2) 0x100000)) none live with
       | .error errno => fail errno
       | .ok (next, count) =>

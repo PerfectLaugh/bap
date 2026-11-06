@@ -89,7 +89,7 @@ private def readBacking (machine : Machine) (number : Nat) (args : List Nat) : I
     | .error _ => pure none
     | .ok (_, file) =>
       match kernel.inodes.get? file.inode with
-      | some { content := .pipe _ _ consumed, .. } => pure (some (Kernel.fileSpace + file.inode, consumed, true))
+      | some { content := .pipe _ _ consumed _, .. } => pure (some (Kernel.fileSpace + file.inode, consumed, true))
       | some { content := .file _, .. } => pure (some (Kernel.fileSpace + file.inode, offset.getD file.offset, false))
       | _ => pure none
   | _ => pure none
@@ -106,7 +106,7 @@ private def callSends (machine : Machine) (opened : Opened) (number : Nat) (args
     | .error _ => pure none
     | .ok (_, file) =>
       match kernel.inodes.get? file.inode with
-      | some { content := .pipe buffer head consumed, .. } => pure (some (file.inode, consumed + (buffer.size - head), false))
+      | some { content := .pipe buffer head consumed _, .. } => pure (some (file.inode, consumed + (buffer.size - head), false))
       | some { content := .file data, .. } =>
         let appends := file.flags &&& 0x400 != 0
         pure (some (file.inode, if appends then data.size else file.offset, appends))

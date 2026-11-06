@@ -505,9 +505,56 @@ private def numberAt (bytes : ByteArray) (offset size : Nat) (big : Bool) : Nat 
     value + bytes[at_]!.toNat * 256 ^ index) 0
 
 /-- A call that has to wait for what happens to the inode `number`: it stops here and runs again when something changes, with its
-registers as they were, as a read of a pipe does, or, of a signal, as `Timers.interrupted` says. -/
-private def waitOn (machine : Machine) (emu : Emu) (number : Nat) : IO SyscallAction :=
-  machine.timers.waitUntil emu (pipeSpace + number) 0 none true
+registers as they were, as a read of a pipe does, having `written` bytes of a write already, or, of a signal, as `Timers.interrupted`
+says. -/
+private def waitOn (machine : Machine) (emu : Emu) (number : Nat) (written : Nat := 0) : IO SyscallAction :=
+  machine.timers.waitUntil emu (pipeSpace + number) 0 none true written
+
+/-- `SIGPIPE`, which is 13 on every architecture, to the thread that runs, of a write to what nothing reads any more. -/
+private def sendBrokenPipe (machine : Machine) (emu : Emu) (group : Nat) : IO Unit := do
+  let kernel ← machine.kernel.get
+  machine.signals.send emu (some (← thread emu)) group ⟨13, 0, .sent group (kernel.process group).credentials.uid 0⟩
+
+/-- A write of `count` bytes to the pipe `number` of a descriptor, which `bytesAt` gives from an offset in them, as Linux has it: of at
+most `PIPE_BUF` bytes, all of them at once, and of more, as much as there is room for; while there is no room for that, `EAGAIN`, or,
+if it may `wait`, a wait for a reader, after which it goes on with what is left until all of it is written. What it wrote before it
+waited the site of its call has (`Timers.written`), which it gives if a signal ends the wait, or with `SIGPIPE` if the readers go.
+Linux keeps a pipe in pages, so that what it has room for is a little less, at times, than here. -/
+private def writePipe (machine : Machine) (emu : Emu) (group fd number count : Nat) (bytesAt : Nat → Nat → IO ByteArray) (wait : Bool) :
+    IO SyscallAction := do
+  let kernel ← machine.kernel.get
+  if let some errno := kernel.writeError group fd count then return errorOf errno
+  let done ← if wait then machine.timers.written emu else pure 0
+  let finished (value : Nat) : IO SyscallAction := do
+    if wait then machine.timers.finish (← thread emu)
+    pure (.returnValue value)
+  let live := ((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups
+  if !kernel.pipeHeld number live false then
+    if done == 0 then return errorOf Errno.epipe
+    sendBrokenPipe machine emu group
+    return ← finished done
+  let room := kernel.pipeRoom number
+  let piece := min room (count - done)
+  if piece < count - done && (piece == 0 || count ≤ Kernel.pipeBuf) then
+    return ← if wait then waitOn machine emu number done else pure (errorOf Errno.eagain)
+  match ← (bytesAt done piece).toBaseIO with
+  | .error _ => if done > 0 then finished done else pure (errorOf Errno.efault)
+  | .ok bytes =>
+    machine.kernel.modify (·.writeKnown group fd bytes)
+    wakePipeReaders emu
+    if done + piece == count || !wait then finished (done + piece) else waitOn machine emu number (done + piece)
+
+/-- `writev` to the pipe `number` of a descriptor, of what its `count` pieces at `address` have together, as `writePipe` has it. -/
+private def writeVectorPipe (machine : Machine) (emu : Emu) (group fd number address count : Nat) (wait : Bool) : IO SyscallAction := do
+  let word := machine.architecture.bits / 8
+  let gathered : IO ByteArray := do
+    let entries ← read emu address (2 * word * count)
+    let field (offset : Nat) : Nat := numberAt entries offset word machine.architecture.big
+    (List.range count).foldlM (init := ByteArray.empty) fun out index => do
+      pure (out ++ (← read emu (field (2 * word * index)) (field (2 * word * index + word))))
+  match ← gathered.toBaseIO with
+  | .error _ => pure (errorOf Errno.efault)
+  | .ok bytes => writePipe machine emu group fd number bytes.size (fun at_ size => pure (bytes.extract at_ (at_ + size))) wait
 
 /-- The name in a `struct sockaddr` of `size` bytes. Of `sockaddr_un`, a path, to its first zero, or a name of its own, which starts with
 one, and of `sockaddr_in` and `sockaddr_in6`, an address of the Internet as a socket has it as its name. -/
@@ -924,18 +971,16 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       | .error errno => pure (errorOf errno)
       | .ok (next, bytes) =>
         machine.kernel.set next
+        -- A writer that waits for room has some.
+        if bytes.size > 0 && (kernel.pipeOf group fd).isSome then wakePipeReaders emu
         returning emu address bytes bytes.size
     let writeOut (fd address count : Nat) : IO SyscallAction := do
       let current ← machine.kernel.get
-      let toPipe := current.pipeOf group fd
-      if let some number := toPipe then
-        if !current.pipeHeld number (← liveGroups) false then return errorOf Errno.epipe
+      if let some number := current.pipeOf group fd then
+        return ← writePipe machine emu group fd number count (fun at_ size => read emu (address + at_) size) !(current.nonblocking group fd)
       match ← (read emu address count).toBaseIO with
       | .error _ => pure (errorOf Errno.efault)
-      | .ok bytes =>
-        let action ← applyNat machine (·.write group fd bytes)
-        if toPipe.isSome then wakePipeReaders emu
-        pure action
+      | .ok bytes => applyNat machine (·.write group fd bytes)
     let statAt (directory address out : Nat) (follow : Bool) : IO SyscallAction :=
       at_ directory address fun from_ path =>
         match kernel.statPath from_ path follow with
@@ -946,7 +991,14 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       machine.kernel.set next
       returning emu out (Abi.time now scale big wordSize)
     -- Anonymous and private is for `serveTaskCalls`, once what it takes the place of isn't mapped.
-    let rings : Ring.Rings := { poller, state := machine.rings, perform := kernelCall machine emu }
+    -- What an io_uring writes to a pipe doesn't wait: it is what there is room for.
+    let perform (call : Call) (args : List Nat) : IO SyscallAction := do
+      let fd := args.getD 0 0
+      match call, (← machine.kernel.get).pipeOf group fd with
+      | .write, some number => writePipe machine emu group fd number (args.getD 2 0) (fun at_ size => read emu (args.getD 1 0 + at_) size) false
+      | .writev, some number => writeVectorPipe machine emu group fd number (args.getD 1 0) (args.getD 2 0) false
+      | _, _ => kernelCall machine emu call args
+    let rings : Ring.Rings := { poller, state := machine.rings, perform }
     let mapMemory (offset : Nat) : IO SyscallAction := do
       -- The rings of an io_uring.
       if arg 3 &&& architecture.mapAnonymous == 0 then
@@ -1133,7 +1185,9 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       | none => vectors (arg 0) (arg 1) (arg 2) readInto
     | .writev =>
       if isObject (arg 0) then vectors (arg 0) (arg 1) (arg 2) fun fd address count => kernelCall machine emu .write [fd, address, count]
-      else vectors (arg 0) (arg 1) (arg 2) writeOut
+      else match kernel.pipeOf group (arg 0) with
+        | some number => writeVectorPipe machine emu group (arg 0) number (arg 1) (arg 2) !(kernel.nonblocking group (arg 0))
+        | none => vectors (arg 0) (arg 1) (arg 2) writeOut
     | .preadv | .pwritev => atOffset (arg 0) (arg 1) (arg 2) vectorOffset (call == .pwritev)
     | .preadv2 | .pwritev2 =>
       -- Of the flags, `RWF_HIPRI`, `RWF_DSYNC` and `RWF_SYNC` are of a disk, which there is none of, and the others aren't here.
@@ -1166,6 +1220,11 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
           | .error errno => errorOf errno
           | .ok value => .returnValue (architecture.guestFlags value))
       | 4 => apply machine (·.setFlags group (arg 0) (architecture.openFlags (arg 2)))
+      | 1031 => applyNat machine (·.setPipeSize group (arg 0) (arg 2) ((kernel.process group).credentials.capable Capability.sysResource))
+      | 1032 =>
+        pure (match kernel.pipeSize group (arg 0) with
+          | .error errno => errorOf errno
+          | .ok value => .returnValue value)
       | 1033 => apply machine (·.addSeals group (arg 0) (arg 2))
       | 1034 =>
         pure (match kernel.seals group (arg 0) with
@@ -1521,16 +1580,13 @@ private def refreshProc (machine : Machine) (emu : Emu) (call : Call) (args : Li
 /-- `write`, on its own: nothing here holds on to the kernel, so that a program that writes a little at a time doesn't have what it wrote before copied each time. -/
 private def writeDirect (machine : Machine) (emu : Emu) (group fd address count : Nat) : IO SyscallAction := do
   let current ← machine.kernel.get
+  if let some number := current.pipeOf group fd then
+    return ← writePipe machine emu group fd number count (fun at_ size => read emu (address + at_) size) !(current.nonblocking group fd)
   if let some errno := current.writeError group fd count then return errorOf errno
-  let toPipe := current.pipeOf group fd
-  if let some number := toPipe then
-    let live := ((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups
-    if !current.pipeHeld number live false then return errorOf Errno.epipe
   match ← (read emu address count).toBaseIO with
   | .error _ => pure (errorOf Errno.efault)
   | .ok bytes =>
     machine.kernel.modify (·.writeKnown group fd bytes)
-    if toPipe.isSome then wakePipeReaders emu
     pure (.returnValue bytes.size)
 
 /-- `pwrite`, on its own, as `writeDirect` is. -/
@@ -1544,6 +1600,9 @@ private def writeDirectAt (machine : Machine) (emu : Emu) (group fd address coun
 
 /-- `writev`, by `writeDirect`. -/
 private def writeVectorDirect (machine : Machine) (emu : Emu) (group fd address count : Nat) : IO SyscallAction := do
+  let current ← machine.kernel.get
+  if let some number := current.pipeOf group fd then
+    return ← writeVectorPipe machine emu group fd number address count !(current.nonblocking group fd)
   let word := machine.architecture.bits / 8
   let big := machine.architecture.big
   let mut total := 0
@@ -1604,8 +1663,8 @@ private def descriptorLimit (machine : Machine) (group : Nat) (call : Call) (arg
       else if free (arg 2 % 2 ^ 32) ≥ limit then some (errorOf Errno.emfile) else none
     | _ => none
 
-/-- A write that finds that nothing reads what it writes to any more, a pipe or a socket of a stream, sends `SIGPIPE`, which is 13 on
-every architecture, to the thread that made it, as `write`, `writev`, `pwritev2` at the offset of the file, `send`, `sendto`, `sendmsg`,
+/-- A write that finds that nothing reads what it writes to any more, a pipe or a socket of a stream, sends `SIGPIPE` to the thread that
+made it, as `write`, `writev`, `pwritev2` at the offset of the file, `send`, `sendto`, `sendmsg`,
 `sendfile`, `splice` and `tee` do that give `EPIPE`, unless a send says `MSG_NOSIGNAL`. The call gives `EPIPE` all the same, if the
 signal doesn't end the process. -/
 private def brokenPipe (machine : Machine) (emu : Emu) (group : Nat) (call : Call) (args : List Nat) (action : SyscallAction) :
@@ -1626,7 +1685,7 @@ private def brokenPipe (machine : Machine) (emu : Emu) (group : Nat) (call : Cal
   -- A socket of datagrams or of packets that can't send says so and no more.
   if let .ok (_, socket) := kernel.socketOf group fd then
     if socket.type != 1 then return
-  machine.signals.send emu (some (← thread emu)) group ⟨13, 0, .sent group (kernel.process group).credentials.uid 0⟩
+  sendBrokenPipe machine emu group
 
 private def serveKernelCalls (machine : Machine) : IO HookId :=
   onSyscall machine.emu fun emu number args => do
@@ -2255,7 +2314,7 @@ and those that stopped for their end, 3 the exits that tracers that aren't paren
 each tracee last started, 6 what a tracer said a call that a tracee is stopped at the start of is to be, and 7 the processes that are
 over that no one waits for. -/
 private def builtinModels : List (String × Nat) :=
-  [(Signals.modelId, 2), (Ptrace.modelId, 7), (Seccomp.modelId, 1), (Timers.modelId, 1), (Ring.modelId, 1), (heapModelId, 1), (libraryModelId, 1),
+  [(Signals.modelId, 2), (Ptrace.modelId, 7), (Seccomp.modelId, 1), (Timers.modelId, 2), (Ring.modelId, 1), (heapModelId, 1), (libraryModelId, 1),
     (traceModelId, 4)]
 
 private def builtinVersion (id : String) : Nat := (builtinModels.lookup id).getD 1
@@ -2738,7 +2797,7 @@ def Machine.realloc (machine : Machine) (address size : Nat) (pid : Option Nat :
 private def checkpointMagic : ByteArray := "BAPLINUX".toUTF8
 
 /-- What the bytes after the magic mean. -/
-def checkpointFormat : Nat := 18
+def checkpointFormat : Nat := 19
 
 /-- What this BAP does with a guest, which goes up when the same state could go on differently. A checkpoint is refused by a BAP
 of another, as nothing else tells two builds apart: the sources that it was built from aren't known to it when it runs. -/

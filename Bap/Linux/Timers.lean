@@ -45,6 +45,8 @@ structure Site where
   restartable : Bool
   /-- Of MIPS, what `a3` had, which is an argument of the call and where an error is said, as the call runs again. -/
   flag : Nat := 0
+  /-- Of a write to a pipe that waits for room for the rest, how much of it it wrote, which it doesn't again and gives if it ends here. -/
+  written : Nat := 0
   deriving Repr
 
 /-- The timers, by the process and which they are: 0 to 2 of `setitimer` and `3 + id` of `timer_create`, the next id of
@@ -179,10 +181,16 @@ def again (timers : Timers) (emu : Emu) : IO Bool := do
   let next ← emu.nextPc.get
   pure (((← timers.state.get).sites.get? (← thread emu)).any (·.next == next))
 
+/-- How much the write that runs again where it waited wrote before, as `waitUntil` was told, or 0. -/
+def written (timers : Timers) (emu : Emu) : IO Nat := do
+  let next ← emu.nextPc.get
+  pure ((((← timers.state.get).sites.get? (← thread emu)).filter (·.next == next)).map (·.written) |>.getD 0)
+
 /-- The thread that runs waits in `space`, for `address`, until something wakes it there or its deadline comes, if it has one, and
-then runs its call again, with its registers as they were. A signal that comes first has it run again or give `EINTR`, as
-`restartable` says of a handler of `SA_RESTART`: see `interrupted`. -/
-def waitUntil (timers : Timers) (emu : Emu) (space address : Nat) (deadline : Option Nat) (restartable : Bool) : IO SyscallAction := do
+then runs its call again, with its registers as they were, having `written` bytes of a write already. A signal that comes first has it
+run again or give `EINTR`, as `restartable` says of a handler of `SA_RESTART`, or give what it wrote: see `interrupted`. -/
+def waitUntil (timers : Timers) (emu : Emu) (space address : Nat) (deadline : Option Nat) (restartable : Bool) (written : Nat := 0) :
+    IO SyscallAction := do
   let tid ← thread emu
   let action ← Ptrace.again emu
   let result := match action with
@@ -194,14 +202,15 @@ def waitUntil (timers : Timers) (emu : Emu) (space address : Nat) (deadline : Op
       | .ok bits => pure bits.2.toNat
       | .error _ => pure 0
     else pure 0
-  timers.state.modify fun state => { state with sites := state.sites.insert tid { next, result, restartable, flag } }
+  timers.state.modify fun state => { state with sites := state.sites.insert tid { next, result, restartable, flag, written } }
   emu.taskTable.modify (·.futexWait { thread := tid, space, address, bitset := 2 ^ 32 - 1, deadline })
   emu.stopped.set true
   pure action
 
 /-- A signal woke a thread from what it waited in. Of a call that runs again, which waited from `2 ^ 61` to the space of shared
-futexes: it runs again with the registers that it had, of a handler of `SA_RESTART` and a call that it restarts, and otherwise goes
-on past the call with `EINTR`, which the signals gave it, and its deadline is gone either way. -/
+futexes: a write that wrote some of what it was given goes on past the call with that, and otherwise it runs again with the registers
+that it had, of a handler of `SA_RESTART` and a call that it restarts, or goes on past the call with `EINTR`, which the signals gave it,
+and its deadline is gone either way. -/
 def interrupted (timers : Timers) (emu : Emu) (tid : Nat) (restart : Bool) (spaces : List Nat) : IO Unit := do
   -- A sleep that a signal ended has what was left of it then.
   if spaces.contains sleepSpace then
@@ -211,7 +220,10 @@ def interrupted (timers : Timers) (emu : Emu) (tid : Nat) (restart : Bool) (spac
   unless spaces.any fun space => 2 ^ 61 ≤ space && space < Kernel.fileSpace do return
   let some site := (← timers.state.get).sites.get? tid | return
   timers.finish tid
-  if restart && site.restartable then
+  if site.written > 0 then
+    setSyscallResult emu tid (.ok site.written)
+    setThreadPc emu tid site.next
+  else if restart && site.restartable then
     let width := timers.architecture.bits
     let (_, _, register) := syscallRegisters emu.config.syscallAbi
     setThreadReg emu tid ⟨register, .imm width, 0, false⟩ (.bits (BitVec.ofNat width site.result))
@@ -387,7 +399,8 @@ def save (timers : Timers) : IO ByteArray := do
   let pair (out : ByteArray) (entry : Nat × Nat) : ByteArray := putNat (putNat out entry.1) entry.2
   let out := putSorted pair out state.nextTimer.toList
   let out := putSorted pair out state.deadlines.toList
-  let out := putSorted (fun out (tid, site) => putNat (putFlag (putNat (putNat (putNat out tid) site.next) site.result) site.restartable) site.flag) out
+  let out := putSorted (fun out (tid, site) =>
+    putNat (putNat (putFlag (putNat (putNat (putNat out tid) site.next) site.result) site.restartable) site.flag) site.written) out
     state.sites.toList
   pure (putSorted (fun out (tid, deadline, address, field, left) =>
     putOption putNat (putNat (putNat (putNat (putNat out tid) deadline) address) field) left) out state.sleeps.toList)
@@ -408,7 +421,8 @@ def load (timers : Timers) (data : ByteArray) : IO Unit := do
       let (result, at_) ← getNat data at_
       let (restartable, at_) ← getFlag data at_
       let (flag, at_) ← getNat data at_
-      .ok ((tid, { next, result, restartable, flag }), at_)) data at_
+      let (written, at_) ← getNat data at_
+      .ok ((tid, { next, result, restartable, flag, written }), at_)) data at_
     let (sleeps, at_) ← getList (fun data at_ => do
       let (tid, at_) ← getNat data at_
       let (deadline, at_) ← getNat data at_
