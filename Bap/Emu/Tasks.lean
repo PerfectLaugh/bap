@@ -263,6 +263,7 @@ private def echild : Nat := 10
 private def enomem : Nat := 12
 private def efault : Nat := 14
 private def einval : Nat := 22
+private def eexist : Nat := 17
 private def esrch : Nat := 3
 /-- The numbers of MIPS differ for these. -/
 private def enosys (emu : Emu) : Nat := if isMips emu then 89 else 38
@@ -543,6 +544,25 @@ def freeAddress (emu : Emu) (size : Nat) : IO Nat := do
   let top := (← emu.mappingTop.get).getD base
   go (tree.size + 1) top top true
 
+/-- Where a hint can put a mapping, as Linux has it: from its `mmap_min_addr` up to its `TASK_SIZE`. -/
+private def hintFloor : Nat := 0x10000
+private def hintCeiling (width : Nat) : Nat := if width == 32 then 2 ^ 31 else 2 ^ 47
+
+/-- Where `mmap` puts `pages` for `address` and `flags`, as Linux does, and whether that is over what is there: with `MAP_FIXED` at
+`address`, and with `MAP_FIXED_NOREPLACE` there if nothing is, which is `EEXIST` otherwise, each `EINVAL` if it isn't at a page;
+otherwise `address` is a hint, which is taken, down to its page, if nothing is there and a mapping can be, and anywhere else is if not. -/
+def mmapPlace (emu : Emu) (address pages flags : Nat) : IO (Except Nat (Nat × Bool)) := do
+  let noReplace := flags &&& 0x100000 != 0
+  if flags &&& 0x10 != 0 || noReplace then
+    if address % 4096 != 0 then return .error einval
+    if noReplace && !(← regionsTouching emu address pages).isEmpty then return .error eexist
+    return .ok (address, true)
+  let hint := address / 4096 * 4096
+  let hint := if hint == 0 then 0 else max hint hintFloor
+  if hint != 0 && hint + pages ≤ hintCeiling (← wordWidth emu) && (← regionsTouching emu hint pages).isEmpty then
+    return .ok (hint, true)
+  return .ok (0, false)
+
 private def protectionOf (bits : Nat) : Primus.Protection := ⟨bits &&& 1 != 0, bits &&& 2 != 0, bits &&& 4 != 0⟩
 
 /-- Places a mapping of `pages` of `data`: at `address` if it is fixed, over what was there, and anywhere else if not. -/
@@ -561,7 +581,6 @@ def placeZeros (emu : Emu) (address : Nat) (fixed : Bool) (size bits : Nat) : IO
 
 /-- `mmap` of anonymous memory, which is what the stacks of threads are. -/
 private def serveMmap (emu : Emu) (address size bits flags : Nat) : IO SyscallAction := do
-  let fixed := flags &&& 0x10 != 0
   let anonymous := flags &&& (if isMips emu then 0x800 else 0x20) != 0
   if !anonymous then
     syscallReturn emu (.error (enosys emu))
@@ -569,9 +588,12 @@ private def serveMmap (emu : Emu) (address size bits flags : Nat) : IO SyscallAc
     syscallReturn emu (.error einval)
   else
     let pages := (size + 4095) / 4096 * 4096
-    try
-      syscallReturn emu (.ok (← placeZeros emu address fixed pages bits))
-    catch _ => syscallReturn emu (.error enomem)
+    match ← mmapPlace emu address pages flags with
+    | .error errno => syscallReturn emu (.error errno)
+    | .ok (start, fixed) =>
+      try
+        syscallReturn emu (.ok (← placeZeros emu start fixed pages bits))
+      catch _ => syscallReturn emu (.error enomem)
 
 /-- `mprotect`. -/
 private def serveProtect (emu : Emu) (address size bits : Nat) : IO SyscallAction := do

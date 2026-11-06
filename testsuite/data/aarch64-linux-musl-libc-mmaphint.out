@@ -1,0 +1,15 @@
+noreplace anonymous at the address 1
+noreplace over a mapping is EEXIST 1
+noreplace over part of one is EEXIST 1
+noreplace off a page is EINVAL 1
+noreplace shared at the address 1
+hint anonymous 1
+hint shared 1
+hint off a page is its page 1
+hint file 1 1
+noreplace file at the address 1 1
+noreplace file over a mapping is EEXIST 1
+hint file over a mapping is not the hint 1
+hint over a mapping is not the hint 1
+what noreplace mapped is kept 7
+fixed over a mapping at the address 1 0

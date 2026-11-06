@@ -264,13 +264,15 @@ private def wakePipeReaders (emu : Emu) : IO Unit := do
 /-- `mmap`: of a file, here, of which a shared one writes back. What is anonymous is for `serveTaskCalls`. -/
 private def serveFileMap (machine : Machine) (group address size bits flags fd offset : Nat) : IO SyscallAction := do
   let emu := machine.emu
-  let fixed := flags &&& 0x10 != 0
-  if size == 0 || offset % 4096 != 0 || flags &&& 3 == 0 || (fixed && address % 4096 != 0) then
+  if size == 0 || offset % 4096 != 0 || flags &&& 3 == 0 then
     return errorOf Errno.einval
   let kernel ← machine.kernel.get
   match kernel.mappingSource group fd with
   | .error errno => pure (errorOf errno)
   | .ok (inode, canRead, canWrite) =>
+    let (address, fixed) ← match ← mmapPlace emu address (pageUp size) flags with
+      | .ok place => pure place
+      | .error errno => return errorOf errno
     let shared := mapsShared flags
     if !canRead || (shared && bits &&& 2 != 0 && !canWrite) then
       return errorOf Errno.eacces
@@ -290,10 +292,12 @@ private def serveFileMap (machine : Machine) (group address size bits flags fd o
 
 /-- `mmap` of memory that a child goes on sharing, which is a file that nothing else can open. -/
 private def serveSharedMemory (machine : Machine) (group address size bits flags : Nat) : IO SyscallAction := do
-  let fixed := flags &&& 0x10 != 0
-  if size == 0 || (fixed && address % 4096 != 0) then
+  if size == 0 then
     return errorOf Errno.einval
   let pages := pageUp size
+  let (address, fixed) ← match ← mmapPlace machine.emu address pages flags with
+    | .ok place => pure place
+    | .error errno => return errorOf errno
   try
     let start ← placeZeros machine.emu address fixed pages bits
     machine.kernel.modify fun kernel =>
@@ -947,7 +951,8 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       else if mapsShared (arg 3) then
         serveSharedMemory machine group (arg 0) (arg 1) (arg 2) (arg 3)
       else
-        if arg 3 &&& 0x10 != 0 then
+        -- `MAP_FIXED` without `MAP_FIXED_NOREPLACE`, which replaces nothing.
+        if arg 3 &&& 0x100010 == 0x10 then
           machine.kernel.modify (·.dropMappings group (arg 0) (arg 0 + pageUp (arg 1)))
         pure .default
     let vectors (fd address count : Nat) (action : Nat → Nat → Nat → IO SyscallAction) : IO SyscallAction := do
