@@ -2947,6 +2947,56 @@ def run (emu : Emu) (maxSteps : Nat := 100000) : IO Nat :=
         (rangeCells emu).chained maxSteps maxSteps 0)
       (step emu) (rangeAgainM (rangeCells emu)) (maxSteps + 1)
 
+/-- What running some instructions takes, the first time and again: how many ran, how long they took and so how many a second, how many
+were lifted and how long that took, of each time, and the most memory of the host that the process has had, in KiB, as Linux says it
+(`VmHWM`), if it does. Lean frees memory as it goes, by counting references, so there is no time of a collector to say. -/
+structure Measurement where
+  instructions : Nat
+  coldNanos : Nat
+  warmNanos : Nat
+  coldLifts : Nat
+  warmLifts : Nat
+  coldLiftNanos : Nat
+  warmLiftNanos : Nat
+  peakResidentKiB : Option Nat
+  deriving Repr
+
+private def perSecond (instructions nanos : Nat) : Nat := if nanos == 0 then 0 else instructions * 1000000000 / nanos
+
+def Measurement.coldPerSecond (measurement : Measurement) : Nat := perSecond measurement.instructions measurement.coldNanos
+def Measurement.warmPerSecond (measurement : Measurement) : Nat := perSecond measurement.instructions measurement.warmNanos
+
+def Measurement.text (measurement : Measurement) : String :=
+  s!"instructions: {measurement.instructions}\n" ++
+  s!"cold: {measurement.coldPerSecond}/s, {measurement.coldLifts} lifts in {measurement.coldLiftNanos / 1000} us\n" ++
+  s!"warm: {measurement.warmPerSecond}/s, {measurement.warmLifts} lifts in {measurement.warmLiftNanos / 1000} us\n" ++
+  s!"peak resident: {(measurement.peakResidentKiB.map (s!"{·} KiB")).getD "unknown"}"
+
+/-- The most memory of the host that this process has had, in KiB, as Linux says it, if it does. -/
+def peakResidentKiB : IO (Option Nat) := do
+  try
+    let status ← IO.FS.readFile "/proc/self/status"
+    pure <| (status.splitOn "\n").findSome? fun line =>
+      if line.startsWith "VmHWM:" then ((line.drop 6).trimAscii.toString.splitOn " ").head?.bind (·.toNat?) else none
+  catch _ => pure none
+
+/-- Runs at most `steps` instructions from where the emulator is, twice: the first time, with whatever it has lifted already, and again
+from the same place, by a snapshot, with what the first lifted, which a restore keeps. It is left where the second run ended. -/
+def measure (emu : Emu) (steps : Nat) : IO Measurement := do
+  let saved ← snapshot emu
+  let once : IO (Nat × Nat × Nat × Nat) := do
+    let before ← Primus.Lifted.stats emu.engine
+    let start ← IO.monoNanosNow
+    let ran ← run emu steps
+    let took := (← IO.monoNanosNow) - start
+    let after ← Primus.Lifted.stats emu.engine
+    pure (ran, took, after.lifts - before.lifts, after.liftNanos - before.liftNanos)
+  let (instructions, coldNanos, coldLifts, coldLiftNanos) ← once
+  restore emu saved
+  let (_, warmNanos, warmLifts, warmLiftNanos) ← once
+  pure { instructions, coldNanos, warmNanos, coldLifts, warmLifts, coldLiftNanos, warmLiftNanos
+         peakResidentKiB := ← peakResidentKiB }
+
 private def switchNextThread (emu : Emu) : IO Bool := do
   saveCurrentThread emu
   let current ← thread emu
@@ -3172,6 +3222,7 @@ def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
         emu.engine.statistics.set (statistics.foldl (init := previous) fun total current => {
           cacheHits := total.cacheHits + current.cacheHits
           lifts := total.lifts + current.lifts
+          liftNanos := total.liftNanos + current.liftNanos
           nativeCompilations := total.nativeCompilations + current.nativeCompilations
           nativeRuns := total.nativeRuns + current.nativeRuns
           interpretedRuns := total.interpretedRuns + current.interpretedRuns

@@ -2565,6 +2565,31 @@ def testTraceWatches : IO Unit := do
   assertEqual "and so it is as it is loaded again" 1 again.accessesHeard
   expectThrow "A range that ends before it starts is refused" (Bap.Emu.traceStartWith emu { accessCapacity := 4, watches := [(8, 4)] })
 
+/-- What running takes, the first time and again, and what changing the bytes of an instruction that was lifted takes: it is lifted again,
+and runs as it is now. -/
+def testMeasure : IO Unit := do
+  let code ← LLVM.assemble "riscv64" "addi a0, a0, 1\nj -4"
+  let emu ← Bap.Emu.riscv64 code 0 0
+  let a0 : Bap.Var := ⟨"X10", .imm 64, 0, false⟩
+  Bap.Emu.setReg emu a0 (.bits (BitVec.ofNat 64 0))
+  let measurement ← Bap.Emu.measure emu 1000
+  assertEqual "Measure runs what it was asked to" 1000 measurement.instructions
+  assertTrue "and lifts the first time" (measurement.coldLifts > 0)
+  assertTrue s!"and less again, with what it lifted: {measurement.coldLifts} then {measurement.warmLifts}"
+    (measurement.warmLifts < measurement.coldLifts)
+  assertTrue "and says the most memory that the process had" measurement.peakResidentKiB.isSome
+  -- Other bytes at an address that was lifted: lifted again, and run as they are.
+  let before ← Primus.Lifted.stats emu.engine
+  Bap.Emu.write emu 0 (← LLVM.assemble "riscv64" "addi a0, a0, 2")
+  Bap.Emu.setReg emu a0 (.bits (BitVec.ofNat 64 0))
+  Bap.Emu.setPc emu 0
+  let _ ← Bap.Emu.run emu 10
+  let after ← Primus.Lifted.stats emu.engine
+  assertTrue "Other bytes at an address that was lifted are lifted again" (after.lifts > before.lifts && after.liftNanos ≥ before.liftNanos)
+  match ← Bap.Emu.reg emu a0 with
+  | .bits bits => assertEqual "and run as they are" 10 bits.toNat
+  | _ => throw <| IO.userError "no a0"
+
 /-- What a handler does, as a contract, without changing the machine, and a replacement checked against it. -/
 def testContract (triple : String) : IO Unit := do
   let (dispatcher, state, _, _, sum) ← cffAddresses triple

@@ -25,6 +25,8 @@ versions and found again, and what writes and limits took from it. -/
 structure Statistics where
   cacheHits : Nat := 0
   lifts : Nat := 0
+  /-- How long the lifts took, of the host's clock. -/
+  liftNanos : Nat := 0
   nativeCompilations : Nat := 0
   nativeRuns : Nat := 0
   interpretedRuns : Nat := 0
@@ -301,6 +303,14 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimi
 
 /-- What it has done so far. -/
 def stats (engine : Engine) : IO Statistics := engine.statistics.get
+
+/-- A lift, counted with how long it took. -/
+private def timedLift (engine : Engine) (lift : Lift) (address : Nat) (code : ByteArray) : IO Block := do
+  let start ← IO.monoNanosNow
+  let block ← lift address code
+  let took := (← IO.monoNanosNow) - start
+  engine.statistics.modify fun stats => { stats with lifts := stats.lifts + 1, liftNanos := stats.liftNanos + took }
+  pure block
 
 private def rememberVersion (engine : Engine)
     (versions : IO.Ref (Std.HashMap Nat (List CachedBlock))) (entry : CachedBlock) : IO Unit := do
@@ -886,8 +896,7 @@ private def reachable (edges : List (Nat × Nat)) (source target : Nat) : Bool :
 
 private def liftGathered (engine : Engine) (lift : Lift) (lowerable : Block → Bool) (target : Nat) (code : ByteArray) :
     IO (Block × Bool) := do
-  engine.statistics.modify fun stats => { stats with lifts := stats.lifts + 1 }
-  let block ← lift target code
+  let block ← timedLift engine lift target code
   if block.address != target then
     throw <| IO.userError s!"lifted graph block address {block.address} does not match {target}"
   let lowers := lowerable block
@@ -1530,8 +1539,7 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
       let entries ← if entries.size ≥ engine.cacheLimit then do
         evictColdest engine engine.cacheVersions entries
       else pure entries
-      engine.statistics.modify fun stats => { stats with lifts := stats.lifts + 1 }
-      let block ← lift address code
+      let block ← timedLift engine lift address code
       if block.address != address then
         throw <| IO.userError s!"lifted block address {block.address} does not match {address}"
       let plan ← if compileSingle && engine.hotThreshold = 1 && cooldown = 0 then compilePlan engine block
