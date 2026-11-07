@@ -1765,9 +1765,13 @@ private def applyPatch (emu : Emu) (address : Nat) (patch : Patch) : IO Patch.Re
   let after ← peek emu address size
   pure (if after == patch.replacement then .applied else .unverified after)
 
+/-- The most bytes that an instruction of any target has, those of x86. -/
+private def longestInstruction : Nat := 15
+
 /-- Applies a patch only where its bytes are what it expects, and says what came of it rather than throwing, but with
-`onMismatch := .error`. With `.wait`, a patch that finds other bytes is tried again before each instruction that runs in its range,
-in the same address space, until it finds them and is applied, and its hook is taken off. -/
+`onMismatch := .error`. With `.wait`, a patch that finds other bytes, or memory that isn't mapped yet, is tried again before each
+instruction that runs in its range or starts before it near enough to run some of its bytes, in the same address space, until it finds
+them and is applied, and its hook is taken off. -/
 def patch (emu : Emu) (patch : Patch) : IO Patch.Result := do
   if patch.expected.size != patch.replacement.size then
     throw <| IO.userError s!"patch at {patch.address} expects {patch.expected.size} bytes and has {patch.replacement.size}"
@@ -1776,10 +1780,11 @@ def patch (emu : Emu) (patch : Patch) : IO Patch.Result := do
   match ← applyPatch emu address patch, patch.onMismatch with
   | .mismatch found, .error =>
     throw <| IO.userError s!"patch at {address} expects {patch.expected.toList} and found {found.toList}"
-  | .mismatch _, .wait =>
+  | .mismatch _, .wait | .skipped _, .wait =>
     let space ← currentSpace emu
     let hook ← IO.mkRef (none : Option HookId)
-    let id ← onCode emu (address, address + patch.expected.size - 1) fun current _ => do
+    let first := address - (longestInstruction - 1)
+    let id ← onCode emu (first, address + patch.expected.size - 1) fun current _ => do
       if (← currentSpace current) != space then return
       match ← applyPatch current address patch with
       | .mismatch _ | .skipped _ => pure ()

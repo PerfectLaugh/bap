@@ -4140,6 +4140,31 @@ def testPatch : IO Unit := do
   | .bits bits => assertEqual "It is applied once the program has made what it expects" 9 bits.toNat
   | _ => throw <| IO.userError "no a0"
   assertTrue "and its hook is gone" (← decrypting.hooks.get).isEmpty
+  -- Code that the program maps only later: a patch that waits waits for it to be mapped too.
+  let mapping ← Bap.Emu.riscv64 (← LLVM.assemble "riscv64" "nop") 0 0
+  Bap.Emu.setReg mapping (register "X10") (.bits (BitVec.ofNat 64 0))
+  let unmappedYet ← Bap.Emu.patch mapping { address := 0x1000, expected := plain, replacement := ← add 9, onMismatch := .wait }
+  assertTrue "A patch that waits waits for what isn't mapped yet" (unmappedYet matches .pending _)
+  Bap.Emu.map mapping ⟨0x1000, plain, ⟨true, false, true⟩⟩
+  Bap.Emu.setPc mapping 0x1000
+  let _ ← Bap.Emu.run mapping 1
+  assertEqual "and is applied once it is" 9 (← Bap.Emu.reg mapping (register "X10") |>.map fun
+    | .bits bits => bits.toNat
+    | _ => 0)
+  -- An instruction that starts before a patch and has its bytes: the immediate of a mov of x86, which a store makes first.
+  let store ← LLVM.assemble "x86_64" "movl $1, 0x101"
+  let moving := store ++ ByteArray.mk (List.replicate (0x100 - store.size) 0x90).toArray ++ (← LLVM.assemble "x86_64" "movl $3, %eax\nnop")
+  let straddled ← Bap.Emu.x86_64 moving 0 0
+  let rax : Bap.Var := ⟨"RAX", .imm 64, 0, false⟩
+  Bap.Emu.setReg straddled rax (.bits (BitVec.ofNat 64 0))
+  let one := ByteArray.mk #[1, 0, 0, 0]
+  let inside ← Bap.Emu.patch straddled { address := 0x101, expected := one, replacement := ByteArray.mk #[9, 0, 0, 0], onMismatch := .wait }
+  assertTrue "A patch inside an instruction waits" (inside matches .pending _)
+  let _ ← Bap.Emu.run straddled (0x100 - store.size + 2)
+  assertEqual "and is applied before the instruction that has its bytes runs" 9 (← Bap.Emu.reg straddled rax |>.map fun
+    | .bits bits => bits.toNat % 2 ^ 32
+    | _ => 0)
+  assertTrue "and its hook is gone" (← straddled.hooks.get).isEmpty
   -- What a check of a program's own code reads of a patch: what it reads is counted by where, and what was there before is kept; one
   -- that is concealed reads what was there before, and what runs there runs the replacement.
   let word (bytes : ByteArray) : Nat := bytes.toList.foldr (fun byte word => word * 256 + byte.toNat) 0
