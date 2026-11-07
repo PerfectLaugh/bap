@@ -5,7 +5,9 @@
 // makes where it runs, which it takes away at the end. /proc/self/maps has a line for each mapping, with its path at column 73 (49 on
 // 32 bits): the program for its own code, [heap] for what brk has grown, s for what is shared, which is /dev/zero (deleted) if it is
 // anonymous, and of a file the path and the offset that it was mapped at, and (deleted) after the path once the file is removed.
-// execve of /proc/self/exe runs the program again. The libc of the tests has no execve, so it is called by number.
+// execve of /proc/self/exe runs the program again, and so does execve of /proc/PID/exe of another process, before anything has looked
+// in /proc; and a program that was run so runs itself again the same way. The libc of the tests has no execve, so it is called by
+// number.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -215,13 +217,30 @@ static void maps(void) {
 }
 
 int main(int argc, char **argv) {
-  if (argc > 1 && strcmp(argv[1], "exe") == 0) return 7;
+  if (argc > 1 && (strcmp(argv[1], "exe") == 0 || strcmp(argv[1], "first") == 0 || strcmp(argv[1], "parent") == 0)) return 7;
+  if (argc > 1 && strcmp(argv[1], "again") == 0) {
+    char *arguments[] = {"/proc/self/exe", "exe", NULL};
+    char *environment[] = {NULL};
+    syscall(SYS_execve, "/proc/self/exe", arguments, environment);
+    return 100 + errno;
+  }
   if (argc > 1 && strcmp(argv[1], "named") == 0) {
     names("run by a long name");
     syscall(SYS_prctl, PR_SET_NAME, "another-long-name-here", 0L, 0L, 0L);
     names("after PR_SET_NAME");
     return 0;
   }
+  // Before anything looks in /proc.
+  run("/proc/self/exe", "first");
+  run("/proc/self/exe", "again");
+  char parent[32] = "/proc/";
+  char digits[24];
+  int d = 0;
+  for (long pid = getpid(); pid; pid /= 10) digits[d++] = (char)('0' + pid % 10);
+  size_t n = strlen(parent);
+  while (d) parent[n++] = digits[--d];
+  memcpy(parent + n, "/exe", 5);
+  run(parent, "parent");
   int directory = syscall(SYS_openat, AT_FDCWD, "/proc/self/fd", O_RDONLY | O_DIRECTORY);
   int before = entries(directory);
   int status = syscall(SYS_openat, AT_FDCWD, "/proc/self/status", O_RDONLY);

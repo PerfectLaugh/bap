@@ -2305,6 +2305,8 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
       ← readStrings emu architecture (args.getD 2 0)) : IO _).toBaseIO with
   | .error _ => pure (errorOf Errno.efault)
   | .ok (path, arguments, environment) =>
+    -- This is served before `serveKernelCalls`, which makes `/proc` for the calls that it serves.
+    refreshProc machine emu group .execve args
     programFromHost machine group path
     let kernel ← machine.kernel.get
     -- With no arguments, a program has one that is empty, as Linux gives it since 5.18.

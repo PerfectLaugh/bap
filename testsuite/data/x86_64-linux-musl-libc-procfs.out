@@ -1,3 +1,6 @@
+first 7
+again 7
+parent 7
 fd after open and dup 4
 fd after close 2
 fd after all closed 0
