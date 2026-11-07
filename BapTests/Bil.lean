@@ -452,17 +452,21 @@ def run : IO Unit := do
     [.unresolvedInput "original" "input", .failed "original" "unbound variable input",
       .failed "simplified" "cannot evaluate unknown value: boom"]
     (← diagnose reading [.move result (.unknown "boom" (.imm 32))])
+  let broken := Analysis.Validate.check [result] deadProgram [.move result (.var (reg "unset"))] { env := [(mem, .memory emptyMemory)] }
+  assertEqual "a simplified that fails where the original runs is a real mismatch"
+    ["the simplified fails where the original runs"] broken.mismatches
   let notTaken : Program := [.ifElse (int 1 0) [.move (reg "input") (int 32 1)] [], .move result (.var (reg "input"))]
   assertEqual "input that the program assigns only on a way that it didn't go is unresolved"
-    [.unresolvedInput "original" "input", .failed "original" "unbound variable input"] (← diagnose notTaken deadProgram)
+    [.unresolvedInput "original" "input", .failed "original" "unbound variable input", .mismatch "the original fails where the simplified runs"] (← diagnose notTaken deadProgram)
   let jumping : Program := [.move result (.var (reg "input")), .jmp (int 32 0x100), .move result (.var (reg "after"))]
   assertEqual "input that the program would read only after a jump isn't unresolved"
-    [.unresolvedInput "original" "input", .failed "original" "unbound variable input"] (← diagnose jumping deadProgram)
+    [.unresolvedInput "original" "input", .failed "original" "unbound variable input", .mismatch "the original fails where the simplified runs"] (← diagnose jumping deadProgram)
   let bothJump : Program := [.ifElse (int 1 1) [.move result (.var (reg "input")), .jmp (int 32 0x100)] [.special "out"],
     .move result (.var (reg "after"))]
   assertEqual "nor after an if of which neither side goes on"
-    [.unresolvedInput "original" "input", .failed "original" "unbound variable input"] (← diagnose bothJump deadProgram)
-  assertEqual "input that the program assigns before it reads it isn't unresolved" [.failed "simplified" "cannot evaluate unknown value: boom"]
+    [.unresolvedInput "original" "input", .failed "original" "unbound variable input", .mismatch "the original fails where the simplified runs"] (← diagnose bothJump deadProgram)
+  assertEqual "input that the program assigns before it reads it isn't unresolved"
+    [.failed "simplified" "cannot evaluate unknown value: boom", .mismatch "the simplified fails where the original runs"]
     (← diagnose deadProgram [.move (reg "input") (int 32 1), .move result (.var (reg "input")), .move result (.unknown "boom" (.imm 32))])
   assertEqual "and a changed result is a mismatch" [.mismatch "result differs"]
     (← diagnose deadProgram (deadProgram ++ [.move result (int 32 0)]))

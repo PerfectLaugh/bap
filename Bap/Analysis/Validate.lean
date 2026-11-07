@@ -166,7 +166,14 @@ def diagnose (registers : List Bap.Var) (original simplified : Bil.Program)
     match run "original" original, run "simplified" simplified with
     | .ok (originalState, originalEffect), .ok (simplifiedState, simplifiedEffect) =>
       pure (originalState, originalEffect, simplifiedState, simplifiedEffect)
-    | left, right => return [left, right].flatMap fun | .error diagnoses => diagnoses | .ok _ => []
+    | left, right =>
+      let diagnoses := [left, right].flatMap fun | .error diagnoses => diagnoses | .ok _ => []
+      -- One that fails where the other runs doesn't do what it does, whatever it was or wasn't given.
+      let one := match left, right with
+        | .ok _, .error _ => [Diagnosis.mismatch "the simplified fails where the original runs"]
+        | .error _, .ok _ => [Diagnosis.mismatch "the original fails where the simplified runs"]
+        | _, _ => []
+      return diagnoses ++ one
   let within (ranges : List (Nat × Nat)) (address : Nat) := ranges.any fun (first, last) => first ≤ address && address < last
   let inRanges := within continuationRanges
   let mut found : Array Diagnosis := #[]
