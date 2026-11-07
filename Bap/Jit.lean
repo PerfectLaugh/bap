@@ -159,6 +159,12 @@ of them from now on. All of them are new to it after `reset`. None outside of an
 @[extern "bap_jit_live_changes"]
 opaque liveChanges (outputs : @& ByteArray) (pc : UInt64) (reset : Bool) : IO (Option ByteArray)
 
+/-- Whether `liveChanges` gives anything at the code site `pc` of the run of the code observer that runs now, which it says without
+saying what changed: as it gives none outside of an observer, of a run whose slots aren't one array, or at a site of optimized code
+that wasn't made to leave its slots there. -/
+@[extern "bap_jit_live_available"]
+opaque liveAvailable (pc : UInt64) : BaseIO Bool
+
 /-- The `index`th word of eight bytes of `bytes`, the least significant first, as `liveChanges` gives them, or 0 past its end: in C,
 which reads it at once rather than a byte at a time. -/
 @[extern "bap_jit_word"]

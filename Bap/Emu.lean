@@ -193,9 +193,41 @@ private def TraceSet.find? (set : TraceSet) (name : String) : Option TraceState 
 private def TraceSet.mapStates (set : TraceSet) (change : TraceState → TraceState) : TraceSet :=
   { set with default := set.default.map change, named := set.named.map fun (name, token, state) => (name, token, change state) }
 
+/-- The state of the thread that runs, as a reference to it is, but for one that a code site of a compiled range says: what reads
+it first has it said, which a hook that reads nothing of it never does, and setting it forgets it. -/
+structure StateCell where
+  ref : IO.Ref Bil.State
+  pending : IO.Ref (Option (IO Bil.State))
+
+def StateCell.new (state : Bil.State) : BaseIO StateCell := do
+  pure { ref := ← IO.mkRef state, pending := ← IO.mkRef none }
+
+def StateCell.get (cell : StateCell) : IO Bil.State := do
+  match ← cell.pending.swap none with
+  | some say =>
+    let state ← say
+    cell.ref.set state
+    pure state
+  | none => cell.ref.get
+
+def StateCell.set (cell : StateCell) (state : Bil.State) : BaseIO Unit := do
+  cell.pending.set none
+  cell.ref.set state
+
+def StateCell.modify (cell : StateCell) (change : Bil.State → Bil.State) : IO Unit := do
+  cell.set (change (← cell.get))
+
+/-- The state that `say` says from now on, said when it is first read. -/
+def StateCell.defer (cell : StateCell) (say : IO Bil.State) : BaseIO Unit :=
+  cell.pending.set (some say)
+
+/-- Whether what `defer` gave is yet to be said. -/
+def StateCell.deferred (cell : StateCell) : BaseIO Bool := do
+  pure (← cell.pending.get).isSome
+
 private structure CodeHookContext where
   engine : Primus.Lifted.Engine
-  state : IO.Ref Bil.State
+  state : StateCell
   pc : IO.Ref Nat
   stopped : IO.Ref Bool
   currentThreadRef : IO.Ref ThreadId
@@ -270,7 +302,7 @@ the tasks of Linux that a kernel needs. Everything in it is a reference, so that
 structure Emu where
   config : Config
   engine : Primus.Lifted.Engine
-  state : IO.Ref Bil.State
+  state : StateCell
   pc : IO.Ref Nat
   regions : IO.Ref (List Region)
   stopped : IO.Ref Bool
@@ -471,7 +503,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
   pure {
     config
     engine := ← createEngine config false
-    state := ← IO.mkRef initial
+    state := ← StateCell.new initial
     pc := ← IO.mkRef entry
     regions := ← IO.mkRef mapped
     stopped := ← IO.mkRef false
@@ -2671,20 +2703,33 @@ private def recordTrace (emu : Emu) (address : Nat) : IO Unit := do
 starts there have: whether they changed what the run goes on with, the state, where it goes or whether the thread stops, for which
 the run stops there with what they left, and its hooks don't fire there again (`siteState`, `redirect`, `skipCode`); as it does where
 they added or took off hooks. -/
-private def hookAtSite (emu : Emu) (address : Nat) (live : Bil.State) : IO Bool := do
+private def hookAtSite (emu : Emu) (address : Nat) (say : IO Bil.State) : IO Bool := do
   let before ← emu.state.get
   let hooks ← emu.hookChanges.get
-  emu.state.set live
-  notifyCode emu address
+  -- The state there, said when a hook first reads it: a hook that reads nothing of it doesn't have it made.
+  let said ← IO.mkRef (none : Option Bil.State)
+  emu.state.defer do
+    let live ← say
+    said.set (some live)
+    pure live
+  -- A hook that fails leaves the state there, said while the run is still there, as it would have read it.
+  try notifyCode emu address catch error =>
+    let _ ← emu.state.get
+    throw error
   emu.firedSites.modify (·.push address)
-  let after ← emu.state.get
   let pc ← emu.pc.get
   -- Hooks that a hook added or took off are of what the run goes on with too, as what it has of the native memory's filter is of those
   -- that there were.
-  if sameObject after live && pc == address && !(← emu.stopped.get) && (← emu.redirect.get).isNone &&
-      (← emu.hookChanges.get) == hooks then
-    emu.state.set before
-    return false
+  if pc == address && !(← emu.stopped.get) && (← emu.redirect.get).isNone && (← emu.hookChanges.get) == hooks then
+    if ← emu.state.deferred then
+      emu.state.set before
+      return false
+    let after ← emu.state.get
+    if let some live ← said.get then
+      if sameObject after live then
+        emu.state.set before
+        return false
+  let after ← emu.state.get
   emu.siteState.set (some after)
   if pc != address then emu.redirect.set (some pc) else emu.skipCode.set (some address)
   pure true
@@ -2701,7 +2746,7 @@ private def observeRangeCode (emu : Emu) (address : Nat) : IO Bool := do
   let hooked := (← hooksNear emu address).any fun hook => hook.first ≤ address && address ≤ hook.last
   -- The hooks of a site fire there, on the state that the run has there, where that can be said, and the run goes on unless they
   -- changed what it goes on with; elsewhere the run stops before the site, for a step to fire them on its state.
-  let live ← if hooked && !dirty && !late then Primus.Lifted.liveState emu.engine address else pure none
+  let live ← if hooked && !dirty && !late then Primus.Lifted.liveSite emu.engine address else pure none
   let stops ← match live with
     | some state => hookAtSite emu address state
     | none => pure (rangeSiteStops dirty late hooked)
@@ -3168,7 +3213,7 @@ private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared :
     regionIndex := ← if space == table.spaceOf (← emu.currentThreadRef.get) then pure emu.regionIndex else IO.mkRef none
     mappingTop := ← IO.mkRef none
     -- What it loaded exclusively before the round may change in it, as when a thread is switched to.
-    state := ← IO.mkRef { env := clearMonitor emu.config context.state.env }
+    state := ← StateCell.new { env := clearMonitor emu.config context.state.env }
     pc := ← IO.mkRef context.pc
     stopped := ← IO.mkRef context.stopped
     currentThreadRef := ← IO.mkRef context.id

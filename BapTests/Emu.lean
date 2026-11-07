@@ -2720,6 +2720,35 @@ def testQuietPages : IO Unit := do
   assertEqual "Single steps hear the read of the word" [4] expected.1
   assertEqual "A range hears it too, on a page that a store found first" expected (← run true)
 
+/-- A hook of code in a range that reads the registers at some of its sites and not at the others, where the state isn't made: what it
+reads at each is what single steps have there, however many sites went by unread, and a hook that writes one without reading has it
+written. -/
+def testHooksReadSometimes : IO Unit := do
+  let code ← LLVM.assemble "x86_64" "1: addq $3, %rax\nimulq $5, %rcx\nxorq %rax, %rcx\ndecq %rdx\njnz 1b\nnop"
+  let register (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
+  let value (emu : Bap.Emu.Emu) (name : String) : IO Nat := do
+    match ← Bap.Emu.reg emu (register name) with
+    | .bits bits => pure bits.toNat
+    | _ => pure 0
+  let run (ranges : Bool) : IO (List (Nat × Nat × Nat) × Nat × Nat) := do
+    let adjust (config : Bap.Emu.Config) : Bap.Emu.Config :=
+      if ranges then { config with hotThreshold := 1, rangeLimit := 16 } else { config with rangeLimit := 1 }
+    let emu ← Bap.Emu.x86_64 code 0 0 (adjust := adjust)
+    for (name, start) in [("RAX", 1), ("RCX", 7), ("RDX", 400)] do
+      Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 64 start))
+    let seen ← IO.mkRef 0
+    let log ← IO.mkRef ([] : List (Nat × Nat × Nat))
+    let _ ← Bap.Emu.onCode emu (0, code.size - 1) fun emu address => do
+      let count ← seen.modifyGet fun count => (count, count + 1)
+      if count % 13 == 5 then log.modify ((address, ← value emu "RAX", ← value emu "RCX") :: ·)
+      -- Written without being read first, at one site.
+      if count == 777 then Bap.Emu.setReg emu (register "RAX") (.bits (BitVec.ofNat 64 1000))
+    let _ ← Bap.Emu.run emu (5 * 400 + 1)
+    pure ((← log.get).reverse, ← value emu "RAX", ← value emu "RCX")
+  let expected ← run false
+  assertTrue "Single steps read at a site in thirteen" (expected.1.length > 100)
+  assertEqual "A range reads what they read, with the sites between unread, and has the write" expected (← run true)
+
 /-- A range of ARM code at an address, run there as Thumb: what runs is the Thumb of those bytes, as a single step has it, rather than
 the range. -/
 def testThumbAfterArmRange : IO Unit := do

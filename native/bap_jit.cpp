@@ -325,6 +325,12 @@ extern "C" uint64_t bap_jit_word(b_lean_obj_arg bytes, b_lean_obj_arg index) {
   return getWord(lean_sarray_cptr(bytes) + 8 * at);
 }
 
+// Whether `bap_jit_live_changes` can say anything at the code site `pc` of the run whose code observer runs now, without saying it.
+extern "C" uint8_t bap_jit_live_available(uint64_t pc, lean_obj_arg) {
+  BapCells *cells = siteCells;
+  return cells != nullptr && cells->slots != nullptr && (cells->slotsLive || cells->flushedPc == pc);
+}
+
 extern "C" lean_obj_res bap_jit_live_changes(b_lean_obj_arg outputs, uint64_t pc, uint8_t reset, lean_obj_arg) {
   BapCells *cells = siteCells;
   if (cells == nullptr || cells->slots == nullptr || !(cells->slotsLive || cells->flushedPc == pc))

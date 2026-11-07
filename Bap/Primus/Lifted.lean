@@ -251,8 +251,9 @@ structure Engine where
   nativeLimit : Nat
   nativeLive : IO.Ref Nat
   dirtyCode : IO.Ref (Option (Nat × Nat))
-  /-- Of the native run that goes on now, the state at a code site of it, if it can be said: what `liveState` gives. -/
-  liveRun : IO.Ref (Option (Nat → IO (Option Bil.State)))
+  /-- Of the native run that goes on now, the state at a code site of it, if it can be said, made when it is first read: what
+  `liveSite` gives. -/
+  liveRun : IO.Ref (Option (Nat → IO (Option (IO Bil.State))))
   /-- What the state at the code sites of that run was last said to be, from which the next is said. -/
   liveCache : IO.Ref (Option LiveCache)
   /-- Whether code at a pc has hooks, which read the state at its site, so that what is optimized leaves its slots there. -/
@@ -2012,8 +2013,20 @@ private def stateAtSite (engine : Engine) (lowering : Lowering) (state : Bil.Sta
   engine.liveCache.set (some { state, sites, vars, bound, base, ordered := true, fresh := false })
   pure (some state)
 
+/-- Of `stateAtSite` at `pc`, what says it, while the run is there, if it can be said, which this says without saying it: a hook
+that reads nothing of the state doesn't have it made. -/
+private def siteSaying (engine : Engine) (lowering : Lowering) (state : Bil.State) (pc : Nat) : IO (Option (IO Bil.State)) := do
+  let isSite := match lowering.liveIndex with
+    | some index => index.get.sites.contains pc
+    | none => true
+  if !isSite || !(← Jit.liveAvailable (UInt64.ofNat pc)) then return none
+  pure <| some do
+    match ← stateAtSite engine lowering state pc with
+    | some state => pure state
+    | none => throw <| IO.userError s!"the state at the code site {pc} can't be said"
+
 /-- `action` with `liveRun` saying what the run is at its code sites, while it runs. -/
-private def withLiveRun (engine : Engine) (at_ : Nat → IO (Option Bil.State)) (action : IO α) : IO α := do
+private def withLiveRun (engine : Engine) (at_ : Nat → IO (Option (IO Bil.State))) (action : IO α) : IO α := do
   let outer ← engine.liveRun.get
   engine.liveRun.set (some at_)
   engine.liveCache.set none
@@ -2021,12 +2034,18 @@ private def withLiveRun (engine : Engine) (at_ : Nat → IO (Option Bil.State)) 
     engine.liveRun.set outer
     engine.liveCache.set none
 
-/-- The state at the code site `pc` of the native run whose code observer runs now, as the run is there, with the memory as it is,
-which a hook there may read and change: none if there is no such run, or it can't be said of it, and then what a hook would read
-isn't so. -/
-def liveState (engine : Engine) (pc : Nat) : IO (Option Bil.State) := do
+/-- What says the state at the code site `pc` of the native run whose code observer runs now, as the run is there, with the memory
+as it is, which a hook there may read and change, while the run is there: none if there is no such run, or it can't be said of it,
+and then what a hook would read isn't so. It says that without saying the state. -/
+def liveSite (engine : Engine) (pc : Nat) : IO (Option (IO Bil.State)) := do
   let some at_ ← engine.liveRun.get | return none
   at_ pc
+
+/-- The state that `liveSite` says, said now. -/
+def liveState (engine : Engine) (pc : Nat) : IO (Option Bil.State) := do
+  match ← liveSite engine pc with
+  | some say => some <$> say
+  | none => pure none
 
 /-- A native memory with what a memory holds, by the page as it holds it: what a process holds doesn't have to become a list of its bytes
 for this, which is as long as a copy. -/
@@ -2200,7 +2219,7 @@ private def runPersistent (engine : Engine) (executions : IO.Ref Nat) (lowering 
     (memory : Jit.Memory) (observer : Option Jit.MemoryObserver)
     (codeObserver : Option Jit.CodeObserver) (budget : Nat) (quietSites : Bool := false) : IO Result := do
   recordNative engine
-  let (next, slots, addresses, values) ← withLiveRun engine (stateAtSite engine lowering state) <| match ← engine.memoryFilter.get with
+  let (next, slots, addresses, values) ← withLiveRun engine (siteSaying engine lowering state) <| match ← engine.memoryFilter.get with
     | some filter => Jit.runWithPersistentMemoryFilteredCode program slots memory filter quietSites observer codeObserver
     | none => Jit.runWithPersistentMemoryObservedCode program slots memory observer codeObserver
   recordChained engine executions lowering budget slots
@@ -2409,7 +2428,7 @@ private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (
           else do
             recordNative engine
             -- Of a run with a memory of its own, what a hook at a site would read of memory isn't what the run has.
-            let at_ := if lowering.memory.isNone then stateAtSite engine lowering state else fun _ => pure none
+            let at_ := if lowering.memory.isNone then siteSaying engine lowering state else fun _ => pure none
             let (next, slots, addresses, values) ← withLiveRun engine at_ <|
               Jit.runWithMemoryObservedCode program slots addresses values observer codeObserver
             recordChained engine entry.executions lowering budget slots
