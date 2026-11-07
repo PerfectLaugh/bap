@@ -856,9 +856,18 @@ private def rollbackBlock (emu : Emu) (snapshot : Snapshot) : IO Unit := do
 /-- How steps have been taken back so far. -/
 def rollbackStats (emu : Emu) : IO RollbackStats := emu.rollbacks.get
 
+/-- Why no thread of a snapshot can go on, if none can: every pc is 0 and nothing is mapped there, as of a snapshot that is zeros. -/
+def Snapshot.unrunnable (snapshot : Snapshot) : Option String :=
+  let mapsZero := (snapshot.regions :: snapshot.processMemory.map (·.2)).any fun regions =>
+    regions.any fun region => region.address == 0 && region.data.size > 0
+  if (snapshot.pc :: snapshot.threads.map (·.pc)).all (· == 0) && !mapsZero then
+    some "a snapshot whose every thread is at 0, where nothing is mapped, so that none can go on"
+  else none
+
 /-- Puts the emulator back to a snapshot, with the memory of each address space. What was compiled stays, but for ranges, which are
-compiled again as they get hot. -/
+compiled again as they get hot. A snapshot that no thread can go on from is refused, and the emulator stays as it was. -/
 def restore (emu : Emu) (snapshot : Snapshot) : IO Unit := do
+  if let some problem := snapshot.unrunnable then throw <| IO.userError problem
   restoreThreads emu snapshot
   emu.memorySwitched.set true
   -- A compiled range holds the code of all of its blocks. A version of it stays, for when those come back.

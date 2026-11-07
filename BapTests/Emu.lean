@@ -67,6 +67,19 @@ private def shellStreams (commands : List String) : IO (IO.FS.Stream × IO.FS.St
   }
   pure (input, output, text)
 
+/-- A snapshot that no thread can go on from, as one of zeros, isn't restored; one whose program is at 0 is. -/
+def testUnrunnableSnapshot : IO Unit := do
+  let code ← LLVM.assemble "riscv64" "addi a0, a0, 1"
+  let low ← Tuned.riscv64 code 0 0
+  Bap.Emu.restore low (← Bap.Emu.snapshot low)
+  let high ← Tuned.riscv64 code 0x1000 0x1000
+  let good ← Bap.Emu.snapshot high
+  let zeroed := { good with pc := 0, threads := good.threads.map ({ · with pc := 0 }) }
+  expectThrow "Emu doesn't restore a snapshot whose every thread is at 0, where nothing is mapped" (Bap.Emu.restore high zeroed)
+  assertEqual "and stays as it was" 0x1000 (← high.pc.get)
+  Bap.Emu.restore high good
+  assertEqual "and restores one that can go on" 0x1000 (← high.pc.get)
+
 private def testDiff : IO Unit := do
   let code := (← LLVM.assemble "riscv64" "addi a0, a0, 1") ++
     (← LLVM.assemble "riscv64" "addi a0, a0, 1")
