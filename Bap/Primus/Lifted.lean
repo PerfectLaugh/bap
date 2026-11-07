@@ -53,6 +53,13 @@ structure Profile where
   compileMs : Nat := 0
   deriving Repr, Inhabited
 
+/-- What `stateAtSite` says the state of a run at its code sites from, which is of its lowering alone: of each site, by its pc, the
+outputs that it has completed, as `Jit.liveChanges` takes them, and of each the place of its variable among the outputs of the run, and
+its width; and the variable of each output, by its place. -/
+private structure LiveIndex where
+  sites : Std.HashMap Nat (ByteArray × Array (Nat × Nat))
+  vars : Array Bap.Var
+
 private structure Lowering where
   /-- The operations so far, the last one first, as most of what lowering does is to add one, and adding to the end of a list costs all
   that is in it: `Lowering.ops` is them in order. -/
@@ -76,6 +83,9 @@ private structure Lowering where
   observed : Option Nat := none
   /-- The outputs that a run of a range may not reach, each with a slot that is not 0 once it was written. -/
   flags : List (Nat × Nat) := []
+  /-- Of a lowering that was compiled, what `stateAtSite` says the state at its code sites from, made the first time that a hook of a
+  site of it reads it and kept for the next (`withLiveIndex`). -/
+  liveIndex : Option (Thunk LiveIndex) := none
 
 /-- The operations, in order. -/
 private def Lowering.ops (lowering : Lowering) : List Jit.Op := lowering.reversed.reverse
@@ -1425,6 +1435,40 @@ private def makeRoom (engine : Engine) : IO Bool := do
   engine.nativeLive.set live
   pure (live < engine.nativeLimit)
 
+/-- Words of eight bytes, the least significant first. -/
+private def wordsOf (words : Array UInt64) : ByteArray :=
+  words.foldl (init := ByteArray.emptyWithCapacity (words.size * 8)) fun bytes word =>
+    (List.range 8).foldl (init := bytes) fun bytes offset => bytes.push (word >>> (8 * offset).toUInt64).toUInt8
+
+/-- What `stateAtSite` says the state at the code sites of a run of a lowering from. -/
+private def liveIndexOf (lowering : Lowering) : LiveIndex := Id.run do
+  let flags : Std.HashMap Nat Nat := lowering.flags.foldl (init := {}) fun flags (output, flag) => flags.insert output flag
+  -- The variables of the outputs of the run, each once, by its place, and the place of each.
+  let mut places : Array Bap.Var := #[]
+  let mut placeOf : Std.HashMap Bap.Var Nat := {}
+  for (_, outputs) in lowering.checkpoints do
+    for (var, _) in outputs do
+      unless placeOf.contains var do
+        placeOf := placeOf.insert var places.size
+        places := places.push var
+  -- The first of each pc, as `atCodeStop` finds it, with what each output of it is.
+  let mut sites : Std.HashMap Nat (ByteArray × Array (Nat × Nat)) := {}
+  for (at_, outputs) in lowering.checkpoints do
+    if !sites.contains at_ then
+      let mut words : Array UInt64 := #[]
+      let mut kept : Array (Nat × Nat) := #[]
+      for (var, slot) in outputs do
+        if let some width := widthOf var then
+          words := words.push (UInt64.ofNat slot)
+          words := words.push (((flags[slot]?).map (UInt64.ofNat · + 1)).getD 0)
+          kept := kept.push ((placeOf[var]?.getD 0, width))
+      sites := sites.insert at_ (wordsOf words, kept)
+  pure { sites, vars := places }
+
+/-- A lowering that was compiled, with what `stateAtSite` says the state at its sites from, made when it is first read. -/
+private def withLiveIndex (lowering : Lowering) : Lowering :=
+  { lowering with liveIndex := some (Thunk.mk fun _ => liveIndexOf lowering) }
+
 private def compilePlan (engine : Engine) (block : Block) : IO Plan := do
   if !(← makeRoom engine) then pure (.interpreted block.program)
   else
@@ -1437,7 +1481,7 @@ private def compilePlan (engine : Engine) (block : Block) : IO Plan := do
       engine.nativeLive.modify (· + 1)
       engine.statistics.modify fun stats =>
         { stats with nativeCompilations := stats.nativeCompilations + 1, compileMs := stats.compileMs + elapsed }
-      pure (.native lowering program block.program)
+      pure (.native (withLiveIndex lowering) program block.program)
 
 /-- Drops the entries that ran least, and of those the ones at the lowest addresses: an eighth of them, so that what a walk over the
 table costs is paid once in many misses, which a table of tens of thousands would otherwise cost on each. -/
@@ -1720,7 +1764,7 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
                   nativeCompilations := stats.nativeCompilations + 1
                   compileMs := stats.compileMs + elapsed
                   graphBlocks := stats.graphBlocks + blocks.length }
-              let plan := Plan.native lowering program firstProgram
+              let plan := Plan.native (withLiveIndex lowering) program firstProgram
               let last := blocks.foldl (init := seed.address) fun current block => max current (block.next - 1)
               let entry := { first with
                 next := lowering.next
@@ -1892,11 +1936,6 @@ private def liveWord (bytes : ByteArray) (index : Nat) : UInt64 :=
     byte 0 ||| byte 1 ||| byte 2 ||| byte 3 ||| byte 4 ||| byte 5 ||| byte 6 ||| byte 7
   else 0
 
-/-- Words of eight bytes, the least significant first. -/
-private def wordsOf (words : Array UInt64) : ByteArray :=
-  words.foldl (init := ByteArray.emptyWithCapacity (words.size * 8)) fun bytes word =>
-    (List.range 8).foldl (init := bytes) fun bytes offset => bytes.push (word >>> (8 * offset).toUInt64).toUInt8
-
 /-- What a run whose memory is the native memory, or that has none, is at its code site `pc`, starting from `state`: what it has
 completed there, as a run that stops at the site leaves (`syncState` of `atCodeStop`). It is said from what it was last said to be in
 this run, with only the outputs whose slots changed since, which `Jit.liveChanges` says, bound again, which a run that went on comes
@@ -1906,35 +1945,14 @@ private def stateAtSite (engine : Engine) (lowering : Lowering) (state : Bil.Sta
   let cache ← match ← engine.liveCache.swap none with
     | some cache => pure cache
     | none =>
-      let flags : Std.HashMap Nat Nat := lowering.flags.foldl (init := {}) fun flags (output, flag) => flags.insert output flag
-      -- The variables of the outputs of the run, each once, by its place, and the place of each.
-      let (places, placeOf) : Array Bap.Var × Std.HashMap Bap.Var Nat := Id.run do
-        let mut places : Array Bap.Var := #[]
-        let mut placeOf : Std.HashMap Bap.Var Nat := {}
-        for (_, outputs) in lowering.checkpoints do
-          for (var, _) in outputs do
-            unless placeOf.contains var do
-              placeOf := placeOf.insert var places.size
-              places := places.push var
-        return (places, placeOf)
-      -- The first of each pc, as `atCodeStop` finds it, with what each output of it is.
-      let sites : Std.HashMap Nat (ByteArray × Array (Nat × Nat)) := Id.run do
-        let mut sites : Std.HashMap Nat (ByteArray × Array (Nat × Nat)) := {}
-        for (at_, outputs) in lowering.checkpoints do
-          if !sites.contains at_ then
-            let mut words : Array UInt64 := #[]
-            let mut kept : Array (Nat × Nat) := #[]
-            for (var, slot) in outputs do
-              if let some width := widthOf var then
-                words := words.push (UInt64.ofNat slot)
-                words := words.push (((flags[slot]?).map (UInt64.ofNat · + 1)).getD 0)
-                kept := kept.push ((placeOf[var]?.getD 0, width))
-            sites := sites.insert at_ (wordsOf words, kept)
-        return sites
-      let bound := places.map fun var => (Bil.lookup state.env var).toOption
-      let before := (places.zip bound).toList.filterMap fun (var, value) => value.map fun _ => var
-      pure { state, sites, vars := places, bound, base := withoutBindings before state.env, ordered := false, fresh := true
-             : LiveCache }
+      -- Made for the lowering once, rather than on each run.
+      let index := match lowering.liveIndex with
+        | some index => index.get
+        | none => liveIndexOf lowering
+      let bound := index.vars.map fun var => (Bil.lookup state.env var).toOption
+      let before := (index.vars.zip bound).toList.filterMap fun (var, value) => value.map fun _ => var
+      pure { state, sites := index.sites, vars := index.vars, bound, base := withoutBindings before state.env, ordered := false,
+             fresh := true : LiveCache }
   let some (outputs, places) := cache.sites[pc]? | engine.liveCache.set (some cache); return none
   let some changes ← Jit.liveChanges outputs (UInt64.ofNat pc) cache.fresh | engine.liveCache.set (some cache); return none
   let { state := last, sites, vars, bound, base, ordered, fresh := _ } := cache
