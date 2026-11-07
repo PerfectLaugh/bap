@@ -2934,6 +2934,17 @@ def Machine.write (machine : Machine) (address : Nat) (data : ByteArray) (pid : 
     finally
       for ends in ← emu.hostEnds.get do ends none
 
+/-- `Emu.patch` in the process that runs or in the one given: the replacement goes only where the bytes are what the patch expects,
+whatever their protection, which stays as it was, and what came of it is said rather than thrown. A patch that waits waits in that
+process. -/
+def Machine.patch (machine : Machine) (patch : Emu.Patch) (pid : Option Nat := none) : IO Emu.Patch.Result :=
+  machine.inProcess pid do
+    let emu := machine.emu
+    for starts in ← emu.hostStarts.get do starts s!"Machine.patch {patch.address} {patch.replacement.size}"
+    try Bap.Emu.patch emu patch
+    finally
+      for ends in ← emu.hostEnds.get do ends none
+
 /-- The most that one block can have: a mapping is held in memory of the host from the start. -/
 def Machine.mallocLimit : Nat := 2 ^ 32
 

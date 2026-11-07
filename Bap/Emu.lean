@@ -1673,6 +1673,72 @@ def poke (emu : Emu) (address : Nat) (data : ByteArray) (known : Bool := false) 
     if !known then
       for changed in ← emu.memoryChanged.get do changed address data.size false
 
+/-- What a patch does where it doesn't find the bytes it expects: says so, throws, or waits for them, as for text that is still
+encrypted. -/
+inductive Patch.OnMismatch where
+  | skip
+  | error
+  | wait
+  deriving Repr, BEq, Inhabited
+
+/-- Bytes to put at an address in place of those it expects to find there, as many as those. -/
+structure Patch where
+  address : Nat
+  expected : ByteArray
+  replacement : ByteArray
+  /-- Whether to read the bytes back after, to say that they are what was put. -/
+  readback : Bool := true
+  onMismatch : Patch.OnMismatch := .skip
+
+/-- What came of a patch. It is `applied` as well where the replacement is there already. A patch that waits is `pending` on a hook,
+which `removeHook` takes off; `found` is what was there. -/
+inductive Patch.Result where
+  | applied
+  | skipped (reason : String)
+  | mismatch (found : ByteArray)
+  | unverified (found : ByteArray)
+  | pending (hook : HookId)
+  deriving Inhabited
+
+/-- Puts a patch's replacement where all of its bytes are mapped and are what it expects, whatever their protection, which it leaves
+as it was: code there runs as patched. -/
+private def applyPatch (emu : Emu) (address : Nat) (patch : Patch) : IO Patch.Result := do
+  let size := patch.expected.size
+  if !coversRange (← emu.regions.get) address (address + size) then
+    return .skipped s!"unmapped address in {address}..{address + size}"
+  let found ← peek emu address size
+  if found == patch.replacement then return .applied
+  if found != patch.expected then return .mismatch found
+  poke emu address patch.replacement
+  if !patch.readback then return .applied
+  let after ← peek emu address size
+  pure (if after == patch.replacement then .applied else .unverified after)
+
+/-- Applies a patch only where its bytes are what it expects, and says what came of it rather than throwing, but with
+`onMismatch := .error`. With `.wait`, a patch that finds other bytes is tried again before each instruction that runs in its range,
+in the same address space, until it finds them and is applied, and its hook is taken off. -/
+def patch (emu : Emu) (patch : Patch) : IO Patch.Result := do
+  if patch.expected.size != patch.replacement.size then
+    throw <| IO.userError s!"patch at {patch.address} expects {patch.expected.size} bytes and has {patch.replacement.size}"
+  if patch.expected.size = 0 then return .applied
+  let address := emu.config.untag patch.address
+  match ← applyPatch emu address patch, patch.onMismatch with
+  | .mismatch found, .error =>
+    throw <| IO.userError s!"patch at {address} expects {patch.expected.toList} and found {found.toList}"
+  | .mismatch _, .wait =>
+    let spaceOf : IO (Option Nat) := do
+      pure (((← emu.taskTable.get).find? (← thread emu)).map (·.space))
+    let space ← spaceOf
+    let hook ← IO.mkRef (none : Option HookId)
+    let id ← onCode emu (address, address + patch.expected.size - 1) fun current _ => do
+      if (← spaceOf) != space then return
+      match ← applyPatch current address patch with
+      | .mismatch _ | .skipped _ => pure ()
+      | _ => if let some id := ← hook.get then removeHook emu id
+    hook.set (some id)
+    pure (.pending id)
+  | result, _ => pure result
+
 private def synchronizeBatch (emu : Emu) (writes : List (Nat × ByteArray)) : IO Unit := do
   let persistent ← emu.engine.persistentMemory.get
   let memoryVar ← emu.engine.persistentVariable.get

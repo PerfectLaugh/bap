@@ -4016,6 +4016,57 @@ private def riscvConfig : IO Bap.Emu.Config := do
     endian := .little
   }
 
+/-- A patch goes only where it finds what it expects, whatever the protection, which stays; says what came of it; and one that waits
+is applied when the program has made the bytes it expects and runs them. -/
+def testPatch : IO Unit := do
+  let add (n : Nat) : IO ByteArray := LLVM.assemble "riscv64" s!"addi a0, a0, {n}"
+  let code := (← add 1) ++ (← LLVM.assemble "riscv64" "addi a1, a1, -1\nbnez a1, -8\nnop")
+  let register (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
+  let emu ← Bap.Emu.create { (← riscvConfig) with hotThreshold := 2, rangeLimit := 8 }
+    [⟨0, code, ⟨true, false, true⟩⟩] { env := [(register "X10", .bits (BitVec.ofNat 64 0)), (register "X11", .bits (BitVec.ofNat 64 0))] } 0
+  let set (name : String) (value : Nat) : IO Unit := Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 64 value))
+  let value (name : String) : IO Nat := do
+    match ← Bap.Emu.reg emu (register name) with
+    | .bits bits => pure bits.toNat
+    | _ => pure 0
+  let loop : IO Nat := do
+    set "X10" 0
+    set "X11" 10
+    Bap.Emu.setPc emu 0
+    let _ ← Bap.Emu.run emu 30
+    value "X10"
+  assertEqual "A loop counts" 10 (← loop)
+  let before ← Bap.Emu.regions emu
+  let result ← Bap.Emu.patch emu { address := 0, expected := ← add 1, replacement := ← add 5 }
+  assertTrue "A patch of read-only code is applied" (result matches .applied)
+  assertTrue "and leaves its protection as it was" ((← Bap.Emu.regions emu) == before)
+  expectThrow "A write there still isn't allowed" (Bap.Emu.write emu 0 (← add 1))
+  assertEqual "Code that was compiled runs as patched" 50 (← loop)
+  let again ← Bap.Emu.patch emu { address := 0, expected := ← add 1, replacement := ← add 5 }
+  assertTrue "A patch that is there already is applied" (again matches .applied)
+  match ← Bap.Emu.patch emu { address := 0, expected := ← add 2, replacement := ← add 3 } with
+  | .mismatch found => assertTrue "A patch that doesn't find what it expects says what it found" (found == (← add 5))
+  | _ => throw <| IO.userError "A patch that doesn't find what it expects isn't applied"
+  assertTrue "and changes nothing" ((← Bap.Emu.read emu 0 4) == (← add 5))
+  expectThrow "It throws if asked to" (Bap.Emu.patch emu { address := 0, expected := ← add 2, replacement := ← add 3, onMismatch := .error })
+  let unmapped ← Bap.Emu.patch emu { address := code.size - 2, expected := ← add 1, replacement := ← add 5 }
+  assertTrue "A patch past what is mapped is skipped" (unmapped matches .skipped _)
+  expectThrow "A replacement of another size is an error" (Bap.Emu.patch emu { address := 0, expected := ← add 5, replacement := code })
+  -- Text that the program decrypts: what it expects is there only once the store has run, and the patch is applied before it runs.
+  let plain ← add 1
+  let program := (← LLVM.assemble "riscv64" "sw a3, 12(zero)\nnop\nnop") ++ (← add 3) ++ (← LLVM.assemble "riscv64" "nop")
+  let decrypting ← Bap.Emu.riscv64 program 0 0
+  Bap.Emu.setReg decrypting (register "X10") (.bits (BitVec.ofNat 64 0))
+  Bap.Emu.setReg decrypting (register "X13") (.bits (BitVec.ofNat 64 (plain.toList.foldr (fun byte word => word * 256 + byte.toNat) 0)))
+  let pending ← Bap.Emu.patch decrypting { address := 12, expected := plain, replacement := ← add 9, onMismatch := .wait }
+  assertTrue "A patch that waits is pending on what isn't there yet" (pending matches .pending _)
+  assertTrue "and changes nothing" ((← Bap.Emu.read decrypting 12 4) == (← add 3))
+  let _ ← Bap.Emu.run decrypting 4
+  match ← Bap.Emu.reg decrypting (register "X10") with
+  | .bits bits => assertEqual "It is applied once the program has made what it expects" 9 bits.toNat
+  | _ => throw <| IO.userError "no a0"
+  assertTrue "and its hook is gone" (← decrypting.hooks.get).isEmpty
+
 private def regionAudit : IO Unit := do
   let rw : Primus.Protection := ⟨true, true, false⟩
   let ro : Primus.Protection := ⟨true, false, false⟩
