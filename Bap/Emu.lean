@@ -1783,6 +1783,7 @@ def patch (emu : Emu) (patch : Patch) : IO Patch.Result := do
   | .mismatch _, .wait | .skipped _, .wait =>
     let space ← currentSpace emu
     let hook ← IO.mkRef (none : Option HookId)
+    -- From 0 for a patch nearer to it than that, where the subtraction of `Nat` stops.
     let first := address - (longestInstruction - 1)
     let id ← onCode emu (first, address + patch.expected.size - 1) fun current _ => do
       if (← currentSpace current) != space then return
