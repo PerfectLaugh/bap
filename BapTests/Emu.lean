@@ -2531,7 +2531,10 @@ def testTraceWatches : IO Unit := do
   let other ← Bap.Emu.riscv64 code 0 0
   Bap.Emu.traceLoad other (← Bap.Emu.traceSave emu)
   assertEqual "Loaded again, the ranges are kept apart" (← Bap.Emu.traceWatches emu) (← Bap.Emu.traceWatches other)
-  assertEqual "with what each kept" first (← Bap.Emu.traceWatchAccesses other 0)
+  assertEqual "with what each kept" (first, last) (← Bap.Emu.traceWatchAccesses other 0, ← Bap.Emu.traceWatchAccesses other 1)
+  let some summary ← Bap.Emu.traceSummary emu | throw <| IO.userError "no summary"
+  assertEqual "Its summary says the one ring keeps none, and what each range does" (false, ← Bap.Emu.traceWatches emu)
+    (summary.sharedAccesses, summary.watches)
   expectThrow "A range that ends before it starts is refused" (Bap.Emu.traceStartWith emu { accessCapacity := 4, watches := [(8, 4)] })
 
 /-- What a handler does, as a contract, without changing the machine, and a replacement checked against it. -/

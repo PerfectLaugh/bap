@@ -1373,6 +1373,9 @@ structure TraceSummary where
   seen : Nat
   kept : Nat
   dropped : Nat
+  /-- Whether the one ring of accesses keeps any, which it doesn't where there are `watches` and no `watch`: those of each range are
+  in `watches` then, and the counts of accesses here are of the one ring only. -/
+  sharedAccesses : Bool
   accessesSeen : Nat
   accessesKept : Nat
   accessesDropped : Nat
@@ -1396,6 +1399,7 @@ def traceSummary (emu : Emu) (trace : String := "") : IO (Option TraceSummary) :
     seen := state.count
     kept := (pcList state).length
     dropped := rings.foldl (· + ·.dropped) 0
+    sharedAccesses := state.options.accessCapacity > 0 && (state.options.watch.isSome || state.options.watches.isEmpty)
     accessesSeen := state.accessCount
     accessesKept
     accessesDropped := state.accessCount - accessesKept
