@@ -455,6 +455,13 @@ def run : IO Unit := do
   let notTaken : Program := [.ifElse (int 1 0) [.move (reg "input") (int 32 1)] [], .move result (.var (reg "input"))]
   assertEqual "input that the program assigns only on a way that it didn't go is unresolved"
     [.unresolvedInput "original" "input", .failed "original" "unbound variable input"] (← diagnose notTaken deadProgram)
+  let jumping : Program := [.move result (.var (reg "input")), .jmp (int 32 0x100), .move result (.var (reg "after"))]
+  assertEqual "input that the program would read only after a jump isn't unresolved"
+    [.unresolvedInput "original" "input", .failed "original" "unbound variable input"] (← diagnose jumping deadProgram)
+  let bothJump : Program := [.ifElse (int 1 1) [.move result (.var (reg "input")), .jmp (int 32 0x100)] [.special "out"],
+    .move result (.var (reg "after"))]
+  assertEqual "nor after an if of which neither side goes on"
+    [.unresolvedInput "original" "input", .failed "original" "unbound variable input"] (← diagnose bothJump deadProgram)
   assertEqual "input that the program assigns before it reads it isn't unresolved" [.failed "simplified" "cannot evaluate unknown value: boom"]
     (← diagnose deadProgram [.move (reg "input") (int 32 1), .move result (.var (reg "input")), .move result (.unknown "boom" (.imm 32))])
   assertEqual "and a changed result is a mismatch" [.mismatch "result differs"]

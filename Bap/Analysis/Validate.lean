@@ -123,23 +123,30 @@ private def memoryOf (state : Bil.State) (var : Bap.Var) : Option (Σ width, Mem
   | _ => none
 
 /-- The variables that a program may read on some way through it before it has assigned them, given those assigned before it, in the
-order read, with those that it has assigned on every way through it: what an `if` assigns counts after it where both sides do, and what a
-loop does where it doesn't run. -/
-private partial def readsUnassigned (assigned : List Bap.Var) : Bil.Program → List Bap.Var × List Bap.Var
-  | [] => ([], assigned)
+order read; those that it has assigned on every way through it that goes on after it; and whether any does. A jump, a special or an
+exception ends a way, as a run ends there, so that what comes after one isn't read on it: what an `if` assigns counts after it where
+each side that goes on does, and nothing comes after one of which neither does, and what a loop does counts where it doesn't run. -/
+private partial def readsUnassigned (assigned : List Bap.Var) : Bil.Program → List Bap.Var × List Bap.Var × Bool
+  | [] => ([], assigned, true)
   | stmt :: rest =>
     let unassigned (exp : Bil.Exp) := (Bil.freeVars exp).filter (!assigned.contains ·)
-    let (here, after) : List Bap.Var × List Bap.Var := match stmt with
-      | .move var value => (unassigned value, var :: assigned)
-      | .jmp target => (unassigned target, assigned)
+    let (here, after, goesOn) : List Bap.Var × List Bap.Var × Bool := match stmt with
+      | .move var value => (unassigned value, var :: assigned, true)
+      | .jmp target => (unassigned target, assigned, false)
       | .ifElse condition yes no =>
-        let (yesReads, yesAssigned) := readsUnassigned assigned yes
-        let (noReads, noAssigned) := readsUnassigned assigned no
-        (unassigned condition ++ yesReads ++ noReads, yesAssigned.filter noAssigned.contains)
-      | .while condition body => (unassigned condition ++ (readsUnassigned assigned body).1, assigned)
-      | .special _ | .cpuExn _ => ([], assigned)
-    let (later, final) := readsUnassigned after rest
-    (here ++ later, final)
+        let (yesReads, yesAssigned, yesGoesOn) := readsUnassigned assigned yes
+        let (noReads, noAssigned, noGoesOn) := readsUnassigned assigned no
+        let after := match yesGoesOn, noGoesOn with
+          | true, true => yesAssigned.filter noAssigned.contains
+          | true, false => yesAssigned
+          | false, _ => noAssigned
+        (unassigned condition ++ yesReads ++ noReads, after, yesGoesOn || noGoesOn)
+      | .while condition body => (unassigned condition ++ (readsUnassigned assigned body).1, assigned, true)
+      | .special _ | .cpuExn _ => ([], assigned, false)
+    if !goesOn then (here, after, false)
+    else
+      let (later, final, last) := readsUnassigned after rest
+      (here ++ later, final, last)
 
 /-- `compare`, as what each disagreement is: of a run that failed, with the input that it reads and nothing gives, of bytes that what
 comes next consumes and neither side has, of a store that the simplified dropped, which is dead where `liveRanges` say what memory is live
