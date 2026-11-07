@@ -2785,6 +2785,24 @@ def testHooksOnceAfterRollback : IO Unit := do
         pure false
       catch _ => pure true
     pure ((← fired.get).size, ← fired.get, ← value emu "X10", failed || (← reads.get) != 1 && watched)
+  -- A hook that adds a hook of reads in the middle of a range: the reads after it are heard, as in single steps.
+  let adding (ranges : Bool) : IO (Nat × Nat) := do
+    let adjust (config : Bap.Emu.Config) : Bap.Emu.Config :=
+      if ranges then { config with hotThreshold := 1, rangeLimit := 16 } else { config with rangeLimit := 1 }
+    let emu ← Bap.Emu.riscv64 code base base (adjust := adjust)
+    Bap.Emu.map emu ⟨buffer, ByteArray.mk (List.replicate (8 * 64) 1).toArray, ⟨true, true, false⟩⟩
+    for (name, initial) in [("X10", 0), ("X11", 50), ("X12", buffer)] do
+      Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 64 initial))
+    let reads ← IO.mkRef 0
+    let added ← IO.mkRef false
+    let _ ← Bap.Emu.onCode emu (base, base + code.size - 1) fun emu address => do
+      if address == base + 20 then Bap.Emu.stop emu
+      if address == base + 8 && !(← added.get) && (← value emu "X11") == 30 then
+        added.set true
+        let _ ← Bap.Emu.onRead emu (buffer, buffer + 8 * 64 - 1) fun _ _ _ => reads.modify (· + 1)
+    let _ ← Bap.Emu.run emu 10000
+    pure (← reads.get, ← value emu "X10")
+  assertEqual "Reads after a hook added a hook of them are heard in ranges as in single steps" (← adding false) (← adding true)
   for (label, words, count, watched) in [("a read that a hook watches", 64, 50, true), ("a fault", 40, 50, false)] do
     let (stepCount, stepFired, stepSum, stepOdd) ← run false words count watched
     let (rangeCount, rangeFired, rangeSum, rangeOdd) ← run true words count watched

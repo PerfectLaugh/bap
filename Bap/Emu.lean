@@ -1134,6 +1134,8 @@ def onRead (emu : Emu) (range : Nat × Nat) (action : Emu → Nat → Nat → IO
   let id ← nextHookId emu
   forgetMemoryFilter emu
   emu.readHooks.modify (· ++ [⟨id, range.1, range.2, fun context => action (withContext emu context)⟩])
+  -- What a run that goes on has of the filter of the native memory is of the hooks that there were.
+  emu.hookChanges.modify (· + 1)
   pure id
 
 /-- Calls `action emu address size value` before each store of the range. -/
@@ -1143,6 +1145,7 @@ def onWrite (emu : Emu) (range : Nat × Nat) (action : Emu → Nat → Nat → N
   let id ← nextHookId emu
   forgetMemoryFilter emu
   emu.writeHooks.modify (· ++ [⟨id, range.1, range.2, fun context => action (withContext emu context)⟩])
+  emu.hookChanges.modify (· + 1)
   pure id
 
 /-- Calls `action emu number arguments` at each system call. -/
@@ -2661,15 +2664,20 @@ private def recordTrace (emu : Emu) (address : Nat) : IO Unit := do
 
 /-- The hooks of a code site in the middle of a native run, on the state that the run has there, `live`, as those of a step that
 starts there have: whether they changed what the run goes on with, the state, where it goes or whether the thread stops, for which
-the run stops there with what they left, and its hooks don't fire there again (`siteState`, `redirect`, `skipCode`). -/
+the run stops there with what they left, and its hooks don't fire there again (`siteState`, `redirect`, `skipCode`); as it does where
+they added or took off hooks. -/
 private def hookAtSite (emu : Emu) (address : Nat) (live : Bil.State) : IO Bool := do
   let before ← emu.state.get
+  let hooks ← emu.hookChanges.get
   emu.state.set live
   notifyCode emu address
   emu.firedSites.modify (·.push address)
   let after ← emu.state.get
   let pc ← emu.pc.get
-  if sameObject after live && pc == address && !(← emu.stopped.get) && (← emu.redirect.get).isNone then
+  -- Hooks that a hook added or took off are of what the run goes on with too, as what it has of the native memory's filter is of those
+  -- that there were.
+  if sameObject after live && pc == address && !(← emu.stopped.get) && (← emu.redirect.get).isNone &&
+      (← emu.hookChanges.get) == hooks then
     emu.state.set before
     return false
   emu.siteState.set (some after)
