@@ -2776,6 +2776,29 @@ def testOptimizedInPieces : IO Unit := do
     pure seen
   assertEqual "An optimized loop run a little at a time is where single steps are, with what they have" (← run false) (← run true)
 
+/-- An emulator that compiles at load has what is at its entry compiled as it is made, before it runs, and runs to what one that doesn't
+comes to. -/
+def testCompileAtLoad : IO Unit := do
+  let code ← LLVM.assemble "riscv64" "1: ld t0, 0(a2)\nadd a0, a0, t0\naddi a2, a2, 8\naddi a1, a1, -1\nbnez a1, 1b\n2: j 2b"
+  let register (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
+  let run (atLoad : Bool) : IO (Nat × Nat × Nat) := do
+    let emu ← Bap.Emu.riscv64 code 0 0 (adjust := fun config => { config with compileAtLoad := atLoad })
+    let compiled := (← Primus.Lifted.stats emu.engine).nativeCompilations
+    Bap.Emu.map emu ⟨0x100000, ByteArray.mk ((List.range (8 * 20000)).map fun at_ => if at_ % 8 == 0 then 3 else 0).toArray,
+      ⟨true, true, false⟩⟩
+    for (name, start) in [("X10", 0), ("X11", 20000), ("X12", 0x100000)] do
+      Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 64 start))
+    let _ ← Bap.Emu.run emu (5 * 20000 + 3)
+    let sum ← match ← Bap.Emu.reg emu (register "X10") with
+      | .bits bits => pure bits.toNat
+      | _ => pure 0
+    pure (compiled, sum, ← Bap.Emu.pc emu)
+  let (before, sum, pc) ← run false
+  let (compiledAtLoad, sumAtLoad, pcAtLoad) ← run true
+  assertEqual "An emulator that doesn't compile at load has nothing compiled before it runs" 0 before
+  assertTrue s!"one that does has its entry compiled: {compiledAtLoad}" (compiledAtLoad ≥ 1)
+  assertEqual "and runs to the same" (60000, sum, pc) (sumAtLoad, sumAtLoad, pcAtLoad)
+
 /-- A range of ARM code at an address, run there as Thumb: what runs is the Thumb of those bytes, as a single step has it, rather than
 the range. -/
 def testThumbAfterArmRange : IO Unit := do

@@ -41,6 +41,10 @@ structure Config where
   /-- How many times an instruction runs in the interpreter, which takes microseconds, before it is compiled, which takes
   hundreds of them: most of a program runs a few times at most. -/
   hotThreshold : Nat := 16
+  /-- Whether what is at the entry is compiled as the emulator is made, with what it loops optimized on other threads then, rather
+  than as it runs: what is done before the first run, such as mapping its memory, is then done while that compiles, as an ahead
+  of time translator does it before a program starts. -/
+  compileAtLoad : Bool := false
   /-- How many instructions what is lifted and compiled is kept of, of which the least used go. -/
   cacheLimit : Nat := 4096
   /-- How many compiled ranges are kept, of which the least used go; `none` is `cacheLimit`. -/
@@ -3512,6 +3516,17 @@ private def decodeAt (decode : Nat → Nat → ByteArray → IO Disasm.Insn) (ba
   catch error =>
     pure (.error (toString error))
 
+/-- What is at `address` compiled now, rather than as it runs (`Config.compileAtLoad`). -/
+def compileAhead (emu : Emu) (address : Nat) : IO Unit := do
+  let thumb := isThumb (← emu.state.get)
+  Primus.Lifted.prepareAhead emu.engine (fun target => do pure (codeOfMode thumb (← fetch emu target)))
+    (fun target code => lift emu thumb target (codeWithoutMode thumb code)) address
+
+/-- An emulator that compiles what is at its entry as it is made, if its configuration says so. -/
+private def loaded (emu : Emu) (entry : Nat) : IO Emu := do
+  if emu.config.compileAtLoad then compileAhead emu entry
+  pure emu
+
 /-- The decoders at each base for RISC-V 64, which all share their semantics. -/
 def riscv64Decoders : IO (Nat → IO Disasm.Disassembler) := do
   let environment ← Target.LLVMLift.riscvEnvironment
@@ -3529,7 +3544,7 @@ def riscv64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config :=
     endian := .little
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create (adjust config) [region] { env := clearMonitor config {} } entry
+  loaded (← create (adjust config) [region] { env := clearMonitor config {} } entry) entry
 
 /-- An emulator of RISC-V 32, as `riscv64`. -/
 def riscv32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
@@ -3544,7 +3559,7 @@ def riscv32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config :=
     endian := .little
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create (adjust config) [region] { env := clearMonitor config {} } entry
+  loaded (← create (adjust config) [region] { env := clearMonitor config {} } entry) entry
 
 /-- An emulator of a variant of PowerPC, as `riscv64`. -/
 def powerpc (code : ByteArray) (base entry : Nat) (variant : Target.LLVMLift.PowerPCVariant) (adjust : Config → Config := id) : IO Emu := do
@@ -3558,7 +3573,7 @@ def powerpc (code : ByteArray) (base entry : Nat) (variant : Target.LLVMLift.Pow
     syscallAbi := if variant.bits == 64 then .powerpc64 else .powerpc
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create (adjust config) [region] { env := clearMonitor config {} } entry
+  loaded (← create (adjust config) [region] { env := clearMonitor config {} } entry) entry
 
 /-- ARM and Thumb, of which it starts in Thumb if `thumb`. -/
 def arm32 (code : ByteArray) (base entry : Nat) (thumb : Bool := false) (adjust : Config → Config := id) : IO Emu := do
@@ -3573,7 +3588,7 @@ def arm32 (code : ByteArray) (base entry : Nat) (thumb : Bool := false) (adjust 
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
   let env := Bil.bind (clearMonitor config {}) ⟨"ISET", .imm 1, 0, false⟩ (.bits (BitVec.ofNat 1 (if thumb then 1 else 0)))
-  create (adjust config) [region] { env } entry
+  loaded (← create (adjust config) [region] { env } entry) entry
 
 /-- An emulator of i686, as `riscv64`. -/
 def x86_32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
@@ -3586,7 +3601,7 @@ def x86_32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := 
     syscallAbi := .x86_32
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create (adjust config) [region] {} entry
+  loaded (← create (adjust config) [region] {} entry) entry
 
 /-- An emulator of x86-64, as `riscv64`. -/
 def x86_64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
@@ -3599,7 +3614,7 @@ def x86_64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := 
     syscallAbi := .x86_64
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create (adjust config) [region] {} entry
+  loaded (← create (adjust config) [region] {} entry) entry
 
 /-- An emulator of AArch64, as `riscv64`, with the top byte of an address ignored, as Linux has it. -/
 def aarch64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
@@ -3613,7 +3628,7 @@ def aarch64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config :=
     untag := Target.AArch64.untag
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create (adjust config) [region] { env := clearMonitor config {} } entry
+  loaded (← create (adjust config) [region] { env := clearMonitor config {} } entry) entry
 
 private def mipsOf (variant : Target.LLVMLift.MipsVariant) (code : ByteArray) (base entry : Nat) (adjust : Config → Config) : IO Emu := do
   let environment ← Target.LLVMLift.mipsEnvironmentOf variant
@@ -3632,7 +3647,7 @@ private def mipsOf (variant : Target.LLVMLift.MipsVariant) (code : ByteArray) (b
     delayPolicy := .mips variant.release6
   }
   let region : Region := ⟨base, code, ⟨true, true, true⟩⟩
-  create (adjust config) [region] { env := clearMonitor config {} } entry
+  loaded (← create (adjust config) [region] { env := clearMonitor config {} } entry) entry
 
 /-- An emulator of MIPS64, of release 6 or not and big-endian or not, as `riscv64`. -/
 def mips64 (code : ByteArray) (base entry : Nat) (release6 : Bool := false) (endian : Endian := .big) (adjust : Config → Config := id) : IO Emu :=

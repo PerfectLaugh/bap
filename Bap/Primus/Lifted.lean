@@ -1734,7 +1734,7 @@ private def restoreRangeVersion (engine : Engine) (fetch : Fetch) (address : Nat
   find (versions.getD address [])
 
 private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
-    (address : Nat) (code : ByteArray) (budget : Nat) : IO CachedBlock := do
+    (address : Nat) (code : ByteArray) (budget : Nat) (force : Bool := false) : IO CachedBlock := do
   -- A run that may enter no other block has no use for a range: the block alone moves less in and out of native code.
   if budget = 0 then return ← prepare engine lift address code
   -- A range is of the bytes that it starts with, as a block is: of others, as of code written since or of another mode, it is a
@@ -1771,7 +1771,8 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
       let first ← prepare engine lift address code false
       -- Nothing to compile it with is a reason not to find and lower its graph either, each time it runs. Nor is being inside a
       -- loop that is being optimized, which a run that its budget ended in the middle of goes back to the start of in a few blocks.
-      if first.settled || (← first.executions.get) < engine.hotThreshold || cooldown != 0 || (← insideOptimizingLoop engine address) ||
+      if first.settled || (!force && (← first.executions.get) < engine.hotThreshold) || cooldown != 0 ||
+          (← insideOptimizingLoop engine address) ||
           !(← makeRoom engine) then return first
       else
         let settle (entry : CachedBlock) : IO CachedBlock := do
@@ -1865,6 +1866,12 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
               indexRange engine address entry
               engine.cache.modify (·.erase address)
               return entry
+
+/-- What runs from `address` lifted and compiled now, as a range if it can be one, whether or not it is hot yet, before anything runs
+it: what loops in it is then optimized on other threads while what comes before its first run is done. -/
+def prepareAhead (engine : Engine) (fetch : Fetch) (lift : Lift) (address : Nat) : IO Unit := do
+  let code ← fetch address
+  let _ ← prepareGraph engine fetch lift address code (2 ^ 32) (force := true)
 
 /-- A number below 60 for a variable, from what is at hand of it, which most others don't have. -/
 private def quickKey (var : Bap.Var) : Nat :=
