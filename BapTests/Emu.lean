@@ -2392,7 +2392,8 @@ def testCffEffects (triple : String) : IO Unit := do
     ((stateOf 3).any fun e => e.services.any (·.startsWith "syscall"))
   assertEqual s!"CffEffects {triple} a state keeps its name" (some (some "asks")) ((stateOf 3).map (·.name))
   assertTrue s!"CffEffects {triple} a state that only computes asks nothing" ((stateOf 1).any fun e => e.services.isEmpty)
-  assertTrue s!"CffEffects {triple} every state's rounds call something" (effects.byState.all fun e => !e.calls.isEmpty)
+  assertTrue s!"CffEffects {triple} each state calls what its rounds called"
+    (effects.byState.all fun e => e.calls == ((taken.transitions.filter (·.state == e.state)).flatMap (·.calls)).eraseDups)
   assertTrue s!"CffEffects {triple} each state's services are within the whole" (effects.byState.all fun e => e.services.all effects.services.contains)
   assertTrue s!"CffEffects {triple} each state's calls are within the whole" (effects.byState.all fun e => e.calls.all effects.calls.contains)
   assertEqual s!"CffEffects {triple} the whole has no service twice" effects.services.length effects.services.eraseDups.length
