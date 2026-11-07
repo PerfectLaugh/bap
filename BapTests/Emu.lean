@@ -2442,12 +2442,31 @@ def testCffGraph (triple : String) : IO Unit := do
   let otherTaken ← Bap.Analysis.Cff.recoverIn other.emu profile (← otherRecorder.visits.get) (some (← otherJournal.toRecord))
   let otherCheck := Bap.Analysis.Cff.check taken otherTaken
   let problems := otherCheck.problems
-  assertEqual s!"CffGraph {triple} one whose rounds don't pair with the original's one to one names nothing otherwise" [] otherCheck.states
-  assertTrue s!"CffGraph {triple} and is told apart: {problems}"
-    (problems.contains "the original goes from 2 to 3, which the simplified doesn't" &&
-      problems.contains "the simplified goes from 2 to 4, which the original doesn't" &&
-      (taken.effects.byState.find? (·.state == 3) |>.all fun three =>
+  assertTrue s!"CffGraph {triple} one of another byte is told apart, by what 3 asks and it doesn't: {problems}"
+    (!otherCheck.ok && (taken.effects.byState.find? (·.state == 3) |>.all fun three =>
         three.services.all fun service => problems.contains s!"the original asks {service}, which the simplified doesn't"))
+  -- The same rounds in another order are the same machine, each state itself.
+  let reordered := Bap.Analysis.Cff.check taken { taken with transitions := taken.transitions.reverse }
+  assertTrue s!"CffGraph {triple} one whose rounds came in another order keeps all: {reordered.problems}"
+    (reordered.ok && taken.cfg.states.all fun state => reordered.states.contains (state, state))
+  -- A state split in two, each of which its rounds take in turn: each stands for it.
+  let splitVisits := (visits.foldl (init := (#[], 0)) fun (out, seen) visit =>
+    if visit.state == 2 then (out.push { visit with state := if seen % 2 == 0 then 20 else 21 }, seen + 1)
+    else (out.push visit, seen)).1
+  let whole := Bap.Analysis.Cff.recover profile visits
+  let split := Bap.Analysis.Cff.check whole (Bap.Analysis.Cff.recover profile splitVisits)
+  assertTrue s!"CffGraph {triple} one with a state split in two keeps all: {split.problems} {split.states}"
+    (split.ok && split.states.contains (20, 2) && split.states.contains (21, 2))
+  -- A target that moved, in a round that gained a call: the call that it gained is new, and the target is what it was.
+  if let some moved := taken.effects.calls.head? then
+    let shifted := taken.rename [] [(moved, moved + 0x100000)]
+    let some at_ := shifted.transitions.findIdx? (·.calls.contains (moved + 0x100000))
+      | throw <| IO.userError "no round calls it"
+    let gained := { shifted with transitions := shifted.transitions.modify at_ fun round => { round with calls := round.calls ++ [0xdead] } }
+    let check := Bap.Analysis.Cff.check taken gained
+    assertEqual s!"CffGraph {triple} a target that moved in a round that gained a call is what it was, and the call is new"
+      ["the simplified calls 0xdead, which the original doesn't"] check.problems
+    assertTrue s!"CffGraph {triple} and it says what the target stood for" (check.targets.contains (moved + 0x100000, moved))
   -- One whose states are named otherwise and whose targets moved, as a simplification may leave them, keeps all of it.
   let states := taken.cfg.states.map fun state => (state, state + 10)
   let targets := taken.effects.calls.map fun target => (target, target + 0x100000)

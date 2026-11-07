@@ -775,34 +775,95 @@ structure Check where
 
 def Check.ok (check : Check) : Bool := check.problems.isEmpty
 
-/-- Pairs that are one to one, the left of each with the right: none where a left has two rights, or a right two lefts. -/
-private def oneToOne (pairs : List (Nat × Nat)) : Option (List (Nat × Nat)) := Id.run do
-  let mut forward : Std.HashMap Nat Nat := {}
-  let mut backward : Std.HashMap Nat Nat := {}
-  let mut order : Array (Nat × Nat) := #[]
-  for (left, right) in pairs do
-    match forward[left]?, backward[right]? with
-    | none, none =>
-      forward := forward.insert left right
-      backward := backward.insert right left
-      order := order.push (left, right)
-    | some known, some back => if known != right || back != left then return none
-    | _, _ => return none
-  pure (some order.toList)
-
 /-- The rounds of a dispatcher by thread, in the order that the threads first came. -/
 private def roundsByThread (dispatcher : Dispatcher) : List (List Transition) :=
   let threads := (dispatcher.transitions.map (·.thread)).eraseDups
   threads.map fun thread => dispatcher.transitions.filter (·.thread == thread)
 
-/-- What the states and the call targets of `simplified` stand for in `original`, as their rounds pair up, the first of each thread
-with the first, and so on: the states where that is one to one, and the targets of rounds that called as many times, where those are. -/
-def correspondence (original simplified : Dispatcher) : Option (List (Nat × Nat)) × Option (List (Nat × Nat)) :=
+/-- What each state of a dispatcher is, as a number that doesn't depend on what it is called or on the order of its rounds: of what
+it asks, how many targets it calls and whether a round ended in it, made again from those of the states that it goes to and comes
+from, as many times as there are states, so that states that are alike only where they are in the graph are told apart. -/
+private def stateSignatures (dispatcher : Dispatcher) : Std.HashMap Nat UInt64 := Id.run do
+  let cfg := dispatcher.cfg
+  let effects := dispatcher.effects
+  let ways := cfg.edges.filterMap fun edge => edge.target.map (edge.source, ·)
+  let sorted (values : List UInt64) : List UInt64 := (values.toArray.qsort (· < ·)).toList
+  let mut signatures : Std.HashMap Nat UInt64 := cfg.states.foldl (init := {}) fun signatures state =>
+    let own := effects.byState.find? (·.state == state)
+    let services := ((own.map (·.services)).getD []).toArray.qsort (· < ·) |>.toList
+    signatures.insert state (hash (services, (own.map (·.calls.length)).getD 0, cfg.exits.contains state))
+  for _ in cfg.states do
+    let before := signatures
+    signatures := cfg.states.foldl (init := {}) fun signatures state =>
+      let next := sorted (ways.filterMap fun (from_, to) => if from_ == state then before[to]? else none)
+      let previous := sorted (ways.filterMap fun (from_, to) => if to == state then before[from_]? else none)
+      signatures.insert state (hash (before.getD state 0, next, previous))
+  pure signatures
+
+/-- Of each that votes, the one that more than half of its votes are for, if one is. -/
+private def majorities (votes : Std.HashMap Nat (Std.HashMap Nat Nat)) : Std.HashMap Nat Nat :=
+  votes.fold (init := {}) fun chosen from_ counts =>
+    let total := counts.fold (init := 0) fun total _ count => total + count
+    match counts.fold (init := (none : Option (Nat × Nat))) fun best to count =>
+        match best with
+        | some (_, most) => if count > most then some (to, count) else best
+        | none => some (to, count) with
+    | some (to, count) => if 2 * count > total then chosen.insert from_ to else chosen
+    | none => chosen
+
+private def vote (votes : Std.HashMap Nat (Std.HashMap Nat Nat)) (from_ to : Nat) : Std.HashMap Nat (Std.HashMap Nat Nat) :=
+  votes.alter from_ fun counts => some ((counts.getD {}).alter to fun count => some (count.getD 0 + 1))
+
+/-- What the states and the call targets of `simplified` stand for in `original`, each of `simplified` with the one of `original`.
+
+States go by what they are in their graphs (`stateSignatures`): one that is the only one of what it is on each side is that one,
+whatever it is called and whatever order the rounds came in. Of those left, one that the original has no state of the number of is
+what more than half of its rounds stand for, where the rounds of each thread are paired in order, as of the same input, so that the
+states that one was split into each stand for it; a state that the original has the number of, or that stands for none more than
+half the time, stands for itself. Targets go by the rounds of states that stand for each other, the first of each thread with the
+first: each target of a round is what more than half of its places in them call in the other, of rounds that call as many times, and
+then of the others, whose calls are paired from the end that agrees more with what is known, or else from the start, as a call that a
+round gained or lost is. Several may stand for one, and one that stands for none more than half the time stands for itself. -/
+def correspondence (original simplified : Dispatcher) : List (Nat × Nat) × List (Nat × Nat) := Id.run do
+  let ours := stateSignatures simplified
+  let theirs := stateSignatures original
+  let counts (signatures : Std.HashMap Nat UInt64) : Std.HashMap UInt64 (Nat × Nat) :=
+    signatures.fold (init := {}) fun counts state signature =>
+      counts.alter signature fun known => some (match known with | some (_, count) => (state, count + 1) | none => (state, 1))
+  let (ourCounts, theirCounts) := (counts ours, counts theirs)
+  let mut states : Std.HashMap Nat Nat := {}
+  for (state, signature) in ours.toList do
+    if let (some (_, 1), some (other, 1)) := (ourCounts[signature]?, theirCounts[signature]?) then
+      states := states.insert state other
+  let originalStates := original.cfg.states
   let rounds := ((roundsByThread simplified).zip (roundsByThread original)).flatMap fun (mine, theirs) => mine.zip theirs
-  let states := oneToOne (rounds.map fun (mine, theirs) => (mine.state, theirs.state))
-  let targets := oneToOne (rounds.flatMap fun (mine, theirs) =>
-    if mine.calls.length == theirs.calls.length then mine.calls.zip theirs.calls else [])
-  (states, targets)
+  let mut stateVotes : Std.HashMap Nat (Std.HashMap Nat Nat) := {}
+  for (mine, theirs) in rounds do
+    if !states.contains mine.state && !originalStates.contains mine.state then
+      stateVotes := vote stateVotes mine.state theirs.state
+  for (state, other) in (majorities stateVotes).toList do states := states.insert state other
+  let stateOf (state : Nat) : Nat := states.getD state state
+  -- The rounds of states that stand for each other, of each thread, in order.
+  let paired := ((roundsByThread simplified).zip (roundsByThread original)).flatMap fun (mine, theirs) =>
+    let keys := (theirs.map (·.state) ++ mine.map (stateOf ·.state)).eraseDups
+    keys.flatMap fun key => (mine.filter (stateOf ·.state == key)).zip (theirs.filter (·.state == key))
+  let mut targetVotes : Std.HashMap Nat (Std.HashMap Nat Nat) := {}
+  for (mine, theirs) in paired do
+    if mine.calls.length == theirs.calls.length then
+      for (target, other) in mine.calls.zip theirs.calls do targetVotes := vote targetVotes target other
+  let known := majorities targetVotes
+  for (mine, theirs) in paired do
+    if mine.calls.length != theirs.calls.length then
+      let length := min mine.calls.length theirs.calls.length
+      let fromStart := (mine.calls.take length).zip (theirs.calls.take length)
+      let fromEnd := (mine.calls.drop (mine.calls.length - length)).zip (theirs.calls.drop (theirs.calls.length - length))
+      let agree (pairs : List (Nat × Nat)) := (pairs.filter fun (target, other) => known[target]? == some other).length
+      let chosen := if agree fromEnd > agree fromStart then fromEnd else fromStart
+      for (target, other) in chosen do targetVotes := vote targetVotes target other
+  let targets := majorities targetVotes
+  let stateList := simplified.cfg.states.filterMap fun state => states[state]?.map (state, ·)
+  let targetList := simplified.effects.calls.filterMap fun target => targets[target]?.map (target, ·)
+  pure (stateList, targetList)
 
 /-- A dispatcher with its states and the targets that it calls named as `states` and `targets` say, and as they are where they don't. -/
 def Dispatcher.rename (dispatcher : Dispatcher) (states targets : List (Nat × Nat)) : Dispatcher :=
@@ -818,15 +879,14 @@ def Dispatcher.rename (dispatcher : Dispatcher) (states targets : List (Nat × N
 /-- Whether `simplified` keeps what `original` does at its boundary, as their rounds say: where the rounds ended, as an opaque exit is, the
 services that they ask of the kernel and the host, the targets that they call, and the ways from a state to the next that they took. Each
 that one has and the other doesn't is a problem, as dropping one is losing what the program does and adding one is doing what it
-didn't. Of rounds of the same input, so that both took the ways that it chose, which pair its states and targets with the original's
-where they are one to one (`correspondence`), so that states named otherwise, or targets that moved, are compared as what they stand for;
-`states` and `targets` say how they were named. -/
+didn't. Of rounds of the same input, so that both took the ways that it chose, with its states and targets as what they stand for in the
+original (`correspondence`), so that states named otherwise, split, or whose rounds came in another order, and targets that moved, are
+compared as that; `states` and `targets` say how they were named. -/
 def check (original simplified : Dispatcher) : Check := Id.run do
   let differ {α : Type} [BEq α] (what : String) (show_ : α → String) (left right : List α) : List String :=
     (left.filter (!right.contains ·)).map (fun item => s!"the original {what} {show_ item}, which the simplified doesn't") ++
       (right.filter (!left.contains ·)).map (fun item => s!"the simplified {what} {show_ item}, which the original doesn't")
   let (states, targets) := correspondence original simplified
-  let (states, targets) := (states.getD [], targets.getD [])
   let simplified := simplified.rename states targets
   let (originalCfg, simplifiedCfg) := (original.cfg, simplified.cfg)
   let (originalEffects, simplifiedEffects) := (original.effects, simplified.effects)
