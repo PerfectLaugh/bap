@@ -223,6 +223,21 @@ structure RollbackStats where
   bytesRestored : Nat := 0
   deriving Repr, Inhabited
 
+/-- A patch that was applied: where, in which address space, what was there before and what was put. -/
+structure PatchRecord where
+  address : Nat
+  space : Nat
+  original : ByteArray
+  replacement : ByteArray
+  deriving Inhabited
+
+/-- How many loads the instruction at `pc` made of the bytes of the patch at `patch`, as a check of a program's own code makes. -/
+structure PatchRead where
+  pc : Nat
+  patch : Nat
+  count : Nat
+  deriving Repr, DecidableEq, Inhabited
+
 /-- An emulator: its configuration, the engine that runs lifted code, the thread that runs and the others, memory, hooks, traces, and
 the tasks of Linux that a kernel needs. Everything in it is a reference, so that a copy of it is the same emulator. -/
 structure Emu where
@@ -337,6 +352,9 @@ structure Emu where
   betweenTurns : IO.Ref (List (IO Unit))
   /-- What hears of bytes of a guest that no instruction of it changed: where and how many, and whether they became zeros because of nothing. -/
   memoryChanged : IO.Ref (List (Nat → Nat → Bool → IO Unit))
+  /-- The patches that were applied, the last first, and the loads of their bytes by the instruction that made them and the patch. -/
+  patched : IO.Ref (List PatchRecord)
+  patchReads : IO.Ref (Std.HashMap (Nat × Nat) Nat)
   /-- What hears that the host moved bytes of a guest from one place to another, from, to and how many. -/
   memoryCopied : IO.Ref (List (Nat → Nat → Nat → IO Unit))
   /-- What hears that the host is serving a call of the guest that isn't a system call, such as one of JNI, by name, and then that it has
@@ -481,6 +499,8 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     syscallEnds := ← IO.mkRef []
     betweenTurns := ← IO.mkRef []
     memoryChanged := ← IO.mkRef []
+    patched := ← IO.mkRef []
+    patchReads := ← IO.mkRef {}
     memoryCopied := ← IO.mkRef []
     hostStarts := ← IO.mkRef []
     hostEnds := ← IO.mkRef []
@@ -1681,6 +1701,13 @@ inductive Patch.OnMismatch where
   | wait
   deriving Repr, BEq, Inhabited
 
+/-- What becomes of loads of a patch's bytes, as a program that checks its own code makes: nothing heard of them, or each counted by
+the instruction that made it (`Emu.patchReads`), so that a loop that reads a program's own code to check it stands out. -/
+inductive Patch.Reads where
+  | ignore
+  | record
+  deriving Repr, BEq, Inhabited
+
 /-- Bytes to put at an address in place of those it expects to find there, as many as those. -/
 structure Patch where
   address : Nat
@@ -1689,6 +1716,7 @@ structure Patch where
   /-- Whether to read the bytes back after, to say that they are what was put. -/
   readback : Bool := true
   onMismatch : Patch.OnMismatch := .skip
+  reads : Patch.Reads := .record
 
 /-- What came of a patch. It is `applied` as well where the replacement is there already. A patch that waits is `pending` on a hook,
 which `removeHook` takes off; `found` is what was there. -/
@@ -1700,8 +1728,20 @@ inductive Patch.Result where
   | pending (hook : HookId)
   deriving Inhabited
 
+/-- The address space of the thread that runs. -/
+private def currentSpace (emu : Emu) : IO Nat := do spaceOf emu (← thread emu)
+
+/-- Counts loads of a patch's bytes, by the instruction that made each, in the address space where the patch is. -/
+private def watchPatch (emu : Emu) (address : Nat) (patch : Patch) (space : Nat) : IO Unit := do
+  if patch.reads == .ignore then return
+  let last := address + patch.expected.size - 1
+  let _ ← onRead emu (address, last) fun current _ _ => do
+    if (← currentSpace current) != space then return
+    let pc ← current.pc.get
+    current.patchReads.modify fun reads => reads.insert (pc, address) (reads.getD (pc, address) 0 + 1)
+
 /-- Puts a patch's replacement where all of its bytes are mapped and are what it expects, whatever their protection, which it leaves
-as it was: code there runs as patched. -/
+as it was: code there runs as patched. What was there is kept. -/
 private def applyPatch (emu : Emu) (address : Nat) (patch : Patch) : IO Patch.Result := do
   let size := patch.expected.size
   if !coversRange (← emu.regions.get) address (address + size) then
@@ -1710,6 +1750,9 @@ private def applyPatch (emu : Emu) (address : Nat) (patch : Patch) : IO Patch.Re
   if found == patch.replacement then return .applied
   if found != patch.expected then return .mismatch found
   poke emu address patch.replacement
+  let space ← currentSpace emu
+  emu.patched.modify ({ address, space, original := found, replacement := patch.replacement } :: ·)
+  watchPatch emu address patch space
   if !patch.readback then return .applied
   let after ← peek emu address size
   pure (if after == patch.replacement then .applied else .unverified after)
@@ -1726,18 +1769,26 @@ def patch (emu : Emu) (patch : Patch) : IO Patch.Result := do
   | .mismatch found, .error =>
     throw <| IO.userError s!"patch at {address} expects {patch.expected.toList} and found {found.toList}"
   | .mismatch _, .wait =>
-    let spaceOf : IO (Option Nat) := do
-      pure (((← emu.taskTable.get).find? (← thread emu)).map (·.space))
-    let space ← spaceOf
+    let space ← currentSpace emu
     let hook ← IO.mkRef (none : Option HookId)
     let id ← onCode emu (address, address + patch.expected.size - 1) fun current _ => do
-      if (← spaceOf) != space then return
+      if (← currentSpace current) != space then return
       match ← applyPatch current address patch with
       | .mismatch _ | .skipped _ => pure ()
       | _ => if let some id := ← hook.get then removeHook emu id
     hook.set (some id)
     pure (.pending id)
   | result, _ => pure result
+
+/-- The patches that were applied, the first first, with what was there before. -/
+def patches (emu : Emu) : IO (List PatchRecord) := do
+  pure (← emu.patched.get).reverse
+
+/-- The loads of patched bytes, by the instruction that made them and the patch, the most first: a loop that sums a program's own
+code to check it is where the most are. -/
+def patchReads (emu : Emu) : IO (List PatchRead) := do
+  let reads := (← emu.patchReads.get).toList.map fun ((pc, patch), count) => { pc, patch, count : PatchRead }
+  pure (reads.toArray.qsort (fun a b => a.count > b.count || (a.count == b.count && a.pc < b.pc))).toList
 
 private def synchronizeBatch (emu : Emu) (writes : List (Nat × ByteArray)) : IO Unit := do
   let persistent ← emu.engine.persistentMemory.get

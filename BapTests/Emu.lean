@@ -4066,6 +4066,27 @@ def testPatch : IO Unit := do
   | .bits bits => assertEqual "It is applied once the program has made what it expects" 9 bits.toNat
   | _ => throw <| IO.userError "no a0"
   assertTrue "and its hook is gone" (← decrypting.hooks.get).isEmpty
+  -- What a check of a program's own code reads of a patch: what it reads is counted by where, and what was there before is kept; one
+  -- that is concealed reads what was there before, and what runs there runs the replacement.
+  let word (bytes : ByteArray) : Nat := bytes.toList.foldr (fun byte word => word * 256 + byte.toNat) 0
+  let check (reads : Bap.Emu.Patch.Reads) : IO (Nat × Nat × List Bap.Emu.PatchRead × List Bap.Emu.PatchRecord) := do
+    let checking ← Bap.Emu.riscv64 ((← add 1) ++ (← LLVM.assemble "riscv64" "lw a2, 0(zero)\nj -8")) 0 0
+    for name in ["X10", "X12"] do Bap.Emu.setReg checking (register name) (.bits (BitVec.ofNat 64 0))
+    let _ ← Bap.Emu.patch checking { address := 0, expected := ← add 1, replacement := ← add 5, reads }
+    let _ ← Bap.Emu.run checking 9
+    let read (name : String) : IO Nat := do
+      match ← Bap.Emu.reg checking (register name) with
+      | .bits bits => pure bits.toNat
+      | _ => pure 0
+    pure (← read "X10", ← read "X12", ← Bap.Emu.patchReads checking, ← Bap.Emu.patches checking)
+  let (ran, loaded, reads, records) ← check .record
+  assertEqual "Code runs as patched" 15 ran
+  assertEqual "and what loads it loads the replacement" (word (← add 5)) loaded
+  assertEqual "Each load of it is counted by the instruction that made it" [{ pc := 4, patch := 0, count := 3 : Bap.Emu.PatchRead }] reads
+  assertEqual "What was there before is kept" [(0, (← add 1).toList, (← add 5).toList)]
+    (records.map fun record => (record.address, record.original.toList, record.replacement.toList))
+  let (_, _, reads, _) ← check .ignore
+  assertEqual "Loads that are ignored aren't counted" [] reads
 
 private def regionAudit : IO Unit := do
   let rw : Primus.Protection := ⟨true, true, false⟩
