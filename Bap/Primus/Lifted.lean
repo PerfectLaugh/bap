@@ -1825,6 +1825,23 @@ private def encodeStateFast (lowering : Lowering) (env : Bil.Env) : Except Strin
 private def slotBits (width : Nat) (slot : UInt64) : BitVec width :=
   if h : width = 64 then h ▸ slot.toBitVec else BitVec.ofNat width slot.toNat
 
+/-- `slotBits`, by a shift rather than a power of two for a variable narrower than a slot, as a flag is. -/
+private def slotBitsFast (width : Nat) (slot : UInt64) : BitVec width :=
+  if h : width = 64 then h ▸ slot.toBitVec
+  else if width < 64 then
+    BitVec.ofFin ⟨slot.toNat % (1 <<< width), by rw [Nat.one_shiftLeft]; exact Nat.mod_lt _ (Nat.two_pow_pos width)⟩
+  else BitVec.ofNat width slot.toNat
+
+@[csimp] private theorem slotBits_eq_fast : @slotBits = @slotBitsFast := by
+  funext width slot
+  unfold slotBits slotBitsFast
+  split
+  · rfl
+  · split
+    · apply BitVec.eq_of_toNat_eq
+      simp [BitVec.toNat_ofNat, Nat.one_shiftLeft]
+    · rfl
+
 /-- The environment without the bindings of `pending`, which are distinct. The bindings stop at the last of
 them and the rest of the environment is shared, and those that a loop writes are near the front. -/
 private def withoutBindings (pending : List Bap.Var) : Bil.Env → Bil.Env
