@@ -2524,7 +2524,7 @@ over that no one waits for; of the timers, 3 has the fraction of what is left of
 and 4 the semaphore that a call of `semop` waits for. -/
 private def builtinModels : List (String × Nat) :=
   [(Signals.modelId, 2), (Ptrace.modelId, 8), (Seccomp.modelId, 1), (Timers.modelId, 4), (Ring.modelId, 2), (heapModelId, 1), (libraryModelId, 1),
-    (traceModelId, 5)]
+    (traceModelId, 6)]
 
 private def builtinVersion (id : String) : Nat := (builtinModels.lookup id).getD 1
 

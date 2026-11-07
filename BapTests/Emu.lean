@@ -2549,6 +2549,20 @@ def testTraceWatches : IO Unit := do
   let some summary ← Bap.Emu.traceSummary emu | throw <| IO.userError "no summary"
   assertEqual "Its summary says the one ring keeps none, and what each range does" (false, ← Bap.Emu.traceWatches emu)
     (summary.sharedAccesses, summary.watches)
+  assertEqual "and how many accesses it kept in any, each once" 21 summary.accessesHeard
+  -- An access that touches two ranges is one access.
+  let overlapping ← Bap.Emu.riscv64 code 0 0
+  Bap.Emu.map overlapping ⟨0x2000, ByteArray.mk (List.replicate 0x3000 0).toArray, ⟨true, true, false⟩⟩
+  for (name, value) in [("X10", 0), ("X11", 0x55), ("X12", 0x2000), ("X13", 0x3000), ("X14", 0x4000)] do
+    Bap.Emu.setReg overlapping ⟨name, .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 value))
+  Bap.Emu.traceStartWith overlapping { accessCapacity := 4, watches := [(0x2000, 0x2003), (0x2004, 0x2007)] }
+  let _ ← Bap.Emu.run overlapping 1
+  let some both ← Bap.Emu.traceSummary overlapping | throw <| IO.userError "no summary"
+  assertEqual "An access that two ranges keep is counted once" (1, [1, 1]) (both.accessesHeard, both.watches.map (·.count))
+  let loaded ← Bap.Emu.riscv64 code 0 0
+  Bap.Emu.traceLoad loaded (← Bap.Emu.traceSave overlapping)
+  let some again ← Bap.Emu.traceSummary loaded | throw <| IO.userError "no summary"
+  assertEqual "and so it is as it is loaded again" 1 again.accessesHeard
   expectThrow "A range that ends before it starts is refused" (Bap.Emu.traceStartWith emu { accessCapacity := 4, watches := [(8, 4)] })
 
 /-- What a handler does, as a contract, without changing the machine, and a replacement checked against it. -/
