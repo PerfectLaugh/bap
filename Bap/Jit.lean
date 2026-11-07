@@ -134,15 +134,17 @@ stands in for, which owns them, and they release them. -/
 @[extern "bap_jit_compile"]
 opaque compile (ops : @& List Op) : IO Program
 
-/-- Compiled with the optimizations of LLVM, which takes longer and is worth it for what runs a lot. -/
+/-- Compiled with the optimizations of LLVM, which takes longer and is worth it for what runs a lot. Its slots are in registers of the
+host between its code sites, but at the sites of `flushSites`, by their pcs, which leave them where `liveChanges` reads them. -/
 @[extern "bap_jit_compile_optimized"]
-opaque compileOptimized (ops : @& List Op) (kept : @& Array UInt64) (budgetSlot : UInt64) (variables : @& Array UInt64) : IO Program
+opaque compileOptimized (ops : @& List Op) (kept : @& Array UInt64) (budgetSlot : UInt64) (variables : @& Array UInt64)
+    (flushSites : @& Array UInt64 := #[]) : IO Program
 
 /-- A program that starts at the label that the slot `entrySlot` of its state says, as one more than it, of those that are
 `entries`, and where it would otherwise when that holds zero. It takes a state that has that slot. -/
 @[extern "bap_jit_compile_entries"]
 opaque compileEntries (ops : @& List Op) (entries : @& List Nat) (entrySlot : @& Nat) (optimized : Bool) (kept : @& Array UInt64)
-    (variables : @& Array UInt64) : IO Program
+    (variables : @& Array UInt64) (flushSites : @& Array UInt64 := #[]) : IO Program
 
 /-- What hears of each load and store before it happens, as obligation 2 says: whether it is a store, the address, the size and what is
 stored. It throws to stop the program, as for a fault. -/
@@ -155,7 +157,7 @@ significant first: those that the run of the code observer that runs now has rea
 last said of them in this run, or weren't said, each as its place among the outputs and its value, eight bytes each, which are said
 of them from now on. All of them are new to it after `reset`. None outside of an observer, or of a run whose slots aren't one array. -/
 @[extern "bap_jit_live_changes"]
-opaque liveChanges (outputs : @& ByteArray) (reset : Bool) : IO (Option ByteArray)
+opaque liveChanges (outputs : @& ByteArray) (pc : UInt64) (reset : Bool) : IO (Option ByteArray)
 
 /-- Runs a program on a state and on a memory image given as its cells, and gives back where it went, its state, and the cells of the
 image after it (obligation 6). -/

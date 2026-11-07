@@ -12,6 +12,7 @@
 #include <llvm/Transforms/Scalar/EarlyCSE.h>
 #include <llvm/Transforms/Scalar/SROA.h>
 #include <llvm/Transforms/Scalar/SimplifyCFG.h>
+#include <llvm/Transforms/Scalar/Sink.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -194,6 +195,10 @@ struct BapCells {
   size_t slotCount = 0;
   // Which run these are of, for what was last said of its slots.
   uint64_t serial = nextCellsSerial();
+  // Whether the slots are always as the run has them, as those of code that isn't optimized are, and else the pc of the site that
+  // last left them so before it called Lean code, which code that is optimized does at the sites that it was told of.
+  bool slotsLive = false;
+  uint64_t flushedPc = ~uint64_t{0};
   BapPageEntry pageEntries[pageEntryCount] = {};
 
   static uint64_t nextCellsSerial() {
@@ -299,10 +304,11 @@ static uint64_t getWord(const uint8_t *in) {
 // Of the outputs of a code site, each as its slot and its flag's slot and 1 or 0 for none, eight bytes each, the least significant
 // first: those that the run has reached at the site that the Lean code that runs now was called from, and whose slots aren't what was
 // last said of them in this run, or weren't said, each as its place among them and its value, which are said of them from now on.
-// All of them are new to it after `reset`. Nothing outside of a site, of a run whose slots aren't one array: `ok` says which.
-extern "C" lean_obj_res bap_jit_live_changes(b_lean_obj_arg outputs, uint8_t reset, lean_obj_arg) {
+// All of them are new to it after `reset`. Nothing outside of a site, of a run whose slots aren't one array, or at a site, `pc`, of
+// optimized code that wasn't made to leave its slots there.
+extern "C" lean_obj_res bap_jit_live_changes(b_lean_obj_arg outputs, uint64_t pc, uint8_t reset, lean_obj_arg) {
   BapCells *cells = siteCells;
-  if (cells == nullptr || cells->slots == nullptr)
+  if (cells == nullptr || cells->slots == nullptr || !(cells->slotsLive || cells->flushedPc == pc))
     return lean_io_result_mk_ok(lean_box(0));
   SiteReport &report = siteReport;
   if (report.serial != cells->serial || reset != 0) {
@@ -426,6 +432,8 @@ struct Program {
   size_t maxSlot = 0;
   // Whether its variables are the chain's registers when it has them.
   bool direct = false;
+  // Whether it keeps its slots in registers of the host between its code sites, as what is optimized does.
+  bool optimized = false;
   size_t memoryStores = 0;
 
   ~Program() {
@@ -537,7 +545,7 @@ bool getSlot(lean_obj_arg value, size_t &slot) {
 // `variables`, for what is optimized, is pairs of a slot of a variable and the variable's number among the registers of a chain.
 static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg entries = nullptr, size_t entrySlot = 0,
                                lean_obj_arg kept = nullptr, uint64_t budgetSlot = ~uint64_t{0},
-                               lean_obj_arg variables = nullptr) {
+                               lean_obj_arg variables = nullptr, b_lean_obj_arg flushSites = nullptr) {
   try {
     std::string initializationError;
     if (!initialize(initializationError))
@@ -1226,8 +1234,21 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
       for (size_t index = 0; index != slotCount; ++index)
         builder.CreateStore(builder.CreateLoad(word, homes[index]), copies[index]);
       builder.CreateBr(first);
-      // A code site that calls Lean code leaves what it wrote in the slots first, where what that runs reads them: only where it
-      // calls, which is where something observes code.
+      // A code site that calls Lean code leaves what it wrote in the slots first, where what that runs reads them, and says so: only
+      // at the sites that it was told of, which have hooks to read them, where it calls, and only those that are read after a run,
+      // the outputs, checkpoints and flags. Elsewhere what a site would leave would have to be worked out at each, where a later
+      // instruction overwrites it, as most flags are, and the rest are temporaries that nothing reads.
+      std::vector<uint64_t> flushPcs;
+      if (flushSites != nullptr)
+        for (size_t index = 0; index != lean_array_size(flushSites); ++index)
+          flushPcs.push_back(lean_unbox_uint64(lean_array_get_core(flushSites, index)));
+      std::vector<bool> readAfter(slotCount, kept == nullptr);
+      if (kept != nullptr)
+        for (size_t index = 0; index != lean_array_size(kept); ++index) {
+          uint64_t slot = lean_unbox_uint64(lean_array_get_core(kept, index));
+          if (slot < slotCount)
+            readAfter[slot] = true;
+        }
       std::vector<llvm::CallInst *> sites;
       for (llvm::BasicBlock &block : *function)
         for (llvm::Instruction &instruction : block)
@@ -1235,10 +1256,14 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
             if (call->getCalledFunction() != nullptr && call->getCalledFunction()->getName() == "bap_jit_code_notify")
               sites.push_back(call);
       for (llvm::CallInst *call : sites) {
+        auto *pc = llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(1));
+        if (pc == nullptr || std::find(flushPcs.begin(), flushPcs.end(), pc->getZExtValue()) == flushPcs.end())
+          continue;
         builder.SetInsertPoint(call);
         for (size_t index = 0; index != slotCount; ++index)
-          if (written[index])
+          if (written[index] && readAfter[index])
             builder.CreateStore(builder.CreateLoad(word, copies[index]), homes[index]);
+        builder.CreateStore(pc, builder.CreateGEP(byte, memory, llvm::ConstantInt::get(word, offsetof(BapCells, flushedPc))));
       }
       // One way out, which leaves the slots in the state once, rather than at each return.
       std::vector<llvm::ReturnInst *> returns;
@@ -1287,6 +1312,8 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
       pipeline.addPass(llvm::InstCombinePass());
       pipeline.addPass(llvm::SimplifyCFGPass());
       pipeline.addPass(llvm::DSEPass());
+      // What only a code site that calls Lean code writes back goes where it does, rather than being worked out at every site.
+      pipeline.addPass(llvm::SinkingPass());
       pipeline.addPass(llvm::ADCEPass());
       pipeline.run(*function, functions);
       if (llvm::verifyModule(*module, &verificationStream))
@@ -1314,6 +1341,7 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
     program->shared = shared;
     program->resources = resources;
     program->direct = optimized && variables != nullptr && hasSlots;
+    program->optimized = optimized && hasSlots;
     program->maxSlot = entries != nullptr ? std::max(hasSlots ? maxSlot + 1 : 0, entrySlot + 1) : (hasSlots ? maxSlot + 1 : 0);
     program->memoryStores = memoryStores;
     return lean_io_result_mk_ok(
@@ -1326,17 +1354,18 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
 extern "C" lean_obj_res bap_jit_compile(lean_obj_arg ops, lean_obj_arg) { return compileOps(ops, false); }
 
 extern "C" lean_obj_res bap_jit_compile_optimized(lean_obj_arg ops, lean_obj_arg kept, uint64_t budgetSlot, lean_obj_arg variables,
-                                                   lean_obj_arg) {
-  return compileOps(ops, true, nullptr, 0, kept, budgetSlot, variables);
+                                                   b_lean_obj_arg flushSites, lean_obj_arg) {
+  return compileOps(ops, true, nullptr, 0, kept, budgetSlot, variables, flushSites);
 }
 
 extern "C" lean_obj_res bap_jit_compile_entries(lean_obj_arg ops, lean_obj_arg entries, lean_obj_arg slot, uint8_t optimized,
-                                                 lean_obj_arg kept, lean_obj_arg variables, lean_obj_arg) {
+                                                 lean_obj_arg kept, lean_obj_arg variables, b_lean_obj_arg flushSites,
+                                                 lean_obj_arg) {
   size_t entrySlot;
   if (!getSlot(slot, entrySlot))
     return ioError("invalid JIT entry slot");
   return compileOps(ops, optimized != 0, entries, entrySlot, optimized != 0 ? kept : nullptr, ~uint64_t{0},
-                    optimized != 0 ? variables : nullptr);
+                    optimized != 0 ? variables : nullptr, optimized != 0 ? flushSites : nullptr);
 }
 
 extern "C" lean_obj_res bap_jit_run(lean_obj_arg programObject,
@@ -1352,6 +1381,7 @@ extern "C" lean_obj_res bap_jit_run(lean_obj_arg programObject,
     BapCells memory{nullptr, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr};
     memory.slots = state.data();
     memory.slotCount = size;
+    memory.slotsLive = !program->optimized;
     uint64_t next = program->function(state.data(), &memory);
     lean_obj_res resultState = lean_alloc_array(size, size);
     for (size_t index = 0; index != size; ++index)
@@ -1398,6 +1428,7 @@ extern "C" lean_obj_res bap_jit_run_memory_code(lean_obj_arg programObject,
     BapCells memory{cells.data(), addressCount, cells.capacity(), observer, nullptr, nullptr, nullptr, codeObserver};
     memory.slots = state.data();
     memory.slotCount = stateSize;
+    memory.slotsLive = !program->optimized;
     uint64_t next = program->function(state.data(), &memory);
     if (memory.error != nullptr)
       return lean_io_result_mk_error(memory.error);
@@ -1744,6 +1775,7 @@ static lean_obj_res runMemoryObject(lean_obj_arg programObject, lean_obj_arg sta
     memory.quietSites = quietSites;
     memory.slots = state.data();
     memory.slotCount = stateSize;
+    memory.slotsLive = !program->optimized;
     uint64_t next = program->function(state.data(), &memory);
     // Before anything else, as this is what a run that failed leaves to be taken back.
     if (persistent->stepActive())

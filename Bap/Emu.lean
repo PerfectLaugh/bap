@@ -1095,6 +1095,8 @@ def onCode (emu : Emu) (range : Nat × Nat) (action : Emu → Nat → IO Unit) (
   let id ← nextHookId emu
   let before ← emu.hooks.get
   emu.hooks.modify (· ++ [⟨id, range.1, range.2, fun context => action (withContext emu context)⟩])
+  -- What is optimized from now on leaves its slots at the sites that hooks read the state at.
+  emu.engine.codeHooked.set fun pc => do pure ((← emu.hooks.get).any fun hook => hook.first ≤ pc && pc ≤ hook.last)
   emu.hooksByPage.set {}
   emu.hookChanges.modify (· + 1)
   let inside (address : Nat) : Bool := range.1 ≤ address && address ≤ range.2

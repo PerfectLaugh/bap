@@ -244,6 +244,8 @@ structure Engine where
   liveRun : IO.Ref (Option (Nat → IO (Option Bil.State)))
   /-- What the state at the code sites of that run was last said to be, from which the next is said. -/
   liveCache : IO.Ref (Option LiveCache)
+  /-- Whether code at a pc has hooks, which read the state at its site, so that what is optimized leaves its slots there. -/
+  codeHooked : IO.Ref (Nat → IO Bool)
   /-- The size from which a block's memory lives in a native memory instead of being copied for each run. -/
   persistentFrom : Nat
   /-- Whether the observer of the runner rejects accesses past the end of the address space. -/
@@ -310,6 +312,7 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimi
     dirtyCode := ← IO.mkRef none
     liveRun := ← IO.mkRef none
     liveCache := ← IO.mkRef none
+    codeHooked := ← IO.mkRef fun _ => pure false
     persistentFrom
     wrapFaults
     chainFallthrough
@@ -1534,11 +1537,14 @@ private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Optio
       for (var, slot) in lowering.layout do
         variables := variables ++ #[UInt64.ofNat slot, UInt64.ofNat (← variableId engine var)]
       let entryLabels := entry.entryLabels
+      -- The sites whose hooks read the state there, which leave their slots where it is read from.
+      let hooked ← engine.codeHooked.get
+      let flushSites ← ((lowering.checkpoints.map (·.1)).eraseDups.filterM hooked).map (·.toArray.map UInt64.ofNat)
       let task ← IO.asTask do
         let started ← IO.monoMsNow
-        let program ← if entryLabels.isEmpty then
-            Jit.compileOptimized lowering.ops kept ((lowering.budget.map UInt64.ofNat).getD (UInt64.ofNat (2 ^ 64 - 1))) variables
-          else Jit.compileEntries lowering.ops entryLabels lowering.nextSlot true (kept.push (UInt64.ofNat lowering.nextSlot)) variables
+        let budget := (lowering.budget.map UInt64.ofNat).getD (UInt64.ofNat (2 ^ 64 - 1))
+        let program ← if entryLabels.isEmpty then Jit.compileOptimized lowering.ops kept budget variables flushSites
+          else Jit.compileEntries lowering.ops entryLabels lowering.nextSlot true (kept.push (UInt64.ofNat lowering.nextSlot)) variables flushSites
         pure (program, (← IO.monoMsNow) - started)
       -- Of those that were, only those that are still compiling are kept.
       let running ← (← backgroundCompiles.get).filterM fun task => do pure !(← IO.hasFinished task)
@@ -1919,7 +1925,7 @@ private def stateAtSite (engine : Engine) (lowering : Lowering) (state : Bil.Sta
       pure { state, sites, vars := places, bound, base := withoutBindings before state.env, ordered := false, fresh := true
              : LiveCache }
   let some (outputs, places) := cache.sites[pc]? | engine.liveCache.set (some cache); return none
-  let some changes ← Jit.liveChanges outputs cache.fresh | engine.liveCache.set (some cache); return none
+  let some changes ← Jit.liveChanges outputs (UInt64.ofNat pc) cache.fresh | engine.liveCache.set (some cache); return none
   let { state := last, sites, vars, bound, base, ordered, fresh := _ } := cache
   let count := changes.size / 16
   if count == 0 then

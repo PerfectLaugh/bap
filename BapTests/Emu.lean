@@ -2682,6 +2682,41 @@ def testHooksInRanges : IO Unit := do
   assertEqual "Hooks in ranges fire at each instruction, and at the one that they stop at" (ran + 1) (← count.get)
   assertTrue s!"and the instructions run in ranges: {stats.nativeRuns + stats.interpretedRuns} runs of {ran}"
     (stats.nativeRuns + stats.interpretedRuns < ran / 2)
+  -- A long run, which optimizes the loop: hooks that were there leave the slots at their sites in what is optimized, and one that
+  -- comes after it was optimized is fired where the range stops for it; each sees what single steps see.
+  let iterations := 150000
+  let long (ranges late : Bool) : IO (Array (Nat × Nat × Nat) × Nat × Nat) := do
+    let adjust (config : Bap.Emu.Config) : Bap.Emu.Config :=
+      if ranges then { config with hotThreshold := 1, rangeLimit := 16 } else { config with rangeLimit := 1 }
+    let emu ← Bap.Emu.riscv64 code base base (adjust := adjust)
+    let farOut := 0x1000000
+    Bap.Emu.map emu ⟨buffer, words iterations, ⟨true, true, false⟩⟩
+    Bap.Emu.map emu ⟨farOut, ByteArray.mk (List.replicate 8 0).toArray, ⟨true, true, false⟩⟩
+    for (name, initial) in [("X10", 0), ("X11", iterations), ("X12", buffer), ("X13", farOut)] do
+      Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 64 initial))
+    let seen ← IO.mkRef (#[] : Array (Nat × Nat × Nat))
+    let record (emu : Bap.Emu.Emu) (address : Nat) : IO Unit := do
+      let left ← value emu "X11"
+      if left % 997 == 0 then seen.modify (·.push (address, left, ← value emu "X10"))
+    let _ ← Bap.Emu.onCode emu (base + 4, base + 4) record
+    let _ ← Bap.Emu.onCode emu (base + 24, base + 24) fun emu _ => Bap.Emu.stop emu
+    -- Of a hook that comes late, at a site that the optimized loop doesn't leave its slots at, most of the loop without it.
+    let optimizedBefore ← if late then do
+        let _ ← Bap.Emu.run emu (5 * (iterations - 10000))
+        let _ ← Bap.Emu.onCode emu (base + 16, base + 16) record
+        pure (← Bap.Primus.Lifted.stats emu.engine).optimized
+      else pure 0
+    let _ ← Bap.Emu.run emu (10 * iterations)
+    let optimizedAfter := (← Bap.Primus.Lifted.stats emu.engine).optimized
+    let optimized := if late then optimizedBefore else optimizedAfter
+    pure (← seen.get, ← value emu "X10", optimized)
+  for late in [false, true] do
+    let (stepSeen, stepSum, _) ← long false late
+    let (rangeSeen, rangeSum, optimized) ← long true late
+    let label := if late then "a hook that came after the loop was optimized" else "hooks in what is optimized"
+    assertTrue s!"Of a long run, {label} see what single steps see ({rangeSeen.size} of {stepSeen.size})"
+      (stepSeen == rangeSeen && stepSum == rangeSum && !stepSeen.isEmpty)
+    assertTrue s!"and the loop was optimized ({optimized})" (optimized > 0)
 
 /-- What a handler does, as a contract, without changing the machine, and a replacement checked against it. -/
 def testContract (triple : String) : IO Unit := do
