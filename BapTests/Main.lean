@@ -476,6 +476,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testTraceWatches,
     Bap.Tests.Emu.testMeasure,
     Bap.Tests.Emu.testThumbAndArmAtOneAddress,
+    Bap.Tests.Emu.testThumbAfterArmRange,
     Bap.Tests.Emu.testHooksInRanges,
     Bap.Tests.Emu.testOwnEntries,
     Bap.Tests.Emu.testHooksOnceAfterRollback,

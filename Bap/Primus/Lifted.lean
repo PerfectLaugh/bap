@@ -1674,7 +1674,18 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
     (address : Nat) (code : ByteArray) (budget : Nat) : IO CachedBlock := do
   -- A run that may enter no other block has no use for a range: the block alone moves less in and out of native code.
   if budget = 0 then return ← prepare engine lift address code
-  match (← engine.ranges.get).get? address with
+  -- A range is of the bytes that it starts with, as a block is: of others, as of code written since or of another mode, it is a
+  -- version, and the range that runs is made of them.
+  let found ← match (← engine.ranges.get).get? address with
+    | some entry =>
+      if sameBytes entry.code code then pure (some entry)
+      else
+        rememberVersion engine engine.rangeVersions entry
+        engine.ranges.modify (·.erase address)
+        clearChain engine
+        pure none
+    | none => pure none
+  match found with
   | some entry =>
     engine.statistics.modify fun stats => { stats with cacheHits := stats.cacheHits + 1 }
     entry.executions.modify (· + 1)

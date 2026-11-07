@@ -2926,8 +2926,9 @@ private def runRange (emu : Emu) (address budget : Nat) : IO (Nat × Bil.Effect)
     emu.rangeQuiet.set !observed
     pure observed
   -- What only Lean's bookkeeping would come between goes on in native code from range to range: nothing observes code, no address is
-  -- one to step at alone, and no branch waits for its delay slot.
-  let chainable := quiet && (← emu.watchedSteps.get).isEmpty && (← emu.pendingRef.get).isNone
+  -- one to step at alone, and no branch waits for its delay slot; nor where code may run as ARM and as Thumb, as the chain goes from
+  -- range to range by the pc alone, not the mode.
+  let chainable := quiet && (← emu.watchedSteps.get).isEmpty && (← emu.pendingRef.get).isNone && emu.config.thumbAt.isNone
   -- Of the mode that it runs in, which the bytes are known by too.
   let thumb := isThumb state
   emu.siteState.set none

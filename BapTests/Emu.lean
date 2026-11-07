@@ -2632,6 +2632,32 @@ def testThumbAndArmAtOneAddress : IO Unit := do
       assertEqual s!"{name} at an address that the other ran runs as {name}, {label}" (if mode == 0 then (1, 0) else (9, 9))
         (← value "R0", ← value "R1")
 
+/-- A range of ARM code at an address, run there as Thumb: what runs is the Thumb of those bytes, as a single step has it, rather than
+the range. -/
+def testThumbAfterArmRange : IO Unit := do
+  let code ← LLVM.assemble "armv7" "1: add r0, r0, #1\nsubs r1, r1, #1\nbne 1b\nnop\nnop"
+  let register (name : String) : Bap.Var := ⟨name, .imm 32, 0, false⟩
+  let value (emu : Bap.Emu.Emu) (name : String) : IO Nat := do
+    match ← Bap.Emu.reg emu (register name) with
+    | .bits bits => pure bits.toNat
+    | _ => pure 0
+  -- Two instructions of Thumb, a move and a branch, which a run may take as a range.
+  let thumbOnce (emu : Bap.Emu.Emu) : IO (Nat × Nat × Nat) := do
+    Bap.Emu.setReg emu (register "R0") (.bits (BitVec.ofNat 32 9))
+    Bap.Emu.setReg emu (register "R1") (.bits (BitVec.ofNat 32 0))
+    Bap.Emu.setReg emu ⟨"ISET", .imm 1, 0, false⟩ (.bits (BitVec.ofNat 1 1))
+    Bap.Emu.setPc emu 0
+    let _ ← Bap.Emu.run emu 2
+    pure (← value emu "R0", ← value emu "R1", ← Bap.Emu.pc emu)
+  let fresh ← Bap.Emu.arm32 code 0 0 (adjust := fun config => { config with rangeLimit := 1 })
+  let expected ← thumbOnce fresh
+  let emu ← Bap.Emu.arm32 code 0 0 (adjust := fun config => { config with hotThreshold := 1, rangeLimit := 16 })
+  Bap.Emu.setReg emu (register "R0") (.bits (BitVec.ofNat 32 0))
+  Bap.Emu.setReg emu (register "R1") (.bits (BitVec.ofNat 32 200))
+  let _ ← Bap.Emu.run emu 600
+  assertEqual "An ARM loop runs as ARM" 200 (← value emu "R0")
+  assertEqual "and its bytes, run as Thumb where it was a range, run as Thumb" expected (← thumbOnce emu)
+
 /-- Hooks of code that a compiled range runs fire at its sites, on the state that the range has there, and do what they do in a step of
 one instruction: they read the registers that the instructions left, change one, send the pc elsewhere, write memory and stop the
 thread, each as a run of single steps has it, and a hook that stopped it doesn't fire again where it goes on. -/
