@@ -588,21 +588,28 @@ private def semanticsContext (address nextPc : Nat) : Primus.Semantics.Context :
   { bits := 64, pc := address, nextPc := nextPc }
 
 /-- Where the semantics are: what `BAP_SEMANTICS_DIR` says, or here, or in the nearest directory above the program that has
-them, which for a program that was built here is this tree, wherever it is run from. -/
+them, which for a program that was built here is this tree, wherever it is run from. It is an error to be told of a directory
+that isn't there, or to find none, rather than to go on and fail to find each file of it one at a time, saying only the first. -/
 def semanticsRoot : IO String := do
-  if let some root ← IO.getEnv "BAP_SEMANTICS_DIR" then return root
+  if let some root ← IO.getEnv "BAP_SEMANTICS_DIR" then
+    if ← System.FilePath.pathExists root then return root
+    throw <| IO.userError s!"BAP_SEMANTICS_DIR is {root}, where there is no such directory"
   if ← System.FilePath.pathExists "semantics" then return "semantics"
-  let rec above : Nat → System.FilePath → IO String
-    | 0, _ => pure "semantics"
+  let rec above : Nat → System.FilePath → IO (Option String)
+    | 0, _ => pure none
     | fuel + 1, directory => do
       let candidate := directory / "semantics"
-      if ← candidate.pathExists then pure candidate.toString
+      if ← candidate.pathExists then pure (some candidate.toString)
       else match directory.parent with
         | some parent => above fuel parent
-        | none => pure "semantics"
-  match (← IO.appPath).parent with
-  | some directory => above 16 directory
-  | none => pure "semantics"
+        | none => pure none
+  let found ← match (← IO.appPath).parent with
+    | some directory => above 16 directory
+    | none => pure none
+  match found with
+  | some root => return root
+  | none =>
+    throw <| IO.userError "no semantics directory: none here, and none above the program; set BAP_SEMANTICS_DIR to where the Primus Lisp semantics are"
 
 private def pluginDirectories (target : String) : IO (List String) := do
   let root ← semanticsRoot
