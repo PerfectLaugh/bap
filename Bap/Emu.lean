@@ -1062,8 +1062,14 @@ private unsafe def sameObjectImpl {α : Type} (left right : α) : Bool := ptrAdd
 /-- Whether two things are one object, as a hook's context and the emulator's own references are, or a state that a hook left as it was given. It may say no when they are only equal. -/
 @[implemented_by sameObjectImpl] private def sameObject {α : Type} (_ _ : α) : Bool := false
 
-/-- The emulator a hook sees: its registers, memory and thread are of the thread that runs it. -/
-private def withContext (emu : Emu) (context : CodeHookContext) : Emu := {
+/-- The emulator a hook sees: its registers, memory and thread are of the thread that runs it. It is the emulator itself where the
+context is of its own references, as it is but in a worker of a parallel round, rather than a copy of it. -/
+private def withContext (emu : Emu) (context : CodeHookContext) : Emu :=
+  if sameObject context.engine emu.engine && sameObject context.state emu.state && sameObject context.pc emu.pc &&
+      sameObject context.stopped emu.stopped && sameObject context.currentThreadRef emu.currentThreadRef &&
+      sameObject context.trace emu.trace && sameObject context.lastFault emu.lastFault && sameObject context.skipCode emu.skipCode &&
+      sameObject context.pendingRef emu.pendingRef then emu
+  else {
   emu with
     engine := context.engine
     state := context.state
