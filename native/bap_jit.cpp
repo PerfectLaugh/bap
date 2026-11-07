@@ -42,6 +42,7 @@
 #include <string>
 #include <optional>
 #include <unordered_set>
+#include <thread>
 #include <vector>
 
 #if defined(__linux__)
@@ -528,12 +529,7 @@ struct Program {
 
 // One for each thread: code generation holds the mutex of its JIT, so that threads that shared one would compile one at a time,
 // however many processors there are. A program keeps its JIT alive, and may run or be freed on any thread.
-std::shared_ptr<SharedJit> sharedJit(bool optimized) {
-  thread_local std::shared_ptr<SharedJit> fast;
-  thread_local std::shared_ptr<SharedJit> full;
-  std::shared_ptr<SharedJit> &shared = optimized ? full : fast;
-  if (shared != nullptr)
-    return shared;
+std::shared_ptr<SharedJit> makeSharedJit(bool optimized) {
   static std::mutex creation;
   std::lock_guard<std::mutex> lock(creation);
   auto machine = llvm::orc::JITTargetMachineBuilder::detectHost();
@@ -569,9 +565,45 @@ std::shared_ptr<SharedJit> sharedJit(bool optimized) {
           llvm::orc::absoluteSymbols(std::move(runtimeSymbols))))
     throw std::runtime_error("LLVM ORC symbol definition failed: " +
                              llvm::toString(std::move(error)));
-  shared = std::make_shared<SharedJit>();
+  auto shared = std::make_shared<SharedJit>();
   shared->jit = std::move(*jit);
   return shared;
+}
+
+// How many threads compile with optimization at once, as many as the host has cores: `Jit.compileThreads`.
+static size_t compileThreads() {
+  unsigned cores = std::thread::hardware_concurrency();
+  return cores == 0 ? 4 : cores;
+}
+
+extern "C" lean_obj_res bap_jit_compile_threads(lean_obj_arg) {
+  return lean_io_result_mk_ok(lean_usize_to_nat(compileThreads()));
+}
+
+// What compiles quickly, one for each thread that does, as that is mostly the one that runs; and what optimizes, a few that the threads
+// that do take whichever is free of, rather than one for each thread, as each keeps all that it compiled for as long as that runs.
+std::shared_ptr<SharedJit> sharedJit(bool optimized) {
+  if (!optimized) {
+    thread_local std::shared_ptr<SharedJit> fast;
+    if (fast == nullptr)
+      fast = makeSharedJit(false);
+    return fast;
+  }
+  static std::mutex choosing;
+  static std::vector<std::shared_ptr<SharedJit>> optimizing(compileThreads());
+  static size_t next = 0;
+  std::lock_guard<std::mutex> lock(choosing);
+  for (std::shared_ptr<SharedJit> &shared : optimizing) {
+    if (shared == nullptr) {
+      shared = makeSharedJit(true);
+      return shared;
+    }
+    if (shared->mutex.try_lock()) {
+      shared->mutex.unlock();
+      return shared;
+    }
+  }
+  return optimizing[next++ % optimizing.size()];
 }
 
 lean_obj_res ioError(const std::string &message) {

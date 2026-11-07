@@ -1586,6 +1586,49 @@ def finishBackgroundCompiles : IO Unit := do
     for task in tasks do
       let _ ← IO.wait task
 
+/-- What is waiting to be compiled with optimization, and how many threads take it, which take one after another and end when there
+is none: as many as the host has cores (`Jit.compileThreads`), rather than a thread for each, which would come to as many as a
+program has loops. -/
+private structure CompileQueue where
+  jobs : Array (IO Unit) := #[]
+  workers : Nat := 0
+
+private instance : Nonempty CompileQueue := ⟨{}⟩
+
+initialize compileQueue : Std.Mutex CompileQueue ← Std.Mutex.new {}
+
+private partial def compileWorker : IO Unit := do
+  let next ← compileQueue.atomically do
+    let queue ← get
+    if h : 0 < queue.jobs.size then
+      set { queue with jobs := queue.jobs.extract 1 queue.jobs.size }
+      pure (some queue.jobs[0])
+    else
+      set { queue with workers := queue.workers - 1 }
+      pure none
+  match next with
+  | some job =>
+    job
+    compileWorker
+  | none => pure ()
+
+private instance : Nonempty (Except IO.Error α) := ⟨.error (IO.userError "")⟩
+
+/-- `compile` on one of those threads, as what it comes to. They are threads of their own rather than of the pool, which what waits
+for them, as the end of the process does, may hold. -/
+private def compileOnWorker (compile : IO α) : IO (Task (Except IO.Error α)) := do
+  let promise ← IO.Promise.new
+  let job : IO Unit := do promise.resolve (← compile.toBaseIO)
+  let workers ← Jit.compileThreads
+  let spawn ← compileQueue.atomically do
+    let queue ← get
+    let spawn := decide (queue.workers < workers)
+    set { queue with jobs := queue.jobs.push job, workers := if spawn then queue.workers + 1 else queue.workers }
+    pure spawn
+  if spawn then
+    let _ ← IO.asTask (prio := .dedicated) compileWorker
+  pure promise.result!
+
 /-- What a lowering of an entry is, as far as what was compiled of one fits another: a block and a range start at the same address, of the
 same bytes, and are lowered differently, with their slots, their entries and their variables. -/
 private def optimizedOf (entry : CachedBlock) (lowering : Lowering) : List (Nat × Nat) × Nat × List Nat × Nat :=
@@ -1604,8 +1647,7 @@ private def startOptimizing (engine : Engine) (address : Nat) (code : ByteArray)
   -- The sites whose hooks read the state there, which leave their slots where it is read from.
   let hooked ← engine.codeHooked.get
   let flushSites ← ((lowering.checkpoints.map (·.1)).eraseDups.filterM hooked).map (·.toArray.map UInt64.ofNat)
-  -- On a thread of its own, rather than one of the pool, which what waits for it, as the end of the process does, may hold.
-  let task ← IO.asTask (prio := .dedicated) do
+  let task ← compileOnWorker do
     let started ← IO.monoMsNow
     let budget := (lowering.budget.map UInt64.ofNat).getD (UInt64.ofNat (2 ^ 64 - 1))
     let program ← if entryLabels.isEmpty then Jit.compileOptimized lowering.ops kept budget variables flushSites true

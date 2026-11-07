@@ -142,6 +142,10 @@ there, rather than have all of that in itself too: that is then given to it by `
 opaque compileOptimized (ops : @& List Op) (kept : @& Array UInt64) (budgetSlot : UInt64) (variables : @& Array UInt64)
     (flushSites : @& Array UInt64 := #[]) (resumable : Bool := false) : IO Program
 
+/-- How many threads compile with optimization at once: as many as the host has cores. -/
+@[extern "bap_jit_compile_threads"]
+opaque compileThreads : BaseIO Nat
+
 /-- What `compileOptimized` made where `resumable` goes on in `fallback`, which `compile` made of the same operations. -/
 @[extern "bap_jit_set_fallback"]
 opaque setFallback (program : @& Program) (fallback : @& Program) : IO Unit
