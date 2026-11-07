@@ -136,17 +136,18 @@ struct MemoryFilter {
   // By the first address, so that what a mapping changes is changed where it is, without making all of it again.
   std::map<uint64_t, Range> ranges;
 
-  bool quiet(uint64_t address, uint64_t size, bool write) const {
+  // The range that an access lies within, of the kind it lets through, if there is one.
+  const Range *quietRange(uint64_t address, uint64_t size, bool write) const {
     if (size == 0)
-      return false;
+      return nullptr;
     uint64_t last = address + size - 1;
     if (last < address)
-      return false;
+      return nullptr;
     auto after = ranges.upper_bound(address);
     if (after == ranges.begin())
-      return false;
+      return nullptr;
     const Range &range = std::prev(after)->second;
-    return last <= range.last && (write ? range.writeQuiet : range.readQuiet);
+    return last <= range.last && (write ? range.writeQuiet : range.readQuiet) ? &range : nullptr;
   }
 
   // Whether a range goes in apart from those there, which it does if so.
@@ -182,17 +183,29 @@ struct BapCells {
   bool leanRan = false;
   bool pendingSite = false;
   uint64_t pendingPc = 0;
+  // The last range that the filter let a read, and a write, through in, which compiled code looks at before it calls the observer, so
+  // that an access there costs no call: none, the first above the last, until the filter finds one, and again once Lean code has run,
+  // which may change what is quiet, or there is an error.
+  uint64_t quietFirst[2] = {1, 1};
+  uint64_t quietLast[2] = {0, 0};
   BapPageEntry pageEntries[pageEntryCount] = {};
 };
+
+static void forgetQuiet(BapCells *cells) {
+  cells->quietFirst[0] = cells->quietFirst[1] = 1;
+  cells->quietLast[0] = cells->quietLast[1] = 0;
+}
 
 // Once there is an error nothing takes effect, and with nothing here compiled code goes to `bap_jit_memory_page`, which says so.
 static void failCells(BapCells *cells, lean_object *error) {
   cells->error = error;
   lean_inc_ref(error);
   std::memset(cells->pageEntries, 0, sizeof(cells->pageEntries));
+  forgetQuiet(cells);
 }
 
 static uint64_t callCodeObserver(BapCells *cells, uint64_t pc) {
+  forgetQuiet(cells);
   lean_inc_ref(cells->codeObserver);
   lean_object *action = lean_apply_1(cells->codeObserver, lean_uint64_to_nat(pc));
   lean_object *result = lean_apply_1(action, lean_io_mk_world());
@@ -212,8 +225,13 @@ extern "C" void bap_jit_memory_notify(BapCells *cells, uint8_t write,
                                       uint64_t value) {
   if (cells->observer == nullptr || cells->error != nullptr)
     return;
-  if (cells->filter != nullptr && cells->filter->quiet(address, size, write != 0))
-    return;
+  if (cells->filter != nullptr) {
+    if (const MemoryFilter::Range *range = cells->filter->quietRange(address, size, write != 0)) {
+      cells->quietFirst[write != 0] = range->first;
+      cells->quietLast[write != 0] = range->last;
+      return;
+    }
+  }
   // The site that waited is the observer's first, now that Lean code is to run. Had it stopped the run, the run fails, to be run
   // again a step at a time.
   if (cells->pendingSite) {
@@ -229,6 +247,7 @@ extern "C" void bap_jit_memory_notify(BapCells *cells, uint8_t write,
     }
   }
   cells->leanRan = true;
+  forgetQuiet(cells);
   lean_inc_ref(cells->observer);
   lean_object *action = lean_apply_1(cells->observer, lean_box(write));
   action = lean_apply_1(action, lean_uint64_to_nat(address));
@@ -520,6 +539,26 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
       page->addIncoming(foundPage, miss);
       return builder.CreateGEP(byte, page, builder.CreateAnd(base, llvm::ConstantInt::get(word, PagedMemory::pageSize - 1)));
     };
+    // The observer of an access, unless it lies within the last range that the filter let one of its kind through in.
+    auto notifyAccess = [&](bool write, llvm::Value *base, size_t size, llvm::Value *value) {
+      auto field = [&](size_t offset) {
+        return builder.CreateLoad(word, builder.CreateGEP(byte, memory, llvm::ConstantInt::get(word, offset + (write ? 8 : 0))));
+      };
+      llvm::Value *first = field(offsetof(BapCells, quietFirst));
+      llvm::Value *last = field(offsetof(BapCells, quietLast));
+      llvm::Value *end = builder.CreateAdd(base, llvm::ConstantInt::get(word, size - 1));
+      llvm::Value *quiet = builder.CreateAnd(
+          builder.CreateAnd(builder.CreateICmpUGE(base, first), builder.CreateICmpULE(end, last)),
+          builder.CreateICmpUGE(end, base));
+      llvm::BasicBlock *call = llvm::BasicBlock::Create(*context, "notify_access", function);
+      llvm::BasicBlock *after = llvm::BasicBlock::Create(*context, "notify_done", function);
+      builder.CreateCondBr(quiet, after, call);
+      builder.SetInsertPoint(call);
+      builder.CreateCall(notifyMemory,
+          {memory, llvm::ConstantInt::get(byte, write ? 1 : 0), base, llvm::ConstantInt::get(word, size), value});
+      builder.CreateBr(after);
+      builder.SetInsertPoint(after);
+    };
     auto swapped = [&](llvm::Value *value, size_t size, bool bigEndian) -> llvm::Value * {
       if (size == 1 || bigEndian == llvm::sys::IsBigEndianHost)
         return value;
@@ -808,9 +847,7 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
           return ioError("invalid JIT memory load");
         bool bigEndian = lean_ctor_get_uint8(op, 3 * sizeof(void *)) != 0;
         llvm::Value *base = load(address);
-        builder.CreateCall(notifyMemory,
-            {memory, llvm::ConstantInt::get(byte, 0), base,
-             llvm::ConstantInt::get(word, size), zero});
+        notifyAccess(false, base, size, zero);
         llvm::Value *endianness = llvm::ConstantInt::get(byte, bigEndian ? 1 : 0);
         llvm::Value *result;
         if (hasInstruction(size)) {
@@ -848,9 +885,7 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
         bool bigEndian = lean_ctor_get_uint8(op, 3 * sizeof(void *)) != 0;
         llvm::Value *base = load(address);
         llvm::Value *stored = load(value);
-        builder.CreateCall(notifyMemory,
-            {memory, llvm::ConstantInt::get(byte, 1), base,
-             llvm::ConstantInt::get(word, size), stored});
+        notifyAccess(true, base, size, stored);
         llvm::Value *endianness = llvm::ConstantInt::get(byte, bigEndian ? 1 : 0);
         llvm::Value *sizeValue = llvm::ConstantInt::get(word, size);
         if (hasInstruction(size)) {
