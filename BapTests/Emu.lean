@@ -2440,12 +2440,23 @@ def testCffGraph (triple : String) : IO Unit := do
   let otherRecorder ← Bap.Analysis.Cff.Recorder.attach other.emu profile
   let _ ← other.run fun _ => pure ()
   let otherTaken ← Bap.Analysis.Cff.recoverIn other.emu profile (← otherRecorder.visits.get) (some (← otherJournal.toRecord))
-  let problems := (Bap.Analysis.Cff.check taken otherTaken).problems
-  assertTrue s!"CffGraph {triple} one that doesn't go to 3 is told apart: {problems}"
+  let otherCheck := Bap.Analysis.Cff.check taken otherTaken
+  let problems := otherCheck.problems
+  assertEqual s!"CffGraph {triple} one whose rounds don't pair with the original's one to one names nothing otherwise" [] otherCheck.states
+  assertTrue s!"CffGraph {triple} and is told apart: {problems}"
     (problems.contains "the original goes from 2 to 3, which the simplified doesn't" &&
       problems.contains "the simplified goes from 2 to 4, which the original doesn't" &&
       (taken.effects.byState.find? (·.state == 3) |>.all fun three =>
         three.services.all fun service => problems.contains s!"the original asks {service}, which the simplified doesn't"))
+  -- One whose states are named otherwise and whose targets moved, as a simplification may leave them, keeps all of it.
+  let states := taken.cfg.states.map fun state => (state, state + 10)
+  let targets := taken.effects.calls.map fun target => (target, target + 0x100000)
+  let renamed := taken.rename states targets
+  let renamedCheck := Bap.Analysis.Cff.check taken renamed
+  assertTrue s!"CffGraph {triple} one with its states and targets named otherwise keeps all: {renamedCheck.problems}" renamedCheck.ok
+  assertTrue s!"CffGraph {triple} and says what each stood for"
+    ((states.all fun (state, other) => renamedCheck.states.contains (other, state)) &&
+      (targets.all fun (target, other) => renamedCheck.targets.contains (other, target)))
   let endless := { taken with transitions := taken.transitions.filter (·.next.isSome) }
   assertTrue s!"CffGraph {triple} and one that doesn't end where the original did, with what its last round asked"
     ((Bap.Analysis.Cff.check taken endless).problems.contains "the original ends at state 6, which the simplified doesn't")

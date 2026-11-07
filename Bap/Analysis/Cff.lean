@@ -759,22 +759,71 @@ def Dispatcher.cfg (dispatcher : Dispatcher) : Cfg :=
 /-- What a simplified machine didn't keep of the original, from the rounds of each: nothing where it keeps it all. -/
 structure Check where
   problems : List String
+  /-- What each state of the simplified machine stood for in the original, and each target that it called, as their rounds paired up:
+  the names that they were compared by. -/
+  states : List (Nat × Nat) := []
+  targets : List (Nat × Nat) := []
   deriving DecidableEq, Repr
 
 def Check.ok (check : Check) : Bool := check.problems.isEmpty
 
+/-- Pairs that are one to one, the left of each with the right: none where a left has two rights, or a right two lefts. -/
+private def oneToOne (pairs : List (Nat × Nat)) : Option (List (Nat × Nat)) := Id.run do
+  let mut forward : Std.HashMap Nat Nat := {}
+  let mut backward : Std.HashMap Nat Nat := {}
+  let mut order : Array (Nat × Nat) := #[]
+  for (left, right) in pairs do
+    match forward[left]?, backward[right]? with
+    | none, none =>
+      forward := forward.insert left right
+      backward := backward.insert right left
+      order := order.push (left, right)
+    | some known, some back => if known != right || back != left then return none
+    | _, _ => return none
+  pure (some order.toList)
+
+/-- The rounds of a dispatcher by thread, in the order that the threads first came. -/
+private def roundsByThread (dispatcher : Dispatcher) : List (List Transition) :=
+  let threads := (dispatcher.transitions.map (·.thread)).eraseDups
+  threads.map fun thread => dispatcher.transitions.filter (·.thread == thread)
+
+/-- What the states and the call targets of `simplified` stand for in `original`, as their rounds pair up, the first of each thread
+with the first, and so on: the states where that is one to one, and the targets of rounds that called as many times, where those are. -/
+def correspondence (original simplified : Dispatcher) : Option (List (Nat × Nat)) × Option (List (Nat × Nat)) :=
+  let rounds := ((roundsByThread simplified).zip (roundsByThread original)).flatMap fun (mine, theirs) => mine.zip theirs
+  let states := oneToOne (rounds.map fun (mine, theirs) => (mine.state, theirs.state))
+  let targets := oneToOne (rounds.flatMap fun (mine, theirs) =>
+    if mine.calls.length == theirs.calls.length then mine.calls.zip theirs.calls else [])
+  (states, targets)
+
+/-- A dispatcher with its states and the targets that it calls named as `states` and `targets` say, and as they are where they don't. -/
+def Dispatcher.rename (dispatcher : Dispatcher) (states targets : List (Nat × Nat)) : Dispatcher :=
+  let state (value : Nat) := (states.lookup value).getD value
+  let target (value : Nat) := (targets.lookup value).getD value
+  { dispatcher with
+    transitions := dispatcher.transitions.map fun transition =>
+      { transition with state := state transition.state, next := transition.next.map state, calls := transition.calls.map target }
+    graph := dispatcher.graph.map fun (from_, to, count) => (state from_, state to, count)
+    handlers := dispatcher.handlers.map fun handler =>
+      { handler with state := state handler.state, nexts := handler.nexts.map state, calls := handler.calls.map target } }
+
 /-- Whether `simplified` keeps what `original` does at its boundary, as their rounds say: where the rounds ended, as an opaque exit is, the
 services that they ask of the kernel and the host, the targets that they call, and the ways from a state to the next that they took. Each
 that one has and the other doesn't is a problem, as dropping one is losing what the program does and adding one is doing what it
-didn't. Of rounds of the same input, so that both took the ways that it chose. -/
+didn't. Of rounds of the same input, so that both took the ways that it chose, which pair its states and targets with the original's
+where they are one to one (`correspondence`), so that states named otherwise, or targets that moved, are compared as what they stand for;
+`states` and `targets` say how they were named. -/
 def check (original simplified : Dispatcher) : Check := Id.run do
   let differ {α : Type} [BEq α] (what : String) (show_ : α → String) (left right : List α) : List String :=
     (left.filter (!right.contains ·)).map (fun item => s!"the original {what} {show_ item}, which the simplified doesn't") ++
       (right.filter (!left.contains ·)).map (fun item => s!"the simplified {what} {show_ item}, which the original doesn't")
+  let (states, targets) := correspondence original simplified
+  let (states, targets) := (states.getD [], targets.getD [])
+  let simplified := simplified.rename states targets
   let (originalCfg, simplifiedCfg) := (original.cfg, simplified.cfg)
   let (originalEffects, simplifiedEffects) := (original.effects, simplified.effects)
   let ways (cfg : Cfg) : List (Nat × Nat) := cfg.edges.filterMap fun edge => edge.target.map (edge.source, ·)
-  pure { problems :=
+  pure { states, targets, problems :=
     differ "ends at state" toString originalCfg.exits simplifiedCfg.exits ++
     differ "asks" id originalEffects.services simplifiedEffects.services ++
     differ "calls" (fun target => s!"0x{String.ofList (Nat.toDigits 16 target)}") originalEffects.calls simplifiedEffects.calls ++
