@@ -174,12 +174,34 @@ def ofTransition (profile : Cff.Profile) (transition : Cff.Transition) : Criteri
 
 /-- The criteria to capture what a program did at the `index`th instruction of a trace of pcs, in the order it ran them: that
 instruction's pc, at the occurrence of it that `index` is, with what `criteria` name — so that a verdict or a slice there needs no
-recovered dispatcher, only the pcs a trace kept. For the occurrence to be the one a fresh run comes to, the pcs have to be of the whole
-run so far, as a ring of every pc keeps them (`pcCapacity := 0`); of a ring that let some go, it is short by what it dropped before `index`.
-It is `none` if `index` is past the end. -/
+recovered dispatcher, only the pcs a trace kept. The occurrence is counted over all of `pcs`, so they have to be what `captureVerdict`
+counts: of the whole run so far, as a ring of every pc keeps them (`pcCapacity := 0`), and of `thread` alone where it is given, as its own
+ring keeps them (`traceThreadPcs`), or of every thread in the order they ran where it isn't, as one ring of them all keeps them.
+`ofMachineTrace` takes them from a trace so. It is `none` if `index` is past the end. -/
 def ofTrace (pcs : List Nat) (index : Nat) (criteria : List Criterion) (thread : Option ThreadId := none) : Option Criteria :=
   match pcs[index]? with
   | none => none
   | some pc => some { pc, thread, hit := ((pcs.take (index + 1)).filter (· == pc)).length, criteria }
+
+/-- `ofTrace` of the pcs that a trace of a machine kept, which are those of `thread`'s own ring where it is given, and of the one ring of
+every thread where it isn't. It is an error where they can't say which occurrence it is: a ring that let some go, a trace with a ring of
+each thread and no thread given, which doesn't say in what order the threads ran, and one ring whose threads aren't just the thread given,
+or all of them where none is. -/
+def ofMachineTrace (machine : Machine) (index : Nat) (criteria : List Criterion) (thread : Option ThreadId := none)
+    (trace : String := "") : IO (Option Criteria) := do
+  let emu := machine.emu
+  let some options ← Bap.Emu.traceOptions emu trace
+    | throw <| IO.userError s!"there is no trace \"{trace}\" open"
+  let (pcs, dropped) ← match thread, options.perThread with
+    | some thread, true => pure (← Bap.Emu.traceThreadPcs emu thread trace, ← Bap.Emu.traceThreadDroppedPcs emu thread trace)
+    | none, true =>
+      throw <| IO.userError "a trace with a ring of each thread doesn't say in what order the threads ran: name the thread"
+    | _, false =>
+      if options.threads != thread.map ([·]) then
+        throw <| IO.userError s!"the trace's one ring has threads {options.threads}, which aren't those that the thread {thread} counts"
+      pure (← Bap.Emu.tracePcs emu trace, ← Bap.Emu.traceDroppedPcs emu trace)
+  if dropped != 0 then
+    throw <| IO.userError s!"the trace let {dropped} pcs go, so which occurrence of a pc it is can't be said: start it with pcCapacity := 0"
+  pure (ofTrace pcs index criteria thread)
 
 end Bap.Analysis.Verdict

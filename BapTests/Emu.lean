@@ -2316,17 +2316,39 @@ def testVerdict (triple : String) : IO Unit := do
 the dispatcher that the trace counts, without recovering the dispatcher. -/
 def testVerdictTrace (triple : String) : IO Unit := do
   let (dispatcher, state, _, _, _) ← cffAddresses triple
-  -- One run with a ring of every pc: the dispatcher is at the top of each round, so its visits count the rounds.
+  -- One run with a ring of every pc, and a trace of a ring for each thread: the dispatcher is at the top of each round, so its visits
+  -- count the rounds.
   let machine ← Bap.Linux.start (← cffKernel triple 'C') "/test" ["/test"]
-  Bap.Emu.traceStartCapacity machine.emu 100000000
+  Bap.Emu.traceStart machine.emu
+  let _ ← Bap.Emu.traceOpen machine.emu "threads" { perThread := true }
   let _ ← machine.run fun _ => pure ()
   let pcs ← Bap.Emu.tracePcs machine.emu
   let visits := (pcs.zipIdx).filter fun (pc, _) => pc == dispatcher
   assertTrue s!"VerdictTrace {triple} the dispatcher is visited more than three times ({visits.length})" (visits.length ≥ 4)
   let some (_, index) := visits[2]? | throw <| IO.userError "no third visit"
-  let some criteria := Bap.Analysis.Verdict.ofTrace pcs index [.memory state 4] | throw <| IO.userError "ofTrace is none"
-  assertEqual s!"VerdictTrace {triple} the trace step is the dispatcher" dispatcher criteria.pc
-  assertEqual s!"VerdictTrace {triple} and the occurrence it is there is counted" 3 criteria.hit
+  let some shared := Bap.Analysis.Verdict.ofTrace pcs index [.memory state 4] | throw <| IO.userError "ofTrace is none"
+  assertEqual s!"VerdictTrace {triple} the trace step is the dispatcher" dispatcher shared.pc
+  assertEqual s!"VerdictTrace {triple} and the occurrence it is there is counted" 3 shared.hit
+  let some ofMachine ← Bap.Analysis.Verdict.ofMachineTrace machine index [.memory state 4]
+    | throw <| IO.userError "ofMachineTrace is none"
+  assertEqual s!"VerdictTrace {triple} a machine's one ring gives the same" (shared.pc, shared.hit) (ofMachine.pc, ofMachine.hit)
+  -- Of a ring for each thread, the thread names its ring, whose occurrences are those that a capture in that thread counts.
+  let some { thread, .. } := (← Bap.Emu.traceThreads machine.emu "threads").head? | throw <| IO.userError "no thread was traced"
+  let threadPcs ← Bap.Emu.traceThreadPcs machine.emu thread "threads"
+  let some (_, threadIndex) := ((threadPcs.zipIdx).filter fun (pc, _) => pc == dispatcher)[2]? | throw <| IO.userError "no third visit"
+  let some criteria ← Bap.Analysis.Verdict.ofMachineTrace machine threadIndex [.memory state 4] (some thread) "threads"
+    | throw <| IO.userError "ofMachineTrace of a thread is none"
+  assertEqual s!"VerdictTrace {triple} a thread's ring gives its own occurrence" (dispatcher, 3, some thread)
+    (criteria.pc, criteria.hit, criteria.thread)
+  expectThrow s!"VerdictTrace {triple} a ring for each thread and no thread is an error"
+    (Bap.Analysis.Verdict.ofMachineTrace machine threadIndex [] none "threads")
+  expectThrow s!"VerdictTrace {triple} and so is a thread of one ring of them all"
+    (Bap.Analysis.Verdict.ofMachineTrace machine index [] (some thread))
+  -- A ring that let pcs go can't say which occurrence it is.
+  let bounded ← Bap.Linux.start (← cffKernel triple 'C') "/test" ["/test"]
+  Bap.Emu.traceStartCapacity bounded.emu 16
+  let _ ← bounded.run fun _ => pure ()
+  expectThrow s!"VerdictTrace {triple} a ring that let pcs go is an error" (Bap.Analysis.Verdict.ofMachineTrace bounded 0 [])
   -- A fresh machine, re-run to just that visit, reads the state the third round started with, which the recovered Cff says is 3.
   let fresh ← Bap.Linux.start (← cffKernel triple 'C') "/test" ["/test"]
   let verdict ← Bap.Analysis.Verdict.captureVerdict fresh criteria
