@@ -208,6 +208,10 @@ opaque createMemory (addresses : @& Array UInt64) (values : @& Array UInt8) : IO
 @[extern "bap_jit_memory_write"]
 opaque writeMemory (memory : @& Memory) (addresses : @& Array UInt64) (values : @& Array UInt8) : IO Unit
 
+/-- The bytes from `address` on, as `writeMemory` writes them, without an address of each. -/
+@[extern "bap_jit_memory_write_bytes"]
+opaque writeMemoryBytes (memory : @& Memory) (address : UInt64) (bytes : @& ByteArray) : IO Unit
+
 /-- Runs a program on a state and on a `Memory`, which it changes, and gives back where it went, its state, and the cells that its
 stores changed (obligation 6). -/
 @[extern "bap_jit_run_memory_object_code"]

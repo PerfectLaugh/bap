@@ -1873,8 +1873,10 @@ private def synchronizeWrite (emu : Emu) (address : Nat) (data : ByteArray) : IO
   match persistent, memoryVar with
   | some memory, some var =>
     if var = emu.config.memory then
-      let addresses := (List.range data.size).map fun offset => UInt64.ofNat (address + offset)
-      Jit.writeMemory memory addresses.toArray data.toList.toArray
+      if address + data.size ≤ 2 ^ 64 then Jit.writeMemoryBytes memory (UInt64.ofNat address) data
+      else
+        let addresses := (List.range data.size).map fun offset => UInt64.ofNat (address + offset)
+        Jit.writeMemory memory addresses.toArray data.toList.toArray
     else Primus.Lifted.discardMemory emu.engine
   | _, _ => pure ()
 
@@ -2113,7 +2115,12 @@ def map (emu : Emu) (region : Region) (zeros : Bool := false) : IO Unit := do
     emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
   if region.protection.executable && region.data.size > 0 then
     Primus.Lifted.discardRange emu.engine region.address (region.address + region.data.size - 1)
-  if written then synchronizeWrite emu region.address region.data
+  -- A lot of bytes go into the native memory now, made of the memory if there is none yet, as an emulator copies what is mapped
+  -- when it is, rather than the first run making it of all of them.
+  if written && region.data.size ≥ 65536 && (← emu.engine.persistentMemory.get).isNone && !emu.engine.deferMemorySync &&
+      (← emu.processMemory.get).isEmpty then
+    attachMemory emu (← nativeFromState emu (← emu.state.get))
+  else if written then synchronizeWrite emu region.address region.data
   for changed in ← emu.memoryChanged.get do changed region.address region.data.size (!written)
   replaceRegions emu (region :: (← emu.regions.get)) [] [region]
 

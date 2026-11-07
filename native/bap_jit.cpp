@@ -1869,6 +1869,30 @@ return lean_io_result_mk_ok(lean_box(0));
   }
 }
 
+// `Jit.writeMemoryBytes`: the bytes from an address on, a word at a time as `bap_jit_memory_write` writes them, and remembered as it
+// remembers them for a step.
+extern "C" lean_obj_res bap_jit_memory_write_bytes(b_lean_obj_arg memoryObject, uint64_t address, b_lean_obj_arg bytes, lean_obj_arg) {
+  try {
+    auto *persistent = static_cast<PagedMemory *>(lean_get_external_data(memoryObject));
+    const uint8_t *data = lean_sarray_cptr(bytes);
+    const size_t size = lean_sarray_size(bytes);
+    size_t done = 0;
+    while (done != size) {
+      uint64_t at = address + done;
+      if (at < address)
+        break;
+      size_t room = 8 - (at & 7);
+      size_t run = room < size - done ? room : size - done;
+      persistent->store(at, run, data + done);
+      persistent->noteStep(at, run);
+      done += run;
+    }
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const std::exception &error) {
+    return ioError(std::string("JIT persistent memory write failed: ") + error.what());
+  }
+}
+
 extern "C" lean_obj_res bap_jit_memory_clone(lean_obj_arg memoryObject, lean_obj_arg) {
   auto *persistent = static_cast<PagedMemory *>(lean_get_external_data(memoryObject));
   auto *copy = new PagedMemory;
