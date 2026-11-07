@@ -1961,8 +1961,8 @@ private def syncState (lowering : Lowering) (state : Bil.State) (slots : Array U
 private def liveWord (bytes : ByteArray) (index : Nat) : UInt64 :=
   let base := index * 8
   if base + 8 ≤ bytes.size then
-    let byte (offset : Nat) : UInt64 := (bytes.get! (base + offset)).toUInt64 <<< (8 * offset).toUInt64
-    byte 0 ||| byte 1 ||| byte 2 ||| byte 3 ||| byte 4 ||| byte 5 ||| byte 6 ||| byte 7
+    let byte (offset : Nat) : UInt64 := (bytes.get! (base + offset)).toUInt64
+    byte 0 ||| byte 1 <<< 8 ||| byte 2 <<< 16 ||| byte 3 <<< 24 ||| byte 4 <<< 32 ||| byte 5 <<< 40 ||| byte 6 <<< 48 ||| byte 7 <<< 56
   else 0
 
 /-- What a run whose memory is the native memory, or that has none, is at its code site `pc`, starting from `state`: what it has
@@ -2008,10 +2008,13 @@ private def stateAtSite (engine : Engine) (lowering : Lowering) (state : Bil.Sta
       bound := bound.set! place (some (.bits (slotBits width (liveWord changes (2 * index + 1)))))
   -- The outputs as they are, in the order of their places, in front of the rest of the state before the run, which they were taken
   -- out of: no variable twice. Of a state that is so already, only those up to the last that changed are made again.
-  let front (upTo : Nat) (rest : Bil.Env) : Bil.Env :=
-    (List.range upTo).foldr (init := rest) fun place env => match bound[place]?.join, vars[place]? with
-      | some value, some var => (var, value) :: env
-      | _, _ => env
+  let front (upTo : Nat) (rest : Bil.Env) : Bil.Env := Id.run do
+    -- From the last place down, each onto those after it, rather than a list of the places to fold over.
+    let mut env := rest
+    for step in [0:upTo] do
+      let place := upTo - 1 - step
+      if let (some value, some var) := (bound[place]?.join, vars[place]?) then env := (var, value) :: env
+    pure env
   let env := if ordered then front (last_ + 1) (last.env.drop before) else front vars.size base
   let state : Bil.State := { env }
   engine.liveCache.set (some { state, sites, vars, bound, base, ordered := true, fresh := false })
