@@ -833,6 +833,138 @@ theorem LinearRun.non_overlapping (hc : Consistent d data) {offset is outcome}
 
 end
 
+/-! ## Tolerant linear sweep -/
+
+private abbrev fastTolerantAux : Disassembler → ByteArray → Nat → Nat → Nat → Nat → List Linear.Piece → IO (List Linear.Piece) :=
+  priv% Bap.Disasm.Linear Bap.Disasm.Linear.tolerantAux
+
+/-- Pieces, by where each is and how many bytes it has, that cover the bytes from `offset` to `size`, one after the other, none empty:
+each byte is in exactly one (`Tiles.unique`). -/
+inductive Tiles (size : Nat) : Nat → List (Nat × Nat) → Prop
+  | done : Tiles size size []
+  | piece (offset width rest) : 0 < width → offset + width ≤ size → Tiles size (offset + width) rest →
+      Tiles size offset ((offset, width) :: rest)
+
+/-- Each instruction of the pieces is what the decoder gave at its offset. -/
+def Decoded (d : Disassembler) (data : ByteArray) (entry : Nat) (pieces : List Linear.Piece) : Prop :=
+  ∀ offset insn, Linear.Piece.insn offset insn ∈ pieces → Gives d data (entry + offset) (.ok insn)
+
+private theorem tolerantAux_succ (d : Disassembler) (data : ByteArray) (entry step fuel offset pieces) :
+    fastTolerantAux d data entry step (fuel + 1) offset pieces =
+      if offset ≥ data.size then pure pieces
+      else
+        d.decode (entry + offset) data >>= fun result => match result with
+        | .error error =>
+          fastTolerantAux d data entry step fuel (offset + Linear.skipWidth step data.size offset)
+            (.skip offset (Linear.skipWidth step data.size offset) error :: pieces)
+        | .ok insn =>
+          if insn.size = 0 ∨ data.size < offset + insn.size then
+            fastTolerantAux d data entry step fuel (offset + Linear.skipWidth step data.size offset)
+              (.skip offset (Linear.skipWidth step data.size offset)
+                (if insn.size = 0 then "decoder produced a zero-sized instruction" else "an instruction past the end of the bytes") :: pieces)
+          else
+            fastTolerantAux d data entry step fuel (offset + insn.size) (.insn offset insn :: pieces) := by
+  dsimp only [fastTolerantAux]
+  prw Bap.Disasm.Linear Bap.Disasm.Linear.tolerantAux
+  rfl
+
+private theorem skipWidth_bounds {step size offset : Nat} (h : offset < size) :
+    0 < Linear.skipWidth step size offset ∧ offset + Linear.skipWidth step size offset ≤ size := by
+  simp only [Linear.skipWidth]
+  omega
+
+private theorem decoded_skip {d data entry rest} (offset width error) (h : Decoded d data entry rest) :
+    Decoded d data entry (.skip offset width error :: rest) := by
+  intro o i hm
+  rcases List.mem_cons.1 hm with hm | hm
+  · cases hm
+  · exact h o i hm
+
+private theorem tolerantAux_spec (d : Disassembler) (data : ByteArray) (entry step fuel offset pieces)
+    (hle : offset ≤ data.size) (hfuel : data.size + 1 ≤ offset + fuel) :
+    Holds (fastTolerantAux d data entry step fuel offset pieces) fun out =>
+      ∃ rest, out = rest.reverse ++ pieces ∧ Tiles data.size offset (rest.map Linear.Piece.extent) ∧
+        Decoded d data entry rest := by
+  induction fuel generalizing offset pieces with
+  | zero => omega
+  | succ fuel ih =>
+    rw [tolerantAux_succ]
+    split
+    · have : offset = data.size := by omega
+      exact Holds.pure ⟨[], by simp, this ▸ Tiles.done, by simp [Decoded]⟩
+    · rename_i hin
+      have hw := skipWidth_bounds (step := step) (show offset < data.size by omega)
+      -- Going past bytes where nothing decoded, with why.
+      have skip : ∀ error, Holds (fastTolerantAux d data entry step fuel (offset + Linear.skipWidth step data.size offset)
+          (.skip offset (Linear.skipWidth step data.size offset) error :: pieces)) fun out =>
+            ∃ rest, out = rest.reverse ++ pieces ∧ Tiles data.size offset (rest.map Linear.Piece.extent) ∧
+              Decoded d data entry rest := by
+        intro error s out s' he
+        have ⟨rest, heq, ht, hd⟩ := ih _ _ (by omega) (by omega) s out s' he
+        exact ⟨.skip offset _ error :: rest, by simp [heq], .piece _ _ _ hw.1 hw.2 ht, decoded_skip _ _ _ hd⟩
+      refine Holds.bind (Holds.true _) fun r _ hr => ?_
+      cases r with
+      | error error => exact skip error
+      | ok insn =>
+        simp only
+        split
+        · exact skip _
+        · rename_i hz
+          intro s out s' he
+          have ⟨rest, heq, ht, hd⟩ := ih (offset + insn.size) _ (by omega) (by omega) s out s' he
+          refine ⟨.insn offset insn :: rest, by simp [heq], .piece _ _ _ (by omega) (by omega) ht, ?_⟩
+          intro o i hm
+          rcases List.mem_cons.1 hm with hm | hm
+          · cases hm; exact hr
+          · exact hd o i hm
+
+/-- The tolerant sweep covers the bytes, from the first to the last, each once, by an instruction that the decoder gave at its offset
+or by bytes that it went past, with why. -/
+theorem sweepTolerant_tiles (d : Disassembler) (data : ByteArray) (entry step : Nat) :
+    Holds (Linear.sweepTolerant d data entry step) fun tolerant =>
+      tolerant.entry = entry ∧ Tiles data.size 0 (tolerant.pieces.map Linear.Piece.extent) ∧
+        Decoded d data entry tolerant.pieces := by
+  unfold Linear.sweepTolerant
+  refine Holds.bind (tolerantAux_spec d data entry step _ 0 [] (by omega) (by omega)) ?_
+  rintro out ⟨rest, rfl, ht, hd⟩ _
+  exact Holds.pure ⟨rfl, by simpa using ht, by simpa using hd⟩
+
+/-- Each piece of tiles starts no earlier than where they do. -/
+theorem Tiles.start_le {size offset pieces} (h : Tiles size offset pieces) : ∀ p ∈ pieces, offset ≤ p.1 := by
+  induction h with
+  | done => simp
+  | piece offset width rest hw hle _ ih =>
+    intro p hm
+    rcases List.mem_cons.1 hm with rfl | hm
+    · exact Nat.le_refl _
+    · have := ih p hm; omega
+
+/-- Every byte from where the tiles start to the end is in one of them: none is gone past without a word. -/
+theorem Tiles.covers {size offset pieces} (h : Tiles size offset pieces) :
+    ∀ x, offset ≤ x → x < size → ∃ p ∈ pieces, p.1 ≤ x ∧ x < p.1 + p.2 := by
+  induction h with
+  | done => intro x h1 h2; omega
+  | piece offset width rest hw hle _ ih =>
+    intro x h1 h2
+    by_cases hx : x < offset + width
+    · exact ⟨(offset, width), by simp, h1, hx⟩
+    · have ⟨p, hm, hp⟩ := ih x (by omega) h2
+      exact ⟨p, by simp [hm], hp⟩
+
+/-- No byte is in two of them: the pieces don't overlap. -/
+theorem Tiles.unique {size offset pieces} (h : Tiles size offset pieces) :
+    ∀ x, ∀ p ∈ pieces, ∀ q ∈ pieces, p.1 ≤ x → x < p.1 + p.2 → q.1 ≤ x → x < q.1 + q.2 → p = q := by
+  induction h with
+  | done => simp
+  | piece offset width rest hw hle hrest ih =>
+    intro x p hp q hq hp1 hp2 hq1 hq2
+    have later := hrest.start_le
+    rcases List.mem_cons.1 hp with rfl | hp <;> rcases List.mem_cons.1 hq with rfl | hq
+    · rfl
+    · have := later q hq; simp at hp2; omega
+    · have := later p hp; simp at hq2; omega
+    · exact ih x p hp q hq hp1 hp2 hq1 hq2
+
 /-- Coverage for the top-level sweep. If a consistent decoder never fails, then every byte of the
 input lies in exactly one decoded instruction. -/
 theorem sweep_exact_cover (d : Disassembler) (data : ByteArray) (entry : Nat)

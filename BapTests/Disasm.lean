@@ -221,6 +221,15 @@ def run : IO Unit := do
   let linear ← Linear.sweep (← Target.X86.disassembler 0) (bytes [0x48, 0x83, 0xec, 0x08, 0xc3])
   assertEqual "linear sweep instruction count" 2 linear.instructions.length
   assertEqual "linear sweep has no errors" [] linear.errors
+  -- A tolerant sweep goes past what doesn't decode, says so, and covers each byte once.
+  let x86 ← Target.X86.disassembler 0
+  let extents (tolerant : Linear.Tolerant) := tolerant.pieces.map Linear.Piece.extent
+  let tolerant ← Linear.sweepTolerant x86 (bytes [0x48, 0x83, 0xec, 0x08, 0x06, 0xc3])
+  assertEqual "tolerant sweep covers each byte once" [(0, 4), (4, 1), (5, 1)] (extents tolerant)
+  assertEqual "tolerant sweep keeps what decodes after what doesn't" 2 tolerant.instructions.length
+  assertEqual "tolerant sweep says where it went past bytes" [(4, 1)] (tolerant.skipped.map fun (offset, size, _) => (offset, size))
+  let wide ← Linear.sweepTolerant x86 (bytes [0x06, 0x06, 0x06]) (step := 4)
+  assertEqual "a step past the end goes past only what there is" [(0, 3)] (extents wide)
   -- revisiting addresses costs no fuel, and running out of it is an error
   let loopInsn (address : Nat) (flow : Flow) (target : Nat) : Insn :=
     { address := address, size := 1, asm := "", flow := flow, target := some target }
