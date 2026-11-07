@@ -1656,7 +1656,9 @@ private def startOptimizing (engine : Engine) (address : Nat) (code : ByteArray)
   let task ← compileOnWorker do
     let started ← IO.monoMsNow
     let budget := (lowering.budget.map UInt64.ofNat).getD (UInt64.ofNat (2 ^ 64 - 1))
-    let program ← if entryLabels.isEmpty then Jit.compileOptimized lowering.ops kept budget variables flushSites true
+    -- What has hooks at its sites keeps the code that checks, which calls them, rather than going on in what isn't optimized,
+    -- which would run all of a run where they are.
+    let program ← if entryLabels.isEmpty then Jit.compileOptimized lowering.ops kept budget variables flushSites flushSites.isEmpty
       else Jit.compileEntries lowering.ops entryLabels lowering.nextSlot true (kept.push (UInt64.ofNat lowering.nextSlot)) variables flushSites
     pure (program, (← IO.monoMsNow) - started)
   -- Of those that were, only those that are still compiling are kept.
@@ -1679,13 +1681,18 @@ private def insideOptimizingLoop (engine : Engine) (address : Nat) : IO Bool := 
 /-- What is native and has run that many times, compiled again with optimization, if this is such a thing: on another thread, while the
 run goes on with what there is, and in its place once that is done, as HotSpot compiles. -/
 private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Option CachedBlock) := do
-  if entry.optimized then return none
   match entry.plan with
   | .interpreted _ => return none
-  | .native lowering unoptimized fallback =>
+  | .native lowering current fallback =>
+    -- What was optimized into what goes on in the code it was optimized from is optimized again, with the code that checks, once
+    -- its sites have hooks, which that calls.
+    if entry.optimized then
+      if !Jit.resumes current then return none
+      let hooked ← engine.codeHooked.get
+      if !(← lowering.checkpoints.anyM fun checkpoint => hooked checkpoint.1) then return none
     -- A loop is compiled again as soon as it is compiled: it is where a run spends its time, and the sooner that is optimized, the
     -- less of it runs as it is.
-    if !(loopsOf lowering) && (← entry.executions.get) < optimizeFrom then return none
+    else if !(loopsOf lowering) && (← entry.executions.get) < optimizeFrom then return none
     match (← engine.optimizing.get)[entry.address]? with
     | some (code, of, ops, task) =>
       -- What was compiled of other bytes than these, or for another lowering of them, is for nothing: of the very operations
@@ -1702,7 +1709,7 @@ private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Optio
         engine.statistics.modify fun stats =>
           { stats with nativeCompilations := stats.nativeCompilations + 1, compileMs := stats.compileMs + elapsed
                        optimized := stats.optimized + 1 }
-        if entry.entryLabels.isEmpty then Jit.setFallback program unoptimized
+        if Jit.resumes program then Jit.setFallback program current
         return some { entry with plan := .native lowering program fallback, optimized := true }
       -- What can't be optimized runs as it was, and isn't tried again.
       | .error _ => return some { entry with optimized := true }
@@ -2482,8 +2489,8 @@ private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (
         let _ ← optimizedVersion engine entry
       -- And what is being optimized comes back now and then, to be put in its place once it is.
       let optimizing := (← engine.optimizing.get).contains entry.address
-      let budget := if entry.optimized then budget
-        else if optimizing then min budget optimizeCheck
+      let budget := if optimizing then min budget optimizeCheck
+        else if entry.optimized then budget
         else min budget (optimizeFrom - min optimizeFrom executions)
       -- Code sites that would only set the pc wait in native code for something to read it (obligation 16 of `Bap.Jit`).
       let quietSites := !observed && (← engine.dirtyCode.get).isNone

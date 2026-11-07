@@ -1800,6 +1800,11 @@ extern "C" lean_obj_res bap_jit_compile_optimized(lean_obj_arg ops, lean_obj_arg
   return compileOps(ops, true, nullptr, 0, kept, budgetSlot, variables, flushSites, resumable != 0);
 }
 
+// `Jit.resumes`: whether a program goes on in the program that `Jit.setFallback` gives it.
+extern "C" uint8_t bap_jit_program_resumes(b_lean_obj_arg programObject) {
+  return static_cast<Program *>(lean_get_external_data(programObject))->resumes ? 1 : 0;
+}
+
 // `Jit.setFallback`: the program that an optimized program goes on in, which it keeps.
 extern "C" lean_obj_res bap_jit_set_fallback(b_lean_obj_arg programObject, b_lean_obj_arg fallbackObject, lean_obj_arg) {
   auto *program = static_cast<Program *>(lean_get_external_data(programObject));
