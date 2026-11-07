@@ -2697,6 +2697,29 @@ def testMemoryHooksOptimized : IO Unit := do
   assertEqual "and the loop comes to the same" expectedSum sum
   assertTrue "and leaves memory the same" (expectedMemory.toList == memory.toList)
 
+/-- A page that a store finds before Lean code runs, where reads are heard: a read there goes to its hook, as single steps have it,
+rather than being taken for one that nothing hears for being on a page that the store made known. -/
+def testQuietPages : IO Unit := do
+  let code ← LLVM.assemble "riscv64" "1: sd a1, 0(a2)\nld t0, 0(a2)\nadd a0, a0, t0\naddi a2, a2, 8\naddi a1, a1, -1\nbnez a1, 1b\n2: j 2b"
+  let register (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
+  let buffer := 0x100000
+  let count := 1000
+  let run (ranges : Bool) : IO (List Nat × String) := do
+    let adjust (config : Bap.Emu.Config) : Bap.Emu.Config :=
+      if ranges then { config with hotThreshold := 1, rangeLimit := 16 } else { config with rangeLimit := 1 }
+    let emu ← Bap.Emu.riscv64 code 0 0 (adjust := adjust)
+    Bap.Emu.mapZeros emu buffer (8 * (count + 2)) ⟨true, true, false⟩
+    Bap.Emu.setReg emu (register "X10") (.bits (BitVec.ofNat 64 0))
+    Bap.Emu.setReg emu (register "X11") (.bits (BitVec.ofNat 64 count))
+    Bap.Emu.setReg emu (register "X12") (.bits (BitVec.ofNat 64 buffer))
+    let hits ← IO.mkRef ([] : List Nat)
+    let _ ← Bap.Emu.onRead emu (buffer + 8 * 100, buffer + 8 * 100 + 7) fun emu _ _ => do hits.modify (· ++ [← Bap.Emu.pc emu])
+    let _ ← Bap.Emu.run emu (6 * count + 2)
+    pure (← hits.get, (repr (← Bap.Emu.reg emu (register "X10"))).pretty)
+  let expected ← run false
+  assertEqual "Single steps hear the read of the word" [4] expected.1
+  assertEqual "A range hears it too, on a page that a store found first" expected (← run true)
+
 /-- A range of ARM code at an address, run there as Thumb: what runs is the Thumb of those bytes, as a single step has it, rather than
 the range. -/
 def testThumbAfterArmRange : IO Unit := do

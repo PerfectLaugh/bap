@@ -122,9 +122,12 @@ public:
 struct BapPageEntry {
   uint64_t tag;
   uint8_t *page;
+  // The tag again for a read, and for a write, where the memory observer would do nothing with any access of that kind to the
+  // page, so that an access there is one check of the page.
+  uint64_t quiet[2];
 };
 constexpr size_t pageEntryCount = 64;
-static_assert(sizeof(BapPageEntry) == 16, "compiled code goes through these by index");
+static_assert(sizeof(BapPageEntry) == 32, "compiled code goes through these by index");
 
 // The ranges of addresses where the memory observer would do nothing, by its first address, none overlapping: an access that lies
 // within one of them, of the kind it lets through, needs no call of the observer, which is what costs most of an access otherwise.
@@ -225,6 +228,8 @@ static thread_local SiteReport siteReport;
 static void forgetQuiet(BapCells *cells) {
   cells->quietFirst[0] = cells->quietFirst[1] = 1;
   cells->quietLast[0] = cells->quietLast[1] = 0;
+  for (BapPageEntry &entry : cells->pageEntries)
+    entry.quiet[0] = entry.quiet[1] = 0;
 }
 
 // Once there is an error nothing takes effect, and with nothing here compiled code goes to `bap_jit_memory_page`, which says so.
@@ -423,7 +428,15 @@ extern "C" uint8_t *bap_jit_memory_page(BapCells *cells, uint64_t address, uint8
   if (page == nullptr)
     return nullptr;
   uint64_t number = address >> PagedMemory::pageBits;
-  cells->pageEntries[number & (pageEntryCount - 1)] = BapPageEntry{number + 1, page};
+  // Quiet as the observer would be at any access of the kind there: as it is with no observer, or where the filter lets all of the
+  // page through, until Lean code runs, which may change what it lets through.
+  auto quiet = [&](bool write) -> uint64_t {
+    bool all = cells->observer == nullptr ||
+        (!cells->leanRan && cells->filter != nullptr &&
+         cells->filter->quietRange(number << PagedMemory::pageBits, PagedMemory::pageSize, write) != nullptr);
+    return all ? number + 1 : 0;
+  };
+  cells->pageEntries[number & (pageEntryCount - 1)] = BapPageEntry{number + 1, page, {quiet(false), quiet(true)}};
   return page;
 }
 
@@ -641,6 +654,25 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
       llvm::PHINode *page = builder.CreatePHI(pointer, 2);
       page->addIncoming(knownPage, hit);
       page->addIncoming(foundPage, miss);
+      return builder.CreateGEP(byte, page, builder.CreateAnd(base, llvm::ConstantInt::get(word, PagedMemory::pageSize - 1)));
+    };
+    // The cell of an access that an instruction can do, on a page that is known with the observer quiet there for accesses of its
+    // kind, which then needs no other check: ends with the insertion point where the access is, and `checked` where it isn't.
+    auto quietCell = [&](llvm::Value *base, size_t size, bool write, llvm::BasicBlock *checked) -> llvm::Value * {
+      llvm::Value *aligned = builder.CreateICmpEQ(
+          builder.CreateAnd(base, llvm::ConstantInt::get(word, size - 1)), zero);
+      llvm::Value *number = builder.CreateLShr(base, PagedMemory::pageBits);
+      llvm::Value *index = builder.CreateAnd(number, llvm::ConstantInt::get(word, pageEntryCount - 1));
+      llvm::Value *entryAddress = builder.CreateGEP(byte, memory, builder.CreateAdd(
+          llvm::ConstantInt::get(word, offsetof(BapCells, pageEntries)),
+          builder.CreateMul(index, llvm::ConstantInt::get(word, sizeof(BapPageEntry)))));
+      llvm::Value *tag = builder.CreateLoad(
+          word, builder.CreateConstGEP1_64(byte, entryAddress, offsetof(BapPageEntry, quiet) + (write ? 8 : 0)));
+      llvm::Value *known = builder.CreateICmpEQ(tag, builder.CreateAdd(number, llvm::ConstantInt::get(word, 1)));
+      llvm::BasicBlock *quick = llvm::BasicBlock::Create(*context, "access_quick", function);
+      builder.CreateCondBr(builder.CreateAnd(aligned, known), quick, checked);
+      builder.SetInsertPoint(quick);
+      llvm::Value *page = builder.CreateLoad(pointer, builder.CreateConstGEP1_64(byte, entryAddress, offsetof(BapPageEntry, page)));
       return builder.CreateGEP(byte, page, builder.CreateAnd(base, llvm::ConstantInt::get(word, PagedMemory::pageSize - 1)));
     };
     // The observer of an access, unless it lies within the last range that the filter let one of its kind through in.
@@ -952,13 +984,25 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
         bool bigEndian = lean_ctor_get_uint8(op, 3 * sizeof(void *)) != 0;
         llvm::BasicBlock *start = startAccess();
         llvm::Value *base = load(address);
-        notifyAccess(start, false, base, size, zero);
         llvm::Value *endianness = llvm::ConstantInt::get(byte, bigEndian ? 1 : 0);
         llvm::Value *result;
         if (hasInstruction(size)) {
+          llvm::BasicBlock *checked = llvm::BasicBlock::Create(*context, "load_checked", function);
           llvm::BasicBlock *slow = llvm::BasicBlock::Create(*context, "load_slow", function);
           llvm::BasicBlock *done = llvm::BasicBlock::Create(*context, "load_done", function);
-          llvm::Value *cell = pageForAccess(base, size, false, slow);
+          llvm::BasicBlock *access = llvm::BasicBlock::Create(*context, "load_cell", function);
+          llvm::Value *quick = quietCell(base, size, false, checked);
+          llvm::BasicBlock *quickEnd = builder.GetInsertBlock();
+          builder.CreateBr(access);
+          builder.SetInsertPoint(checked);
+          notifyAccess(start, false, base, size, zero);
+          llvm::Value *paged = pageForAccess(base, size, false, slow);
+          llvm::BasicBlock *pagedEnd = builder.GetInsertBlock();
+          builder.CreateBr(access);
+          builder.SetInsertPoint(access);
+          llvm::PHINode *cell = builder.CreatePHI(pointer, 2);
+          cell->addIncoming(quick, quickEnd);
+          cell->addIncoming(paged, pagedEnd);
           llvm::IntegerType *width = llvm::IntegerType::get(*context, size * 8);
           llvm::LoadInst *loaded = builder.CreateAlignedLoad(width, cell, llvm::Align(size));
           loaded->setAtomic(llvm::AtomicOrdering::Acquire);
@@ -974,6 +1018,7 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
           merged->addIncoming(bytes, slow);
           result = merged;
         } else {
+          notifyAccess(start, false, base, size, zero);
           result = builder.CreateCall(loadBytes, {memory, base, llvm::ConstantInt::get(word, size), endianness});
         }
         store(dst, result);
@@ -991,13 +1036,25 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
         llvm::BasicBlock *start = startAccess();
         llvm::Value *base = load(address);
         llvm::Value *stored = load(value);
-        notifyAccess(start, true, base, size, stored);
         llvm::Value *endianness = llvm::ConstantInt::get(byte, bigEndian ? 1 : 0);
         llvm::Value *sizeValue = llvm::ConstantInt::get(word, size);
         if (hasInstruction(size)) {
+          llvm::BasicBlock *checked = llvm::BasicBlock::Create(*context, "store_checked", function);
           llvm::BasicBlock *slow = llvm::BasicBlock::Create(*context, "store_slow", function);
           llvm::BasicBlock *done = llvm::BasicBlock::Create(*context, "store_done", function);
-          llvm::Value *cell = pageForAccess(base, size, true, slow);
+          llvm::BasicBlock *access = llvm::BasicBlock::Create(*context, "store_cell", function);
+          llvm::Value *quick = quietCell(base, size, true, checked);
+          llvm::BasicBlock *quickEnd = builder.GetInsertBlock();
+          builder.CreateBr(access);
+          builder.SetInsertPoint(checked);
+          notifyAccess(start, true, base, size, stored);
+          llvm::Value *paged = pageForAccess(base, size, true, slow);
+          llvm::BasicBlock *pagedEnd = builder.GetInsertBlock();
+          builder.CreateBr(access);
+          builder.SetInsertPoint(access);
+          llvm::PHINode *cell = builder.CreatePHI(pointer, 2);
+          cell->addIncoming(quick, quickEnd);
+          cell->addIncoming(paged, pagedEnd);
           llvm::IntegerType *width = llvm::IntegerType::get(*context, size * 8);
           llvm::StoreInst *written = builder.CreateAlignedStore(
               swapped(builder.CreateTrunc(stored, width), size, bigEndian), cell, llvm::Align(size));
@@ -1009,6 +1066,7 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
           builder.CreateBr(done);
           builder.SetInsertPoint(done);
         } else {
+          notifyAccess(start, true, base, size, stored);
           builder.CreateCall(storeBytes, {memory, base, sizeValue, endianness, stored});
         }
         memoryStores += size;
