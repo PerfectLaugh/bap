@@ -666,9 +666,9 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
             pure (if current.config.endian == Endian.big then first * 2 ^ 32 + second else second * 2 ^ 32 + first)) |>.toBaseIO with
         | .error _ => syscallReturn current (.error efault)
         | .ok [flags, _, childTid, parentTid, exitSignal, stack, size, tls] =>
-          -- CLONE_PIDFD, which has no descriptor here, a signal that isn't one, one in the flags, which is in `exit_signal`, and one of a
-          -- thread or of CLONE_PARENT, which sends none of its own.
-          if flags &&& 0x1000 != 0 || exitSignal > (if current.config.syscallAbi == .mips then 128 else 64) || flags &&& 0x7f != 0 ||
+          -- CLONE_PIDFD, which has no descriptor here, a signal that isn't one, one in the flags, which is in `exit_signal`, or
+          -- CLONE_DETACHED, whose bit clone3 keeps for itself, and one of a thread or of CLONE_PARENT, which sends none of its own.
+          if flags &&& 0x1000 != 0 || exitSignal > (if current.config.syscallAbi == .mips then 128 else 64) || flags &&& 0x40007f != 0 ||
               (flags &&& (0x10000 ||| 0x8000) != 0 && exitSignal != 0) then
             syscallReturn current (.error einval)
           else serveClone current flags exitSignal (if stack != 0 then stack + size else 0) parentTid tls childTid

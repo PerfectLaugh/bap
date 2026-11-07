@@ -122,6 +122,10 @@ int main(void) {
   child = clone3With(SIGUSR1, 0);
   if (child == 0) _exit(0);
   say("clone3 signal in flags", 1, child < 0 ? -errno : 0, 0);
+  // Nor CLONE_DETACHED, whose bit clone3 keeps for itself.
+  child = clone3With(0x400000, 0);
+  if (child == 0) _exit(0);
+  say("clone3 CLONE_DETACHED", 1, child < 0 ? -errno : 0, 0);
   child = clone3With(0, SIGUSR1);
   if (child == 0) _exit(9);
   waited("clone3 waitpid any", -1, 0);

@@ -12,6 +12,7 @@ none waitpid any -10 -1
 none waitpid wall 1 4
 none heard usr1 chld 2 1
 clone3 signal in flags -22
+clone3 CLONE_DETACHED -22
 clone3 waitpid any -10 -1
 clone3 waitpid wclone 1 9
 clone3 heard usr1 chld 3 1
