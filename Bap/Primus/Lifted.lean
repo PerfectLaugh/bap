@@ -1617,9 +1617,7 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
     | none =>
       let entries ← engine.cache.get
       entries.get? address |>.forM fun previous => rememberVersion engine engine.cacheVersions previous
-      let entries ← if entries.size ≥ engine.cacheLimit then do
-        evictColdest engine engine.cacheVersions entries
-      else pure entries
+      if entries.size ≥ engine.cacheLimit then engine.cache.set (← evictColdest engine engine.cacheVersions entries)
       let block ← timedLift engine lift address code
       if block.address != address then
         throw <| IO.userError s!"lifted block address {block.address} does not match {address}"
@@ -1629,7 +1627,8 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
         address, code, next := block.next, firstNext := block.next, last := address
         executions := ← IO.mkRef 1, plan
       }
-      engine.cache.set (entries.insert address entry)
+      -- Into the cache as it is now, as compiling may have made room in it (`makeRoom`).
+      engine.cache.modify (·.insert address entry)
       engine.blockIndex.modify (CodeIndex.add · address address address)
       return entry
   match (← engine.cache.get).get? address with

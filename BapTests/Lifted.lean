@@ -292,6 +292,16 @@ def run : IO Unit := do
   let earlyFall ← Primus.Lifted.runBlock early earlyFetch earlyLift (earlyState 0) 0x1000
   assertEqual "native run past the branch has the target" 0x3000 earlyFall.pc
   assertBits "native run past the branch writes" (BitVec.ofNat 64 40) (Bil.lookup earlyFall.state.env x)
+  -- What makes room for native code drops what it says it drops: blocks that it evicted are lifted again when they run again.
+  let roomy ← Primus.Lifted.Engine.create (nativeLimit := 4)
+  let roomyFetch : Primus.Lifted.Fetch := fun _ => pure (ByteArray.mk #[0, 0, 0, 0])
+  let roomyLift : Primus.Lifted.Lift := fun address _ => pure ⟨address, address + 4, [.move x (int address), .jmp (int (address + 4))]⟩
+  for _ in [0:2] do
+    for index in List.range 10 do
+      let _ ← Primus.Lifted.runBlock roomy roomyFetch roomyLift {} (0x100000 + 4 * index)
+  let roomyStats ← Primus.Lifted.stats roomy
+  assertTrue s!"blocks that made room for others are lifted again ({roomyStats.lifts} lifts of 10 blocks twice, {roomyStats.evictions} evicted)"
+    (roomyStats.lifts > 10 && roomyStats.nativeRuns > 0)
   -- A loop that stores to as many addresses as it goes round, run natively with a memory of cells: each store stays.
   let cellEngine ← Primus.Lifted.Engine.create
   let mem : Var := ⟨"mem", .mem 64 8, 0, false⟩
