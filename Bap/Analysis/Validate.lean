@@ -97,8 +97,8 @@ def ok (result : Result) : Bool := result.effects && result.registers && result.
 
 /-- What a disagreement of a comparison is, so that a real one stands out. -/
 inductive Diagnosis where
-  /-- A run that failed, on the side named, reads a variable that neither the initial state gives nor the program assigns: until it is
-  given, the comparison says nothing. -/
+  /-- A run that failed, on the side named, may read a variable before anything gives it, on some way through it: neither the initial
+  state nor the program before it on that way. Until it is given, the comparison says nothing. -/
   | unresolvedInput (side : String) (name : String)
   /-- A run that failed, on the side named, with what it said. -/
   | failed (side : String) (message : String)
@@ -118,13 +118,24 @@ private def memoryOf (state : Bil.State) (var : Bap.Var) : Option (Σ width, Mem
   | .ok (@Value.memory width memory) => some ⟨width, memory⟩
   | _ => none
 
-/-- The variables that a program assigns, however it runs. -/
-private partial def assignsOf : Bil.Program → List Bap.Var
-  | [] => []
-  | .move var _ :: rest => var :: assignsOf rest
-  | .while _ body :: rest => assignsOf body ++ assignsOf rest
-  | .ifElse _ yes no :: rest => assignsOf yes ++ assignsOf no ++ assignsOf rest
-  | _ :: rest => assignsOf rest
+/-- The variables that a program may read on some way through it before it has assigned them, given those assigned before it, in the
+order read, with those that it has assigned on every way through it: what an `if` assigns counts after it where both sides do, and what a
+loop does where it doesn't run. -/
+private partial def readsUnassigned (assigned : List Bap.Var) : Bil.Program → List Bap.Var × List Bap.Var
+  | [] => ([], assigned)
+  | stmt :: rest =>
+    let unassigned (exp : Bil.Exp) := (Bil.freeVars exp).filter (!assigned.contains ·)
+    let (here, after) : List Bap.Var × List Bap.Var := match stmt with
+      | .move var value => (unassigned value, var :: assigned)
+      | .jmp target => (unassigned target, assigned)
+      | .ifElse condition yes no =>
+        let (yesReads, yesAssigned) := readsUnassigned assigned yes
+        let (noReads, noAssigned) := readsUnassigned assigned no
+        (unassigned condition ++ yesReads ++ noReads, yesAssigned.filter noAssigned.contains)
+      | .while condition body => (unassigned condition ++ (readsUnassigned assigned body).1, assigned)
+      | .special _ | .cpuExn _ => ([], assigned)
+    let (later, final) := readsUnassigned after rest
+    (here ++ later, final)
 
 /-- `compare`, as what each disagreement is: of a run that failed, with the input that it reads and nothing gives, of bytes that what
 comes next consumes and neither side has, of a store that the simplified dropped, or a real mismatch. A side that failed doesn't hide
@@ -137,9 +148,7 @@ def diagnose (registers : List Bap.Var) (original simplified : Bil.Program)
     match Bil.run program initial fuel with
     | .ok result => .ok result
     | .error message =>
-      let assigned := assignsOf program
-      let ungiven := (Bil.readsOfProgram program).eraseDups.filter fun var =>
-        !assigned.contains var && (Bil.lookup initial.env var).toOption.isNone
+      let ungiven := (readsUnassigned [] program).1.eraseDups.filter fun var => (Bil.lookup initial.env var).toOption.isNone
       .error (ungiven.map (.unresolvedInput side ·.name) ++ [.failed side message])
   let (originalState, originalEffect, simplifiedState, simplifiedEffect) ←
     match run "original" original, run "simplified" simplified with
