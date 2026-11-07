@@ -369,6 +369,10 @@ structure Emu where
   /-- What the hooks of a code site in the middle of a native run left the state as, where they changed what the run goes on with,
   which the run stopped there for: the state that the step leaves, rather than the run's. -/
   siteState : IO.Ref (Option Bil.State)
+  /-- The sites in the middle of the native run that goes on whose hooks fired, in order, and, of a run that was taken back to be run
+  again a step at a time, those of them that it hasn't come to again, whose hooks don't fire again where it does. -/
+  firedSites : IO.Ref (Array Nat)
+  replaySites : IO.Ref (List Nat)
   /-- How much of its turn the thread that runs had had when the fuel ran out, or 0 between turns. -/
   turnUsed : IO.Ref Nat
   /-- What runs when a system call has its result, which may send the thread somewhere else. -/
@@ -522,6 +526,8 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     nextPc := ← IO.mkRef 0
     redirect := ← IO.mkRef none
     siteState := ← IO.mkRef none
+    firedSites := ← IO.mkRef #[]
+    replaySites := ← IO.mkRef []
     turnUsed := ← IO.mkRef 0
     serving := ← IO.mkRef false
     afterSyscall := ← IO.mkRef none
@@ -1639,6 +1645,15 @@ private def hooksNear (emu : Emu) (address : Nat) : IO (List CodeHook) := do
     pure hooks
 
 private def notifyCode (emu : Emu) (address : Nat) : IO Unit := do
+  -- Of a run that was taken back, the hooks of a site that fired as it ran don't fire again as it is run again, as long as it comes to
+  -- them in the same order.
+  match ← emu.replaySites.get with
+  | site :: rest =>
+    if site == address then
+      emu.replaySites.set rest
+      return
+    emu.replaySites.set []
+  | [] => pure ()
   if (← emu.hooks.get).isEmpty then return
   let near ← hooksNear emu address
   -- What fired before the thread stopped here doesn't again, the first time that it goes on.
@@ -2651,6 +2666,7 @@ private def hookAtSite (emu : Emu) (address : Nat) (live : Bil.State) : IO Bool 
   let before ← emu.state.get
   emu.state.set live
   notifyCode emu address
+  emu.firedSites.modify (·.push address)
   let after ← emu.state.get
   let pc ← emu.pc.get
   if sameObject after live && pc == address && !(← emu.stopped.get) && (← emu.redirect.get).isNone then
@@ -2907,9 +2923,18 @@ private def runRange (emu : Emu) (address budget : Nat) : IO (Nat × Bil.Effect)
   -- Of the mode that it runs in, which the bytes are known by too.
   let thumb := isThumb state
   emu.siteState.set none
-  let result ← Primus.Lifted.runBlockObserved emu.engine (fun target => do pure (codeOfMode thumb (← fetch emu target)))
-    (fun target code => lift emu thumb target (codeWithoutMode thumb code)) state address
-    (some (notifyMemory emu)) (some (observeRangeCode emu)) (!quiet) budget observedIn chainable
+  emu.firedSites.set #[]
+  -- A run that fails is taken back and run again, a step at a time from its start: the hooks of its sites that fired as it ran don't
+  -- fire again there (`notifyCode`).
+  let result ← try
+      Primus.Lifted.runBlockObserved emu.engine (fun target => do pure (codeOfMode thumb (← fetch emu target)))
+        (fun target code => lift emu thumb target (codeWithoutMode thumb code)) state address
+        (some (notifyMemory emu)) (some (observeRangeCode emu)) (!quiet) budget observedIn chainable
+    catch error =>
+      emu.replaySites.set (← emu.firedSites.get).toList
+      emu.firedSites.set #[]
+      throw error
+  emu.firedSites.set #[]
   Primus.Lifted.flushDirtyRange emu.engine
   match ← emu.siteState.get with
   | none => emu.state.set result.state
@@ -3152,6 +3177,8 @@ private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared :
     nextPc := ← IO.mkRef context.pc
     redirect := ← IO.mkRef none
     siteState := ← IO.mkRef none
+    firedSites := ← IO.mkRef #[]
+    replaySites := ← IO.mkRef []
     atomicGated := ← IO.mkRef true
     atomicReached := ← IO.mkRef false
   }

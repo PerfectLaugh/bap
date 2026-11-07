@@ -478,6 +478,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testThumbAndArmAtOneAddress,
     Bap.Tests.Emu.testHooksInRanges,
     Bap.Tests.Emu.testOwnEntries,
+    Bap.Tests.Emu.testHooksOnceAfterRollback,
     Bap.Tests.Emu.testKernelFiles,
     Bap.Tests.Emu.testSeccompState,
     Bap.Tests.Emu.testWaitResultMapping "x86_64",

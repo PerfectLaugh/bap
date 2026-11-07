@@ -2753,6 +2753,45 @@ def testOwnEntries : IO Unit := do
   let (nextOwn, nextAfter) := Bap.Analysis.Cff.ownEntries next (events.push (.call 11 1 (frame 11))) after
   assertEqual "and the next round goes on from where it left them" ([10], 3) (nextOwn.toList.map (·.seq), nextAfter)
 
+/-- A range whose sites' hooks fired, taken back and run again a step at a time, as for a read that a hook watches or a fault, doesn't
+fire them again: each fires as often as single steps fire it. -/
+def testHooksOnceAfterRollback : IO Unit := do
+  let code ← LLVM.assemble "riscv64" "1: ld t0, 0(a2)\nadd a0, a0, t0\naddi a2, a2, 8\naddi a1, a1, -1\nbnez a1, 1b\nnop"
+  let base := 0x10000
+  let buffer := 0x20000
+  let register (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
+  let value (emu : Bap.Emu.Emu) (name : String) : IO Nat := do
+    match ← Bap.Emu.reg emu (register name) with
+    | .bits bits => pure bits.toNat
+    | _ => pure 0
+  -- `words` words of the buffer, `count` rounds of the loop, which fault past the buffer where there are more of them than words.
+  let run (ranges : Bool) (words count : Nat) (watched : Bool) : IO (Nat × Array Nat × Nat × Bool) := do
+    let adjust (config : Bap.Emu.Config) : Bap.Emu.Config :=
+      if ranges then { config with hotThreshold := 1, rangeLimit := 16 } else { config with rangeLimit := 1 }
+    let emu ← Bap.Emu.riscv64 code base base (adjust := adjust)
+    Bap.Emu.map emu ⟨buffer, ByteArray.mk (List.replicate (8 * words) 1).toArray, ⟨true, true, false⟩⟩
+    for (name, initial) in [("X10", 0), ("X11", count), ("X12", buffer)] do
+      Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 64 initial))
+    let fired ← IO.mkRef (#[] : Array Nat)
+    let _ ← Bap.Emu.onCode emu (base, base + code.size - 1) fun emu address => do
+      fired.modify (·.push address)
+      if address == base + 20 then Bap.Emu.stop emu
+    let reads ← IO.mkRef 0
+    -- A read in the middle of the loop that a hook watches, which takes the range back to be run again.
+    if watched then
+      let _ ← Bap.Emu.onRead emu (buffer + 8 * 30, buffer + 8 * 30 + 7) fun _ _ _ => reads.modify (· + 1)
+    let failed ← try
+        let _ ← Bap.Emu.run emu 10000
+        pure false
+      catch _ => pure true
+    pure ((← fired.get).size, ← fired.get, ← value emu "X10", failed || (← reads.get) != 1 && watched)
+  for (label, words, count, watched) in [("a read that a hook watches", 64, 50, true), ("a fault", 40, 50, false)] do
+    let (stepCount, stepFired, stepSum, stepOdd) ← run false words count watched
+    let (rangeCount, rangeFired, rangeSum, rangeOdd) ← run true words count watched
+    assertEqual s!"After {label}, hooks fire in ranges as often as in single steps" stepCount rangeCount
+    assertTrue s!"and at the same instructions, with the same result, after {label}"
+      (stepFired == rangeFired && stepSum == rangeSum && stepOdd == rangeOdd)
+
 /-- What a handler does, as a contract, without changing the machine, and a replacement checked against it. -/
 def testContract (triple : String) : IO Unit := do
   let (dispatcher, state, _, _, sum) ← cffAddresses triple
