@@ -193,9 +193,17 @@ def atomicProgram (program : Bil.Program) : Bool :=
 site has completed. -/
 structure LiveCache where
   state : Bil.State
-  /-- Of each site, by its pc, the outputs that it has completed, as `Jit.liveChanges` takes them, and the variable of each with its
-  width. -/
-  sites : Std.HashMap Nat (ByteArray × Array (Bap.Var × Nat))
+  /-- Of each site, by its pc, the outputs that it has completed, as `Jit.liveChanges` takes them, and of each the place of its
+  variable among the outputs of the run, and its width. -/
+  sites : Std.HashMap Nat (ByteArray × Array (Nat × Nat))
+  /-- The variable of each output of the run, by its place, and the value that the state has of it: what the run left in it, or what
+  it was before, if it was. -/
+  vars : Array Bap.Var
+  bound : Array (Option Value)
+  /-- The state before the run without the outputs of the run, which the state has after them. -/
+  base : Bil.Env
+  /-- Whether the state is the outputs that it has, in the order of their places, and then `base`, as it is once it was made of them. -/
+  ordered : Bool
   /-- Whether what was last said of the slots of the run is to be said again, as nothing has been said since this was made. -/
   fresh : Bool
 
@@ -1870,22 +1878,6 @@ private def syncState (lowering : Lowering) (state : Bil.State) (slots : Array U
   let updates := syncUpdates (reachedOutputs lowering slots) slots
   { env := updates ++ withoutBindings (updates.map Prod.fst) state.env }
 
-private unsafe def sameObjectImpl {α : Type} (left right : α) : Bool := ptrAddrUnsafe left == ptrAddrUnsafe right
-
-/-- Whether two things are one object, as the variables of a site are each time that its outputs are bound again. It may say no when
-they are only equal. -/
-@[implemented_by sameObjectImpl] private def sameObject {α : Type} (_ _ : α) : Bool := false
-
-/-- `withoutBindings`, which looks first whether a variable is the very one that is pending, as those that a site binds again are. -/
-private def withoutBound (pending : List Bap.Var) : Bil.Env → Bil.Env
-  | [] => []
-  | binding :: rest =>
-    if pending.isEmpty then binding :: rest
-    else
-      match pending.find? fun var => sameObject var binding.1 || var == binding.1 with
-      | some var => withoutBound (pending.erase var) rest
-      | none => binding :: withoutBound pending rest
-
 /-- The `index`th word of eight bytes of what `Jit.liveChanges` gives, or 0 past its end. -/
 private def liveWord (bytes : ByteArray) (index : Nat) : UInt64 :=
   let base := index * 8
@@ -1905,30 +1897,54 @@ this run, with only the outputs whose slots changed since, which `Jit.liveChange
 to the same as, as an output that it reached stays reached; and it is that state itself where none did. None at a pc that isn't a
 site of it, or where its slots can't be had. -/
 private def stateAtSite (engine : Engine) (lowering : Lowering) (state : Bil.State) (pc : Nat) : IO (Option Bil.State) := do
-  let cache ← match ← engine.liveCache.get with
+  let cache ← match ← engine.liveCache.swap none with
     | some cache => pure cache
     | none =>
       let flags : Std.HashMap Nat Nat := lowering.flags.foldl (init := {}) fun flags (output, flag) => flags.insert output flag
+      -- The variables of the outputs of the run, each once, by its place.
+      let places : Array Bap.Var := lowering.checkpoints.foldl (init := #[]) fun places (_, outputs) =>
+        outputs.foldl (init := places) fun places (var, _) => if places.contains var then places else places.push var
+      let placeOf (var : Bap.Var) : Nat := (places.idxOf? var).getD 0
       -- The first of each pc, as `atCodeStop` finds it, with what each output of it is.
-      let sites := lowering.checkpoints.foldl (init := ({} : Std.HashMap Nat (ByteArray × Array (Bap.Var × Nat))))
+      let sites := lowering.checkpoints.foldl (init := ({} : Std.HashMap Nat (ByteArray × Array (Nat × Nat))))
         fun sites (at_, outputs) =>
           if sites.contains at_ then sites
           else
             let kept := outputs.toArray.filterMap fun (var, slot) => (widthOf var).map fun width => (var, width, slot)
             let words := kept.foldl (init := #[]) fun words (_, _, slot) =>
               words ++ #[UInt64.ofNat slot, ((flags[slot]?).map (UInt64.ofNat · + 1)).getD 0]
-            sites.insert at_ (wordsOf words, kept.map fun (var, width, _) => (var, width))
-      pure { state, sites, fresh := true : LiveCache }
-  let some (outputs, vars) := cache.sites[pc]? | return none
-  let some changes ← Jit.liveChanges outputs cache.fresh | return none
+            sites.insert at_ (wordsOf words, kept.map fun (var, width, _) => (placeOf var, width))
+      let bound := places.map fun var => (Bil.lookup state.env var).toOption
+      let before := (places.zip bound).toList.filterMap fun (var, value) => value.map fun _ => var
+      pure { state, sites, vars := places, bound, base := withoutBindings before state.env, ordered := false, fresh := true
+             : LiveCache }
+  let some (outputs, places) := cache.sites[pc]? | engine.liveCache.set (some cache); return none
+  let some changes ← Jit.liveChanges outputs cache.fresh | engine.liveCache.set (some cache); return none
+  let { state := last, sites, vars, bound, base, ordered, fresh := _ } := cache
   let count := changes.size / 16
-  let mut updates : List (Bap.Var × Value) := []
+  if count == 0 then
+    engine.liveCache.set (some { state := last, sites, vars, bound, base, ordered, fresh := false })
+    return some last
+  -- How many of the places up to the last that changed the state has as it is: those that it has after them are as they were.
+  let mut last_ := 0
+  let mut before := 0
   for index in [0:count] do
-    if let some (var, width) := vars[(liveWord changes (2 * index)).toNat]? then
-      updates := (var, .bits (slotBits width (liveWord changes (2 * index + 1)))) :: updates
-  let state := if updates.isEmpty then cache.state
-    else { env := updates ++ withoutBound (updates.map (·.1)) cache.state.env }
-  engine.liveCache.set (some { cache with state, fresh := false })
+    if let some (place, _) := places[(liveWord changes (2 * index)).toNat]? then last_ := max last_ place
+  for place in [0:last_ + 1] do
+    if (bound[place]?.join).isSome then before := before + 1
+  let mut bound := bound
+  for index in [0:count] do
+    if let some (place, width) := places[(liveWord changes (2 * index)).toNat]? then
+      bound := bound.set! place (some (.bits (slotBits width (liveWord changes (2 * index + 1)))))
+  -- The outputs as they are, in the order of their places, in front of the rest of the state before the run, which they were taken
+  -- out of: no variable twice. Of a state that is so already, only those up to the last that changed are made again.
+  let front (upTo : Nat) (rest : Bil.Env) : Bil.Env :=
+    (List.range upTo).foldr (init := rest) fun place env => match bound[place]?.join, vars[place]? with
+      | some value, some var => (var, value) :: env
+      | _, _ => env
+  let env := if ordered then front (last_ + 1) (last.env.drop before) else front vars.size base
+  let state : Bil.State := { env }
+  engine.liveCache.set (some { state, sites, vars, bound, base, ordered := true, fresh := false })
   pure (some state)
 
 /-- `action` with `liveRun` saying what the run is at its code sites, while it runs. -/
