@@ -104,8 +104,12 @@ inductive Diagnosis where
   | failed (side : String) (message : String)
   /-- What comes next would consume a byte that the memory has on neither side, as of code or data that wasn't captured. -/
   | missingBytes (memory : String) (address : Nat)
-  /-- A byte that the original stored and the simplified left as it was, outside what comes next consumes: a store taken as dead. -/
+  /-- A byte that the original stored and the simplified left as it was, outside what comes next consumes and the memory that is said
+  to be live after: a store that is dead. -/
   | deadStore (memory : String) (address : Nat)
+  /-- A byte that the original stored and the simplified left as it was, outside what comes next consumes, where nothing says what
+  memory is live after: whether the store was dead isn't known. -/
+  | droppedStore (memory : String) (address : Nat)
   | mismatch (what : String)
   deriving DecidableEq, Repr
 
@@ -138,10 +142,11 @@ private partial def readsUnassigned (assigned : List Bap.Var) : Bil.Program → 
     (here ++ later, final)
 
 /-- `compare`, as what each disagreement is: of a run that failed, with the input that it reads and nothing gives, of bytes that what
-comes next consumes and neither side has, of a store that the simplified dropped, or a real mismatch. A side that failed doesn't hide
-what the other is. Nothing is what `ok` of `compare` is. -/
+comes next consumes and neither side has, of a store that the simplified dropped, which is dead where `liveRanges` say what memory is live
+after and it is outside them, or a real mismatch. A side that failed doesn't hide what the other is. Nothing is what `ok` of `compare` is. -/
 def diagnose (registers : List Bap.Var) (original simplified : Bil.Program)
-    (initial : Bil.State := {}) (fuel : Nat := 100000) (continuationRanges : List (Nat × Nat) := []) : List Diagnosis := Id.run do
+    (initial : Bil.State := {}) (fuel : Nat := 100000) (continuationRanges : List (Nat × Nat) := [])
+    (liveRanges : Option (List (Nat × Nat)) := none) : List Diagnosis := Id.run do
   -- A run, or why it failed: what it said, with each variable that it reads and nothing gives, which is known of the program and not
   -- of what the message says.
   let run (side : String) (program : Bil.Program) : Except (List Diagnosis) (Bil.State × Bil.Effect) :=
@@ -155,7 +160,8 @@ def diagnose (registers : List Bap.Var) (original simplified : Bil.Program)
     | .ok (originalState, originalEffect), .ok (simplifiedState, simplifiedEffect) =>
       pure (originalState, originalEffect, simplifiedState, simplifiedEffect)
     | left, right => return [left, right].flatMap fun | .error diagnoses => diagnoses | .ok _ => []
-  let inRanges (address : Nat) := continuationRanges.any fun (first, last) => first ≤ address && address < last
+  let within (ranges : List (Nat × Nat)) (address : Nat) := ranges.any fun (first, last) => first ≤ address && address < last
+  let inRanges := within continuationRanges
   let mut found : Array Diagnosis := #[]
   if !effectKindEq originalEffect simplifiedEffect then
     found := found.push (.mismatch s!"the original ends {repr originalEffect} and the simplified {repr simplifiedEffect}")
@@ -178,8 +184,9 @@ def diagnose (registers : List Bap.Var) (original simplified : Bil.Program)
           let leftByte := Memory.readByte left address
           let rightByte := Memory.readByte right address
           if leftByte != rightByte then
-            if !inRanges address.toNat && rightByte == readBefore address && leftByte != readBefore address then
-              found := found.push (.deadStore var.name address.toNat)
+            let dropped := rightByte == readBefore address && leftByte != readBefore address
+            if dropped && !inRanges address.toNat && liveRanges.all (!within · address.toNat) then
+              found := found.push (if liveRanges.isSome then .deadStore var.name address.toNat else .droppedStore var.name address.toNat)
             else
               found := found.push (.mismatch s!"{var.name} at {address.toNat} holds {leftByte} and not {rightByte}")
         for (first, last) in continuationRanges do
@@ -199,14 +206,15 @@ structure Verdict where
 /-- Whether both ran and agree in all that `compare` asks. -/
 def Verdict.ok (verdict : Verdict) : Bool := verdict.result.any Validate.ok
 
-/-- The disagreements that are real ones, rather than of input or bytes that weren't given or of a store taken as dead. -/
+/-- The disagreements that are real ones, rather than of input or bytes that weren't given or of a store that was dropped. -/
 def Verdict.mismatches (verdict : Verdict) : List String :=
   verdict.diagnoses.filterMap fun | .mismatch what => some what | _ => none
 
 /-- `compare` and `diagnose` at once. -/
 def check (registers : List Bap.Var) (original simplified : Bil.Program)
-    (initial : Bil.State := {}) (fuel : Nat := 100000) (continuationRanges : List (Nat × Nat) := []) : Verdict :=
+    (initial : Bil.State := {}) (fuel : Nat := 100000) (continuationRanges : List (Nat × Nat) := [])
+    (liveRanges : Option (List (Nat × Nat)) := none) : Verdict :=
   { result := (compare registers original simplified initial fuel continuationRanges).toOption
-    diagnoses := diagnose registers original simplified initial fuel continuationRanges }
+    diagnoses := diagnose registers original simplified initial fuel continuationRanges liveRanges }
 
 end Bap.Analysis.Validate
