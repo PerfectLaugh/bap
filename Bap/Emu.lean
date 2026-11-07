@@ -117,6 +117,10 @@ structure TraceOptions where
   accessCapacity : Nat := 0
   /-- Only the accesses that touch this range, if there is one. -/
   watch : Option (Nat × Nat) := none
+  /-- Ranges, each with a ring of its own of the last `accessCapacity` accesses that touch it, so that what touches one isn't lost
+  among what touches the others or anything else: `traceWatchAccesses`. With these and no `watch`, the one ring of accesses keeps
+  nothing. -/
+  watches : List (Nat × Nat) := []
   /-- Only what these threads do, if they are given. -/
   threads : Option (List ThreadId) := none
   /-- Each thread with a ring of its own, of `pcCapacity` each. -/
@@ -126,6 +130,23 @@ structure TraceOptions where
 /-- What a trace says of a thread: how many of its instructions it saw, how many of them it keeps, and how many it let go of. -/
 structure TraceThread where
   thread : ThreadId
+  count : Nat
+  kept : Nat
+  dropped : Nat
+  deriving DecidableEq, Repr
+
+/-- The ring of a range that a trace watches on its own: the accesses that touched it, the last first, how many did, and how many it
+has, which are let go of when they are twice what is kept. -/
+private structure WatchRing where
+  range : Nat × Nat
+  accesses : List TraceAccess := []
+  count : Nat := 0
+  retained : Nat := 0
+
+/-- What a trace says of a range that it watches on its own: how many accesses touched it, how many of them it keeps, and how many it let
+go of. -/
+structure TraceWatch where
+  range : Nat × Nat
   count : Nat
   kept : Nat
   dropped : Nat
@@ -142,6 +163,8 @@ private structure TraceState where
   accessCount : Nat := 0
   /-- How many there are of `accesses`, which are let go of when they are twice what is kept. -/
   accessRetained : Nat := 0
+  /-- A ring of each of `options.watches`, in their order. -/
+  watched : Array WatchRing := #[]
 
 
 /-- Whether a trace keeps what a thread does. -/
@@ -1158,9 +1181,9 @@ def breakpoints (emu : Emu) : IO (List Nat) := do
 
 /-- A trace that has nothing yet, which keeps what `options` say. -/
 private def freshTrace (options : TraceOptions) : IO TraceState := do
-  if let some range := options.watch then
+  for range in options.watch.toList ++ options.watches do
     if range.1 > range.2 then throw <| IO.userError "invalid Emu trace watch range"
-  pure { options, ring := { capacity := options.pcCapacity } }
+  pure { options, ring := { capacity := options.pcCapacity }, watched := options.watches.toArray.map ({ range := · }) }
 
 /-- Starts the default trace afresh, which keeps what `options` say. -/
 def traceStartWith (emu : Emu) (options : TraceOptions) : IO Unit := do
@@ -1329,6 +1352,19 @@ def traceDroppedAccesses (emu : Emu) (trace : String := "") : IO Nat := do
   let state ← traceState emu trace
   pure (state.accessCount - min state.accessRetained state.options.accessCapacity)
 
+/-- Each range that the trace watches on its own, in the order of `watches`, with how many accesses touched it, kept and let go. -/
+def traceWatches (emu : Emu) (trace : String := "") : IO (List TraceWatch) := do
+  let state ← traceState emu trace
+  pure (state.watched.toList.map fun ring =>
+    let kept := min ring.retained state.options.accessCapacity
+    { range := ring.range, count := ring.count, kept, dropped := ring.count - kept })
+
+/-- The accesses that the trace kept of the `index`th range that it watches on its own, the oldest first. -/
+def traceWatchAccesses (emu : Emu) (index : Nat) (trace : String := "") : IO (List TraceAccess) := do
+  let state ← traceState emu trace
+  let some ring := state.watched[index]? | throw <| IO.userError s!"the trace watches no range {index} on its own"
+  pure (ring.accesses.take state.options.accessCapacity).reverse
+
 /-- What a trace has, all at once: what it keeps, how many pcs it saw, kept and let go of for its capacity, of all threads, and so of
 accesses, how many versions of code it keeps, and its rings of threads. One that let none go has every pc since it started; one that
 `wrapped` has the last of them only, and says how many it let go. -/
@@ -1342,6 +1378,8 @@ structure TraceSummary where
   accessesDropped : Nat
   codeVersions : Nat
   threads : List TraceThread
+  /-- Each range that it watches on its own. -/
+  watches : List TraceWatch := []
   deriving Repr
 
 /-- Whether a trace let pcs go for its capacity, so that it keeps the last of what it saw only. -/
@@ -1362,7 +1400,8 @@ def traceSummary (emu : Emu) (trace : String := "") : IO (Option TraceSummary) :
     accessesKept
     accessesDropped := state.accessCount - accessesKept
     codeVersions := rings.foldl (· + ·.codeSize) 0
-    threads := ← traceThreads emu trace })
+    threads := ← traceThreads emu trace
+    watches := ← traceWatches emu trace })
 
 /-- All of the trace as bytes, for a checkpoint: what it keeps, its rings with their pcs in order and the bytes that they ran as, its
 accesses, and what it counts and keeps of each, which `traceLoad` makes the same again, so that a machine of a checkpoint has the trace
@@ -1381,6 +1420,9 @@ def traceSave (emu : Emu) : IO ByteArray := do
     out := out ++ word code.length
     for (at_, pc, bytes) in code do out := out ++ word at_ ++ word pc ++ word bytes.size ++ bytes
     pure out
+  let accessBytes (access : TraceAccess) : ByteArray :=
+    word access.insn ++ word access.pc ++ word access.address ++ word access.size
+      ++ ByteArray.mk #[if access.write then 1 else 0] ++ option access.value ++ word access.thread
   let stateBytes (state : Option TraceState) : ByteArray := Id.run do
     match state with
     | none => pure (ByteArray.mk #[0])
@@ -1397,10 +1439,16 @@ def traceSave (emu : Emu) : IO ByteArray := do
       for (thread, ring) in rings do out := out ++ word thread ++ ringBytes ring
       let accesses := state.accesses.reverse
       out := out ++ word accesses.length
-      for access in accesses do
-        out := out ++ word access.insn ++ word access.pc ++ word access.address ++ word access.size
-          ++ ByteArray.mk #[if access.write then 1 else 0] ++ option access.value ++ word access.thread
-      pure (out ++ word state.accessCount ++ word state.accessRetained)
+      for access in accesses do out := out ++ accessBytes access
+      out := out ++ word state.accessCount ++ word state.accessRetained
+      -- Each range watched on its own, with its ring, so that a trace loaded again keeps them apart.
+      out := out ++ word state.watched.size
+      for ring in state.watched do
+        out := out ++ word ring.range.1 ++ word ring.range.2 ++ word ring.count ++ word ring.retained
+        let accesses := ring.accesses.reverse
+        out := out ++ word accesses.length
+        for access in accesses do out := out ++ accessBytes access
+      pure out
   let set ← emu.trace.get
   let mut out := stateBytes set.default ++ word set.nextToken ++ word set.named.length
   for (name, token, state) in set.named do
@@ -1456,7 +1504,7 @@ def traceLoad (emu : Emu) (data : ByteArray) : IO Unit := do
       let rings ← list do
         let thread ← word
         pure (thread, ← ring)
-      let accesses ← list do
+      let access : IO TraceAccess := do
         let insn ← word
         let pc ← word
         let address ← word
@@ -1464,11 +1512,20 @@ def traceLoad (emu : Emu) (data : ByteArray) : IO Unit := do
         let write := (← byte) == 1
         let value ← if (← byte) == 1 then some <$> word else pure none
         let thread ← word
-        pure ({ insn, pc, address, size, write, value, thread } : TraceAccess)
+        pure { insn, pc, address, size, write, value, thread }
+      let accesses ← list access
       let accessCount ← word
       let accessRetained ← word
+      let watched ← list do
+        let low ← word
+        let high ← word
+        let count ← word
+        let retained ← word
+        let accesses ← list access
+        pure ({ range := (low, high), accesses := accesses.reverse, count, retained } : WatchRing)
       let state : TraceState := {
-        options := { pcCapacity, accessCapacity, watch, threads, perThread }
+        options := { pcCapacity, accessCapacity, watch, watches := watched.map (·.range), threads, perThread }
+        watched := watched.toArray
         count
         ring := shared
         rings := rings.foldl (init := {}) fun rings (thread, ring) => rings.insert thread ring
@@ -1504,13 +1561,19 @@ private def serialize (emu : Emu) (action : IO α) : IO α := do
     try action finally Std.BaseMutex.unlock mutex
   | none => action
 
+/-- An access in front of the last that a ring keeps, of which it lets go of the oldest once it has twice `capacity`: what it has then,
+and how many. -/
+private def keepAccess (capacity : Nat) (access : TraceAccess) (accesses : List TraceAccess) (retained : Nat) :
+    List TraceAccess × Nat :=
+  if retained + 1 ≥ 2 * capacity then ((access :: accesses).take capacity, capacity) else (access :: accesses, retained + 1)
+
 private def recordAccess (emu : Emu) (write : Bool) (address size value : Nat) : IO Unit := do
   if !(← emu.trace.get).active then return
   let pc ← emu.pc.get
   let thread ← emu.currentThreadRef.get
   emu.trace.modify fun set => set.mapStates fun state =>
-    if state.options.accessCapacity = 0 || !state.keeps thread then state
-    else if state.options.watch.any fun range => !accessTouches range.1 range.2 address size then state
+    let options := state.options
+    if options.accessCapacity = 0 || !state.keeps thread then state
     else
       let access : TraceAccess := {
         insn := state.count - 1
@@ -1521,11 +1584,19 @@ private def recordAccess (emu : Emu) (write : Bool) (address size value : Nat) :
         value := if write then some value else none
         thread
       }
-      let (accesses, accessRetained) :=
-        if state.accessRetained + 1 ≥ 2 * state.options.accessCapacity then
-          ((access :: state.accesses).take state.options.accessCapacity, state.options.accessCapacity)
-        else (access :: state.accesses, state.accessRetained + 1)
-      { state with accesses, accessRetained, accessCount := state.accessCount + 1 }
+      -- Each range that it touches, in the ring of its own.
+      let watched := state.watched.map fun ring =>
+        if !accessTouches ring.range.1 ring.range.2 address size then ring
+        else
+          let (accesses, retained) := keepAccess options.accessCapacity access ring.accesses ring.retained
+          { ring with accesses, retained, count := ring.count + 1 }
+      let shared := match options.watch with
+        | some range => accessTouches range.1 range.2 address size
+        | none => options.watches.isEmpty
+      if !shared then { state with watched }
+      else
+        let (accesses, accessRetained) := keepAccess options.accessCapacity access state.accesses state.accessRetained
+        { state with accesses, accessRetained, accessCount := state.accessCount + 1, watched }
 
 /-- The hooks of the page of an address, in the order they came. -/
 private def hooksNear (emu : Emu) (address : Nat) : IO (List CodeHook) := do

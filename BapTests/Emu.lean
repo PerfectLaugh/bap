@@ -2485,6 +2485,38 @@ def testSummaries : IO Unit := do
     (info.threads.any fun thread => thread.id == main && thread.pc == dispatcher)
   assertTrue "and has each of its tasks" (info.threads.all fun thread => info.tasks.any (·.tid == thread.id))
 
+/-- Two ranges watched on their own, far apart, under much else: what touched each stays, by what made it, and each counts what it let go
+of, which a single ring of the same size loses. -/
+def testTraceWatches : IO Unit := do
+  let code ← LLVM.assemble "riscv64" "sd a1, 0(a2)\nsd a0, 0(a3)\nsd a0, 8(a3)\naddi a0, a0, 1\nsd a0, 0(a4)\nj -16"
+  let emu ← Bap.Emu.riscv64 code 0 0
+  Bap.Emu.map emu ⟨0x2000, ByteArray.mk (List.replicate 0x3000 0).toArray, ⟨true, true, false⟩⟩
+  for (name, value) in [("X10", 0), ("X11", 0x55), ("X12", 0x2000), ("X13", 0x3000), ("X14", 0x4000)] do
+    Bap.Emu.setReg emu ⟨name, .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 value))
+  let a := (0x2000, 0x2007)
+  let b := (0x4000, 0x4007)
+  Bap.Emu.traceStartWith emu { accessCapacity := 4, watches := [a, b] }
+  let session ← Bap.Emu.traceOpen emu "one ring" { accessCapacity := 4 }
+  let _ ← Bap.Emu.run emu 101
+  assertEqual "Watches: each range says what touched it, kept and let go"
+    [{ range := a, count := 1, kept := 1, dropped := 0 : Bap.Emu.TraceWatch }, { range := b, count := 20, kept := 4, dropped := 16 }]
+    (← Bap.Emu.traceWatches emu)
+  let first ← Bap.Emu.traceWatchAccesses emu 0
+  assertEqual "the one store to a range far from the rest stays, by what made it" [(0, 0x2000, some 0x55)]
+    (first.map fun access => (access.pc, access.address, access.value))
+  let last ← Bap.Emu.traceWatchAccesses emu 1
+  assertEqual "and the other keeps its last, by what made them" [(16, some 17), (16, some 18), (16, some 19), (16, some 20)]
+    (last.map fun access => (access.pc, access.value))
+  assertEqual "with watches and no watch, the one ring keeps nothing" ([], 0) (← Bap.Emu.traceAccesses emu, ← Bap.Emu.traceAccessesCount emu)
+  let shared ← Bap.Emu.traceAccesses emu "one ring"
+  assertTrue "a ring of the same size of everything lost the first" (!shared.any (·.address == 0x2000))
+  let _ ← Bap.Emu.traceClose emu session
+  let other ← Bap.Emu.riscv64 code 0 0
+  Bap.Emu.traceLoad other (← Bap.Emu.traceSave emu)
+  assertEqual "Loaded again, the ranges are kept apart" (← Bap.Emu.traceWatches emu) (← Bap.Emu.traceWatches other)
+  assertEqual "with what each kept" first (← Bap.Emu.traceWatchAccesses other 0)
+  expectThrow "A range that ends before it starts is refused" (Bap.Emu.traceStartWith emu { accessCapacity := 4, watches := [(8, 4)] })
+
 /-- What a handler does, as a contract, without changing the machine, and a replacement checked against it. -/
 def testContract (triple : String) : IO Unit := do
   let (dispatcher, state, _, _, sum) ← cffAddresses triple
