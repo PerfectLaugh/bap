@@ -159,6 +159,16 @@ of them from now on. All of them are new to it after `reset`. None outside of an
 @[extern "bap_jit_live_changes"]
 opaque liveChanges (outputs : @& ByteArray) (pc : UInt64) (reset : Bool) : IO (Option ByteArray)
 
+/-- The `index`th word of eight bytes of `bytes`, the least significant first, as `liveChanges` gives them, or 0 past its end: in C,
+which reads it at once rather than a byte at a time. -/
+@[extern "bap_jit_word"]
+def word (bytes : @& ByteArray) (index : @& Nat) : UInt64 :=
+  let base := index * 8
+  if base + 8 ≤ bytes.size then
+    let byte (offset : Nat) : UInt64 := (bytes.get! (base + offset)).toUInt64
+    byte 0 ||| byte 1 <<< 8 ||| byte 2 <<< 16 ||| byte 3 <<< 24 ||| byte 4 <<< 32 ||| byte 5 <<< 40 ||| byte 6 <<< 48 ||| byte 7 <<< 56
+  else 0
+
 /-- Runs a program on a state and on a memory image given as its cells, and gives back where it went, its state, and the cells of the
 image after it (obligation 6). -/
 @[extern "bap_jit_run_memory_code"]

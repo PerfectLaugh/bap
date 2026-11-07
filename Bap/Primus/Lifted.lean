@@ -1957,14 +1957,6 @@ private def syncState (lowering : Lowering) (state : Bil.State) (slots : Array U
   let updates := syncUpdates (reachedOutputs lowering slots) slots
   { env := updates ++ withoutBindings (updates.map Prod.fst) state.env }
 
-/-- The `index`th word of eight bytes of what `Jit.liveChanges` gives, or 0 past its end. -/
-private def liveWord (bytes : ByteArray) (index : Nat) : UInt64 :=
-  let base := index * 8
-  if base + 8 ≤ bytes.size then
-    let byte (offset : Nat) : UInt64 := (bytes.get! (base + offset)).toUInt64
-    byte 0 ||| byte 1 <<< 8 ||| byte 2 <<< 16 ||| byte 3 <<< 24 ||| byte 4 <<< 32 ||| byte 5 <<< 40 ||| byte 6 <<< 48 ||| byte 7 <<< 56
-  else 0
-
 /-- What a run whose memory is the native memory, or that has none, is at its code site `pc`, starting from `state`: what it has
 completed there, as a run that stops at the site leaves (`syncState` of `atCodeStop`). It is said from what it was last said to be in
 this run, with only the outputs whose slots changed since, which `Jit.liveChanges` says, bound again, which a run that went on comes
@@ -1999,13 +1991,13 @@ private def stateAtSite (engine : Engine) (lowering : Lowering) (state : Bil.Sta
   let mut last_ := 0
   let mut before := 0
   for index in [0:count] do
-    if let some (place, _) := places[(liveWord changes (2 * index)).toNat]? then last_ := max last_ place
+    if let some (place, _) := places[(Jit.word changes (2 * index)).toNat]? then last_ := max last_ place
   for place in [0:last_ + 1] do
     if (bound[place]?.join).isSome then before := before + 1
   let mut bound := bound
   for index in [0:count] do
-    if let some (place, width) := places[(liveWord changes (2 * index)).toNat]? then
-      bound := bound.set! place (some (.bits (slotBits width (liveWord changes (2 * index + 1)))))
+    if let some (place, width) := places[(Jit.word changes (2 * index)).toNat]? then
+      bound := bound.set! place (some (.bits (slotBits width (Jit.word changes (2 * index + 1)))))
   -- The outputs as they are, in the order of their places, in front of the rest of the state before the run, which they were taken
   -- out of: no variable twice. Of a state that is so already, only those up to the last that changed are made again.
   let front (upTo : Nat) (rest : Bil.Env) : Bil.Env := Id.run do

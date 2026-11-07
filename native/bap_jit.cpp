@@ -315,6 +315,16 @@ static uint64_t getWord(const uint8_t *in) {
 // last said of them in this run, or weren't said, each as its place among them and its value, which are said of them from now on.
 // All of them are new to it after `reset`. Nothing outside of a site, of a run whose slots aren't one array, or at a site, `pc`, of
 // optimized code that wasn't made to leave its slots there.
+// `Jit.word`: the `index`th word of eight bytes of `bytes`, the least significant first, or 0 past its end.
+extern "C" uint64_t bap_jit_word(b_lean_obj_arg bytes, b_lean_obj_arg index) {
+  if (!lean_is_scalar(index))
+    return 0;
+  size_t at = lean_unbox(index);
+  if (at >= lean_sarray_size(bytes) / 8)
+    return 0;
+  return getWord(lean_sarray_cptr(bytes) + 8 * at);
+}
+
 extern "C" lean_obj_res bap_jit_live_changes(b_lean_obj_arg outputs, uint64_t pc, uint8_t reset, lean_obj_arg) {
   BapCells *cells = siteCells;
   if (cells == nullptr || cells->slots == nullptr || !(cells->slotsLive || cells->flushedPc == pc))
