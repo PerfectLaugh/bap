@@ -2753,7 +2753,7 @@ def testHooksReadSometimes : IO Unit := do
 
 /-- A loop that is optimized, run a little at a time: where a run has too little budget for the optimized code to go on alone, it goes
 on in the code it was optimized from, from the start or from where it was, with the registers that it and the runs before it left,
-as single steps have them, whether they are in the chain or in the state. -/
+as single steps have them, whether they are in the chain or in the state, as they are where the chain goes from range to range. -/
 def testOptimizedInPieces : IO Unit := do
   let code ← LLVM.assemble "riscv64" ("1: li a2, 7\n2: addi a0, a0, 3\naddi a2, a2, -1\nbnez a2, 2b\nli a3, 5\n" ++
     "3: xor a1, a1, a0\nslli a5, a1, 1\nadd a1, a1, a5\naddi a3, a3, -1\nbnez a3, 3b\naddi a4, a4, -1\nbnez a4, 1b\n4: j 4b")
@@ -2762,9 +2762,10 @@ def testOptimizedInPieces : IO Unit := do
     match ← Bap.Emu.reg emu (register name) with
     | .bits bits => pure bits.toNat
     | _ => pure 0
-  let run (ranges : Bool) : IO (List (List Nat)) := do
+  -- Ranges of a few blocks, which the chain goes from one to another of, each with its variables in the chain's registers.
+  let run (limit : Nat) : IO (List (List Nat)) := do
     let adjust (config : Bap.Emu.Config) : Bap.Emu.Config :=
-      if ranges then { config with hotThreshold := 1, rangeLimit := 16 } else { config with rangeLimit := 1 }
+      if limit > 1 then { config with hotThreshold := 1, rangeLimit := limit } else { config with rangeLimit := 1 }
     let emu ← Bap.Emu.riscv64 code 0 0 (adjust := adjust)
     for (name, start) in [("X10", 1), ("X11", 5), ("X14", 100000)] do
       Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 64 start))
@@ -2776,7 +2777,10 @@ def testOptimizedInPieces : IO Unit := do
       seen := seen ++ [[← Bap.Emu.pc emu, ← value emu "X10", ← value emu "X11", ← value emu "X12", ← value emu "X13",
         ← value emu "X14"]]
     pure seen
-  assertEqual "An optimized loop run a little at a time is where single steps are, with what they have" (← run false) (← run true)
+  let expected ← run 1
+  for limit in [2, 4, 16] do
+    assertEqual s!"An optimized loop run a little at a time in ranges of {limit} is where single steps are, with what they have"
+      expected (← run limit)
 
 /-- An emulator that compiles at load has what is at its entry compiled as it is made, before it runs, and runs to what one that doesn't
 comes to. -/
