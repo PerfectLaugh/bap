@@ -2429,6 +2429,23 @@ def testCffGraph (triple : String) : IO Unit := do
   let blind := (Bap.Analysis.Cff.recover profile visits).cfg
   assertTrue s!"CffGraph {triple} rounds without a journal have no direct edge"
     (!blind.edges.isEmpty && blind.edges.all (·.kind == .unresolved))
+  -- What a simplified machine keeps of the original: all of it, of itself; of another byte, not the way to 3 or what 3 asks; and of
+  -- rounds that never end, not where they ended.
+  assertTrue s!"CffGraph {triple} a machine keeps all of itself" (Bap.Analysis.Cff.check taken taken).ok
+  let other ← Bap.Linux.start (← cffKernel triple 'D') "/test" ["/test"]
+  let otherJournal ← other.journal
+  let otherRecorder ← Bap.Analysis.Cff.Recorder.attach other.emu profile
+  let _ ← other.run fun _ => pure ()
+  let otherTaken ← Bap.Analysis.Cff.recoverIn other.emu profile (← otherRecorder.visits.get) (some (← otherJournal.toRecord))
+  let problems := (Bap.Analysis.Cff.check taken otherTaken).problems
+  assertTrue s!"CffGraph {triple} one that doesn't go to 3 is told apart: {problems}"
+    (problems.contains "the original goes from 2 to 3, which the simplified doesn't" &&
+      problems.contains "the simplified goes from 2 to 4, which the original doesn't" &&
+      (taken.effects.byState.find? (·.state == 3) |>.all fun three =>
+        three.services.all fun service => problems.contains s!"the original asks {service}, which the simplified doesn't"))
+  let endless := { taken with transitions := taken.transitions.filter (·.next.isSome) }
+  assertTrue s!"CffGraph {triple} and one that doesn't end where the original did, with what its last round asked"
+    ((Bap.Analysis.Cff.check taken endless).problems.contains "the original ends at state 6, which the simplified doesn't")
 
 /-- What is restored has the state of each model that is attached, of its version, or isn't restored. -/
 def testRestoreModels : IO Unit := do

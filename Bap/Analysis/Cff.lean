@@ -727,6 +727,30 @@ def Dispatcher.cfg (dispatcher : Dispatcher) : Cfg :=
     edges
     exits := (dispatcher.transitions.filter (·.next.isNone)).map (·.state) |>.eraseDups }
 
+/-- What a simplified machine didn't keep of the original, from the rounds of each: nothing where it keeps it all. -/
+structure Check where
+  problems : List String
+  deriving DecidableEq, Repr
+
+def Check.ok (check : Check) : Bool := check.problems.isEmpty
+
+/-- Whether `simplified` keeps what `original` does at its boundary, as their rounds say: where the rounds ended, as an opaque exit is, the
+services that they ask of the kernel and the host, the targets that they call, and the ways from a state to the next that they took. Each
+that one has and the other doesn't is a problem, as dropping one is losing what the program does and adding one is doing what it
+didn't. Of rounds of the same input, so that both took the ways that it chose. -/
+def check (original simplified : Dispatcher) : Check := Id.run do
+  let differ {α : Type} [BEq α] (what : String) (show_ : α → String) (left right : List α) : List String :=
+    (left.filter (!right.contains ·)).map (fun item => s!"the original {what} {show_ item}, which the simplified doesn't") ++
+      (right.filter (!left.contains ·)).map (fun item => s!"the simplified {what} {show_ item}, which the original doesn't")
+  let (originalCfg, simplifiedCfg) := (original.cfg, simplified.cfg)
+  let (originalEffects, simplifiedEffects) := (original.effects, simplified.effects)
+  let ways (cfg : Cfg) : List (Nat × Nat) := cfg.edges.filterMap fun edge => edge.target.map (edge.source, ·)
+  pure { problems :=
+    differ "ends at state" toString originalCfg.exits simplifiedCfg.exits ++
+    differ "asks" id originalEffects.services simplifiedEffects.services ++
+    differ "calls" (fun target => s!"0x{String.ofList (Nat.toDigits 16 target)}") originalEffects.calls simplifiedEffects.calls ++
+    differ "goes" (fun (source, target) => s!"from {source} to {target}") (ways originalCfg) (ways simplifiedCfg) }
+
 private def hex (value : Nat) : String := "0x" ++ String.ofList (Nat.toDigits 16 value)
 
 def Dispatcher.text (dispatcher : Dispatcher) : String :=
