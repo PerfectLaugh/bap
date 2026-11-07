@@ -1907,19 +1907,30 @@ private def stateAtSite (engine : Engine) (lowering : Lowering) (state : Bil.Sta
     | some cache => pure cache
     | none =>
       let flags : Std.HashMap Nat Nat := lowering.flags.foldl (init := {}) fun flags (output, flag) => flags.insert output flag
-      -- The variables of the outputs of the run, each once, by its place.
-      let places : Array Bap.Var := lowering.checkpoints.foldl (init := #[]) fun places (_, outputs) =>
-        outputs.foldl (init := places) fun places (var, _) => if places.contains var then places else places.push var
-      let placeOf (var : Bap.Var) : Nat := (places.idxOf? var).getD 0
+      -- The variables of the outputs of the run, each once, by its place, and the place of each.
+      let (places, placeOf) : Array Bap.Var × Std.HashMap Bap.Var Nat := Id.run do
+        let mut places : Array Bap.Var := #[]
+        let mut placeOf : Std.HashMap Bap.Var Nat := {}
+        for (_, outputs) in lowering.checkpoints do
+          for (var, _) in outputs do
+            unless placeOf.contains var do
+              placeOf := placeOf.insert var places.size
+              places := places.push var
+        return (places, placeOf)
       -- The first of each pc, as `atCodeStop` finds it, with what each output of it is.
-      let sites := lowering.checkpoints.foldl (init := ({} : Std.HashMap Nat (ByteArray × Array (Nat × Nat))))
-        fun sites (at_, outputs) =>
-          if sites.contains at_ then sites
-          else
-            let kept := outputs.toArray.filterMap fun (var, slot) => (widthOf var).map fun width => (var, width, slot)
-            let words := kept.foldl (init := #[]) fun words (_, _, slot) =>
-              words ++ #[UInt64.ofNat slot, ((flags[slot]?).map (UInt64.ofNat · + 1)).getD 0]
-            sites.insert at_ (wordsOf words, kept.map fun (var, width, _) => (placeOf var, width))
+      let sites : Std.HashMap Nat (ByteArray × Array (Nat × Nat)) := Id.run do
+        let mut sites : Std.HashMap Nat (ByteArray × Array (Nat × Nat)) := {}
+        for (at_, outputs) in lowering.checkpoints do
+          if !sites.contains at_ then
+            let mut words : Array UInt64 := #[]
+            let mut kept : Array (Nat × Nat) := #[]
+            for (var, slot) in outputs do
+              if let some width := widthOf var then
+                words := words.push (UInt64.ofNat slot)
+                words := words.push (((flags[slot]?).map (UInt64.ofNat · + 1)).getD 0)
+                kept := kept.push ((placeOf[var]?.getD 0, width))
+            sites := sites.insert at_ (wordsOf words, kept)
+        return sites
       let bound := places.map fun var => (Bil.lookup state.env var).toOption
       let before := (places.zip bound).toList.filterMap fun (var, value) => value.map fun _ => var
       pure { state, sites, vars := places, bound, base := withoutBindings before state.env, ordered := false, fresh := true
