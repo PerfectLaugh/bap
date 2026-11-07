@@ -1,4 +1,5 @@
 import Bap.Bil.Eval
+import Bap.Bil.Transform
 
 namespace Bap.Analysis.Validate
 
@@ -96,8 +97,11 @@ def ok (result : Result) : Bool := result.effects && result.registers && result.
 
 /-- What a disagreement of a comparison is, so that a real one stands out. -/
 inductive Diagnosis where
-  /-- A run read a variable that the initial state doesn't give, on the side named: until it does, the comparison says nothing. -/
+  /-- A run that failed, on the side named, reads a variable that neither the initial state gives nor the program assigns: until it is
+  given, the comparison says nothing. -/
   | unresolvedInput (side : String) (name : String)
+  /-- A run that failed, on the side named, with what it said. -/
+  | failed (side : String) (message : String)
   /-- What comes next would consume a byte that the memory has on neither side, as of code or data that wasn't captured. -/
   | missingBytes (memory : String) (address : Nat)
   /-- A byte that the original stored and the simplified left as it was, outside what comes next consumes: a store taken as dead. -/
@@ -114,24 +118,34 @@ private def memoryOf (state : Bil.State) (var : Bap.Var) : Option (Σ width, Mem
   | .ok (@Value.memory width memory) => some ⟨width, memory⟩
   | _ => none
 
-/-- `compare`, as what each disagreement is: of input that a run needed and wasn't given, of bytes that what comes next consumes and
-neither side has, of a store that the simplified dropped, or a real mismatch. Nothing is what `ok` of `compare` is. -/
+/-- The variables that a program assigns, however it runs. -/
+private partial def assignsOf : Bil.Program → List Bap.Var
+  | [] => []
+  | .move var _ :: rest => var :: assignsOf rest
+  | .while _ body :: rest => assignsOf body ++ assignsOf rest
+  | .ifElse _ yes no :: rest => assignsOf yes ++ assignsOf no ++ assignsOf rest
+  | _ :: rest => assignsOf rest
+
+/-- `compare`, as what each disagreement is: of a run that failed, with the input that it reads and nothing gives, of bytes that what
+comes next consumes and neither side has, of a store that the simplified dropped, or a real mismatch. A side that failed doesn't hide
+what the other is. Nothing is what `ok` of `compare` is. -/
 def diagnose (registers : List Bap.Var) (original simplified : Bil.Program)
-    (initial : Bil.State := {}) (fuel : Nat := 100000) (continuationRanges : List (Nat × Nat) := []) :
-    Except String (List Diagnosis) := do
-  let unbound := "unbound variable "
-  -- A run, or the input that it needed and wasn't given.
-  let run (side : String) (program : Bil.Program) : Except String (Except Diagnosis (Bil.State × Bil.Effect)) :=
+    (initial : Bil.State := {}) (fuel : Nat := 100000) (continuationRanges : List (Nat × Nat) := []) : List Diagnosis := Id.run do
+  -- A run, or why it failed: what it said, with each variable that it reads and nothing gives, which is known of the program and not
+  -- of what the message says.
+  let run (side : String) (program : Bil.Program) : Except (List Diagnosis) (Bil.State × Bil.Effect) :=
     match Bil.run program initial fuel with
-    | .ok result => .ok (.ok result)
+    | .ok result => .ok result
     | .error message =>
-      if message.startsWith unbound then .ok (.error (.unresolvedInput side (message.drop unbound.length).toString))
-      else .error s!"{side}: {message}"
+      let assigned := assignsOf program
+      let ungiven := (Bil.readsOfProgram program).eraseDups.filter fun var =>
+        !assigned.contains var && (Bil.lookup initial.env var).toOption.isNone
+      .error (ungiven.map (.unresolvedInput side ·.name) ++ [.failed side message])
   let (originalState, originalEffect, simplifiedState, simplifiedEffect) ←
-    match ← run "original" original, ← run "simplified" simplified with
+    match run "original" original, run "simplified" simplified with
     | .ok (originalState, originalEffect), .ok (simplifiedState, simplifiedEffect) =>
       pure (originalState, originalEffect, simplifiedState, simplifiedEffect)
-    | left, right => return [left, right].filterMap fun | .error diagnosis => some diagnosis | .ok _ => none
+    | left, right => return [left, right].flatMap fun | .error diagnoses => diagnoses | .ok _ => []
   let inRanges (address : Nat) := continuationRanges.any fun (first, last) => first ≤ address && address < last
   let mut found : Array Diagnosis := #[]
   if !effectKindEq originalEffect simplifiedEffect then
