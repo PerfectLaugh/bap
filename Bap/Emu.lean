@@ -366,6 +366,9 @@ structure Emu where
   nextPc : IO.Ref Nat
   /-- Where the instruction that runs goes after all, for a program that a system call has replaced. -/
   redirect : IO.Ref (Option Nat)
+  /-- What the hooks of a code site in the middle of a native run left the state as, where they changed what the run goes on with,
+  which the run stopped there for: the state that the step leaves, rather than the run's. -/
+  siteState : IO.Ref (Option Bil.State)
   /-- How much of its turn the thread that runs had had when the fuel ran out, or 0 between turns. -/
   turnUsed : IO.Ref Nat
   /-- What runs when a system call has its result, which may send the thread somewhere else. -/
@@ -518,6 +521,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     idle := ← IO.mkRef none
     nextPc := ← IO.mkRef 0
     redirect := ← IO.mkRef none
+    siteState := ← IO.mkRef none
     turnUsed := ← IO.mkRef 0
     serving := ← IO.mkRef false
     afterSyscall := ← IO.mkRef none
@@ -1052,6 +1056,11 @@ private def hookContext (emu : Emu) : CodeHookContext := {
   skipCode := emu.skipCode
   pendingRef := emu.pendingRef
 }
+
+private unsafe def sameObjectImpl {α : Type} (left right : α) : Bool := ptrAddrUnsafe left == ptrAddrUnsafe right
+
+/-- Whether two things are one object, as a hook's context and the emulator's own references are, or a state that a hook left as it was given. It may say no when they are only equal. -/
+@[implemented_by sameObjectImpl] private def sameObject {α : Type} (_ _ : α) : Bool := false
 
 /-- The emulator a hook sees: its registers, memory and thread are of the thread that runs it. -/
 private def withContext (emu : Emu) (context : CodeHookContext) : Emu := {
@@ -2627,21 +2636,45 @@ private def recordTrace (emu : Emu) (address : Nat) : IO Unit := do
       default := set.default.map (·.record thread address first)
       named := (set.named.zip others).map fun ((name, token, state), changed) => (name, token, state.record thread address changed) }
 
-/-- The code site of a block inside a compiled range, whose first block is the step's. A block with hooks ends the range, with
-the block not entered and its hooks not fired: they are the next step's, which has the state that they read. -/
+/-- The hooks of a code site in the middle of a native run, on the state that the run has there, `live`, as those of a step that
+starts there have: whether they changed what the run goes on with, the state, where it goes or whether the thread stops, for which
+the run stops there with what they left, and its hooks don't fire there again (`siteState`, `redirect`, `skipCode`). -/
+private def hookAtSite (emu : Emu) (address : Nat) (live : Bil.State) : IO Bool := do
+  let before ← emu.state.get
+  emu.state.set live
+  notifyCode emu address
+  let after ← emu.state.get
+  let pc ← emu.pc.get
+  if sameObject after live && pc == address && !(← emu.stopped.get) && (← emu.redirect.get).isNone then
+    emu.state.set before
+    return false
+  emu.siteState.set (some after)
+  if pc != address then emu.redirect.set (some pc) else emu.skipCode.set (some address)
+  pure true
+
+/-- The code site of a block inside a compiled range, whose first block is the step's. The hooks of a block fire there, on the state
+that the run has there, and the range goes on unless they changed what it goes on with. Where that state can't be said, a block with
+hooks ends the range, with the block not entered and its hooks not fired: they are the next step's, which has the state that they
+read. -/
 private def observeRangeCode (emu : Emu) (address : Nat) : IO Bool := do
   emu.pc.set address
   let dirty := (← emu.engine.dirtyCode.get).isSome
   let late := (← emu.rangeQuiet.get) &&
     ((← emu.hookChanges.get) != (← emu.rangeHooks.get) || (← emu.trace.get).active)
   let hooked := (← hooksNear emu address).any fun hook => hook.first ≤ address && address ≤ hook.last
+  -- The hooks of a site fire there, on the state that the run has there, where that can be said, and the run goes on unless they
+  -- changed what it goes on with; elsewhere the run stops before the site, for a step to fire them on its state.
+  let live ← if hooked && !dirty && !late then Primus.Lifted.liveState emu.engine address else pure none
+  let stops ← match live with
+    | some state => hookAtSite emu address state
+    | none => pure (rangeSiteStops dirty late hooked)
   -- A range that ends at its first site has done no good: where it starts, the step runs its one instruction by itself.
   match ← emu.rangeStart.get with
   | some start =>
     emu.rangeStart.set none
-    if hooked then emu.watchedSteps.modify (·.insert start)
+    if hooked && stops then emu.watchedSteps.modify (·.insert start)
   | none => pure ()
-  if rangeSiteStops dirty late hooked then return true
+  if stops then return true
   recordTrace emu address
   pure false
 
@@ -2865,11 +2898,25 @@ private def runRange (emu : Emu) (address budget : Nat) : IO (Nat × Bil.Effect)
   let chainable := quiet && (← emu.watchedSteps.get).isEmpty && (← emu.pendingRef.get).isNone
   -- Of the mode that it runs in, which the bytes are known by too.
   let thumb := isThumb state
+  emu.siteState.set none
   let result ← Primus.Lifted.runBlockObserved emu.engine (fun target => do pure (codeOfMode thumb (← fetch emu target)))
     (fun target code => lift emu thumb target (codeWithoutMode thumb code)) state address
     (some (notifyMemory emu)) (some (observeRangeCode emu)) (!quiet) budget observedIn chainable
   Primus.Lifted.flushDirtyRange emu.engine
-  emu.state.set result.state
+  match ← emu.siteState.get with
+  | none => emu.state.set result.state
+  | some hooked =>
+    -- The hooks of a site changed what the run went on with: their state, with the memory that the run left, or, where they wrote
+    -- memory too, with the native memory, which has both.
+    emu.siteState.set none
+    let wrote := match Bil.lookup hooked.env emu.config.memory, Bil.lookup state.env emu.config.memory with
+      | .ok left, .ok right => !sameObject left right
+      | _, _ => false
+    match Bil.lookup result.state.env emu.config.memory, wrote with
+    | .ok memory, false => emu.state.set { env := Bil.bind hooked.env emu.config.memory memory }
+    | _, _ =>
+      emu.state.set hooked
+      synchronizePersistentMemory emu
   emu.lastFault.set none
   pure (result.next, result.effect)
 
@@ -3096,6 +3143,7 @@ private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared :
     rangeStart := ← IO.mkRef none
     nextPc := ← IO.mkRef context.pc
     redirect := ← IO.mkRef none
+    siteState := ← IO.mkRef none
     atomicGated := ← IO.mkRef true
     atomicReached := ← IO.mkRef false
   }

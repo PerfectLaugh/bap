@@ -2613,6 +2613,76 @@ def testThumbAndArmAtOneAddress : IO Unit := do
       assertEqual s!"{name} at an address that the other ran runs as {name}, {label}" (if mode == 0 then (1, 0) else (9, 9))
         (← value "R0", ← value "R1")
 
+/-- Hooks of code that a compiled range runs fire at its sites, on the state that the range has there, and do what they do in a step of
+one instruction: they read the registers that the instructions left, change one, send the pc elsewhere, write memory and stop the
+thread, each as a run of single steps has it, and a hook that stopped it doesn't fire again where it goes on. -/
+def testHooksInRanges : IO Unit := do
+  let code ← LLVM.assemble "riscv64" "1: ld t0, 0(a2)\nadd a0, a0, t0\nsd a0, 0(a3)\naddi a2, a2, 8\naddi a1, a1, -1\nbnez a1, 1b\nnop"
+  let base := 0x10000
+  let buffer := 0x20000
+  let out := 0x30000
+  let register (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
+  let words (count : Nat) : ByteArray := Id.run do
+    let mut bytes := ByteArray.empty
+    for index in List.range count do
+      for byte in List.range 8 do bytes := bytes.push (UInt8.ofNat ((index + 1) / 256 ^ byte % 256))
+    pure bytes
+  let value (emu : Bap.Emu.Emu) (name : String) : IO Nat := do
+    match ← Bap.Emu.reg emu (register name) with
+    | .bits bits => pure bits.toNat
+    | _ => pure 0
+  -- What each hook saw and did, and where the run ended, of a run in ranges or of single steps.
+  let run (ranges : Bool) (stopAt : Option Nat) : IO (List (Nat × Nat × Nat) × Nat × Nat × Nat × Bool × ByteArray) := do
+    let adjust (config : Bap.Emu.Config) : Bap.Emu.Config :=
+      if ranges then { config with hotThreshold := 1, rangeLimit := 16 } else { config with rangeLimit := 1 }
+    let emu ← Bap.Emu.riscv64 code base base (adjust := adjust)
+    Bap.Emu.map emu ⟨buffer, words 20, ⟨true, true, false⟩⟩
+    Bap.Emu.map emu ⟨out, ByteArray.mk (List.replicate 8 0).toArray, ⟨true, true, false⟩⟩
+    for (name, initial) in [("X10", 0), ("X11", 20), ("X12", buffer), ("X13", out)] do
+      Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 64 initial))
+    let seen ← IO.mkRef (#[] : Array (Nat × Nat × Nat))
+    let _ ← Bap.Emu.onCode emu (base, base + code.size - 1) fun emu address => do
+      let left ← value emu "X11"
+      seen.modify (·.push (address, ← value emu "X10", left))
+      -- Changes a register, then the pc, then memory, then stops, each once, in the middle of the loop.
+      if address == base + 4 && left == 15 then
+        Bap.Emu.setReg emu (register "X10") (.bits (BitVec.ofNat 64 ((← value emu "X10") + 1000)))
+      if address == base + 12 && left == 10 then Bap.Emu.setPc emu (base + 16)
+      if address == base && left == 7 then Bap.Emu.write emu (← value emu "X12") (words 1)
+      if stopAt == some left && address == base + 8 then Bap.Emu.stop emu
+      -- The end of the program.
+      if address == base + 24 then Bap.Emu.stop emu
+    let _ ← Bap.Emu.run emu 1000
+    let stoppedThere ← Bap.Emu.stopped emu
+    let pcThere ← Bap.Emu.pc emu
+    if stoppedThere && pcThere != base + 24 then
+      Bap.Emu.resume emu
+      let _ ← Bap.Emu.run emu 1000
+    pure ((← seen.get).toList, ← value emu "X10", ← value emu "X11", pcThere, stoppedThere, ← Bap.Emu.read emu out 8)
+  for stopAt in [none, some 3] do
+    let (stepSeen, stepSum, stepLeft, stepPc, stepStopped, stepOut) ← run false stopAt
+    let (rangeSeen, rangeSum, rangeLeft, rangePc, rangeStopped, rangeOut) ← run true stopAt
+    let label := if stopAt.isSome then " and one that stops the thread" else ""
+    assertEqual s!"Hooks in ranges see what single steps see{label}" stepSeen.length rangeSeen.length
+    assertTrue s!"and the same, at each instruction{label}" (stepSeen == rangeSeen)
+    assertEqual s!"and leave what they leave{label}" (stepSum, stepLeft, stepPc, stepStopped, stepOut.toList)
+      (rangeSum, rangeLeft, rangePc, rangeStopped, rangeOut.toList)
+  -- The run in ranges was in ranges, rather than single steps: it ran far fewer times than it had instructions.
+  let emu ← Bap.Emu.riscv64 code base base (adjust := fun config => { config with hotThreshold := 1, rangeLimit := 16 })
+  Bap.Emu.map emu ⟨buffer, words 20, ⟨true, true, false⟩⟩
+  Bap.Emu.map emu ⟨out, ByteArray.mk (List.replicate 8 0).toArray, ⟨true, true, false⟩⟩
+  for (name, initial) in [("X10", 0), ("X11", 20), ("X12", buffer), ("X13", out)] do
+    Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 64 initial))
+  let count ← IO.mkRef 0
+  let _ ← Bap.Emu.onCode emu (base, base + code.size - 1) fun emu address => do
+    count.modify (· + 1)
+    if address == base + 24 then Bap.Emu.stop emu
+  let ran ← Bap.Emu.run emu 1000
+  let stats ← Bap.Primus.Lifted.stats emu.engine
+  assertEqual "Hooks in ranges fire at each instruction, and at the one that they stop at" (ran + 1) (← count.get)
+  assertTrue s!"and the instructions run in ranges: {stats.nativeRuns + stats.interpretedRuns} runs of {ran}"
+    (stats.nativeRuns + stats.interpretedRuns < ran / 2)
+
 /-- What a handler does, as a contract, without changing the machine, and a replacement checked against it. -/
 def testContract (triple : String) : IO Unit := do
   let (dispatcher, state, _, _, sum) ← cffAddresses triple

@@ -189,6 +189,16 @@ def atomicProgram (program : Bil.Program) : Bool :=
   let stores := programAny (fun | .store .. => true | _ => false) (fun _ => false) depth program
   programAny (fun | .var var => var.name == monitorName | _ => false) (·.name == monitorName) depth program || (loads && stores)
 
+/-- What the state at the code sites of a native run was last said to be, from what its slots were then, and of the run, what each
+site has completed. -/
+structure LiveCache where
+  state : Bil.State
+  /-- Of each site, by its pc, the outputs that it has completed, as `Jit.liveChanges` takes them, and the variable of each with its
+  width. -/
+  sites : Std.HashMap Nat (ByteArray × Array (Bap.Var × Nat))
+  /-- Whether what was last said of the slots of the run is to be said again, as nothing has been said since this was made. -/
+  fresh : Bool
+
 /-- What runs lifted code: the blocks that it lifted and compiled, by address, the ranges that it compiled from them, versions of both
 for code that comes back as it was, where they are for a write to find them, the native memory that compiled code uses, and its limits. -/
 structure Engine where
@@ -222,6 +232,10 @@ structure Engine where
   nativeLimit : Nat
   nativeLive : IO.Ref Nat
   dirtyCode : IO.Ref (Option (Nat × Nat))
+  /-- Of the native run that goes on now, the state at a code site of it, if it can be said: what `liveState` gives. -/
+  liveRun : IO.Ref (Option (Nat → IO (Option Bil.State)))
+  /-- What the state at the code sites of that run was last said to be, from which the next is said. -/
+  liveCache : IO.Ref (Option LiveCache)
   /-- The size from which a block's memory lives in a native memory instead of being copied for each run. -/
   persistentFrom : Nat
   /-- Whether the observer of the runner rejects accesses past the end of the address space. -/
@@ -286,6 +300,8 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimi
     nativeLimit := max nativeLimit 1
     nativeLive := ← IO.mkRef 0
     dirtyCode := ← IO.mkRef none
+    liveRun := ← IO.mkRef none
+    liveCache := ← IO.mkRef none
     persistentFrom
     wrapFaults
     chainFallthrough
@@ -1837,6 +1853,83 @@ private def syncState (lowering : Lowering) (state : Bil.State) (slots : Array U
   let updates := syncUpdates (reachedOutputs lowering slots) slots
   { env := updates ++ withoutBindings (updates.map Prod.fst) state.env }
 
+private unsafe def sameObjectImpl {α : Type} (left right : α) : Bool := ptrAddrUnsafe left == ptrAddrUnsafe right
+
+/-- Whether two things are one object, as the variables of a site are each time that its outputs are bound again. It may say no when
+they are only equal. -/
+@[implemented_by sameObjectImpl] private def sameObject {α : Type} (_ _ : α) : Bool := false
+
+/-- `withoutBindings`, which looks first whether a variable is the very one that is pending, as those that a site binds again are. -/
+private def withoutBound (pending : List Bap.Var) : Bil.Env → Bil.Env
+  | [] => []
+  | binding :: rest =>
+    if pending.isEmpty then binding :: rest
+    else
+      match pending.find? fun var => sameObject var binding.1 || var == binding.1 with
+      | some var => withoutBound (pending.erase var) rest
+      | none => binding :: withoutBound pending rest
+
+/-- The `index`th word of eight bytes of what `Jit.liveChanges` gives, or 0 past its end. -/
+private def liveWord (bytes : ByteArray) (index : Nat) : UInt64 :=
+  let base := index * 8
+  if base + 8 ≤ bytes.size then
+    let byte (offset : Nat) : UInt64 := (bytes.get! (base + offset)).toUInt64 <<< (8 * offset).toUInt64
+    byte 0 ||| byte 1 ||| byte 2 ||| byte 3 ||| byte 4 ||| byte 5 ||| byte 6 ||| byte 7
+  else 0
+
+/-- Words of eight bytes, the least significant first. -/
+private def wordsOf (words : Array UInt64) : ByteArray :=
+  words.foldl (init := ByteArray.emptyWithCapacity (words.size * 8)) fun bytes word =>
+    (List.range 8).foldl (init := bytes) fun bytes offset => bytes.push (word >>> (8 * offset).toUInt64).toUInt8
+
+/-- What a run whose memory is the native memory, or that has none, is at its code site `pc`, starting from `state`: what it has
+completed there, as a run that stops at the site leaves (`syncState` of `atCodeStop`). It is said from what it was last said to be in
+this run, with only the outputs whose slots changed since, which `Jit.liveChanges` says, bound again, which a run that went on comes
+to the same as, as an output that it reached stays reached; and it is that state itself where none did. None at a pc that isn't a
+site of it, or where its slots can't be had. -/
+private def stateAtSite (engine : Engine) (lowering : Lowering) (state : Bil.State) (pc : Nat) : IO (Option Bil.State) := do
+  let cache ← match ← engine.liveCache.get with
+    | some cache => pure cache
+    | none =>
+      let flags : Std.HashMap Nat Nat := lowering.flags.foldl (init := {}) fun flags (output, flag) => flags.insert output flag
+      -- The first of each pc, as `atCodeStop` finds it, with what each output of it is.
+      let sites := lowering.checkpoints.foldl (init := ({} : Std.HashMap Nat (ByteArray × Array (Bap.Var × Nat))))
+        fun sites (at_, outputs) =>
+          if sites.contains at_ then sites
+          else
+            let kept := outputs.toArray.filterMap fun (var, slot) => (widthOf var).map fun width => (var, width, slot)
+            let words := kept.foldl (init := #[]) fun words (_, _, slot) =>
+              words ++ #[UInt64.ofNat slot, ((flags[slot]?).map (UInt64.ofNat · + 1)).getD 0]
+            sites.insert at_ (wordsOf words, kept.map fun (var, width, _) => (var, width))
+      pure { state, sites, fresh := true : LiveCache }
+  let some (outputs, vars) := cache.sites[pc]? | return none
+  let some changes ← Jit.liveChanges outputs cache.fresh | return none
+  let count := changes.size / 16
+  let mut updates : List (Bap.Var × Value) := []
+  for index in [0:count] do
+    if let some (var, width) := vars[(liveWord changes (2 * index)).toNat]? then
+      updates := (var, .bits (slotBits width (liveWord changes (2 * index + 1)))) :: updates
+  let state := if updates.isEmpty then cache.state
+    else { env := updates ++ withoutBound (updates.map (·.1)) cache.state.env }
+  engine.liveCache.set (some { cache with state, fresh := false })
+  pure (some state)
+
+/-- `action` with `liveRun` saying what the run is at its code sites, while it runs. -/
+private def withLiveRun (engine : Engine) (at_ : Nat → IO (Option Bil.State)) (action : IO α) : IO α := do
+  let outer ← engine.liveRun.get
+  engine.liveRun.set (some at_)
+  engine.liveCache.set none
+  try action finally
+    engine.liveRun.set outer
+    engine.liveCache.set none
+
+/-- The state at the code site `pc` of the native run whose code observer runs now, as the run is there, with the memory as it is,
+which a hook there may read and change: none if there is no such run, or it can't be said of it, and then what a hook would read
+isn't so. -/
+def liveState (engine : Engine) (pc : Nat) : IO (Option Bil.State) := do
+  let some at_ ← engine.liveRun.get | return none
+  at_ pc
+
 /-- A native memory with what a memory holds, by the page as it holds it: what a process holds doesn't have to become a list of its bytes
 for this, which is as long as a copy. -/
 def nativeOfMemory {width : Nat} (memory : Bap.Memory width) : IO Jit.Memory := do
@@ -2009,7 +2102,7 @@ private def runPersistent (engine : Engine) (executions : IO.Ref Nat) (lowering 
     (memory : Jit.Memory) (observer : Option Jit.MemoryObserver)
     (codeObserver : Option Jit.CodeObserver) (budget : Nat) (quietSites : Bool := false) : IO Result := do
   recordNative engine
-  let (next, slots, addresses, values) ← match ← engine.memoryFilter.get with
+  let (next, slots, addresses, values) ← withLiveRun engine (stateAtSite engine lowering state) <| match ← engine.memoryFilter.get with
     | some filter => Jit.runWithPersistentMemoryFilteredCode program slots memory filter quietSites observer codeObserver
     | none => Jit.runWithPersistentMemoryObservedCode program slots memory observer codeObserver
   recordChained engine executions lowering budget slots
@@ -2217,7 +2310,9 @@ private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (
             runPersistent engine entry.executions lowering entry.next program state slots memory observer codeObserver budget quietSites
           else do
             recordNative engine
-            let (next, slots, addresses, values) ←
+            -- Of a run with a memory of its own, what a hook at a site would read of memory isn't what the run has.
+            let at_ := if lowering.memory.isNone then stateAtSite engine lowering state else fun _ => pure none
+            let (next, slots, addresses, values) ← withLiveRun engine at_ <|
               Jit.runWithMemoryObservedCode program slots addresses values observer codeObserver
             recordChained engine entry.executions lowering budget slots
             let completed := atCodeStop lowering next

@@ -150,6 +150,13 @@ abbrev MemoryObserver := Bool → Nat → Nat → Nat → IO Unit
 /-- What hears of each code site, as obligation 3 says, with its pc: `true` stops the program there. -/
 abbrev CodeObserver := Nat → IO Bool
 
+/-- Of the outputs of a code site, each as its slot, and its flag's slot plus 1 or 0 for none, eight bytes each with the least
+significant first: those that the run of the code observer that runs now has reached at its site, and whose slots aren't what was
+last said of them in this run, or weren't said, each as its place among the outputs and its value, eight bytes each, which are said
+of them from now on. All of them are new to it after `reset`. None outside of an observer, or of a run whose slots aren't one array. -/
+@[extern "bap_jit_live_changes"]
+opaque liveChanges (outputs : @& ByteArray) (reset : Bool) : IO (Option ByteArray)
+
 /-- Runs a program on a state and on a memory image given as its cells, and gives back where it went, its state, and the cells of the
 image after it (obligation 6). -/
 @[extern "bap_jit_run_memory_code"]

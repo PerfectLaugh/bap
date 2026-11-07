@@ -188,8 +188,30 @@ struct BapCells {
   // which may change what is quiet, or there is an error.
   uint64_t quietFirst[2] = {1, 1};
   uint64_t quietLast[2] = {0, 0};
+  // The slots of the run, which a code site that calls Lean code leaves as they are there, so that what it runs can read them: none
+  // for a run whose slots aren't one array, as of a chain.
+  uint64_t *slots = nullptr;
+  size_t slotCount = 0;
+  // Which run these are of, for what was last said of its slots.
+  uint64_t serial = nextCellsSerial();
   BapPageEntry pageEntries[pageEntryCount] = {};
+
+  static uint64_t nextCellsSerial() {
+    static std::atomic<uint64_t> serials{0};
+    return ++serials;
+  }
 };
+
+// The cells of the run whose code site the Lean code that runs now was called from, if it was.
+static thread_local BapCells *siteCells = nullptr;
+
+// What was last said of the slots of a run, by `bap_jit_live_changes`, of the run of `serial`.
+struct SiteReport {
+  uint64_t serial = 0;
+  std::vector<uint64_t> values;
+  std::vector<uint8_t> known;
+};
+static thread_local SiteReport siteReport;
 
 static void forgetQuiet(BapCells *cells) {
   cells->quietFirst[0] = cells->quietFirst[1] = 1;
@@ -208,7 +230,10 @@ static uint64_t callCodeObserver(BapCells *cells, uint64_t pc) {
   forgetQuiet(cells);
   lean_inc_ref(cells->codeObserver);
   lean_object *action = lean_apply_1(cells->codeObserver, lean_uint64_to_nat(pc));
+  BapCells *outer = siteCells;
+  siteCells = cells;
   lean_object *result = lean_apply_1(action, lean_io_mk_world());
+  siteCells = outer;
   uint64_t stop = 0;
   if (lean_io_result_is_error(result)) {
     failCells(cells, lean_io_result_get_error(result));
@@ -257,6 +282,56 @@ extern "C" void bap_jit_memory_notify(BapCells *cells, uint8_t write,
   if (lean_io_result_is_error(result))
     failCells(cells, lean_io_result_get_error(result));
   lean_dec_ref(result);
+}
+
+static void putWord(uint8_t *out, uint64_t value) {
+  for (size_t byte = 0; byte != 8; ++byte)
+    out[byte] = static_cast<uint8_t>(value >> (8 * byte));
+}
+
+static uint64_t getWord(const uint8_t *in) {
+  uint64_t value = 0;
+  for (size_t byte = 0; byte != 8; ++byte)
+    value |= static_cast<uint64_t>(in[byte]) << (8 * byte);
+  return value;
+}
+
+// Of the outputs of a code site, each as its slot and its flag's slot and 1 or 0 for none, eight bytes each, the least significant
+// first: those that the run has reached at the site that the Lean code that runs now was called from, and whose slots aren't what was
+// last said of them in this run, or weren't said, each as its place among them and its value, which are said of them from now on.
+// All of them are new to it after `reset`. Nothing outside of a site, of a run whose slots aren't one array: `ok` says which.
+extern "C" lean_obj_res bap_jit_live_changes(b_lean_obj_arg outputs, uint8_t reset, lean_obj_arg) {
+  BapCells *cells = siteCells;
+  if (cells == nullptr || cells->slots == nullptr)
+    return lean_io_result_mk_ok(lean_box(0));
+  SiteReport &report = siteReport;
+  if (report.serial != cells->serial || reset != 0) {
+    report.serial = cells->serial;
+    report.values.assign(cells->slotCount, 0);
+    report.known.assign(cells->slotCount, 0);
+  }
+  const uint8_t *in = lean_sarray_cptr(outputs);
+  const size_t count = lean_sarray_size(outputs) / 16;
+  std::vector<uint64_t> changes;
+  for (size_t index = 0; index != count; ++index) {
+    uint64_t slot = getWord(in + index * 16);
+    uint64_t flag = getWord(in + index * 16 + 8);
+    if (slot >= cells->slotCount || (flag != 0 && (flag - 1 >= cells->slotCount || cells->slots[flag - 1] == 0)))
+      continue;
+    uint64_t value = cells->slots[slot];
+    if (report.known[slot] && report.values[slot] == value)
+      continue;
+    report.known[slot] = 1;
+    report.values[slot] = value;
+    changes.push_back(index);
+    changes.push_back(value);
+  }
+  lean_obj_res bytes = lean_alloc_sarray(1, changes.size() * 8, changes.size() * 8);
+  for (size_t index = 0; index != changes.size(); ++index)
+    putWord(lean_sarray_cptr(bytes) + index * 8, changes[index]);
+  lean_object *some = lean_alloc_ctor(1, 1, 0);
+  lean_ctor_set(some, 0, bytes);
+  return lean_io_result_mk_ok(some);
 }
 
 extern "C" uint64_t bap_jit_code_notify(BapCells *cells, uint64_t pc) {
@@ -1151,6 +1226,20 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
       for (size_t index = 0; index != slotCount; ++index)
         builder.CreateStore(builder.CreateLoad(word, homes[index]), copies[index]);
       builder.CreateBr(first);
+      // A code site that calls Lean code leaves what it wrote in the slots first, where what that runs reads them: only where it
+      // calls, which is where something observes code.
+      std::vector<llvm::CallInst *> sites;
+      for (llvm::BasicBlock &block : *function)
+        for (llvm::Instruction &instruction : block)
+          if (auto *call = llvm::dyn_cast<llvm::CallInst>(&instruction))
+            if (call->getCalledFunction() != nullptr && call->getCalledFunction()->getName() == "bap_jit_code_notify")
+              sites.push_back(call);
+      for (llvm::CallInst *call : sites) {
+        builder.SetInsertPoint(call);
+        for (size_t index = 0; index != slotCount; ++index)
+          if (written[index])
+            builder.CreateStore(builder.CreateLoad(word, copies[index]), homes[index]);
+      }
       // One way out, which leaves the slots in the state once, rather than at each return.
       std::vector<llvm::ReturnInst *> returns;
       for (llvm::BasicBlock &block : *function)
@@ -1261,6 +1350,8 @@ extern "C" lean_obj_res bap_jit_run(lean_obj_arg programObject,
     for (size_t index = 0; index != size; ++index)
       state[index] = lean_unbox_uint64(lean_array_get_core(stateObject, index));
     BapCells memory{nullptr, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr};
+    memory.slots = state.data();
+    memory.slotCount = size;
     uint64_t next = program->function(state.data(), &memory);
     lean_obj_res resultState = lean_alloc_array(size, size);
     for (size_t index = 0; index != size; ++index)
@@ -1305,6 +1396,8 @@ extern "C" lean_obj_res bap_jit_run_memory_code(lean_obj_arg programObject,
     lean_object *codeObserver = lean_is_scalar(codeObserverObject)
         ? nullptr : lean_ctor_get(codeObserverObject, 0);
     BapCells memory{cells.data(), addressCount, cells.capacity(), observer, nullptr, nullptr, nullptr, codeObserver};
+    memory.slots = state.data();
+    memory.slotCount = stateSize;
     uint64_t next = program->function(state.data(), &memory);
     if (memory.error != nullptr)
       return lean_io_result_mk_error(memory.error);
@@ -1649,6 +1742,8 @@ static lean_obj_res runMemoryObject(lean_obj_arg programObject, lean_obj_arg sta
     BapCells memory{nullptr, 0, 0, observer, nullptr, persistent, &changes, codeObserver};
     memory.filter = filter;
     memory.quietSites = quietSites;
+    memory.slots = state.data();
+    memory.slotCount = stateSize;
     uint64_t next = program->function(state.data(), &memory);
     // Before anything else, as this is what a run that failed leaves to be taken back.
     if (persistent->stepActive())
