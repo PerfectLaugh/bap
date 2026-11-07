@@ -2749,6 +2749,33 @@ def testHooksReadSometimes : IO Unit := do
   assertTrue "Single steps read at a site in thirteen" (expected.1.length > 100)
   assertEqual "A range reads what they read, with the sites between unread, and has the write" expected (← run true)
 
+/-- A loop that is optimized, run a little at a time: where a run has too little budget for the optimized code to go on alone, it goes
+on in the code it was optimized from, from the start or from where it was, with the registers that it and the runs before it left,
+as single steps have them, whether they are in the chain or in the state. -/
+def testOptimizedInPieces : IO Unit := do
+  let code ← LLVM.assemble "riscv64" ("1: li a2, 7\n2: addi a0, a0, 3\naddi a2, a2, -1\nbnez a2, 2b\nli a3, 5\n" ++
+    "3: xor a1, a1, a0\nslli a5, a1, 1\nadd a1, a1, a5\naddi a3, a3, -1\nbnez a3, 3b\naddi a4, a4, -1\nbnez a4, 1b\n4: j 4b")
+  let register (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
+  let value (emu : Bap.Emu.Emu) (name : String) : IO Nat := do
+    match ← Bap.Emu.reg emu (register name) with
+    | .bits bits => pure bits.toNat
+    | _ => pure 0
+  let run (ranges : Bool) : IO (List (List Nat)) := do
+    let adjust (config : Bap.Emu.Config) : Bap.Emu.Config :=
+      if ranges then { config with hotThreshold := 1, rangeLimit := 16 } else { config with rangeLimit := 1 }
+    let emu ← Bap.Emu.riscv64 code 0 0 (adjust := adjust)
+    for (name, start) in [("X10", 1), ("X11", 5), ("X14", 100000)] do
+      Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 64 start))
+    let _ ← Bap.Emu.run emu 60000
+    Primus.Lifted.finishBackgroundCompiles
+    let mut seen := []
+    for fuel in [1, 2, 3, 5, 7, 11, 13, 6, 4, 17, 23, 1, 29, 600, 31, 2, 37, 9000, 41, 997, 1009, 4999, 10007, 3] do
+      let _ ← Bap.Emu.run emu fuel
+      seen := seen ++ [[← Bap.Emu.pc emu, ← value emu "X10", ← value emu "X11", ← value emu "X12", ← value emu "X13",
+        ← value emu "X14"]]
+    pure seen
+  assertEqual "An optimized loop run a little at a time is where single steps are, with what they have" (← run false) (← run true)
+
 /-- A range of ARM code at an address, run there as Thumb: what runs is the Thumb of those bytes, as a single step has it, rather than
 the range. -/
 def testThumbAfterArmRange : IO Unit := do

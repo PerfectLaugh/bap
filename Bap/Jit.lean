@@ -135,10 +135,16 @@ stands in for, which owns them, and they release them. -/
 opaque compile (ops : @& List Op) : IO Program
 
 /-- Compiled with the optimizations of LLVM, which takes longer and is worth it for what runs a lot. Its slots are in registers of the
-host between its code sites, but at the sites of `flushSites`, by their pcs, which leave them where `liveChanges` reads them. -/
+host between its code sites, but at the sites of `flushSites`, by their pcs, which leave them where `liveChanges` reads them. Where
+`resumable`, it may go on in what `compile` makes of the same operations where it would check its budget or call an observer, from
+there, rather than have all of that in itself too: that is then given to it by `setFallback` before it runs, as it can't without. -/
 @[extern "bap_jit_compile_optimized"]
 opaque compileOptimized (ops : @& List Op) (kept : @& Array UInt64) (budgetSlot : UInt64) (variables : @& Array UInt64)
-    (flushSites : @& Array UInt64 := #[]) : IO Program
+    (flushSites : @& Array UInt64 := #[]) (resumable : Bool := false) : IO Program
+
+/-- What `compileOptimized` made where `resumable` goes on in `fallback`, which `compile` made of the same operations. -/
+@[extern "bap_jit_set_fallback"]
+opaque setFallback (program : @& Program) (fallback : @& Program) : IO Unit
 
 /-- A program that starts at the label that the slot `entrySlot` of its state says, as one more than it, of those that are
 `entries`, and where it would otherwise when that holds zero. It takes a state that has that slot. -/

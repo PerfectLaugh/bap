@@ -13,8 +13,11 @@
 #include <llvm/Transforms/Scalar/SROA.h>
 #include <llvm/Transforms/Scalar/SimplifyCFG.h>
 #include <llvm/Transforms/Scalar/Sink.h>
+#include <llvm/Transforms/Scalar/LICM.h>
+#include <llvm/Transforms/Scalar/LoopPassManager.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/MDBuilder.h>
+#include <llvm/Transforms/Utils/Local.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
@@ -37,6 +40,8 @@
 #include <new>
 #include <mutex>
 #include <string>
+#include <optional>
+#include <unordered_set>
 #include <vector>
 
 #if defined(__linux__)
@@ -206,6 +211,10 @@ struct BapCells {
   // last left them so before it called Lean code, which code that is optimized does at the sites that it was told of.
   bool slotsLive = false;
   uint64_t flushedPc = ~uint64_t{0};
+  // Of an optimized program that is the copy that doesn't check its budget alone, the program without optimizing that it goes on
+  // in where that would check, at the label or access that `resume` says (`bap_jit_resume`).
+  uint64_t (*fallback)(uint64_t *, BapCells *) = nullptr;
+  uint64_t resume = 0;
   BapPageEntry pageEntries[pageEntryCount] = {};
 
   static uint64_t nextCellsSerial() {
@@ -323,6 +332,33 @@ extern "C" uint64_t bap_jit_word(b_lean_obj_arg bytes, b_lean_obj_arg index) {
   if (at >= lean_sarray_size(bytes) / 8)
     return 0;
   return getWord(lean_sarray_cptr(bytes) + 8 * at);
+}
+
+// Whether the memory observer would do nothing with an access, as it doesn't with none or where the filter lets it through, which
+// is then the last quiet range of its kind, as `bap_jit_memory_notify` has it, without calling it, as no Lean code runs here.
+extern "C" uint8_t bap_jit_memory_quiet(BapCells *cells, uint8_t write, uint64_t address, uint64_t size) {
+  if (cells->error != nullptr)
+    return 0;
+  if (cells->observer == nullptr)
+    return 1;
+  if (cells->filter == nullptr)
+    return 0;
+  const MemoryFilter::Range *range = cells->filter->quietRange(address, size, write != 0);
+  if (range == nullptr)
+    return 0;
+  cells->quietFirst[write != 0] = range->first;
+  cells->quietLast[write != 0] = range->last;
+  return 1;
+}
+
+// What an optimized program goes on in where it would check its budget or call the observer, as `resume` says: the program it
+// was optimized from, at the same place, with the slots in the state as they are there, as they are when it isn't optimized.
+extern "C" uint64_t bap_jit_resume(uint64_t *state, BapCells *cells) {
+  bool live = cells->slotsLive;
+  cells->slotsLive = true;
+  uint64_t next = cells->fallback(state, cells);
+  cells->slotsLive = live;
+  return next;
 }
 
 // Whether `bap_jit_live_changes` can say anything at the code site `pc` of the run whose code observer runs now, without saying it.
@@ -473,8 +509,15 @@ struct Program {
   // Whether it keeps its slots in registers of the host between its code sites, as what is optimized does.
   bool optimized = false;
   size_t memoryStores = 0;
+  // The program without optimizing that it goes on in, kept for as long as it is (`bap_jit_resume`).
+  lean_object *fallbackObject = nullptr;
+  uint64_t (*fallback)(uint64_t *, BapCells *) = nullptr;
+  // Whether it goes on in that, which it can't run without.
+  bool resumes = false;
 
   ~Program() {
+    if (fallbackObject != nullptr)
+      lean_dec(fallbackObject);
     if (shared == nullptr || resources == nullptr)
       return;
     std::lock_guard<std::mutex> lock(shared->mutex);
@@ -518,6 +561,10 @@ std::shared_ptr<SharedJit> sharedJit(bool optimized) {
       llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_memory_notify);
   runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_code_notify")] =
       llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_code_notify);
+  runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_resume")] =
+      llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_resume);
+  runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_memory_quiet")] =
+      llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_memory_quiet);
   if (llvm::Error error = (*jit)->getMainJITDylib().define(
           llvm::orc::absoluteSymbols(std::move(runtimeSymbols))))
     throw std::runtime_error("LLVM ORC symbol definition failed: " +
@@ -583,7 +630,8 @@ bool getSlot(lean_obj_arg value, size_t &slot) {
 // `variables`, for what is optimized, is pairs of a slot of a variable and the variable's number among the registers of a chain.
 static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg entries = nullptr, size_t entrySlot = 0,
                                lean_obj_arg kept = nullptr, uint64_t budgetSlot = ~uint64_t{0},
-                               lean_obj_arg variables = nullptr, b_lean_obj_arg flushSites = nullptr) {
+                               lean_obj_arg variables = nullptr, b_lean_obj_arg flushSites = nullptr,
+                               bool resumable = false) {
   try {
     std::string initializationError;
     if (!initialize(initializationError))
@@ -633,10 +681,15 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
     std::vector<std::pair<llvm::Instruction *, uint64_t>> siteBranches;
     std::vector<std::pair<llvm::Instruction *, llvm::BasicBlock *>> observerBranches;
     // An access starts a block, which the copy can go to in this, as the operation reads all it reads from the slots there.
+    // Where a program can be resumed, by what `resume` says there: each access, as more than any label, and each label, as one
+    // more than it, which are the same places in a program and in it optimized, as both are made of the same operations.
+    std::unordered_map<llvm::BasicBlock *, uint64_t> resumeOf;
+    uint64_t accesses = 0;
     auto startAccess = [&]() {
       llvm::BasicBlock *start = llvm::BasicBlock::Create(*context, "access", function);
       builder.CreateBr(start);
       builder.SetInsertPoint(start);
+      resumeOf[start] = (uint64_t{1} << 40) + accesses++;
       return start;
     };
     // Whether a size is that of an instruction of the host, which is atomic at an address that is a multiple of it.
@@ -1161,6 +1214,22 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
       }
     }
 
+    for (auto &[id, block] : labels)
+      resumeOf[block] = id + 1;
+    // What isn't optimized starts where `resume` says, if anything, for what is optimized of it to go on in it there. Nothing is
+    // held in a register from one operation to the next, so that it can start at any of them.
+    if (!optimized) {
+      llvm::BasicBlock *start = &function->getEntryBlock();
+      llvm::BasicBlock *resume = llvm::BasicBlock::Create(*context, "resume", function, start);
+      builder.SetInsertPoint(resume);
+      llvm::Value *at = builder.CreateGEP(byte, memory, llvm::ConstantInt::get(word, offsetof(BapCells, resume)));
+      llvm::Value *where = builder.CreateLoad(word, at);
+      builder.CreateStore(zero, at);
+      llvm::SwitchInst *choice = builder.CreateSwitch(where, start, static_cast<unsigned>(resumeOf.size()));
+      for (auto &[block, id] : resumeOf)
+        choice->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(word, id)), block);
+    }
+
     std::string verificationErrors;
     llvm::raw_string_ostream verificationStream(verificationErrors);
     if (llvm::verifyModule(*module, &verificationStream))
@@ -1179,6 +1248,10 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
     // function's, which LLVM keeps in a register, and is left in the cells where it goes on in this: the copy runs no Lean code to
     // read it there, and a store to them at each site would be most of what it does.
     llvm::AllocaInst *pending = nullptr;
+    // Whether the copy is all there is, which goes on in `fallback` where it would go on in this (`bap_jit_resume`), and the slots
+    // that that reads from each place where it does, which are all it needs to have there.
+    bool fastOnly = false;
+    std::unordered_map<llvm::CallInst *, std::vector<bool>> resumeLive;
     if (optimized && entries == nullptr && budgetSlot != ~uint64_t{0} && hasSlots && budgetSlot <= maxSlot) {
       auto budgetBranch = [&](llvm::Instruction *terminator) -> llvm::CondBrInst * {
         auto *branch = llvm::dyn_cast<llvm::CondBrInst>(terminator);
@@ -1262,8 +1335,15 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
           builder.CreateBr(target);
           return edge;
         };
-        for (auto &[observed, start] : observerBranches)
-          llvm::cast<llvm::Instruction>(map[observed])->setSuccessor(1, toThis(start));
+        // Of each, the branch of the copy, its call of the observer, and the way to this.
+        std::vector<std::tuple<llvm::Instruction *, llvm::BasicBlock *, llvm::BasicBlock *>> observerCalls;
+        for (auto &[observed, start] : observerBranches) {
+          auto *branch = llvm::cast<llvm::Instruction>(map[observed]);
+          llvm::BasicBlock *call = branch->getSuccessor(1);
+          llvm::BasicBlock *edge = toThis(start);
+          branch->setSuccessor(1, edge);
+          observerCalls.push_back({branch, call, edge});
+        }
         // The targets of the jumps back of the copy, by a search in depth from its start, which stays in the copy: an access goes on in
         // this.
         std::unordered_map<llvm::BasicBlock *, int> visit;
@@ -1340,9 +1420,10 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
             llvm::BasicBlock *original = originalOf[target];
             std::vector<llvm::Instruction *> users = usersOf(target);
             std::vector<llvm::Instruction *> originalUsers = usersOf(original);
-            llvm::BasicBlock *check = checked(target, original, "budget_check", true);
+            // A check on each way in, rather than one where they meet: what leaves for this from there is what the way in has, rather
+            // than what goes round the loop to the target, so that what only a way out needs, such as most flags, is worked out there.
             for (llvm::Instruction *user : users)
-              user->replaceUsesOfWith(target, check);
+              user->replaceUsesOfWith(target, checked(target, original, "budget_check", true));
             llvm::BasicBlock *back = checked(target, original, "budget_back", false);
             for (llvm::Instruction *user : originalUsers)
               user->replaceUsesOfWith(original, back);
@@ -1350,6 +1431,121 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
           llvm::BasicBlock *start = original.front();
           llvm::BasicBlock *choose = checked(llvm::cast<llvm::BasicBlock>(map[start]), start, "budget_start", false);
           choose->moveBefore(start);
+          // With the program that isn't optimized to go on in, at each place where this would be gone on in, this is left out: it
+          // is most of what the code generator would make, and that program is made already.
+          for (llvm::BasicBlock *edge : edges)
+            resumable = resumable && resumeOf.count(edge->getTerminator()->getSuccessor(0)) != 0;
+          if (resumable) {
+            llvm::FunctionCallee resumeIn = module->getOrInsertFunction(
+                "bap_jit_resume", llvm::FunctionType::get(word, {pointer, pointer}, false));
+            // The slots that the program reads from each of its blocks on before it writes them, which are all that it has to have
+            // there: those that a return leaves are read there. What its calls run reads no slot of a run that goes on in it, which
+            // is one where nothing hooks its code, as the copy is only for that: only the code observer of a site with hooks does.
+            const size_t slotTotal = maxSlot + 1;
+            std::vector<bool> keptMask(slotTotal, kept == nullptr);
+            if (kept != nullptr)
+              for (size_t index = 0; index != lean_array_size(kept); ++index) {
+                uint64_t slot = lean_unbox_uint64(lean_array_get_core(kept, index));
+                if (slot < slotTotal)
+                  keptMask[slot] = true;
+              }
+            std::unordered_set<llvm::BasicBlock *> inProgram(original.begin(), original.end());
+            auto slotOf = [&](llvm::Value *pointerValue) -> std::optional<size_t> {
+              auto *address = llvm::dyn_cast<llvm::GetElementPtrInst>(pointerValue);
+              if (address == nullptr || address->getPointerOperand() != state || address->getNumOperands() != 2)
+                return std::nullopt;
+              auto *index = llvm::dyn_cast<llvm::ConstantInt>(address->getOperand(1));
+              if (index == nullptr || index->getZExtValue() >= slotTotal)
+                return std::nullopt;
+              return static_cast<size_t>(index->getZExtValue());
+            };
+            std::unordered_map<llvm::BasicBlock *, std::vector<bool>> liveIn;
+            for (llvm::BasicBlock *block : original)
+              liveIn[block] = std::vector<bool>(slotTotal, false);
+            for (bool changed = true; changed;) {
+              changed = false;
+              for (auto block = original.rbegin(); block != original.rend(); ++block) {
+                std::vector<bool> live(slotTotal, false);
+                auto add = [&](llvm::BasicBlock *next) {
+                  const std::vector<bool> &in = liveIn[next];
+                  for (size_t index = 0; index != slotTotal; ++index)
+                    live[index] = live[index] || in[index];
+                };
+                for (llvm::BasicBlock *next : llvm::successors(*block)) {
+                  if (inProgram.count(next) != 0)
+                    add(next);
+                  else
+                    for (llvm::BasicBlock *beyond : llvm::successors(next))
+                      if (inProgram.count(beyond) != 0)
+                        add(beyond);
+                }
+                for (auto instruction = (*block)->rbegin(); instruction != (*block)->rend(); ++instruction) {
+                  if (llvm::isa<llvm::ReturnInst>(&*instruction)) {
+                    for (size_t index = 0; index != slotTotal; ++index)
+                      live[index] = live[index] || keptMask[index];
+                  } else if (auto *storeInst = llvm::dyn_cast<llvm::StoreInst>(&*instruction)) {
+                    if (auto slot = slotOf(storeInst->getPointerOperand()))
+                      live[*slot] = false;
+                  } else if (auto *loadInst = llvm::dyn_cast<llvm::LoadInst>(&*instruction)) {
+                    if (auto slot = slotOf(loadInst->getPointerOperand()))
+                      live[*slot] = true;
+                  }
+                }
+                if (live != liveIn[*block]) {
+                  liveIn[*block] = live;
+                  changed = true;
+                }
+              }
+            }
+            auto goOn = [&](uint64_t at, std::vector<bool> live) {
+              builder.CreateStore(llvm::ConstantInt::get(word, at),
+                                  builder.CreateGEP(byte, memory, llvm::ConstantInt::get(word, offsetof(BapCells, resume))));
+              llvm::CallInst *call = builder.CreateCall(resumeIn, {state, memory});
+              resumeLive[call] = std::move(live);
+              builder.CreateRet(call);
+            };
+            // An access that the last quiet range doesn't have is asked of the filter, which needs no Lean code, and goes on here if
+            // the observer would do nothing with it: only one that it would do something with goes on in the program.
+            llvm::FunctionCallee quietFor = module->getOrInsertFunction(
+                "bap_jit_memory_quiet", llvm::FunctionType::get(byte, {pointer, byte, word, word}, false));
+            for (auto &[branch, call, edge] : observerCalls) {
+              llvm::CallInst *notify = nullptr;
+              for (llvm::Instruction &instruction : *call)
+                if (auto *found = llvm::dyn_cast<llvm::CallInst>(&instruction))
+                  if (found->getCalledFunction() != nullptr && found->getCalledFunction()->getName() == "bap_jit_memory_notify")
+                    notify = found;
+              if (notify == nullptr)
+                continue;
+              llvm::BasicBlock *after = call->getTerminator()->getSuccessor(0);
+              builder.SetInsertPoint(notify);
+              llvm::Value *quiet = builder.CreateCall(quietFor, {notify->getArgOperand(0), notify->getArgOperand(1),
+                                                                 notify->getArgOperand(2), notify->getArgOperand(3)});
+              call->getTerminator()->eraseFromParent();
+              notify->eraseFromParent();
+              builder.SetInsertPoint(call);
+              builder.CreateCondBr(builder.CreateICmpNE(quiet, llvm::ConstantInt::get(byte, 0)), after, edge);
+              branch->setSuccessor(1, call);
+            }
+            for (llvm::BasicBlock *edge : edges) {
+              llvm::Instruction *branch = edge->getTerminator();
+              llvm::BasicBlock *target = branch->getSuccessor(0);
+              uint64_t at = resumeOf[target];
+              std::vector<bool> live = liveIn.count(target) != 0 ? liveIn[target] : std::vector<bool>(slotTotal, true);
+              branch->eraseFromParent();
+              builder.SetInsertPoint(edge);
+              goOn(at, std::move(live));
+            }
+            llvm::BasicBlock *fromStart = llvm::BasicBlock::Create(*context, "resume_start", function);
+            builder.SetInsertPoint(fromStart);
+            // From the start it reads what it reads from where the run has it, as variables of a chain have it in its registers
+            // rather than the state.
+            goOn(0, liveIn.count(start) != 0 ? liveIn[start] : std::vector<bool>(slotTotal, true));
+            choose->getTerminator()->setSuccessor(1, fromStart);
+            // The variable of what waits is in the block that this started at, which goes with the rest of this.
+            pending->moveBefore(*choose, choose->getFirstInsertionPt());
+            llvm::removeUnreachableBlocks(*function);
+            fastOnly = true;
+          }
         } else {
           for (llvm::BasicBlock *copy : copies)
             copy->eraseFromParent();
@@ -1437,11 +1633,47 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
             builder.CreateStore(builder.CreateLoad(word, copies[index]), homes[index]);
         builder.CreateStore(pc, builder.CreateGEP(byte, memory, llvm::ConstantInt::get(word, offsetof(BapCells, flushedPc))));
       }
+      // Where the copy goes on in the program that isn't optimized, that has the slots in the state, the variables' among them,
+      // as it has them, and the chain's registers have them back from it, which it then leaves as they are.
+      auto resumes = [](llvm::Instruction *instruction) {
+        auto *call = llvm::dyn_cast<llvm::CallInst>(instruction);
+        return call != nullptr && call->getCalledFunction() != nullptr && call->getCalledFunction()->getName() == "bap_jit_resume";
+      };
+      std::vector<llvm::CallInst *> resumeCalls;
+      for (llvm::BasicBlock &block : *function)
+        for (llvm::Instruction &instruction : block)
+          if (resumes(&instruction))
+            resumeCalls.push_back(llvm::cast<llvm::CallInst>(&instruction));
+      for (llvm::CallInst *call : resumeCalls) {
+        builder.SetInsertPoint(call);
+        const std::vector<bool> *live = resumeLive.count(call) != 0 ? &resumeLive[call] : nullptr;
+        auto needed = [&](size_t index) { return live == nullptr || (index < live->size() && (*live)[index]); };
+        for (size_t index = 0; index != slotCount; ++index)
+          if (written[index] && needed(index))
+            builder.CreateStore(builder.CreateLoad(word, copies[index]), builder.CreateConstGEP1_64(word, state, index));
+        std::vector<std::pair<uint64_t, uint64_t>> chainedSlots;
+        if (variables != nullptr)
+          for (size_t at = 0; at + 1 < lean_array_size(variables); at += 2) {
+            uint64_t slot = lean_unbox_uint64(lean_array_get_core(variables, at));
+            uint64_t number = lean_unbox_uint64(lean_array_get_core(variables, at + 1));
+            if (slot < slotCount)
+              chainedSlots.push_back({slot, number});
+          }
+        for (auto [slot, number] : chainedSlots)
+          if (!written[slot] && needed(slot)) {
+            llvm::Value *inState = builder.CreateConstGEP1_64(word, state, slot);
+            builder.CreateStore(builder.CreateLoad(word, homes[slot]), inState);
+          }
+        builder.SetInsertPoint(call->getNextNode());
+        for (auto [slot, number] : chainedSlots)
+          builder.CreateStore(builder.CreateLoad(word, builder.CreateConstGEP1_64(word, state, slot)), homes[slot]);
+      }
       // One way out, which leaves the slots in the state once, rather than at each return.
       std::vector<llvm::ReturnInst *> returns;
       for (llvm::BasicBlock &block : *function)
         if (auto *ret = llvm::dyn_cast<llvm::ReturnInst>(block.getTerminator()))
-          returns.push_back(ret);
+          if (auto *value = llvm::dyn_cast_or_null<llvm::Instruction>(ret->getReturnValue()); value == nullptr || !resumes(value))
+            returns.push_back(ret);
       llvm::BasicBlock *leave = llvm::BasicBlock::Create(*context, "leave", function);
       builder.SetInsertPoint(leave);
       llvm::PHINode *result = builder.CreatePHI(word, static_cast<unsigned>(returns.size()));
@@ -1486,6 +1718,8 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
       // Again, for the selects that SimplifyCFG makes of what waits in the copy that doesn't check its budget, one at each site
       // that a slot of the run guards, which fold into one rather than going round the loop one after another.
       pipeline.addPass(llvm::InstCombinePass());
+      // What a loop of the copy works out that only its ways out read, such as most flags, is worked out on those ways instead.
+      pipeline.addPass(llvm::createFunctionToLoopPassAdaptor(llvm::LICMPass(llvm::LICMOptions()), true));
       pipeline.addPass(llvm::DSEPass());
       // What only a code site that calls Lean code writes back goes where it does, rather than being worked out at every site.
       pipeline.addPass(llvm::SinkingPass());
@@ -1519,6 +1753,7 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
     program->optimized = optimized && hasSlots;
     program->maxSlot = entries != nullptr ? std::max(hasSlots ? maxSlot + 1 : 0, entrySlot + 1) : (hasSlots ? maxSlot + 1 : 0);
     program->memoryStores = memoryStores;
+    program->resumes = fastOnly;
     return lean_io_result_mk_ok(
         lean_alloc_external(programClass(), program.release()));
   } catch (const std::exception &error) {
@@ -1529,8 +1764,19 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
 extern "C" lean_obj_res bap_jit_compile(lean_obj_arg ops, lean_obj_arg) { return compileOps(ops, false); }
 
 extern "C" lean_obj_res bap_jit_compile_optimized(lean_obj_arg ops, lean_obj_arg kept, uint64_t budgetSlot, lean_obj_arg variables,
-                                                   b_lean_obj_arg flushSites, lean_obj_arg) {
-  return compileOps(ops, true, nullptr, 0, kept, budgetSlot, variables, flushSites);
+                                                   b_lean_obj_arg flushSites, uint8_t resumable, lean_obj_arg) {
+  return compileOps(ops, true, nullptr, 0, kept, budgetSlot, variables, flushSites, resumable != 0);
+}
+
+// `Jit.setFallback`: the program that an optimized program goes on in, which it keeps.
+extern "C" lean_obj_res bap_jit_set_fallback(b_lean_obj_arg programObject, b_lean_obj_arg fallbackObject, lean_obj_arg) {
+  auto *program = static_cast<Program *>(lean_get_external_data(programObject));
+  if (program->fallbackObject != nullptr)
+    lean_dec(program->fallbackObject);
+  lean_inc(fallbackObject);
+  program->fallbackObject = fallbackObject;
+  program->fallback = static_cast<Program *>(lean_get_external_data(fallbackObject))->function;
+  return lean_io_result_mk_ok(lean_box(0));
 }
 
 extern "C" lean_obj_res bap_jit_compile_entries(lean_obj_arg ops, lean_obj_arg entries, lean_obj_arg slot, uint8_t optimized,
@@ -1557,6 +1803,9 @@ extern "C" lean_obj_res bap_jit_run(lean_obj_arg programObject,
     memory.slots = state.data();
     memory.slotCount = size;
     memory.slotsLive = !program->optimized;
+    if (program->resumes && program->fallback == nullptr)
+      return ioError("an optimized program without the program that it goes on in");
+    memory.fallback = program->fallback;
     uint64_t next = program->function(state.data(), &memory);
     lean_obj_res resultState = lean_alloc_array(size, size);
     for (size_t index = 0; index != size; ++index)
@@ -1605,6 +1854,9 @@ extern "C" lean_obj_res bap_jit_run_memory_code(lean_obj_arg programObject,
     memory.slots = state.data();
     memory.slotCount = stateSize;
     memory.slotsLive = !program->optimized;
+    if (program->resumes && program->fallback == nullptr)
+      return ioError("an optimized program without the program that it goes on in");
+    memory.fallback = program->fallback;
     uint64_t next = program->function(state.data(), &memory);
     if (memory.error != nullptr)
       return lean_io_result_mk_error(memory.error);
@@ -1976,6 +2228,9 @@ static lean_obj_res runMemoryObject(lean_obj_arg programObject, lean_obj_arg sta
     memory.slots = state.data();
     memory.slotCount = stateSize;
     memory.slotsLive = !program->optimized;
+    if (program->resumes && program->fallback == nullptr)
+      return ioError("an optimized program without the program that it goes on in");
+    memory.fallback = program->fallback;
     uint64_t next = program->function(state.data(), &memory);
     // Before anything else, as this is what a run that failed leaves to be taken back.
     if (persistent->stepActive())
@@ -2247,6 +2502,10 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
       auto *program = static_cast<Program *>(lean_get_external_data(current->program));
       memory.pendingSite = false;
       memory.registers = current->direct ? registers.data() : nullptr;
+      if (program->resumes && program->fallback == nullptr)
+        return ioError("an optimized program without the program that it goes on in");
+      memory.fallback = program->fallback;
+      memory.resume = 0;
       next = program->function(state.data(), &memory);
       if (memory.error != nullptr) { error = memory.error; break; }
       if (current->direct)

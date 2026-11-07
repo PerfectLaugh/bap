@@ -481,6 +481,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testMemoryHooksOptimized,
     Bap.Tests.Emu.testQuietPages,
     Bap.Tests.Emu.testHooksReadSometimes,
+    Bap.Tests.Emu.testOptimizedInPieces,
     Bap.Tests.Emu.testHooksInRanges,
     Bap.Tests.Emu.testOwnEntries,
     Bap.Tests.Emu.testHooksOnceAfterRollback,

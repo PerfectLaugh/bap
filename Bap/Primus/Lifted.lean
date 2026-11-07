@@ -87,6 +87,8 @@ private structure Lowering where
   /-- Of a lowering that was compiled, what `stateAtSite` says the state at its code sites from, made the first time that a hook of a
   site of it reads it and kept for the next (`withLiveIndex`). -/
   liveIndex : Option (Thunk LiveIndex) := none
+  /-- Of a lowering that was compiled, whether it jumps back to a label before the jump, as a loop does (`withLiveIndex`). -/
+  jumpsBack : Option (Thunk Bool) := none
 
 /-- The operations, in order. -/
 private def Lowering.ops (lowering : Lowering) : List Jit.Op := lowering.reversed.reverse
@@ -150,6 +152,8 @@ private structure CachedBlock where
   /-- Which of them a run starts at, as one more than its label, and what that needs. -/
   entered : Nat := 0
   enteredNeeds : List Bap.Var := []
+  /-- For a range: whether a way in it leads back to its start, as a loop that it starts at does. -/
+  loopsToStart : Bool := false
 
 /-- The name of the variable of the exclusive monitor of the targets that have one. -/
 def monitorName : String := "EXCLUSIVE_MONITOR"
@@ -1474,9 +1478,28 @@ private def liveIndexOf (lowering : Lowering) : LiveIndex := Id.run do
       sites := sites.insert at_ (wordsOf words, kept)
   pure { sites, vars := places, placeOf }
 
-/-- A lowering that was compiled, with what `stateAtSite` says the state at its sites from, made when it is first read. -/
+/-- Whether the operations jump back to a label before the jump. -/
+private def opsJumpBack (ops : List Jit.Op) : Bool := Id.run do
+  let mut seen : Std.HashSet Nat := {}
+  for op in ops do
+    match op with
+    | .label id => seen := seen.insert id
+    | .goto id => if seen.contains id then return true
+    | .branch _ yes no => if seen.contains yes || seen.contains no then return true
+    | _ => pure ()
+  pure false
+
+/-- A lowering that was compiled, with what `stateAtSite` says the state at its sites from, made when it is first read, and whether it
+jumps back. -/
 private def withLiveIndex (lowering : Lowering) : Lowering :=
-  { lowering with liveIndex := some (Thunk.mk fun _ => liveIndexOf lowering) }
+  { lowering with liveIndex := some (Thunk.mk fun _ => liveIndexOf lowering)
+                  jumpsBack := some (Thunk.mk fun _ => opsJumpBack lowering.ops) }
+
+/-- Whether a lowering that was compiled is of a loop. -/
+private def loopsOf (lowering : Lowering) : Bool :=
+  match lowering.jumpsBack with
+  | some jumps => jumps.get
+  | none => false
 
 private def compilePlan (engine : Engine) (block : Block) : IO Plan := do
   if !(← makeRoom engine) then pure (.interpreted block.program)
@@ -1524,7 +1547,7 @@ private def restoreBlockVersion (engine : Engine) (address : Nat) (code : ByteAr
 private def optimizeFrom : Nat := 4096
 
 /-- How many runs of what is being optimized go by before it comes back to see whether that is done. -/
-private def optimizeCheck : Nat := 65536
+private def optimizeCheck : Nat := 4096
 
 /-- The number of a variable for the chain. -/
 private def variableId (engine : Engine) (var : Bap.Var) : IO Nat := do
@@ -1568,13 +1591,53 @@ same bytes, and are lowered differently, with their slots, their entries and the
 private def optimizedOf (entry : CachedBlock) (lowering : Lowering) : List (Nat × Nat) × Nat × List Nat × Nat :=
   (entry.coverage, lowering.nextSlot, entry.entryLabels, lowering.layout.length)
 
+/-- What is at `address` compiled with optimization on another thread, kept as being optimized, for `optimizedVersion` to put in its
+place once that is done. Without entry labels it is the copy that doesn't check its budget alone, which goes on in what it was
+compiled from where it would, given to it then (`Jit.setFallback`). -/
+private def startOptimizing (engine : Engine) (address : Nat) (code : ByteArray) (of : List (Nat × Nat) × Nat × List Nat × Nat)
+    (lowering : Lowering) (entryLabels : List Nat) : IO Unit := do
+  let kept := keptSlots lowering
+  -- Its variables by their numbers in the chain, whose registers it uses for them there (obligation 17 of `Bap.Jit`).
+  let mut variables : Array UInt64 := #[]
+  for (var, slot) in lowering.layout do
+    variables := variables ++ #[UInt64.ofNat slot, UInt64.ofNat (← variableId engine var)]
+  -- The sites whose hooks read the state there, which leave their slots where it is read from.
+  let hooked ← engine.codeHooked.get
+  let flushSites ← ((lowering.checkpoints.map (·.1)).eraseDups.filterM hooked).map (·.toArray.map UInt64.ofNat)
+  -- On a thread of its own, rather than one of the pool, which what waits for it, as the end of the process does, may hold.
+  let task ← IO.asTask (prio := .dedicated) do
+    let started ← IO.monoMsNow
+    let budget := (lowering.budget.map UInt64.ofNat).getD (UInt64.ofNat (2 ^ 64 - 1))
+    let program ← if entryLabels.isEmpty then Jit.compileOptimized lowering.ops kept budget variables flushSites true
+      else Jit.compileEntries lowering.ops entryLabels lowering.nextSlot true (kept.push (UInt64.ofNat lowering.nextSlot)) variables flushSites
+    pure (program, (← IO.monoMsNow) - started)
+  -- Of those that were, only those that are still compiling are kept.
+  withBackgroundCompiles do
+    let running ← (← backgroundCompiles.get).filterM fun task => do pure !(← IO.hasFinished task)
+    backgroundCompiles.set (running.push task)
+  engine.optimizing.modify (·.insert address (code, of, task))
+  Jit.chainOptimizing engine.chain (UInt64.ofNat address) (UInt64.ofNat optimizeCheck)
+
+/-- Whether an address is inside a range, other than at its start, that loops back to its start and is being optimized. -/
+private def insideOptimizingLoop (engine : Engine) (address : Nat) : IO Bool := do
+  let ranges ← engine.ranges.get
+  let optimizing ← engine.optimizing.get
+  pure ((CodeIndex.candidates (← engine.rangeIndex.get) address address).any fun start =>
+    start != address && optimizing.contains start &&
+      match ranges.get? start with
+      | some range => range.loopsToStart && range.coverage.any fun (lo, hi) => lo ≤ address && address ≤ hi
+      | none => false)
+
 /-- What is native and has run that many times, compiled again with optimization, if this is such a thing: on another thread, while the
 run goes on with what there is, and in its place once that is done, as HotSpot compiles. -/
 private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Option CachedBlock) := do
-  if entry.optimized || (← entry.executions.get) < optimizeFrom then return none
+  if entry.optimized then return none
   match entry.plan with
   | .interpreted _ => return none
-  | .native lowering _ fallback =>
+  | .native lowering unoptimized fallback =>
+    -- A loop is compiled again as soon as it is compiled: it is where a run spends its time, and the sooner that is optimized, the
+    -- less of it runs as it is.
+    if !(loopsOf lowering) && (← entry.executions.get) < optimizeFrom then return none
     match (← engine.optimizing.get)[entry.address]? with
     | some (code, of, task) =>
       -- What was compiled of other bytes than these, or for another lowering of them, is for nothing.
@@ -1590,31 +1653,12 @@ private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Optio
         engine.statistics.modify fun stats =>
           { stats with nativeCompilations := stats.nativeCompilations + 1, compileMs := stats.compileMs + elapsed
                        optimized := stats.optimized + 1 }
+        if entry.entryLabels.isEmpty then Jit.setFallback program unoptimized
         return some { entry with plan := .native lowering program fallback, optimized := true }
       -- What can't be optimized runs as it was, and isn't tried again.
       | .error _ => return some { entry with optimized := true }
     | none =>
-      let kept := keptSlots lowering
-      -- Its variables by their numbers in the chain, whose registers it uses for them there (obligation 17 of `Bap.Jit`).
-      let mut variables : Array UInt64 := #[]
-      for (var, slot) in lowering.layout do
-        variables := variables ++ #[UInt64.ofNat slot, UInt64.ofNat (← variableId engine var)]
-      let entryLabels := entry.entryLabels
-      -- The sites whose hooks read the state there, which leave their slots where it is read from.
-      let hooked ← engine.codeHooked.get
-      let flushSites ← ((lowering.checkpoints.map (·.1)).eraseDups.filterM hooked).map (·.toArray.map UInt64.ofNat)
-      let task ← IO.asTask do
-        let started ← IO.monoMsNow
-        let budget := (lowering.budget.map UInt64.ofNat).getD (UInt64.ofNat (2 ^ 64 - 1))
-        let program ← if entryLabels.isEmpty then Jit.compileOptimized lowering.ops kept budget variables flushSites
-          else Jit.compileEntries lowering.ops entryLabels lowering.nextSlot true (kept.push (UInt64.ofNat lowering.nextSlot)) variables flushSites
-        pure (program, (← IO.monoMsNow) - started)
-      -- Of those that were, only those that are still compiling are kept.
-      withBackgroundCompiles do
-        let running ← (← backgroundCompiles.get).filterM fun task => do pure !(← IO.hasFinished task)
-        backgroundCompiles.set (running.push task)
-      engine.optimizing.modify (·.insert entry.address (entry.code, optimizedOf entry lowering, task))
-      Jit.chainOptimizing engine.chain (UInt64.ofNat entry.address) (UInt64.ofNat optimizeCheck)
+      startOptimizing engine entry.address entry.code (optimizedOf entry lowering) lowering entry.entryLabels
       return none
 
 private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : ByteArray)
@@ -1725,8 +1769,9 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
       return entry
     | none => do
       let first ← prepare engine lift address code false
-      -- Nothing to compile it with is a reason not to find and lower its graph either, each time it runs.
-      if first.settled || (← first.executions.get) < engine.hotThreshold || cooldown != 0 ||
+      -- Nothing to compile it with is a reason not to find and lower its graph either, each time it runs. Nor is being inside a
+      -- loop that is being optimized, which a run that its budget ended in the middle of goes back to the start of in a few blocks.
+      if first.settled || (← first.executions.get) < engine.hotThreshold || cooldown != 0 || (← insideOptimizingLoop engine address) ||
           !(← makeRoom engine) then return first
       else
         let settle (entry : CachedBlock) : IO CachedBlock := do
@@ -1785,6 +1830,11 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
                   some (block.address, label, writtenAt definite block.address ++ leadingMoves seed.program)
                 else none
               let labels := points.map (·.2.1)
+              let held := withLiveIndex lowering
+              let coverage := blocks.map fun block => (block.address, block.next - 1)
+              -- A loop is optimized from the start, on another thread while this is compiled to run until that is done.
+              if loopsOf held && labels.isEmpty then
+                startOptimizing engine address code (coverage, held.nextSlot, labels, held.layout.length) held labels
               let program ← if labels.isEmpty then Jit.compile lowering.ops
                 else Jit.compileEntries lowering.ops labels lowering.nextSlot false #[] #[]
               let elapsed := (← IO.monoMsNow) - started
@@ -1794,16 +1844,17 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
                   nativeCompilations := stats.nativeCompilations + 1
                   compileMs := stats.compileMs + elapsed
                   graphBlocks := stats.graphBlocks + blocks.length }
-              let plan := Plan.native (withLiveIndex lowering) program firstProgram
+              let plan := Plan.native held program firstProgram
               let last := blocks.foldl (init := seed.address) fun current block => max current (block.next - 1)
               let entry := { first with
                 next := lowering.next
                 last
                 plan
-                coverage := blocks.map fun block => (block.address, block.next - 1)
+                coverage
                 sources
                 entryLabels := labels
                 entryPoints := points
+                loopsToStart := edges.any (·.2 == seed.address)
               }
               engine.entryRanges.modify fun ranges => points.foldl (init := ranges) fun ranges point => ranges.insert point.1 address
               let ranges ← engine.ranges.get
@@ -2370,6 +2421,9 @@ private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (
       -- What isn't optimized yet goes back to the dispatcher by when it has run enough to be, so that a loop that never leaves its range
       -- is compiled again with optimization, as it is then entered again.
       let executions ← entry.executions.get
+      -- A loop is optimized from its first run (`optimizedVersion`).
+      if !entry.optimized && loopsOf lowering && !(← engine.optimizing.get).contains entry.address then
+        let _ ← optimizedVersion engine entry
       -- And what is being optimized comes back now and then, to be put in its place once it is.
       let optimizing := (← engine.optimizing.get).contains entry.address
       let budget := if entry.optimized then budget
