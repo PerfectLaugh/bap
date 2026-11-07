@@ -1442,52 +1442,57 @@ def traceSummary (emu : Emu) (trace : String := "") : IO (Option TraceSummary) :
 accesses, and what it counts and keeps of each, which `traceLoad` makes the same again, so that a machine of a checkpoint has the trace
 that the one it was of had. -/
 def traceSave (emu : Emu) : IO ByteArray := do
-  let word (value : Nat) : ByteArray := ByteArray.mk ((List.range 8).map fun index => UInt8.ofNat (value / 256 ^ index % 256)).toArray
-  let option (value : Option Nat) : ByteArray := match value with
-    | some value => ByteArray.mk #[1] ++ word value
-    | none => ByteArray.mk #[0]
-  let ringBytes (ring : TraceRing) : ByteArray := Id.run do
+  -- Each part is pushed onto the one array: an array made of each word and appended copied all that came before it, and a division
+  -- and a power for each byte, made a checkpoint of a long trace take longer than the trace.
+  let word (out : ByteArray) (value : Nat) : ByteArray :=
+    let value := value.toUInt64
+    out.push value.toUInt8 |>.push (value >>> 8).toUInt8 |>.push (value >>> 16).toUInt8 |>.push (value >>> 24).toUInt8
+      |>.push (value >>> 32).toUInt8 |>.push (value >>> 40).toUInt8 |>.push (value >>> 48).toUInt8 |>.push (value >>> 56).toUInt8
+  let option (out : ByteArray) (value : Option Nat) : ByteArray := match value with
+    | some value => word (out.push 1) value
+    | none => out.push 0
+  let ringBytes (out : ByteArray) (ring : TraceRing) : ByteArray := Id.run do
     let pcs := ring.pcs
-    let mut out := word pcs.length
-    for pc in pcs do out := out ++ word pc
-    out := out ++ word ring.retained ++ word ring.count ++ word ring.dropped ++ word ring.capacity
+    let mut out := word out pcs.length
+    for pc in pcs do out := word out pc
+    out := word (word (word (word out ring.retained) ring.count) ring.dropped) ring.capacity
     let code := ring.code.reverse
-    out := out ++ word code.length
-    for (at_, pc, bytes) in code do out := out ++ word at_ ++ word pc ++ word bytes.size ++ bytes
+    out := word out code.length
+    for (at_, pc, bytes) in code do out := word (word (word out at_) pc) bytes.size ++ bytes
     pure out
-  let accessBytes (access : TraceAccess) : ByteArray :=
-    word access.insn ++ word access.pc ++ word access.address ++ word access.size
-      ++ ByteArray.mk #[if access.write then 1 else 0] ++ option access.value ++ word access.thread
-  let stateBytes (state : Option TraceState) : ByteArray := Id.run do
+  let accessBytes (out : ByteArray) (access : TraceAccess) : ByteArray :=
+    let out := word (word (word (word out access.insn) access.pc) access.address) access.size
+    word (option (out.push (if access.write then 1 else 0)) access.value) access.thread
+  let stateBytes (out : ByteArray) (state : Option TraceState) : ByteArray := Id.run do
     match state with
-    | none => pure (ByteArray.mk #[0])
+    | none => pure (out.push 0)
     | some state =>
       let options := state.options
-      let mut out := ByteArray.mk #[1] ++ word options.pcCapacity ++ word options.accessCapacity
-      out := out ++ (match options.watch with | some (low, high) => ByteArray.mk #[1] ++ word low ++ word high | none => ByteArray.mk #[0])
-      out := out ++ (match options.threads with
-        | some threads => threads.foldl (· ++ word ·) (ByteArray.mk #[1] ++ word threads.length)
-        | none => ByteArray.mk #[0])
-      out := out ++ ByteArray.mk #[if options.perThread then 1 else 0] ++ word state.count ++ ringBytes state.ring
+      let mut out := word (word (out.push 1) options.pcCapacity) options.accessCapacity
+      out := match options.watch with | some (low, high) => word (word (out.push 1) low) high | none => out.push 0
+      out := match options.threads with
+        | some threads => threads.foldl word (word (out.push 1) threads.length)
+        | none => out.push 0
+      out := ringBytes (word (out.push (if options.perThread then 1 else 0)) state.count) state.ring
       let rings := state.threadRings
-      out := out ++ word rings.length
-      for (thread, ring) in rings do out := out ++ word thread ++ ringBytes ring
+      out := word out rings.length
+      for (thread, ring) in rings do out := ringBytes (word out thread) ring
       let accesses := state.accesses.reverse
-      out := out ++ word accesses.length
-      for access in accesses do out := out ++ accessBytes access
-      out := out ++ word state.accessCount ++ word state.accessRetained
+      out := word out accesses.length
+      for access in accesses do out := accessBytes out access
+      out := word (word out state.accessCount) state.accessRetained
       -- Each range watched on its own, with its ring, so that a trace loaded again keeps them apart.
-      out := out ++ word state.watched.size
+      out := word out state.watched.size
       for ring in state.watched do
-        out := out ++ word ring.range.1 ++ word ring.range.2 ++ word ring.count ++ word ring.retained
+        out := word (word (word (word out ring.range.1) ring.range.2) ring.count) ring.retained
         let accesses := ring.accesses.reverse
-        out := out ++ word accesses.length
-        for access in accesses do out := out ++ accessBytes access
-      pure (out ++ word state.accessesHeard)
+        out := word out accesses.length
+        for access in accesses do out := accessBytes out access
+      pure (word out state.accessesHeard)
   let set ← emu.trace.get
-  let mut out := stateBytes set.default ++ word set.nextToken ++ word set.named.length
+  let mut out := word (word (stateBytes .empty set.default) set.nextToken) set.named.length
   for (name, token, state) in set.named do
-    out := out ++ word name.utf8ByteSize ++ name.toUTF8 ++ word token ++ stateBytes (some state)
+    out := stateBytes (word (word out name.utf8ByteSize ++ name.toUTF8) token) (some state)
   pure out
 
 /-- The trace that `traceSave` gave the bytes of. -/
