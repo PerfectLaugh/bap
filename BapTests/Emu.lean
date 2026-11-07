@@ -4121,10 +4121,13 @@ def testPatch : IO Unit := do
   -- What a check of a program's own code reads of a patch: what it reads is counted by where, and what was there before is kept; one
   -- that is concealed reads what was there before, and what runs there runs the replacement.
   let word (bytes : ByteArray) : Nat := bytes.toList.foldr (fun byte word => word * 256 + byte.toNat) 0
-  let check (reads : Bap.Emu.Patch.Reads) : IO (Nat × Nat × List Bap.Emu.PatchRead × List Bap.Emu.PatchRecord) := do
+  let check (reads : Bap.Emu.Patch.Reads) (again : Bool := false) :
+      IO (Nat × Nat × List Bap.Emu.PatchRead × List Bap.Emu.PatchRecord) := do
     let checking ← Bap.Emu.riscv64 ((← add 1) ++ (← LLVM.assemble "riscv64" "lw a2, 0(zero)\nj -8")) 0 0
     for name in ["X10", "X12"] do Bap.Emu.setReg checking (register name) (.bits (BitVec.ofNat 64 0))
     let _ ← Bap.Emu.patch checking { address := 0, expected := ← add 1, replacement := ← add 5, reads }
+    if again then
+      let _ ← Bap.Emu.patch checking { address := 0, expected := ← add 5, replacement := ← add 7, reads }
     let _ ← Bap.Emu.run checking 9
     let read (name : String) : IO Nat := do
       match ← Bap.Emu.reg checking (register name) with
@@ -4139,6 +4142,10 @@ def testPatch : IO Unit := do
     (records.map fun record => (record.address, record.original.toList, record.replacement.toList))
   let (_, _, reads, _) ← check .ignore
   assertEqual "Loads that are ignored aren't counted" [] reads
+  let (ran, _, reads, records) ← check .record (again := true)
+  assertEqual "A patch over a patch runs" 21 ran
+  assertEqual "and each load of it is counted once" [{ pc := 4, patch := 0, count := 3 : Bap.Emu.PatchRead }] reads
+  assertEqual "Only the last patch at an address counts its loads" [false, true] (records.map (·.readHook.isSome))
 
 private def regionAudit : IO Unit := do
   let rw : Primus.Protection := ⟨true, true, false⟩

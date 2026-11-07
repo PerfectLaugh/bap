@@ -223,12 +223,14 @@ structure RollbackStats where
   bytesRestored : Nat := 0
   deriving Repr, Inhabited
 
-/-- A patch that was applied: where, in which address space, what was there before and what was put. -/
+/-- A patch that was applied: where, in which address space, what was there before and what was put, and the hook that counts loads
+of its bytes while it is the last patch there. -/
 structure PatchRecord where
   address : Nat
   space : Nat
   original : ByteArray
   replacement : ByteArray
+  readHook : Option HookId := none
   deriving Inhabited
 
 /-- How many loads the instruction at `pc` made of the bytes of the patch at `patch`, as a check of a program's own code makes. -/
@@ -1731,11 +1733,17 @@ inductive Patch.Result where
 /-- The address space of the thread that runs. -/
 private def currentSpace (emu : Emu) : IO Nat := do spaceOf emu (← thread emu)
 
-/-- Counts loads of a patch's bytes, by the instruction that made each, in the address space where the patch is. -/
-private def watchPatch (emu : Emu) (address : Nat) (patch : Patch) (space : Nat) : IO Unit := do
-  if patch.reads == .ignore then return
+/-- Counts loads of a patch's bytes, by the instruction that made each, in the address space where the patch is, in place of what
+counted them for a patch before it at the same address there, so that a load is counted once. -/
+private def watchPatch (emu : Emu) (address : Nat) (patch : Patch) (space : Nat) : IO (Option HookId) := do
+  let records ← emu.patched.get
+  if let some previous := records.find? fun record => record.address == address && record.space == space then
+    if let some id := previous.readHook then
+      removeHook emu id
+      emu.patched.set (records.map fun record => if record.readHook == some id then { record with readHook := none } else record)
+  if patch.reads == .ignore then return none
   let last := address + patch.expected.size - 1
-  let _ ← onRead emu (address, last) fun current _ _ => do
+  some <$> onRead emu (address, last) fun current _ _ => do
     if (← currentSpace current) != space then return
     let pc ← current.pc.get
     current.patchReads.modify fun reads => reads.insert (pc, address) (reads.getD (pc, address) 0 + 1)
@@ -1751,8 +1759,8 @@ private def applyPatch (emu : Emu) (address : Nat) (patch : Patch) : IO Patch.Re
   if found != patch.expected then return .mismatch found
   poke emu address patch.replacement
   let space ← currentSpace emu
-  emu.patched.modify ({ address, space, original := found, replacement := patch.replacement } :: ·)
-  watchPatch emu address patch space
+  let readHook ← watchPatch emu address patch space
+  emu.patched.modify ({ address, space, original := found, replacement := patch.replacement, readHook } :: ·)
   if !patch.readback then return .applied
   let after ← peek emu address size
   pure (if after == patch.replacement then .applied else .unverified after)
