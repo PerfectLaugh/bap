@@ -292,6 +292,27 @@ def run : IO Unit := do
   let earlyFall ← Primus.Lifted.runBlock early earlyFetch earlyLift (earlyState 0) 0x1000
   assertEqual "native run past the branch has the target" 0x3000 earlyFall.pc
   assertBits "native run past the branch writes" (BitVec.ofNat 64 40) (Bil.lookup earlyFall.state.env x)
+  -- A loop that stores to as many addresses as it goes round, run natively with a memory of cells: each store stays.
+  let cellEngine ← Primus.Lifted.Engine.create
+  let mem : Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let i := reg "i"
+  let storing : Primus.Lifted.Block := {
+    address := 0x1000
+    next := 0x1004
+    program := [.move i (int 0), .move mem (.store (.var mem) (int 0x5000) (.cast .low 8 (int 7)) .little 1),
+      .while (.bin .lt (.var i) (int 100))
+        [.move mem (.store (.var mem) (.bin .add (int 0x6000) (.var i)) (.cast .low 8 (.var i)) .little 1),
+         .move i (.bin .add (.var i) (int 1))],
+      .jmp (int 0x2000)]
+  }
+  let (storingFetch, storingLift) := fixed storing
+  let stored ← Primus.Lifted.runBlock cellEngine storingFetch storingLift { env := [(mem, .memory (Memory.empty 64))] } 0x1000
+  assertEqual "the loop of stores ran natively" 1 (← Primus.Lifted.stats cellEngine).nativeRuns
+  match Bil.lookup stored.state.env mem with
+  | .ok (@Value.memory width memory) =>
+    let bytes := (List.range 100).map fun index => (Memory.readByte memory (BitVec.ofNat width (0x6000 + index))).toNat
+    assertEqual "each store of a loop to as many addresses as it goes round stays" (List.range 100) bytes
+  | _ => throw <| IO.userError "no memory after the loop"
   let engine ← Primus.Lifted.Engine.create
   let block : Primus.Lifted.Block := {
     address := 0x1000

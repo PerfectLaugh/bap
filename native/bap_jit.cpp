@@ -193,6 +193,9 @@ struct BapCells {
   // for a run whose slots aren't one array, as of a chain.
   uint64_t *slots = nullptr;
   size_t slotCount = 0;
+  // Where `items` are, of a run that keeps them, for a store to an address that they haven't yet to add one to, rather than being
+  // dropped once there are as many as were set aside, as a loop that stores to as many addresses as it goes round makes.
+  std::vector<BapCell> *growable = nullptr;
   // Which run these are of, for what was last said of its slots.
   uint64_t serial = nextCellsSerial();
   // Whether the slots are always as the run has them, as those of code that isn't optimized are, and else the pc of the site that
@@ -365,7 +368,12 @@ static void storeByte(BapCells *cells, uint64_t address, uint8_t value) {
       return;
     }
   }
-  if (cells->size < cells->capacity)
+  if (cells->growable != nullptr) {
+    cells->growable->push_back(BapCell{address, value});
+    cells->items = cells->growable->data();
+    cells->size = cells->growable->size();
+    cells->capacity = cells->growable->capacity();
+  } else if (cells->size < cells->capacity)
     cells->items[cells->size++] = BapCell{address, value};
 }
 
@@ -1426,6 +1434,7 @@ extern "C" lean_obj_res bap_jit_run_memory_code(lean_obj_arg programObject,
     lean_object *codeObserver = lean_is_scalar(codeObserverObject)
         ? nullptr : lean_ctor_get(codeObserverObject, 0);
     BapCells memory{cells.data(), addressCount, cells.capacity(), observer, nullptr, nullptr, nullptr, codeObserver};
+    memory.growable = &cells;
     memory.slots = state.data();
     memory.slotCount = stateSize;
     memory.slotsLive = !program->optimized;
