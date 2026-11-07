@@ -2656,6 +2656,47 @@ def testOptimizedAfterWrite : IO Unit := do
     value emu "X10"
   assertEqual "Code written while it was being optimized runs as it is" (← run false) (← run true)
 
+/-- Hooks of memory on a loop that runs optimized, where nothing observed it before: each access that they watch fires them, with the pc
+of the instruction that made it and the registers that it left, as single steps have it, and the loop comes to the same. -/
+def testMemoryHooksOptimized : IO Unit := do
+  let code ← LLVM.assemble "riscv64" "1: ld t0, 0(a2)\nadd a0, a0, t0\nsd a0, 0(a2)\naddi a2, a2, 8\naddi a1, a1, -1\nbnez a1, 1b\n2: j 2b"
+  let register (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
+  let value (emu : Bap.Emu.Emu) (name : String) : IO Nat := do
+    match ← Bap.Emu.reg emu (register name) with
+    | .bits bits => pure bits.toNat
+    | _ => pure 0
+  let buffer := 0x100000
+  let count := 20000
+  let run (ranges : Bool) : IO (List (Nat × Nat × Nat) × Nat × ByteArray × Nat) := do
+    let adjust (config : Bap.Emu.Config) : Bap.Emu.Config :=
+      if ranges then { config with hotThreshold := 1, rangeLimit := 16 } else { config with rangeLimit := 1 }
+    let emu ← Bap.Emu.riscv64 code 0 0 (adjust := adjust)
+    Bap.Emu.mapZeros emu buffer (8 * (count + 2)) ⟨true, true, false⟩
+    Bap.Emu.write emu buffer (ByteArray.mk ((List.range (8 * count)).map fun at_ => if at_ % 8 == 0 then 1 else 0).toArray)
+    Bap.Emu.setReg emu (register "X10") (.bits (BitVec.ofNat 64 0))
+    Bap.Emu.setReg emu (register "X11") (.bits (BitVec.ofNat 64 count))
+    Bap.Emu.setReg emu (register "X12") (.bits (BitVec.ofNat 64 buffer))
+    -- Half of it with nothing watching, long enough for the loop to be optimized and to run so.
+    let _ ← Bap.Emu.run emu (6 * (count / 2) - 3000)
+    Primus.Lifted.finishBackgroundCompiles
+    let _ ← Bap.Emu.run emu 3000
+    let log ← IO.mkRef ([] : List (Nat × Nat × Nat))
+    let note (kind : Nat) (emu : Bap.Emu.Emu) : IO Unit := do log.modify ((kind, ← Bap.Emu.pc emu, ← value emu "X10") :: ·)
+    let _ ← Bap.Emu.onRead emu (buffer + 8 * 15000, buffer + 8 * 15000 + 7) fun emu _ _ => note 0 emu
+    let _ ← Bap.Emu.onWrite emu (buffer + 8 * 17001, buffer + 8 * 17001 + 7) fun emu _ _ _ => note 1 emu
+    let _ ← Bap.Emu.run emu (6 * (count / 2) + 10)
+    pure ((← log.get).reverse, ← value emu "X10", ← Bap.Emu.read emu buffer (8 * (count + 1)),
+          (← Primus.Lifted.stats emu.engine).optimized)
+  let (expectedLog, expectedSum, expectedMemory, _) ← run false
+  let (log, sum, memory, optimized) ← run true
+  assertEqual "Single steps hear the read and the write, with what was added up before them"
+    [(0, 0, 15000), (1, 8, 17002)] expectedLog
+  assertEqual "and add all of it up" count expectedSum
+  assertTrue s!"A loop with no hooks is optimized: {optimized}" (optimized ≥ 1)
+  assertEqual "Hooks of memory on it fire where single steps fire them, with what they read" expectedLog log
+  assertEqual "and the loop comes to the same" expectedSum sum
+  assertTrue "and leaves memory the same" (expectedMemory.toList == memory.toList)
+
 /-- A range of ARM code at an address, run there as Thumb: what runs is the Thumb of those bytes, as a single step has it, rather than
 the range. -/
 def testThumbAfterArmRange : IO Unit := do

@@ -14,6 +14,7 @@
 #include <llvm/Transforms/Scalar/SimplifyCFG.h>
 #include <llvm/Transforms/Scalar/Sink.h>
 #include <llvm/IR/Intrinsics.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
@@ -266,8 +267,8 @@ extern "C" void bap_jit_memory_notify(BapCells *cells, uint8_t write,
     }
   }
   // The site that waited is the observer's first, now that Lean code is to run. Had it stopped the run, the run fails, to be run
-  // again a step at a time.
-  if (cells->pendingSite) {
+  // again a step at a time. What doesn't check its budget leaves one where nothing observes code too, which is then nothing's.
+  if (cells->pendingSite && cells->codeObserver != nullptr) {
     cells->pendingSite = false;
     cells->leanRan = true;
     if (callCodeObserver(cells, cells->pendingPc) != 0) {
@@ -597,6 +598,18 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
     auto pointerTo = [&](size_t slot) {
       return builder.CreateConstGEP1_64(word, state, slot);
     };
+    // Of each code site, its branch on whether it has anything to do and its pc; and of each access to memory, the block that it
+    // starts, and the branch on whether the memory observer is called for it: the copy that doesn't check its budget has them
+    // otherwise, below.
+    std::vector<std::pair<llvm::Instruction *, uint64_t>> siteBranches;
+    std::vector<std::pair<llvm::Instruction *, llvm::BasicBlock *>> observerBranches;
+    // An access starts a block, which the copy can go to in this, as the operation reads all it reads from the slots there.
+    auto startAccess = [&]() {
+      llvm::BasicBlock *start = llvm::BasicBlock::Create(*context, "access", function);
+      builder.CreateBr(start);
+      builder.SetInsertPoint(start);
+      return start;
+    };
     // Whether a size is that of an instruction of the host, which is atomic at an address that is a multiple of it.
     auto hasInstruction = [](size_t size) { return size == 1 || size == 2 || size == 4 || size == 8; };
     // The page of an access that an instruction can do, if the page can be had: ends with the insertion point where the access
@@ -631,7 +644,7 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
       return builder.CreateGEP(byte, page, builder.CreateAnd(base, llvm::ConstantInt::get(word, PagedMemory::pageSize - 1)));
     };
     // The observer of an access, unless it lies within the last range that the filter let one of its kind through in.
-    auto notifyAccess = [&](bool write, llvm::Value *base, size_t size, llvm::Value *value) {
+    auto notifyAccess = [&](llvm::BasicBlock *start, bool write, llvm::Value *base, size_t size, llvm::Value *value) {
       auto field = [&](size_t offset) {
         return builder.CreateLoad(word, builder.CreateGEP(byte, memory, llvm::ConstantInt::get(word, offset + (write ? 8 : 0))));
       };
@@ -643,7 +656,7 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
           builder.CreateICmpUGE(end, base));
       llvm::BasicBlock *call = llvm::BasicBlock::Create(*context, "notify_access", function);
       llvm::BasicBlock *after = llvm::BasicBlock::Create(*context, "notify_done", function);
-      builder.CreateCondBr(quiet, after, call);
+      observerBranches.push_back({builder.CreateCondBr(quiet, after, call), start});
       builder.SetInsertPoint(call);
       builder.CreateCall(notifyMemory,
           {memory, llvm::ConstantInt::get(byte, write ? 1 : 0), base, llvm::ConstantInt::get(word, size), value});
@@ -937,8 +950,9 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
             !getSlot(lean_ctor_get(op, 2), size) || size == 0 || size > 8)
           return ioError("invalid JIT memory load");
         bool bigEndian = lean_ctor_get_uint8(op, 3 * sizeof(void *)) != 0;
+        llvm::BasicBlock *start = startAccess();
         llvm::Value *base = load(address);
-        notifyAccess(false, base, size, zero);
+        notifyAccess(start, false, base, size, zero);
         llvm::Value *endianness = llvm::ConstantInt::get(byte, bigEndian ? 1 : 0);
         llvm::Value *result;
         if (hasInstruction(size)) {
@@ -974,9 +988,10 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
             !getSlot(lean_ctor_get(op, 2), size) || size == 0 || size > 8)
           return ioError("invalid JIT memory store");
         bool bigEndian = lean_ctor_get_uint8(op, 3 * sizeof(void *)) != 0;
+        llvm::BasicBlock *start = startAccess();
         llvm::Value *base = load(address);
         llvm::Value *stored = load(value);
-        notifyAccess(true, base, size, stored);
+        notifyAccess(start, true, base, size, stored);
         llvm::Value *endianness = llvm::ConstantInt::get(byte, bigEndian ? 1 : 0);
         llvm::Value *sizeValue = llvm::ConstantInt::get(word, size);
         if (hasInstruction(size)) {
@@ -1022,7 +1037,7 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
         llvm::BasicBlock *pendBlock = llvm::BasicBlock::Create(*context, "code_pend", function);
         llvm::BasicBlock *decideBlock = llvm::BasicBlock::Create(*context, "code_decide", function);
         llvm::BasicBlock *callBlock = llvm::BasicBlock::Create(*context, "code_call", function);
-        builder.CreateCondBr(builder.CreateAnd(fine, builder.CreateNot(observed)), continueBlock, decideBlock);
+        siteBranches.push_back({builder.CreateCondBr(builder.CreateAnd(fine, builder.CreateNot(observed)), continueBlock, decideBlock), pc});
         builder.SetInsertPoint(decideBlock);
         builder.CreateCondBr(builder.CreateAnd(fine, waits), pendBlock, callBlock);
         builder.SetInsertPoint(pendBlock);
@@ -1082,6 +1097,11 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
     // checked against all the blocks there are at the start and at each of those, and while it is enough the copy goes on, and
     // otherwise this, which checks at each block. It does what this does, as each check here would have gone on, and what is only
     // there for a block to leave with, such as the flags that the next instruction sets again, is then for nothing and goes.
+    // Nor does it run Lean code, and so it is only for where a code site would only wait as the pending one, as Lean code hasn't run
+    // and nothing observes code but the observer of a range, or where nothing does at all: a site waits there, which is two stores
+    // and no way out, which would keep what a later instruction overwrites. An access that the memory observer is to hear of goes
+    // on in this, from the start of the access, which calls it, and this goes on from there by the checks at the targets of its
+    // jumps back as before, which come back to the copy if Lean code didn't run.
     if (optimized && entries == nullptr && budgetSlot != ~uint64_t{0} && hasSlots && budgetSlot <= maxSlot) {
       auto budgetBranch = [&](llvm::Instruction *terminator) -> llvm::CondBrInst * {
         auto *branch = llvm::dyn_cast<llvm::CondBrInst>(terminator);
@@ -1140,7 +1160,21 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
             builder.SetInsertPoint(copy);
             builder.CreateBr(go);
           }
-        // The targets of the jumps back of the copy, by a search in depth from its start.
+        for (auto &[site, pc] : siteBranches) {
+          auto *branch = llvm::cast<llvm::Instruction>(map[site]);
+          llvm::BasicBlock *block = branch->getParent();
+          llvm::BasicBlock *go = branch->getSuccessor(0);
+          branch->eraseFromParent();
+          builder.SetInsertPoint(block);
+          builder.CreateStore(llvm::ConstantInt::get(byte, 1),
+                              builder.CreateConstGEP1_64(byte, memory, offsetof(BapCells, pendingSite)));
+          builder.CreateStore(llvm::ConstantInt::get(word, pc), builder.CreateConstGEP1_64(byte, memory, offsetof(BapCells, pendingPc)));
+          builder.CreateBr(go);
+        }
+        for (auto &[observed, start] : observerBranches)
+          llvm::cast<llvm::Instruction>(map[observed])->setSuccessor(1, start);
+        // The targets of the jumps back of the copy, by a search in depth from its start, which stays in the copy: an access goes on in
+        // this.
         std::unordered_map<llvm::BasicBlock *, int> visit;
         std::vector<llvm::BasicBlock *> targets;
         std::vector<std::pair<llvm::BasicBlock *, unsigned>> stack{{copies.front(), 0}};
@@ -1150,6 +1184,8 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
           llvm::Instruction *terminator = block->getTerminator();
           if (at < terminator->getNumSuccessors()) {
             llvm::BasicBlock *successor = terminator->getSuccessor(at++);
+            if (map.count(successor) != 0)
+              continue;
             int &mark = visit[successor];
             if (mark == 1)
               targets.push_back(successor);
@@ -1168,27 +1204,54 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
         std::unordered_map<llvm::BasicBlock *, llvm::BasicBlock *> originalOf;
         for (size_t at = 0; at != original.size(); ++at)
           originalOf[copies[at]] = original[at];
-        auto checked = [&](llvm::BasicBlock *fast, llvm::BasicBlock *slow, const char *name) {
+        // From the copy, only its budget: nothing in it runs Lean code, which is what could change the rest.
+        auto checked = [&](llvm::BasicBlock *fast, llvm::BasicBlock *slow, const char *name, bool fromCopy) {
           llvm::BasicBlock *check = llvm::BasicBlock::Create(*context, name, function, fast);
           builder.SetInsertPoint(check);
           llvm::Value *budget = builder.CreateLoad(word, builder.CreateConstGEP1_64(word, state, budgetSlot));
-          builder.CreateCondBr(builder.CreateICmpUGE(budget, llvm::ConstantInt::get(word, checks)), fast, slow);
+          llvm::Value *enough = builder.CreateICmpUGE(budget, llvm::ConstantInt::get(word, checks));
+          // The copy is the way that a run goes, for where LLVM puts its loops.
+          llvm::MDNode *likely = llvm::MDBuilder(*context).createLikelyBranchWeights();
+          if (fromCopy) {
+            builder.CreateCondBr(enough, fast, slow, likely);
+            return check;
+          }
+          auto field = [&](llvm::Type *type, size_t offset) {
+            return builder.CreateLoad(type, builder.CreateConstGEP1_64(byte, memory, offset));
+          };
+          llvm::Value *waits = builder.CreateAnd(
+              builder.CreateICmpNE(field(byte, offsetof(BapCells, quietSites)), llvm::ConstantInt::get(byte, 0)),
+              builder.CreateICmpEQ(field(byte, offsetof(BapCells, leanRan)), llvm::ConstantInt::get(byte, 0)));
+          llvm::Value *sitesWait = builder.CreateAnd(
+              builder.CreateIsNull(field(pointer, offsetof(BapCells, error))),
+              builder.CreateOr(builder.CreateIsNull(field(pointer, offsetof(BapCells, codeObserver))), waits));
+          builder.CreateCondBr(builder.CreateAnd(enough, sitesWait), fast, slow, likely);
           return check;
         };
         if (plain) {
           std::sort(targets.begin(), targets.end());
           targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
-          for (llvm::BasicBlock *target : targets) {
+          auto usersOf = [](llvm::BasicBlock *block) {
             std::vector<llvm::Instruction *> users;
-            for (llvm::User *user : target->users())
+            for (llvm::User *user : block->users())
               if (auto *instruction = llvm::dyn_cast<llvm::Instruction>(user))
                 users.push_back(instruction);
-            llvm::BasicBlock *check = checked(target, originalOf[target], "budget_check");
+            return users;
+          };
+          for (llvm::BasicBlock *target : targets) {
+            // This comes back to the copy there too, as an access that went on in this did.
+            llvm::BasicBlock *original = originalOf[target];
+            std::vector<llvm::Instruction *> users = usersOf(target);
+            std::vector<llvm::Instruction *> originalUsers = usersOf(original);
+            llvm::BasicBlock *check = checked(target, original, "budget_check", true);
             for (llvm::Instruction *user : users)
               user->replaceUsesOfWith(target, check);
+            llvm::BasicBlock *back = checked(target, original, "budget_back", false);
+            for (llvm::Instruction *user : originalUsers)
+              user->replaceUsesOfWith(original, back);
           }
           llvm::BasicBlock *start = original.front();
-          llvm::BasicBlock *choose = checked(llvm::cast<llvm::BasicBlock>(map[start]), start, "budget_start");
+          llvm::BasicBlock *choose = checked(llvm::cast<llvm::BasicBlock>(map[start]), start, "budget_start", false);
           choose->moveBefore(start);
         } else {
           for (llvm::BasicBlock *copy : copies)
