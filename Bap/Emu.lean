@@ -44,7 +44,7 @@ structure Config where
   /-- Whether what is at the entry is compiled as the emulator is made, with what it loops optimized on other threads then, rather
   than as it runs: what is done before the first run, such as mapping its memory, is then done while that compiles, as an ahead
   of time translator does it before a program starts. -/
-  compileAtLoad : Bool := false
+  compileAtLoad : Bool := true
   /-- How many instructions what is lifted and compiled is kept of, of which the least used go. -/
   cacheLimit : Nat := 4096
   /-- How many compiled ranges are kept, of which the least used go; `none` is `cacheLimit`. -/
@@ -3524,7 +3524,9 @@ def compileAhead (emu : Emu) (address : Nat) : IO Unit := do
 
 /-- An emulator that compiles what is at its entry as it is made, if its configuration says so. -/
 private def loaded (emu : Emu) (entry : Nat) : IO Emu := do
-  if emu.config.compileAtLoad then compileAhead emu entry
+  -- What can't be compiled yet, such as an entry with nothing there, is left to the run, which says what is wrong with it.
+  if emu.config.compileAtLoad then
+    try compileAhead emu entry catch _ => pure ()
   pure emu
 
 /-- The decoders at each base for RISC-V 64, which all share their semantics. -/

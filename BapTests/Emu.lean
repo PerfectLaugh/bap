@@ -976,7 +976,8 @@ def testRangeEntries : IO Unit := do
 /-- What changes what was compiled without changing its bytes, hooks that come to a thread where it stopped, and a profile of what ran. -/
 def testCodeControl : IO Unit := do
   let code ← LLVM.assemble "riscv64" "addi a0, a0, 1\naddi a1, a1, -1\nbnez a1, -8\nnop\nnop"
-  let emu ← Bap.Emu.riscv64 code 0 0 (adjust := fun config => { config with hotThreshold := 2, rangeLimit := 8 })
+  -- What is compiled as it runs, as its profile is of that.
+  let emu ← Bap.Emu.riscv64 code 0 0 (adjust := fun config => { config with hotThreshold := 2, rangeLimit := 8, compileAtLoad := false })
   let register (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
   let set (name : String) (value : Nat) : IO Unit := Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 64 value))
   let value (name : String) : IO Nat := do
@@ -2588,7 +2589,8 @@ def testTraceWatches : IO Unit := do
 and runs as it is now. -/
 def testMeasure : IO Unit := do
   let code ← LLVM.assemble "riscv64" "addi a0, a0, 1\nj -4"
-  let emu ← Bap.Emu.riscv64 code 0 0
+  -- Lifted as it runs, the first time, which is what it measures.
+  let emu ← Bap.Emu.riscv64 code 0 0 (adjust := fun config => { config with compileAtLoad := false })
   let a0 : Bap.Var := ⟨"X10", .imm 64, 0, false⟩
   Bap.Emu.setReg emu a0 (.bits (BitVec.ofNat 64 0))
   let measurement ← Bap.Emu.measure emu 1000
