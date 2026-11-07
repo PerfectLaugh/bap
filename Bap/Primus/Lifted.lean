@@ -55,10 +55,11 @@ structure Profile where
 
 /-- What `stateAtSite` says the state of a run at its code sites from, which is of its lowering alone: of each site, by its pc, the
 outputs that it has completed, as `Jit.liveChanges` takes them, and of each the place of its variable among the outputs of the run, and
-its width; and the variable of each output, by its place. -/
+its width; and the variable of each output, by its place, and the place of each. -/
 private structure LiveIndex where
   sites : Std.HashMap Nat (ByteArray × Array (Nat × Nat))
   vars : Array Bap.Var
+  placeOf : Std.HashMap Bap.Var Nat
 
 private structure Lowering where
   /-- The operations so far, the last one first, as most of what lowering does is to add one, and adding to the end of a list costs all
@@ -1470,7 +1471,7 @@ private def liveIndexOf (lowering : Lowering) : LiveIndex := Id.run do
           words := words.push (((flags[slot]?).map (UInt64.ofNat · + 1)).getD 0)
           kept := kept.push ((placeOf[var]?.getD 0, width))
       sites := sites.insert at_ (wordsOf words, kept)
-  pure { sites, vars := places }
+  pure { sites, vars := places, placeOf }
 
 /-- A lowering that was compiled, with what `stateAtSite` says the state at its sites from, made when it is first read. -/
 private def withLiveIndex (lowering : Lowering) : Lowering :=
@@ -1977,10 +1978,16 @@ private def stateAtSite (engine : Engine) (lowering : Lowering) (state : Bil.Sta
       let index := match lowering.liveIndex with
         | some index => index.get
         | none => liveIndexOf lowering
-      let bound := index.vars.map fun var => (Bil.lookup state.env var).toOption
-      let before := (index.vars.zip bound).toList.filterMap fun (var, value) => value.map fun _ => var
-      pure { state, sites := index.sites, vars := index.vars, bound, base := withoutBindings before state.env, ordered := false,
-             fresh := true : LiveCache }
+      -- One pass over the state, rather than a search of it for each output and another to take them out: the first binding of an
+      -- output is its value, as `Bil.lookup` takes it, and the rest is the state before the run.
+      let mut bound : Array (Option Value) := Array.replicate index.vars.size none
+      let mut base : Array (Bap.Var × Value) := #[]
+      for binding in state.env do
+        match index.placeOf[binding.1]? with
+        | some place => if bound[place]?.join.isNone then bound := bound.set! place (some binding.2) else base := base.push binding
+        | none => base := base.push binding
+      pure { state, sites := index.sites, vars := index.vars, bound, base := base.toList, ordered := false, fresh := true
+             : LiveCache }
   let some (outputs, places) := cache.sites[pc]? | engine.liveCache.set (some cache); return none
   let some changes ← Jit.liveChanges outputs (UInt64.ofNat pc) cache.fresh | engine.liveCache.set (some cache); return none
   let { state := last, sites, vars, bound, base, ordered, fresh := _ } := cache
