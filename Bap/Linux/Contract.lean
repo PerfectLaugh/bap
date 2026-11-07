@@ -20,6 +20,9 @@ structure Contract where
   /-- What it asked, of the kernel and of the host, with what was answered. -/
   services : List (String × Option Nat)
   instructions : Nat
+  /-- The status that the program ended with, where the round ended it rather than coming back to the dispatcher, which is the
+  boundary that a replacement keeps too; there is no next state then. -/
+  exit : Option Nat := none
   deriving DecidableEq, Repr
 
 /-- What hears what a round does, which is attached once to a machine: it hears only while it is asked to, and only of one thread. -/
@@ -86,6 +89,12 @@ private def byteAt (machine : Machine) (address : Nat) : IO (Option UInt8) := do
   | .ok bytes => pure bytes[0]?
   | .error _ => pure none
 
+/-- The status that the process of a thread ended with, if it has. -/
+private def exitOf (machine : Machine) (thread : ThreadId) : IO (Option Nat) := do
+  let table ← machine.emu.taskTable.get
+  let group := ((table.tasks.find? (·.tid == thread)).map (·.group)).getD thread
+  pure ((table.tasks.find? (·.tid == group)).bind (·.status))
+
 /-- What happens from here while `act` runs, for the thread that runs, which is then put back as it was. -/
 private def observe (recorder : Recorder) (profile : Cff.Profile) (act : IO Nat) : IO Contract := do
   let machine := recorder.machine
@@ -105,7 +114,8 @@ private def observe (recorder : Recorder) (profile : Cff.Profile) (act : IO Nat)
   let instructions ← try act finally
     recorder.active.set none
     Bap.Emu.removeHook emu hook
-  let next := profile.decode (← Cff.readState emu profile.state)
+  let exit ← exitOf machine thread
+  let next ← if exit.isSome then pure none else pure (some (profile.decode (← Cff.readState emu profile.state)))
   -- What is below the stack pointer when the round is over is no one's any more, as a handler's frame is.
   let width ← Bap.Emu.wordWidth emu
   let stack ← match Value.asBits (← Bap.Emu.reg emu ⟨(Bap.Emu.threadRegisters emu.config.syscallAbi).1, .imm width, 0, false⟩) with
@@ -119,10 +129,10 @@ private def observe (recorder : Recorder) (profile : Cff.Profile) (act : IO Nat)
   let before ← addresses.foldlM (init := ({} : Std.HashMap Nat (Option UInt8))) fun table address => do
     pure (table.insert address (← byteAt machine address))
   let look (table : Std.HashMap Nat (Option UInt8)) (address : Nat) : Option UInt8 := (table.get? address).join
-  pure { state, next := some next, writes := changes (look before) (look after) addresses, services, instructions }
+  pure { state, next, writes := changes (look before) (look after) addresses, services, instructions, exit }
 
 /-- One round of the handler of the state that the machine is in, which has to be at the dispatcher: what it did by the time its thread came
-back to the dispatcher. The machine is then as it was. -/
+back to the dispatcher, or the program ended. The machine is then as it was. -/
 def capture (recorder : Recorder) (profile : Cff.Profile) (fuel : Nat := 100000000) : IO Contract :=
   observe recorder profile do
     let machine := recorder.machine
@@ -142,6 +152,7 @@ def capture (recorder : Recorder) (profile : Cff.Profile) (fuel : Nat := 1000000
             return (← emu.executed.get) - started
           Bap.Emu.resumeThread emu id
           left := left - 1
+        | .finished _ => return (← emu.executed.get) - started
         | other => throw <| IO.userError s!"the round never came back to the dispatcher, and ended as {repr other}"
       throw <| IO.userError "the round never came back to the dispatcher"
     finally
@@ -177,13 +188,18 @@ structure Verification where
   deriving Repr
 
 /-- Whether `replacement` does what the handler of the state that the machine is in does, from here: the same next state, the same
-memory changed to the same, and the same asked of the kernel and the host, in the same order and answered the same, so that a service
-that is gone, one that is new and one asked otherwise are each a difference. How many instructions each ran is in its contract and isn't
+memory changed to the same, the same asked of the kernel and the host, in the same order and answered the same, so that a service
+that is gone, one that is new and one asked otherwise are each a difference, and the program ended the same where the handler ended it. How many instructions each ran is in its contract and isn't
 one: the replacement is there to run fewer, or none of the guest. The machine is as it was afterwards. -/
 def verify (recorder : Recorder) (profile : Cff.Profile) (replacement : Machine → IO Unit) : IO Verification := do
   let original ← capture recorder profile
   let replaced ← captureReplacement recorder profile replacement
   let mut differences : List String := []
+  if original.exit != replaced.exit then
+    differences := differences ++ [match original.exit, replaced.exit with
+      | some status, some other => s!"it ends the program with {status} and the replacement with {other}"
+      | some status, none => s!"it ends the program with {status}, which the replacement doesn't"
+      | none, _ => s!"the replacement ends the program, which the handler doesn't"]
   if original.next != replaced.next then
     differences := differences ++ [s!"the next state is {original.next} and not {replaced.next}"]
   for (address, bytes) in original.writes do

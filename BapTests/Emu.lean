@@ -2568,6 +2568,15 @@ def testContract (triple : String) : IO Unit := do
     (Bap.Analysis.Contract.serviceDifferences services (services ++ [("read", some 4)]))
   assertEqual s!"Contract {triple} and the same asked in another order" ["it asks [read, write] in that order and not [write, read]"]
     (Bap.Analysis.Contract.serviceDifferences services services.reverse)
+  -- The round of 6, the twenty-first, ends the program rather than coming back: the boundary that a replacement keeps too.
+  Bap.Emu.resumeThread machine.emu (← Bap.Emu.thread machine.emu)
+  let _ ← Bap.Analysis.Verdict.captureVerdict machine { pc := dispatcher, criteria := [], hit := 18 }
+  let ending ← Bap.Analysis.Contract.capture recorder profile
+  assertEqual s!"Contract {triple} a round that ends the program has its status and no next state" (6, some 0, none)
+    (ending.state, ending.exit, ending.next)
+  let staying ← Bap.Analysis.Contract.verify recorder profile fun machine => machine.write state (word 7 4)
+  assertTrue s!"Contract {triple} a replacement that doesn't end it is told apart: {staying.differences}"
+    (staying.differences.contains "it ends the program with 0, which the replacement doesn't")
 
 /-- What a machine has loaded, by what the files were and whether their initializers ran, and a checkpoint that hasn't what is expected. -/
 def testManifest : IO Unit := do
