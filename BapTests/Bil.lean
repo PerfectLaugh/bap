@@ -381,6 +381,27 @@ def run : IO Unit := do
     | .error error => throw <| IO.userError error
   assertTrue "execution validation rejects changed result" !(Analysis.Validate.ok divergent)
   assertTrue "execution validation reports register mismatch" !divergent.registers
+  let jumps ← match Analysis.Validate.compare [] [.jmp (int 32 0x100)] [.jmp (int 32 0x200)] with
+    | .ok result => pure result
+    | .error error => throw <| IO.userError error
+  assertTrue "execution validation sees two jumps as of one kind" jumps.effects
+  assertTrue "and that they don't go on at the same place" !jumps.continuation
+  let special ← match Analysis.Validate.compare [] [.special "call"] [] with
+    | .ok result => pure result
+    | .error error => throw <| IO.userError error
+  assertTrue "execution validation rejects a special that is gone" !special.effects
+  assertTrue "which goes on at the same place" special.continuation
+  let emptyMemory : Memory 32 := ⟨{}⟩
+  let storing (value : Nat) : Program := [.move mem (.store (.var mem) (int 32 0x100) (int 32 value) .little 4)]
+  let consumed (ranges : List (Nat × Nat)) : IO Analysis.Validate.Result :=
+    match Analysis.Validate.compare [] (storing 1) (storing 2) { env := [(mem, .memory emptyMemory)] } (continuationRanges := ranges) with
+    | .ok result => pure result
+    | .error error => throw <| IO.userError error
+  let inside ← consumed [(0x100, 0x104)]
+  assertTrue "execution validation rejects a continuation whose bytes differ" !inside.continuation
+  assertTrue "as memory" !inside.memory
+  let outside ← consumed [(0x200, 0x204)]
+  assertTrue "a difference outside what the continuation consumes isn't one of it" outside.continuation
 
   let captured := reg "x" 8
   let binder := reg "y" 8

@@ -9247,7 +9247,7 @@ section Validate
 open Bap.Bil
 open Bap.Analysis.Validate
 open_private Bap.Analysis.Validate in Bap.Analysis.Validate :
-  memoryEqual valueEq lookupEqual effectEq memoryVars
+  memoryEqual valueEq lookupEqual effectEq effectKindEq targetEq bytesEqual rangesEqual memoryVars
 
 theorem validate_ok_iff (r : Result) :
     ok r = true ↔ r.effects = true ∧ r.registers = true ∧ r.memory = true ∧ r.continuation = true := by
@@ -9260,6 +9260,25 @@ theorem validate_effectEq_refl (e : Effect) : effectEq e e = true := by
 theorem validate_effectEq_symm (a b : Effect) : effectEq a b = effectEq b a := by
   cases a <;> cases b <;> simp [effectEq, eq_comm]
 
+theorem validate_effectKindEq_refl (e : Effect) : effectKindEq e e = true := by
+  cases e <;> simp [effectKindEq]
+
+theorem validate_effectKindEq_symm (a b : Effect) : effectKindEq a b = effectKindEq b a := by
+  cases a <;> cases b <;> simp [effectKindEq, eq_comm]
+
+theorem validate_targetEq_refl (e : Effect) : targetEq e e = true := by
+  cases e <;> simp [targetEq]
+
+/-- The kind of an outcome and where it goes on are all of it: together they are `effectEq`. -/
+theorem validate_kind_target_eq (a b : Effect) : (effectKindEq a b && targetEq a b) = effectEq a b := by
+  cases a <;> cases b <;> simp [effectKindEq, targetEq, effectEq]
+
+/-- Two jumps to different targets are of one kind and don't go on at the same place: `effects` and `continuation` tell them apart. -/
+theorem validate_jumps_differ_in_target_only :
+    effectKindEq (.jump (1 : BitVec 8)) (.jump (2 : BitVec 8)) = true ∧
+      targetEq (.jump (1 : BitVec 8)) (.jump (2 : BitVec 8)) = false := by
+  decide
+
 /-- `effectEq` is exact equality of control-flow outcomes. -/
 theorem validate_effectEq_sound {a b : Effect} (h : effectEq a b = true) : a = b := by
   cases a <;> cases b <;> simp [effectEq] at h ⊢
@@ -9268,6 +9287,13 @@ theorem validate_effectEq_sound {a b : Effect} (h : effectEq a b = true) : a = b
     simpa using BitVec.eq_of_toNat_eq hv
   · exact h
   · exact h
+
+/-- Two outcomes of one kind that go on at the same place are the same. -/
+theorem validate_kind_target_sound {a b : Effect} (hk : effectKindEq a b = true) (ht : targetEq a b = true) :
+    a = b := by
+  apply validate_effectEq_sound
+  rw [← validate_kind_target_eq, hk, ht]
+  rfl
 
 /-- Every nonzero byte a memory reads at an address is listed in its cells at that address. -/
 private theorem validate_mem_cells {w : Nat} (m : Memory w) (a : BitVec w)
@@ -9352,38 +9378,46 @@ private theorem validate_lookupEqual_self (env : Env) (v : Bap.Var) :
   | error => rfl
   | ok r => exact validate_valueEq_refl r
 
+private theorem validate_bytesEqual_self (first last : Nat) (v : Value) : bytesEqual first last v v = true := by
+  cases v <;> simp [bytesEqual, validate_valueEq_refl]
+
+private theorem validate_rangesEqual_self (ranges : List (Nat × Nat)) (s : State) : rangesEqual ranges s s = true := by
+  simp only [rangesEqual, List.all_eq_true]
+  rintro ⟨first, last⟩ _ var _
+  cases lookup s.env var <;> simp [validate_bytesEqual_self]
+
 /-- The shape of a comparison when both runs succeed. -/
 theorem validate_compare_ok {registers : List Bap.Var} {a b : Bil.Program} {init : State} {fuel : Nat}
-    {sa sb : State} {ea eb : Effect}
+    {ranges : List (Nat × Nat)} {sa sb : State} {ea eb : Effect}
     (ha : run a init fuel = .ok (sa, ea)) (hb : run b init fuel = .ok (sb, eb)) :
-    compare registers a b init fuel = .ok {
-      effects := effectEq ea eb
+    compare registers a b init fuel ranges = .ok {
+      effects := effectKindEq ea eb
       registers := (registers ++ memoryVars sa ++ memoryVars sb).eraseDups.all
         fun v => lookupEqual v sa.env sb.env
       memory := (memoryVars sa ++ memoryVars sb).eraseDups.all fun v => lookupEqual v sa.env sb.env
-      continuation := effectEq ea eb } := by
+      continuation := targetEq ea eb && rangesEqual ranges sa sb } := by
   unfold Bap.Analysis.Validate.compare
   rw [ha, hb]
   rfl
 
 theorem validate_compare_error_left {registers : List Bap.Var} {a b : Bil.Program} {init : State}
-    {fuel : Nat} {m : String} (ha : run a init fuel = .error m) :
-    compare registers a b init fuel = .error m := by
+    {fuel : Nat} {ranges : List (Nat × Nat)} {m : String} (ha : run a init fuel = .error m) :
+    compare registers a b init fuel ranges = .error m := by
   unfold Bap.Analysis.Validate.compare
   rw [ha]
   rfl
 
 theorem validate_compare_error_right {registers : List Bap.Var} {a b : Bil.Program} {init : State}
-    {fuel : Nat} {m : String} {r : State × Effect} (ha : run a init fuel = .ok r)
+    {fuel : Nat} {ranges : List (Nat × Nat)} {m : String} {r : State × Effect} (ha : run a init fuel = .ok r)
     (hb : run b init fuel = .error m) :
-    compare registers a b init fuel = .error m := by
+    compare registers a b init fuel ranges = .error m := by
   rcases r with ⟨s, e⟩
   unfold Bap.Analysis.Validate.compare
   rw [ha, hb]
   rfl
 
 private theorem validate_compare_cases {registers : List Bap.Var} {a b : Bil.Program} {init : State}
-    {fuel : Nat} {r : Result} (h : compare registers a b init fuel = .ok r) :
+    {fuel : Nat} {ranges : List (Nat × Nat)} {r : Result} (h : compare registers a b init fuel ranges = .ok r) :
     ∃ sa ea sb eb, run a init fuel = .ok (sa, ea) ∧ run b init fuel = .ok (sb, eb) := by
   cases ha : run a init fuel with
   | error m => rw [validate_compare_error_left ha] at h; cases h
@@ -9392,27 +9426,29 @@ private theorem validate_compare_cases {registers : List Bap.Var} {a b : Bil.Pro
     | error m => rw [validate_compare_error_right ha hb] at h; cases h
     | ok rb => exact ⟨ra.1, ra.2, rb.1, rb.2, rfl, rfl⟩
 
-/-- The `continuation` verdict always duplicates `effects`. -/
-theorem validate_continuation_eq_effects {registers : List Bap.Var} {a b : Bil.Program} {init : State}
-    {fuel : Nat} {r : Result} (h : compare registers a b init fuel = .ok r) :
-    r.continuation = r.effects := by
+/-- Where a comparison says that both go on at the same place, they do, and read the same bytes in the ranges given. -/
+theorem validate_continuation_sound {registers : List Bap.Var} {a b : Bil.Program} {init : State} {fuel : Nat}
+    {ranges : List (Nat × Nat)} {r : Result} (h : compare registers a b init fuel ranges = .ok r)
+    (hc : r.continuation = true) :
+    ∃ sa ea sb eb, run a init fuel = .ok (sa, ea) ∧ run b init fuel = .ok (sb, eb) ∧ targetEq ea eb = true ∧
+      rangesEqual ranges sa sb = true := by
   obtain ⟨sa, ea, sb, eb, ha, hb⟩ := validate_compare_cases h
   rw [validate_compare_ok ha hb] at h
   cases h
-  rfl
+  exact ⟨sa, ea, sb, eb, ha, hb, (Bool.and_eq_true_iff.mp hc).1, (Bool.and_eq_true_iff.mp hc).2⟩
 
 /-- A program that runs always validates against itself. -/
 theorem validate_compare_refl {registers : List Bap.Var} {a : Bil.Program} {init : State} {fuel : Nat}
-    {s : State} {e : Effect} (ha : run a init fuel = .ok (s, e)) :
-    ∃ r, compare registers a a init fuel = .ok r ∧ ok r = true := by
+    {ranges : List (Nat × Nat)} {s : State} {e : Effect} (ha : run a init fuel = .ok (s, e)) :
+    ∃ r, compare registers a a init fuel ranges = .ok r ∧ ok r = true := by
   refine ⟨_, validate_compare_ok ha ha, ?_⟩
   rw [validate_ok_iff]
   have hl := validate_lookupEqual_self s.env
-  simp [validate_effectEq_refl, List.all_eq_true, hl]
+  simp [validate_effectKindEq_refl, validate_targetEq_refl, validate_rangesEqual_self, List.all_eq_true, hl]
 
 /-- `compare` of a program with itself fails only if the program itself fails to run. -/
 theorem validate_compare_self_error {registers : List Bap.Var} {a : Bil.Program} {init : State}
-    {fuel : Nat} {m : String} (h : compare registers a a init fuel = .error m) :
+    {fuel : Nat} {ranges : List (Nat × Nat)} {m : String} (h : compare registers a a init fuel ranges = .error m) :
     run a init fuel = .error m := by
   cases ha : run a init fuel with
   | error m' =>
@@ -9426,7 +9462,7 @@ theorem validate_compare_self_error {registers : List Bap.Var} {a : Bil.Program}
 
 /-- Soundness: when the verdict holds, every listed register and control-flow effect agree. -/
 theorem validate_compare_sound {registers : List Bap.Var} {a b : Bil.Program} {init : State} {fuel : Nat}
-    {r : Result} (h : compare registers a b init fuel = .ok r) (hok : ok r = true) :
+    {r : Result} (h : compare registers a b init fuel ranges = .ok r) (hok : ok r = true) :
     ∃ sa sb e, run a init fuel = .ok (sa, e) ∧ run b init fuel = .ok (sb, e) ∧
       (∀ v ∈ registers, ∀ {w : Nat} (x : BitVec w), lookup sa.env v = .ok (.bits x) →
         ∃ y : BitVec w, lookup sb.env v = .ok (.bits y) ∧ y.toNat = x.toNat) ∧
@@ -9436,8 +9472,8 @@ theorem validate_compare_sound {registers : List Bap.Var} {a b : Bil.Program} {i
   obtain ⟨sa, ea, sb, eb, ha, hb⟩ := validate_compare_cases h
   rw [validate_compare_ok ha hb] at h
   cases h
-  obtain ⟨he, hr, _, _⟩ := (validate_ok_iff _).mp hok
-  have heq := validate_effectEq_sound he
+  obtain ⟨he, hr, _, hc⟩ := (validate_ok_iff _).mp hok
+  have heq := validate_kind_target_sound he (Bool.and_eq_true_iff.mp hc).1
   subst heq
   refine ⟨sa, sb, ea, ha, hb, ?_, ?_⟩
   · intro v hv w x hx
@@ -9472,12 +9508,12 @@ theorem validate_compare_sound {registers : List Bap.Var} {a b : Bil.Program} {i
 
 /-- Comparing in the other order gives the same `effects` verdict. -/
 theorem validate_compare_effects_symm {registers registers' : List Bap.Var} {a b : Bil.Program}
-    {init : State} {fuel : Nat} {r : Result} (h : compare registers a b init fuel = .ok r) :
-    ∃ r', compare registers' b a init fuel = .ok r' ∧ r'.effects = r.effects := by
+    {init : State} {fuel : Nat} {ranges : List (Nat × Nat)} {r : Result} (h : compare registers a b init fuel ranges = .ok r) :
+    ∃ r', compare registers' b a init fuel ranges = .ok r' ∧ r'.effects = r.effects := by
   obtain ⟨sa, ea, sb, eb, ha, hb⟩ := validate_compare_cases h
   rw [validate_compare_ok ha hb] at h
   cases h
-  exact ⟨_, validate_compare_ok hb ha, validate_effectEq_symm eb ea⟩
+  exact ⟨_, validate_compare_ok hb ha, validate_effectKindEq_symm eb ea⟩
 
 /-- Pages that alias under `addressWidth` no longer break reflexivity: the memory compares equal to
 itself, and the empty program validates against itself from a state holding it. -/
