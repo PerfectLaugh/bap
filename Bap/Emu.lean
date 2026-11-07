@@ -2499,7 +2499,8 @@ private def lift (emu : Emu) (thumb : Bool) (address : Nat) (code : ByteArray) :
       emu.servedPrograms.modify (·.insert insn.address insn.bil)
       pure ⟨insn.address, insn.next, [.special s!"served:{insn.address}"]⟩
     else
-      pure ⟨insn.address, insn.next, insn.bil⟩
+      -- What a lifter loads again of the same bytes is loaded once, as the instruction does.
+      pure ⟨insn.address, insn.next, Bil.shareLoads insn.bil⟩
 
 /-- The program of the instruction at an address, and how many bytes it was made from at most, as it would run now, without running it or
 saying that anything faulted: none if it can't be fetched or decoded. -/

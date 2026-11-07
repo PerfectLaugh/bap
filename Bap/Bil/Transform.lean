@@ -562,4 +562,108 @@ theorem simplifyExp_of_eval_bits {exp : Exp} {value : BitVec width}
   unfold simplifyExp
   rw [h]
 
+/-! ### Loads that an instruction makes again
+
+A lifter may write the operand of an instruction in memory into each expression that uses it, as the flags of an `add` from memory
+are, so that the program loads the same bytes several times where the instruction loads them once. `shareLoads` loads them once. -/
+
+/-- The loads that an expression makes whatever it comes to, inner first: not those of what an `ite` chooses between, nor those that read
+a variable that a `let` around them binds, which mean something else outside of it. -/
+private partial def certainLoads (bound : List Bap.Var) : Exp → List Exp
+  | exp@(.load memory address _ _) =>
+    let inner := certainLoads bound memory ++ certainLoads bound address
+    if (freeVars exp).any bound.contains then inner else inner ++ [exp]
+  | .store memory address value _ _ => certainLoads bound memory ++ certainLoads bound address ++ certainLoads bound value
+  | .bin _ left right | .concat left right => certainLoads bound left ++ certainLoads bound right
+  | .un _ value | .cast _ _ value | .extract _ _ value => certainLoads bound value
+  | .letIn var value body => certainLoads bound value ++ certainLoads (var :: bound) body
+  | .ite condition _ _ => certainLoads bound condition
+  | _ => []
+
+/-- Every load of an expression, wherever it is. -/
+private partial def allLoads : Exp → List Exp
+  | exp@(.load memory address _ _) => exp :: (allLoads memory ++ allLoads address)
+  | .store memory address value _ _ => allLoads memory ++ allLoads address ++ allLoads value
+  | .bin _ left right | .concat left right => allLoads left ++ allLoads right
+  | .un _ value | .cast _ _ value | .extract _ _ value => allLoads value
+  | .letIn _ value body => allLoads value ++ allLoads body
+  | .ite condition yes no => allLoads condition ++ allLoads yes ++ allLoads no
+  | _ => []
+
+private partial def stmtLoads : Stmt → List Exp
+  | .move _ value => allLoads value
+  | .jmp target => allLoads target
+  | .ifElse condition yes no => allLoads condition ++ yes.flatMap stmtLoads ++ no.flatMap stmtLoads
+  | .while condition body => allLoads condition ++ body.flatMap stmtLoads
+  | .special _ | .cpuExn _ => []
+
+/-- An expression with each load that was loaded already, into the variable given, read from that variable, but where a `let` around it
+binds a variable that it reads. -/
+private partial def reuseLoads (loaded : List (Exp × Bap.Var)) (bound : List Bap.Var) : Exp → Exp
+  | exp@(.load memory address endian size) =>
+    match loaded.lookup exp with
+    | some var => if (freeVars exp).any bound.contains then .load (reuseLoads loaded bound memory) (reuseLoads loaded bound address) endian size
+      else .var var
+    | none => .load (reuseLoads loaded bound memory) (reuseLoads loaded bound address) endian size
+  | .store memory address value endian size =>
+    .store (reuseLoads loaded bound memory) (reuseLoads loaded bound address) (reuseLoads loaded bound value) endian size
+  | .bin op left right => .bin op (reuseLoads loaded bound left) (reuseLoads loaded bound right)
+  | .concat left right => .concat (reuseLoads loaded bound left) (reuseLoads loaded bound right)
+  | .un op value => .un op (reuseLoads loaded bound value)
+  | .cast kind width value => .cast kind width (reuseLoads loaded bound value)
+  | .extract high low value => .extract high low (reuseLoads loaded bound value)
+  | .letIn var value body => .letIn var (reuseLoads loaded bound value) (reuseLoads loaded (var :: bound) body)
+  | .ite condition yes no => .ite (reuseLoads loaded bound condition) (reuseLoads loaded bound yes) (reuseLoads loaded bound no)
+  | exp => exp
+
+/-- The variable that a load made again is loaded into, the `count`th of the program. -/
+private def sharedLoad (count size : Nat) : Bap.Var := ⟨s!"_primus_load{count}", .imm (size * 8), 0, false⟩
+
+/-- Statements in a row, with the loads that each makes whatever it comes to and that the program makes more than once loaded once, before
+it, into a variable that what loads them again reads, until something assigns a variable that one reads, the memory among them, or
+control goes elsewhere: a branch, a loop, a special or an exception. -/
+private partial def shareLoadsIn (repeated : Exp → Bool) : List Stmt → List (Exp × Bap.Var) → Nat → List Stmt × Nat
+  | [], _, count => ([], count)
+  | stmt :: rest, loaded, count =>
+    -- What this statement loads first, whatever it comes to, that is loaded again and not yet.
+    let hoist (exp : Exp) (loaded : List (Exp × Bap.Var)) (count : Nat) : List Stmt × List (Exp × Bap.Var) × Nat :=
+      (certainLoads [] exp).foldl (init := ([], loaded, count)) fun (moves, loaded, count) load =>
+        match load with
+        | .load _ _ _ size =>
+          if !repeated load || (loaded.lookup load).isSome then (moves, loaded, count)
+          else
+            let var := sharedLoad count size
+            (moves ++ [.move var (reuseLoads loaded [] load)], loaded ++ [(load, var)], count + 1)
+        | _ => (moves, loaded, count)
+    let forget (var : Bap.Var) (loaded : List (Exp × Bap.Var)) := loaded.filter fun (load, _) => !(freeVars load).contains var
+    let (here, loaded, count) : List Stmt × List (Exp × Bap.Var) × Nat := match stmt with
+      | .move var value =>
+        let (moves, loaded, count) := hoist value loaded count
+        (moves ++ [.move var (reuseLoads loaded [] value)], forget var loaded, count)
+      | .jmp target =>
+        let (moves, loaded, count) := hoist target loaded count
+        (moves ++ [.jmp (reuseLoads loaded [] target)], loaded, count)
+      | .ifElse condition yes no =>
+        let (moves, loaded, count) := hoist condition loaded count
+        let (yes, count) := shareLoadsIn repeated yes loaded count
+        let (no, count) := shareLoadsIn repeated no loaded count
+        (moves ++ [.ifElse (reuseLoads loaded [] condition) yes no], [], count)
+      | .while condition body =>
+        let (body, count) := shareLoadsIn repeated body [] count
+        ([.while condition body], [], count)
+      | other => ([other], [], count)
+    let (later, count) := shareLoadsIn repeated rest loaded count
+    (here ++ later, count)
+
+/-- A program with each load that it makes more than once, of the same bytes, made once, as the instruction that it is of does: the first
+that is made whatever the program comes to is loaded into a variable of the lifter's, `_primus_loadN`, which the others read, until the
+memory or a variable of its address is assigned, or control goes elsewhere. A load that only one way of an `ite` makes isn't made earlier
+than it was, so that nothing faults that didn't. -/
+partial def shareLoads (program : Program) : Program :=
+  let loads := program.flatMap stmtLoads
+  if loads.length < 2 then program
+  else
+    let repeated (load : Exp) := (loads.filter (· == load)).length ≥ 2
+    if !(loads.any repeated) then program else (shareLoadsIn repeated program [] 0).1
+
 end Bap.Bil

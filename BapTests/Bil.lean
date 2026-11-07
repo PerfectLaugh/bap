@@ -381,6 +381,33 @@ def run : IO Unit := do
     | .error error => throw <| IO.userError error
   assertTrue "execution validation rejects changed result" !(Analysis.Validate.ok divergent)
   assertTrue "execution validation reports register mismatch" !divergent.registers
+  -- A load that a program makes again of the same bytes is made once, until the memory or its address changes, and one that only
+  -- one way of an `ite` makes isn't made earlier: each does what it did.
+  let loadsIn (program : Program) : Nat := (repr program).pretty.splitOn "Exp.load" |>.length |>.pred
+  let filled : Memory 32 := Bap.Memory.writeRegion (Bap.Memory.empty 32) 0x100 (ByteArray.mk #[1, 2, 3, 4, 5, 6, 7, 8])
+  let at_ (address : Nat) : Exp := .load (.var mem) (int 32 address) .little 4
+  let a := reg "a"
+  let b := reg "b"
+  let p := reg "p"
+  let sameAs (name : String) (program : Program) (vars : List Var) (expected : Nat) : IO Unit := do
+    let shared := shareLoads program
+    let initial : State := { env := [(mem, .memory filled), (p, .bits (BitVec.ofNat 32 0x100))] }
+    match Bap.Bil.run program initial, Bap.Bil.run shared initial with
+    | .ok (before, _), .ok (after, _) =>
+      for var in vars do
+        assertEqual s!"{name}: {var.name} is what it was" (repr (lookup before.env var)).pretty (repr (lookup after.env var)).pretty
+    | _, _ => throw <| IO.userError s!"{name} didn't run"
+    assertEqual s!"{name}: loads made" expected (loadsIn shared)
+  sameAs "shared loads" [.move a (at_ 0x100), .move b (plus (at_ 0x100) (int 32 1))] [a, b] 1
+  sameAs "a store between" [.move a (at_ 0x100), .move mem (.store (.var mem) (int 32 0x100) (int 32 9) .little 4), .move b (at_ 0x100)]
+    [a, b] 2
+  let byP : Exp := .load (.var mem) (.var p) .little 4
+  sameAs "an address that changed" [.move a byP, .move p (plus (.var p) (int 32 4)), .move b byP] [a, b] 2
+  let conditional : Program := [.move a (.ite (int 1 0) (at_ 0x100) (int 32 0)), .move b (at_ 0x100), .move a (plus (.var a) (at_ 0x100))]
+  sameAs "a load that only one way makes" conditional [a, b] 2
+  match shareLoads conditional with
+  | .move _ (.ite _ (.load ..) _) :: _ => pure ()
+  | other => throw <| IO.userError s!"a load that only one way makes was made earlier: {repr other}"
   let jumps ← match Analysis.Validate.compare [] [.jmp (int 32 0x100)] [.jmp (int 32 0x200)] with
     | .ok result => pure result
     | .error error => throw <| IO.userError error
