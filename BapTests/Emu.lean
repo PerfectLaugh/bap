@@ -2632,6 +2632,30 @@ def testThumbAndArmAtOneAddress : IO Unit := do
       assertEqual s!"{name} at an address that the other ran runs as {name}, {label}" (if mode == 0 then (1, 0) else (9, 9))
         (← value "R0", ← value "R1")
 
+/-- Code that is written while what was compiled of it is being optimized: what was optimized of the old code isn't put in place of
+the new, which runs as it is, as single steps run it. -/
+def testOptimizedAfterWrite : IO Unit := do
+  let code ← LLVM.assemble "riscv64" "1: addi a1, a1, -1\nbeqz a1, 2f\naddi a0, a0, 1\nj 1b\n2: j 2b"
+  let register (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
+  let value (emu : Bap.Emu.Emu) (name : String) : IO Nat := do
+    match ← Bap.Emu.reg emu (register name) with
+    | .bits bits => pure bits.toNat
+    | _ => pure 0
+  let run (ranges : Bool) : IO Nat := do
+    let adjust (config : Bap.Emu.Config) : Bap.Emu.Config :=
+      if ranges then { config with hotThreshold := 1, rangeLimit := 16 } else { config with rangeLimit := 1 }
+    let emu ← Bap.Emu.riscv64 code 0 0 (adjust := adjust)
+    Bap.Emu.setReg emu (register "X10") (.bits (BitVec.ofNat 64 0))
+    Bap.Emu.setReg emu (register "X11") (.bits (BitVec.ofNat 64 400000))
+    -- A hook at the end stops it, and keeps the loop from going on in the native chain, which optimizes it there.
+    let _ ← Bap.Emu.onCode emu (16, 16) fun emu _ => Bap.Emu.stop emu
+    -- Long enough for the loop to be optimized, then its second block adds 2 rather than 1.
+    let _ ← Bap.Emu.run emu 80000
+    Bap.Emu.write emu 8 (← LLVM.assemble "riscv64" "addi a0, a0, 2")
+    let _ ← Bap.Emu.run emu 1600000
+    value emu "X10"
+  assertEqual "Code written while it was being optimized runs as it is" (← run false) (← run true)
+
 /-- A range of ARM code at an address, run there as Thumb: what runs is the Thumb of those bytes, as a single step has it, rather than
 the range. -/
 def testThumbAfterArmRange : IO Unit := do

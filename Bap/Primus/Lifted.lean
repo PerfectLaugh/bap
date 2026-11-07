@@ -420,6 +420,8 @@ def discardRange (engine : Engine) (first last : Nat) : IO Unit := do
       if let some entry := (← engine.cache.get).get? address then
         rememberVersion engine engine.cacheVersions entry
         engine.cache.modify (·.erase address)
+        -- What is being optimized of it is of the bytes that it had.
+        engine.optimizing.modify (·.erase address)
   for address in CodeIndex.candidates (← engine.rangeIndex.get) lo hi do
     if let some entry := (← engine.ranges.get).get? address then
       let affected := if entry.coverage.isEmpty then first ≤ entry.address && entry.address ≤ last
@@ -427,7 +429,9 @@ def discardRange (engine : Engine) (first last : Nat) : IO Unit := do
       if affected then rememberVersion engine engine.rangeVersions entry
       let kept := if entry.coverage.isEmpty then entry.last < first || last < entry.address
         else entry.coverage.all fun (lo, hi) => hi < first || last < lo
-      if !kept then engine.ranges.modify (·.erase address)
+      if !kept then
+        engine.ranges.modify (·.erase address)
+        engine.optimizing.modify (·.erase address)
   if engine.writeCooldown > 0 then engine.nativeCooldown.set (engine.writeCooldown + 1)
 
 /-- Forgets all that was made of the code that has a byte from `first` to `last`: the blocks of its instructions, the ranges compiled from
@@ -445,13 +449,16 @@ def invalidateCode (engine : Engine) (first last : Nat) : IO Unit := do
   let native (entry : CachedBlock) : Nat := match entry.plan with | .native .. => 1 | .interpreted _ => 0
   let mut freed := 0
   let mut droppedRanges : Std.HashSet Nat := {}
+  -- What is being optimized of what goes is of what it was, and is for nothing.
   for (address, entry) in (← engine.cache.get).toList do
     if touches entry then
       engine.cache.modify (·.erase address)
+      engine.optimizing.modify (·.erase address)
       freed := freed + native entry
   for (address, entry) in (← engine.ranges.get).toList do
     if touches entry then
       engine.ranges.modify (·.erase address)
+      engine.optimizing.modify (·.erase address)
       droppedRanges := droppedRanges.insert address
       freed := freed + native entry
   for versions in [engine.cacheVersions, engine.rangeVersions] do
