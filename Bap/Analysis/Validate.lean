@@ -181,4 +181,23 @@ def diagnose (registers : List Bap.Var) (original simplified : Bil.Program)
     | _, _ => found := found.push (.mismatch s!"{var.name} is a memory on one side only")
   pure found.toList
 
+/-- A comparison with what each of its disagreements is: what `compare` says, none where a run failed, and why it isn't `ok`. -/
+structure Verdict where
+  result : Option Result
+  diagnoses : List Diagnosis
+  deriving Repr
+
+/-- Whether both ran and agree in all that `compare` asks. -/
+def Verdict.ok (verdict : Verdict) : Bool := verdict.result.any Validate.ok
+
+/-- The disagreements that are real ones, rather than of input or bytes that weren't given or of a store taken as dead. -/
+def Verdict.mismatches (verdict : Verdict) : List String :=
+  verdict.diagnoses.filterMap fun | .mismatch what => some what | _ => none
+
+/-- `compare` and `diagnose` at once. -/
+def check (registers : List Bap.Var) (original simplified : Bil.Program)
+    (initial : Bil.State := {}) (fuel : Nat := 100000) (continuationRanges : List (Nat × Nat) := []) : Verdict :=
+  { result := (compare registers original simplified initial fuel continuationRanges).toOption
+    diagnoses := diagnose registers original simplified initial fuel continuationRanges }
+
 end Bap.Analysis.Validate

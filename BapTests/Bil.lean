@@ -423,6 +423,11 @@ def run : IO Unit := do
     (← diagnose deadProgram [.move (reg "input") (int 32 1), .move result (.var (reg "input")), .move result (.unknown "boom" (.imm 32))])
   assertEqual "and a changed result is a mismatch" [.mismatch "result differs"]
     (← diagnose deadProgram (deadProgram ++ [.move result (int 32 0)]))
+  let verdict (original simplified : Program) := Analysis.Validate.check [result] original simplified { env := [(mem, .memory emptyMemory)] }
+  assertTrue "a verdict of an equivalent optimization is ok, with nothing to say" ((verdict deadProgram optimized).ok &&
+    (verdict deadProgram optimized).diagnoses.isEmpty)
+  assertEqual "one of a dropped store isn't ok, and has no real mismatch" (false, []) ((verdict (storing 1) []).ok, (verdict (storing 1) []).mismatches)
+  assertEqual "one of a run that failed has no result" (false, true) ((verdict reading reading).ok, (verdict reading reading).result.isNone)
 
   let captured := reg "x" 8
   let binder := reg "y" 8
