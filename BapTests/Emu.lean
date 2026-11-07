@@ -2718,6 +2718,22 @@ def testHooksInRanges : IO Unit := do
       (stepSeen == rangeSeen && stepSum == rangeSum && !stepSeen.isEmpty)
     assertTrue s!"and the loop was optimized ({optimized})" (optimized > 0)
 
+/-- The instructions that are a round's own: not those of what it called, and those after a return of more frames than it went into,
+as it goes on where that lands; and the events of a thread are gone through once, round after round. -/
+def testOwnEntries : IO Unit := do
+  let executed (seq : Nat) : Bap.Analysis.Journal.Executed := { seq, thread := 1, group := 1, index := seq, pc := 0x100 + seq }
+  let frame (seq : Nat) : Bap.Analysis.Journal.Frame := { site := 0, callee := 0, returnsTo := 0, seq }
+  let round := (List.range 6).toArray.map executed
+  -- A call at 1, and a return at 3 of three frames, of which the round went into one.
+  let events : Array Bap.Analysis.Journal.Event := #[.call 1 1 (frame 1), .ret 3 1 0 0 3]
+  let (own, after) := Bap.Analysis.Cff.ownEntries round events 0
+  assertEqual "A round's own instructions are those at its depth, and after a return past it" [0, 3, 4, 5] (own.toList.map (·.seq))
+  assertEqual "and the events of it are gone through" 2 after
+  -- The next round goes on from there, past what is before it.
+  let next := (List.range 3).toArray.map fun index => executed (10 + index)
+  let (nextOwn, nextAfter) := Bap.Analysis.Cff.ownEntries next (events.push (.call 11 1 (frame 11))) after
+  assertEqual "and the next round goes on from where it left them" ([10], 3) (nextOwn.toList.map (·.seq), nextAfter)
+
 /-- What a handler does, as a contract, without changing the machine, and a replacement checked against it. -/
 def testContract (triple : String) : IO Unit := do
   let (dispatcher, state, _, _, sum) ← cffAddresses triple

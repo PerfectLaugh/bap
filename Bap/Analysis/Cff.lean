@@ -345,11 +345,16 @@ private partial def branches : Bil.Program → Bool
 
 /-- The instructions of a round that are its own, at the depth of calls that it started at, rather than of what it called: a call
 comes at the first instruction of what was called and a return at the one that it comes back to, and the round's first instruction,
-which a call may have come to, is where it starts. -/
-private def ownEntries (round : Array Journal.Executed) (events : Array Journal.Event) (from_ : Nat) : Array Journal.Executed := Id.run do
-  let mut depth : Int := 0
-  let mut at_ := from_
+which a call may have come to, is where it starts. A return of more frames than the round went into comes back to its depth, as where
+it lands is where the round goes on. The events are its thread's, in order, from `cursor`, which is at or before the round's: where
+they are after it is given back, for the next round of the thread to go on from, so that each event is looked at once. -/
+def ownEntries (round : Array Journal.Executed) (events : Array Journal.Event) (cursor : Nat) :
+    Array Journal.Executed × Nat := Id.run do
+  let mut depth : Nat := 0
+  let mut at_ := cursor
   let mut own : Array Journal.Executed := #[]
+  let first := (round[0]?.map (·.seq)).getD 0
+  while at_ < events.size && events[at_]!.seq < first do at_ := at_ + 1
   for (entry, k) in round.zipIdx do
     while at_ < events.size && events[at_]!.seq ≤ entry.seq do
       if k > 0 then
@@ -359,7 +364,7 @@ private def ownEntries (round : Array Journal.Executed) (events : Array Journal.
         | _ => pure ()
       at_ := at_ + 1
     if depth == 0 then own := own.push entry
-  pure own
+  pure (own, at_)
 
 /-- What has been seen, in the order that it was first: a list for that and a set for whether it has. -/
 private structure Seen (α : Type) [BEq α] [Hashable α] where
@@ -468,6 +473,8 @@ def recover (profile : Profile) (visits : Array Visit) (record : Option Journal.
     let mine := ofThread thread
     let rounds := segments.get? thread
     let events := happened.getD thread #[]
+    -- Where the events of the thread are, round by round.
+    let mut cursor := 0
     for k in List.range mine.size do
       let visit := mine[k]!
       let next := (mine[k + 1]?).map (·.state)
@@ -520,14 +527,15 @@ def recover (profile : Profile) (visits : Array Visit) (record : Option Journal.
       let inDispatch (pc : Nat) : Bool := match profile.dispatchRange with
         | some (low, high) => low ≤ pc && pc < high
         | none => dispatch.known.contains pc
-      let branched := match round, handler, span with
-        | some round, some entry, some (first, _) =>
-          let mine := ownEntries round events (firstFrom events Journal.Event.seq first)
+      let (branched, after) : Option Bool × Nat := match round, handler with
+        | some round, some entry =>
+          let (mine, after) : Array Journal.Executed × Nat := ownEntries round events cursor
           let own := ((mine.toList.drop 1).dropWhile (·.pc != entry)).filter (!inDispatch ·.pc)
           if own.all fun executed => (programOf executed.pc).isSome then
-            some (own.any fun executed => (programOf executed.pc).any branches)
-          else none
-        | _, _, _ => none
+            (some (own.any fun executed => (programOf executed.pc).any branches), after)
+          else (none, after)
+        | _, _ => (none, cursor)
+      cursor := after
       let transition : Transition := {
         thread, group := visit.group, index := k, state := visit.state, next, handler, branched
         exit := if next.isSome then round.bind (·.back?.map (·.pc)) else none
