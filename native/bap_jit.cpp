@@ -1101,7 +1101,10 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
     // and nothing observes code but the observer of a range, or where nothing does at all: a site waits there, which is two stores
     // and no way out, which would keep what a later instruction overwrites. An access that the memory observer is to hear of goes
     // on in this, from the start of the access, which calls it, and this goes on from there by the checks at the targets of its
-    // jumps back as before, which come back to the copy if Lean code didn't run.
+    // jumps back as before, which come back to the copy if Lean code didn't run. What waits in the copy is a variable of the
+    // function's, which LLVM keeps in a register, and is left in the cells where it goes on in this: the copy runs no Lean code to
+    // read it there, and a store to them at each site would be most of what it does.
+    llvm::AllocaInst *pending = nullptr;
     if (optimized && entries == nullptr && budgetSlot != ~uint64_t{0} && hasSlots && budgetSlot <= maxSlot) {
       auto budgetBranch = [&](llvm::Instruction *terminator) -> llvm::CondBrInst * {
         auto *branch = llvm::dyn_cast<llvm::CondBrInst>(terminator);
@@ -1160,19 +1163,33 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
             builder.SetInsertPoint(copy);
             builder.CreateBr(go);
           }
+        builder.SetInsertPoint(original.front(), original.front()->getFirstInsertionPt());
+        pending = builder.CreateAlloca(word, nullptr, "pending");
         for (auto &[site, pc] : siteBranches) {
           auto *branch = llvm::cast<llvm::Instruction>(map[site]);
           llvm::BasicBlock *block = branch->getParent();
           llvm::BasicBlock *go = branch->getSuccessor(0);
           branch->eraseFromParent();
           builder.SetInsertPoint(block);
-          builder.CreateStore(llvm::ConstantInt::get(byte, 1),
-                              builder.CreateConstGEP1_64(byte, memory, offsetof(BapCells, pendingSite)));
-          builder.CreateStore(llvm::ConstantInt::get(word, pc), builder.CreateConstGEP1_64(byte, memory, offsetof(BapCells, pendingPc)));
+          builder.CreateStore(llvm::ConstantInt::get(word, pc + 1), pending);
           builder.CreateBr(go);
         }
+        // From the copy to this: what waits, as the cells have it, the pc and one more, or nothing.
+        std::vector<llvm::BasicBlock *> edges;
+        auto toThis = [&](llvm::BasicBlock *target) {
+          llvm::BasicBlock *edge = llvm::BasicBlock::Create(*context, "to_checked", function);
+          edges.push_back(edge);
+          builder.SetInsertPoint(edge);
+          llvm::Value *waiting = builder.CreateLoad(word, pending);
+          builder.CreateStore(builder.CreateZExt(builder.CreateICmpNE(waiting, zero), byte),
+                              builder.CreateConstGEP1_64(byte, memory, offsetof(BapCells, pendingSite)));
+          builder.CreateStore(builder.CreateSub(waiting, llvm::ConstantInt::get(word, 1)),
+                              builder.CreateConstGEP1_64(byte, memory, offsetof(BapCells, pendingPc)));
+          builder.CreateBr(target);
+          return edge;
+        };
         for (auto &[observed, start] : observerBranches)
-          llvm::cast<llvm::Instruction>(map[observed])->setSuccessor(1, start);
+          llvm::cast<llvm::Instruction>(map[observed])->setSuccessor(1, toThis(start));
         // The targets of the jumps back of the copy, by a search in depth from its start, which stays in the copy: an access goes on in
         // this.
         std::unordered_map<llvm::BasicBlock *, int> visit;
@@ -1213,18 +1230,24 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
           // The copy is the way that a run goes, for where LLVM puts its loops.
           llvm::MDNode *likely = llvm::MDBuilder(*context).createLikelyBranchWeights();
           if (fromCopy) {
-            builder.CreateCondBr(enough, fast, slow, likely);
+            llvm::BasicBlock *edge = toThis(slow);
+            builder.SetInsertPoint(check);
+            builder.CreateCondBr(enough, fast, edge, likely);
             return check;
           }
+          llvm::Value *waits = builder.CreateICmpNE(
+              builder.CreateLoad(byte, builder.CreateConstGEP1_64(byte, memory, offsetof(BapCells, pendingSite))),
+              llvm::ConstantInt::get(byte, 0));
+          llvm::Value *waitingPc = builder.CreateLoad(word, builder.CreateConstGEP1_64(byte, memory, offsetof(BapCells, pendingPc)));
+          builder.CreateStore(builder.CreateSelect(waits, builder.CreateAdd(waitingPc, llvm::ConstantInt::get(word, 1)), zero), pending);
           auto field = [&](llvm::Type *type, size_t offset) {
             return builder.CreateLoad(type, builder.CreateConstGEP1_64(byte, memory, offset));
           };
-          llvm::Value *waits = builder.CreateAnd(
-              builder.CreateICmpNE(field(byte, offsetof(BapCells, quietSites)), llvm::ConstantInt::get(byte, 0)),
-              builder.CreateICmpEQ(field(byte, offsetof(BapCells, leanRan)), llvm::ConstantInt::get(byte, 0)));
           llvm::Value *sitesWait = builder.CreateAnd(
               builder.CreateIsNull(field(pointer, offsetof(BapCells, error))),
-              builder.CreateOr(builder.CreateIsNull(field(pointer, offsetof(BapCells, codeObserver))), waits));
+              builder.CreateOr(builder.CreateIsNull(field(pointer, offsetof(BapCells, codeObserver))), builder.CreateAnd(
+                  builder.CreateICmpNE(field(byte, offsetof(BapCells, quietSites)), llvm::ConstantInt::get(byte, 0)),
+                  builder.CreateICmpEQ(field(byte, offsetof(BapCells, leanRan)), llvm::ConstantInt::get(byte, 0)))));
           builder.CreateCondBr(builder.CreateAnd(enough, sitesWait), fast, slow, likely);
           return check;
         };
@@ -1256,6 +1279,8 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
         } else {
           for (llvm::BasicBlock *copy : copies)
             copy->eraseFromParent();
+          for (llvm::BasicBlock *edge : edges)
+            edge->eraseFromParent();
         }
       }
     }
@@ -1271,6 +1296,8 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
       std::vector<llvm::AllocaInst *> copies(slotCount);
       for (size_t index = 0; index != slotCount; ++index)
         copies[index] = builder.CreateAlloca(word);
+      if (pending != nullptr)
+        pending->moveBefore(*promote, promote->end());
       std::vector<bool> written(slotCount, false);
       std::vector<llvm::GetElementPtrInst *> addresses;
       for (llvm::User *user : state->users())
@@ -1382,6 +1409,9 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
       pipeline.addPass(llvm::EarlyCSEPass(true));
       pipeline.addPass(llvm::InstCombinePass());
       pipeline.addPass(llvm::SimplifyCFGPass());
+      // Again, for the selects that SimplifyCFG makes of what waits in the copy that doesn't check its budget, one at each site
+      // that a slot of the run guards, which fold into one rather than going round the loop one after another.
+      pipeline.addPass(llvm::InstCombinePass());
       pipeline.addPass(llvm::DSEPass());
       // What only a code site that calls Lean code writes back goes where it does, rather than being worked out at every site.
       pipeline.addPass(llvm::SinkingPass());
