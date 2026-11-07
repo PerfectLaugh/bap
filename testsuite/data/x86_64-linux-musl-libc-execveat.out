@@ -1,0 +1,62 @@
+mkdir 0
+copied 1
+symlink 0
+empty 1
+execfn of /dev/fd 1
+execfn ends in /copy 0
+execfn is execveat/copy 0
+comm is copy 1
+exit 7
+opath 1
+execfn of /dev/fd 1
+execfn ends in /copy 0
+execfn is execveat/copy 0
+comm is copy 1
+exit 7
+directory 1
+execfn of /dev/fd 1
+execfn ends in /copy 1
+execfn is execveat/copy 0
+comm is copy 1
+exit 7
+cwd 1
+execfn of /dev/fd 0
+execfn ends in /copy 1
+execfn is execveat/copy 1
+comm is copy 1
+exit 7
+absolute 1
+execfn of /dev/fd 0
+execfn ends in /copy 0
+execfn is execveat/copy 0
+comm is copy 0
+exit 7
+link 1
+execfn of /dev/fd 1
+execfn ends in /copy 0
+execfn is execveat/copy 0
+comm is copy 0
+exit 7
+script 1
+execfn of /dev/fd 1
+execfn ends in /copy 0
+execfn is execveat/copy 0
+comm is copy 1
+script of /dev/fd 1
+exit 7
+link without following -40
+exit 100
+unknown flag -22
+exit 100
+empty path of a directory -13
+exit 100
+empty path without AT_EMPTY_PATH -2
+exit 100
+from a file -20
+exit 100
+from a bad descriptor -9
+exit 100
+script that closes on exec -2
+exit 100
+unlink 0
+rmdir 0

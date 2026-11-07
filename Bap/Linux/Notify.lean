@@ -154,7 +154,7 @@ def after (notifier : Notifier) (kernelRef : IO.Ref Kernel) (group : Nat) (call 
   let instances ← instancesOf notifier after
   if instances.isEmpty then return false
   -- An instance that nothing holds, as `heldFiles` has it, is gone, with its watches.
-  let instances ← if [Call.close, .dup2, .dup3, .execve].contains call then do
+  let instances ← if [Call.close, .dup2, .dup3, .execve, .execveat].contains call then do
       let held := instances.filter (after.inodeHeld live)
       notifier.instances.set (some held)
       pure held

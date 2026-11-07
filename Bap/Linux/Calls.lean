@@ -60,7 +60,7 @@ inductive Call where
   | access | faccessat | faccessat2 | dup | dup2 | dup3 | fcntl | ioctl | getdents | getcwd | chdir | fchdir | mkdir | mkdirat | rmdir
   | unlink | unlinkat | rename | renameat | symlink | symlinkat | readlink | readlinkat | chmod | fchmod | fchmodat | truncate
   | ftruncate | fsync | fdatasync | syncfs | sync | umask | pipe | pipe2 | mmap | munmap | mprotect | madvise | mremap | brk | gettimeofday | time | clockGettime | clockGetres | uname | getrlimit | prlimit
-  | getrandom | sigaltstack | schedGetaffinity | statfs | fstatfs | sysinfo | execve
+  | getrandom | sigaltstack | schedGetaffinity | statfs | fstatfs | sysinfo | execve | execveat
   /-- `statfs` and `fstatfs` with the size of the structure in the middle, as 32-bit systems and PowerPC have them. -/
   | statfs64 | fstatfs64
   /-- What 32-bit systems have for numbers that don't fit a word: the offsets of `mmap2` are in pages and `truncate64`,
@@ -114,7 +114,7 @@ def x86_64Calls : List (Nat × Call) :=
    (35, .nanosleep), (230, .clockNanosleep), (38, .setitimer), (36, .getitimer), (37, .alarm), (222, .timerCreate), (223, .timerSettime), (224, .timerGettime), (225, .timerGetoverrun), (226, .timerDelete),
    (157, .prctl), (317, .seccomp), (41, .socket), (42, .connect), (43, .accept), (44, .sendto), (45, .recvfrom), (46, .sendmsg), (47, .recvmsg), (48, .shutdown), (49, .bind), (50, .listen), (51, .getsockname), (52, .getpeername), (53, .socketpair), (54, .setsockopt), (55, .getsockopt), (288, .accept4),
    (22, .pipe), (293, .pipe2),
-   (11, .munmap), (10, .mprotect), (28, .madvise),    (59, .execve), (137, .statfs), (138, .fstatfs), (99, .sysinfo),
+   (11, .munmap), (10, .mprotect), (28, .madvise),    (59, .execve), (322, .execveat), (137, .statfs), (138, .fstatfs), (99, .sysinfo),
    (0, .read), (1, .write), (2, .open_), (257, .openat), (3, .close), (4, .stat), (6, .lstat), (5, .fstat), (262, .fstatat),
    (332, .statx), (8, .lseek), (17, .pread), (18, .pwrite), (19, .readv), (20, .writev), (21, .access), (269, .faccessat),
    (439, .faccessat2), (32, .dup), (33, .dup2), (292, .dup3), (72, .fcntl), (16, .ioctl), (217, .getdents), (79, .getcwd),
@@ -141,7 +141,7 @@ def genericCalls : List (Nat × Call) :=
    (101, .nanosleep), (115, .clockNanosleep), (103, .setitimer), (102, .getitimer), (107, .timerCreate), (110, .timerSettime), (108, .timerGettime), (109, .timerGetoverrun), (111, .timerDelete),
    (277, .seccomp), (198, .socket), (199, .socketpair), (200, .bind), (201, .listen), (202, .accept), (203, .connect), (204, .getsockname), (205, .getpeername), (206, .sendto), (207, .recvfrom), (208, .setsockopt), (209, .getsockopt), (210, .shutdown), (211, .sendmsg), (212, .recvmsg), (242, .accept4),
    (59, .pipe2), (167, .prctl),
-   (215, .munmap), (226, .mprotect), (233, .madvise),    (221, .execve), (43, .statfs), (44, .fstatfs), (179, .sysinfo),
+   (215, .munmap), (226, .mprotect), (233, .madvise),    (221, .execve), (281, .execveat), (43, .statfs), (44, .fstatfs), (179, .sysinfo),
    (63, .read), (64, .write), (56, .openat), (57, .close), (80, .fstat), (79, .fstatat), (291, .statx), (62, .lseek),
    (67, .pread), (68, .pwrite), (65, .readv), (66, .writev), (48, .faccessat), (439, .faccessat2), (23, .dup), (24, .dup3),
    (25, .fcntl), (29, .ioctl), (61, .getdents), (17, .getcwd), (49, .chdir), (50, .fchdir), (34, .mkdirat), (35, .unlinkat),
@@ -166,7 +166,7 @@ def generic32Calls : List (Nat × Call) :=
    (101, .nanosleep), (407, .clockNanosleep64), (103, .setitimer), (102, .getitimer), (107, .timerCreate), (409, .timerSettime64), (408, .timerGettime64), (109, .timerGetoverrun), (111, .timerDelete),
    (277, .seccomp), (198, .socket), (199, .socketpair), (200, .bind), (201, .listen), (202, .accept), (203, .connect), (204, .getsockname), (205, .getpeername), (206, .sendto), (207, .recvfrom), (208, .setsockopt), (209, .getsockopt), (210, .shutdown), (211, .sendmsg), (212, .recvmsg), (242, .accept4),
    (59, .pipe2), (167, .prctl),
-   (215, .munmap), (226, .mprotect), (233, .madvise),    (221, .execve), (43, .statfs64), (44, .fstatfs64), (179, .sysinfo),
+   (215, .munmap), (226, .mprotect), (233, .madvise),    (221, .execve), (281, .execveat), (43, .statfs64), (44, .fstatfs64), (179, .sysinfo),
    (63, .read), (64, .write), (56, .openat), (57, .close), (291, .statx), (62, .llseek),
    (67, .pread), (68, .pwrite), (65, .readv), (66, .writev), (48, .faccessat), (439, .faccessat2), (23, .dup), (24, .dup3),
    (25, .fcntl), (29, .ioctl), (61, .getdents), (17, .getcwd), (49, .chdir), (50, .fchdir), (34, .mkdirat), (35, .unlinkat),
@@ -192,7 +192,7 @@ def o32Calls : List (Nat × Call) :=
    (166, .nanosleep), (407, .clockNanosleep64), (104, .setitimer), (105, .getitimer), (27, .alarm), (257, .timerCreate), (409, .timerSettime64), (408, .timerGettime64), (260, .timerGetoverrun), (261, .timerDelete),
    (192, .prctl), (352, .seccomp), (168, .accept), (169, .bind), (170, .connect), (171, .getpeername), (172, .getsockname), (173, .getsockopt), (174, .listen), (175, .recv), (176, .recvfrom), (177, .recvmsg), (178, .send), (179, .sendmsg), (180, .sendto), (181, .setsockopt), (182, .shutdown), (183, .socket), (184, .socketpair), (334, .accept4),
    (42, .pipe), (328, .pipe2),
-   (91, .munmap), (125, .mprotect), (218, .madvise),    (11, .execve), (213, .stat), (214, .lstat), (215, .fstat), (293, .fstatat), (255, .statfs64), (256, .fstatfs64), (116, .sysinfo),
+   (91, .munmap), (125, .mprotect), (218, .madvise),    (11, .execve), (356, .execveat), (213, .stat), (214, .lstat), (215, .fstat), (293, .fstatat), (255, .statfs64), (256, .fstatfs64), (116, .sysinfo),
    (3, .read), (4, .write), (5, .open_), (288, .openat), (6, .close), (366, .statx), (19, .lseek), (140, .llseek),
    (200, .pread), (201, .pwrite), (145, .readv), (146, .writev), (33, .access), (300, .faccessat), (439, .faccessat2),
    (41, .dup), (63, .dup2), (327, .dup3), (55, .fcntl), (220, .fcntl), (54, .ioctl), (219, .getdents), (203, .getcwd),
@@ -219,7 +219,7 @@ def n64Calls : List (Nat × Call) :=
    (34, .nanosleep), (224, .clockNanosleep), (36, .setitimer), (35, .getitimer), (37, .alarm), (216, .timerCreate), (217, .timerSettime), (218, .timerGettime), (219, .timerGetoverrun), (220, .timerDelete),
    (153, .prctl), (312, .seccomp), (40, .socket), (41, .connect), (42, .accept), (43, .sendto), (44, .recvfrom), (45, .sendmsg), (46, .recvmsg), (47, .shutdown), (48, .bind), (49, .listen), (50, .getsockname), (51, .getpeername), (52, .socketpair), (53, .setsockopt), (54, .getsockopt), (293, .accept4),
    (21, .pipe), (287, .pipe2),
-   (11, .munmap), (10, .mprotect), (27, .madvise),    (57, .execve), (134, .statfs), (135, .fstatfs), (97, .sysinfo),
+   (11, .munmap), (10, .mprotect), (27, .madvise),    (57, .execve), (316, .execveat), (134, .statfs), (135, .fstatfs), (97, .sysinfo),
    (0, .read), (1, .write), (2, .open_), (247, .openat), (3, .close), (4, .stat), (6, .lstat), (5, .fstat), (252, .fstatat),
    (326, .statx), (8, .lseek), (16, .pread), (17, .pwrite), (18, .readv), (19, .writev), (20, .access), (259, .faccessat),
    (439, .faccessat2), (31, .dup), (32, .dup2), (286, .dup3), (70, .fcntl), (15, .ioctl), (308, .getdents), (77, .getcwd),
@@ -248,7 +248,7 @@ def armCalls : List (Nat × Call) :=
    (162, .nanosleep), (407, .clockNanosleep64), (104, .setitimer), (105, .getitimer), (257, .timerCreate), (409, .timerSettime64), (408, .timerGettime64), (260, .timerGetoverrun), (261, .timerDelete),
    (172, .prctl), (383, .seccomp), (281, .socket), (282, .bind), (283, .connect), (284, .listen), (285, .accept), (286, .getsockname), (287, .getpeername), (288, .socketpair), (289, .send), (290, .sendto), (291, .recv), (292, .recvfrom), (293, .shutdown), (294, .setsockopt), (295, .getsockopt), (296, .sendmsg), (297, .recvmsg), (366, .accept4),
    (42, .pipe), (359, .pipe2),
-   (91, .munmap), (125, .mprotect), (220, .madvise),    (11, .execve), (195, .stat), (196, .lstat), (197, .fstat), (327, .fstatat), (266, .statfs64), (267, .fstatfs64), (116, .sysinfo),
+   (91, .munmap), (125, .mprotect), (220, .madvise),    (11, .execve), (387, .execveat), (195, .stat), (196, .lstat), (197, .fstat), (327, .fstatat), (266, .statfs64), (267, .fstatfs64), (116, .sysinfo),
    (3, .read), (4, .write), (5, .open_), (322, .openat), (6, .close), (397, .statx), (19, .lseek), (140, .llseek),
    (180, .pread), (181, .pwrite), (145, .readv), (146, .writev), (33, .access), (334, .faccessat), (439, .faccessat2), (41, .dup),
    (63, .dup2), (358, .dup3), (55, .fcntl), (221, .fcntl), (54, .ioctl), (217, .getdents), (183, .getcwd), (12, .chdir),
@@ -277,7 +277,7 @@ def i686Calls : List (Nat × Call) :=
    (162, .nanosleep), (407, .clockNanosleep64), (104, .setitimer), (105, .getitimer), (27, .alarm), (259, .timerCreate), (409, .timerSettime64), (408, .timerGettime64),
    (172, .prctl), (354, .seccomp), (359, .socket), (360, .socketpair), (361, .bind), (362, .connect), (363, .listen), (364, .accept4), (365, .getsockopt), (366, .setsockopt), (367, .getsockname), (368, .getpeername), (369, .sendto), (370, .sendmsg), (371, .recvfrom), (372, .recvmsg), (373, .shutdown),
    (42, .pipe), (331, .pipe2),
-   (91, .munmap), (125, .mprotect), (219, .madvise),    (11, .execve), (195, .stat), (196, .lstat), (197, .fstat), (300, .fstatat), (268, .statfs64), (269, .fstatfs64), (116, .sysinfo),
+   (91, .munmap), (125, .mprotect), (219, .madvise),    (11, .execve), (358, .execveat), (195, .stat), (196, .lstat), (197, .fstat), (300, .fstatat), (268, .statfs64), (269, .fstatfs64), (116, .sysinfo),
    (3, .read), (4, .write), (5, .open_), (295, .openat), (6, .close), (383, .statx), (19, .lseek), (140, .llseek),
    (180, .pread), (181, .pwrite), (145, .readv), (146, .writev), (33, .access), (307, .faccessat), (439, .faccessat2), (41, .dup),
    (63, .dup2), (330, .dup3), (55, .fcntl), (221, .fcntl), (54, .ioctl), (220, .getdents), (183, .getcwd), (12, .chdir),
@@ -305,7 +305,7 @@ def powerpcCalls : List (Nat × Call) :=
    (162, .nanosleep), (407, .clockNanosleep64), (104, .setitimer), (105, .getitimer), (27, .alarm), (240, .timerCreate), (409, .timerSettime64), (408, .timerGettime64), (243, .timerGetoverrun), (244, .timerDelete),
    (171, .prctl), (358, .seccomp), (326, .socket), (327, .bind), (328, .connect), (329, .listen), (330, .accept), (331, .getsockname), (332, .getpeername), (333, .socketpair), (334, .send), (335, .sendto), (336, .recv), (337, .recvfrom), (338, .shutdown), (339, .setsockopt), (340, .getsockopt), (341, .sendmsg), (342, .recvmsg), (344, .accept4),
    (42, .pipe), (317, .pipe2),
-   (91, .munmap), (125, .mprotect), (205, .madvise),    (11, .execve), (116, .sysinfo),
+   (91, .munmap), (125, .mprotect), (205, .madvise),    (11, .execve), (362, .execveat), (116, .sysinfo),
    (3, .read), (4, .write), (5, .open_), (286, .openat), (6, .close), (106, .stat), (107, .lstat), (108, .fstat), (291, .fstatat),
    (383, .statx), (19, .lseek), (140, .llseek), (179, .pread), (180, .pwrite), (145, .readv), (146, .writev), (33, .access),
    (298, .faccessat), (439, .faccessat2), (41, .dup), (63, .dup2), (316, .dup3), (55, .fcntl), (204, .fcntl), (54, .ioctl),

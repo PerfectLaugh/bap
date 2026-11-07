@@ -1313,7 +1313,7 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       | .ok _ =>
         let bytes := Abi.statfs (architecture.bits == 64) big mips
         if call == .fstatfs then returning emu (arg 1) bytes else returning emu (arg 2) (bytes.extract 0 (arg 1))
-    | .execve => pure (errorOf Errno.enosys)
+    | .execve | .execveat => pure (errorOf Errno.enosys)
     | .sysinfo => returning emu (arg 0) (Abi.sysinfo (architecture.bits == 64) big (kernel.clock / 1000000000 - 1700000000) 1)
     | .statx =>
       let path ← (readString emu (arg 1)).toBaseIO
@@ -1671,7 +1671,7 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
 /-- The argument of a call that is a path, if it has one, and whether it is relative to a descriptor. -/
 private def pathArgument : Call → Option Nat
   | .open_ | .stat | .lstat | .access | .readlink | .chdir | .truncate | .truncate64 | .statfs | .statfs64 | .execve => some 0
-  | .openat | .fstatat | .statx | .faccessat | .faccessat2 | .readlinkat => some 1
+  | .openat | .fstatat | .statx | .faccessat | .faccessat2 | .readlinkat | .execveat => some 1
   | _ => none
 
 /-- The paths that a call is given, by the index of each, and whether the argument before it is a directory that it is from. -/
@@ -1680,7 +1680,7 @@ private def pathArguments : Call → List (Nat × Bool)
   | .unlink | .chmod | .chown | .lchown | .utimes | .utime | .setxattr | .lsetxattr | .getxattr | .lgetxattr | .listxattr
   | .llistxattr | .removexattr | .lremovexattr | .chroot | .umount2 => [(0, false)]
   | .openat | .fstatat | .statx | .faccessat | .faccessat2 | .readlinkat | .mkdirat | .unlinkat | .fchmodat | .fchownat | .utimensat
-  | .utimensat64 | .futimesat => [(1, true)]
+  | .utimensat64 | .futimesat | .execveat => [(1, true)]
   | .rename | .link => [(0, false), (1, false)]
   | .renameat | .renameat2 | .linkat => [(1, true), (3, true)]
   | .symlink | .inotifyAddWatch | .mount => [(1, false)]
@@ -1741,6 +1741,16 @@ private partial def fromHost (machine : Machine) (path : String) (links : Nat :=
     for entry in entries do
       let _ ← bring (child guest entry.fileName) (child host entry.fileName)
 
+/-- Whether a path from `/` may look at `/proc`: `/dev/stdin`, `/dev/stdout`, `/dev/stderr` and `/dev/fd` are links to `/proc/self/fd`. -/
+private def looksAtProc (path : String) : Bool := ["/proc", "/dev/std", "/dev/fd"].any (path.startsWith ·)
+
+/-- Makes `/proc` what it is for the threads that there are now. -/
+private def makeProc (machine : Machine) (emu : Emu) (group : Nat) : IO Unit := do
+  let self ← thread emu
+  let live ← liveProcesses emu
+  let tasks := (← emu.taskTable.get).tasks.filter (·.status.isNone)
+  machine.kernel.modify (Proc.refresh · group self live fun pid => (tasks.filter (·.group == pid)).map (·.tid))
+
 /-- Makes `/proc` what it has to be for a call that may look at it, which a path tells, or of `getdents` the directory that it reads,
 which the directory that was read last says, if it is that one. -/
 private def refreshProc (machine : Machine) (emu : Emu) (group : Nat) (call : Call) (args : List Nat) : IO Unit := do
@@ -1762,15 +1772,9 @@ private def refreshProc (machine : Machine) (emu : Emu) (group : Nat) (call : Ca
           -- What the second argument is relative to is the first, which may be in there.
           let base := if index == 1 && !atCwd (args.getD 0 0) then (kernel.baseOf group (args.getD 0 0) false).toOption.getD ""
             else kernel.cwdOf group
-          -- `/dev/stdin`, `/dev/stdout`, `/dev/stderr` and `/dev/fd` are links to `/proc/self/fd`.
-          let absolute := Path.ofParts (Path.parts base path)
-          pure (["/proc", "/dev/std", "/dev/fd"].any (absolute.startsWith ·))
+          pure (looksAtProc (Path.ofParts (Path.parts base path)))
   if looks then
-    let self ← thread emu
-    let live ← liveProcesses emu
-    let tasks := (← emu.taskTable.get).tasks.filter (·.status.isNone)
-    machine.kernel.modify (Proc.refresh · group self live fun pid =>
-      (tasks.filter (·.group == pid)).map (·.tid))
+    makeProc machine emu group
     -- What was read of a directory before is of what was there then.
     if call == .getdents then machine.listing.set none
 
@@ -1922,7 +1926,7 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
         -- as `ipc` of i386 has all of its calls, would take as its own.
         if !(← Bap.Emu.stopped emu) then machine.timers.finish (← thread emu)
         refreshChanged machine emu before
-        if [Call.close, .dup2, .dup3, .execve].contains call then released machine
+        if [Call.close, .dup2, .dup3, .execve, .execveat].contains call then released machine
         if watching then
           let live := ((← emu.taskTable.get).tasks.filter (·.status.isNone)).map (·.group) |>.eraseDups
           if ← Notify.after machine.notifier machine.kernel group call args before action live then wakePipeReaders emu
@@ -2294,21 +2298,41 @@ private def readStrings (emu : Emu) (architecture : Architecture) (address : Nat
       else go fuel (at_ + size) ((← readString emu pointer) :: found)
   go 65536 address []
 
-/-- `execve`: nothing of the process changes until the program is known to run, and then all its memory and its threads other
-than this one are gone, and its descriptors but for those that stay open over it, and this one goes on with the id of the process,
-with the credentials that `Credentials.executed` says. -/
-private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO SyscallAction := do
+/-- `execve`, and `execveat`, whose path is from the directory that a descriptor is open on, or with `AT_EMPTY_PATH` is the file that
+it is open on when it is empty, and which with `AT_SYMLINK_NOFOLLOW` doesn't follow a link at its end: nothing of the process changes
+until the program is known to run, and then all its memory and its threads other than this one are gone, and its descriptors but for
+those that stay open over it, and this one goes on with the id of the process, with the credentials that `Credentials.executed` says.
+A program of a descriptor is run by `/dev/fd/N`, or `/dev/fd/N/path`, as Linux names it, and of an empty path named by its file; a
+script so is `ENOENT` if the descriptor closes on exec, as what runs it couldn't open it. -/
+private def execute (machine : Machine) (emu : Emu) (call : Call) (args : List Nat) : IO SyscallAction := do
   let architecture := machine.architecture
   let kernel ← machine.kernel.get
   let group := (← currentTask emu).group
+  let (directory, flags, args) := if call == .execveat then (some (args.getD 0 0), args.getD 4 0, args.drop 1) else (none, 0, args)
   match ← (do pure (← readString emu (args.getD 0 0), ← readStrings emu architecture (args.getD 1 0),
       ← readStrings emu architecture (args.getD 2 0)) : IO _).toBaseIO with
   | .error _ => pure (errorOf Errno.efault)
-  | .ok (path, arguments, environment) =>
+  | .ok (given, arguments, environment) =>
+    if flags ||| 0x1100 != 0x1100 then return errorOf Errno.einval
+    if given.isEmpty && flags &&& 0x1000 == 0 then return errorOf Errno.enoent
+    -- The descriptor that the path is from, if it is from one.
+    let descriptor := directory.filter fun fd => !atCwd fd && !given.startsWith "/"
+    if let some fd := descriptor then
+      if let .error errno := kernel.openFileOf group fd then return errorOf errno
+    let path := match descriptor with
+      | some fd => if given.isEmpty then s!"/dev/fd/{fd}" else s!"/dev/fd/{fd}/{given}"
+      | none => given
     -- This is served before `serveKernelCalls`, which makes `/proc` for the calls that it serves.
-    refreshProc machine emu group .execve args
+    if looksAtProc (Path.ofParts (Path.parts (kernel.cwdOf group) path)) then makeProc machine emu group
     programFromHost machine group path
     let kernel ← machine.kernel.get
+    if flags &&& 0x100 != 0 then
+      if let .ok (_, some number) := kernel.resolve "/" (treePath kernel group path) (follow := false) then
+        if let .ok { content := .symlink _, .. } := kernel.inodeOf number then return errorOf Errno.eloop
+    if let some fd := descriptor then
+      if ((kernel.process group).descriptors.get? fd).any (·.closeOnExec) then
+        if let .ok data := kernel.executable group (treePath kernel group path) then
+          if data.size ≥ 2 && data.get! 0 == 35 && data.get! 1 == 33 then return errorOf Errno.enoent
     -- With no arguments, a program has one that is empty, as Linux gives it since 5.18.
     match programOf kernel group architecture 4 path (if arguments.isEmpty then [""] else arguments) with
     | .error errno => pure (errorOf errno)
@@ -2334,7 +2358,8 @@ private def execute (machine : Machine) (emu : Emu) (args : List Nat) : IO Sysca
       wakePipeReaders emu
       machine.kernel.set (kernel.setProcess group { process with
         descriptors := process.descriptors.filter fun _ entry => !entry.closeOnExec
-        breakStart := top, breakEnd := top, command := arguments, environment, program := name, name := commOf (Path.name path), auxiliary
+        breakStart := top, breakEnd := top, command := arguments, environment, program := name
+        name := commOf (Path.name (if given.isEmpty then name else path)), auxiliary
         mappings := [], forkAdvice := [], credentials })
       releaseVfork emu group
       machine.timers.executed group
@@ -2646,9 +2671,9 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
         pure (LoadedLibrary.encode ((← machine.libraries.get).filter fun space _ => table.tasks.any (·.space == space)))
       load := fun data => do machine.libraries.set (← IO.ofExcept (LoadedLibrary.decode data)) } }])
   let _ ← onSyscall emu fun emu number args => do
-    if machine.architecture.call number == some .execve then
+    if let some call := (machine.architecture.call number).filter [Call.execve, .execveat].contains then
       let former ← thread emu
-      let action ← handOver machine emu (← execute { machine with emu } emu args)
+      let action ← handOver machine emu (← execute { machine with emu } emu call args)
       -- It is a new program if it is going there, and nothing else sends it anywhere in the middle of a system call.
       if (← emu.redirect.get).isSome then
         signals.executed (← currentTask emu).group (← thread emu)
