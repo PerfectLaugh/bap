@@ -47,7 +47,8 @@ structure Machine.Kept where
   emulator : Snapshot
   run : RunState
   kernel : Kernel
-  models : List (String × ByteArray)
+  /-- What each model held, by its id, with the version that its bytes are of. -/
+  models : List (String × Nat × ByteArray)
 
 /-- What `Machine.stepBack` goes back with: where a run is, and what it was at some of the places that it has been. -/
 structure Machine.History where
@@ -2792,23 +2793,32 @@ private def Machine.keep (machine : Machine) : IO Machine.Kept := do
     emulator := ← snapshot machine.emu
     run := ← runState machine.emu
     kernel := ← machine.kernel.get
-    models := (← machine.modelBytes).map fun (model, bytes) => (model.id, bytes)
+    models := (← machine.modelBytes).map fun (model, bytes) => (model.id, model.version, bytes)
   }
 
+/-- What is kept goes back only if each model that is attached now has its state in it, of the version that it is: one that was
+attached since, or is of another version, has nothing to go back to, and the machine would go on with what it holds now. -/
 private def Machine.restoreKept (machine : Machine) (kept : Machine.Kept) : IO Unit := do
+  for model in ← machine.models.get do
+    match kept.models.find? (·.1 == model.id) with
+    | none => throw <| IO.userError s!"model {model.id} is attached, and what is restored has nothing of it, as it was attached since"
+    | some (_, version, _) =>
+      if version != model.version then
+        throw <| IO.userError s!"what is restored has version {version} of model {model.id}, and this is version {model.version}"
   Bap.Emu.restore machine.emu kept.emulator
   -- Which breakpoints there are is up to who is debugging it now.
   setRunState machine.emu { kept.run with breakpoints := [] }
   machine.kernel.set kept.kernel
   for model in ← machine.models.get do
-    if let some bytes := kept.models.lookup model.id then model.state.load bytes
+    if let some (_, _, bytes) := kept.models.find? (·.1 == model.id) then model.state.load bytes
 
 /-- What the machine is, and where it is in what it keeps for `stepBack`, if it keeps that. -/
 def Machine.save (machine : Machine) : IO Machine.Saved := do
   pure { toKept := ← machine.keep, history := ← machine.history.get }
 
 /-- The machine is what it was saved as. If it keeps a history, that is the history it had then: where it was, and what it could step back to from there, and not what it ran
-after. One that was saved before it kept any has nothing to step back to, as nothing says where it was. -/
+after. One that was saved before it kept any has nothing to step back to, as nothing says where it was. It is refused, with nothing
+restored, where a model that is attached now has nothing in what was saved, or is of another version. -/
 def Machine.restore (machine : Machine) (saved : Machine.Saved) (label : String := "Machine.restore") : IO Unit := do
   machine.restoreKept saved.toKept
   if let some current := ← machine.history.get then

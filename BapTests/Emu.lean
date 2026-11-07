@@ -2430,6 +2430,26 @@ def testCffGraph (triple : String) : IO Unit := do
   assertTrue s!"CffGraph {triple} rounds without a journal have no direct edge"
     (!blind.edges.isEmpty && blind.edges.all (·.kind == .unresolved))
 
+/-- What is restored has the state of each model that is attached, of its version, or isn't restored. -/
+def testRestoreModels : IO Unit := do
+  let machine ← Bap.Linux.start (← cffKernel "aarch64" 'C') "/test" ["/test"]
+  let counter ← IO.mkRef (0 : Nat)
+  let model : Bap.Linux.RuntimeModel := {
+    id := "test.counter"
+    attach := fun _ => pure { save := do pure (ByteArray.mk #[(← counter.get).toUInt8]), load := fun bytes => counter.set bytes[0]!.toNat } }
+  let before ← machine.save
+  let _ ← machine.attachModel model
+  counter.set 7
+  let pc ← machine.emu.pc.get
+  expectThrow "Restore refuses what has nothing of a model attached since" (machine.restore before)
+  assertEqual "and restores nothing" (pc, 7) (← machine.emu.pc.get, ← counter.get)
+  let saved ← machine.save
+  counter.set 9
+  machine.restore saved
+  assertEqual "What has the model's state gives it back" 7 (← counter.get)
+  let other := { saved with models := saved.models.map fun (id, version, bytes) => (id, if id == model.id then 2 else version, bytes) }
+  expectThrow "and what has another version of it is refused" (machine.restore other)
+
 /-- What a handler does, as a contract, without changing the machine, and a replacement checked against it. -/
 def testContract (triple : String) : IO Unit := do
   let (dispatcher, state, _, _, sum) ← cffAddresses triple
