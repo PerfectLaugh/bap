@@ -2312,6 +2312,30 @@ def testVerdict (triple : String) : IO Unit := do
   assertTrue s!"Verdict {triple} a round comes from the byte that chose it"
     (slice.sources.any fun (label, offset, _) => label == "pread /data" && offset == some 2)
 
+/-- A verdict from a trace alone: the state that a chosen round of a flattened machine started with, found by re-running to the visit of
+the dispatcher that the trace counts, without recovering the dispatcher. -/
+def testVerdictTrace (triple : String) : IO Unit := do
+  let (dispatcher, state, _, _, _) ← cffAddresses triple
+  -- One run with a ring of every pc: the dispatcher is at the top of each round, so its visits count the rounds.
+  let machine ← Bap.Linux.start (← cffKernel triple 'C') "/test" ["/test"]
+  Bap.Emu.traceStartCapacity machine.emu 100000000
+  let _ ← machine.run fun _ => pure ()
+  let pcs ← Bap.Emu.tracePcs machine.emu
+  let visits := (pcs.zipIdx).filter fun (pc, _) => pc == dispatcher
+  assertTrue s!"VerdictTrace {triple} the dispatcher is visited more than three times ({visits.length})" (visits.length ≥ 4)
+  let some (_, index) := visits[2]? | throw <| IO.userError "no third visit"
+  let some criteria := Bap.Analysis.Verdict.ofTrace pcs index [.memory state 4] | throw <| IO.userError "ofTrace is none"
+  assertEqual s!"VerdictTrace {triple} the trace step is the dispatcher" dispatcher criteria.pc
+  assertEqual s!"VerdictTrace {triple} and the occurrence it is there is counted" 3 criteria.hit
+  -- A fresh machine, re-run to just that visit, reads the state the third round started with, which the recovered Cff says is 3.
+  let fresh ← Bap.Linux.start (← cffKernel triple 'C') "/test" ["/test"]
+  let verdict ← Bap.Analysis.Verdict.captureVerdict fresh criteria
+  assertEqual s!"VerdictTrace {triple} it lands on that visit" dispatcher (← fresh.emu.pc.get)
+  let read := (verdict.values.headD (.memory 0 0, ByteArray.empty)).2.toList.map (·.toNat)
+  assertEqual s!"VerdictTrace {triple} and reads the state the third round started with ({read})" [3] (read.filter (· != 0))
+  -- A step past the end has no criteria.
+  assertTrue s!"VerdictTrace {triple} a step past the end is none" (Bap.Analysis.Verdict.ofTrace pcs pcs.length [] |>.isNone)
+
 /-- What a handler does, as a contract, without changing the machine, and a replacement checked against it. -/
 def testContract (triple : String) : IO Unit := do
   let (dispatcher, state, _, _, sum) ← cffAddresses triple

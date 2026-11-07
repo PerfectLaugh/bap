@@ -172,4 +172,14 @@ went the wrong way starts. -/
 def ofTransition (profile : Cff.Profile) (transition : Cff.Transition) : Criteria :=
   { pc := profile.dispatcher, thread := some transition.thread, hit := transition.index + 2, criteria := [.location profile.state] }
 
+/-- The criteria to capture what a program did at the `index`th instruction of a trace of pcs, in the order it ran them: that
+instruction's pc, at the occurrence of it that `index` is, with what `criteria` name — so that a verdict or a slice there needs no
+recovered dispatcher, only the pcs a trace kept. For the occurrence to be the one a fresh run comes to, the pcs have to be of the whole
+run so far, as a ring of every pc keeps them (`pcCapacity := 0`); of a ring that let some go, it is short by what it dropped before `index`.
+It is `none` if `index` is past the end. -/
+def ofTrace (pcs : List Nat) (index : Nat) (criteria : List Criterion) (thread : Option ThreadId := none) : Option Criteria :=
+  match pcs[index]? with
+  | none => none
+  | some pc => some { pc, thread, hit := ((pcs.take (index + 1)).filter (· == pc)).length, criteria }
+
 end Bap.Analysis.Verdict
