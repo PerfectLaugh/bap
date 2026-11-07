@@ -148,11 +148,26 @@ def capture (recorder : Recorder) (profile : Cff.Profile) (fuel : Nat := 1000000
       Bap.Emu.removeHook emu breakpoint
 
 /-- What something that is to do what a round does did, from the same machine: it changes the machine as it likes, by `Machine.write` and
-the like, and leaves the next state where the state is. -/
+the like, and leaves the next state where the state is. Its instructions are those of the guest that it ran, none where it is all of the
+host. -/
 def captureReplacement (recorder : Recorder) (profile : Cff.Profile) (replacement : Machine → IO Unit) : IO Contract :=
   observe recorder profile do
+    let started ← recorder.machine.emu.executed.get
     replacement recorder.machine
-    pure 0
+    pure ((← recorder.machine.emu.executed.get) - started)
+
+/-- How what two asked differ: each that one asked and the other didn't, as many times as it is short of, and of what both asked in the
+same order, each that was answered otherwise. -/
+def serviceDifferences (original replacement : List (String × Option Nat)) : List String :=
+  let names (services : List (String × Option Nat)) := services.map (·.1)
+  let removed := (names replacement).foldl (fun left name => left.erase name) (names original)
+  let added := (names original).foldl (fun left name => left.erase name) (names replacement)
+  let answers := if names original == names replacement then
+      (original.zip replacement).filterMap fun ((name, answer), (_, other)) =>
+        if answer != other then some s!"{name} answers it {answer} and the replacement {other}" else none
+    else if removed.isEmpty && added.isEmpty then [s!"it asks {names original} in that order and not {names replacement}"]
+    else []
+  removed.map (s!"it asks {·}, which the replacement doesn't") ++ added.map (s!"the replacement asks {·}, which the handler doesn't") ++ answers
 
 structure Verification where
   original : Contract
@@ -162,7 +177,9 @@ structure Verification where
   deriving Repr
 
 /-- Whether `replacement` does what the handler of the state that the machine is in does, from here: the same next state, the same
-memory changed to the same, and the same asked of the kernel and the host. The machine is as it was afterwards. -/
+memory changed to the same, and the same asked of the kernel and the host, in the same order and answered the same, so that a service
+that is gone, one that is new and one asked otherwise are each a difference. How many instructions each ran is in its contract and isn't
+one: the replacement is there to run fewer, or none of the guest. The machine is as it was afterwards. -/
 def verify (recorder : Recorder) (profile : Cff.Profile) (replacement : Machine → IO Unit) : IO Verification := do
   let original ← capture recorder profile
   let replaced ← captureReplacement recorder profile replacement
@@ -176,8 +193,7 @@ def verify (recorder : Recorder) (profile : Cff.Profile) (replacement : Machine 
   for (address, bytes) in replaced.writes do
     if (original.writes.lookup address).isNone then
       differences := differences ++ [s!"the replacement leaves {bytes.toList} at {address}, which the handler doesn't"]
-  if original.services.map (·.1) != replaced.services.map (·.1) then
-    differences := differences ++ [s!"it asks {original.services.map (·.1)} and not {replaced.services.map (·.1)}"]
+  differences := differences ++ serviceDifferences original.services replaced.services
   pure { original, replacement := replaced, differences }
 
 end Bap.Analysis.Contract

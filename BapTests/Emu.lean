@@ -2425,6 +2425,18 @@ def testContract (triple : String) : IO Unit := do
   let asking ← Bap.Analysis.Contract.capture recorder profile
   assertEqual s!"Contract {triple} the third round is of state 3" 3 asking.state
   assertTrue s!"Contract {triple} and it asks the kernel" (!asking.services.isEmpty)
+  let skipping ← Bap.Analysis.Contract.verify recorder profile fun machine => machine.write state (word asking.next.get! 4)
+  assertTrue s!"Contract {triple} a replacement that asks nothing is told apart by what it doesn't ask: {skipping.differences}"
+    (asking.services.all fun (name, _) => skipping.differences.contains s!"it asks {name}, which the replacement doesn't")
+  assertEqual s!"Contract {triple} and it ran none of the guest" 0 skipping.replacement.instructions
+  let services := [("read", some 4), ("write", some 1)]
+  assertEqual s!"Contract {triple} what both ask, answered otherwise, is a difference"
+    ["write answers it (some 1) and the replacement (some 2)"]
+    (Bap.Analysis.Contract.serviceDifferences services [("read", some 4), ("write", some 2)])
+  assertEqual s!"Contract {triple} as is one asked once more" ["the replacement asks read, which the handler doesn't"]
+    (Bap.Analysis.Contract.serviceDifferences services (services ++ [("read", some 4)]))
+  assertEqual s!"Contract {triple} and the same asked in another order" ["it asks [read, write] in that order and not [write, read]"]
+    (Bap.Analysis.Contract.serviceDifferences services services.reverse)
 
 /-- What a machine has loaded, by what the files were and whether their initializers ran, and a checkpoint that hasn't what is expected. -/
 def testManifest : IO Unit := do
