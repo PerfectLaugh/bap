@@ -94,4 +94,77 @@ def compare (registers : List Bap.Var) (original simplified : Bil.Program)
 
 def ok (result : Result) : Bool := result.effects && result.registers && result.memory && result.continuation
 
+/-- What a disagreement of a comparison is, so that a real one stands out. -/
+inductive Diagnosis where
+  /-- A run read a variable that the initial state doesn't give, on the side named: until it does, the comparison says nothing. -/
+  | unresolvedInput (side : String) (name : String)
+  /-- What comes next would consume a byte that the memory has on neither side, as of code or data that wasn't captured. -/
+  | missingBytes (memory : String) (address : Nat)
+  /-- A byte that the original stored and the simplified left as it was, outside what comes next consumes: a store taken as dead. -/
+  | deadStore (memory : String) (address : Nat)
+  | mismatch (what : String)
+  deriving DecidableEq, Repr
+
+/-- Whether a memory has the byte at an address at all, which a write gives the page of. -/
+private def holds (memory : Memory width) (address : Nat) : Bool :=
+  memory.pages.contains (address / Memory.pageSize)
+
+private def memoryOf (state : Bil.State) (var : Bap.Var) : Option (Σ width, Memory width) :=
+  match Bil.lookup state.env var with
+  | .ok (@Value.memory width memory) => some ⟨width, memory⟩
+  | _ => none
+
+/-- `compare`, as what each disagreement is: of input that a run needed and wasn't given, of bytes that what comes next consumes and
+neither side has, of a store that the simplified dropped, or a real mismatch. Nothing is what `ok` of `compare` is. -/
+def diagnose (registers : List Bap.Var) (original simplified : Bil.Program)
+    (initial : Bil.State := {}) (fuel : Nat := 100000) (continuationRanges : List (Nat × Nat) := []) :
+    Except String (List Diagnosis) := do
+  let unbound := "unbound variable "
+  -- A run, or the input that it needed and wasn't given.
+  let run (side : String) (program : Bil.Program) : Except String (Except Diagnosis (Bil.State × Bil.Effect)) :=
+    match Bil.run program initial fuel with
+    | .ok result => .ok (.ok result)
+    | .error message =>
+      if message.startsWith unbound then .ok (.error (.unresolvedInput side (message.drop unbound.length).toString))
+      else .error s!"{side}: {message}"
+  let (originalState, originalEffect, simplifiedState, simplifiedEffect) ←
+    match ← run "original" original, ← run "simplified" simplified with
+    | .ok (originalState, originalEffect), .ok (simplifiedState, simplifiedEffect) =>
+      pure (originalState, originalEffect, simplifiedState, simplifiedEffect)
+    | left, right => return [left, right].filterMap fun | .error diagnosis => some diagnosis | .ok _ => none
+  let inRanges (address : Nat) := continuationRanges.any fun (first, last) => first ≤ address && address < last
+  let mut found : Array Diagnosis := #[]
+  if !effectKindEq originalEffect simplifiedEffect then
+    found := found.push (.mismatch s!"the original ends {repr originalEffect} and the simplified {repr simplifiedEffect}")
+  else if !targetEq originalEffect simplifiedEffect then
+    found := found.push (.mismatch s!"the original goes on at {repr originalEffect} and the simplified at {repr simplifiedEffect}")
+  for var in registers.eraseDups do
+    if !(var.typ matches .mem _ _) && !lookupEqual var originalState.env simplifiedState.env then
+      found := found.push (.mismatch s!"{var.name} differs")
+  for var in (memoryVars originalState ++ memoryVars simplifiedState).eraseDups do
+    match memoryOf originalState var, memoryOf simplifiedState var with
+    | some ⟨width, left⟩, some ⟨rightWidth, right⟩ =>
+      if h : rightWidth = width then
+        let right : Memory width := h ▸ right
+        let before : Option (Memory width) := match memoryOf initial var with
+          | some ⟨initialWidth, memory⟩ => if h : initialWidth = width then some (h ▸ memory) else none
+          | none => none
+        let readBefore (address : BitVec width) : UInt8 := (before.map (Memory.readByte · address)).getD 0
+        let addresses := ((Memory.cells left ++ Memory.cells right).map (·.1)).eraseDups
+        for address in addresses do
+          let leftByte := Memory.readByte left address
+          let rightByte := Memory.readByte right address
+          if leftByte != rightByte then
+            if !inRanges address.toNat && rightByte == readBefore address && leftByte != readBefore address then
+              found := found.push (.deadStore var.name address.toNat)
+            else
+              found := found.push (.mismatch s!"{var.name} at {address.toNat} holds {leftByte} and not {rightByte}")
+        for (first, last) in continuationRanges do
+          for offset in List.range (last - first) do
+            let address := first + offset
+            if !holds left address && !holds right address then found := found.push (.missingBytes var.name address)
+      else found := found.push (.mismatch s!"{var.name} is of {width} bits and of {rightWidth}")
+    | _, _ => found := found.push (.mismatch s!"{var.name} is a memory on one side only")
+  pure found.toList
+
 end Bap.Analysis.Validate

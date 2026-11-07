@@ -402,6 +402,23 @@ def run : IO Unit := do
   assertTrue "as memory" !inside.memory
   let outside ← consumed [(0x200, 0x204)]
   assertTrue "a difference outside what the continuation consumes isn't one of it" outside.continuation
+  let diagnose (original simplified : Program) (ranges : List (Nat × Nat) := []) : IO (List Analysis.Validate.Diagnosis) :=
+    match Analysis.Validate.diagnose [result] original simplified { env := [(mem, .memory emptyMemory)] }
+        (continuationRanges := ranges) with
+    | .ok diagnoses => pure diagnoses
+    | .error error => throw <| IO.userError error
+  assertEqual "diagnosis of an equivalent optimization is nothing" [] (← diagnose deadProgram optimized)
+  assertEqual "a store that the simplified dropped is a dead store" [.deadStore "mem" 0x100] (← diagnose (storing 1) [])
+  assertEqual "but not where what comes next consumes it" [.mismatch "mem at 256 holds 1 and not 0"]
+    (← diagnose (storing 1) [] [(0x100, 0x104)])
+  assertEqual "a byte stored otherwise is a mismatch" [.mismatch "mem at 256 holds 1 and not 2"] (← diagnose (storing 1) (storing 2))
+  assertEqual "bytes that what comes next consumes and neither side has are missing" [.missingBytes "mem" 0x1000, .missingBytes "mem" 0x1001]
+    (← diagnose (storing 1) (storing 1) [(0x1000, 0x1002)])
+  let reading : Program := [.move result (.var (reg "input"))]
+  assertEqual "input that neither run was given is unresolved, on each side"
+    [.unresolvedInput "original" "input", .unresolvedInput "simplified" "input"] (← diagnose reading reading)
+  assertEqual "and a changed result is a mismatch" [.mismatch "result differs"]
+    (← diagnose deadProgram (deadProgram ++ [.move result (int 32 0)]))
 
   let captured := reg "x" 8
   let binder := reg "y" 8
