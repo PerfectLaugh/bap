@@ -469,7 +469,11 @@ def run : IO Unit := do
   let verdict (original simplified : Program) := Analysis.Validate.check [result] original simplified { env := [(mem, .memory emptyMemory)] }
   assertTrue "a verdict of an equivalent optimization is ok, with nothing to say" ((verdict deadProgram optimized).ok &&
     (verdict deadProgram optimized).diagnoses.isEmpty)
-  assertEqual "one of a dropped store isn't ok, and has no real mismatch" (false, []) ((verdict (storing 1) []).ok, (verdict (storing 1) []).mismatches)
+  assertEqual "one of a dropped store isn't ok, and says it among what may be real, as nothing says that it is dead"
+    (false, ["mem at 256 isn't stored by the simplified, and nothing says that it is dead"])
+    ((verdict (storing 1) []).ok, (verdict (storing 1) []).mismatches)
+  let deadVerdict := Analysis.Validate.check [result] (storing 1) [] { env := [(mem, .memory emptyMemory)] } (liveRanges := some [])
+  assertEqual "but not one that is dead" [] deadVerdict.mismatches
   assertEqual "one of a run that failed has no result" (false, true) ((verdict reading reading).ok, (verdict reading reading).result.isNone)
 
   let captured := reg "x" 8

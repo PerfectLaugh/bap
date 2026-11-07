@@ -213,9 +213,13 @@ structure Verdict where
 /-- Whether both ran and agree in all that `compare` asks. -/
 def Verdict.ok (verdict : Verdict) : Bool := verdict.result.any Validate.ok
 
-/-- The disagreements that are real ones, rather than of input or bytes that weren't given or of a store that was dropped. -/
+/-- The disagreements that may be real ones: each mismatch, and each store that the simplified dropped that nothing says is dead, as
+`liveRanges` would, as what comes after may read it. Input or bytes that weren't given, and a store that is dead, aren't. -/
 def Verdict.mismatches (verdict : Verdict) : List String :=
-  verdict.diagnoses.filterMap fun | .mismatch what => some what | _ => none
+  verdict.diagnoses.filterMap fun
+    | .mismatch what => some what
+    | .droppedStore memory address => some s!"{memory} at {address} isn't stored by the simplified, and nothing says that it is dead"
+    | _ => none
 
 /-- `compare` and `diagnose` at once. -/
 def check (registers : List Bap.Var) (original simplified : Bil.Program)
