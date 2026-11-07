@@ -4660,6 +4660,12 @@ def testPatch : IO Unit := do
     | .bits bits => bits.toNat % 2 ^ 32
     | _ => 0)
   assertTrue "and its hook is gone" (← straddled.hooks.get).isEmpty
+  -- On ARM, as far before it as an IT block of Thumb that has its bytes may start, which is decoded whole, of up to 18 bytes.
+  let arm ← Bap.Emu.arm32 (ByteArray.mk (List.replicate 0x80 0).toArray) 0 0
+  let armPending ← Bap.Emu.patch arm { address := 0x40, expected := ByteArray.mk #[1, 2], replacement := ByteArray.mk #[3, 4], onMismatch := .wait }
+  assertTrue "A patch that waits on ARM is pending" (armPending matches .pending _)
+  assertEqual "and is tried from as far before it as an IT block that has its bytes starts" [(0x40 - 17, 0x41)]
+    ((← arm.hooks.get).map fun hook => (hook.first, hook.last))
   -- What a check of a program's own code reads of a patch: what it reads is counted by where, and what was there before is kept; one
   -- that is concealed reads what was there before, and what runs there runs the replacement.
   let word (bytes : ByteArray) : Nat := bytes.toList.foldr (fun byte word => word * 256 + byte.toNat) 0

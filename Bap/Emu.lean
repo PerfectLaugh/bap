@@ -1964,8 +1964,10 @@ private def applyPatch (emu : Emu) (address : Nat) (patch : Patch) : IO Patch.Re
   let after ← peek emu address size
   pure (if after == patch.replacement then .applied else .unverified after)
 
-/-- The most bytes that an instruction of any target has, those of x86. -/
-private def longestInstruction : Nat := 15
+/-- How many bytes an instruction is decoded from, at most, which is the most that one has: an IT block of Thumb is decoded whole, its
+two bytes and four instructions of up to four, x86 has up to fifteen, and PowerPC has prefixed instructions of eight. -/
+private def decodeWindow (config : Config) : Nat :=
+  match config.syscallAbi with | .x86_64 | .x86_32 => 16 | .arm => 18 | .powerpc | .powerpc64 => 8 | _ => 4
 
 /-- Applies a patch only where its bytes are what it expects, and says what came of it rather than throwing, but with
 `onMismatch := .error`. With `.wait`, a patch that finds other bytes, or memory that isn't mapped yet, is tried again before each
@@ -1982,8 +1984,9 @@ def patch (emu : Emu) (patch : Patch) : IO Patch.Result := do
   | .mismatch _, .wait | .skipped _, .wait =>
     let space ← currentSpace emu
     let hook ← IO.mkRef (none : Option HookId)
-    -- From 0 for a patch nearer to it than that, where the subtraction of `Nat` stops.
-    let first := address - (longestInstruction - 1)
+    -- From as far before it as an instruction that has some of its bytes may start, or from 0 for a patch nearer to it than that, where
+    -- the subtraction of `Nat` stops.
+    let first := address - (decodeWindow emu.config - 1)
     let id ← onCode emu (first, address + patch.expected.size - 1) fun current _ => do
       if (← currentSpace current) != space then return
       match ← applyPatch current address patch with
@@ -2473,10 +2476,7 @@ private def fetchSpanOf (emu : Emu) (address limit : Nat) : IO (Except String Na
 
 private def fetch (emu : Emu) (address : Nat) : IO ByteArray := do
   try
-    -- An IT block of Thumb is decoded whole: its two bytes and four instructions of up to four.
-    -- And PowerPC has prefixed instructions of eight.
-    let limit := match emu.config.syscallAbi with | .x86_64 | .x86_32 => 16 | .arm => 18 | .powerpc | .powerpc64 => 8 | _ => 4
-    match ← fetchSpanOf emu address limit with
+    match ← fetchSpanOf emu address (decodeWindow emu.config) with
     | .error error => throw <| IO.userError error
     | .ok span =>
       match ← emu.engine.persistentMemory.get with
@@ -2712,8 +2712,7 @@ private def observeRangeCode (emu : Emu) (address : Nat) : IO Bool := do
 
 /-- The bytes that `programAt` makes a program from, as they are now, which is what says whether it still stands. -/
 def codeAt (emu : Emu) (address : Nat) : IO ByteArray := do
-  let limit := match emu.config.syscallAbi with | .x86_64 | .x86_32 => 16 | .arm => 18 | .powerpc | .powerpc64 => 8 | _ => 4
-  peek emu address limit
+  peek emu address (decodeWindow emu.config)
 
 /-- How instructions run from the next one on. What was compiled stays, for if it goes back. -/
 def setExecutionMode (emu : Emu) (mode : ExecutionMode) : IO Unit :=
