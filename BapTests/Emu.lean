@@ -2336,6 +2336,34 @@ def testVerdictTrace (triple : String) : IO Unit := do
   -- A step past the end has no criteria.
   assertTrue s!"VerdictTrace {triple} a step past the end is none" (Bap.Analysis.Verdict.ofTrace pcs pcs.length [] |>.isNone)
 
+/-- The inventory of what a flattened machine does: the services it asks of the kernel and the targets it calls, all together and of
+each state, from the rounds alone. -/
+def testCffEffects (triple : String) : IO Unit := do
+  let (dispatcher, state, _, _, _) ← cffAddresses triple
+  let stack := match triple with | "x86_64" => ("RSP", 64) | "mips" => ("R29", 32) | _ => ("SP", 64)
+  let profile : Bap.Analysis.Cff.Profile := { dispatcher, state := .memory state 4, names := [(3, "asks"), (6, "ends")], registers := [stack] }
+  let machine ← Bap.Linux.start (← cffKernel triple 'C') "/test" ["/test"]
+  let journal ← machine.journal
+  let tracker ← machine.track
+  let recorder ← Bap.Analysis.Cff.Recorder.attach machine.emu profile
+  let _ ← machine.run fun _ => pure ()
+  let record ← journal.toRecord
+  let recovered ← Bap.Analysis.Cff.recoverIn machine.emu profile (← recorder.visits.get) (some record)
+  let taken ← Bap.Analysis.Cff.withPredicates recovered tracker journal
+  let effects := taken.effects
+  let stateOf (s : Nat) := effects.byState.find? (·.state == s)
+  assertTrue s!"CffEffects {triple} the machine asks the kernel" (!effects.services.isEmpty)
+  assertTrue s!"CffEffects {triple} the asking state's service is inventoried, as a syscall"
+    ((stateOf 3).any fun e => e.services.any (·.startsWith "syscall"))
+  assertEqual s!"CffEffects {triple} a state keeps its name" (some (some "asks")) ((stateOf 3).map (·.name))
+  assertTrue s!"CffEffects {triple} a state that only computes asks nothing" ((stateOf 1).any fun e => e.services.isEmpty)
+  assertTrue s!"CffEffects {triple} every state's rounds call something" (effects.byState.all fun e => !e.calls.isEmpty)
+  assertTrue s!"CffEffects {triple} each state's services are within the whole" (effects.byState.all fun e => e.services.all effects.services.contains)
+  assertTrue s!"CffEffects {triple} each state's calls are within the whole" (effects.byState.all fun e => e.calls.all effects.calls.contains)
+  assertEqual s!"CffEffects {triple} the whole has no service twice" effects.services.length effects.services.eraseDups.length
+  assertEqual s!"CffEffects {triple} nor any call twice" effects.calls.length effects.calls.eraseDups.length
+  assertEqual s!"CffEffects {triple} it has every state of the rounds" ((taken.transitions.map (·.state)).eraseDups.length) effects.byState.length
+
 /-- What a handler does, as a contract, without changing the machine, and a replacement checked against it. -/
 def testContract (triple : String) : IO Unit := do
   let (dispatcher, state, _, _, sum) ← cffAddresses triple

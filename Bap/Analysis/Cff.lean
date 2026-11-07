@@ -618,6 +618,46 @@ def withPredicates (dispatcher : Dispatcher) (tracker : Tracker) (journal : Jour
     transitions := transitions.push { transition with predicate }
   pure { dispatcher with transitions := transitions.toList }
 
+/-- What one state of a flattened machine does, over all its rounds: the services it asks of the kernel or host, and the targets it
+calls, each once, in the order they were first asked or called. -/
+structure StateEffects where
+  state : Nat
+  name : Option String
+  services : List String
+  calls : List Nat
+  deriving DecidableEq, Repr
+
+/-- An inventory of what a flattened machine does, from its rounds, without running it again: every service it asks of the kernel or
+host and every target it calls, each once, in first-seen order, and the same for each state on its own — the effects a dispatcher hides
+behind its rounds. The memory it writes beyond the state itself is the Contract's to say, by running a round against a replacement. -/
+structure Effects where
+  services : List String
+  calls : List Nat
+  byState : List StateEffects
+  deriving DecidableEq, Repr
+
+/-- The effects of a dispatcher: what each state asks and calls, and all of it together. -/
+def Dispatcher.effects (dispatcher : Dispatcher) : Effects := Id.run do
+  let names : Std.HashMap Nat (Option String) :=
+    dispatcher.handlers.foldl (fun names handler => names.insert handler.state handler.name) {}
+  -- The states in the order their rounds first came, so the inventory reads as the machine ran.
+  let mut order : List Nat := []
+  let mut perState : Std.HashMap Nat StateEffects := {}
+  for transition in dispatcher.transitions do
+    let state := transition.state
+    if !perState.contains state then order := state :: order
+    let current := perState.getD state { state, name := names.getD state none, services := [], calls := [] }
+    perState := perState.insert state
+      { current with
+        services := (current.services ++ transition.services).eraseDups
+        calls := (current.calls ++ transition.calls).eraseDups }
+  let byState := order.reverse.filterMap (perState[·]?)
+  pure {
+    services := (byState.flatMap (·.services)).eraseDups
+    calls := (byState.flatMap (·.calls)).eraseDups
+    byState
+  }
+
 private def hex (value : Nat) : String := "0x" ++ String.ofList (Nat.toDigits 16 value)
 
 def Dispatcher.text (dispatcher : Dispatcher) : String :=
