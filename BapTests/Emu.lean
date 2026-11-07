@@ -2386,6 +2386,37 @@ def testCffEffects (triple : String) : IO Unit := do
   assertEqual s!"CffEffects {triple} nor any call twice" effects.calls.length effects.calls.eraseDups.length
   assertEqual s!"CffEffects {triple} it has every state of the rounds" ((taken.transitions.map (·.state)).eraseDups.length) effects.byState.length
 
+/-- The graph of the states behind a dispatcher: a direct edge only where every round chose one state without a branch or a condition, the
+alternative that no round took of one chosen on a condition, and nothing direct where the rounds don't say how they chose. -/
+def testCffGraph (triple : String) : IO Unit := do
+  let (dispatcher, state, _, _, _) ← cffAddresses triple
+  let stack := match triple with | "x86_64" => ("RSP", 64) | "mips" => ("R29", 32) | _ => ("SP", 64)
+  let profile : Bap.Analysis.Cff.Profile := { dispatcher, state := .memory state 4, registers := [stack] }
+  let machine ← Bap.Linux.start (← cffKernel triple 'C') "/test" ["/test"]
+  let journal ← machine.journal
+  let tracker ← machine.track
+  let recorder ← Bap.Analysis.Cff.Recorder.attach machine.emu profile
+  let _ ← machine.run fun _ => pure ()
+  let visits ← recorder.visits.get
+  let recovered ← Bap.Analysis.Cff.recoverIn machine.emu profile visits (some (← journal.toRecord))
+  let taken ← Bap.Analysis.Cff.withPredicates recovered tracker journal
+  let cfg := taken.cfg
+  let from_ (source : Nat) := cfg.edges.filter (·.source == source)
+  assertEqual s!"CffGraph {triple} it starts at 1 and ends at 6" (some 1, [6]) (cfg.entry, cfg.exits)
+  assertEqual s!"CffGraph {triple} 1 goes only to 2, directly" [{ source := 1, target := some 2, kind := .direct, count := 5 }] (from_ 1)
+  assertEqual s!"CffGraph {triple} 2 goes to 3 on a condition, and keeps the way to 4 that no round took"
+    [(some 3, Bap.Analysis.Cff.EdgeKind.conditional), (none, .conditional)] ((from_ 2).map fun edge => (edge.target, edge.kind))
+  assertTrue s!"CffGraph {triple} 5 goes to 1 and to 6, neither directly"
+    ([some 1, some 6].all fun target => (from_ 5).any fun edge => edge.target == target && edge.kind != .direct)
+  assertTrue s!"CffGraph {triple} a direct edge is the only one of its state"
+    (cfg.edges.all fun edge => edge.kind != .direct || (from_ edge.source).length == 1)
+  assertTrue s!"CffGraph {triple} each edge to a state is as often as the rounds went there"
+    (cfg.edges.all fun edge => edge.target.all fun target => taken.graph.contains (edge.source, target, edge.count))
+  -- Without a journal, no round says how it chose: nothing is direct.
+  let blind := (Bap.Analysis.Cff.recover profile visits).cfg
+  assertTrue s!"CffGraph {triple} rounds without a journal have no direct edge"
+    (!blind.edges.isEmpty && blind.edges.all (·.kind == .unresolved))
+
 /-- What a handler does, as a contract, without changing the machine, and a replacement checked against it. -/
 def testContract (triple : String) : IO Unit := do
   let (dispatcher, state, _, _, sum) ← cffAddresses triple

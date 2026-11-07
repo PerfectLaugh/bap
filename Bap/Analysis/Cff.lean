@@ -225,6 +225,9 @@ structure Transition where
   /-- What assigned the next state, if that is known: by a write that was seen, of a state in memory, or by the code of the round's
   instructions, of one in a register. -/
   assignment : Option Assignment := none
+  /-- Whether its handler's own code, from where it started, ran a branch on a condition, outside the dispatcher's: none where that
+  isn't known, without a journal of the round or the code of what it ran. -/
+  branched : Option Bool := none
   predicate : Option Predicate := none
   /-- What the registers of the profile held as the round started, and as it ended, when its thread came back to the dispatcher. -/
   registers : List (String × Nat) := []
@@ -488,9 +491,19 @@ def recover (profile : Profile) (visits : Array Visit) (record : Option Journal.
           match chosen with
           | some condition => { pc, conditional := true, condition }
           | none => { pc, conditional := false, condition := [] }
+      let handler := round.bind (entryOf visit.state)
+      let inDispatch (pc : Nat) : Bool := match profile.dispatchRange with
+        | some (low, high) => low ≤ pc && pc < high
+        | none => dispatch.known.contains pc
+      let branched := match round, handler with
+        | some round, some entry =>
+          let own := ((round.toList.drop 1).dropWhile (·.pc != entry)).filter (!inDispatch ·.pc)
+          if own.all fun executed => (programOf executed.pc).isSome then
+            some (own.any fun executed => (programOf executed.pc).any branches)
+          else none
+        | _, _ => none
       let transition : Transition := {
-        thread, group := visit.group, index := k, state := visit.state, next
-        handler := round.bind (entryOf visit.state)
+        thread, group := visit.group, index := k, state := visit.state, next, handler, branched
         exit := if next.isSome then round.bind (·.back?.map (·.pc)) else none
         instructions := if next.isSome then round.map (·.size) else none
         span, services, serviceInputs, calls, assignment
@@ -657,6 +670,62 @@ def Dispatcher.effects (dispatcher : Dispatcher) : Effects := Id.run do
     calls := (byState.flatMap (·.calls)).eraseDups
     byState
   }
+
+/-- How the rounds of a state chose the state after them, as far as they say. -/
+inductive EdgeKind where
+  /-- Without a branch of its handler or a condition, to the one state that every round of it went to. -/
+  | direct
+  /-- On a condition: a branch of its handler, a conditional assignment, or something marked that decided it. -/
+  | conditional
+  /-- Without a branch or a condition, to more than one state, as by a table: computed. -/
+  | indirect
+  /-- How isn't known, as the rounds have no journal or the code of what they ran isn't there: a round went there, but that it is the
+  only way that it goes isn't said. -/
+  | unresolved
+  deriving DecidableEq, Repr
+
+/-- A way from a state to the next: where to, or nowhere known, for an alternative that no round took, and how many rounds took it. -/
+structure Edge where
+  source : Nat
+  target : Option Nat
+  kind : EdgeKind
+  count : Nat
+  deriving DecidableEq, Repr
+
+/-- The control flow that a flattened machine hides behind its dispatcher, of states rather than blocks: the state of its first round, the
+states, the ways from each to the next, and where the rounds ended. -/
+structure Cfg where
+  entry : Option Nat
+  states : List Nat
+  edges : List Edge
+  exits : List Nat
+  deriving DecidableEq, Repr
+
+/-- The graph of the states, from the rounds: an edge is direct only where every round of its state is known to have chosen the next one
+without a branch or a condition and all chose the same. A state that chose on a condition and went one way keeps the alternative that no
+round took, and one that computed where to go keeps that it may go elsewhere, as an edge to nowhere known; an edge whose rounds don't say
+how they chose is unresolved, never direct. -/
+def Dispatcher.cfg (dispatcher : Dispatcher) : Cfg :=
+  let edges := dispatcher.handlers.flatMap fun handler =>
+    let source := handler.state
+    let rounds := dispatcher.transitions.filter fun transition => transition.state == source && transition.next.isSome
+    let targets := dispatcher.graph.filter (·.1 == source)
+    let conditional := rounds.any fun transition =>
+      transition.branched == some true || transition.assignment.any (·.conditional) || transition.predicate.isSome
+    let known := rounds.all fun transition => transition.branched.isSome && transition.assignment.isSome
+    let kind : EdgeKind :=
+      if conditional then .conditional else if !known then .unresolved else if targets.length > 1 then .indirect else .direct
+    let seen := targets.map fun (_, to, count) => { source, target := some to, kind, count : Edge }
+    let open_ := { source, target := none, kind, count := 0 : Edge }
+    if targets.isEmpty then []
+    else match kind with
+      | .conditional => if targets.length == 1 then seen ++ [open_] else seen
+      | .indirect => seen ++ [open_]
+      | _ => seen
+  { entry := dispatcher.transitions.head?.map (·.state)
+    states := dispatcher.handlers.map (·.state)
+    edges
+    exits := (dispatcher.transitions.filter (·.next.isNone)).map (·.state) |>.eraseDups }
 
 private def hex (value : Nat) : String := "0x" ++ String.ofList (Nat.toDigits 16 value)
 
