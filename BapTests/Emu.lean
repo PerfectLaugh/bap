@@ -2420,6 +2420,8 @@ def testCffGraph (triple : String) : IO Unit := do
   assertEqual s!"CffGraph {triple} 1 goes only to 2, directly" [{ source := 1, target := some 2, kind := .direct, count := 5 }] (from_ 1)
   assertEqual s!"CffGraph {triple} 2 goes to 3 on a condition, and keeps the way to 4 that no round took"
     [(some 3, Bap.Analysis.Cff.EdgeKind.conditional), (none, .conditional)] ((from_ 2).map fun edge => (edge.target, edge.kind))
+  assertEqual s!"CffGraph {triple} 3 goes only to 5, directly, as what decided in getpid is getpid's"
+    [{ source := 3, target := some 5, kind := .direct, count := 5 }] (from_ 3)
   assertTrue s!"CffGraph {triple} 5 goes to 1 and to 6, neither directly"
     ([some 1, some 6].all fun target => (from_ 5).any fun edge => edge.target == target && edge.kind != .direct)
   assertTrue s!"CffGraph {triple} a direct edge is the only one of its state"

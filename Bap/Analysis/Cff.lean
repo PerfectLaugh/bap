@@ -225,8 +225,8 @@ structure Transition where
   /-- What assigned the next state, if that is known: by a write that was seen, of a state in memory, or by the code of the round's
   instructions, of one in a register. -/
   assignment : Option Assignment := none
-  /-- Whether its handler's own code, from where it started, ran a branch on a condition, outside the dispatcher's: none where that
-  isn't known, without a journal of the round or the code of what it ran. -/
+  /-- Whether its handler's own code, from where it started, ran a branch on a condition, outside the dispatcher's and what it called:
+  none where that isn't known, without a journal of the round or the code of what it ran. -/
   branched : Option Bool := none
   predicate : Option Predicate := none
   /-- What the registers of the profile held as the round started, and as it ended, when its thread came back to the dispatcher. -/
@@ -308,26 +308,33 @@ private def cyclesFound (thread : ThreadId) (states : Array Nat) (longest : Nat)
 def cyclesOf (thread : ThreadId) (states : Array Nat) (longest : Nat := 32) : List Cycle :=
   (cyclesFound thread states longest).filter (·.holds states)
 
-/-- Whether an instruction compares something with this value, as a chain of compares that dispatches does for the state that it finds. -/
-private partial def comparesWith (value : Nat) : Bil.Program → Bool
-  | [] => false
-  | stmt :: rest =>
-    let rec inExp : Bil.Exp → Bool
-      | .bin op left right =>
-        let constant := match right with
-          | .int bits => bits.toNat == value
-          | _ => false
-        ((op == .sub || op == .eq || op == .neq) && constant) || inExp left || inExp right
-      | .un _ value | .cast _ _ value | .extract _ _ value => inExp value
-      | .letIn _ value body => inExp value || inExp body
-      | .ite condition yes no => inExp condition || inExp yes || inExp no
-      | .concat left right => inExp left || inExp right
-      | _ => false
-    let here := match stmt with
-      | .move _ exp => inExp exp
-      | .ifElse condition yes no => inExp condition || comparesWith value yes || comparesWith value no
-      | _ => false
-    here || comparesWith value rest
+/-- Whether an instruction compares something with this value, as a chain of compares that dispatches does for the state that it finds:
+by a subtraction or an (in)equality of it, or by an addition of its negation, as AArch64 lifts `cmp`, once its constants are folded. -/
+private partial def comparesWith (value : Nat) (program : Bil.Program) : Bool :=
+  let rec inExp : Bil.Exp → Bool
+    | .bin op left right =>
+      let constant := match right with
+        | .int bits => bits.toNat == value
+        | _ => false
+      -- Of either side, as an addition goes either way.
+      let negated := match left, right with
+        | @Bil.Exp.int width bits, _ | _, @Bil.Exp.int width bits => value != 0 && (bits.toNat + value) % 2 ^ width == 0
+        | _, _ => false
+      ((op == .sub || op == .eq || op == .neq) && constant) || (op == .add && negated) || inExp left || inExp right
+    | .un _ value | .cast _ _ value | .extract _ _ value => inExp value
+    | .letIn _ value body => inExp value || inExp body
+    | .ite condition yes no => inExp condition || inExp yes || inExp no
+    | .concat left right => inExp left || inExp right
+    | _ => false
+  let rec go : Bil.Program → Bool
+    | [] => false
+    | stmt :: rest =>
+      let here := match stmt with
+        | .move _ exp => inExp exp
+        | .ifElse condition yes no => inExp condition || go yes || go no
+        | _ => false
+      here || go rest
+  go (Bil.foldProgram program)
 
 /-- Whether an instruction may go two ways. -/
 private partial def branches : Bil.Program → Bool
@@ -335,6 +342,24 @@ private partial def branches : Bil.Program → Bool
   | .ifElse _ _ _ :: _ => true
   | .jmp (.ite ..) :: _ => true
   | _ :: rest => branches rest
+
+/-- The instructions of a round that are its own, at the depth of calls that it started at, rather than of what it called: a call
+comes at the first instruction of what was called and a return at the one that it comes back to, and the round's first instruction,
+which a call may have come to, is where it starts. -/
+private def ownEntries (round : Array Journal.Executed) (events : Array Journal.Event) (from_ : Nat) : Array Journal.Executed := Id.run do
+  let mut depth : Int := 0
+  let mut at_ := from_
+  let mut own : Array Journal.Executed := #[]
+  for (entry, k) in round.zipIdx do
+    while at_ < events.size && events[at_]!.seq ≤ entry.seq do
+      if k > 0 then
+        match events[at_]! with
+        | .call .. => depth := depth + 1
+        | .ret _ _ _ _ frames => depth := depth - frames
+        | _ => pure ()
+      at_ := at_ + 1
+    if depth == 0 then own := own.push entry
+  pure own
 
 /-- What has been seen, in the order that it was first: a list for that and a set for whether it has. -/
 private structure Seen (α : Type) [BEq α] [Hashable α] where
@@ -385,7 +410,7 @@ def recover (profile : Profile) (visits : Array Visit) (record : Option Journal.
         histories := histories.alter entry.thread fun known => some ((known.getD #[]).push entry)
     for event in record.events do
       match event with
-      | .service .. | .call .. => happened := happened.alter event.thread fun known => some ((known.getD #[]).push event)
+      | .service .. | .call .. | .ret .. => happened := happened.alter event.thread fun known => some ((known.getD #[]).push event)
       | _ => pure ()
   -- Each thread's rounds, by where in its own instructions each visit is.
   let mut segments : Std.HashMap ThreadId (Array (Array Journal.Executed)) := {}
@@ -495,13 +520,14 @@ def recover (profile : Profile) (visits : Array Visit) (record : Option Journal.
       let inDispatch (pc : Nat) : Bool := match profile.dispatchRange with
         | some (low, high) => low ≤ pc && pc < high
         | none => dispatch.known.contains pc
-      let branched := match round, handler with
-        | some round, some entry =>
-          let own := ((round.toList.drop 1).dropWhile (·.pc != entry)).filter (!inDispatch ·.pc)
+      let branched := match round, handler, span with
+        | some round, some entry, some (first, _) =>
+          let mine := ownEntries round events (firstFrom events Journal.Event.seq first)
+          let own := ((mine.toList.drop 1).dropWhile (·.pc != entry)).filter (!inDispatch ·.pc)
           if own.all fun executed => (programOf executed.pc).isSome then
             some (own.any fun executed => (programOf executed.pc).any branches)
           else none
-        | _, _ => none
+        | _, _, _ => none
       let transition : Transition := {
         thread, group := visit.group, index := k, state := visit.state, next, handler, branched
         exit := if next.isSome then round.bind (·.back?.map (·.pc)) else none
@@ -710,8 +736,11 @@ def Dispatcher.cfg (dispatcher : Dispatcher) : Cfg :=
     let source := handler.state
     let rounds := dispatcher.transitions.filter fun transition => transition.state == source && transition.next.isSome
     let targets := dispatcher.graph.filter (·.1 == source)
+    -- What was marked and decided a round counts where its own branching isn't known: of one known not to have branched, it was
+    -- decided in what it called, or by a conditional assignment, which counts of itself.
     let conditional := rounds.any fun transition =>
-      transition.branched == some true || transition.assignment.any (·.conditional) || transition.predicate.isSome
+      transition.branched == some true || transition.assignment.any (·.conditional) ||
+        (transition.branched.isNone && transition.predicate.isSome)
     let known := rounds.all fun transition => transition.branched.isSome && transition.assignment.isSome
     let kind : EdgeKind :=
       if conditional then .conditional else if !known then .unresolved else if targets.length > 1 then .indirect else .direct
