@@ -1545,11 +1545,21 @@ private def keptSlots (lowering : Lowering) : Array UInt64 :=
 that ends while LLVM compiles ends in the middle of it, as its static parts are torn down under it. -/
 initialize backgroundCompiles : IO.Ref (Array (Task (Except IO.Error (Jit.Program × Nat)))) ← IO.mkRef #[]
 
+/-- What `backgroundCompiles` is changed under, as engines of workers of a parallel round add to it at once. -/
+initialize backgroundCompilesLock : Std.BaseMutex ← Std.BaseMutex.new
+
+private def withBackgroundCompiles (action : IO α) : IO α := do
+  backgroundCompilesLock.lock
+  try action finally backgroundCompilesLock.unlock
+
 /-- Waits for what is being compiled on other threads, for a process that is about to end. -/
 def finishBackgroundCompiles : IO Unit := do
-  for task in ← backgroundCompiles.get do
-    let _ ← IO.wait task
-  backgroundCompiles.set #[]
+  -- Those that are there now, and again those that came while they were waited for, until none is.
+  repeat
+    let tasks ← withBackgroundCompiles (backgroundCompiles.swap #[])
+    if tasks.isEmpty then break
+    for task in tasks do
+      let _ ← IO.wait task
 
 /-- What a lowering of an entry is, as far as what was compiled of one fits another: a block and a range start at the same address, of the
 same bytes, and are lowered differently, with their slots, their entries and their variables. -/
@@ -1598,8 +1608,9 @@ private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Optio
           else Jit.compileEntries lowering.ops entryLabels lowering.nextSlot true (kept.push (UInt64.ofNat lowering.nextSlot)) variables flushSites
         pure (program, (← IO.monoMsNow) - started)
       -- Of those that were, only those that are still compiling are kept.
-      let running ← (← backgroundCompiles.get).filterM fun task => do pure !(← IO.hasFinished task)
-      backgroundCompiles.set (running.push task)
+      withBackgroundCompiles do
+        let running ← (← backgroundCompiles.get).filterM fun task => do pure !(← IO.hasFinished task)
+        backgroundCompiles.set (running.push task)
       engine.optimizing.modify (·.insert entry.address (entry.code, optimizedOf entry lowering, task))
       Jit.chainOptimizing engine.chain (UInt64.ofNat entry.address) (UInt64.ofNat optimizeCheck)
       return none
