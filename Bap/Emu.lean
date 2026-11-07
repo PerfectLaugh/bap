@@ -3524,9 +3524,10 @@ def compileAhead (emu : Emu) (address : Nat) : IO Unit := do
 
 /-- An emulator that compiles what is at its entry as it is made, if its configuration says so. -/
 private def loaded (emu : Emu) (entry : Nat) : IO Emu := do
-  -- What can't be compiled yet, such as an entry with nothing there, is left to the run, which says what is wrong with it.
-  if emu.config.compileAtLoad then
-    try compileAhead emu entry catch _ => pure ()
+  -- An entry where no code is mapped yet is left to the run, which says what is wrong with it.
+  let mapped := (← emu.regions.get).any fun region =>
+    region.protection.executable && region.address ≤ entry && entry < region.address + region.data.size
+  if emu.config.compileAtLoad && mapped then compileAhead emu entry
   pure emu
 
 /-- The decoders at each base for RISC-V 64, which all share their semantics. -/
