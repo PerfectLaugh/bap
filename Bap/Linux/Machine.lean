@@ -3130,6 +3130,8 @@ structure Machine.CheckpointInfo where
   from it takes of the host, which restoring takes as long as the first. -/
   mapped : Nat
   resident : Nat
+  /-- Each thread, by id, with where it goes on and what it waits for. -/
+  threads : List Bap.Emu.ThreadSummary
 
 /-- The parts of a checkpoint: what `CheckpointInfo` says, with the image of its kernel, its emulator and the bytes of its models. -/
 private def readCheckpoint (data : ByteArray) : IO (Machine.CheckpointInfo × Image × ByteArray × List (String × Nat × ByteArray)) := do
@@ -3184,7 +3186,8 @@ private def readCheckpoint (data : ByteArray) : IO (Machine.CheckpointInfo × Im
   let info : Machine.CheckpointInfo := {
     identity := { format, bap, semantics, target }, architecture, handled
     models := savedModels.map fun (id, version, _) => (id, version), libraries, files, generated
-    tasks := snapshot.table.tasks, waiters := snapshot.table.waiters, signals, mapped, resident }
+    tasks := snapshot.table.tasks, waiters := snapshot.table.waiters, signals, mapped, resident
+    threads := snapshot.threadSummaries }
   pure (info, image, emulator, savedModels)
 
 /-- What a checkpoint says of itself, without restoring anything of it. -/

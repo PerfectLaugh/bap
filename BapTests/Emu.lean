@@ -2450,6 +2450,41 @@ def testRestoreModels : IO Unit := do
   let other := { saved with models := saved.models.map fun (id, version, bytes) => (id, if id == model.id then 2 else version, bytes) }
   expectThrow "and what has another version of it is refused" (machine.restore other)
 
+/-- What a trace has, all at once, and kept as it is through its bytes; and each thread of a snapshot and a checkpoint, with where it goes
+on and what it waits for. -/
+def testSummaries : IO Unit := do
+  let code ← LLVM.assemble "riscv64" "addi a0, a0, 1\nj -4"
+  let emu ← Bap.Emu.riscv64 code 0 0
+  Bap.Emu.setReg emu ⟨"X10", .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 0))
+  assertTrue "Summary of no trace is none" (← Bap.Emu.traceSummary emu).isNone
+  Bap.Emu.traceStartCapacity emu 4
+  let some empty ← Bap.Emu.traceSummary emu | throw <| IO.userError "no summary of a trace that started"
+  assertEqual "A trace that saw nothing yet has nothing and hasn't wrapped" (0, 0, false) (empty.seen, empty.kept, empty.wrapped)
+  let _ ← Bap.Emu.run emu 10
+  let some full ← Bap.Emu.traceSummary emu | throw <| IO.userError "no summary"
+  assertEqual "One that let pcs go has wrapped, and says how many it saw, kept and let go" (10, 4, 6, true)
+    (full.seen, full.kept, full.dropped, full.wrapped)
+  let other ← Bap.Emu.riscv64 code 0 0
+  Bap.Emu.traceLoad other (← Bap.Emu.traceSave emu)
+  let some loaded ← Bap.Emu.traceSummary other | throw <| IO.userError "no summary of a trace loaded"
+  assertEqual "and so does it as it is loaded again" (10, 4, 6, true) (loaded.seen, loaded.kept, loaded.dropped, loaded.wrapped)
+  -- Threads of a snapshot: one that waits on a futex says where.
+  let snapshot ← Bap.Emu.snapshot emu
+  let id := snapshot.currentThread
+  let waiting := { snapshot with table := { snapshot.table with futexes := [{ thread := id, space := id, address := 0x40, bitset := 1 }] } }
+  assertEqual "A thread of a snapshot goes on where its pc is" [{ id, pc := ← emu.pc.get, wait := .runs : Bap.Emu.ThreadSummary }]
+    snapshot.threadSummaries
+  assertEqual "and says what it waits for" [Bap.Emu.ThreadWait.futex 0x40 false] (waiting.threadSummaries.map (·.wait))
+  -- A checkpoint says the same of each of its threads, without restoring it.
+  let (dispatcher, _, _, _, _) ← cffAddresses "aarch64"
+  let machine ← Bap.Linux.start (← cffKernel "aarch64" 'C') "/test" ["/test"]
+  let _ ← Bap.Analysis.Verdict.captureVerdict machine { pc := dispatcher, criteria := [] }
+  let info ← Bap.Linux.Machine.checkpointInfo (← machine.checkpoint)
+  let main ← Bap.Emu.thread machine.emu
+  assertTrue s!"A checkpoint says where each thread goes on: {repr info.threads}"
+    (info.threads.any fun thread => thread.id == main && thread.pc == dispatcher)
+  assertTrue "and has each of its tasks" (info.threads.all fun thread => info.tasks.any (·.tid == thread.id))
+
 /-- What a handler does, as a contract, without changing the machine, and a replacement checked against it. -/
 def testContract (triple : String) : IO Unit := do
   let (dispatcher, state, _, _, sum) ← cffAddresses triple

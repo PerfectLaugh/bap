@@ -856,6 +856,42 @@ private def rollbackBlock (emu : Emu) (snapshot : Snapshot) : IO Unit := do
 /-- How steps have been taken back so far. -/
 def rollbackStats (emu : Emu) : IO RollbackStats := emu.rollbacks.get
 
+/-- What a thread of a snapshot waits for, as it would go on from it: nothing, whoever runs it to let it go on, a futex, a child, or
+nothing any more, as it has exited. -/
+inductive ThreadWait where
+  | runs
+  | stopped
+  | futex (address : Nat) (timed : Bool)
+  | child (target : Option Nat)
+  | exited (status : Nat)
+  deriving DecidableEq, Repr
+
+/-- A thread of a snapshot: where it goes on and what it waits for. -/
+structure ThreadSummary where
+  id : Nat
+  pc : Nat
+  wait : ThreadWait
+  deriving DecidableEq, Repr
+
+/-- Each thread of a snapshot, by id, with where it goes on and what it waits for. -/
+def Snapshot.threadSummaries (snapshot : Snapshot) : List ThreadSummary :=
+  let contexts := if snapshot.threads.any (·.id == snapshot.currentThread) then snapshot.threads.map fun context => (context.id, context.pc, context.stopped)
+    else (snapshot.currentThread, snapshot.pc, snapshot.stopped) :: snapshot.threads.map fun context => (context.id, context.pc, context.stopped)
+  let table := snapshot.table
+  let summaries := contexts.map fun (id, pc, stopped) =>
+    let wait : ThreadWait :=
+      match (table.tasks.find? (·.tid == id)).bind (·.status) with
+      | some status => .exited status
+      | none =>
+        match table.futexes.find? (·.thread == id) with
+        | some waiter => .futex waiter.address waiter.timed
+        | none =>
+          match table.waiters.find? (·.thread == id) with
+          | some waiter => .child waiter.target
+          | none => if stopped then .stopped else .runs
+    { id, pc, wait : ThreadSummary }
+  summaries.mergeSort fun left right => left.id ≤ right.id
+
 /-- Why no thread of a snapshot can go on, if none can: every pc is 0 and nothing is mapped there, as of a snapshot that is zeros. -/
 def Snapshot.unrunnable (snapshot : Snapshot) : Option String :=
   let mapsZero := (snapshot.regions :: snapshot.processMemory.map (·.2)).any fun regions =>
@@ -1292,6 +1328,41 @@ def traceAccessesCount (emu : Emu) (trace : String := "") : IO Nat := do
 def traceDroppedAccesses (emu : Emu) (trace : String := "") : IO Nat := do
   let state ← traceState emu trace
   pure (state.accessCount - min state.accessRetained state.options.accessCapacity)
+
+/-- What a trace has, all at once: what it keeps, how many pcs it saw, kept and let go of for its capacity, of all threads, and so of
+accesses, how many versions of code it keeps, and its rings of threads. One that let none go has every pc since it started; one that
+`wrapped` has the last of them only, and says how many it let go. -/
+structure TraceSummary where
+  options : TraceOptions
+  seen : Nat
+  kept : Nat
+  dropped : Nat
+  accessesSeen : Nat
+  accessesKept : Nat
+  accessesDropped : Nat
+  codeVersions : Nat
+  threads : List TraceThread
+  deriving Repr
+
+/-- Whether a trace let pcs go for its capacity, so that it keeps the last of what it saw only. -/
+def TraceSummary.wrapped (summary : TraceSummary) : Bool := summary.dropped > 0
+
+/-- What a trace has, of the default trace unless a name is given: none if there is no such trace, and one that saw nothing yet if it
+hasn't. -/
+def traceSummary (emu : Emu) (trace : String := "") : IO (Option TraceSummary) := do
+  let some state := (← emu.trace.get).find? trace | return none
+  let rings := if state.options.perThread then state.threadRings.map (·.2) else [state.ring]
+  let accessesKept := min state.accessRetained state.options.accessCapacity
+  pure (some {
+    options := state.options
+    seen := state.count
+    kept := (pcList state).length
+    dropped := rings.foldl (· + ·.dropped) 0
+    accessesSeen := state.accessCount
+    accessesKept
+    accessesDropped := state.accessCount - accessesKept
+    codeVersions := rings.foldl (· + ·.codeSize) 0
+    threads := ← traceThreads emu trace })
 
 /-- All of the trace as bytes, for a checkpoint: what it keeps, its rings with their pcs in order and the bytes that they ran as, its
 accesses, and what it counts and keeps of each, which `traceLoad` makes the same again, so that a machine of a checkpoint has the trace

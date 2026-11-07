@@ -472,6 +472,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testPatch,
     Bap.Tests.Emu.testUnrunnableSnapshot,
     Bap.Tests.Emu.testRestoreModels,
+    Bap.Tests.Emu.testSummaries,
     Bap.Tests.Emu.testKernelFiles,
     Bap.Tests.Emu.testSeccompState,
     Bap.Tests.Emu.testWaitResultMapping "x86_64",
