@@ -2469,6 +2469,13 @@ private def isThumb (state : Bil.State) : Bool :=
   | .ok (.bits bits) => bits.toNat == 1
   | _ => false
 
+/-- The bytes that the engine knows code by, of the mode that it runs in: those of Thumb with a byte after them that those of ARM haven't,
+so that the same bytes at an address are two blocks, and two versions of one, rather than one lifted in the other mode. -/
+private def codeOfMode (thumb : Bool) (code : ByteArray) : ByteArray := if thumb then code.push 1 else code
+
+/-- The bytes of code as they are, of those that the engine knows it by. -/
+private def codeWithoutMode (thumb : Bool) (code : ByteArray) : ByteArray := if thumb then code.extract 0 (code.size - 1) else code
+
 private def disassemblerFor (emu : Emu) (thumb : Bool) (address : Nat) :=
   match emu.config.thumbAt, emu.config.disassemblerAt with
   | some create, _ => if thumb then create address else
@@ -2855,7 +2862,10 @@ private def runRange (emu : Emu) (address budget : Nat) : IO (Nat × Bil.Effect)
   -- What only Lean's bookkeeping would come between goes on in native code from range to range: nothing observes code, no address is
   -- one to step at alone, and no branch waits for its delay slot.
   let chainable := quiet && (← emu.watchedSteps.get).isEmpty && (← emu.pendingRef.get).isNone
-  let result ← Primus.Lifted.runBlockObserved emu.engine (fetch emu) (fun target code => lift emu (isThumb state) target code) state address
+  -- Of the mode that it runs in, which the bytes are known by too.
+  let thumb := isThumb state
+  let result ← Primus.Lifted.runBlockObserved emu.engine (fun target => do pure (codeOfMode thumb (← fetch emu target)))
+    (fun target code => lift emu thumb target (codeWithoutMode thumb code)) state address
     (some (notifyMemory emu)) (some (observeRangeCode emu)) (!quiet) budget observedIn chainable
   Primus.Lifted.flushDirtyRange emu.engine
   emu.state.set result.state

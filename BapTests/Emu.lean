@@ -2590,6 +2590,29 @@ def testMeasure : IO Unit := do
   | .bits bits => assertEqual "and run as they are" 10 bits.toNat
   | _ => throw <| IO.userError "no a0"
 
+/-- The same bytes at the same address, run as ARM and then as Thumb: each runs as what it is in its mode, rather than as what was lifted
+of it in the other. `mov r0, #1` of ARM is `movs r1, r0` and a branch of Thumb. -/
+def testThumbAndArmAtOneAddress : IO Unit := do
+  let code ← LLVM.assemble "armv7" "mov r0, #1"
+  let register (name : String) : Bap.Var := ⟨name, .imm 32, 0, false⟩
+  -- As it is interpreted, and compiled at once with ranges.
+  for (label, adjust) in [("interpreted", id), ("compiled", fun (config : Bap.Emu.Config) => { config with hotThreshold := 1, rangeLimit := 8 })] do
+    let emu ← Bap.Emu.arm32 (code ++ code) 0 0 (adjust := adjust)
+    let set (name : String) (value : Nat) := Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 32 value))
+    let value (name : String) : IO Nat := do
+      match ← Bap.Emu.reg emu (register name) with
+      | .bits bits => pure bits.toNat
+      | _ => pure 0
+    for mode in [0, 1, 0, 1] do
+      set "R0" 9
+      set "R1" 0
+      Bap.Emu.setReg emu ⟨"ISET", .imm 1, 0, false⟩ (.bits (BitVec.ofNat 1 mode))
+      Bap.Emu.setPc emu 0
+      let _ ← Bap.Emu.run emu 1
+      let name := if mode == 0 then "ARM" else "Thumb"
+      assertEqual s!"{name} at an address that the other ran runs as {name}, {label}" (if mode == 0 then (1, 0) else (9, 9))
+        (← value "R0", ← value "R1")
+
 /-- What a handler does, as a contract, without changing the machine, and a replacement checked against it. -/
 def testContract (triple : String) : IO Unit := do
   let (dispatcher, state, _, _, sum) ← cffAddresses triple
