@@ -286,7 +286,8 @@ structure Engine where
   variables : IO.Ref (Array Bap.Var)
   /-- What is being optimized on another thread, by where it starts, with the bytes it was compiled from and what it is of them (see
   `optimizedOf`): the run goes on with what there is until it is done. -/
-  optimizing : IO.Ref (Std.HashMap Nat (ByteArray × (List (Nat × Nat) × Nat × List Nat × Nat) × Task (Except IO.Error (Jit.Program × Nat))))
+  optimizing : IO.Ref (Std.HashMap Nat (ByteArray × (List (Nat × Nat) × Nat × List Nat × Nat) × List Jit.Op ×
+    Task (Except IO.Error (Jit.Program × Nat))))
 
 /-- What a run of a block or a range comes to: the state after it, where it went, where the instruction after the last that it ran
 is, and how it ended. -/
@@ -1533,6 +1534,11 @@ private def evictColdest (engine : Engine)
       pure (entries.erase address)
     | none => pure entries
 
+private unsafe def sameOpsImpl (left right : List Jit.Op) : Bool := ptrAddrUnsafe left == ptrAddrUnsafe right
+
+/-- Whether two lists of operations are one object, as those of one lowering are. It may say no when they are only equal. -/
+@[implemented_by sameOpsImpl] private def sameOps (_ _ : List Jit.Op) : Bool := false
+
 /-- Whether two byte strings are the same, without unpacking them. -/
 private def sameBytes (left right : ByteArray) : Bool :=
   left.size == right.size &&
@@ -1657,7 +1663,7 @@ private def startOptimizing (engine : Engine) (address : Nat) (code : ByteArray)
   withBackgroundCompiles do
     let running ← (← backgroundCompiles.get).filterM fun task => do pure !(← IO.hasFinished task)
     backgroundCompiles.set (running.push task)
-  engine.optimizing.modify (·.insert address (code, of, task))
+  engine.optimizing.modify (·.insert address (code, of, lowering.reversed, task))
   Jit.chainOptimizing engine.chain (UInt64.ofNat address) (UInt64.ofNat optimizeCheck)
 
 /-- Whether an address is inside a range, other than at its start, that loops back to its start and is being optimized. -/
@@ -1681,9 +1687,10 @@ private def optimizedVersion (engine : Engine) (entry : CachedBlock) : IO (Optio
     -- less of it runs as it is.
     if !(loopsOf lowering) && (← entry.executions.get) < optimizeFrom then return none
     match (← engine.optimizing.get)[entry.address]? with
-    | some (code, of, task) =>
-      -- What was compiled of other bytes than these, or for another lowering of them, is for nothing.
-      if !sameBytes code entry.code || of != optimizedOf entry lowering then
+    | some (code, of, ops, task) =>
+      -- What was compiled of other bytes than these, or for another lowering of them, is for nothing: of the very operations
+      -- that what it goes on in was compiled from, as it goes on in that where they are, which another lowering has elsewhere.
+      if !sameBytes code entry.code || of != optimizedOf entry lowering || !sameOps ops lowering.reversed then
         engine.optimizing.modify (·.erase entry.address)
         return none
       if !(← IO.hasFinished task) then
