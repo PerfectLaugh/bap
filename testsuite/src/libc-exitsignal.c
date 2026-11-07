@@ -2,7 +2,9 @@
 // clone with SIGUSR1 sends SIGUSR1 and not SIGCHLD, and one with 0 sends nothing; a wait sees such a child, a clone child, only with
 // __WCLONE or __WALL, and a wait without them sees only the others, failing with ECHILD if there are none; a clone child isn't reaped as
 // it exits when SIGCHLD is ignored, which only a child that sends SIGCHLD is; and the parent of a child that another process traces hears
-// of its exit only once that tracer has waited for it. It says what each call gave, the same on each target.
+// of its exit only once that tracer has waited for it; and a clone child's exit signal is SIGCHLD if its parent has run a program since
+// it made it, as Linux has it. It says what each call gave, the same on each target. The libc of the tests has no execve, so it is
+// called by number.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <signal.h>
@@ -78,7 +80,21 @@ static void waited(const char *label, int pid, int options) {
   say(label, 2, got <= 0 ? got : got == pid || pid < 0, got > 0 && WIFEXITED(status) ? WEXITSTATUS(status) : -1);
 }
 
-int main(void) {
+// The program that its parent runs while a clone child of SIGUSR1 waits on the pipe whose other end is the descriptor `text`: that
+// child ends once the end is closed, and its parent, which isn't the program that made it, is sent SIGCHLD.
+static int afterExec(const char *text) {
+  int end = 0;
+  for (; *text; text++) end = end * 10 + (*text - '0');
+  setAction(SIGUSR1, onUsr1);
+  setAction(SIGCHLD, onChld);
+  close(end);
+  waited("exec waitpid wclone", -1, __WCLONE);
+  say("exec heard usr1 chld", 2, usr1, chld);
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  if (argc > 2 && strcmp(argv[1], "exec") == 0) return afterExec(argv[2]);
   setAction(SIGUSR1, onUsr1);
   setAction(SIGCHLD, onChld);
 
@@ -192,5 +208,25 @@ int main(void) {
   waited("traced waitpid", traced, 0);
   write(toTracer[1], &byte, 1);
   waited("tracer waitpid", tracer, 0);
-  return 0;
+
+  // The parent of a clone child runs a program, which hears of its end: see `afterExec`.
+  int ends[2];
+  pipe(ends);
+  child = cloneWith(SIGUSR1);
+  if (child == 0) {
+    close(ends[1]);
+    read(ends[0], &byte, 1);
+    _exit(10);
+  }
+  close(ends[0]);
+  char text[24];
+  int digits = 0;
+  for (int end = ends[1]; end || !digits; end /= 10) digits++;
+  text[digits] = 0;
+  for (int end = ends[1], at = digits; at; end /= 10) text[--at] = (char)('0' + end % 10);
+  char *arguments[] = {argv[0], "exec", text, 0};
+  char *environment[] = {0};
+  syscall(SYS_execve, argv[0], arguments, environment);
+  say("exec failed", 1, -errno, 0);
+  return 1;
 }

@@ -225,8 +225,9 @@ private def reapUnwaited (ptrace : Ptrace) (emu : Emu) : IO Unit := do
 /-- A process that is over goes without a wait if it sends SIGCHLD to a parent that doesn't wait for its children, as Linux has it, once
 the parent has heard of it. -/
 private def markUnwaited (ptrace : Ptrace) (emu : Emu) (group : Nat) : IO Unit := do
-  let some task := (← emu.taskTable.get).find? group | return
-  if task.parent != 0 && task.exitSignal.isNone && (← ptrace.signals.reapsChildren task.parent) then
+  let tasks ← emu.taskTable.get
+  let some task := tasks.find? group | return
+  if task.parent != 0 && (tasks.exitSignalOf task).isNone && (← ptrace.signals.reapsChildren task.parent) then
     ptrace.table.modify fun table => { table with reaping := table.reaping ++ [group] }
 
 /-- The exit of a thread that a tracer that isn't its parent was to hear of is no longer for that one, as it waited for it or is over: if

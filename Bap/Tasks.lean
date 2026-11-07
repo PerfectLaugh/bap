@@ -33,6 +33,11 @@ structure Entry where
   /-- The signal that its parent is sent when its process ends, if `clone` asked for one other than SIGCHLD, which `fork` has: 0 is
   none. Such a process is a clone child, which a wait sees only if it asks for those, as Linux has it. -/
   exitSignal : Option Nat := none
+  /-- How many programs it has run, as Linux's `self_exec_id`: a new task has the count of the task that made it. -/
+  selfExecId : Nat := 0
+  /-- The `selfExecId` that its parent had when it was made, as Linux's `parent_exec_id`, which a thread has of its process. If the parent
+  has run a program since, it is sent SIGCHLD for this one and not its `exitSignal`. -/
+  parentExecId : Nat := 0
   deriving DecidableEq, Repr
 
 /-- A task blocked on a futex, which is the word at `address` of `space`. -/
@@ -107,6 +112,11 @@ def poll (table : TaskTable) (parent : Nat) (target : Option Nat) : WaitResult :
   match children.findSome? table.report with
   | some (pid, status) => .exited pid status
   | none => if children.isEmpty then .noChild else .running
+
+/-- The signal that the parent of `task` is sent when its process ends, as Linux's `do_notify_parent` has it: its `exitSignal`, unless its
+parent has run a program since it made it, and then SIGCHLD, which is `none`. -/
+def exitSignalOf (table : TaskTable) (task : Entry) : Option Nat :=
+  if (table.find? task.parent).any (·.selfExecId != task.parentExecId) then none else task.exitSignal
 
 /-- The children of a group that is over go to `init`, as it can't wait for them, and send it SIGCHLD. -/
 def reparent (table : TaskTable) (group init : Nat) : TaskTable :=
@@ -185,15 +195,17 @@ def blockedTasks (table : TaskTable) : List Nat :=
 def setClearTid (table : TaskTable) (tid address : Nat) : TaskTable :=
   { table with tasks := table.tasks.map fun task => if task.tid == tid then { task with clearTid := some address } else task }
 
-/-- `execve` of the task, once the others of its group are over: it has no `clearTid`, which was of the program that it ran, and if
-it isn't the leader, it takes the leader's id, which is the process's, and its place, with SIGCHLD to send, and the leader is gone. -/
+/-- `execve` of the task, once the others of its group are over: it has run one more program, it has no `clearTid`, which was of the
+program that it ran, and if it isn't the leader, it takes the leader's id, which is the process's, and its place, with SIGCHLD to send,
+and the leader is gone. -/
 def executed (table : TaskTable) (tid : Nat) : TaskTable :=
   match table.find? tid with
   | none => table
   | some task =>
     let exitSignal := if tid == task.group then task.exitSignal else none
+    let selfExecId := task.selfExecId + 1
     { table with tasks := table.tasks.filterMap fun other =>
-        if other.tid == task.group then some { task with tid := task.group, parent := other.parent, clearTid := none, exitSignal }
+        if other.tid == task.group then some { task with tid := task.group, parent := other.parent, clearTid := none, exitSignal, selfExecId }
         else if other.tid == tid then none
         else some other }
 

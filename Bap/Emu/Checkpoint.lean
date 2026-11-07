@@ -93,7 +93,8 @@ private def putTask (writer : Writer) (task : Tasks.Entry) : Writer :=
   let writer := putNat writer task.group
   let writer := putNat writer task.parent
   let writer := putNat writer task.space
-  putSkipBin (putSkipBin (putSkipBin writer task.status) task.clearTid) task.exitSignal
+  let writer := putSkipBin (putSkipBin (putSkipBin writer task.status) task.clearTid) task.exitSignal
+  putNat (putNat writer task.selfExecId) task.parentExecId
 
 private def putFutex (writer : Writer) (waiter : Tasks.FutexWaiter) : Writer :=
   let writer := putNat writer waiter.thread
@@ -250,8 +251,9 @@ private def getProcessBin (getRegion : Reader → Except String (Region × Reade
   let (regions, reader) ← getList reader getRegion
   .ok ((id, regions), reader)
 
-/-- A task, with its exit signal if `signal` says the format has it: a task of a format before it sends SIGCHLD. -/
-private def getTask (signal : Bool) (reader : Reader) : Except String (Tasks.Entry × Reader) := do
+/-- A task, with its exit signal if `signal` says the format has it, and the programs it and its parent had run if `execIds` says the
+format has them: a task of a format before it sends SIGCHLD, and one before them has counts of 0. -/
+private def getTask (signal execIds : Bool) (reader : Reader) : Except String (Tasks.Entry × Reader) := do
   let (tid, reader) ← getNat reader
   let (group, reader) ← getNat reader
   let (parent, reader) ← getNat reader
@@ -259,7 +261,9 @@ private def getTask (signal : Bool) (reader : Reader) : Except String (Tasks.Ent
   let (status, reader) ← getSkipBin reader
   let (clearTid, reader) ← getSkipBin reader
   let (exitSignal, reader) ← if signal then getSkipBin reader else .ok (none, reader)
-  .ok (⟨tid, group, parent, space, status, clearTid, exitSignal⟩, reader)
+  let (selfExecId, reader) ← if execIds then getNat reader else .ok (0, reader)
+  let (parentExecId, reader) ← if execIds then getNat reader else .ok (0, reader)
+  .ok (⟨tid, group, parent, space, status, clearTid, exitSignal, selfExecId, parentExecId⟩, reader)
 
 private def getFutex (reader : Reader) : Except String (Tasks.FutexWaiter × Reader) := do
   let (thread, reader) ← getNat reader
@@ -276,7 +280,10 @@ private def getWaiter (reader : Reader) : Except String (Tasks.Waiter × Reader)
   let (statusAddress, reader) ← getSkipBin reader
   .ok (⟨thread, target, statusAddress⟩, reader)
 
-private def binaryMagic : ByteArray := "BAPCKPT7".toUTF8
+private def binaryMagic : ByteArray := "BAPCKPT8".toUTF8
+
+/-- What checkpoints were before tasks had the programs that they and their parents had run, which are still read. -/
+private def binaryMagicV7 : ByteArray := "BAPCKPT7".toUTF8
 
 /-- What checkpoints were before tasks had their exit signal, which are still read. -/
 private def binaryMagicV6 : ByteArray := "BAPCKPT6".toUTF8
@@ -340,7 +347,7 @@ private def processFits (process : ThreadId × List Region) : Bool :=
 
 private def taskFits (task : Tasks.Entry) : Bool :=
   fitsWord task.tid && fitsWord task.group && fitsWord task.parent && fitsWord task.space && skipFits task.status &&
-    skipFits task.clearTid && skipFits task.exitSignal
+    skipFits task.clearTid && skipFits task.exitSignal && fitsWord task.selfExecId && fitsWord task.parentExecId
 
 private def futexFits (waiter : Tasks.FutexWaiter) : Bool :=
   fitsWord waiter.thread && fitsWord waiter.space && fitsWord waiter.address && fitsWord waiter.bitset && skipFits waiter.deadline
@@ -367,9 +374,10 @@ def encodeBinarySnapshot (snapshot : Snapshot) : Except String ByteArray :=
 
 /-- The snapshot that `encodeBinarySnapshot` made, of either format that it has made, with its memory variable left out as it was. -/
 def decodeBinarySnapshot (data : ByteArray) : Except String Snapshot := do
-  let (getRegion, signal) ← if data.extract 0 binaryMagic.size == binaryMagic then pure (getRegionBin, true)
-    else if data.extract 0 binaryMagicV6.size == binaryMagicV6 then pure (getRegionBin, false)
-    else if data.extract 0 binaryMagicV5.size == binaryMagicV5 then pure (getRegionV5, false)
+  let (getRegion, signal, execIds) ← if data.extract 0 binaryMagic.size == binaryMagic then pure (getRegionBin, true, true)
+    else if data.extract 0 binaryMagicV7.size == binaryMagicV7 then pure (getRegionBin, true, false)
+    else if data.extract 0 binaryMagicV6.size == binaryMagicV6 then pure (getRegionBin, false, false)
+    else if data.extract 0 binaryMagicV5.size == binaryMagicV5 then pure (getRegionV5, false, false)
     else .error "not a binary checkpoint"
   do
     let reader : Reader := { data, offset := binaryMagic.size }
@@ -383,7 +391,7 @@ def decodeBinarySnapshot (data : ByteArray) : Except String Snapshot := do
     let (pending, reader) ← getPendingBin reader
     let (processMemory, reader) ← getList reader (getProcessBin getRegion)
     let (skip, reader) ← getSkipBin reader
-    let (tasks, reader) ← getList reader (getTask signal)
+    let (tasks, reader) ← getList reader (getTask signal execIds)
     let (waiters, reader) ← getList reader getWaiter
     let (futexes, reader) ← getList reader getFutex
     if reader.offset != data.size then

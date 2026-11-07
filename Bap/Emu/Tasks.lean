@@ -55,7 +55,9 @@ def clone (emu : Emu) (options : CloneOptions) : IO ThreadId := do
   emu.nextThreadRef.set (id + 1)
   let group := if options.sameGroup then task.group else id
   let parent := if options.sameGroup then task.parent else task.group
-  emu.taskTable.modify (·.addTask { tid := id, group, parent, space := task.space, exitSignal := options.exitSignal })
+  let parentExecId := if options.sameGroup then task.parentExecId else task.selfExecId
+  emu.taskTable.modify (·.addTask
+    { tid := id, group, parent, space := task.space, exitSignal := options.exitSignal, selfExecId := task.selfExecId, parentExecId })
   let width ← wordWidth emu
   let (_, _, result) := syscallRegisters emu.config.syscallAbi
   let (stackRegister, threadRegister) := threadRegisters emu.config.syscallAbi

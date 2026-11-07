@@ -27,3 +27,5 @@ traced tracer waited 3
 traced heard chld after 1
 traced waitpid 1 3
 tracer waitpid 1 0
+exec waitpid wclone 1 10
+exec heard usr1 chld 0 1

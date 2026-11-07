@@ -2070,22 +2070,24 @@ theorem getProcess_decodes (process : ThreadId × List Bap.Emu.Region) (h : Proc
 
 private def encTask (task : Tasks.Entry) : ByteArray :=
   natBytes task.tid ++ natBytes task.group ++ natBytes task.parent ++ natBytes task.space ++ encSkip task.status ++
-    encSkip task.clearTid ++ encSkip task.exitSignal
+    encSkip task.clearTid ++ encSkip task.exitSignal ++ natBytes task.selfExecId ++ natBytes task.parentExecId
 
 /-- A task representable in the binary format. -/
 def TaskSafe (task : Tasks.Entry) : Prop :=
   task.tid < 2 ^ 64 ∧ task.group < 2 ^ 64 ∧ task.parent < 2 ^ 64 ∧ task.space < 2 ^ 64 ∧ SkipSafe task.status ∧
-    SkipSafe task.clearTid ∧ SkipSafe task.exitSignal
+    SkipSafe task.clearTid ∧ SkipSafe task.exitSignal ∧ task.selfExecId < 2 ^ 64 ∧ task.parentExecId < 2 ^ 64
 
 private theorem data_putTask (writer : Writer) (task : Tasks.Entry) :
     Writer.data (putTask writer task) = Writer.data writer ++ encTask task := by
   simp only [putTask, encTask, data_putSkip, data_putNat, ByteArray.append_assoc]
 
-theorem getTask_decodes (task : Tasks.Entry) (h : TaskSafe task) : Decodes (getTask true) (encTask task) task := by
+theorem getTask_decodes (task : Tasks.Entry) (h : TaskSafe task) : Decodes (getTask true true) (encTask task) task := by
   intro data offset hat
-  obtain ⟨tid, group, parent, space, status, clearTid, exitSignal⟩ := task
-  obtain ⟨h1, h2, h3, h4, h5, h6, h7⟩ := h
-  obtain ⟨hl, he⟩ := At.split hat
+  obtain ⟨tid, group, parent, space, status, clearTid, exitSignal, selfExecId, parentExecId⟩ := task
+  obtain ⟨h1, h2, h3, h4, h5, h6, h7, h8, h9⟩ := h
+  obtain ⟨hl, hpe⟩ := At.split hat
+  obtain ⟨hl, hse⟩ := At.split hl
+  obtain ⟨hl, he⟩ := At.split hl
   obtain ⟨hl, hc⟩ := At.split hl
   obtain ⟨hl, hs⟩ := At.split hl
   obtain ⟨hl, hsp⟩ := At.split hl
@@ -2098,8 +2100,11 @@ theorem getTask_decodes (task : Tasks.Entry) (h : TaskSafe task) : Decodes (getT
   have d5 := getSkip_decodes status h5 data _ hs
   have d6 := getSkip_decodes clearTid h6 data _ hc
   have d7 := getSkip_decodes exitSignal h7 data _ he
-  simp only [ByteArray.size_append, Nat.add_assoc] at d1 d2 d3 d4 d5 d6 d7
-  simp only [getTask, bind, Except.bind, d1, d2, d3, d4, d5, d6, d7, encTask, ByteArray.size_append, Nat.add_assoc, ↓reduceIte]
+  have d8 := natBytes_decodes selfExecId h8 data _ hse
+  have d9 := natBytes_decodes parentExecId h9 data _ hpe
+  simp only [ByteArray.size_append, Nat.add_assoc] at d1 d2 d3 d4 d5 d6 d7 d8 d9
+  simp only [getTask, bind, Except.bind, d1, d2, d3, d4, d5, d6, d7, d8, d9, encTask, ByteArray.size_append, Nat.add_assoc,
+    ↓reduceIte]
 
 private def encFutex (waiter : Tasks.FutexWaiter) : ByteArray :=
   natBytes waiter.thread ++ natBytes waiter.space ++ natBytes waiter.address ++ natBytes waiter.bitset ++
@@ -2226,7 +2231,7 @@ private theorem unchecked_roundtrip (snapshot : Snapshot) (h : SnapshotSafe snap
     rw [← hdata, ByteArray.size_append]
   have hsame : (binaryMagic == binaryMagic) = true := by decide +kernel
   simp only [decodeBinarySnapshot, hmagic, hsame, ↓reduceIte]
-  rw [bind_ok_eq (rfl : (pure (getRegionBin, true) : Except String _) = .ok (getRegionBin, true))]
+  rw [bind_ok_eq (rfl : (pure (getRegionBin, true, true) : Except String _) = .ok (getRegionBin, true, true))]
   clear hmagic hdata hsame
   generalize binaryMagic.size = start at hat hsize ⊢
   obtain ⟨⟨env⟩, pc, regions, stopped, threads, current, next, pending, processes, skip, ⟨table, waiters, futexes⟩⟩ := snapshot
@@ -2257,7 +2262,7 @@ private theorem unchecked_roundtrip (snapshot : Snapshot) (h : SnapshotSafe snap
   have d9 := getList_decodes (decode := getProcessBin getRegionBin) encProcess id processes h.processesLength h9
     fun p hp => getProcess_decodes p (h.processes p hp)
   have d10 := getSkip_decodes skip h.skip data _ h10
-  have d11 := getList_decodes (decode := getTask true) encTask id table h.tableLength h11
+  have d11 := getList_decodes (decode := getTask true true) encTask id table h.tableLength h11
     fun t ht => getTask_decodes t (h.table t ht)
   have d12 := getList_decodes (decode := getWaiter) encWaiter id waiters h.waitersLength h12t
     fun w hw => getWaiter_decodes w (h.waiters w hw)
@@ -2332,9 +2337,10 @@ private theorem fits_process {process : ThreadId × List Bap.Emu.Region} (h : pr
 
 private theorem fits_task {task : Tasks.Entry} (h : taskFits task = true) : TaskSafe task := by
   simp only [taskFits, Bool.and_eq_true] at h
-  obtain ⟨⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩ := h
+  obtain ⟨⟨⟨⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩, h8⟩, h9⟩ := h
   exact ⟨by simpa [fitsWord] using h1, by simpa [fitsWord] using h2, by simpa [fitsWord] using h3,
-    by simpa [fitsWord] using h4, fits_skip h5, fits_skip h6, fits_skip h7⟩
+    by simpa [fitsWord] using h4, fits_skip h5, fits_skip h6, fits_skip h7, by simpa [fitsWord] using h8,
+    by simpa [fitsWord] using h9⟩
 
 private theorem fits_futex {waiter : Tasks.FutexWaiter} (h : futexFits waiter = true) : FutexSafe waiter := by
   simp only [futexFits, Bool.and_eq_true] at h

@@ -1095,12 +1095,12 @@ def faulted (signals : Signals) (emu : Emu) (fault : MemoryFault) : IO Bool := d
   | .terminate | .stop => fail "nothing handles SIGSEGV"
 
 /-- The parent of a process that is over hears of it, as Linux's `do_notify_parent` has it: it is sent the exit signal of the process,
-which is SIGCHLD unless `clone` asked for another, or for none. -/
+which is SIGCHLD unless `clone` asked for another, or for none, and SIGCHLD if the parent has run a program since it made it. -/
 def notifyParent (signals : Signals) (emu : Emu) (group status : Nat) : IO Unit := do
   let table ← emu.taskTable.get
   let some task := table.find? group | return
   if task.parent == 0 then return
-  let signal := task.exitSignal.getD (signals.numbers).chld
+  let signal := (table.exitSignalOf task).getD (signals.numbers).chld
   if signal == 0 || signal > (signals.numbers).count then return
   -- A parent that ignores SIGCHLD isn't sent it, as Linux has it.
   if signal == (signals.numbers).chld && (← actionOf signals task.parent signal).handler == 1 then return
