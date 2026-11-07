@@ -917,6 +917,30 @@ static lean_obj_res compileOps(lean_obj_arg ops, bool optimized, lean_obj_arg en
         uint64_t pc = lean_ctor_get_uint64(op, sizeof(void *));
         llvm::BasicBlock *stopBlock = llvm::BasicBlock::Create(*context, "code_stop", function);
         llvm::BasicBlock *continueBlock = llvm::BasicBlock::Create(*context, "code_continue", function);
+        // What `bap_jit_code_notify` does without running Lean code is done here, without a call, which would keep what is in the
+        // registers of the host from staying there across it: nothing where nothing observes code, and where a site would only set
+        // the pc, it waits as the pending one. Anything else is the call's.
+        auto cellsField = [&](llvm::Type *type, size_t offset) {
+          return builder.CreateLoad(type, builder.CreateGEP(byte, memory, llvm::ConstantInt::get(word, offset)));
+        };
+        llvm::Value *observed = builder.CreateIsNotNull(cellsField(pointer, offsetof(BapCells, codeObserver)));
+        llvm::Value *fine = builder.CreateIsNull(cellsField(pointer, offsetof(BapCells, error)));
+        llvm::Value *waits = builder.CreateAnd(
+            builder.CreateICmpNE(cellsField(byte, offsetof(BapCells, quietSites)), llvm::ConstantInt::get(byte, 0)),
+            builder.CreateICmpEQ(cellsField(byte, offsetof(BapCells, leanRan)), llvm::ConstantInt::get(byte, 0)));
+        llvm::BasicBlock *pendBlock = llvm::BasicBlock::Create(*context, "code_pend", function);
+        llvm::BasicBlock *decideBlock = llvm::BasicBlock::Create(*context, "code_decide", function);
+        llvm::BasicBlock *callBlock = llvm::BasicBlock::Create(*context, "code_call", function);
+        builder.CreateCondBr(builder.CreateAnd(fine, builder.CreateNot(observed)), continueBlock, decideBlock);
+        builder.SetInsertPoint(decideBlock);
+        builder.CreateCondBr(builder.CreateAnd(fine, waits), pendBlock, callBlock);
+        builder.SetInsertPoint(pendBlock);
+        builder.CreateStore(llvm::ConstantInt::get(byte, 1),
+                            builder.CreateGEP(byte, memory, llvm::ConstantInt::get(word, offsetof(BapCells, pendingSite))));
+        builder.CreateStore(llvm::ConstantInt::get(word, pc),
+                            builder.CreateGEP(byte, memory, llvm::ConstantInt::get(word, offsetof(BapCells, pendingPc))));
+        builder.CreateBr(continueBlock);
+        builder.SetInsertPoint(callBlock);
         builder.CreateCondBr(
             builder.CreateICmpNE(
                 builder.CreateCall(notifyCode, {memory, llvm::ConstantInt::get(word, pc)}), zero),
