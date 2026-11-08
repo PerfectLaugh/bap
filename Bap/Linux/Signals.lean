@@ -972,8 +972,8 @@ def unblockedPending (signals : Signals) (tid group : Nat) : IO Bool := do
   let pending ← signals.pendingBits tid group
   pure (pending - (pending &&& (← threadOf signals tid).mask) != 0)
 
-/-- Where a thread blocks that waits for no address: no guest can wake it, as this isn't memory that it has. -/
-private def waitAddress (tid : Nat) : Nat := 2 ^ 64 - 8 * (tid + 1)
+/-- Where a thread blocks that waits for no address: no guest can wake it, as this isn't memory that it has, and `wakeAll` leaves it. -/
+private def waitAddress (tid : Nat) : Nat := noAddressWait tid
 
 private def blockOnSignal (emu : Emu) (tid space : Nat) (timed : Bool) (deadline : Option Nat := none) : IO Unit := do
   emu.taskTable.modify (·.futexWait { thread := tid, space, address := waitAddress tid, bitset := 2 ^ 32 - 1, timed, deadline })
@@ -1170,18 +1170,27 @@ private def writeAction (signals : Signals) (emu : Emu) (address : Nat) (action 
   if let some at_ := restorerAt then write emu (address + at_) (encodeNumber emu word action.restorer)
   write emu (address + maskAt) (encodeMask signals emu action.mask (maskBytes signals.architecture))
 
-/-- Back from a handler, by what its frame and its context say. -/
-private def sigreturn (signals : Signals) (emu : Emu) : IO SyscallAction := do
+/-- The frames of handlers of the thread that runs that a return could still go back to, the innermost first: a handler that left by
+`longjmp` left its frame, which is further down the stack it is on now. -/
+private def liveFrames (signals : Signals) (emu : Emu) : IO (List SignalFrame) := do
+  let architecture := signals.architecture
+  let state ← threadOf signals (← thread emu)
+  let sp ← registerValue emu architecture.bits (stackRegister architecture)
+  let inAlternate := onAlternateStack state.alternate sp
+  pure (state.frames.dropWhile fun frame => frame.onAlternate == inAlternate && frame.entry + 64 < sp)
+
+/-- Whether the thread that runs is in a handler that `leaveHandler` could go back from, by the test that it goes by. -/
+def handlerFrame (signals : Signals) (emu : Emu) : IO Bool := do
+  pure !(← liveFrames signals emu).isEmpty
+
+/-- Back from a handler, by what its frame and its context say: `rt_sigreturn`, and what an `exit` in a handler can leave it by. Without
+a frame to go back to, as `handlerFrame` says, the process dies of `SIGSEGV`, as in Linux. -/
+def leaveHandler (signals : Signals) (emu : Emu) : IO SyscallAction := do
   let architecture := signals.architecture
   let layout := layoutOf architecture
   let width := architecture.bits
   let tid ← thread emu
-  let state ← threadOf signals tid
-  let sp ← registerValue emu width (stackRegister architecture)
-  let inAlternate := onAlternateStack state.alternate sp
-  -- A handler that left by `longjmp` left its frame, which is further down this stack.
-  let live := state.frames.dropWhile fun frame => frame.onAlternate == inAlternate && frame.entry + 64 < sp
-  match live with
+  match ← liveFrames signals emu with
   | [] =>
     signals.failures.modify (·.push (.sigreturn tid "no frame of a handler to go back to"))
     kill emu (← currentTask emu).group (signals.numbers).segv
@@ -1291,7 +1300,7 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
       | none => syscallReturn current (.ok 0)
       | some error => fail current error
     else if calls.returns.contains number then
-      sigreturn signals current
+      leaveHandler signals current
     else if number == calls.kill then
       -- A `pid_t`: a process, its own process group of 0, every process but the first and itself of -1, and a group of the rest.
       let target := arg 0 % 2 ^ 32

@@ -906,6 +906,55 @@ def testReadAcrossHoles : IO Unit := do
   assertEqual "A peek reads across the hole, with zeros in it" ((filled 4 2).toList ++ (filled 4 0).toList)
     (← Bap.Emu.peek emu 0x21ffc 8).toList
 
+/-- A thread that ends holding a lock of the guest: `releaseLocks` clears the words of a space and wakes who waits on them, `wakeAll` only
+wakes them, and neither touches a wait for a signal or a word of another space. -/
+def testReleaseLocks : IO Unit := do
+  let rv (text : String) := LLVM.assemble "riscv64" text
+  let asm (lines : List String) : IO ByteArray := do
+    lines.foldlM (fun code line => do pure (code ++ (← rv line))) ByteArray.empty
+  let word (emu : Bap.Emu.Emu) (address : Nat) : IO Nat := do
+    let bytes ← Bap.Emu.read emu address 4
+    pure (bytes[0]!.toNat + bytes[1]!.toNat * 256 + bytes[2]!.toNat * 65536 + bytes[3]!.toNat * 16777216)
+  -- FUTEX_WAIT on the word at 0x1000 while it is 0, then the result in s1 and exit(0).
+  let waiting ← asm [
+    "lui a0, 1", "addi a1, zero, 128", "addi a2, zero, 0", "addi a3, zero, 0", "addi a7, zero, 98", "ecall",
+    "addi s1, a0, 0", "addi a0, zero, 0", "addi a7, zero, 94", "ecall"]
+  let blocked : IO Bap.Emu.Emu := do
+    let emu ← Tuned.riscv64 waiting 0 0
+    for index in List.range 32 do
+      Bap.Emu.setReg emu (reg s!"X{index}") (.bits (BitVec.ofNat 64 0))
+    Bap.Emu.map emu ⟨0x1000, ByteArray.mk (List.replicate 64 (0 : UInt8)).toArray, ⟨true, true, false⟩⟩
+    let _ ← Bap.Emu.serveTaskCalls emu
+    assertEqual "Emu a futex wait that nothing wakes is a deadlock" (Bap.Tasks.ScheduleOutcome.deadlock [1]) (← Bap.Emu.runProcesses emu 4 200)
+    -- What is not of a lock of space 1: a wait for a signal there, and a word of space 2.
+    emu.taskTable.modify (·.futexWait { thread := 9, space := 1, address := Bap.Emu.noAddressWait 9, bitset := 2 ^ 32 - 1 })
+    emu.taskTable.modify (·.futexWait { thread := 8, space := 2, address := 0x1000, bitset := 2 ^ 32 - 1 })
+    -- The lock is held by a thread that is gone.
+    Bap.Emu.write emu 0x1000 (ByteArray.mk #[5, 0, 0, 0])
+    pure emu
+  let finish (name : String) (emu : Bap.Emu.Emu) : IO Unit := do
+    emu.taskTable.modify fun table => { table with futexes := table.futexes.filter (·.thread == 1) }
+    assertEqual s!"Emu {name}: the woken thread finishes" (Bap.Tasks.ScheduleOutcome.finished 0) (← Bap.Emu.runProcesses emu 4 200)
+    assertBits s!"Emu {name}: its wait returns 0" (BitVec.ofNat 64 0) (.ok (← Bap.Emu.reg emu (reg "X9")))
+  let released ← blocked
+  assertEqual "Emu waitingOn is the waiters of the words of the space"
+    [(1, 0x1000)] ((← Bap.Emu.waitingOn released 1).map fun waiter => (waiter.thread, waiter.address))
+  Bap.Emu.releaseLocks released 1
+  assertEqual "Emu releaseLocks clears the word" 0 (← word released 0x1000)
+  assertEqual "Emu releaseLocks leaves no waiter of the space" [] ((← Bap.Emu.waitingOn released 1).map (·.thread))
+  assertEqual "Emu releaseLocks leaves a wait for a signal and another space" [9, 8]
+    ((← released.taskTable.get).futexes.map (·.thread))
+  finish "releaseLocks" released
+  let woken ← blocked
+  Bap.Emu.wakeAll woken 1
+  assertEqual "Emu wakeAll leaves the word" 5 (← word woken 0x1000)
+  assertEqual "Emu wakeAll leaves a wait for a signal and another space" [9, 8] ((← woken.taskTable.get).futexes.map (·.thread))
+  finish "wakeAll" woken
+  -- Nothing waits: nothing is written.
+  Bap.Emu.write woken 0x1000 (ByteArray.mk #[5, 0, 0, 0])
+  Bap.Emu.releaseLocks woken 1
+  assertEqual "Emu releaseLocks without waiters leaves the word" 5 (← word woken 0x1000)
+
 /-- A write as a program may write goes across writable regions that are next to each other, and writes nothing if any of it can't
 be written, which says where. -/
 def testWriteAcrossRegions : IO Unit := do

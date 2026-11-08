@@ -208,6 +208,40 @@ def exitThread (emu : Emu) (code : Nat) : IO Unit := do
       if left.alone leader then
         if let some heard := ← emu.processExited.get then heard task.group status
 
+/-- Where a thread blocks that waits for no address, as for a signal: no guest can wake it, as this isn't memory that it has. -/
+def noAddressWait (tid : Nat) : Nat := 2 ^ 64 - 8 * (tid + 1)
+
+/-- Whether a waiter waits on a word of memory, as for a lock, and not for a signal at `noAddressWait`. -/
+private def onWord (waiter : FutexWaiter) : Bool := waiter.address != noAddressWait waiter.thread
+
+/-- The threads that wait on a futex word of `space`, in the order that they began to. Not those that wait for a signal. -/
+def waitingOn (emu : Emu) (space : Nat) : IO (List FutexWaiter) := do
+  pure ((← emu.taskTable.get).futexes.filter fun waiter => waiter.space == space && onWord waiter)
+
+/-- Every thread that waits on a futex word of `space` goes on, as from a `FUTEX_WAKE` of each word, and what it finds there is up to
+it. For a thread that ends without letting go of what it holds: Linux's own `exit` lets its waiters go, and here nothing else would. -/
+def wakeAll (emu : Emu) (space : Nat) : IO Unit := do
+  let table ← emu.taskTable.get
+  let (woken, kept) := table.futexes.partition fun waiter => waiter.space == space && onWord waiter
+  if woken.isEmpty then return
+  emu.taskTable.set { table with futexes := kept }
+  wakeThreads emu (woken.map (·.thread))
+
+/-- `wakeAll`, with each word that a thread waits on written 0 first, which is a mutex nobody holds: a thread that ends holding a lock of
+the guest strands every thread that waits for it, as nothing unlocks it. A word is written only in the memory of the thread that runs,
+which is that of its space: one of another space, as a shared futex key may be, or that can't be written, is left as it is, and its
+waiters are still woken. -/
+def releaseLocks (emu : Emu) (space : Nat) : IO Unit := do
+  let waiters ← waitingOn emu space
+  if waiters.isEmpty then return
+  if (← currentTask emu).space == space then
+    -- Each word once, in the order that its first waiter began to wait.
+    let words := waiters.foldl (init := ([] : List Nat)) fun words waiter =>
+      if words.contains waiter.address then words else words ++ [waiter.address]
+    for address in words do
+      try write emu address (word32 emu 0) catch _ => pure ()
+  wakeAll emu space
+
 /-- A signal ends the process. Nothing else of signals is modelled. -/
 def kill (emu : Emu) (target signal : Nat) : IO Unit := do
   match (← emu.taskTable.get).find? target with
