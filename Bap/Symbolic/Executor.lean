@@ -8,7 +8,7 @@ namespace Bap.Symbolic
 abbrev Env := List (Bap.Var × Expr)
 
 structure State where
-  env : Env := []
+  env : Env := {}
   constraints : List Expr := []
   /-- The memory of each memory variable written so far; the others are still unconstrained. -/
   memories : List (Bap.Var × Memory) := []

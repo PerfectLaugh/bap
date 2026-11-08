@@ -26,11 +26,11 @@ def run : IO Unit := do
   let (machine, id) ← match Machine.clone {} with
     | .ok result => pure result
     | .error error => throw <| IO.userError error
-  let machine ← modify machine fun inst => { inst with state := { env := [(x, .bits (BitVec.ofNat 64 40))] } }
+  let machine ← modify machine fun inst => { inst with state := { env := VarMap.ofList [(x, .bits (BitVec.ofNat 64 40))] } }
   let machine ← match machine.switch id with
     | .ok machine => pure machine
     | .error error => throw <| IO.userError error
-  let machine ← modify machine fun inst => { inst with state := { env := [(x, .bits (BitVec.ofNat 64 41))] } }
+  let machine ← modify machine fun inst => { inst with state := { env := VarMap.ofList [(x, .bits (BitVec.ofNat 64 41))] } }
   let machine ← match machine.switch 1 with
     | .ok machine => pure machine
     | .error error => throw <| IO.userError error
@@ -69,7 +69,7 @@ def run : IO Unit := do
   assertEqual "a thread is in its space" (sharing.tasks.spaceOf 1) (sharing.tasks.spaceOf sibling)
   let mem : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
   let filled ← modify sharing fun inst =>
-    { inst with state := { env := [(mem, .memory (Bap.Memory.empty 64))] } }
+    { inst with state := { env := VarMap.ofList [(mem, .memory (Bap.Memory.empty 64))] } }
   match Machine.step filled {} (.move mem (.store (.var mem) (int 0x10) (int 7) .little 8)) with
   | .error error => throw <| IO.userError error
   | .ok (after, _) =>

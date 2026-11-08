@@ -12,7 +12,7 @@ private def expString (exp : Exp) : String := toString (Wire.printExp exp)
 
 /-- `simplifyExp` as it reads: it evaluates each node first. What runs is one pass that knows where that fails. -/
 private def simplifyBySpec (exp : Exp) : Exp :=
-  match evalExp [] exp with
+  match evalExp {} exp with
   | .ok (.bits value) => .int value
   | _ =>
     match exp with
@@ -87,7 +87,7 @@ def run : IO Unit := do
   let closed := Exp.bin .add (int 40) (int 2)
   let folded := foldExp closed
   assertEqual "constant folding" (expString (int 42)) (expString folded)
-  assertBits "folded expression evaluates" (BitVec.ofNat 32 42) (evalExp [] folded)
+  assertBits "folded expression evaluates" (BitVec.ofNat 32 42) (evalExp {} folded)
   let identity := Exp.bin .add (.var x) (int 0)
   assertEqual "add-zero simplification" (expString (.var x)) (expString (simplifyExp identity))
   let zero := Exp.bin .mul (.var x) (int 0)

@@ -13,7 +13,7 @@ private def assigns (insn : Disasm.Insn) (var : Bap.Var) (value : Nat) : Bool :=
     match stmt with
     | .move dst exp =>
       if dst != var then false else
-        match Bil.evalExp [] exp with
+        match Bil.evalExp {} exp with
         | .ok result => (Bap.Value.asBits result).toOption.any fun result => result.2.toNat = value
         | .error _ => false
     | _ => false

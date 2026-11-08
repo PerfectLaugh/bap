@@ -92,7 +92,7 @@ private structure Info where
 /-- The constant address of a `size`-byte access. An access that wraps around the address space
 is not one contiguous `Location`, and counts as dynamic. -/
 private def constantRange (exp : Bil.Exp) (size : Nat) : Option Nat :=
-  match Bil.evalExp [] exp with
+  match Bil.evalExp {} exp with
   | .ok value =>
     match Bap.Value.asBits value with
     | .ok address => if address.2.toNat + size ≤ 2 ^ address.1 then some address.2.toNat else none
@@ -101,7 +101,7 @@ private def constantRange (exp : Bil.Exp) (size : Nat) : Option Nat :=
 
 /-- The value of an expression that no variable changes. -/
 private def closedBits (exp : Bil.Exp) : Option (Σ width, BitVec width) :=
-  match Bil.evalExp [] exp with
+  match Bil.evalExp {} exp with
   | .ok value => (Bap.Value.asBits value).toOption
   | .error _ => none
 
@@ -349,7 +349,7 @@ private structure Exits where
   unknown : Bool := false
 
 private def constantTarget (exp : Bil.Exp) : Option Nat :=
-  match Bil.evalExp [] exp with
+  match Bil.evalExp {} exp with
   | .ok value =>
     match Bap.Value.asBits value with
     | .ok target => some target.2.toNat

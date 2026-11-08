@@ -9,7 +9,7 @@ private def reg (name : String) : Var := ⟨name, .imm 64, 0, false⟩
 private def reg1 (name : String) : Var := ⟨name, .imm 1, 0, false⟩
 private def int (value : Nat) : Exp := .int (BitVec.ofNat 64 value)
 private def state (var : Var) (value : Nat) : State :=
-  { env := [(var, .bits (BitVec.ofNat 64 value))] }
+  { env := VarMap.ofList [(var, .bits (BitVec.ofNat 64 value))] }
 
 private def fixed (block : Primus.Lifted.Block) : Primus.Lifted.Fetch × Primus.Lifted.Lift :=
   (fun _ => pure (ByteArray.mk #[1]), fun _ _ => pure block)
@@ -283,7 +283,7 @@ def run : IO Unit := do
     next := 0x1004
     program := [.ifElse (.var (⟨"c", .imm 1, 0, false⟩ : Var)) [.jmp (int 0x2000)] [], .move x (int 40), .jmp (int 0x3000)]
   }
-  let earlyState (bit : Nat) : State := { env := [(⟨"c", .imm 1, 0, false⟩, .bits (BitVec.ofNat 1 bit))] }
+  let earlyState (bit : Nat) : State := { env := VarMap.ofList [(⟨"c", .imm 1, 0, false⟩, .bits (BitVec.ofNat 1 bit))] }
   let (earlyFetch, earlyLift) := fixed earlyBlock
   let earlyTaken ← Primus.Lifted.runBlock early earlyFetch earlyLift (earlyState 1) 0x1000
   assertEqual "native jump before a write has the target" 0x2000 earlyTaken.pc
@@ -316,7 +316,7 @@ def run : IO Unit := do
       .jmp (int 0x2000)]
   }
   let (storingFetch, storingLift) := fixed storing
-  let stored ← Primus.Lifted.runBlock cellEngine storingFetch storingLift { env := [(mem, .memory (Memory.empty 64))] } 0x1000
+  let stored ← Primus.Lifted.runBlock cellEngine storingFetch storingLift { env := VarMap.ofList [(mem, .memory (Memory.empty 64))] } 0x1000
   assertEqual "the loop of stores ran natively" 1 (← Primus.Lifted.stats cellEngine).nativeRuns
   match Bil.lookup stored.state.env mem with
   | .ok (@Value.memory width memory) =>
@@ -406,7 +406,7 @@ def run : IO Unit := do
       (int 0) .little 1)]
   }
   let (fallbackFetch, fallbackLift) := fixed fallbackBlock
-  let fallbackInitial : State := { env := [
+  let fallbackInitial : State := { env := VarMap.ofList [
     (memoryVar, .memory (Memory.empty 64)),
     (x, .bits (BitVec.ofNat 64 0))
   ] }
@@ -463,7 +463,7 @@ def run : IO Unit := do
     ]
   }
   let (narrowFetch, narrowLift) := fixed narrowBlock
-  let narrowInitial : State := { env := [
+  let narrowInitial : State := { env := VarMap.ofList [
     (x8, .bits (BitVec.ofNat 8 200)),
     (y8, .bits (BitVec.ofNat 8 100))
   ] }
@@ -481,7 +481,7 @@ def run : IO Unit := do
     program := [.move z (.bin .lshift (.var x) (.var y))]
   }
   let (shiftFetch, shiftLift) := fixed shiftBlock
-  let shiftInitial : State := { env := [
+  let shiftInitial : State := { env := VarMap.ofList [
     (x, .bits (BitVec.ofNat 64 1)),
     (y, .bits (BitVec.ofNat 64 64))
   ] }
@@ -494,7 +494,7 @@ def run : IO Unit := do
   let armLift : Primus.Lifted.Lift := fun address code => do
     let insn ← Target.LLVMLift.decodeAArch64 address address code
     pure ⟨insn.address, insn.next, insn.bil⟩
-  let armInitial : State := { env := [
+  let armInitial : State := { env := VarMap.ofList [
     (reg "X0", .bits (BitVec.ofNat 64 40)),
     (reg "X1", .bits (BitVec.ofNat 64 2))
   ] }
@@ -507,18 +507,18 @@ def run : IO Unit := do
 
   let cmpBytes ← LLVM.assemble "aarch64" "cmp x8, x9"
   let cmpResult ← Primus.Lifted.runBlock armEngine (fun _ => pure cmpBytes) armLift
-    { env := [(reg "X8", .bits (BitVec.ofNat 64 0)), (reg "X9", .bits (BitVec.ofNat 64 0))] } 0x8004
+    { env := VarMap.ofList [(reg "X8", .bits (BitVec.ofNat 64 0)), (reg "X9", .bits (BitVec.ofNat 64 0))] } 0x8004
   assertBits "Primus AArch64 CMP sets ZF for equal operands" (BitVec.ofNat 1 1)
     (lookup cmpResult.state.env ⟨"ZF", .imm 1, 0, false⟩)
 
   let clzBytes ← LLVM.assemble "aarch64" "clz x9, x9"
   let clzResult ← Primus.Lifted.runBlock armEngine (fun _ => pure clzBytes) armLift
-    { env := [(reg "X9", .bits (BitVec.ofNat 64 1))] } 0x8004
+    { env := VarMap.ofList [(reg "X9", .bits (BitVec.ofNat 64 1))] } 0x8004
   assertBits "Primus AArch64 CLZ accepts a shared destination and source" (BitVec.ofNat 64 63)
     (lookup clzResult.state.env (reg "X9"))
   let clzDistinctBytes ← LLVM.assemble "aarch64" "clz x9, x10"
   let clzDistinct ← Primus.Lifted.runBlock armEngine (fun _ => pure clzDistinctBytes) armLift
-    { env := [(reg "X10", .bits (BitVec.ofNat 64 0x8000000000000000))] } 0x8008
+    { env := VarMap.ofList [(reg "X10", .bits (BitVec.ofNat 64 0x8000000000000000))] } 0x8008
   assertBits "Primus AArch64 CLZ counts distinct operand bits" (BitVec.ofNat 64 0)
     (lookup clzDistinct.state.env (reg "X9"))
 
@@ -539,7 +539,7 @@ def run : IO Unit := do
     ]
   }
   let (signedFetch, signedLift) := fixed signedBlock
-  let signedInitial : State := { env := [
+  let signedInitial : State := { env := VarMap.ofList [
     (x8, .bits (BitVec.ofNat 8 0xfe)),
     (y8, .bits (BitVec.ofNat 8 2))
   ] }
@@ -568,7 +568,7 @@ def run : IO Unit := do
     ]
   }
   let (divisionFetch, divisionLift) := fixed divisionBlock
-  let zeroInitial : State := { env := [
+  let zeroInitial : State := { env := VarMap.ofList [
     (x, .bits (BitVec.ofNat 64 40)),
     (y, .bits (BitVec.ofNat 64 0))
   ] }
@@ -577,7 +577,7 @@ def run : IO Unit := do
   assertBits "native unsigned remainder by zero" (BitVec.ofNat 64 40) (lookup divided.state.env w)
   assertBits "native signed division by zero" (BitVec.ofNat 64 0xffffffffffffffff) (lookup divided.state.env s)
   assertBits "native signed remainder by zero" (BitVec.ofNat 64 40) (lookup divided.state.env r)
-  let overflowInitial : State := { env := [
+  let overflowInitial : State := { env := VarMap.ofList [
     (x, .bits (BitVec.ofNat 64 0x8000000000000000)),
     (y, .bits (BitVec.ofNat 64 0xffffffffffffffff))
   ] }
@@ -587,7 +587,7 @@ def run : IO Unit := do
   assertBits "native signed remainder overflow is zero" (BitVec.ofNat 64 0) (lookup overflow.state.env r)
   let divisionStats ← Primus.Lifted.stats divisionEngine
   assertEqual "native division guards execute twice" 2 divisionStats.nativeRuns
-  let negativeInitial : Bil.State := { env := [
+  let negativeInitial : Bil.State := { env := VarMap.ofList [
     (x, .bits (BitVec.ofInt 64 (-40))),
     (y, .bits (BitVec.ofNat 64 0))
   ] }
@@ -600,7 +600,7 @@ def run : IO Unit := do
   let riscvLift : Primus.Lifted.Lift := fun address code => do
     let insn ← Target.LLVMLift.decodeRISCV address address code
     pure ⟨insn.address, insn.next, insn.bil⟩
-  let riscvInitial : State := { env := [
+  let riscvInitial : State := { env := VarMap.ofList [
     (reg "X11", .bits (BitVec.ofNat 64 0xffffffffffffffff)),
     (reg "X12", .bits (BitVec.ofNat 64 1))
   ] }
@@ -626,11 +626,11 @@ def run : IO Unit := do
     ]
   }
   let (conditionalFetch, conditionalLift) := fixed conditionalBlock
-  let trueInitial : State := { env := [
+  let trueInitial : State := { env := VarMap.ofList [
     (x, .bits (BitVec.ofNat 64 2)),
     (y, .bits (BitVec.ofNat 64 3))
   ] }
-  let falseInitial : State := { env := [
+  let falseInitial : State := { env := VarMap.ofList [
     (x, .bits (BitVec.ofNat 64 5)),
     (y, .bits (BitVec.ofNat 64 3))
   ] }
@@ -677,7 +677,7 @@ def run : IO Unit := do
     (40, 0, 40)
   ]
   smodCases.forM fun test => do
-    let initial : State := { env := [
+    let initial : State := { env := VarMap.ofList [
       (x, .bits (BitVec.ofNat 64 test.1)),
       (y, .bits (BitVec.ofNat 64 test.2.1))
     ] }
@@ -792,7 +792,7 @@ def run : IO Unit := do
   let narrowBit : Var := ⟨"narrowBit", .imm 1, 0, false⟩
   for (leftValue, rightValue) in [(7, 3), (0xf9, 3), (7, 0xfd), (0xf9, 0xfd), (6, 3), (0xfa, 3), (6, 0xfd),
       (0xfa, 0xfd), (0x80, 0xff), (0x7f, 0xff), (5, 0), (0xfb, 0), (0, 0), (0x80, 1), (1, 9), (0x80, 9), (0x80, 8)] do
-    let initial : State := { env := [(narrowLeft, .bits (BitVec.ofNat 8 leftValue)),
+    let initial : State := { env := VarMap.ofList [(narrowLeft, .bits (BitVec.ofNat 8 leftValue)),
       (narrowRight, .bits (BitVec.ofNat 8 rightValue))] }
     for op in [BinOp.add, .sub, .mul, .div, .sdiv, .rem, .srem, .smod, .lshift, .rshift, .ashift, .and, .or, .xor] do
       let block : Primus.Lifted.Block := {
@@ -839,7 +839,7 @@ def run : IO Unit := do
     let engine ← Primus.Lifted.Engine.create
     let (fetch, lift) := fixed { address := 0x10400, next := 0x10401, program }
     let memory := Bap.Memory.empty 64
-    let initial : State := { env := [(wideMemory, .memory memory), (wordMemory, .memory (Bap.Memory.empty 32))] }
+    let initial : State := { env := VarMap.ofList [(wideMemory, .memory memory), (wordMemory, .memory (Bap.Memory.empty 32))] }
     match (← (Primus.Lifted.runBlock engine fetch lift initial 0x10400).toBaseIO) with
     | _ => pure ()
     assertEqual s!"{name} is not native" 0 (← Primus.Lifted.stats engine).nativeRuns
@@ -855,7 +855,7 @@ def run : IO Unit := do
     ]
   }
   let (memoryFetch, memoryLift) := fixed memoryBlock
-  let memoryInitial : State := { env := [(memoryVar, .memory (Memory.empty 64))] }
+  let memoryInitial : State := { env := VarMap.ofList [(memoryVar, .memory (Memory.empty 64))] }
   let memoryResult ← Primus.Lifted.runBlock memoryEngine memoryFetch memoryLift memoryInitial 0x11000
   assertBits "native little-endian memory" (BitVec.ofNat 64 0x0123456789abcdef)
     (lookup memoryResult.state.env y)
@@ -895,7 +895,7 @@ def run : IO Unit := do
   let syncPersistent ← Jit.createMemory #[0] #[1]
   syncEngine.persistentMemory.set (some syncPersistent)
   syncEngine.persistentVariable.set (some memoryVar)
-  let syncInitial : State := { env := [
+  let syncInitial : State := { env := VarMap.ofList [
     (memoryVar, .memory (Memory.writeByte (Memory.empty 64) (BitVec.ofNat 64 0) 1))
   ] }
   let syncFallback : Primus.Lifted.Block := {
@@ -974,7 +974,7 @@ def run : IO Unit := do
       pure ⟨pc, pc + 4, [.move z (.bin .add (.var y) (int increment)), .jmp (.var z)]⟩
     | 42 => pure ⟨42, 42, []⟩
     | _ => throw <| IO.userError s!"unexpected range lift at {pc}"
-  let rangeInitial : State := { env := [(memoryVar, .memory (Memory.empty 64))] }
+  let rangeInitial : State := { env := VarMap.ofList [(memoryVar, .memory (Memory.empty 64))] }
   let singleEngine ← Primus.Lifted.Engine.create
   let singleResult ← Primus.Lifted.run singleEngine rangeFetch rangeLift rangeInitial 0x14000 10
   assertEqual "single-block reference continuation" 42 singleResult.pc
@@ -1011,7 +1011,7 @@ def run : IO Unit := do
     | 0x16100 => pure ⟨pc, 0x16104, [.move z (.bin .add (.var y) (int 2)), .jmp (.var z)]⟩
     | 42 => pure ⟨42, 42, []⟩
     | _ => throw <| IO.userError s!"unexpected graph lift at {pc}"
-  let graphInitial : State := { env := [
+  let graphInitial : State := { env := VarMap.ofList [
     (x, .bits (BitVec.ofNat 64 0)),
     (y, .bits (BitVec.ofNat 64 0))
   ] }
@@ -1172,7 +1172,7 @@ def run : IO Unit := do
     .move value32 (.load (.var mem32) (.var address32) .little 4)]⟩
   let (wrapFetch, wrapLift) := fixed wrapBlock
   let wrapEngine ← Primus.Lifted.Engine.create
-  let wrapInitial : State := { env := [(mem32, .memory (Memory.empty 32)), (address32, .bits 0xfffffffe#32)] }
+  let wrapInitial : State := { env := VarMap.ofList [(mem32, .memory (Memory.empty 32)), (address32, .bits 0xfffffffe#32)] }
   let wrapped ← Primus.Lifted.runBlock wrapEngine wrapFetch wrapLift wrapInitial 0x43000
   assertBits "a load that wraps reads what the store wrote" 0x04030201#32 (lookup wrapped.state.env value32)
   match Bil.lookup wrapped.state.env mem32 with
@@ -1199,7 +1199,7 @@ def run : IO Unit := do
     | 0x45004 => pure ⟨pc, 0x45008, [.move reader (.var leaver)]⟩
     | _ => pure ⟨pc, pc + 4, [.jmp (int pc)]⟩
   let leaveEngine ← Primus.Lifted.Engine.create (rangeLimit := 8) (chainFallthrough := true)
-  let leaveInitial : State := { env := [(leftFlag, .bits 0#1)] }
+  let leaveInitial : State := { env := VarMap.ofList [(leftFlag, .bits 0#1)] }
   let leaveFirst ← Primus.Lifted.runBlock leaveEngine leaveFetch leaveLift leaveInitial 0x45000
   assertEqual "a block whose later read is an unbound input is interpreted" 1 (← Primus.Lifted.stats leaveEngine).interpretedRuns
   assertEqual "and it does not chain" 0x45004 leaveFirst.pc
@@ -1207,7 +1207,7 @@ def run : IO Unit := do
   let leaveSecond ← Primus.Lifted.runBlock leaveEngine leaveFetch leaveLift leaveFirst.state 0x45004
   assertBits "the later block reads the write, not a 0" 1#64 (lookup leaveSecond.state.env reader)
   let leaveBound ← Primus.Lifted.runBlock leaveEngine leaveFetch leaveLift
-    { env := (leaver, .bits 7#64) :: leaveInitial.env } 0x45000
+    { env := Bil.bind leaveInitial.env leaver (.bits 7#64) } 0x45000
   assertEqual "with the input bound the range runs natively" 2 (← Primus.Lifted.stats leaveEngine).nativeRuns
   assertBits "and the later block reads the write" 1#64 (lookup leaveBound.state.env reader)
 

@@ -488,7 +488,7 @@ private def initializeMemory (config : Config) (regions : List Region) : Except 
     .error "Emu region exceeds the address space"
   let cells := regions.foldl (init := Bap.Memory.empty width) fun cells region =>
     Bap.Memory.writeRegion cells region.address region.data
-  .ok { env := [(config.memory, .memory cells)] }
+  .ok { env := Bil.bind {} config.memory (.memory cells) }
 
 /-- An engine for the emulator. Its memory is native from the start, its observer is `notifyMemory`, which rejects
 an access past the end of the address space, and a block that runs off its end goes on with the next one. -/

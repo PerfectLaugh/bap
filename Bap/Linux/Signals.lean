@@ -644,7 +644,7 @@ private def enterHandler (signals : Signals) (emu : Emu) (tid : Nat) (info : Sig
     write emu (contextAddress + at_) (encodeNumber emu 4 (if (← registerValue emu 1 "ISET") == 1 then 0x20 else 0))
   -- What goes back on `sigreturn`.
   let memoryVar := emu.config.memory
-  let env := (← emu.state.get).env.filter fun binding => binding.1 != memoryVar
+  let env := ((← emu.state.get).env.filter fun binding => binding.1 != memoryVar).toList
   let frame : SignalFrame := { entry, context := contextAddress, onAlternate, env, pc := resume, skip, mask := oldMask }
   let withoutStale := thread.frames.filter fun other => other.onAlternate != onAlternate || other.entry + 64 ≥ entry
   let addedMask := action.mask ||| (if hasFlag action.flags saNoDefer then 0 else bitOf info.signal)
@@ -1190,7 +1190,7 @@ private def sigreturn (signals : Signals) (emu : Emu) : IO SyscallAction := do
     let memoryVar := emu.config.memory
     let current ← emu.state.get
     let memoryBinding := current.env.filter fun binding => binding.1 == memoryVar
-    emu.state.set { env := frame.env ++ memoryBinding }
+    emu.state.set { env := VarMap.ofList frame.env ++ memoryBinding }
     let slotValue (at_ : Nat) : IO Nat := do
       pure ((← readNumber emu (frame.context + at_) layout.slot) % 2 ^ width)
     let mut failed := false

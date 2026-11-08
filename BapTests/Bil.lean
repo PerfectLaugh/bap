@@ -25,7 +25,7 @@ private def collatz : Program :=
   ]
 
 /-- `run` works on a map, and `execStmt` of a block on the list: they have to agree on all of the result. -/
-private def sameAsList (name : String) (program : Program) (env : Env := []) (fuel : Nat := 100000) : IO Unit := do
+private def sameAsList (name : String) (program : Program) (env : Env := {}) (fuel : Nat := 100000) : IO Unit := do
   let viaList := match execStmt (fuel + 1) { env := env } (.ifElse (.int (1 : BitVec 1)) program []) with
     | .ok (state, effect) => s!"{repr state.env} {repr effect}"
     | .error error => error
@@ -44,7 +44,7 @@ private def mapPath : IO Unit := do
   let c := reg "c" 8
   let m : Bap.Var := ⟨"m", .mem 32 8, 0, false⟩
   let bindings (var : Bap.Var) (value : Nat) : Bap.Var × Value := (var, .bits (BitVec.ofNat 8 value))
-  let shadowed : Env := [bindings a 1, bindings b 2, bindings a 3, bindings c 4, bindings b 5]
+  let shadowed : Env := VarMap.ofList [bindings a 1, bindings b 2, bindings a 3, bindings c 4, bindings b 5]
   sameAsList "an environment with shadowed bindings" (padding 20) shadowed
   sameAsList "reads see the first binding" (padding 20 ++ [.move c (.bin .add (.var a) (.var b))]) shadowed
   sameAsList "a move drops all older bindings" (.move a (int 8 9) :: padding 20 ++ [.move a (.bin .add (.var a) (int 8 1))]) shadowed
@@ -61,7 +61,7 @@ private def mapPath : IO Unit := do
   sameAsList "a bad condition" (padding 20 ++ [.ifElse (int 8 1) [] []]) shadowed
   sameAsList "a jump in a branch" (padding 20 ++ [.ifElse (.int (1 : BitVec 1)) [.jmp (int 8 1)] [], .move a (int 8 1)]) shadowed
   sameAsList "memory" (padding 20 ++ [.move m (.store (.var m) (int 32 4) (int 8 7) .little 1),
-    .move c (.load (.var m) (int 32 4) .little 1)]) ((m, .memory (Memory.empty 32)) :: shadowed)
+    .move c (.load (.var m) (int 32 4) .little 1)]) (VarMap.ofList ((m, Value.memory (Memory.empty 32)) :: shadowed.toList))
   sameAsList "no fuel" (padding 20) shadowed 0
   sameAsList "little fuel" (padding 20) shadowed 10
   sameAsList "just enough fuel" (padding 20) shadowed 21
@@ -72,15 +72,15 @@ private def mapPath : IO Unit := do
   sameAsList "a loop that keeps binding" [.move counter (int 16 0), loop] shadowed
   sameAsList "a loop out of fuel" [.move counter (int 16 0), loop] shadowed 500
   sameAsList "a jump out of a loop" [.move counter (int 16 0), .while (int 1 1) [.move counter (plus (.var counter) (int 16 1)), .jmp (.var counter)]] shadowed
-  sameAsList "a long environment" (padding 100 ++ [.move c (.var (reg "e50" 8))]) ((List.range 2000).map fun i => bindings (reg s!"e{i % 1500}" 8) i)
+  sameAsList "a long environment" (padding 100 ++ [.move c (.var (reg "e50" 8))]) (VarMap.ofList ((List.range 2000).map fun i => bindings (reg s!"e{i % 1500}" 8) i))
 
 def run : IO Unit := do
   mapPath
   let a := reg "a" 8
   let nested := Exp.letIn a (int 8 2) (.letIn a (plus (.var a) (int 8 3)) (.bin .mul (.var a) (int 8 2)))
-  assertBits "nested lexical let" (BitVec.ofNat 8 10) (evalExp [] nested)
-  let rebound := bind (bind [] a (.bits (BitVec.ofNat 8 2))) a (.bits (BitVec.ofNat 8 3))
-  assertEqual "BIL bind replaces older bindings" 1 rebound.length
+  assertBits "nested lexical let" (BitVec.ofNat 8 10) (evalExp {} nested)
+  let rebound := bind (bind {} a (.bits (BitVec.ofNat 8 2))) a (.bits (BitVec.ofNat 8 3))
+  assertEqual "BIL bind replaces older bindings" 1 rebound.size
   assertBits "BIL bind returns newest value" (BitVec.ofNat 8 3) (lookup rebound a)
   let b := reg "b" 8
   let updates := [
@@ -90,15 +90,15 @@ def run : IO Unit := do
   ]
   let sequential := updates.foldl (init := rebound) fun env update => bind env update.1 update.2
   let batch := bindMany rebound updates
-  assertEqual "BIL bindMany matches sequential order" (sequential.map fun binding => binding.1.name)
-    (batch.map fun binding => binding.1.name)
-  assertEqual "BIL bindMany matches sequential length" sequential.length batch.length
+  assertEqual "BIL bindMany matches sequential order" (sequential.toList.map fun binding => binding.1.name)
+    (batch.toList.map fun binding => binding.1.name)
+  assertEqual "BIL bindMany matches sequential length" sequential.size batch.size
   assertBits "BIL bindMany returns newest value" (BitVec.ofNat 8 6) (lookup batch a)
   assertBits "BIL bindMany binds additional value" (BitVec.ofNat 8 5) (lookup batch b)
   let mem : Var := ⟨"mem", .mem 32 8, 0, false⟩
   let stored := Exp.store (.var mem) (int 32 0) (int 32 0xdeadbeef) .little 4
   let loaded := Exp.load stored (int 32 0) .big 4
-  let initialMemory : Env := [(mem, .memory (Memory.empty 32))]
+  let initialMemory : Env := VarMap.ofList [(mem, Value.memory (Memory.empty 32))]
   assertBits "BIL store/load endianness" (BitVec.ofNat 32 0xefbeadde) (evalExp initialMemory loaded)
   let program : Program := [
     .move (reg "a") (int 32 3),
@@ -346,7 +346,7 @@ def run : IO Unit := do
     (Analysis.Taint.labelsOfMemory dynamicStore ⟨mem, 0x5000⟩)
   let aliased : Memory 8 := ⟨(({} : Std.TreeMap Nat ByteArray).insert 0
     (ByteArray.mk (List.replicate 256 1).toArray)).insert 1 (ByteArray.mk (List.replicate 256 2).toArray)⟩
-  let selfCompare := Analysis.Validate.compare [] [] [] { env := [(mem, .memory aliased)] }
+  let selfCompare := Analysis.Validate.compare [] [] [] { env := VarMap.ofList [(mem, .memory aliased)] }
   match selfCompare with
   | .ok result => assertTrue "validation is reflexive on aliased memory" (Analysis.Validate.ok result)
   | .error error => throw <| IO.userError error
@@ -391,7 +391,7 @@ def run : IO Unit := do
   let p := reg "p"
   let sameAs (name : String) (program : Program) (vars : List Var) (expected : Nat) : IO Unit := do
     let shared := shareLoads program
-    let initial : State := { env := [(mem, .memory filled), (p, .bits (BitVec.ofNat 32 0x100))] }
+    let initial : State := { env := VarMap.ofList [(mem, .memory filled), (p, .bits (BitVec.ofNat 32 0x100))] }
     match Bap.Bil.run program initial, Bap.Bil.run shared initial with
     | .ok (before, _), .ok (after, _) =>
       for var in vars do
@@ -421,7 +421,7 @@ def run : IO Unit := do
   let emptyMemory : Memory 32 := ⟨{}⟩
   let storing (value : Nat) : Program := [.move mem (.store (.var mem) (int 32 0x100) (int 32 value) .little 4)]
   let consumed (ranges : List (Nat × Nat)) : IO Analysis.Validate.Result :=
-    match Analysis.Validate.compare [] (storing 1) (storing 2) { env := [(mem, .memory emptyMemory)] } (continuationRanges := ranges) with
+    match Analysis.Validate.compare [] (storing 1) (storing 2) { env := VarMap.ofList [(mem, .memory emptyMemory)] } (continuationRanges := ranges) with
     | .ok result => pure result
     | .error error => throw <| IO.userError error
   let inside ← consumed [(0x100, 0x104)]
@@ -431,7 +431,7 @@ def run : IO Unit := do
   assertTrue "a difference outside what the continuation consumes isn't one of it" outside.continuation
   let diagnose (original simplified : Program) (ranges : List (Nat × Nat) := []) (live : Option (List (Nat × Nat)) := none) :
       IO (List Analysis.Validate.Diagnosis) :=
-    pure (Analysis.Validate.diagnose [result] original simplified { env := [(mem, .memory emptyMemory)] } (continuationRanges := ranges)
+    pure (Analysis.Validate.diagnose [result] original simplified { env := VarMap.ofList [(mem, .memory emptyMemory)] } (continuationRanges := ranges)
       (liveRanges := live))
   assertEqual "diagnosis of an equivalent optimization is nothing" [] (← diagnose deadProgram optimized)
   assertEqual "a store that the simplified dropped is dropped, where nothing says what is live" [.droppedStore "mem" 0x100]
@@ -452,7 +452,7 @@ def run : IO Unit := do
     [.unresolvedInput "original" "input", .failed "original" "unbound variable input",
       .failed "simplified" "cannot evaluate unknown value: boom"]
     (← diagnose reading [.move result (.unknown "boom" (.imm 32))])
-  let broken := Analysis.Validate.check [result] deadProgram [.move result (.var (reg "unset"))] { env := [(mem, .memory emptyMemory)] }
+  let broken := Analysis.Validate.check [result] deadProgram [.move result (.var (reg "unset"))] { env := VarMap.ofList [(mem, .memory emptyMemory)] }
   assertEqual "a simplified that fails where the original runs is a real mismatch"
     ["the simplified fails where the original runs"] broken.mismatches
   let notTaken : Program := [.ifElse (int 1 0) [.move (reg "input") (int 32 1)] [], .move result (.var (reg "input"))]
@@ -470,13 +470,13 @@ def run : IO Unit := do
     (← diagnose deadProgram [.move (reg "input") (int 32 1), .move result (.var (reg "input")), .move result (.unknown "boom" (.imm 32))])
   assertEqual "and a changed result is a mismatch" [.mismatch "result differs"]
     (← diagnose deadProgram (deadProgram ++ [.move result (int 32 0)]))
-  let verdict (original simplified : Program) := Analysis.Validate.check [result] original simplified { env := [(mem, .memory emptyMemory)] }
+  let verdict (original simplified : Program) := Analysis.Validate.check [result] original simplified { env := VarMap.ofList [(mem, .memory emptyMemory)] }
   assertTrue "a verdict of an equivalent optimization is ok, with nothing to say" ((verdict deadProgram optimized).ok &&
     (verdict deadProgram optimized).diagnoses.isEmpty)
   assertEqual "one of a dropped store isn't ok, and says it among what may be real, as nothing says that it is dead"
     (false, ["mem at 256 isn't stored by the simplified, and nothing says that it is dead"])
     ((verdict (storing 1) []).ok, (verdict (storing 1) []).mismatches)
-  let deadVerdict := Analysis.Validate.check [result] (storing 1) [] { env := [(mem, .memory emptyMemory)] } (liveRanges := some [])
+  let deadVerdict := Analysis.Validate.check [result] (storing 1) [] { env := VarMap.ofList [(mem, .memory emptyMemory)] } (liveRanges := some [])
   assertEqual "but not one that is dead" [] deadVerdict.mismatches
   assertEqual "one of a run that failed has no result" (false, true) ((verdict reading reading).ok, (verdict reading reading).result.isNone)
 
@@ -484,16 +484,16 @@ def run : IO Unit := do
   let binder := reg "y" 8
   let avoided := substitute [(captured, .var binder)] (.letIn binder (int 8 1) (.var captured))
   assertBits "substitution avoids capture" (BitVec.ofNat 8 7)
-    (evalExp [(binder, .bits (BitVec.ofNat 8 7))] avoided)
+    (evalExp (VarMap.ofList [(binder, .bits (BitVec.ofNat 8 7))]) avoided)
   let kept := substitute [(captured, .var binder)] (.letIn (reg "z" 8) (int 8 1) (.var captured))
   assertEqual "substitution keeps a non-capturing binder"
     (toString (Wire.printExp (.letIn (reg "z" 8) (int 8 1) (.var binder)))) (toString (Wire.printExp kept))
   assertTrue "simplification keeps width errors"
-    ((evalExp [] (simplifyExp (plus (int 8 0) (int 16 1)))).toOption.isNone)
+    ((evalExp {} (simplifyExp (plus (int 8 0) (int 16 1)))).toOption.isNone)
   assertTrue "simplification keeps unknown errors"
-    ((evalExp [] (simplifyExp (.bin .mul (int 8 0) (.unknown "x" (.imm 8))))).toOption.isNone)
+    ((evalExp {} (simplifyExp (.bin .mul (int 8 0) (.unknown "x" (.imm 8))))).toOption.isNone)
   assertTrue "simplification keeps condition-width errors"
-    ((evalExp [] (simplifyExp (.ite (int 8 0) (int 8 1) (int 8 2)))).toOption.isNone)
+    ((evalExp {} (simplifyExp (.ite (int 8 0) (int 8 1) (int 8 2)))).toOption.isNone)
   let memoryVar : Var := ⟨"mem", .mem 64 8, 0, false⟩
   let rejected (exp : Exp) : Bool := (inferExp exp).toOption.isNone
   assertTrue "unary operator on memory is rejected" (rejected (.un .neg (.var memoryVar)))
@@ -559,9 +559,9 @@ def run : IO Unit := do
   assertTrue "different widths are an error"
     (match evalBin .add ⟨8, BitVec.ofNat 8 1⟩ ⟨16, BitVec.ofNat 16 1⟩ with | .error _ => true | _ => false)
   let failing : Exp := .load (int 8 0) (.unknown "a" .unit) .little 1
-  let observedResult ← evalExpObserved none [] failing
+  let observedResult ← evalExpObserved none {} failing
   assertTrue "observed evaluation reports the same first error"
-    (match observedResult, evalExp [] failing with
+    (match observedResult, evalExp {} failing with
       | .error first, .error second => first == second
       | _, _ => false)
 end Bap.Tests.Bil

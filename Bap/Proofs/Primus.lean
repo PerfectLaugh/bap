@@ -3244,7 +3244,7 @@ private theorem truth_denoted {context : Context} {env : Bil.Env} {value : SV} {
   | bil width e =>
     simp only [expectBil, Except.ok.injEq, Prod.mk.injEq] at he
     obtain ⟨rfl, rfl⟩ := he
-    cases hc : Bil.evalExp [] e with
+    cases hc : Bil.evalExp {} e with
     | error msg => exact Or.inr ⟨by simp [truth, hc], hcond⟩
     | ok closed =>
       have hclosed := Bap.Proofs.Bil.evalExp_extends (Bap.Proofs.Bil.nil_extends env) e hc
@@ -6278,46 +6278,8 @@ private theorem bindMany_latest_keys (updates : List (Bap.Var × Bap.Value)) (va
 
 /-- Frame law of the batched register update: variables that are not updated keep their binding. -/
 theorem bindMany_frame (env : Bil.Env) (updates : List (Bap.Var × Bap.Value)) (var : Bap.Var)
-    (hv : var ∉ updates.map Prod.fst) : Bil.lookup (Bil.bindMany env updates) var = Bil.lookup env var := by
-  simp only [Bil.bindMany, Bil.lookup]
-  rw [List.find?_append]
-  have hnone := bindMany_latest_keys updates var hv [] (by simp)
-  have hf : (updates.foldl (init := ([] : List (Bap.Var × Bap.Value))) fun current update =>
-      update :: current.filter (fun binding => binding.1 != update.1)).find? (fun binding => binding.1 == var) = none := by
-    apply List.find?_eq_none.2
-    intro x hx he
-    apply hnone
-    refine List.mem_map.2 ⟨x, hx, ?_⟩
-    simpa using he
-  rw [hf]
-  have hfilter := find?_filter_of_imp (fun binding : Bap.Var × Bap.Value => binding.1 == var)
-    (fun binding => !(updates.map Prod.fst).contains binding.1) env (by
-      intro x hx
-      have hxv : x.1 = var := by simpa using hx
-      rw [hxv]
-      simpa using hv)
-  simp only [Option.none_or]
-  rw [hfilter]
-
-/-- Taking out the bindings of other variables changes nothing about a variable. -/
-private theorem find?_withoutBindings (env : Bil.Env) (pending : List Bap.Var) {var : Bap.Var} (hv : var ∉ pending) :
-    (withoutBindings pending env).find? (fun binding => binding.1 == var) =
-      env.find? (fun binding => binding.1 == var) := by
-  induction env generalizing pending with
-  | nil => simp [withoutBindings]
-  | cons head rest ih =>
-    simp only [withoutBindings]
-    split
-    · rfl
-    · split
-      · rename_i hc
-        have hne : head.1 ≠ var := by
-          intro he
-          exact hv (he ▸ (by simpa using hc))
-        have hb : (head.1 == var) = false := by simpa using hne
-        rw [ih _ (fun hm => hv (List.mem_of_mem_erase hm))]
-        simp [hb]
-      · simp only [List.find?_cons, ih _ hv]
+    (hv : var ∉ updates.map Prod.fst) : Bil.lookup (Bil.bindMany env updates) var = Bil.lookup env var :=
+  Bil.lookup_bindMany_of_not_mem env updates hv
 
 /-- Native execution writes back only declared outputs: every other variable is untouched. -/
 theorem syncState_frame (lowering : Lowering) (state : Bil.State) (slots : Array UInt64) (var : Bap.Var)
@@ -6344,14 +6306,7 @@ theorem syncState_frame (lowering : Lowering) (state : Bil.State) (slots : Array
       · simp only [List.map_cons, List.mem_cons, not_or]
         exact ⟨hv.1, ih hv.2⟩
       · exact ih hv.2
-  generalize syncUpdates (reachedOutputs lowering slots) slots = updates at hkeys
-  simp only [Bil.lookup, List.find?_append]
-  have hnone : updates.find? (fun binding => binding.1 == var) = none := by
-    apply List.find?_eq_none.2
-    intro x hx he
-    exact hkeys (List.mem_map.2 ⟨x, hx, by simpa using he⟩)
-  rw [hnone, find?_withoutBindings _ _ hkeys]
-  rfl
+  exact Bil.lookup_bindMany_of_not_mem _ _ hkeys
 
 /-! Reachability over the block graph. -/
 
@@ -6543,7 +6498,7 @@ structure Machine where
   /-- Which slots a `move` wrote. No native code keeps this: it is what the proofs say about the flags of a range with. -/
   moved : Nat → Bool := fun _ => false
   /-- The environment that a run started from, likewise. -/
-  origin : Bil.Env := []
+  origin : Bil.Env := {}
 
 def Machine.write (machine : Machine) (slot : Nat) (value : Word64) : Machine :=
   { machine with slots := fun other => if other = slot then value else machine.slots other }
@@ -9029,33 +8984,8 @@ private theorem pairwise_same {α β : Type} {items : List α} {f : α → β}
     · exact ih h2 ha' hb'
 
 private theorem lookup_bind_other {env : Bil.Env} {var other : Bap.Var} {value : Bap.Value} (h : other ≠ var) :
-    Bil.lookup (Bil.bind env var value) other = Bil.lookup env other := by
-  have hbe : ∀ a b : Bap.Var, (a == b) = decide (a = b) := by
-    intro a b
-    by_cases hab : a = b
-    · subst hab
-      simp
-    · have : (a == b) = false := by
-        cases he : (a == b)
-        · rfl
-        · exact absurd (eq_of_beq he) hab
-      simp [hab, this]
-  simp only [Bil.lookup, Bil.bind, List.find?_cons]
-  have hne : (var == other) = false := by simp [hbe, Ne.symm h]
-  simp only [hne]
-  have hfilter : ∀ items : List (Bap.Var × Bap.Value), (items.filter fun binding => binding.1 != var).find? (fun binding => binding.1 == other) =
-      items.find? fun binding => binding.1 == other := by
-    intro items
-    induction items with
-    | nil => rfl
-    | cons head rest ih =>
-      by_cases hv : head.1 = var
-      · have h1 : (head.1 != var) = false := by simp [hv]
-        have h2 : (head.1 == other) = false := by simp [hbe, hv, Ne.symm h]
-        simp [h1, h2, ih]
-      · have h1 : (head.1 != var) = true := by simp [hv]
-        simp only [List.filter_cons, h1, ↓reduceIte, List.find?_cons, ih]
-  rw [hfilter]
+    Bil.lookup (Bil.bind env var value) other = Bil.lookup env other :=
+  Bil.lookup_bind_of_ne env value (Ne.symm h)
 
 private theorem lookup_bind_same (env : Bil.Env) (var : Bap.Var) (value : Bap.Value) :
     Bil.lookup (Bil.bind env var value) var = .ok value := by

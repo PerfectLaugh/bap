@@ -222,7 +222,7 @@ private def expectBil (context : Context) : Value → Except String (Nat × Bil.
 private def expectNat : Value → Except String Nat
   | .int value => .ok value.toNat
   | .bil _ value =>
-    match Bil.evalExp [] value with
+    match Bil.evalExp {} value with
     | .ok (.bits value) => .ok value.toNat
     | _ => .error "expected a statically known Primus integer"
   | _ => .error "expected a statically known Primus integer"
@@ -230,7 +230,7 @@ private def expectNat : Value → Except String Nat
 private def truth : Value → Except String (Option Bool)
   | .bool value => .ok (some value)
   | .bil _ value =>
-    match Bil.evalExp [] value with
+    match Bil.evalExp {} value with
     | .ok (.bits value) => .ok (some (value != 0))
     | _ => .ok none
   | .int value => .ok (some (value != 0))
@@ -839,7 +839,7 @@ private def applyPrimitiveIndex (context : Context) (operation : Nat) (args : Li
   | _ => throw s!"unsupported compiled Primus primitive {operation}"
 
 private def freezeBil (state : State) (width : Nat) (expression : Bil.Exp) : Value × State :=
-  match Bil.evalExp [] expression with
+  match Bil.evalExp {} expression with
   | .ok _ => (.bil width expression, state)
   | .error _ =>
     let temporary : Bap.Var := ⟨s!"_primus_{state.nextTemp}", .imm width, 0, false⟩

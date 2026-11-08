@@ -22,7 +22,7 @@ private def assignments (insn : Disasm.Insn) : List (Bap.Var × Nat) :=
   insn.bil.filterMap fun stmt =>
     match stmt with
     | .move var exp =>
-      match Bil.evalExp [] exp with
+      match Bil.evalExp {} exp with
       | .ok value => (Bap.Value.asBits value).toOption.map fun value => (var, value.2.toNat)
       | .error _ => none
     | _ => none

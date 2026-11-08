@@ -2353,7 +2353,7 @@ def toSsaPruned (sub : Sub) (protectedVars : List Bap.Var := []) : Sub :=
   (eliminateDeadCode ssa (ssa.protectedNames protectedVars)).intoSub (toSsa sub)
 
 theorem eval_constant_toExp (constant : Constant) :
-    Bil.evalExp [] constant.toExp = .ok (.bits (BitVec.ofNat constant.width constant.value)) := by
+    Bil.evalExp {} constant.toExp = .ok (.bits (BitVec.ofNat constant.width constant.value)) := by
   rfl
 
 end Bap.IR

@@ -25,25 +25,14 @@ local elab "open_private_as " m:ident full:ident short:ident : command => do
 
 /-! ## Environments -/
 
-private theorem find?_bind_other (env : Env) {var other : Bap.Var} (value : Value) (h : other ≠ var) :
-    (Bap.Bil.bind env var value).find? (fun binding => binding.1 == other) =
-      env.find? (fun binding => binding.1 == other) := by
-  have hv : (var == other) = false := by simpa using h.symm
-  simp only [Bap.Bil.bind, List.find?_cons, hv]
-  induction env with
-  | nil => simp
-  | cons head rest ih =>
-    obtain ⟨k, v⟩ := head
-    by_cases hk : k = var
-    · subst hk
-      simp [hv, ih]
-    · by_cases hko : k = other
-      · subst hko; simp [hk]
-      · simp [hk, hko, ih]
+theorem lookup_eq (env : Env) (var : Bap.Var) :
+    lookup env var = match env.get? var with
+      | some value => .ok value
+      | none => .error s!"unbound variable {var.name}" := rfl
 
 theorem lookup_bind_other (env : Env) {var other : Bap.Var} (value : Value) (h : other ≠ var) :
     lookup (Bap.Bil.bind env var value) other = lookup env other := by
-  simp only [lookup, find?_bind_other env value h]
+  simp only [lookup, Bap.Bil.bind, VarMap.get?_insert, Ne.symm h, ite_false]
 
 theorem lookup_bind_eq (env : Env) (var other : Bap.Var) (value : Value) :
     lookup (Bap.Bil.bind env var value) other = if other = var then .ok value else lookup env other := by
@@ -65,114 +54,45 @@ theorem lookup_bind_comm (env : Env) {first second : Bap.Var} (h : first ≠ sec
   · subst h1; simp [h]
   · simp [h1]
 
+theorem lookup_ok_iff {env : Env} {var : Bap.Var} {value : Value} : lookup env var = .ok value ↔ (var, value) ∈ env := by
+  rw [← VarMap.get?_eq_some]
+  simp only [lookup]
+  split <;> simp_all
+
 theorem mem_of_lookup {env : Env} {var : Bap.Var} {value : Value} (h : lookup env var = .ok value) :
-    (var, value) ∈ env := by
-  simp only [lookup] at h
-  split at h
-  · rename_i binding hf
-    simp only [Except.ok.injEq] at h
-    subst h
-    have hmem := List.mem_of_find?_eq_some hf
-    have hk := List.find?_some hf
-    simp only [beq_iff_eq] at hk
-    obtain ⟨k, v⟩ := binding
-    simp only at hk
-    subst hk
-    exact hmem
-  · simp at h
+    (var, value) ∈ env := lookup_ok_iff.1 h
 
-private theorem foldl_latest_lookup (updates acc : List (Bap.Var × Value)) (other : Bap.Var) :
-    (updates.foldl (init := acc) fun current update =>
-        update :: current.filter (fun binding => binding.1 != update.1)).find? (fun b => b.1 == other) =
-      match (updates.reverse.find? (fun b => b.1 == other)) with
-      | some binding => some binding
-      | none => acc.find? (fun b => b.1 == other) := by
-  induction updates generalizing acc with
-  | nil => simp
-  | cons update rest ih =>
-    rw [List.foldl_cons, ih, List.reverse_cons, List.find?_append]
-    cases hr : rest.reverse.find? (fun b => b.1 == other) with
-    | some binding => simp
-    | none =>
-      obtain ⟨k, v⟩ := update
-      by_cases hk : k = other
-      · subst hk; simp
-      · have hbeq : (k == other) = false := by simpa using hk
-        have := find?_bind_other acc (var := k) (other := other) v (Ne.symm hk)
-        simp only [Bap.Bil.bind] at this
-        simp only [List.find?_cons, hbeq, List.find?_nil, Option.or_none, this]
-
-private theorem find?_filter_not (names : List Bap.Var) (env : Env) (other : Bap.Var) :
-    (env.filter fun binding => !names.contains binding.1).find? (fun b => b.1 == other) =
-      if other ∈ names then none else env.find? (fun b => b.1 == other) := by
-  by_cases hm : other ∈ names
-  · simp only [hm, ite_true]
-    apply List.find?_eq_none.mpr
-    intro entry hentry
-    have := (List.mem_filter.mp hentry).2
-    intro heq
-    simp only [beq_iff_eq] at heq
-    simp [heq, hm] at this
-  · simp only [hm, ite_false]
-    induction env with
-    | nil => simp
-    | cons head rest ih =>
-      obtain ⟨k, v⟩ := head
-      by_cases hk : k ∈ names
-      · have hko : (k == other) = false := by
-          simp only [beq_eq_false_iff_ne, ne_eq]
-          rintro rfl
-          exact hm hk
-        have hc : names.contains k = true := by simpa using hk
-        simp only [List.filter_cons, hc, Bool.not_true, Bool.false_eq_true, ite_false, List.find?_cons, hko, ih]
-      · have hc : names.contains k = false := by simpa using hk
-        simp only [List.filter_cons, hc, Bool.not_false, ite_true, List.find?_cons, ih]
-
-/-- Parallel `bindMany` agrees with folding `bind`, so later updates win. -/
+/-- `bindMany` binds each update in turn, so later updates win. -/
 theorem lookup_bindMany (env : Env) (updates : List (Bap.Var × Value)) (other : Bap.Var) :
     lookup (bindMany env updates) other =
-      lookup (updates.foldl (fun env update => Bap.Bil.bind env update.1 update.2) env) other := by
-  have hfold : ∀ (env : Env) (updates : List (Bap.Var × Value)),
-      (updates.foldl (fun env update => Bap.Bil.bind env update.1 update.2) env).find?
-          (fun b => b.1 == other) =
-        match updates.reverse.find? (fun b => b.1 == other) with
-        | some binding => some binding
-        | none => env.find? (fun b => b.1 == other) := by
-    intro env updates
-    induction updates generalizing env with
-    | nil => simp
-    | cons update rest ih =>
-      rw [List.foldl_cons, ih, List.reverse_cons, List.find?_append]
-      cases hr : rest.reverse.find? (fun b => b.1 == other) with
-      | some binding => simp
-      | none =>
-        obtain ⟨k, v⟩ := update
-        by_cases hk : k = other
-        · subst hk; simp [Bap.Bil.bind]
-        · have hbeq : (k == other) = false := by simpa using hk
-          simp [find?_bind_other env v (Ne.symm hk), hbeq]
-  have hrev : updates.reverse.find? (fun b => b.1 == other) = none → other ∉ updates.map Prod.fst := by
-    intro hr hm
-    obtain ⟨⟨k, v⟩, hmem, hk⟩ := List.mem_map.mp hm
-    simp only at hk
+      lookup (updates.foldl (fun env update => Bap.Bil.bind env update.1 update.2) env) other := rfl
+
+/-- What an environment made of a list has of a variable is its first binding there. -/
+theorem lookup_ofList (list : List (Bap.Var × Value)) (var : Bap.Var) :
+    lookup (VarMap.ofList list) var = match list.find? (·.1 == var) with
+      | some binding => .ok binding.2
+      | none => .error s!"unbound variable {var.name}" := by
+  simp only [lookup, VarMap.get?_ofList]
+  cases list.find? (·.1 == var) <;> rfl
+
+theorem mem_bind {env : Env} {var : Bap.Var} {value : Value} {binding : Bap.Var × Value}
+    (h : binding ∈ Bap.Bil.bind env var value) : binding = (var, value) ∨ binding ∈ env := by
+  obtain ⟨k, v⟩ := binding
+  rw [← VarMap.get?_eq_some, Bap.Bil.bind, VarMap.get?_insert] at h
+  split at h
+  · rename_i hk
     subst hk
-    have := List.find?_eq_none.mp hr (k, v) (List.mem_reverse.mpr hmem)
-    simp at this
-  simp only [lookup]
-  rw [hfold]
-  simp only [bindMany]
-  rw [List.find?_append, foldl_latest_lookup, find?_filter_not]
-  cases hr : updates.reverse.find? (fun b => b.1 == other) with
-  | some binding => simp
-  | none => simp [hrev hr]
+    simp only [Option.some.injEq] at h
+    exact Or.inl (by rw [h])
+  · exact Or.inr (VarMap.get?_eq_some.1 h)
 
 /-- Environment extension: everything `env` binds, `env'` binds to the same value. -/
 def Extends (env env' : Env) : Prop :=
   ∀ var value, lookup env var = .ok value → lookup env' var = .ok value
 
-theorem nil_extends (env : Env) : Extends [] env := by
+theorem nil_extends (env : Env) : Extends {} env := by
   intro var value h
-  simp [lookup] at h
+  simp at h
 
 theorem Extends.bind {env env' : Env} (h : Extends env env') (var : Bap.Var) (value : Value) :
     Extends (Bap.Bil.bind env var value) (Bap.Bil.bind env' var value) := by
@@ -817,15 +737,17 @@ open_private Bap.Bil.Typecheck Bap.Bil.expectImm Bap.Bil.expectSameType Bap.Bil.
 def WellTypedEnv (env : Env) : Prop :=
   ∀ binding ∈ env, binding.2.type = binding.1.typ
 
-theorem wellTypedEnv_nil : WellTypedEnv [] := by simp [WellTypedEnv]
+theorem wellTypedEnv_nil : WellTypedEnv {} := by
+  intro binding hm
+  rw [← VarMap.mem_toList, VarMap.toList_emptyCollection] at hm
+  cases hm
 
 theorem WellTypedEnv.bind {env : Env} (h : WellTypedEnv env) {var : Bap.Var} {value : Value}
     (hv : value.type = var.typ) : WellTypedEnv (Bap.Bil.bind env var value) := by
   intro binding hm
-  simp only [Bap.Bil.bind, List.mem_cons] at hm
-  rcases hm with rfl | hm
+  rcases mem_bind hm with rfl | hm
   · exact hv
-  · exact h _ (List.mem_filter.mp hm).1
+  · exact h _ hm
 
 theorem WellTypedEnv.lookup {env : Env} (h : WellTypedEnv env) {var : Bap.Var} {value : Value}
     (hl : Bap.Bil.lookup env var = .ok value) : value.type = var.typ :=
@@ -1274,7 +1196,7 @@ theorem evalExp_progress (exp : Exp) (hu : hasUnknown exp = false) {t : Typ} (hi
 /-! ## Simplification -/
 
 private theorem simplify_shortcut {env : Env} {exp : Exp} {result : Value} {value : BitVec w}
-    (h : evalExp env exp = .ok result) (hv : evalExp [] exp = .ok (.bits value)) :
+    (h : evalExp env exp = .ok result) (hv : evalExp {} exp = .ok (.bits value)) :
     evalExp env (.int value) = .ok result := by
   have := evalExp_extends (nil_extends env) _ hv
   rw [h] at this
@@ -1746,9 +1668,9 @@ theorem evalExp_simplifyExp_exact (exp : Exp) {t : Typ} (hi : inferExp exp = .ok
 /-- Intended: an unbound variable under `* 0` is dropped, as in the reference simplifier's
 `TIMES, x, _ when is0 x`, so `evalExp_simplifyExp_exact` needs its variables to be bound. -/
 theorem simplify_drops_unbound_variable (var : Bap.Var) (h : var.typ = .imm 8) :
-    (evalExp [] (.bin .mul (.int (0#8)) (.var var))).toOption = none ∧
-      evalExp [] (simplifyExp (.bin .mul (.int (0#8)) (.var var))) = .ok (.bits (0#8)) := by
-  have horig : evalExp [] (.bin .mul (.int (0#8)) (.var var)) = .error s!"unbound variable {var.name}" := by
+    (evalExp {} (.bin .mul (.int (0#8)) (.var var))).toOption = none ∧
+      evalExp {} (simplifyExp (.bin .mul (.int (0#8)) (.var var))) = .ok (.bits (0#8)) := by
+  have horig : evalExp {} (.bin .mul (.int (0#8)) (.var var)) = .error s!"unbound variable {var.name}" := by
     simp [evalExp, lookup, Bind.bind, Except.bind, Value.asBits]
   refine ⟨by rw [horig]; rfl, ?_⟩
   rw [simplifyExp, horig]
@@ -1756,17 +1678,17 @@ theorem simplify_drops_unbound_variable (var : Bap.Var) (h : var.typ = .imm 8) :
 
 /-- Width errors survive simplification. -/
 theorem simplify_keeps_width_error :
-    evalExp [] (simplifyExp (.bin .add (.int (0#8)) (.int (1#16)))) =
+    evalExp {} (simplifyExp (.bin .add (.int (0#8)) (.int (1#16)))) =
       .error "binary operands have different widths" := by
-  have horig : evalExp [] (.bin .add (.int (0#8)) (.int (1#16))) = .error "binary operands have different widths" := rfl
+  have horig : evalExp {} (.bin .add (.int (0#8)) (.int (1#16))) = .error "binary operands have different widths" := rfl
   rw [simplifyExp, horig]
   simp [simplifyExp, evalExp, hasImmWidth, inferExp, expectBits, Bind.bind, Except.bind, Value.asBits, evalBin]
 
 /-- `0 * unknown` keeps failing: the annihilator rule never drops an `unknown`. -/
 theorem simplify_keeps_unknown_error :
-    evalExp [] (simplifyExp (.bin .mul (.int (0#8)) (.unknown "x" (.imm 8)))) =
+    evalExp {} (simplifyExp (.bin .mul (.int (0#8)) (.unknown "x" (.imm 8)))) =
       .error "cannot evaluate unknown value: x" := by
-  have horig : evalExp [] (.bin .mul (.int (0#8)) (.unknown "x" (.imm 8))) =
+  have horig : evalExp {} (.bin .mul (.int (0#8)) (.unknown "x" (.imm 8))) =
       .error "cannot evaluate unknown value: x" := rfl
   rw [simplifyExp, horig]
   simp [simplifyExp, evalExp, hasImmWidth, inferExp, expectBits, hasUnknown, isZeroLiteral]

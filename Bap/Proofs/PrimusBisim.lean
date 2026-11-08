@@ -303,7 +303,7 @@ theorem StateRel.setTemp {first second : State} (h : StateRel globals first seco
 theorem freezeBil_rel {first second : State} (hs : StateRel globals first second) (width : Nat) (expression : Bil.Exp) :
     ResultRel globals (freezeBil first width expression) (freezeBil second width expression) := by
   simp only [freezeBil]
-  cases Bil.evalExp [] expression with
+  cases Bil.evalExp {} expression with
   | ok _ => exact ⟨.bil _ _, hs⟩
   | error _ =>
     simp only [hs.nextTemp]

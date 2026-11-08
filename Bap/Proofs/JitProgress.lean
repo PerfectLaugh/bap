@@ -1116,7 +1116,7 @@ private theorem lowered_progress : (∀ stmt, StmtProgress stmt) ∧ (∀ progra
 
 /-- A closed target is the same value in every environment. -/
 theorem closed_evalExp (exp : Bil.Exp) (env : Bil.Env) (h : closedTarget.closed exp = true) :
-    Bil.evalExp env exp = Bil.evalExp [] exp := by
+    Bil.evalExp env exp = Bil.evalExp {} exp := by
   induction exp with
   | int value => rfl
   | bin op left right ihl ihr =>

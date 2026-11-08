@@ -1518,12 +1518,12 @@ theorem byteArray_toList (data : ByteArray) : data.toList = data.data.toList :=
 
 /-- A thread with its memory values normalised. -/
 def normalizeThread (context : ThreadContext) : ThreadContext :=
-  { context with state := { env := context.state.env.map normalizeBinding } }
+  { context with state := { env := VarMap.ofList (context.state.env.toList.map normalizeBinding) } }
 
 /-- A snapshot with its memory values normalised. -/
 def normalizeSnapshot (snapshot : Snapshot) : Snapshot :=
   { snapshot with
-    state := { env := snapshot.state.env.map normalizeBinding }
+    state := { env := VarMap.ofList (snapshot.state.env.toList.map normalizeBinding) }
     threads := snapshot.threads.map normalizeThread }
 
 end TextCheckpoint
@@ -2008,18 +2008,18 @@ theorem getRegion_decodes (region : Bap.Emu.Region) (h : RegionSafe region) :
 
 private def encThread (context : ThreadContext) : ByteArray :=
   natBytes context.id ++ natBytes context.pc ++ byteEnc (if context.stopped then 1 else 0) ++
-    (natBytes context.state.env.length ++ body encBinding context.state.env) ++ encPending context.pending ++
+    (natBytes context.state.env.size ++ body encBinding context.state.env.toList) ++ encPending context.pending ++
     encSkip context.skip
 
 /-- A thread representable in the binary format. -/
 def ThreadSafe (context : ThreadContext) : Prop :=
-  context.id < 2 ^ 64 ∧ context.pc < 2 ^ 64 ∧ context.state.env.length < 2 ^ 64 ∧
+  context.id < 2 ^ 64 ∧ context.pc < 2 ^ 64 ∧ context.state.env.size < 2 ^ 64 ∧
     (∀ binding ∈ context.state.env, BindingSafe binding) ∧ PendingSafe context.pending ∧ SkipSafe context.skip
 
 private theorem data_putThread (writer : Writer) (context : ThreadContext) :
     Writer.data (putThreadBin writer context) = Writer.data writer ++ encThread context := by
   simp only [putThreadBin, data_putSkip, data_putPending, encThread, ByteArray.append_assoc]
-  rw [foldl_writer _ encBinding data_putBinding]
+  rw [VarMap.foldl_eq, foldl_writer _ encBinding data_putBinding]
   simp only [data_putBool, data_putNat, ByteArray.append_assoc]
 
 theorem getThread_decodes (context : ThreadContext) (h : ThreadSafe context) :
@@ -2027,7 +2027,8 @@ theorem getThread_decodes (context : ThreadContext) (h : ThreadSafe context) :
   intro data offset hat
   obtain ⟨id, ⟨env⟩, pc, stopped, pending, skip⟩ := context
   obtain ⟨hi, hp, hl, hb, hq, hs⟩ := h
-  simp only [encThread] at hat
+  simp only [encThread, VarMap.size_eq_length] at hat
+  simp only [VarMap.size_eq_length] at hl
   obtain ⟨h45, h6⟩ := At.split hat
   obtain ⟨h4, h5⟩ := At.split h45
   obtain ⟨h3, h34⟩ := At.split h4
@@ -2036,13 +2037,13 @@ theorem getThread_decodes (context : ThreadContext) (h : ThreadSafe context) :
   have d1 := natBytes_decodes id hi data offset h1
   have d2 := natBytes_decodes pc hp data _ h12
   have d3 := getBool_decodes stopped data _ h23
-  have d4 := getList_decodes (decode := getBindingBin) encBinding normalizeBinding env hl h34
+  have d4 := getList_decodes (decode := getBindingBin) encBinding normalizeBinding env.toList hl h34
     fun b hb' => getBinding_decodes b (hb b hb')
   have d5 := getPending_decodes pending hq data _ h5
   have d6 := getSkip_decodes skip hs data _ h6
   simp only [ByteArray.size_append, Nat.add_assoc] at d1 d2 d3 d4 d5 d6
   simp only [getThreadBin, bind, Except.bind, d1, d2, d3, d4, d5, d6, encThread, ByteArray.size_append, Nat.add_assoc,
-    normalizeThread]
+    normalizeThread, VarMap.size_eq_length]
 
 private def encProcess (process : ThreadId × List Bap.Emu.Region) : ByteArray :=
   natBytes process.1 ++ (natBytes process.2.length ++ body encRegion process.2)
@@ -2165,7 +2166,7 @@ structure SnapshotSafe (snapshot : Snapshot) : Prop where
   pc : snapshot.pc < 2 ^ 64
   regionsLength : snapshot.regions.length < 2 ^ 64
   regions : ∀ region ∈ snapshot.regions, RegionSafe region
-  envLength : snapshot.state.env.length < 2 ^ 64
+  envLength : snapshot.state.env.size < 2 ^ 64
   env : ∀ binding ∈ snapshot.state.env, BindingSafe binding
   threadsLength : snapshot.threads.length < 2 ^ 64
   threads : ∀ thread ∈ snapshot.threads, ThreadSafe thread
@@ -2185,7 +2186,7 @@ structure SnapshotSafe (snapshot : Snapshot) : Prop where
 private def encBody (snapshot : Snapshot) : ByteArray :=
   natBytes snapshot.pc ++ byteEnc (if snapshot.stopped then 1 else 0) ++
     (natBytes snapshot.regions.length ++ body encRegion snapshot.regions) ++
-    (natBytes snapshot.state.env.length ++ body encBinding snapshot.state.env) ++
+    (natBytes snapshot.state.env.size ++ body encBinding snapshot.state.env.toList) ++
     (natBytes snapshot.threads.length ++ body encThread snapshot.threads) ++
     natBytes snapshot.currentThread ++ natBytes snapshot.nextThread ++ encPending snapshot.pending ++
     (natBytes snapshot.processMemory.length ++ body encProcess snapshot.processMemory) ++ encSkip snapshot.skip ++
@@ -2206,7 +2207,7 @@ private theorem encodeBinary_eq (snapshot : Snapshot) :
   simp only [data_putPending, data_putNat]
   rw [foldl_writer _ encThread data_putThread]
   simp only [data_putNat]
-  rw [foldl_writer _ encBinding data_putBinding]
+  rw [VarMap.foldl_eq, foldl_writer _ encBinding data_putBinding]
   simp only [data_putNat]
   rw [foldl_writer _ encRegion data_putRegion]
   simp only [data_putNat, data_putBool, data_putBytes, ByteArray.append_assoc]
@@ -2235,7 +2236,7 @@ private theorem unchecked_roundtrip (snapshot : Snapshot) (h : SnapshotSafe snap
   clear hmagic hdata hsame
   generalize binaryMagic.size = start at hat hsize ⊢
   obtain ⟨⟨env⟩, pc, regions, stopped, threads, current, next, pending, processes, skip, ⟨table, waiters, futexes⟩⟩ := snapshot
-  simp only [encBody] at hat hsize
+  simp only [encBody, VarMap.size_eq_length] at hat hsize
   obtain ⟨hup, h13t⟩ := At.split hat
   obtain ⟨hup, h12t⟩ := At.split hup
   obtain ⟨hup, h11⟩ := At.split hup
@@ -2252,7 +2253,7 @@ private theorem unchecked_roundtrip (snapshot : Snapshot) (h : SnapshotSafe snap
   have d2 := getBool_decodes stopped data _ h12
   have d3 := getList_decodes (decode := getRegionBin) encRegion id regions h.regionsLength h23
     fun r hr => getRegion_decodes r (h.regions r hr)
-  have d4 := getList_decodes (decode := getBindingBin) encBinding normalizeBinding env h.envLength h34
+  have d4 := getList_decodes (decode := getBindingBin) encBinding normalizeBinding env.toList h.envLength h34
     fun b hb => getBinding_decodes b (h.env b hb)
   have d5 := getList_decodes (decode := getThreadBin) encThread normalizeThread threads h.threadsLength h45
     fun t ht => getThread_decodes t (h.threads t ht)
@@ -2324,7 +2325,7 @@ private theorem fits_region {region : Bap.Emu.Region} (h : regionFits region = t
   exact ⟨by simpa [fitsWord] using h.1, by simpa using h.2⟩
 
 private theorem fits_thread {context : ThreadContext} (h : threadFits context = true) : ThreadSafe context := by
-  simp only [threadFits, Bool.and_eq_true, List.all_eq_true] at h
+  simp only [threadFits, Bool.and_eq_true, VarMap.all_eq, List.all_eq_true] at h
   obtain ⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩ := h
   exact ⟨by simpa [fitsWord] using h1, by simpa [fitsWord] using h2, by simpa [fitsWord] using h3,
     fun b hb => fits_binding (h4 b hb), fits_pending h5, fits_skip h6⟩
@@ -2354,7 +2355,7 @@ private theorem fits_waiter {waiter : Tasks.Waiter} (h : waiterFits waiter = tru
   exact ⟨by simpa [fitsWord] using h1, fits_skip h2, fits_skip h3⟩
 
 private theorem fits_snapshot {snapshot : Snapshot} (h : binaryFits snapshot = true) : SnapshotSafe snapshot := by
-  simp only [binaryFits, Bool.and_eq_true, List.all_eq_true] at h
+  simp only [binaryFits, Bool.and_eq_true, VarMap.all_eq, List.all_eq_true] at h
   obtain ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩, h8⟩, h9⟩, h10⟩, h11⟩, h12⟩, h13⟩, h14⟩, h15⟩, h16⟩, h17⟩, h18⟩, h19⟩ := h
   exact ⟨by simpa [fitsWord] using h1, by simpa [fitsWord] using h2, fun r hr => fits_region (h3 r hr),
     by simpa [fitsWord] using h4, fun b hb => fits_binding (h5 b hb), by simpa [fitsWord] using h6,
@@ -2397,50 +2398,21 @@ theorem binary_rejects_wide_pc (snapshot : Snapshot) (hp : 2 ^ 64 ≤ snapshot.p
 
 /-! Save and restore. -/
 
-private theorem find_map_normalize (env : Bil.Env) (var : Bap.Var) :
-    (env.map normalizeBinding).find? (fun binding => binding.1 == var) =
-      (env.find? fun binding => binding.1 == var).map normalizeBinding := by
-  induction env with
-  | nil => rfl
-  | cons head tail ih =>
-    simp only [List.map_cons, List.find?_cons]
-    have : (normalizeBinding head).1 = head.1 := rfl
-    rw [this]
-    cases head.1 == var <;> simp [ih]
-
 /-- Normalizing changes no register's bits: a lookup finds the same binding, with memory values rebuilt. -/
 theorem lookup_normalize (env : Bil.Env) (var : Bap.Var) :
-    Bil.lookup (env.map normalizeBinding) var = (Bil.lookup env var).map normalizeValue := by
-  simp only [Bil.lookup, find_map_normalize]
-  cases env.find? (fun binding => binding.1 == var) <;> rfl
-
-private theorem find_filter_other (env : Bil.Env) (memoryVar var : Bap.Var) (h : var ≠ memoryVar) :
-    (env.filter fun binding => binding.1 != memoryVar).find? (fun binding => binding.1 == var) =
-      env.find? fun binding => binding.1 == var := by
-  induction env with
-  | nil => rfl
-  | cons head tail ih =>
-    simp only [List.filter_cons, List.find?_cons]
-    by_cases hm : head.1 = memoryVar
-    · have h1 : (head.1 != memoryVar) = false := by simp [hm]
-      have h2 : (head.1 == var) = false := by
-        simp only [beq_eq_false_iff_ne, ne_eq, hm]
-        exact fun he => h he.symm
-      simp [h1, h2, ih]
-    · have h1 : (head.1 != memoryVar) = true := by simpa using hm
-      simp [h1, List.find?_cons, ih]
+    Bil.lookup (VarMap.ofList (env.toList.map normalizeBinding)) var = (Bil.lookup env var).map normalizeValue := by
+  have hfind : (env.toList.map normalizeBinding).find? (fun binding => binding.1 == var) =
+      (env.toList.find? fun binding => binding.1 == var).map normalizeBinding := by
+    rw [List.find?_map]
+    rfl
+  simp only [Bil.lookup, VarMap.get?_ofList, hfind, VarMap.get?_eq_find env]
+  cases env.toList.find? (fun binding => binding.1 == var) <;> rfl
 
 /-- `save` leaves the memory variable out, and every other variable as it is. -/
 theorem lookup_withoutMemory (env : Bil.Env) (memoryVar var : Bap.Var) (h : var ≠ memoryVar) :
     Bil.lookup (env.filter fun binding => binding.1 != memoryVar) var = Bil.lookup env var := by
-  simp only [Bil.lookup, find_filter_other env memoryVar var h]
-
-private theorem lookup_cons_other (env : Bil.Env) (memoryVar var : Bap.Var) (value : Value) (h : var ≠ memoryVar) :
-    Bil.lookup ((memoryVar, value) :: env) var = Bil.lookup env var := by
-  have hne : (memoryVar == var) = false := by
-    simp only [beq_eq_false_iff_ne, ne_eq]
-    exact fun he => h he.symm
-  simp [Bil.lookup, hne]
+  simp only [Bil.lookup, VarMap.get?_filter]
+  cases env.get? var <;> simp [h]
 
 /-- Saving and restoring through the binary format gives back exactly the emulator that was saved: pc,
 stopped flag, regions, thread ids, pending branch, skip marker and forked memories, all threads with their
@@ -2476,10 +2448,10 @@ theorem checkpoint_restores (memoryVar : Bap.Var) (width : Nat) (snapshot : Snap
   simp only [materializeState, hspace]
   refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, ?_, ?_, ?_, ?_⟩
   · intro var hvar
-    show Bil.lookup ((memoryVar, _) :: ((snapshot.state.env.filter fun binding => binding.1 != memoryVar).map normalizeBinding)) var = _
-    rw [lookup_cons_other _ _ _ _ hvar, lookup_normalize, lookup_withoutMemory _ _ _ hvar]
-  · show Bil.lookup ((memoryVar, _) :: _) memoryVar = _
-    simp [Bil.lookup]
+    rw [Bil.lookup_bind_of_ne _ _ (Ne.symm hvar)]
+    simp only [normalizeSnapshot, withoutMemory]
+    rw [lookup_normalize, lookup_withoutMemory _ _ _ hvar]
+  · simp only [Bil.lookup_bind_self]
     rfl
   · simp [normalizeSnapshot, withoutMemory, normalizeThread, List.map_map, Function.comp_def]
   · intro thread hm
@@ -3211,7 +3183,7 @@ theorem registerValue_too_wide (name : String) (width index : Nat) (isVirtual : 
   have : ¬ value < 2 ^ width := by omega
   simp [registerValue, this]
 
-private theorem registerNames_foldl (env : Bil.Env) (names : List String) (hnodup : names.Nodup) :
+private theorem registerNames_foldl (env : List (Bap.Var × Value)) (names : List String) (hnodup : names.Nodup) :
     let result := env.foldl (init := names) fun names binding =>
       if isMemoryType binding.1.typ || names.contains binding.1.name.str then names
       else binding.1.name.str :: names
@@ -3261,7 +3233,7 @@ private theorem registerNames_foldl (env : Bil.Env) (names : List String) (hnodu
 theorem registerNames_spec (env : Bil.Env) :
     (registerNames env).Nodup ∧ ∀ name, name ∈ registerNames env ↔
       ∃ binding ∈ env, binding.1.name.str = name ∧ isMemoryType binding.1.typ = false := by
-  obtain ⟨h1, h2⟩ := registerNames_foldl env [] List.nodup_nil
+  obtain ⟨h1, h2⟩ := registerNames_foldl env.toList [] List.nodup_nil
   simp only [registerNames, List.mem_reverse]
   refine ⟨(List.reverse_perm _).nodup_iff.2 h1, fun name => ?_⟩
   rw [h2 name]

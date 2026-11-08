@@ -2157,8 +2157,8 @@ private def stateOf (machine : Bap.Linux.Machine) : IO (List (Nat × ByteArray �
   let regions := (← machine.emu.regions.get).map fun region =>
     (region.address, region.data, region.protection.readable, region.protection.writable, region.protection.executable)
   let registers (env : Bap.Bil.Env) : List (String × Nat) :=
-    let named := env.filterMap fun (var, value) => match value with
-      | .bits bits => if var.name.str.startsWith "_primus_" || var.name.str.startsWith "intrinsic:" then none else some (var.name, bits.toNat)
+    let named := env.toList.filterMap fun (var, value) => match value with
+      | .bits bits => if var.name.str.startsWith "_primus_" || var.name.str.startsWith "intrinsic:" then none else some (var.name.str, bits.toNat)
       | _ => none
     (named.toArray.qsort fun left right => left.1 < right.1).toList
   let threads := (← machine.emu.threadsRef.get).map fun context => (context.id, context.pc, context.stopped, registers context.state.env)
@@ -4756,8 +4756,8 @@ private def diffAndCodecRegressions : IO Unit := do
   assertEqual "diff of identical tables is empty" []
     (Bap.Emu.diffRanges [region 0x10 [1, 2]] [region 0x10 [1, 2]])
   let register (name : String) : Bap.Var := ⟨name, .imm 256, 0, false⟩
-  let snapshotOf (env : Bil.Env) (pc : Nat := 0x1000) : Bap.Emu.Snapshot :=
-    ⟨{ env := env }, pc, [region 0x10 [1, 2]], false, [], 0, 0, none, [], none, {}⟩
+  let snapshotOf (env : List (Bap.Var × Value)) (pc : Nat := 0x1000) : Bap.Emu.Snapshot :=
+    ⟨{ env := VarMap.ofList env }, pc, [region 0x10 [1, 2]], false, [], 0, 0, none, [], none, {}⟩
   let wide := BitVec.ofNat 256 (2 ^ 255 + 7)
   match Bap.Emu.encodeBinarySnapshot (snapshotOf [(register "ymm", .bits wide)]) with
   | .error error => throw <| IO.userError error
@@ -4796,7 +4796,7 @@ def testPatch : IO Unit := do
   let code := (← add 1) ++ (← LLVM.assemble "riscv64" "addi a1, a1, -1\nbnez a1, -8\nnop")
   let register (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
   let emu ← Bap.Emu.create { (← riscvConfig) with hotThreshold := 2, rangeLimit := 8 }
-    [⟨0, code, ⟨true, false, true⟩⟩] { env := [(register "X10", .bits (BitVec.ofNat 64 0)), (register "X11", .bits (BitVec.ofNat 64 0))] } 0
+    [⟨0, code, ⟨true, false, true⟩⟩] { env := VarMap.ofList [(register "X10", .bits (BitVec.ofNat 64 0)), (register "X11", .bits (BitVec.ofNat 64 0))] } 0
   let set (name : String) (value : Nat) : IO Unit := Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 64 value))
   let value (name : String) : IO Nat := do
     match ← Bap.Emu.reg emu (register name) with
@@ -4906,7 +4906,7 @@ private def regionAudit : IO Unit := do
   let code ← LLVM.assemble "riscv64" "addi a0, a0, 1"
   let a0 : Bap.Var := ⟨"X10", .imm 64, 0, false⟩
   -- Instruction fetch needs execute permission only.
-  let executeOnly ← Bap.Emu.create (← riscvConfig) [⟨0, code, ⟨false, false, true⟩⟩] { env := [(a0, .bits (BitVec.ofNat 64 0))] } 0
+  let executeOnly ← Bap.Emu.create (← riscvConfig) [⟨0, code, ⟨false, false, true⟩⟩] { env := VarMap.ofList [(a0, .bits (BitVec.ofNat 64 0))] } 0
   assertTrue "Emu fetches execute-only memory" (← Bap.Emu.step executeOnly)
   assertBits "Emu runs execute-only code" (BitVec.ofNat 64 1) (.ok (← Bap.Emu.reg executeOnly a0))
   expectThrow "Emu execute-only memory is not readable" (Bap.Emu.read executeOnly 0 4)
@@ -5216,7 +5216,7 @@ private def coreRegressions : IO Unit := do
     rangeLimit := 8
   }
   let rangeCode := (← rv "jal 4") ++ (← rv "jal 4") ++ (← rv "jal 4") ++ (← rv "jal 4") ++ (← rv "addi a0, a0, 1")
-  let ranging ← Bap.Emu.create rangeConfig [⟨0, rangeCode, ⟨true, true, true⟩⟩] { env := [(a0, bits 0)] } 0
+  let ranging ← Bap.Emu.create rangeConfig [⟨0, rangeCode, ⟨true, true, true⟩⟩] { env := VarMap.ofList [(a0, bits 0)] } 0
   Bap.Emu.traceStart ranging
   let rangeHits ← IO.mkRef 0
   let _ ← Bap.Emu.onCode ranging (8, 8) fun _ _ => do

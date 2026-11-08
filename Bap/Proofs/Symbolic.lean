@@ -1268,18 +1268,7 @@ private theorem find_bind_same (env : Bil.Env) (var : Bap.Var) (value : Value) :
 
 private theorem lookup_bind_ne (env : Bil.Env) {var var' : Bap.Var} (value : Value) (h : var' ≠ var) :
     Bil.lookup (Bil.bind env var value) var' = Bil.lookup env var' := by
-  have hb : (var == var') = false := by simpa using fun e => h e.symm
-  simp only [Bil.lookup, Bil.bind, List.find?_cons, hb]
-  have : (env.filter fun binding => binding.1 != var).find? (fun binding => binding.1 == var') =
-      env.find? fun binding => binding.1 == var' := by
-    induction env with
-    | nil => rfl
-    | cons entry rest ih =>
-      by_cases he : entry.1 = var
-      · have hne : (entry.1 == var') = false := by rw [he]; exact hb
-        simp [he, hb, ih]
-      · simp [he, List.find?_cons, ih]
-  rw [this]
+  simp only [Bil.lookup, Bil.bind, VarMap.get?_insert, Ne.symm h, ite_false]
 
 private theorem memoryOf_bind_same (s : State) (var : Bap.Var) (m : Bap.Symbolic.Memory) :
     memoryOf { s with memories := (var, m) :: s.memories } var = m := by
@@ -2171,7 +2160,7 @@ private theorem freshen_of_noUnknown (s : State) (e : Bil.Exp) (h : noUnknown e 
 
 /-- A concrete state: an environment, and how many unknowns have been drawn. -/
 structure OState where
-  env : Bil.Env := []
+  env : Bil.Env := {}
   unknowns : Nat := 0
 
 mutual
@@ -3665,29 +3654,34 @@ private theorem find?_congr {α : Type} {p q : α → Bool} {l : List α} (h : �
 
 private theorem find_input {env : Bil.Env} {var : Bap.Var} {value : Value} (hl : Bil.lookup env var = .ok value) :
     (env.find? fun binding => inputName binding.1 == inputName var) = some (var, value) := by
-  unfold Bil.lookup at hl
-  split at hl
-  · next b hfind =>
-    cases hl
-    have hvar : b.1 = var := by simpa using List.find?_some hfind
-    have hcongr : (env.find? fun binding => inputName binding.1 == inputName var) =
-        env.find? fun binding => binding.1 == var := by
-      apply find?_congr
-      intro x _
-      show (inputName x.1 == inputName var) = (x.1 == var)
-      by_cases hxv : x.1 = var
-      · simp [hxv]
-      · have : inputName x.1 ≠ inputName var := fun he => hxv (inputName_injective he)
-        rw [beq_eq_false_iff_ne.mpr this, beq_eq_false_iff_ne.mpr hxv]
-    rw [hcongr, hfind]
+  rw [VarMap.find?_eq]
+  have hcongr : (env.toList.find? fun binding => inputName binding.1 == inputName var) =
+      env.toList.find? fun binding => binding.1 == var := by
+    apply find?_congr
+    intro x _
+    show (inputName x.1 == inputName var) = (x.1 == var)
+    by_cases hxv : x.1 = var
+    · simp [hxv]
+    · have : inputName x.1 ≠ inputName var := fun he => hxv (inputName_injective he)
+      rw [beq_eq_false_iff_ne.mpr this, beq_eq_false_iff_ne.mpr hxv]
+  rw [hcongr]
+  have hg : env.get? var = some value := by
+    unfold Bil.lookup at hl
+    split at hl <;> simp_all
+  rw [VarMap.get?_eq_find] at hg
+  cases hf : env.toList.find? (·.1 == var) with
+  | none => simp [hf] at hg
+  | some b =>
+    simp only [hf, Option.map_some, Option.some.injEq] at hg
+    have hvar : b.1 = var := by simpa using List.find?_some hf
     obtain ⟨b1, b2⟩ := b
-    cases (show b1 = var from hvar)
+    simp only at hvar hg
+    subst hvar hg
     rfl
-  · cases hl
 
 private theorem find_unknown (env : Bil.Env) (message : String) :
     (env.find? fun binding => inputName binding.1 == unknownName message) = none := by
-  rw [List.find?_eq_none]
+  rw [VarMap.find?_eq, List.find?_eq_none]
   intro b _
   simpa using inputName_ne_unknownName b.1 message
 

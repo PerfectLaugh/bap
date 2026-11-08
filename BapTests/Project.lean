@@ -801,7 +801,7 @@ def run : IO Unit := do
   let runTrace (listed : List Disasm.Insn) : Except String Bil.State :=
     listed.foldlM (fun state insn => do
       let (next, _) ← Bil.execProgram 100 state insn.bil
-      .ok next) { env := [(mem, .memory (Memory.empty 64))] }
+      .ok next) { env := VarMap.ofList [(mem, .memory (Memory.empty 64))] }
   let readCriterion (result : Except String Bil.State) : Option Nat :=
     match result with
     | .ok state =>

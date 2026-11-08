@@ -8,12 +8,12 @@ open Bap
 
 private def reg (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
 
-private def executeEffect (insn : Disasm.Insn) (env : Bil.Env := []) : IO (Bil.State × Bil.Effect) :=
-  match Bil.run insn.bil { env := env } with
+private def executeEffect (insn : Disasm.Insn) (env : List (Bap.Var × Bap.Value) := []) : IO (Bil.State × Bil.Effect) :=
+  match Bil.run insn.bil { env := VarMap.ofList env } with
   | .ok result => pure result
   | .error error => throw <| IO.userError error
 
-private def execute (insn : Disasm.Insn) (env : Bil.Env := []) : IO Bil.State := do
+private def execute (insn : Disasm.Insn) (env : List (Bap.Var × Bap.Value) := []) : IO Bil.State := do
   let (state, _) ← executeEffect insn env
   pure state
 
@@ -27,7 +27,7 @@ private def testRiscvRem : IO Unit := do
   let reg (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
   let cases : List (Int × Int × Int) := [(-7, 3, -1), (7, -3, 1), (-7, -3, -1), (7, 3, 1), (-7, 0, -7)]
   for (dividend, divisor, expected) in cases do
-    let env : Bil.Env := [
+    let env : List (Bap.Var × Bap.Value) := [
       (reg "X11", .bits (BitVec.ofInt 64 dividend)),
       (reg "X12", .bits (BitVec.ofInt 64 divisor))]
     let state ← execute insn env
@@ -108,7 +108,7 @@ private def assertControl (label : String) (flow : Disasm.Flow) (target : Option
 private def thumbMemVar : Bap.Var := ⟨"mem", .mem 32 8, 0, false⟩
 
 /-- A 32-bit stack at 0x1000 that holds the given words. -/
-private def thumbStack (values : List Nat) : IO Bil.Env := do
+private def thumbStack (values : List Nat) : IO (List (Bap.Var × Bap.Value)) := do
   let mut memory : Memory 32 := Memory.empty 32
   for (index, value) in (List.range values.length).zip values do
     match Memory.write memory (BitVec.ofNat 32 (0x1000 + 4 * index)) (BitVec.ofNat 32 value) .little 4 with
@@ -440,7 +440,7 @@ private def testVectorRegisters : IO Unit := do
   assertEqual "x86-32 K1" "K1 64 64" (← view "i386" "K1" x8632)
 
 /-- A memory with one word at an address. -/
-private def thumbMemAt (address value : Nat) : IO Bil.Env :=
+private def thumbMemAt (address value : Nat) : IO (List (Bap.Var × Bap.Value)) :=
   match Memory.write (Memory.empty 32) (BitVec.ofNat 32 address) (BitVec.ofNat 32 value) .little 4 with
   | .ok memory => pure [(thumbMemVar, .memory memory)]
   | .error error => throw <| IO.userError error
@@ -449,7 +449,7 @@ private def thumbMemAt (address value : Nat) : IO Bil.Env :=
 private def testThumbNarrow : IO Unit := do
   let thumb ← Target.LLVMLift.thumbEnvironment
   let decode (values : List Nat) := Target.LLVMLift.decodeThumbWith thumb 0x2000 0x2000 (bytes values)
-  let run (values : List Nat) (env : Bil.Env) := do execute (← decode values) env
+  let run (values : List Nat) (env : List (Bap.Var × Bap.Value)) := do execute (← decode values) env
   let r (name : String) (value : Nat) := word32 name value
   assertReg32 "tMOVi8" "R0" 1 (← run [0x01, 0x20] [])
   let adds ← run [0x01, 0x30] [r "R0" 0xffffffff]
@@ -499,10 +499,10 @@ private def testThumbNarrow : IO Unit := do
   assertFlag "tSUBi3 no borrow" "CF" 1 sub3
   assertReg32 "tSXTH" "R0" 0xffff8000 (← run [0x08, 0xb2] [r "R1" 0x18000, r "R0" 0])
   assertReg32 "tUXTH" "R0" 0x8000 (← run [0x88, 0xb2] [r "R1" 0x18000, r "R0" 0])
-  let bytesAt (values : List Nat) : IO Bil.Env := thumbStack values
+  let bytesAt (values : List Nat) : IO (List (Bap.Var × Bap.Value)) := thumbStack values
   -- memory from 0x1000: the words 0x8877ff80 and 0x44332211, with an offset register R2
   let mem ← bytesAt [0x8877ff80, 0x44332211]
-  let at' (rest : Bil.Env) : Bil.Env := rest ++ r "R1" 0x1000 :: r "R0" 0 :: mem
+  let at' (rest : List (Bap.Var × Bap.Value)) : List (Bap.Var × Bap.Value) := rest ++ r "R1" 0x1000 :: r "R0" 0 :: mem
   assertReg32 "tLDRr" "R0" 0x44332211 (← run [0x88, 0x58] (at' [r "R2" 4]))
   assertReg32 "tLDRBr" "R0" 0x80 (← run [0x88, 0x5c] (at' [r "R2" 0]))
   assertReg32 "tLDRSB" "R0" 0xffffff80 (← run [0x88, 0x56] (at' [r "R2" 0]))
@@ -514,12 +514,12 @@ private def testThumbNarrow : IO Unit := do
   -- a literal, from the word-aligned pc: at 0x2000 the pc is 0x2004
   assertReg32 "tLDRpci" "R0" 0x12345678 (← run [0x01, 0x48] (r "R0" 0 :: (← thumbMemAt 0x2008 0x12345678)))
   -- a store and the load of what it wrote, with the neighbours left alone
-  let store (values : List Nat) (env : Bil.Env) := do pure (← run values (at' env)).env
+  let store (values : List Nat) (env : List (Bap.Var × Bap.Value)) := do pure (← run values (at' env)).env
   let afterStr ← store [0x48, 0x60] [r "R0" 0xaabbccdd]
   assertReg32 "tSTRi scales by four" "R3" 0xaabbccdd (← run [0x4b, 0x68] (r "R3" 0 :: afterStr))
   let afterStrr ← store [0x88, 0x50] [r "R0" 0xaabbccdd, r "R2" 4]
   assertReg32 "tSTRr" "R3" 0xaabbccdd (← run [0x4b, 0x68] (r "R3" 0 :: afterStrr))
-  let storeWith (values : List Nat) (env : Bil.Env) := do
+  let storeWith (values : List Nat) (env : List (Bap.Var × Bap.Value)) := do
     pure (← run values (r "R1" 0x1000 :: env ++ mem)).env
   let afterStrb ← storeWith [0x48, 0x70] [r "R0" 0xaabbccdd]
   assertReg32 "tSTRBi writes one byte" "R3" 0x8877dd80 (← run [0x0b, 0x68] (r "R3" 0 :: afterStrb))
@@ -557,24 +557,24 @@ private def testThumbNarrow : IO Unit := do
 private def testThumbIt : IO Unit := do
   let thumb ← Target.LLVMLift.thumbEnvironment
   let decode (values : List Nat) := Target.LLVMLift.decodeThumbWith thumb 0x2000 0x2000 (bytes values)
-  let run (values : List Nat) (env : Bil.Env) := do execute (← decode values) env
+  let run (values : List Nat) (env : List (Bap.Var × Bap.Value)) := do execute (← decode values) env
   let r (name : String) (value : Nat) := word32 name value
   -- ite eq; moveq r0, r1; movne r0, r2
   let ite := [0x0c, 0xbf, 0x08, 0x46, 0x10, 0x46]
   let block ← decode ite
   assertEqual "IT covers its block" 6 block.size
   assertEqual "IT has a normal flow" Disasm.Flow.normal block.flow
-  let flags (z : Nat) : Bil.Env := [bit "ZF" z, bit "NF" 0, bit "VF" 0, bit "CF" 0, r "R1" 11, r "R2" 22, r "R0" 0]
+  let flags (z : Nat) : List (Bap.Var × Bap.Value) := [bit "ZF" z, bit "NF" 0, bit "VF" 0, bit "CF" 0, r "R1" 11, r "R2" 22, r "R0" 0]
   assertReg32 "ite: then" "R0" 11 (← run ite (flags 1))
   assertReg32 "ite: else" "R0" 22 (← run ite (flags 0))
   -- itte lt; addlt r0, #1; addlt r0, r1; subge r0, r0, #1: narrow instructions in a block do not set the flags
   let itte := [0xba, 0xbf, 0x01, 0x30, 0x08, 0x44, 0x40, 0x1e]
-  let less : Bil.Env := [bit "NF" 1, bit "VF" 0, bit "ZF" 0, bit "CF" 0, r "R0" 0xffffffff, r "R1" 5]
+  let less : List (Bap.Var × Bap.Value) := [bit "NF" 1, bit "VF" 0, bit "ZF" 0, bit "CF" 0, r "R0" 0xffffffff, r "R1" 5]
   let taken ← run itte less
   assertReg32 "itte: both then branches run" "R0" 5 taken
   assertFlag "itte: adds in a block leaves the carry" "CF" 0 taken
   assertFlag "itte: adds in a block leaves zero" "ZF" 0 taken
-  let notLess : Bil.Env := [bit "NF" 0, bit "VF" 0, bit "ZF" 0, bit "CF" 0, r "R0" 1, r "R1" 5]
+  let notLess : List (Bap.Var × Bap.Value) := [bit "NF" 0, bit "VF" 0, bit "ZF" 0, bit "CF" 0, r "R0" 1, r "R1" 5]
   let other ← run itte notLess
   assertReg32 "itte: the else branch runs" "R0" 0 other
   assertFlag "itte: subs in a block leaves zero" "ZF" 0 other
@@ -681,7 +681,7 @@ private def testX86Sse : IO Unit := do
   let memory ← match Memory.write (Memory.empty 64) (BitVec.ofNat 64 0x1000) (BitVec.ofNat 128 value) .little 16 with
     | .ok memory => pure memory
     | .error error => throw <| IO.userError error
-  let start : Bil.Env := [(cell, .memory memory), word64 "RAX" 0x1000, ymm "ZMM0" upper, word64 "RBX" 0x2000]
+  let start : List (Bap.Var × Bap.Value) := [(cell, .memory memory), word64 "RAX" 0x1000, ymm "ZMM0" upper, word64 "RBX" 0x2000]
   assertEqual "movaps from memory" (upper + value) (← readYmm (← execute (← decode [0x0f, 0x28, 0x00]) start) "ZMM0")
   assertEqual "movdqu from memory" (upper + value) (← readYmm (← execute (← decode [0xf3, 0x0f, 0x6f, 0x00]) start) "ZMM0")
   assertEqual "movss from memory clears the rest of xmm" (upper + 0xccddeeff)
@@ -1269,7 +1269,7 @@ private def testX86Evex : IO Unit := do
     (⟨s!"ZMM{number}", .imm 512, 0, false⟩, .bits (BitVec.ofNat 512 value))
   let word (name : String) (value : Nat) : Bap.Var × Bap.Value :=
     (⟨name, .imm 64, 0, false⟩, .bits (BitVec.ofNat 64 value))
-  let start : Bil.Env :=
+  let start : List (Bap.Var × Bap.Value) :=
     [(cell, .memory memory), word "RAX" 0x1000, word "RCX" evexRcx, word "K1" evexK1, word "K3" evexK3, word "K2" 0,
       zmm 1 evexA, zmm 2 evexB, zmm 3 evexC, zmm 16 evexZ16, zmm 17 evexA, zmm 18 evexB, zmm 19 evexC] ++
     ((List.range 32).filter (fun n => ![1, 2, 3, 16, 17, 18, 19].contains n)).map (zmm · 0)
@@ -1309,7 +1309,7 @@ private def testX86Evex : IO Unit := do
   assertEqual "a load without a mask is one load" [(32, false)] (moved wholeLoad)
   -- the same in the 32-bit mode: vpaddd %zmm1,%zmm2,%zmm3{%k1} and kmovd %ecx,%k2
   let x8632 ← Target.LLVMLift.x8632Environment
-  let start32 : Bil.Env := [word "K1" 0b101, word "K2" 0, zmm 1 7, zmm 2 (2 ^ 40 + 5), zmm 3 (9 * 2 ^ 32),
+  let start32 : List (Bap.Var × Bap.Value) := [word "K1" 0b101, word "K2" 0, zmm 1 7, zmm 2 (2 ^ 40 + 5), zmm 3 (9 * 2 ^ 32),
     (⟨"ECX", .imm 32, 0, false⟩, .bits (BitVec.ofNat 32 0x12345678))]
   let added ← execute (← Target.LLVMLift.decodeX8632With x8632 0 0 (bytes [0x62, 0xf1, 0x6d, 0x49, 0xfe, 0xd9])) start32
   match Bil.lookup added.env ⟨"ZMM3", .imm 512, 0, false⟩ with
@@ -1644,7 +1644,7 @@ private def testArmMultipleAgree : IO Unit := do
     | .reg name => .register (if name.isEmpty || name = "NoRegister" then "Nil" else name) 32 32
     | .imm value => .bil 32 (.int (BitVec.ofInt 32 value))
   let names := (List.range 13).map (s!"R{·}") ++ ["SP", "LR", "PC"]
-  let initial (flag : Nat) : IO Bil.Env := do
+  let initial (flag : Nat) : IO (List (Bap.Var × Bap.Value)) := do
     let mut memory := Memory.empty 32
     for index in List.range 0x100 do
       let address := 0x1000 + index * 4
@@ -1692,7 +1692,7 @@ private def testThumbMultipleAgree : IO Unit := do
     | .reg name => .register (if name.isEmpty || name = "NoRegister" then "Nil" else name) 32 32
     | .imm value => .bil 32 (.int (BitVec.ofInt 32 value))
   let names := (List.range 13).map (s!"R{·}") ++ ["SP", "LR", "PC"]
-  let initial : IO Bil.Env := do
+  let initial : IO (List (Bap.Var × Bap.Value)) := do
     let mut memory := Memory.empty 32
     for index in List.range 0x100 do
       let address := 0x1000 + index * 4
@@ -1772,7 +1772,7 @@ private def testX86EvexModel : IO Unit := do
     (⟨s!"ZMM{number}", .imm 512, 0, false⟩, .bits (BitVec.ofNat 512 value))
   let word (name : String) (value : Nat) : Bap.Var × Bap.Value :=
     (⟨name, .imm 64, 0, false⟩, .bits (BitVec.ofNat 64 value))
-  let start : Bil.Env :=
+  let start : List (Bap.Var × Bap.Value) :=
     [(cell, .memory memory), word "RAX" 0x1000, word "RCX" evexRcx, word "K1" evexK1, word "K3" evexK3, word "K2" 0,
       zmm 1 evexA, zmm 2 evexB, zmm 3 evexC, zmm 16 evexZ16, zmm 20 0x20000000f0000000c000000090000000600000003000000000000000d0000000a0000000700000004000000010000000e0000000b0000000800000005, zmm 21 0x50000000000000000000000000000000300000000000000060000000000000001000000000000000400000000000000070000000000000002, zmm 22 0x500000002000000070000000400000001000000060000000300000000]
   for (name, encoding, registers, _, stored) in evexModelCases do
@@ -1902,7 +1902,7 @@ private def testX86Memo : IO Unit := do
 /-! The values of `testHardware` are what the differential test of `tools/difftest` observed, on a Ryzen 9 5950X for x86 and under
 qemu-user for the others, each from a disagreement it found: they guard the fix with no machine. -/
 
-private def windowOf (bits base : Nat) (cells : List (Nat × Nat)) : Bil.Env := Id.run do
+private def windowOf (bits base : Nat) (cells : List (Nat × Nat)) : List (Bap.Var × Bap.Value) := Id.run do
   let mut memory : Memory bits := Memory.empty bits
   for (offset, value) in cells do
     memory := Memory.writeByte memory (BitVec.ofNat bits (base + offset)) (UInt8.ofNat value)
@@ -2275,7 +2275,7 @@ private def testX86Rest : IO Unit := do
   let memory ← match Memory.write (Memory.empty 64) (BitVec.ofNat 64 0x1000) (BitVec.ofNat 1024 x86RestMemory) .little 128 with
     | .ok memory => pure memory
     | .error error => throw <| IO.userError error
-  let start : Bil.Env :=
+  let start : List (Bap.Var × Bap.Value) :=
     (cell, .memory memory) :: (⟨"RAX", .imm 64, 0, false⟩, .bits (BitVec.ofNat 64 0x1000)) ::
       x86RestState.map fun (name, width, value) => (⟨name, .imm width, 0, false⟩, .bits (BitVec.ofNat width value))
   let widthOf (name : String) : Nat :=

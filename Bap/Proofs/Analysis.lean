@@ -1154,17 +1154,8 @@ private theorem slice_stmtInfo_ifElse (condition : Bap.Bil.Exp) (yes no : Bap.Bi
   simp [stmtInfo, merge, h1, h2, blockInfo]
 
 private theorem slice_lookup_bind_other {env : Bap.Bil.Env} {var other : Bap.Var} (value : Bap.Value)
-    (h : var ≠ other) : Bap.Bil.lookup (Bap.Bil.bind env var value) other = Bap.Bil.lookup env other := by
-  have hfind : (List.filter (fun binding : Bap.Var × Bap.Value => binding.1 != var) env).find?
-      (fun binding => binding.1 == other) = env.find? (fun binding => binding.1 == other) := by
-    induction env with
-    | nil => rfl
-    | cons head tail ih =>
-      by_cases hv : head.1 = var
-      · simp [hv, h, ih]
-      · simp only [List.filter_cons, bne_iff_ne, ne_eq, hv, not_false_eq_true, ite_true, List.find?_cons, ih]
-  have hne : (var == other) = false := by simp [h]
-  simp only [Bap.Bil.lookup, Bap.Bil.bind, List.find?_cons, hne, hfind]
+    (h : var ≠ other) : Bap.Bil.lookup (Bap.Bil.bind env var value) other = Bap.Bil.lookup env other :=
+  Bap.Bil.lookup_bind_of_ne env value h
 
 private theorem slice_bind_ok {α β : Type} {x : Except String α} {f : α → Except String β} {r : β}
     (h : (x >>= f) = .ok r) : ∃ a, x = .ok a ∧ f a = .ok r := by
@@ -1441,7 +1432,7 @@ private theorem slice_constantRange_eval {address : Bap.Bil.Exp} {size n : Nat}
     (h : constantRange address size = some n) :
     ∃ (w : Nat) (c : BitVec w), (∀ env, evalExp env address = .ok (.bits c)) ∧ c.toNat = n ∧ n + size ≤ 2 ^ w := by
   simp only [constantRange] at h
-  cases he : evalExp [] address with
+  cases he : evalExp {} address with
   | error e => simp [he] at h
   | ok value =>
     rw [he] at h
@@ -1479,7 +1470,7 @@ private theorem slice_closedBits_eval {exp : Bap.Bil.Exp} {x : Σ width, BitVec 
     ∀ env, evalExp env exp = .ok (.bits x.2) := by
   intro env
   simp only [closedBits] at h
-  cases he : evalExp [] exp with
+  cases he : evalExp {} exp with
   | error e => simp [he] at h
   | ok value =>
     rw [he] at h
@@ -2772,7 +2763,7 @@ private theorem slice_exec_frame_live {Ms : List Bap.Var} (hM : slice_Memories M
 private theorem slice_constantTarget_eval {target : Bap.Bil.Exp} {n : Nat} (h : constantTarget target = some n) :
     ∃ (w : Nat) (c : BitVec w), (∀ env, evalExp env target = .ok (.bits c)) ∧ c.toNat = n := by
   simp only [constantTarget] at h
-  cases he : evalExp [] target with
+  cases he : evalExp {} target with
   | error e => simp [he] at h
   | ok value =>
     rw [he] at h
@@ -4529,30 +4520,10 @@ open_private Bap.Analysis.Propagate in Bap.Analysis.Propagate : sameConstant
 def propagate_Extends (a b : Env) : Prop :=
   ∀ v r, lookup a v = .ok r → lookup b v = .ok r
 
-private theorem propagate_find_filter (env : Env) (k w : Bap.Var) (h : w ≠ k) :
-    (env.filter fun b => b.1 != k).find? (fun b => b.1 == w) = env.find? (fun b => b.1 == w) := by
-  induction env with
-  | nil => rfl
-  | cons head tail ih =>
-    by_cases hv : head.1 = k
-    · have : head.1 ≠ w := fun e => h (e.symm.trans hv)
-      simp [hv, h.symm] at ih ⊢
-      exact ih
-    · by_cases hw : head.1 = w
-      · simp [hw, h]
-      · simp [hv, hw, ih] at ih ⊢
-
 theorem propagate_lookup_bind (env : Env) (v w : Bap.Var) (r : Value) :
     lookup (Bil.bind env v r) w = if w = v then .ok r else lookup env w := by
-  by_cases h : w = v
-  · subst h; simp [lookup, Bil.bind]
-  · have hh : ¬ v = w := fun e => h e.symm
-    unfold lookup Bil.bind
-    rw [List.find?_cons]
-    have e : ((v, r).1 == w) = false := by simpa using hh
-    rw [e]
-    simp only [h, ite_false]
-    rw [propagate_find_filter env v w h]
+  rw [Bil.lookup_bind]
+  by_cases h : w = v <;> simp [h, Ne.symm]
 
 private theorem propagate_Extends_bind {a b : Env} (h : propagate_Extends a b) (v : Bap.Var) (r : Value) :
     propagate_Extends (Bil.bind a v r) (Bil.bind b v r) := by
@@ -4642,18 +4613,18 @@ theorem propagate_eval_extends (e : Exp) : ∀ {a b : Env}, propagate_Extends a 
   intro a b h r k
   exact main h r k
 
-private theorem propagate_Extends_nil (env : Env) : propagate_Extends [] env := by
-  intro v r h; simp [lookup] at h
+private theorem propagate_Extends_nil (env : Env) : propagate_Extends {} env := by
+  intro v r h; simp at h
 
 /-- A closed expression (one that evaluates in the empty environment) evaluates to the same
 value everywhere. -/
-theorem propagate_eval_closed {e : Exp} {r : Value} (env : Env) (h : evalExp [] e = .ok r) :
+theorem propagate_eval_closed {e : Exp} {r : Value} (env : Env) (h : evalExp {} e = .ok r) :
     evalExp env e = .ok r :=
   propagate_eval_extends e (propagate_Extends_nil env) r h
 
 /-- Constant folding preserves evaluation exactly, in every environment, including failures. -/
 theorem propagate_foldExp_eval (e : Exp) : ∀ env, evalExp env (foldExp e) = evalExp env e := by
-  have folded : ∀ {e : Exp} {w} {v : BitVec w} (env : Env), evalExp [] e = .ok (.bits v) →
+  have folded : ∀ {e : Exp} {w} {v : BitVec w} (env : Env), evalExp {} e = .ok (.bits v) →
       evalExp env (Exp.int v) = evalExp env e := by
     intro e w v env h
     rw [propagate_eval_closed env h]; rfl
@@ -5909,8 +5880,7 @@ theorem deadcode_deleted_move_may_hide_error (x u : Bap.Var) (hx : deadcode_isMe
     rw [deadcode_move_dead [] _ hx (by simp)]
     rfl
   refine ⟨?_, hopt, ?_⟩
-  · simp only [run, propagate_exec_cons, propagate_exec_move, evalExp, lookup]
-    rfl
+  · simp [run, propagate_exec_cons, propagate_exec_move, evalExp, Bind.bind, Except.bind, Except.toOption]
   · rw [hopt]
     rfl
 
@@ -6264,30 +6234,10 @@ open Bap.Bil
 def taint_Extends (a b : Env) : Prop :=
   ∀ v r, lookup a v = .ok r → lookup b v = .ok r
 
-private theorem taint_env_find_filter (env : Env) (k w : Bap.Var) (h : w ≠ k) :
-    (env.filter fun b => b.1 != k).find? (fun b => b.1 == w) = env.find? (fun b => b.1 == w) := by
-  induction env with
-  | nil => rfl
-  | cons head tail ih =>
-    by_cases hv : head.1 = k
-    · have : head.1 ≠ w := fun e => h (e.symm.trans hv)
-      simp [hv, h.symm] at ih ⊢
-      exact ih
-    · by_cases hw : head.1 = w
-      · simp [hw, h]
-      · simp [hv, hw, ih] at ih ⊢
-
 theorem taint_lookup_bind (env : Env) (v w : Bap.Var) (r : Value) :
     lookup (Bil.bind env v r) w = if w = v then .ok r else lookup env w := by
-  by_cases h : w = v
-  · subst h; simp [lookup, Bil.bind]
-  · have hh : ¬ v = w := fun e => h e.symm
-    unfold lookup Bil.bind
-    rw [List.find?_cons]
-    have e : ((v, r).1 == w) = false := by simpa using hh
-    rw [e]
-    simp only [h, ite_false]
-    rw [taint_env_find_filter env v w h]
+  rw [Bil.lookup_bind]
+  by_cases h : w = v <;> simp [h, Ne.symm]
 
 private theorem taint_Extends_bind {a b : Env} (h : taint_Extends a b) (v : Bap.Var) (r : Value) :
     taint_Extends (Bil.bind a v r) (Bil.bind b v r) := by
@@ -6377,12 +6327,12 @@ theorem taint_eval_extends (e : Exp) : ∀ {a b : Env}, taint_Extends a b →
   intro a b h r k
   exact main h r k
 
-private theorem taint_Extends_nil (env : Env) : taint_Extends [] env := by
-  intro v r h; simp [lookup] at h
+private theorem taint_Extends_nil (env : Env) : taint_Extends {} env := by
+  intro v r h; simp at h
 
 /-- A closed expression (one that evaluates in the empty environment) evaluates to the same
 value everywhere. -/
-theorem taint_eval_closed {e : Exp} {r : Value} (env : Env) (h : evalExp [] e = .ok r) :
+theorem taint_eval_closed {e : Exp} {r : Value} (env : Env) (h : evalExp {} e = .ok r) :
     evalExp env e = .ok r :=
   taint_eval_extends e (taint_Extends_nil env) r h
 end Evaluation
@@ -7557,7 +7507,7 @@ private theorem taint_address_of_constant {a : Bil.Exp} {x : Σ width, BitVec wi
     (h : constant a = some x) : taint_address env a = some x := by
   unfold constant at h
   unfold taint_address
-  cases he : Bil.evalExp [] a with
+  cases he : Bil.evalExp {} a with
   | error _ => rw [he] at h; cases h
   | ok r =>
     rw [he] at h
@@ -9519,10 +9469,10 @@ theorem validate_compare_effects_symm {registers registers' : List Bap.Var} {a b
 itself, and the empty program validates against itself from a state holding it. -/
 theorem validate_compare_refl_aliased_memory {w : Nat} (pages : Std.TreeMap Nat ByteArray)
     (m : Bap.Var) (fuel : Nat) :
-    ∃ r, Bap.Analysis.Validate.compare [] [] [] ⟨[(m, .memory (⟨pages⟩ : Memory w))]⟩ (fuel + 1) = .ok r ∧
+    ∃ r, Bap.Analysis.Validate.compare [] [] [] ⟨VarMap.ofList [(m, Value.memory (⟨pages⟩ : Memory w))]⟩ (fuel + 1) = .ok r ∧
       ok r = true := by
-  have : run [] (⟨[(m, .memory (⟨pages⟩ : Memory w))]⟩ : State) (fuel + 1) =
-      .ok (⟨[(m, .memory (⟨pages⟩ : Memory w))]⟩, .normal) := by
+  have : run [] (⟨VarMap.ofList [(m, Value.memory (⟨pages⟩ : Memory w))]⟩ : State) (fuel + 1) =
+      .ok (⟨VarMap.ofList [(m, Value.memory (⟨pages⟩ : Memory w))]⟩, .normal) := by
     simp [run, execProgram]
   exact validate_compare_refl this
 
@@ -9615,7 +9565,7 @@ theorem statemachine_analyzeWithState_complete {instructions : List Bap.Disasm.I
 
 theorem statemachine_mem_assignments {insn : Bap.Disasm.Insn} {var : Bap.Var} {value : Nat}
     (h : (var, value) ∈ assignments insn) :
-    ∃ exp result, Bap.Bil.Stmt.move var exp ∈ insn.bil ∧ Bap.Bil.evalExp [] exp = .ok result ∧
+    ∃ exp result, Bap.Bil.Stmt.move var exp ∈ insn.bil ∧ Bap.Bil.evalExp {} exp = .ok result ∧
       ((Bap.Value.asBits result).toOption.map fun bits => bits.2.toNat) = some value := by
   simp only [assignments, List.mem_filterMap] at h
   rcases h with ⟨stmt, hs, he⟩
@@ -9912,7 +9862,7 @@ theorem deflatten_mem_assignmentAddresses {instructions : List Bap.Disasm.Insn} 
 /-- `assigns` is exactly: some top-level move to the variable evaluates, closed, to the value. -/
 theorem deflatten_assigns_iff {insn : Bap.Disasm.Insn} {var : Bap.Var} {value : Nat} :
     assigns insn var value = true ↔
-      ∃ exp result, Bap.Bil.Stmt.move var exp ∈ insn.bil ∧ Bap.Bil.evalExp [] exp = .ok result ∧
+      ∃ exp result, Bap.Bil.Stmt.move var exp ∈ insn.bil ∧ Bap.Bil.evalExp {} exp = .ok result ∧
         (Bap.Value.asBits result).toOption.any (fun bits => bits.2.toNat = value) = true := by
   simp only [assigns, List.any_eq_true]
   constructor

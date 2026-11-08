@@ -595,7 +595,7 @@ private def bitsBytes (bits : Option (Σ width, BitVec width)) : ByteArray :=
   | none => ByteArray.empty
 
 private def constantly (exp : Bil.Exp) : Option (Σ width, BitVec width) :=
-  match Bil.evalExp [] exp with
+  match Bil.evalExp {} exp with
   | .ok value => (Bap.Value.asBits value).toOption
   | .error _ => none
 

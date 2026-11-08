@@ -126,8 +126,8 @@ private def semantics : IO Unit := do
   assertRuns "taken branch" oneArm [(c, bit 1)] x
   assertRuns "untaken branch, unbound on the path" oneArm [(c, bit 0)] y
   assertRuns "untaken branch keeps the entry value" oneArm [(c, bit 0), (x, word 9)] x
-  assertRuns "phis exchanging values around a loop" swapLoop [] x
-  assertEqual "the exchange takes one trip round" (some [1, 2, 2, 3]) ((runFrom swapLoop []).toOption.map (·.1))
+  assertRuns "phis exchanging values around a loop" swapLoop {} x
+  assertEqual "the exchange takes one trip round" (some [1, 2, 2, 3]) ((runFrom swapLoop {}).toOption.map (·.1))
   assertEqual "condition decides the path" (some [1, 3]) ((runFrom oneArm [(c, bit 0)]).toOption.map (·.1))
   assertEqual "condition decides the path when taken" (some [1, 2, 3]) ((runFrom oneArm [(c, bit 1)]).toOption.map (·.1))
   match Proofs.IR.execPhis 2 [(x, word 1), (y, word 2)]
@@ -136,7 +136,7 @@ private def semantics : IO Unit := do
     assertEqual "phis read simultaneously" (reprStr (word 2)) (showRead env x)
     assertEqual "whatever their order" (reprStr (word 1)) (showRead env y)
   | .error message => throw <| IO.userError message
-  match Proofs.IR.execPhis 9 [] [⟨4, x, [(2, .var y)]⟩] [] with
+  match Proofs.IR.execPhis 9 {} [⟨4, x, [(2, .var y)]⟩] {} with
   | .ok _ => throw <| IO.userError "a phi without an input for the predecessor must fail"
   | .error _ => pure ()
   match Proofs.IR.execPhis 2 [(x, word 1)] [⟨4, x, [(2, .var y)]⟩] [(x, word 1)] with

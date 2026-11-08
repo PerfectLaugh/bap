@@ -79,7 +79,7 @@ private def putThreadBin (writer : Writer) (context : ThreadContext) : Writer :=
   let writer := putNat writer context.id
   let writer := putNat writer context.pc
   let writer := putBool writer context.stopped
-  let writer := putNat writer context.state.env.length
+  let writer := putNat writer context.state.env.size
   let writer := context.state.env.foldl putBindingBin writer
   putSkipBin (putPendingBin writer context.pending) context.skip
 
@@ -296,7 +296,7 @@ private def encodeBinaryUnchecked (snapshot : Snapshot) : ByteArray :=
   let writer := putBool writer snapshot.stopped
   let writer := putNat writer snapshot.regions.length
   let writer := snapshot.regions.foldl putRegionBin writer
-  let writer := putNat writer snapshot.state.env.length
+  let writer := putNat writer snapshot.state.env.size
   let writer := snapshot.state.env.foldl putBindingBin writer
   let writer := putNat writer snapshot.threads.length
   let writer := snapshot.threads.foldl putThreadBin writer
@@ -339,7 +339,7 @@ private def regionFits (region : Region) : Bool :=
   fitsWord region.address && decide (region.data.size < Jit.fillLimit)
 
 private def threadFits (context : ThreadContext) : Bool :=
-  fitsWord context.id && fitsWord context.pc && fitsWord context.state.env.length &&
+  fitsWord context.id && fitsWord context.pc && fitsWord context.state.env.size &&
     context.state.env.all bindingFits && pendingFits context.pending && skipFits context.skip
 
 private def processFits (process : ThreadId × List Region) : Bool :=
@@ -359,7 +359,7 @@ private def waiterFits (waiter : Tasks.Waiter) : Bool :=
 def binaryFits (snapshot : Snapshot) : Bool :=
   fitsWord snapshot.pc &&
     fitsWord snapshot.regions.length && snapshot.regions.all regionFits &&
-    fitsWord snapshot.state.env.length && snapshot.state.env.all bindingFits &&
+    fitsWord snapshot.state.env.size && snapshot.state.env.all bindingFits &&
     fitsWord snapshot.threads.length && snapshot.threads.all threadFits &&
     fitsWord snapshot.currentThread && fitsWord snapshot.nextThread && pendingFits snapshot.pending &&
     fitsWord snapshot.processMemory.length && snapshot.processMemory.all processFits && skipFits snapshot.skip &&
@@ -417,7 +417,7 @@ and a forked process does not get the memory of its parent. -/
 def materializeState (memoryVar : Bap.Var) (width : Nat) (snapshot : Snapshot) : Snapshot :=
   let memoryOf (id : ThreadId) : Value := .memory (regionsMemory width (spaceRegions snapshot id))
   { snapshot with
-    state := { env := (memoryVar, memoryOf snapshot.currentThread) :: snapshot.state.env }
+    state := { env := Bil.bind snapshot.state.env memoryVar (memoryOf snapshot.currentThread) }
     threads := snapshot.threads.map fun thread =>
       { thread with state := { env := Bil.bind thread.state.env memoryVar (memoryOf thread.id) } }
   }
@@ -445,7 +445,7 @@ private def materializeStateShared (memoryVar : Bap.Var) (width : Nat) (snapshot
   let (processes, shared) := spaceMemories width snapshot
   let memoryOf (id : ThreadId) : Value := ((processes.lookup (snapshot.table.spaceOf id)).getD shared).get
   { snapshot with
-    state := { env := (memoryVar, memoryOf snapshot.currentThread) :: snapshot.state.env }
+    state := { env := Bil.bind snapshot.state.env memoryVar (memoryOf snapshot.currentThread) }
     threads := snapshot.threads.map fun thread =>
       { thread with state := { env := Bil.bind thread.state.env memoryVar (memoryOf thread.id) } }
   }

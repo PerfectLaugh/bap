@@ -148,7 +148,7 @@ private def auditSemantics : IO Unit := do
 private def semanticsValue (state : Primus.Semantics.State) : IO Nat :=
   match state.code with
   | [.move _ value] =>
-    match Bil.evalExp [] value with
+    match Bil.evalExp {} value with
     | .ok (.bits value) => pure value.toNat
     | _ => throw <| IO.userError s!"not a constant: {repr value}"
   | code => throw <| IO.userError s!"expected one move, got {repr code}"
@@ -318,7 +318,7 @@ private def armMultipleRegressions : IO Unit := do
   let var (name : String) : Bap.Var := ⟨name, .imm 32, 0, false⟩
   let memory := Bap.Memory.ofCells (addressWidth := 32)
     ((List.range 12).map fun offset => (BitVec.ofNat 32 (0x100 + offset), UInt8.ofNat (offset + 1)))
-  let initial : Bil.State := { env := [
+  let initial : Bil.State := { env := VarMap.ofList [
     (context.memory, .memory memory), (var "R0", .bits (BitVec.ofNat 32 0x100)),
     (var "R1", .bits (BitVec.ofNat 32 0)), (var "R2", .bits (BitVec.ofNat 32 0)),
     (var "R3", .bits (BitVec.ofNat 32 0)), (var "R4", .bits (BitVec.ofNat 32 0xaabbccdd))] }
@@ -351,8 +351,8 @@ private def armMultipleRegressions : IO Unit := do
   let vfp := Primus.Semantics.register "D0" 64 64
   let vldm ← Primus.Semantics.liftWith environment context "VLDMDIA"
     [register "R0", armWord 14, register "Nil", vfp, Primus.Semantics.register "D1" 64 64]
-  let loaded ← runProgram vldm { env := initial.env ++ [(⟨"D0", .imm 64, 0, false⟩, .bits (BitVec.ofNat 64 0)),
-    (⟨"D1", .imm 64, 0, false⟩, .bits (BitVec.ofNat 64 0))] }
+  let loaded ← runProgram vldm { env := initial.env ++ VarMap.ofList [((⟨"D0", .imm 64, 0, false⟩ : Bap.Var), Value.bits (BitVec.ofNat 64 0)),
+    ((⟨"D1", .imm 64, 0, false⟩ : Bap.Var), Value.bits (BitVec.ofNat 64 0))] }
   match Bil.lookup loaded.env ⟨"D1", .imm 64, 0, false⟩ with
   | .ok (.bits value) => assertEqual "VLDM selects the list of its arity" 0 (value.toNat - 0x100f0e0d0c0b0a09)
   | _ => throw <| IO.userError "D1 is missing"
@@ -380,7 +380,7 @@ private def conditionalValues : IO Unit := do
     | .ok state => pure state.code
     | .error error => throw <| IO.userError error
   let finalS (r : Nat) : IO (Option Nat) := do
-    let state ← runProgram program { env := [(⟨"R", .imm 64, 0, false⟩, .bits (BitVec.ofNat 64 r))] }
+    let state ← runProgram program { env := VarMap.ofList [(⟨"R", .imm 64, 0, false⟩, .bits (BitVec.ofNat 64 r))] }
     match Bil.evalExp state.env (.var ⟨"S", .imm 64, 0, false⟩) with
     | .ok (.bits value) => pure (some value.toNat)
     | _ => pure none
@@ -406,7 +406,7 @@ private def conditionalValues : IO Unit := do
     (toString (Bil.Wire.printProgram unreadCode))
   let readCode ← Primus.Semantics.lift unread {} "i" []
   let runs (code : Bil.Program) (r : Nat) : IO (Option Nat) := do
-    let state ← runProgram code { env := [(⟨"R", .imm 64, 0, false⟩, .bits (BitVec.ofNat 64 r))] }
+    let state ← runProgram code { env := VarMap.ofList [(⟨"R", .imm 64, 0, false⟩, .bits (BitVec.ofNat 64 r))] }
     match Bil.evalExp state.env (.var ⟨"S", .imm 64, 0, false⟩) with
     | .ok (.bits value) => pure (some value.toNat)
     | _ => pure none
@@ -554,7 +554,7 @@ def run : IO Unit := do
   let x := reg "x"
   let y := reg "y"
   let initial ← modify ({ : Machine }) fun inst =>
-    { inst with state := { env := [(x, .bits (BitVec.ofNat 64 40)), (memVar, .memory Primus.Memory.empty.cells)] } }
+    { inst with state := { env := VarMap.ofList [(x, .bits (BitVec.ofNat 64 40)), (memVar, .memory Primus.Memory.empty.cells)] } }
   let program : Bil.Program := [
     .move y (.bin .add (.var x) (int 2)),
     .jmp (.var y)
@@ -613,11 +613,11 @@ def run : IO Unit := do
   let machines ← match machines.switch id with
     | .ok machine => pure machine
     | .error error => throw <| IO.userError error
-  let machines ← modify machines fun inst => { inst with state := { env := [(x, .bits (BitVec.ofNat 64 1))] } }
+  let machines ← modify machines fun inst => { inst with state := { env := VarMap.ofList [(x, .bits (BitVec.ofNat 64 1))] } }
   let machines ← match machines.switch 1 with
     | .ok machine => pure machine
     | .error error => throw <| IO.userError error
-  let machines ← modify machines fun inst => { inst with state := { env := [(x, .bits (BitVec.ofNat 64 2))] } }
+  let machines ← modify machines fun inst => { inst with state := { env := VarMap.ofList [(x, .bits (BitVec.ofNat 64 2))] } }
   let machines ← match machines.switch id with
     | .ok machine => pure machine
     | .error error => throw <| IO.userError error

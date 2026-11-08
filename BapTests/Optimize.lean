@@ -406,7 +406,7 @@ def run : IO Unit := do
   match Bap.IR.optimize failing with
   | { blks := [block], .. } =>
     assertEqual "a dead definition that would fail is removed" 0 block.defs.length
-    assertTrue "the definition does fail" (match Bil.evalExp [] (.var y) with | .error _ => true | .ok _ => false)
+    assertTrue "the definition does fail" (match Bil.evalExp {} (.var y) with | .error _ => true | .ok _ => false)
   | _ => throw <| IO.userError "missing optimized block"
   let cfg := Cfg.fromSub sample
   let (ins, outs) := cfg.liveness

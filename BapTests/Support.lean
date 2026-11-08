@@ -2,6 +2,9 @@ import Bap
 
 namespace Bap.Tests
 
+/-- Tests build environments as lists, and give what a run leaves back to what takes one. -/
+instance {α : Type} : CoeOut (Bap.VarMap α) (List (Bap.Var × α)) := ⟨Bap.VarMap.toList⟩
+
 def assertEqual [DecidableEq α] [Repr α] (name : String) (expected actual : α) : IO Unit := do
   if expected = actual then
     IO.println s!"ok: {name}"

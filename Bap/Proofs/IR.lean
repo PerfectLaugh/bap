@@ -880,20 +880,8 @@ private theorem lookup_bind_same (env : Env) (v : Var) (value : Value) :
   simp [Bil.lookup, Bil.bind]
 
 private theorem lookup_bind_ne (env : Env) {v x : Var} (value : Value) (h : x ≠ v) :
-    Bil.lookup (Bil.bind env v value) x = Bil.lookup env x := by
-  have hv : (v == x) = false := by simpa using Ne.symm h
-  have key : ∀ l : Env, (l.filter fun b => b.1 != v).find? (fun b => b.1 == x) = l.find? fun b => b.1 == x := by
-    intro l
-    induction l with
-    | nil => rfl
-    | cons e es ih =>
-      obtain ⟨a, val⟩ := e
-      by_cases ha : a = v
-      · subst ha
-        simp [hv, ih]
-      · have hb : (a != v) = true := by simpa using ha
-        simp only [List.filter_cons, hb, ite_true, List.find?_cons, ih]
-  simp only [Bil.lookup, Bil.bind, List.find?_cons, hv, key]
+    Bil.lookup (Bil.bind env v value) x = Bil.lookup env x :=
+  Bil.lookup_bind_of_ne env value (Ne.symm h)
 
 /-! ### Dead-code elimination -/
 
@@ -1621,7 +1609,7 @@ private theorem writes_not_bits {env : Env} {e : Exp} (h : writesMemory env e = 
 /-- Simplification keeps a write that happens. -/
 private theorem writesMemory_simplify {env : Env} {e : Exp} (h : writesMemory env e = true) :
     writesMemory env (Bil.simplifyExp e) = true := by
-  have hclosed : ∀ {w : Nat} (b : BitVec w), evalExp [] e ≠ .ok (.bits b) := by
+  have hclosed : ∀ {w : Nat} (b : BitVec w), evalExp {} e ≠ .ok (.bits b) := by
     intro w b he
     exact writes_not_bits h b (Bap.Proofs.Bil.evalExp_extends (Bap.Proofs.Bil.nil_extends env) _ he)
   induction e generalizing env with
@@ -2206,38 +2194,16 @@ private theorem lookup_assignPhi_same (env : Env) (v : Var) (r : Option Value) :
   cases r with
   | some value => exact lookup_bind_same env v value
   | none =>
-    have key : ∀ l : Env, (l.filter fun b => b.1 != v).find? (fun b => b.1 == v) = none := by
-      intro l
-      induction l with
-      | nil => rfl
-      | cons e es ih =>
-        obtain ⟨a, val⟩ := e
-        by_cases ha : a = v
-        · subst ha
-          simp [ih]
-        · have hb : (a != v) = true := by simpa using ha
-          have hb' : (a == v) = false := by simpa using ha
-          simp only [List.filter_cons, hb, ite_true, List.find?_cons, hb', ih]
-    simp only [Bil.lookup, assignPhi, key, phiResult]
+    simp only [Bil.lookup, assignPhi, VarMap.get?_filter, phiResult]
+    cases env.get? v <;> simp
 
 private theorem lookup_assignPhi_ne (env : Env) {v x : Var} (r : Option Value) (h : x ≠ v) :
     Bil.lookup (assignPhi env v r) x = Bil.lookup env x := by
   cases r with
   | some value => exact lookup_bind_ne env value h
   | none =>
-    have key : ∀ l : Env, (l.filter fun b => b.1 != v).find? (fun b => b.1 == x) = l.find? fun b => b.1 == x := by
-      intro l
-      induction l with
-      | nil => rfl
-      | cons e es ih =>
-        obtain ⟨a, val⟩ := e
-        by_cases ha : a = v
-        · subst ha
-          have hv : (a == x) = false := by simpa using Ne.symm h
-          simp [hv, ih]
-        · have hb : (a != v) = true := by simpa using ha
-          simp only [List.filter_cons, hb, ite_true, List.find?_cons, ih]
-    simp only [Bil.lookup, assignPhi, key]
+    simp only [Bil.lookup, assignPhi, VarMap.get?_filter]
+    cases env.get? x <;> simp [h]
 
 private theorem phiResult_of_lookup {env : Env} {w : Var} (v : Var) (hn : v.name = w.name) :
     phiResult v (match Bil.lookup env w with
@@ -3215,12 +3181,12 @@ private def failingSample : Sub := ⟨1, "failing", [], [⟨1, [], [⟨10, vx, .
 /-- `optimize` removes the definition, so its output runs where the original fails: why
 `optimize_reflects_runs` has to allow for failure. -/
 theorem optimize_forgives_removed_failure :
-    RunFails (Cfg.fromSub failingSample) pseudoStart (Cfg.fromSub failingSample).start [] [1] ∧
-      ∃ tr final f, Run (Cfg.fromSub (optimize failingSample)) pseudoStart (Cfg.fromSub failingSample).start [] [1] tr final f := by
+    RunFails (Cfg.fromSub failingSample) pseudoStart (Cfg.fromSub failingSample).start {} [1] ∧
+      ∃ tr final f, Run (Cfg.fromSub (optimize failingSample)) pseudoStart (Cfg.fromSub failingSample).start {} [1] tr final f := by
   have hstart : (Cfg.fromSub failingSample).start = 1 := rfl
   rw [hstart]
-  refine ⟨.defs (env₁ := []) (blk := ⟨1, [], [⟨10, vx, .var vy⟩], []⟩) (m := "unbound variable y") rfl rfl ?_, [], [], ⟨1, [], [], []⟩,
-    .last (env₁ := []) (r := ([], [])) rfl rfl rfl⟩
+  refine ⟨.defs (env₁ := {}) (blk := ⟨1, [], [⟨10, vx, .var vy⟩], []⟩) (m := "unbound variable y") rfl rfl ?_, [], {}, ⟨1, [], [], []⟩,
+    .last (env₁ := {}) (r := ({}, [])) rfl rfl rfl⟩
   rfl
 
 /-- `x := 1; goto L; L: y := x; x := 2; if z goto L else M; M: ret y`. -/

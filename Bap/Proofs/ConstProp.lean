@@ -444,32 +444,37 @@ theorem ConstLe.trans {a b c : ConstEnv} (h₁ : ConstLe a b) (h₂ : ConstLe b 
 /-- Each constant of a table has the type of its variable. -/
 def ConstTyped (e : ConstEnv) : Prop := ∀ x ∈ e, x.1.typ = .imm x.2.width
 
-private def constValues (e : ConstEnv) : Env := e.map fun x => (x.1, .bits (BitVec.ofNat x.2.width x.2.value))
+private def constValues (e : ConstEnv) : Env :=
+  VarMap.ofList (e.map fun x => (x.1, Value.bits (BitVec.ofNat x.2.width x.2.value)))
 
 private theorem lookup_constValues (e : ConstEnv) (v : Var) :
     lookup (constValues e) v = match Assoc.get v e with
       | some c => .ok (.bits (BitVec.ofNat c.width c.value))
       | none => .error s!"unbound variable {v.name}" := by
-  induction e with
-  | nil => rfl
-  | cons x xs ih =>
-    obtain ⟨k, c⟩ := x
-    by_cases hk : v = k
-    · subst hk
-      simp [constValues, lookup, Assoc.get]
-    · have h1 : (k == v) = false := by simpa using fun h : k = v => hk h.symm
-      have h2 : (v == k) = false := by simpa using hk
-      simp only [constValues, List.map_cons, lookup, List.find?_cons, h1, Assoc.get, List.lookup_cons, h2] at ih ⊢
-      exact ih
+  have key : ((e.map fun x => (x.1, Value.bits (BitVec.ofNat x.2.width x.2.value))).find? (·.1 == v)).map (·.2) =
+      (Assoc.get v e).map fun c => Value.bits (BitVec.ofNat c.width c.value) := by
+    induction e with
+    | nil => rfl
+    | cons x xs ih =>
+      obtain ⟨k, c⟩ := x
+      by_cases hk : v = k
+      · subst hk
+        simp [Assoc.get]
+      · have h1 : (k == v) = false := by simpa using fun h : k = v => hk h.symm
+        have h2 : (v == k) = false := by simpa using hk
+        simp only [List.map_cons, List.find?_cons, h1, Assoc.get, List.lookup_cons, h2] at ih ⊢
+        exact ih
+  simp only [constValues, lookup, VarMap.get?_ofList, key]
+  cases Assoc.get v e <;> rfl
 
 private theorem constValues_typed {e : ConstEnv} (h : ConstTyped e) : Bap.Proofs.Bil.WellTypedEnv (constValues e) := by
   intro b hb
-  obtain ⟨x, hx, rfl⟩ := List.mem_map.1 hb
+  obtain ⟨x, hx, rfl⟩ := List.mem_map.1 (VarMap.mem_of_mem_ofList hb)
   exact (h x hx).symm
 
 private abbrev sub (e : ConstEnv) (x : Exp) : Exp := Bil.substitute (replacements e) x
 
-private theorem eval_sub (e : ConstEnv) (x : Exp) : evalExp [] (sub e x) = evalExp (constValues e) x := by
+private theorem eval_sub (e : ConstEnv) (x : Exp) : evalExp {} (sub e x) = evalExp (constValues e) x := by
   apply Bap.Proofs.Bil.evalExp_substitute
   intro v _
   rw [get_replacements, lookup_constValues]
@@ -497,16 +502,16 @@ private theorem constValues_extends {a b : ConstEnv} (h : ConstLe a b) : Bap.Pro
     rw [h v c hg]
     exact hr
 
-private theorem simp_fold {x : Exp} {w} {v : BitVec w} (h : evalExp [] x = .ok (.bits v)) : simplifyExp x = .int v := by
+private theorem simp_fold {x : Exp} {w} {v : BitVec w} (h : evalExp {} x = .ok (.bits v)) : simplifyExp x = .int v := by
   rw [simplifyExp.eq_def, h]
 
 /-- Either side folding settles it. Neither is what's left, where the two are of the same form. -/
 private theorem rel_wrap {a b : ConstEnv} (hle : ConstLe a b) (hb : ConstTyped b) (x : Exp)
-    (hnf : (∀ w (v : BitVec w), evalExp [] (sub a x) ≠ .ok (.bits v)) → (∀ w (v : BitVec w), evalExp [] (sub b x) ≠ .ok (.bits v)) →
+    (hnf : (∀ w (v : BitVec w), evalExp {} (sub a x) ≠ .ok (.bits v)) → (∀ w (v : BitVec w), evalExp {} (sub b x) ≠ .ok (.bits v)) →
       SimpRel (simplifyExp (sub a x)) (simplifyExp (sub b x))) :
     SimpRel (simplifyExp (sub a x)) (simplifyExp (sub b x)) := by
-  by_cases h₁ : ∀ w (v : BitVec w), evalExp [] (sub a x) ≠ .ok (.bits v)
-  · by_cases h₂ : ∀ w (v : BitVec w), evalExp [] (sub b x) ≠ .ok (.bits v)
+  by_cases h₁ : ∀ w (v : BitVec w), evalExp {} (sub a x) ≠ .ok (.bits v)
+  · by_cases h₂ : ∀ w (v : BitVec w), evalExp {} (sub b x) ≠ .ok (.bits v)
     · exact hnf h₁ h₂
     · obtain ⟨w, hw⟩ := Classical.not_forall.1 h₂
       obtain ⟨u, hu⟩ := Classical.not_forall.1 hw
@@ -529,7 +534,7 @@ private theorem rel_wrap {a b : ConstEnv} (hle : ConstLe a b) (hb : ConstTyped b
   · obtain ⟨w, hw⟩ := Classical.not_forall.1 h₁
     obtain ⟨v, hv⟩ := Classical.not_forall.1 hw
     have hv := Classical.not_not.1 hv
-    have hv' : evalExp [] (sub b x) = .ok (.bits v) := by
+    have hv' : evalExp {} (sub b x) = .ok (.bits v) := by
       rw [eval_sub] at hv ⊢
       exact Bap.Proofs.Bil.evalExp_extends (constValues_extends hle) _ hv
     rw [simp_fold hv, simp_fold hv']

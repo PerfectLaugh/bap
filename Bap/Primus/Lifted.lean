@@ -211,14 +211,8 @@ structure LiveCache where
   /-- Of each site, by its pc, the outputs that it has completed, as `Jit.liveChanges` takes them, and of each the place of its
   variable among the outputs of the run, and its width. -/
   sites : Std.HashMap Nat (ByteArray × Array (Nat × Nat))
-  /-- The variable of each output of the run, by its place, and the value that the state has of it: what the run left in it, or what
-  it was before, if it was. -/
+  /-- The variable of each output of the run, by its place. -/
   vars : Array Bap.Var
-  bound : Array (Option Value)
-  /-- The state before the run without the outputs of the run, which the state has after them. -/
-  base : Bil.Env
-  /-- Whether the state is the outputs that it has, in the order of their places, and then `base`, as it is once it was made of them. -/
-  ordered : Bool
   /-- Whether what was last said of the slots of the run is to be said again, as nothing has been said since this was made. -/
   fresh : Bool
 
@@ -876,7 +870,7 @@ private def closedTarget (target : Bil.Exp) : Option Nat :=
     | .concat left right => closed left && closed right
     | _ => false
   if closed target then
-    match Bil.evalExp [] target with
+    match Bil.evalExp {} target with
     | .ok (@Value.bits width value) => if width ≤ 64 then some value.toNat else none
     | _ => none
   else none
@@ -1929,54 +1923,6 @@ def prepareAhead (engine : Engine) (fetch : Fetch) (lift : Lift) (address : Nat)
   let code ← fetch address
   let _ ← prepareGraph engine fetch lift address code (2 ^ 32) (force := true)
 
-/-- A number below 60 for a variable, from the key of its name, which most others don't have. -/
-private def quickKey (var : Bap.Var) : Nat :=
-  (var.name.key.toNat + var.index) % 60
-
-/-- The bindings of an environment by the key of their variables, in their order. -/
-private def envIndex (env : Bil.Env) : Array Bil.Env :=
-  env.foldr (init := Array.replicate 60 []) fun binding index => index.modify (quickKey binding.1) (binding :: ·)
-
-/-- `Bil.lookup`, in what `envIndex` makes. -/
-private def lookupIndexed (index : Array Bil.Env) (var : Bap.Var) : Except String Value :=
-  match (index.getD (quickKey var) []).find? fun binding => binding.1 == var with
-  | some binding => .ok binding.2
-  | none => .error s!"unbound variable {var.name}"
-
-private theorem quickKey_lt (var : Bap.Var) : quickKey var < 60 := by
-  unfold quickKey
-  exact Nat.mod_lt _ (by omega)
-
-private theorem envIndex_find (env : Bil.Env) (var : Bap.Var) :
-    (envIndex env).size = 60 ∧ ((envIndex env).getD (quickKey var) []).find? (fun binding => binding.1 == var) =
-      env.find? fun binding => binding.1 == var := by
-  induction env with
-  | nil =>
-    have hk := quickKey_lt var
-    simp [envIndex, Array.getD_eq_getD_getElem?, hk]
-  | cons head rest ih =>
-    obtain ⟨hs, hf⟩ := ih
-    have hstep : envIndex (head :: rest) = (envIndex rest).modify (quickKey head.1) (head :: ·) := rfl
-    have hk := quickKey_lt var
-    refine ⟨by rw [hstep, Array.size_modify]; exact hs, ?_⟩
-    rw [hstep, Array.getD_eq_getD_getElem?, Array.getElem?_modify, List.find?_cons]
-    by_cases he : quickKey head.1 = quickKey var
-    · have hin : quickKey var < (envIndex rest).size := by omega
-      simp only [he, ite_true, Array.getElem?_eq_getElem hin, Option.map_some, Option.getD_some, List.find?_cons]
-      rw [Array.getD_eq_getD_getElem?, Array.getElem?_eq_getElem hin, Option.getD_some] at hf
-      rw [hf]
-    · have hne : (head.1 == var) = false := by
-        simp only [beq_eq_false_iff_ne, ne_eq]
-        intro h
-        exact he (congrArg quickKey h)
-      simp only [he, ite_false, hne]
-      rw [Array.getD_eq_getD_getElem?] at hf
-      exact hf
-
-private theorem lookupIndexed_eq (env : Bil.Env) (var : Bap.Var) : lookupIndexed (envIndex env) var = Bil.lookup env var := by
-  simp only [lookupIndexed, Bil.lookup, (envIndex_find env var).2]
-  rfl
-
 private def encodeState (lowering : Lowering) (env : Bil.Env) : Except String (Array UInt64) := do
   lowering.layout.foldlM (init := Array.replicate lowering.nextSlot 0) fun slots binding => do
     let var := binding.1
@@ -1990,35 +1936,6 @@ private def encodeState (lowering : Lowering) (env : Bil.Env) : Except String (A
       | none => .error s!"unsupported variable {var.name}"
     | .error error =>
       if lowering.inputs.contains var then .error error else .ok slots
-
-private def encodeStateIndexed (lowering : Lowering) (index : Array Bil.Env) : Except String (Array UInt64) := do
-  lowering.layout.foldlM (init := Array.replicate lowering.nextSlot 0) fun slots binding => do
-    let var := binding.1
-    match lookupIndexed index var with
-    | .ok value =>
-      let ⟨width, value⟩ ← Value.asBits value
-      match widthOf var with
-      | some expected =>
-        if width == expected then .ok (slots.set! binding.2 (immediate value))
-        else .error s!"variable {var.name} has width {width}, expected {expected}"
-      | none => .error s!"unsupported variable {var.name}"
-    | .error error =>
-      if lowering.inputs.contains var then .error error else .ok slots
-
-/-- From how many variables an index of the environment pays. -/
-private def indexedFrom : Nat := 32
-
-private def encodeStateFast (lowering : Lowering) (env : Bil.Env) : Except String (Array UInt64) :=
-  -- What a loop uses is near the front, and is found sooner than the index is made, unless there is a lot of it.
-  if lowering.layout.length < indexedFrom then encodeState lowering env
-  else encodeStateIndexed lowering (envIndex env)
-
-@[csimp] private theorem encodeState_eq_fast : @encodeState = @encodeStateFast := by
-  funext lowering env
-  unfold encodeStateFast
-  split
-  · rfl
-  · simp only [encodeState, encodeStateIndexed, lookupIndexed_eq]
 
 /-- The value of a slot in a variable, without working out `2 ^ 64` for the common width. -/
 private def slotBits (width : Nat) (slot : UInt64) : BitVec width :=
@@ -2041,15 +1958,6 @@ private def slotBitsFast (width : Nat) (slot : UInt64) : BitVec width :=
       simp [BitVec.toNat_ofNat, Nat.one_shiftLeft]
     · rfl
 
-/-- The environment without the bindings of `pending`, which are distinct. The bindings stop at the last of
-them and the rest of the environment is shared, and those that a loop writes are near the front. -/
-private def withoutBindings (pending : List Bap.Var) : Bil.Env → Bil.Env
-  | [] => []
-  | binding :: rest =>
-    if pending.isEmpty then binding :: rest
-    else if pending.contains binding.1 then withoutBindings (pending.erase binding.1) rest
-    else binding :: withoutBindings pending rest
-
 /-- The values of the outputs in the slots. -/
 private def syncUpdates (outputs : List (Bap.Var × Nat)) (slots : Array UInt64) : List (Bap.Var × Value) :=
   outputs.foldr (init := []) fun output updates =>
@@ -2066,8 +1974,7 @@ private def reachedOutputs (lowering : Lowering) (slots : Array UInt64) : List (
     | none => true
 
 private def syncState (lowering : Lowering) (state : Bil.State) (slots : Array UInt64) : Bil.State :=
-  let updates := syncUpdates (reachedOutputs lowering slots) slots
-  { env := updates ++ withoutBindings (updates.map Prod.fst) state.env }
+  { env := Bil.bindMany state.env (syncUpdates (reachedOutputs lowering slots) slots) }
 
 /-- What a run whose memory is the native memory, or that has none, is at its code site `pc`, starting from `state`: what it has
 completed there, as a run that stops at the site leaves (`syncState` of `atCodeStop`). It is said from what it was last said to be in
@@ -2082,46 +1989,18 @@ private def stateAtSite (engine : Engine) (lowering : Lowering) (state : Bil.Sta
       let index := match lowering.liveIndex with
         | some index => index.get
         | none => liveIndexOf lowering
-      -- One pass over the state, rather than a search of it for each output and another to take them out: the first binding of an
-      -- output is its value, as `Bil.lookup` takes it, and the rest is the state before the run.
-      let mut bound : Array (Option Value) := Array.replicate index.vars.size none
-      let mut base : Array (Bap.Var × Value) := #[]
-      for binding in state.env do
-        match index.placeOf[binding.1]? with
-        | some place => if bound[place]?.join.isNone then bound := bound.set! place (some binding.2) else base := base.push binding
-        | none => base := base.push binding
-      pure { state, sites := index.sites, vars := index.vars, bound, base := base.toList, ordered := false, fresh := true
-             : LiveCache }
+      pure { state, sites := index.sites, vars := index.vars, fresh := true : LiveCache }
   let some (outputs, places) := cache.sites[pc]? | engine.liveCache.set (some cache); return none
   let some changes ← Jit.liveChanges outputs (UInt64.ofNat pc) cache.fresh | engine.liveCache.set (some cache); return none
-  let { state := last, sites, vars, bound, base, ordered, fresh := _ } := cache
-  let count := changes.size / 16
-  if count == 0 then
-    engine.liveCache.set (some { state := last, sites, vars, bound, base, ordered, fresh := false })
-    return some last
-  -- How many of the places up to the last that changed the state has as it is: those that it has after them are as they were.
-  let mut last_ := 0
-  let mut before := 0
-  for index in [0:count] do
-    if let some (place, _) := places[(Jit.word changes (2 * index)).toNat]? then last_ := max last_ place
-  for place in [0:last_ + 1] do
-    if (bound[place]?.join).isSome then before := before + 1
-  let mut bound := bound
-  for index in [0:count] do
+  let { state := last, sites, vars, fresh := _ } := cache
+  -- The outputs whose slots changed, bound where the state has them.
+  let mut env := last.env
+  for index in [0:changes.size / 16] do
     if let some (place, width) := places[(Jit.word changes (2 * index)).toNat]? then
-      bound := bound.set! place (some (.bits (slotBits width (Jit.word changes (2 * index + 1)))))
-  -- The outputs as they are, in the order of their places, in front of the rest of the state before the run, which they were taken
-  -- out of: no variable twice. Of a state that is so already, only those up to the last that changed are made again.
-  let front (upTo : Nat) (rest : Bil.Env) : Bil.Env := Id.run do
-    -- From the last place down, each onto those after it, rather than a list of the places to fold over.
-    let mut env := rest
-    for step in [0:upTo] do
-      let place := upTo - 1 - step
-      if let (some value, some var) := (bound[place]?.join, vars[place]?) then env := (var, value) :: env
-    pure env
-  let env := if ordered then front (last_ + 1) (last.env.drop before) else front vars.size base
+      if let some var := vars[place]? then
+        env := env.insert var (.bits (slotBits width (Jit.word changes (2 * index + 1))))
   let state : Bil.State := { env }
-  engine.liveCache.set (some { state, sites, vars, bound, base, ordered := true, fresh := false })
+  engine.liveCache.set (some { state, sites, vars, fresh := false })
   pure (some state)
 
 /-- Of `stateAtSite` at `pc`, what says it, while the run is there, if it can be said, which this says without saying it: a hook
@@ -2406,21 +2285,18 @@ private def runChained (engine : Engine) (pc : Nat) (entry : CachedBlock) (state
   let some id := (← engine.chainAt.get)[pc]? | return none
   -- The variables that the chain knows of, as the state has them: one of the wrong kind is for Lean, as `encodeState` says.
   let ids ← engine.variableIds.get
-  let mut seen : Std.HashSet Nat := {}
   let mut variables : Array UInt64 := #[]
   let mut values : Array UInt64 := #[]
   for (var, value) in state.env do
     match ids[var]? with
     | none => pure ()
     | some number =>
-      if !seen.contains number then
-        seen := seen.insert number
-        match value, widthOf var with
-        | @Value.bits width bits, some expected =>
-          if width != expected then return none
-          variables := variables.push (UInt64.ofNat number)
-          values := values.push (immediate bits)
-        | _, _ => return none
+      match value, widthOf var with
+      | @Value.bits width bits, some expected =>
+        if width != expected then return none
+        variables := variables.push (UInt64.ofNat number)
+        values := values.push (immediate bits)
+      | _, _ => return none
   recordNative engine
   let (next, slots, addresses, cells, info) ← Jit.runChain program slots memory filter quietSites observer codeObserver
     engine.chain (UInt64.ofNat id) (UInt64.ofNat pc) (UInt64.ofNat budget) variables values
@@ -2442,7 +2318,7 @@ private def runChained (engine : Engine) (pc : Nat) (entry : CachedBlock) (state
       ran.executions.modify (· + at_ (runsAt + 3 + 3 * index))
   let runs := (List.range (at_ runsAt)).foldl (fun total index => total + at_ (runsAt + 2 + 3 * index)) 0
   engine.statistics.modify fun stats => { stats with nativeRuns := stats.nativeRuns + runs - 1 }
-  let state : Bil.State := { env := updates ++ withoutBindings (updates.map Prod.fst) state.env }
+  let state : Bil.State := { env := Bil.bindMany state.env updates }
   let completed := atCodeStop lowering next
   let memoryVar ← engine.persistentVariable.get
   -- What the last range wrote is among the variables written if it wrote them in the chain's registers, and in its slots otherwise.

@@ -54,7 +54,7 @@ def clearVar (state : State) (var : Bap.Var) : State := putVar var [] state
 def clearMemory (state : State) (cell : Cell) : State := putMemory cell [] state
 
 private def constant (exp : Bil.Exp) : Option (Σ width, BitVec width) :=
-  match Bil.evalExp [] exp with
+  match Bil.evalExp {} exp with
   | .ok value => (Bap.Value.asBits value).toOption
   | .error _ => none
 

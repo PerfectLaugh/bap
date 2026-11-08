@@ -99,14 +99,14 @@ private def checkOperators : IO Unit := do
   let b : Bap.Var := ⟨"b", .imm 8, 0, false⟩
   let aExpr : Expr := .var "a" 8
   let bExpr : Expr := .var "b" 8
-  let state : State := { env := [(a, aExpr), (b, bExpr)] }
+  let state : State := { env := VarMap.ofList [(a, aExpr), (b, bExpr)] }
   for op in operators do
     for left in samples do
       for right in samples do
         let leftValue := BitVec.ofNat 8 left
         let rightValue := BitVec.ofNat 8 right
         let exp : Bil.Exp := .bin op (.var a) (.var b)
-        let concrete := Bil.evalExp [(a, .bits leftValue), (b, .bits rightValue)] exp
+        let concrete := Bil.evalExp (VarMap.ofList [(a, .bits leftValue), (b, .bits rightValue)]) exp
         match evalExp state exp, concrete with
         | .ok symbolic, .ok (.bits expected) =>
           let bound := [equal aExpr (.const leftValue), equal bExpr (.const rightValue)]
@@ -230,7 +230,7 @@ private def unknowns : IO Unit := do
   let u : Bap.Var := ⟨"u", .imm 8, 0, false⟩
   let program : Bil.Program := [
     .ifElse (.bin .eq (.var x) (int 0)) [.move u (.int (BitVec.ofNat 8 1))] [.move u (.unknown "drawn" (.imm 8))]]
-  match Bil.run program { env := [(x, .bits (BitVec.ofNat 64 0))] } with
+  match Bil.run program { env := VarMap.ofList [(x, .bits (BitVec.ofNat 64 0))] } with
   | .ok (final, _) => assertBits "a run past an unknown it doesn't reach" (BitVec.ofNat 8 1) (Bil.lookup final.env u)
   | .error error => throw <| IO.userError error
   match Bap.Symbolic.run program with

@@ -45,7 +45,7 @@ structure Index where
   table_eq : table.get = FunctionTable.ofList functions := by exact rfl
 
 private def constant (exp : Bil.Exp) : Option Nat :=
-  match Bil.evalExp [] exp with
+  match Bil.evalExp {} exp with
   | .ok value => (Bap.Value.asBits value).toOption.map fun value => value.2.toNat
   | .error _ => none
 

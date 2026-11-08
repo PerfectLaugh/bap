@@ -66,7 +66,7 @@ private def bytesEqual (first last : Nat) : Value → Value → Bool
   | left, right => valueEq left right
 
 private def memoryVars (state : Bil.State) : List Bap.Var :=
-  (state.env.filter fun binding => binding.1.typ matches .mem _ _).map Prod.fst |>.eraseDups
+  (state.env.toList.filter fun binding => binding.1.typ matches .mem _ _).map Prod.fst
 
 /-- Whether each memory of either side reads the same bytes in each range `[first, last)` that what comes next consumes. -/
 private def rangesEqual (ranges : List (Nat × Nat)) (left right : Bil.State) : Bool :=

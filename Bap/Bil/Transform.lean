@@ -66,7 +66,7 @@ def substitute (replacements : List (Bap.Var × Exp)) : Exp → Exp
   | .unknown message typ => .unknown message typ
 
 def foldExp (exp : Exp) : Exp :=
-  match evalExp [] exp with
+  match evalExp {} exp with
   | .ok (.bits value) => .int value
   | _ =>
     match exp with
@@ -109,7 +109,7 @@ must discard an expression that is sure to evaluate once its variables are bound
 a literal zero is zero whichever rule looks first, so that knowing a factor never loses a `x * 0`
 (`Bap.Proofs.IR.simplify_mono`). -/
 def simplifyExp (exp : Exp) : Exp :=
-  match evalExp [] exp with
+  match evalExp {} exp with
   | .ok (.bits value) => .int value
   | _ =>
     match exp with
@@ -176,10 +176,10 @@ private theorem fails_right {α β : Type} (x : Except String α) {f : α → Ex
   | error e => exact ⟨e, rfl⟩
   | ok a => exact h a
 
-private theorem eval_of_stuck {exp : Exp} (h : stuck exp = true) : ∃ message, evalExp [] exp = .error message := by
+private theorem eval_of_stuck {exp : Exp} (h : stuck exp = true) : ∃ message, evalExp {} exp = .error message := by
   induction exp with
   | int value => simp [stuck] at h
-  | var var => exact ⟨_, rfl⟩
+  | var var => exact ⟨s!"unbound variable {var.name}", by simp [evalExp, lookup]⟩
   | unknown message typ => exact ⟨_, rfl⟩
   | load m a e s ihm iha =>
     simp only [stuck, Bool.or_eq_true] at h
@@ -282,7 +282,7 @@ private def simplifyFast : Exp → Exp × Bool
     let b := simplifyFast address
     if a.2 || b.2 then (.load a.1 b.1 endian size, true)
     else
-      match evalExp [] (.load memory address endian size) with
+      match evalExp {} (.load memory address endian size) with
       | .ok (.bits value) => (.int value, false)
       | _ => (.load a.1 b.1 endian size, false)
   | .store memory address value endian size =>
@@ -291,7 +291,7 @@ private def simplifyFast : Exp → Exp × Bool
     let c := simplifyFast value
     if a.2 || b.2 || c.2 then (.store a.1 b.1 c.1 endian size, true)
     else
-      match evalExp [] (.store memory address value endian size) with
+      match evalExp {} (.store memory address value endian size) with
       | .ok (.bits value) => (.int value, false)
       | _ => (.store a.1 b.1 c.1 endian size, false)
   | .bin op left right =>
@@ -299,21 +299,21 @@ private def simplifyFast : Exp → Exp × Bool
     let b := simplifyFast right
     if a.2 || b.2 then (binRule op a.1 b.1, true)
     else
-      match evalExp [] (.bin op left right) with
+      match evalExp {} (.bin op left right) with
       | .ok (.bits value) => (.int value, false)
       | _ => (binRule op a.1 b.1, false)
   | .un op value =>
     let a := simplifyFast value
     if a.2 then (.un op a.1, true)
     else
-      match evalExp [] (.un op value) with
+      match evalExp {} (.un op value) with
       | .ok (.bits result) => (.int result, false)
       | _ => (.un op a.1, false)
   | .cast kind width value =>
     let a := simplifyFast value
     if a.2 then (.cast kind width a.1, true)
     else
-      match evalExp [] (.cast kind width value) with
+      match evalExp {} (.cast kind width value) with
       | .ok (.bits result) => (.int result, false)
       | _ => (.cast kind width a.1, false)
   | .letIn var value body =>
@@ -321,7 +321,7 @@ private def simplifyFast : Exp → Exp × Bool
     let b := simplifyFast body
     if a.2 then (.letIn var a.1 b.1, true)
     else
-      match evalExp [] (.letIn var value body) with
+      match evalExp {} (.letIn var value body) with
       | .ok (.bits result) => (.int result, false)
       | _ => (.letIn var a.1 b.1, false)
   | .ite condition yes no =>
@@ -330,14 +330,14 @@ private def simplifyFast : Exp → Exp × Bool
     let c := simplifyFast no
     if a.2 then (iteRule a.1 b.1 c.1, true)
     else
-      match evalExp [] (.ite condition yes no) with
+      match evalExp {} (.ite condition yes no) with
       | .ok (.bits result) => (.int result, false)
       | _ => (iteRule a.1 b.1 c.1, false)
   | .extract high low value =>
     let a := simplifyFast value
     if a.2 then (.extract high low a.1, true)
     else
-      match evalExp [] (.extract high low value) with
+      match evalExp {} (.extract high low value) with
       | .ok (.bits result) => (.int result, false)
       | _ => (.extract high low a.1, false)
   | .concat left right =>
@@ -345,11 +345,11 @@ private def simplifyFast : Exp → Exp × Bool
     let b := simplifyFast right
     if a.2 || b.2 then (.concat a.1 b.1, true)
     else
-      match evalExp [] (.concat left right) with
+      match evalExp {} (.concat left right) with
       | .ok (.bits result) => (.int result, false)
       | _ => (.concat a.1 b.1, false)
 
-private theorem simplifyExp_of_not_bits {exp : Exp} (h : ∀ width (value : BitVec width), evalExp [] exp ≠ .ok (.bits value)) :
+private theorem simplifyExp_of_not_bits {exp : Exp} (h : ∀ width (value : BitVec width), evalExp {} exp ≠ .ok (.bits value)) :
     simplifyExp exp =
       match exp with
       | .int _ | .var _ | .unknown _ _ => exp
@@ -370,13 +370,13 @@ private theorem simplifyExp_of_not_bits {exp : Exp} (h : ∀ width (value : BitV
   · cases exp <;> rfl
 
 private theorem simplifyFast_eq (exp : Exp) : simplifyFast exp = (simplifyExp exp, stuck exp) := by
-  have hstuck : ∀ {e : Exp}, stuck e = true → ∀ width (value : BitVec width), evalExp [] e ≠ .ok (.bits value) := by
+  have hstuck : ∀ {e : Exp}, stuck e = true → ∀ width (value : BitVec width), evalExp {} e ≠ .ok (.bits value) := by
     intro e h width value hv
     obtain ⟨_, he⟩ := eval_of_stuck h
     rw [he] at hv
     cases hv
-  have hnode : ∀ (e result : Exp), (∀ (hn : ∀ width (value : BitVec width), evalExp [] e ≠ .ok (.bits value)), result = simplifyExp e) →
-      stuck e = false → (match evalExp [] e with
+  have hnode : ∀ (e result : Exp), (∀ (hn : ∀ width (value : BitVec width), evalExp {} e ≠ .ok (.bits value)), result = simplifyExp e) →
+      stuck e = false → (match evalExp {} e with
         | .ok (.bits value) => (Exp.int value, false)
         | _ => (result, false)) = (simplifyExp e, stuck e) := by
     intro e result hr hs
@@ -553,12 +553,12 @@ def dropDeadTemps (program : Program) : Program := dropDeadTempsAux (programTemp
   simp [substitute]
 
 theorem foldExp_of_eval_bits {exp : Exp} {value : BitVec width}
-    (h : evalExp [] exp = .ok (.bits value)) : foldExp exp = .int value := by
+    (h : evalExp {} exp = .ok (.bits value)) : foldExp exp = .int value := by
   unfold foldExp
   rw [h]
 
 theorem simplifyExp_of_eval_bits {exp : Exp} {value : BitVec width}
-    (h : evalExp [] exp = .ok (.bits value)) : simplifyExp exp = .int value := by
+    (h : evalExp {} exp = .ok (.bits value)) : simplifyExp exp = .int value := by
   unfold simplifyExp
   rw [h]
 

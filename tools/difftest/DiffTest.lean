@@ -181,8 +181,8 @@ private def runCase (rules : Bap.Float.NaNRules) (vars : List Bap.Var) (window :
     (memoryBytes : String) (values : List String) : String :=
   let memoryVar : Bap.Var := ⟨"mem", .mem window.bits 8, 0, false⟩
   let memory := memoryOf window.bits window.base (bytesOf memoryBytes) (memoryOf window.bits address code)
-  let env : Bil.Env := (memoryVar, .memory memory) ::
-    (vars.zip values).map fun (var, value) => (var, .bits (BitVec.ofNat (widthOf var) (parseHex value)))
+  let env : Bil.Env := VarMap.ofList <| (memoryVar, Value.memory memory) ::
+    (vars.zip values).map fun (var, value) => (var, Value.bits (BitVec.ofNat (widthOf var) (parseHex value)))
   let floats := (specialsOf 64 program).any Bap.Float.serves
   match (if floats then runServed rules { env := env } program else Bil.run program { env := env }) with
   | .error message => s!"X {index} {message}"

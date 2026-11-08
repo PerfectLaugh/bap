@@ -95,9 +95,9 @@ def registerValue (var : Bap.Var) (value : Nat) : Except String Value :=
 
 /-- The names of the registers, in order of their first appearance. -/
 def registerNames (env : Bil.Env) : List String :=
-  (env.foldl (init := []) fun names binding =>
-    if isMemoryType binding.1.typ || names.contains binding.1.name then names
-    else binding.1.name :: names).reverse
+  (env.toList.foldl (init := []) fun names binding =>
+    if isMemoryType binding.1.typ || names.contains binding.1.name.str then names
+    else binding.1.name.str :: names).reverse
 
 private def formatValue (value : Value) : String :=
   match Value.asBits value with

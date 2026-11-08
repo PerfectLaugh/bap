@@ -14,12 +14,12 @@ private def decodeWith (disassembler : Disassembler) (values : List Nat) : IO In
 
 private def reg (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
 
-private def executeEffect (insn : Insn) (env : Bil.Env := []) : IO (Bil.State × Bil.Effect) :=
-  match Bil.run insn.bil { env := env } with
+private def executeEffect (insn : Insn) (env : List (Bap.Var × Bap.Value) := []) : IO (Bil.State × Bil.Effect) :=
+  match Bil.run insn.bil { env := VarMap.ofList env } with
   | .ok result => pure result
   | .error error => throw <| IO.userError error
 
-private def execute (insn : Insn) (env : Bil.Env := []) : IO Bil.State := do
+private def execute (insn : Insn) (env : List (Bap.Var × Bap.Value) := []) : IO Bil.State := do
   let (state, _) ← executeEffect insn env
   pure state
 

@@ -2898,8 +2898,32 @@ theorem syncState_output {lowering : Lowering} {state : Bil.State} {slots : Arra
         | some w =>
           simp only [List.find?_cons, hb]
           exact hi
-  simp only [syncState, Bil.lookup, List.find?_append, key]
-  rfl
+  have hall : ∀ outputs : List (Bap.Var × Nat), (∀ other, (var, other) ∈ outputs → other = slot) →
+      ∀ update ∈ syncUpdates outputs slots, update.1 = var → update.2 = .bits (slotBits width (slots.getD slot 0)) := by
+    intro outputs
+    induction outputs with
+    | nil => simp [syncUpdates]
+    | cons head rest ih =>
+      intro hu' update hupdate he
+      obtain ⟨hv, hs⟩ := head
+      have hrest : ∀ other, (var, other) ∈ rest → other = slot := fun other ho => hu' other (List.mem_cons_of_mem _ ho)
+      simp only [syncUpdates, List.foldr_cons] at hupdate
+      cases hwv : widthOf hv with
+      | none =>
+        rw [hwv] at hupdate
+        exact ih hrest update (by simpa [syncUpdates] using hupdate) he
+      | some w =>
+        rw [hwv] at hupdate
+        rcases List.mem_cons.1 hupdate with rfl | hupdate
+        · simp only at he
+          subst he
+          have hslot : hs = slot := hu' hs List.mem_cons_self
+          subst hslot
+          rw [hw] at hwv
+          cases hwv
+          rfl
+        · exact ih hrest update (by simpa [syncUpdates] using hupdate) he
+  exact Bil.lookup_bindMany_of_mem _ _ (List.mem_of_find?_eq_some key) (hall _ hu)
 
 /-- An output whose flag says that the run did not reach a write of it is not written back. -/
 theorem reachedOutputs_unflagged {lowering : Lowering} {slots : Array UInt64} {output : Bap.Var × Nat} {flag : Nat × Nat}
@@ -3378,7 +3402,7 @@ private theorem inner_jump {limit : Prop} {stops : Nat → Bool} {plan : GraphPl
   exact hret.endsAt
 
 private theorem closed_lt {target : Bil.Exp} {address : Nat} (h : closedTarget target = some address) : address < 2 ^ 64 := by
-  obtain ⟨w, value, _, hw, hv⟩ := closedTarget_sound h []
+  obtain ⟨w, value, _, hw, hv⟩ := closedTarget_sound h {}
   rw [← hv]
   exact Nat.lt_of_lt_of_le value.isLt (Nat.pow_le_pow_right (by decide) hw)
 
@@ -4555,29 +4579,6 @@ theorem RunAt.withFlags {stops : Nat → Bool} {program : List Op} {limit : Nat}
         rw [flagOps_cons]
         exact (Run.linear rfl _ m').toAt.trans h2
 
-private theorem withoutBindings_lookup (var : Bap.Var) (env : Bil.Env) (pending : List Bap.Var) (h : var ∉ pending) :
-    Bil.lookup (withoutBindings pending env) var = Bil.lookup env var := by
-  induction env generalizing pending with
-  | nil => rfl
-  | cons binding rest ih =>
-    simp only [withoutBindings]
-    split
-    · rfl
-    · split
-      · next hc =>
-        rw [ih _ (fun hm => h (List.mem_of_mem_erase hm))]
-        have hne : (binding.1 == var) = false := by
-          simp only [beq_eq_false_iff_ne, ne_eq]
-          intro he
-          subst he
-          exact h (by simpa using hc)
-        simp [Bil.lookup, hne]
-      · have hl := ih pending h
-        simp only [Bil.lookup, List.find?_cons] at hl ⊢
-        cases (binding.1 == var) with
-        | true => rfl
-        | false => exact hl
-
 private theorem syncUpdates_names {outputs : List (Bap.Var × Nat)} {slots : Array UInt64} {update : Bap.Var × Bap.Value}
     (h : update ∈ syncUpdates outputs slots) : ∃ slot, (update.1, slot) ∈ outputs := by
   induction outputs with
@@ -4606,15 +4607,7 @@ theorem syncState_other {lowering : Lowering} {state : Bil.State} {slots : Array
     obtain ⟨u, hu, he⟩ := List.mem_map.1 hm
     exact hnames u hu he
   simp only [syncState]
-  rw [← withoutBindings_lookup var state.env _ hnot]
-  generalize withoutBindings _ state.env = rest
-  generalize syncUpdates (reachedOutputs lowering slots) slots = updates at hnames hnot ⊢
-  simp only [Bil.lookup, List.find?_append]
-  have : updates.find? (fun binding => binding.1 == var) = none := by
-    apply List.find?_eq_none.2
-    intro u hu
-    simpa using hnames u hu
-  simp [this]
+  exact Bil.lookup_bindMany_of_not_mem _ _ hnot
 
 /-- The way out of a range: the variables have what the interpreter has, if only a flag may say that one was not written, and what
 is not flagged has a value. -/
