@@ -2161,8 +2161,13 @@ def protect (emu : Emu) (address size : Nat) (protection : Primus.Protection) : 
     | some regions =>
       let touched ← regionsTouching emu address size
       replaceRegions emu regions touched (touched.flatMap (splitRegion address (address + size) protection))
-      -- A compiled range would keep running code that lost its execute permission.
-      if !protection.executable then Primus.Lifted.discardRange emu.engine address (address + size - 1)
+      -- A compiled range would keep running code that lost its execute permission: what was executable of the range, and nothing
+      -- else, as a page made writable again and again for a stub or the GOT had nothing compiled to lose.
+      if !protection.executable then
+        for region in touched do
+          let low := max address region.address
+          let high := min (address + size) (region.address + region.data.size)
+          if region.protection.executable && low < high then Primus.Lifted.discardRange emu.engine low (high - 1)
     | none => throw <| IO.userError s!"unmapped Emu protection range at {address}"
 
 /-- `MADV_DONTNEED`: the bytes in the range read as zeros, and take no memory of the host until they are written. -/

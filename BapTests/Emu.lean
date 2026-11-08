@@ -923,6 +923,20 @@ def testWriteAcrossRegions : IO Unit := do
   assertEqual "and one into what can't be written says where" "read-only Emu address 139264" refused
   assertEqual "and writes nothing" (filled 8 0).toList (← Bap.Emu.read emu 0x21ffc 8).toList
 
+/-- Taking execute permission off drops what was compiled of what was executable, and changing what may be done with data, which
+nothing was compiled of, drops nothing. -/
+def testProtectDropsOnlyCode : IO Unit := do
+  let emu ← Bap.Emu.riscv64 (← LLVM.assemble "riscv64" "nop") 0x10000 0x10000
+  Bap.Emu.map emu ⟨0x20000, ByteArray.mk (List.replicate 0x2000 0).toArray, ⟨true, true, false⟩⟩
+  let invalidations : IO Nat := do pure (← Bap.Primus.Lifted.stats emu.engine).invalidations
+  let before ← invalidations
+  for _ in List.range 3 do
+    Bap.Emu.protect emu 0x20000 0x1000 ⟨true, false, false⟩
+    Bap.Emu.protect emu 0x20000 0x1000 ⟨true, true, false⟩
+  assertEqual "Changing what may be done with data drops nothing compiled" before (← invalidations)
+  Bap.Emu.protect emu 0x10000 4 ⟨true, false, false⟩
+  assertEqual "and taking execute permission off code drops what was compiled of it" (before + 1) (← invalidations)
+
 /-- Loops of x86-64 that multiply with 64 bits and add to a byte of a register stay in their ranges: the high half of a product is of halves
 of 32 bits, with nothing of 128 bits, and a write to part of a register is a concatenation, which has its lowering. -/
 def testRangeLoopsX86 : IO Unit := do
