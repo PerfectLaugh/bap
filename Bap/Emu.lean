@@ -1773,13 +1773,14 @@ def synchronizePersistentMemory (emu : Emu) : IO Unit := do
       { context with state := { env := Bil.bind context.state.env emu.config.memory (.memory memory) } })
     emu.state.set { env := Bil.bind state.env emu.config.memory (.memory memory) }
 
-private def rawByte (emu : Emu) (address : Nat) : IO UInt8 := do
+/-- The bytes at an address, of the native memory or else of the state's, all at once. -/
+private def rawBytes (emu : Emu) (address size : Nat) : IO ByteArray := do
   match ← emu.engine.persistentMemory.get with
-  | some memory => Jit.readMemory memory (UInt64.ofNat address)
+  | some memory => Jit.readMemoryRange memory (UInt64.ofNat address) size
   | none =>
     let state ← emu.state.get
-    let ⟨width, memory⟩ ← cells emu state
-    pure (Bap.Memory.readByte memory (BitVec.ofNat width address))
+    let ⟨_, memory⟩ ← cells emu state
+    pure (Bap.Memory.readRegion memory address size)
 
 /-- Whether every address in `lower`..`upper` lies in a region. -/
 def coversRange (regions : List Region) (lower upper : Nat) : Bool :=
@@ -1793,15 +1794,6 @@ def coversRange (regions : List Region) (lower upper : Nat) : Bool :=
         | some region => loop fuel (region.address + region.data.size)
         | none => false
   loop regions.length lower
-
-private def readByte (emu : Emu) (address : Nat) : IO UInt8 := do
-  let regions ← regionsTouching emu address 1
-  match lookupRegion regions address with
-  | none => throw <| IO.userError s!"unmapped Emu address {address}"
-  | some region =>
-    if !region.protection.readable then
-      throw <| IO.userError s!"unreadable Emu address {address}"
-    rawByte emu address
 
 /-- Starts keeping a profile of what runs, from nothing: by each address that a step starts at, how often it ran compiled and in the
 interpreter, the instructions that came to, and the time of each. A range is counted at the address that it was entered at, with all
@@ -1845,31 +1837,22 @@ def read (emu : Emu) (address size : Nat) : IO ByteArray := do
   let regions ← regionsTouching emu address size
   if !coversRange regions address (address + size) then
     throw <| IO.userError s!"unmapped Emu address in {size} bytes at {address}"
-  match ← emu.engine.persistentMemory.get with
+  let rec check : Nat → Nat → IO Unit
+    | 0, _ => pure ()
+    | fuel + 1, position => do
+      if position < address + size then
+        match lookupRegion regions position with
+        | none => throw <| IO.userError s!"unmapped Emu address {position}"
+        | some region =>
+          if !region.protection.readable then throw <| IO.userError s!"unreadable Emu address {position}"
+          check fuel (region.address + region.data.size)
+  check (regions.length + 1) address
   -- All at once, as what a worker of a parallel round stores is seen whole.
-  | some memory =>
-    let rec check : Nat → Nat → IO Unit
-      | 0, _ => pure ()
-      | fuel + 1, position => do
-        if position < address + size then
-          match lookupRegion regions position with
-          | none => throw <| IO.userError s!"unmapped Emu address {position}"
-          | some region =>
-            if !region.protection.readable then throw <| IO.userError s!"unreadable Emu address {position}"
-            check fuel (region.address + region.data.size)
-    check (regions.length + 1) address
-    Jit.readMemoryRange memory (UInt64.ofNat address) size
-  | none =>
-    let bytes ← (List.range size).mapM fun offset => readByte emu (address + offset)
-    pure (ByteArray.mk bytes.toArray)
+  rawBytes emu address size
 
 /-- The bytes at an address, whatever a program may do with them there, as a kernel sees them. -/
-def peek (emu : Emu) (address size : Nat) : IO ByteArray := do
-  match ← emu.engine.persistentMemory.get with
-  | some memory => Jit.readMemoryRange memory (UInt64.ofNat address) size
-  | none =>
-    let bytes ← (List.range size).mapM fun offset => rawByte emu (address + offset)
-    pure (ByteArray.mk bytes.toArray)
+def peek (emu : Emu) (address size : Nat) : IO ByteArray :=
+  rawBytes emu address size
 
 private def synchronizeWrite (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
   let persistent ← emu.engine.persistentMemory.get
