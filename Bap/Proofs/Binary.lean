@@ -243,7 +243,7 @@ theorem getVar_putVar {out data : ByteArray} {value : Bap.Var} (h : Prefix (putV
   obtain ⟨h2, r2⟩ := getNat_putNat h3
   obtain ⟨h1, r1⟩ := getTyp_putTyp h2
   obtain ⟨hp, hr⟩ := getText_putText h1
-  exact ⟨hp, by simp only [getVar, hr, r1, r2, r3, bind, Option.bind]⟩
+  exact ⟨hp, by simp only [getVar, hr, r1, r2, r3, bind, Option.bind, VarName.ofString_str]⟩
 
 theorem beq_var (first second : Bap.Var) (h : (first == second) = true) : first = second := by
   simpa using h

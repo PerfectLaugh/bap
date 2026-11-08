@@ -2880,7 +2880,7 @@ private def runServed (emu : Emu) (serve : String → List Nat → Option (Nat �
       | .move var value =>
         let value ← evaluate value
         if var == emu.config.memory then wroteMemory.set true
-        if var.name.startsWith "intrinsic:x" then
+        if var.name.str.startsWith "intrinsic:x" then
           match Value.asBits value with
           | .ok bits => operands.modify (· ++ [bits.2.toNat])
           | .error error => throw <| IO.userError error

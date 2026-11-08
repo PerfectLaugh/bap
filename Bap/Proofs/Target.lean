@@ -1098,7 +1098,7 @@ private theorem highByte_alias (base : String → Option String) (width : Nat) (
 
 /-- Reads of a high byte are bits 15 to 8 of the base. -/
 theorem highBytes_read (base : String → Option String) (width : Nat) (var : Bap.Var) (name : String)
-    (h : base var.name = some name) (hflags : var.name ≠ "EFLAGS") :
+    (h : base var.name = some name) (hflags : var.name.str ≠ "EFLAGS") :
     aliasExp (x86Aliases base width) (.var var) = .extract 15 8 (.var ⟨name, .imm width, 0, false⟩) := by
   rw [alias_read _ _ _ (highByte_alias base width _ _ h hflags)]
   simp [aliasRead, AliasPart.read, AliasPart.var]
@@ -1106,7 +1106,7 @@ theorem highBytes_read (base : String → Option String) (width : Nat) (var : Ba
 /-- Writes of a high byte keep the other bits of the base. -/
 theorem highBytes_write (base : String → Option String) (width : Nat) (var : Bap.Var)
     (name : String) (value : Bil.Exp) (rest : Bil.Program) (h : base var.name = some name)
-    (hflags : var.name ≠ "EFLAGS") (hwidth : 16 < width) :
+    (hflags : var.name.str ≠ "EFLAGS") (hwidth : 16 < width) :
     resolveAliases (x86Aliases base width) (.move var value :: rest) =
       .move ⟨name, .imm width, 0, false⟩
         (.concat (.extract (width - 1) 16 (.var ⟨name, .imm width, 0, false⟩))
@@ -1118,7 +1118,7 @@ theorem highBytes_write (base : String → Option String) (width : Nat) (var : B
 
 /-- A move to another register than a high byte or EFLAGS keeps its target. -/
 theorem highBytes_write_other (base : String → Option String) (width : Nat) (var : Bap.Var)
-    (value : Bil.Exp) (rest : Bil.Program) (h : base var.name = none) (hflags : var.name ≠ "EFLAGS") :
+    (value : Bil.Exp) (rest : Bil.Program) (h : base var.name = none) (hflags : var.name.str ≠ "EFLAGS") :
     resolveAliases (x86Aliases base width) (.move var value :: rest) =
       .move var (aliasExp (x86Aliases base width) value) :: resolveAliases (x86Aliases base width) rest := by
   apply alias_write_other
@@ -1523,7 +1523,7 @@ register stay. -/
 theorem armMultipleBody_load_eval (pc : Nat) (context : Primus.Semantics.Context)
     (addressing : ArmMultiple) (writeback : Bool) (base : String) (list : List String)
     (hpc : "PC" ∉ list) (hnd : list.Nodup)
-    (hn : armMultipleBase.name ∉ list) (hbn : base ≠ armMultipleBase.name)
+    (hn : armMultipleBase.name.str ∉ list) (hbn : base ≠ armMultipleBase.name)
     (hmem : context.memory.typ ≠ .imm 32) (fuel : Nat)
     {env : Bil.Env} {b : BitVec 32} {m : Memory 32}
     (hbase : Bil.lookup env (armVar base) = .ok (.bits b)) (hm : Bil.lookup env context.memory = .ok (.memory m)) :
@@ -1541,7 +1541,7 @@ theorem armMultipleBody_load_eval (pc : Nat) (context : Primus.Semantics.Context
   intro first
   have hne : ∀ name, armVar name ≠ context.memory := fun name he => hmem (by rw [← he])
   have hbvm : armMultipleBase ≠ context.memory := fun he => hmem (by rw [← he]; rfl)
-  have hbv : armVar base ≠ armMultipleBase := fun he => hbn (congrArg Bap.Var.name he)
+  have hbv : armVar base ≠ armMultipleBase := fun he => hbn (congrArg (fun var : Bap.Var => var.name.str) he)
   have hnames : ∀ name ∈ list, armVar name ≠ armMultipleBase := fun name hin he =>
     hn ((congrArg Bap.Var.name he) ▸ hin)
   let entries := (List.range list.length).zip list
@@ -1635,8 +1635,8 @@ theorem armMultipleBody_load_eval (pc : Nat) (context : Primus.Semantics.Context
     exact hv o.2 (hmemEntries o ho) he.symm
   have hbaseNot : base ∉ list → armVar base ∉ entries.map (armVar ·.2) := fun hb =>
     hnotList _ fun name hin he => hb (by
-      have := congrArg Bap.Var.name he
-      simp only at this
+      have := congrArg (fun var : Bap.Var => var.name.str) he
+      simp only [VarName.str_ofString] at this
       exact this ▸ hin)
   refine ⟨state', ?_, hloaded, ?_, ?_, ?_, ?_⟩
   · rw [hstate, hexec]
@@ -1778,7 +1778,7 @@ base is written back after the stores, which stored its old value if it is on th
 theorem armMultipleBody_store_eval (pc : Nat) (context : Primus.Semantics.Context)
     (addressing : ArmMultiple) (writeback : Bool) (base : String) (list : List String)
     (hlen : 4 * list.length ≤ 2 ^ 32) (hbn : base ≠ armMultipleBase.name)
-    (hn : armMultipleBase.name ∉ list)
+    (hn : armMultipleBase.name.str ∉ list)
     (hmem : context.memory.typ ≠ .imm 32) (fuel : Nat)
     {env : Bil.Env} {b : BitVec 32} {m : Memory 32} (regs : String → BitVec 32)
     (hpages : Bap.Proofs.Core.MemoryLaws.PagesSized m)
@@ -1800,7 +1800,7 @@ theorem armMultipleBody_store_eval (pc : Nat) (context : Primus.Semantics.Contex
   intro first
   have hne : ∀ name, armVar name ≠ context.memory := fun name he => hmem (by rw [← he])
   have hbvm : armMultipleBase ≠ context.memory := fun he => hmem (by rw [← he]; rfl)
-  have hbv : armVar base ≠ armMultipleBase := fun he => hbn (congrArg Bap.Var.name he)
+  have hbv : armVar base ≠ armMultipleBase := fun he => hbn (congrArg (fun var : Bap.Var => var.name.str) he)
   have hnames : ∀ name ∈ list, armVar name ≠ armMultipleBase := fun name hin he =>
     hn ((congrArg Bap.Var.name he) ▸ hin)
   let entries := (List.range list.length).zip list
@@ -2509,7 +2509,7 @@ theorem flagAlias_write_read (typ : Typ) (value : Bil.Exp) (name next : String) 
 private theorem flag_not_temporary (typ : Typ) (names : List String) (h : "_alias" ∉ names) :
     ∀ n ∈ names, (flagPart n).var ≠ aliasTemporary typ := by
   intro n hn e
-  have : n = "_alias" := congrArg Bap.Var.name e
+  have : n = "_alias" := congrArg (fun var : Bap.Var => var.name.str) e
   exact h (this ▸ hn)
 
 /-- EFLAGS is the 32 flags: what is written to it is what is read from it, whatever it is. -/

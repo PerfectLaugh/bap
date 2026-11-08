@@ -514,7 +514,7 @@ mutual
 end
 
 /-- What the lifter names for itself: `freeze`, `let` and the value of a conditional. -/
-def isTemporary (var : Bap.Var) : Bool := var.name.startsWith "_primus_"
+def isTemporary (var : Bap.Var) : Bool := var.name.str.startsWith "_primus_"
 
 mutual
   /-- The temporaries a statement assigns. -/

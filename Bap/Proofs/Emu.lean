@@ -1908,12 +1908,12 @@ theorem getValue_decodes (value : Value) (h : ValueSafe value) :
       omega
 
 private def encBinding (binding : Bap.Var × Value) : ByteArray :=
-  natBytes binding.1.name.utf8ByteSize ++ binding.1.name.toUTF8 ++ encTyp binding.1.typ ++ natBytes binding.1.index ++
+  natBytes binding.1.name.str.utf8ByteSize ++ binding.1.name.str.toUTF8 ++ encTyp binding.1.typ ++ natBytes binding.1.index ++
     byteEnc (if binding.1.isVirtual then 1 else 0) ++ encValue binding.2
 
 /-- A binding representable in the binary format. -/
 def BindingSafe (binding : Bap.Var × Value) : Prop :=
-  binding.1.name.utf8ByteSize < 2 ^ 64 ∧ TypSafe binding.1.typ ∧ binding.1.index < 2 ^ 64 ∧ ValueSafe binding.2
+  binding.1.name.str.utf8ByteSize < 2 ^ 64 ∧ TypSafe binding.1.typ ∧ binding.1.index < 2 ^ 64 ∧ ValueSafe binding.2
 
 private theorem data_putBinding (writer : Writer) (binding : Bap.Var × Value) :
     Writer.data (putBindingBin writer binding) = Writer.data writer ++ encBinding binding := by
@@ -1931,14 +1931,14 @@ theorem getBinding_decodes (binding : Bap.Var × Value) (h : BindingSafe binding
   obtain ⟨h4, h45⟩ := At.split h5
   obtain ⟨h3, h34⟩ := At.split h4
   obtain ⟨h2, h23⟩ := At.split h3
-  have d1 := getText_decodes name hn data offset h2
+  have d1 := getText_decodes name.str hn data offset h2
   have d2 := getTyp_decodes typ ht data _ h23
   have d3 := natBytes_decodes index hi data _ h34
   have d4 := getBool_decodes isVirtual data _ h45
   have d5 := getValue_decodes value hv data _ h6
   simp only [ByteArray.size_append, Nat.add_assoc] at d1 d2 d3 d4 d5
   simp only [getBindingBin, bind, Except.bind, d1, d2, d3, d4, d5, encBinding, ByteArray.size_append, Nat.add_assoc,
-    normalizeBinding]
+    normalizeBinding, VarName.ofString_str]
 
 private def encPiece (piece : Nat × ByteArray) : ByteArray :=
   natBytes piece.1 ++ natBytes piece.2.size ++ piece.2
@@ -3213,10 +3213,10 @@ theorem registerValue_too_wide (name : String) (width index : Nat) (isVirtual : 
 
 private theorem registerNames_foldl (env : Bil.Env) (names : List String) (hnodup : names.Nodup) :
     let result := env.foldl (init := names) fun names binding =>
-      if isMemoryType binding.1.typ || names.contains binding.1.name then names
-      else binding.1.name :: names
+      if isMemoryType binding.1.typ || names.contains binding.1.name.str then names
+      else binding.1.name.str :: names
     result.Nodup ∧ ∀ name, name ∈ result ↔ name ∈ names ∨
-      ∃ binding ∈ env, binding.1.name = name ∧ isMemoryType binding.1.typ = false := by
+      ∃ binding ∈ env, binding.1.name.str = name ∧ isMemoryType binding.1.typ = false := by
   induction env generalizing names with
   | nil => simpa using hnodup
   | cons head tail ih =>
@@ -3240,9 +3240,9 @@ private theorem registerNames_foldl (env : Bil.Env) (names : List String) (hnodu
             · exact Or.inl (hn ▸ hs)
           · exact Or.inr ⟨b, hb, hn, hm⟩
     · rename_i hkeep
-      have hnot : ¬ (isMemoryType head.1.typ || names.contains head.1.name) = true := hkeep
+      have hnot : ¬ (isMemoryType head.1.typ || names.contains head.1.name.str) = true := hkeep
       simp only [Bool.or_eq_true, not_or, List.contains_iff_mem] at hnot
-      obtain ⟨h1, h2⟩ := ih (head.1.name :: names) (List.nodup_cons.2 ⟨hnot.2, hnodup⟩)
+      obtain ⟨h1, h2⟩ := ih (head.1.name.str :: names) (List.nodup_cons.2 ⟨hnot.2, hnodup⟩)
       refine ⟨h1, fun name => ?_⟩
       rw [h2 name]
       constructor
@@ -3260,7 +3260,7 @@ private theorem registerNames_foldl (env : Bil.Env) (names : List String) (hnodu
 /-- `regs` lists each register once, and memories not at all. -/
 theorem registerNames_spec (env : Bil.Env) :
     (registerNames env).Nodup ∧ ∀ name, name ∈ registerNames env ↔
-      ∃ binding ∈ env, binding.1.name = name ∧ isMemoryType binding.1.typ = false := by
+      ∃ binding ∈ env, binding.1.name.str = name ∧ isMemoryType binding.1.typ = false := by
   obtain ⟨h1, h2⟩ := registerNames_foldl env [] List.nodup_nil
   simp only [registerNames, List.mem_reverse]
   refine ⟨(List.reverse_perm _).nodup_iff.2 h1, fun name => ?_⟩

@@ -604,7 +604,7 @@ def run : IO Unit := do
     ⟨0x100c, 4, "case2", .jump, some 0x3000, [.jmp (.int (BitVec.ofNat 64 0x3000))]⟩
   ]
   let machine := Analysis.StateMachine.analyze smInstructions
-  assertEqual "state machine selects state variable" (some "state") (machine.stateVar.map Bap.Var.name)
+  assertEqual "state machine selects state variable" (some "state") (machine.stateVar.map (·.name.str))
   assertEqual "state machine recovers case values" [1, 2] (machine.cases.map Analysis.StateMachine.Case.value)
   assertEqual "state machine recovers case targets" [0x2000, 0x3000]
     (machine.cases.map Analysis.StateMachine.Case.target)
@@ -619,7 +619,7 @@ def run : IO Unit := do
   assertTrue "deflattening accepts declared external targets" recovery.complete
   assertTrue "deflattening adds first direct case edge" (recovery.disasm.edges.contains (0x1000, 0x2000))
   assertTrue "deflattening adds second direct case edge" (recovery.disasm.edges.contains (0x1008, 0x3000))
-  assertEqual "deflattening preserves state variable" (some "state") (recovery.stateVar.map Bap.Var.name)
+  assertEqual "deflattening preserves state variable" (some "state") (recovery.stateVar.map (·.name.str))
   let missingRecovery := Analysis.Deflatten.recover 0x1000 smInstructions
   assertTrue "deflattening rejects undeclared external targets" !missingRecovery.complete
   let memorySlice := Analysis.Slice.backwardProject xrefProject 0x1000 [.mem 0x3000 8]

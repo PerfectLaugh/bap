@@ -498,7 +498,7 @@ private theorem typeChars_injective {a b : Bap.Var} (h : typeChars a = typeChars
 /-- Decoding the rendered name recovers the name, and the rest is the index and the qualifier. -/
 private theorem varName_decode (scope : List Bap.Var) (var : Bap.Var) :
     decode (varName scope var).toList.length (varName scope var).toList =
-      (var.name.toList, indexChars var.index ++ if clash scope var then qualChars var else []) := by
+      (var.name.str.toList, indexChars var.index ++ if clash scope var then qualChars var else []) := by
   rw [varName_toList, List.append_assoc]
   apply decode_identifier
   · intro c hc
@@ -535,7 +535,7 @@ theorem varName_name_index {scope : List Bap.Var} {a b : Bap.Var} (h : varName s
     split at hr
     · simp [qualChars] at hr; exact ⟨_, hr.symm⟩
     · simp at hr
-  exact ⟨String.toList_inj.mp hn.symm, (index_cut (q b) (q a) (m b) (m a) hi).1.symm⟩
+  exact ⟨VarName.ext_str (String.toList_inj.mp hn.symm), (index_cut (q b) (q a) (m b) (m a) hi).1.symm⟩
 
 /-- With no other variable of that name and index in sight, the name is the plain one, so most
 output does not change. -/

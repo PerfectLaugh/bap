@@ -2158,7 +2158,7 @@ private def stateOf (machine : Bap.Linux.Machine) : IO (List (Nat × ByteArray �
     (region.address, region.data, region.protection.readable, region.protection.writable, region.protection.executable)
   let registers (env : Bap.Bil.Env) : List (String × Nat) :=
     let named := env.filterMap fun (var, value) => match value with
-      | .bits bits => if var.name.startsWith "_primus_" || var.name.startsWith "intrinsic:" then none else some (var.name, bits.toNat)
+      | .bits bits => if var.name.str.startsWith "_primus_" || var.name.str.startsWith "intrinsic:" then none else some (var.name, bits.toNat)
       | _ => none
     (named.toArray.qsort fun left right => left.1 < right.1).toList
   let threads := (← machine.emu.threadsRef.get).map fun context => (context.id, context.pc, context.stopped, registers context.state.env)

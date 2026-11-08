@@ -3578,7 +3578,7 @@ private theorem typeName_inj {a b : Typ} (h : typeName a = typeName b) : a = b :
   case imm.imm => rw [digits_inj hl]
 
 private theorem inputName_toList (var : Bap.Var) : (inputName var).toList =
-    (var.name.toList ++ '#' :: (Nat.toDigits 10 var.index ++ '#' :: (typeName var.typ).toList)) ++ '#' ::
+    (var.name.str.toList ++ '#' :: (Nat.toDigits 10 var.index ++ '#' :: (typeName var.typ).toList)) ++ '#' ::
       [if var.isVirtual then 'v' else 'r'] := by
   simp only [inputName, String.toList_append, toList_toString]
   cases var.isVirtual <;> simp <;> rfl
@@ -3591,8 +3591,8 @@ theorem inputName_injective {a b : Bap.Var} (h : inputName a = inputName b) : a 
   have hd : ∀ {n : Nat}, '#' ∉ Nat.toDigits 10 n := not_mem_digits (by decide)
   obtain ⟨h1, h2⟩ := split_last hbit hbit hl
   obtain ⟨h3, h4⟩ := split_last (hash_not_mem_typeName _) (hash_not_mem_typeName _) (show
-    (a.name.toList ++ '#' :: Nat.toDigits 10 a.index) ++ '#' :: _ =
-    (b.name.toList ++ '#' :: Nat.toDigits 10 b.index) ++ '#' :: _ by simpa using h1)
+    (a.name.str.toList ++ '#' :: Nat.toDigits 10 a.index) ++ '#' :: _ =
+    (b.name.str.toList ++ '#' :: Nat.toDigits 10 b.index) ++ '#' :: _ by simpa using h1)
   obtain ⟨h5, h6⟩ := split_last hd hd h3
   have hname := String.toList_inj.mp h5
   have hindex := digits_inj h6
@@ -3603,6 +3603,7 @@ theorem inputName_injective {a b : Bap.Var} (h : inputName a = inputName b) : a 
   obtain ⟨an, at', ai, av⟩ := a
   obtain ⟨bn, bt, bi, bv⟩ := b
   simp only at hname hindex htyp hv
+  have hname := VarName.ext_str hname
   subst hname hindex htyp hv
   rfl
 
@@ -3615,7 +3616,7 @@ theorem inputName_ne_unknownName (var : Bap.Var) (message : String) : inputName 
   intro h
   have hl := congrArg (fun name => name.toList.getLast?) h
   have hi : ∃ front, (inputName var).toList = front ++ [if var.isVirtual then 'v' else 'r'] :=
-    ⟨(var.name.toList ++ '#' :: (Nat.toDigits 10 var.index ++ '#' :: (typeName var.typ).toList)) ++ ['#'], by
+    ⟨(var.name.str.toList ++ '#' :: (Nat.toDigits 10 var.index ++ '#' :: (typeName var.typ).toList)) ++ ['#'], by
       rw [inputName_toList]; simp⟩
   obtain ⟨front, hf⟩ := hi
   simp only [hf, unknownName_toList, List.getLast?_append, List.getLast?_singleton, Option.some_or] at hl

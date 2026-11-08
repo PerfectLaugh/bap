@@ -333,7 +333,7 @@ private def valueFits : Value → Bool
   | @Value.memory addressWidth memory => addressWidth ≤ 64 && fitsWord (Memory.cells memory).length
 
 private def bindingFits (binding : Bap.Var × Value) : Bool :=
-  fitsWord binding.1.name.utf8ByteSize && typFits binding.1.typ && fitsWord binding.1.index && valueFits binding.2
+  fitsWord binding.1.name.str.utf8ByteSize && typFits binding.1.typ && fitsWord binding.1.index && valueFits binding.2
 
 private def regionFits (region : Region) : Bool :=
   fitsWord region.address && decide (region.data.size < Jit.fillLimit)

@@ -600,7 +600,7 @@ private def constantly (exp : Bil.Exp) : Option (Σ width, BitVec width) :=
   | .error _ => none
 
 private def isTemporary (var : Bap.Var) : Bool :=
-  var.isVirtual || var.name.startsWith "intrinsic:" || var.name.startsWith "#" || var.name.startsWith "_primus_"
+  var.isVirtual || var.name.str.startsWith "intrinsic:" || var.name.str.startsWith "#" || var.name.str.startsWith "_primus_"
 
 /-- Whether what an instruction leaves may be where a call comes back to: just after it, in a word or two. It is a call if it then jumps. -/
 private def noteLink (frame : Frame) (bits : Option (Σ width, BitVec width)) : IO Unit := do
@@ -753,7 +753,7 @@ private partial def perform (tracker : Tracker) (frame : Frame) : Nat → Bil.Pr
       if var == tracker.emu.config.memory then
         pure ()
       else if isTemporary var then
-        if var.name.startsWith "intrinsic:x" then
+        if var.name.str.startsWith "intrinsic:x" then
           frame.scratch.operands.modify (union · (allInputs shade))
         frame.scratch.variables.modify ((var, bits, shade) :: ·)
       else

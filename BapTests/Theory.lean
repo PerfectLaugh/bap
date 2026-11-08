@@ -273,15 +273,15 @@ def run : IO Unit := do
   assertEqual "x86-64 eighth argument stack offset" (ABI.Location.stack 8) (ABI.argumentLocation amd64 7)
   assertEqual "x86-64 stack pointer" "RSP" amd64.stackPointer.name
   assertEqual "x86-64 return address is on stack" none amd64.returnAddress
-  assertEqual "x86-64 syscall register" (some "R10") ((amd64.syscallArguments.map Bap.Var.name)[3]?)
+  assertEqual "x86-64 syscall register" (some "R10") ((amd64.syscallArguments.map (·.name.str))[3]?)
   let rv ← convention .riscv
   assertEqual "RISC-V has eight function arguments" 8 rv.functionArguments.length
   assertEqual "RISC-V has six syscall arguments" 6 rv.syscallArguments.length
   assertEqual "RISC-V syscall number register" "X17" rv.syscallNumber.name
   assertEqual "RISC-V result register" "X10" rv.result.name
-  assertEqual "RISC-V return register" (some "X1") (rv.returnAddress.map Bap.Var.name)
+  assertEqual "RISC-V return register" (some "X1") (rv.returnAddress.map (·.name.str))
   let arm64 ← convention .aarch64
-  assertEqual "AArch64 argument register" (some "X0") (arm64.functionArguments.head?.map Bap.Var.name)
+  assertEqual "AArch64 argument register" (some "X0") (arm64.functionArguments.head?.map (·.name.str))
   assertEqual "AArch64 syscall number register" "X8" arm64.syscallNumber.name
   assertEqual "AArch64 stack alignment" 32 (ABI.alignStack 16 33)
   let mips ← convention .mips
@@ -300,7 +300,7 @@ def run : IO Unit := do
   assertEqual "x86 stack slots are words" (ABI.Location.stack 4) (ABI.argumentLocation i386 1)
   let arm ← convention .arm
   assertEqual "ARM syscall number register" "R7" arm.syscallNumber.name
-  assertEqual "ARM return register" (some "LR") (arm.returnAddress.map Bap.Var.name)
+  assertEqual "ARM return register" (some "LR") (arm.returnAddress.map (·.name.str))
   assertEqual "ARM stack pointer" "SP" arm.stackPointer.name
   let ppc ← convention .powerpc
   assertEqual "PowerPC result register" "R3" ppc.result.name

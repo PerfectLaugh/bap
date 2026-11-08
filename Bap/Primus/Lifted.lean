@@ -1929,12 +1929,9 @@ def prepareAhead (engine : Engine) (fetch : Fetch) (lift : Lift) (address : Nat)
   let code ← fetch address
   let _ ← prepareGraph engine fetch lift address code (2 ^ 32) (force := true)
 
-/-- A number below 60 for a variable, from what is at hand of it, which most others don't have. -/
+/-- A number below 60 for a variable, from the key of its name, which most others don't have. -/
 private def quickKey (var : Bap.Var) : Nat :=
-  let size := var.name.utf8ByteSize
-  let last := if h : size - 1 < size then (var.name.getUTF8Byte ⟨size - 1⟩ h).toNat else 0
-  let before := if h : size - 2 < size then (var.name.getUTF8Byte ⟨size - 2⟩ h).toNat else 0
-  (last * 7 + before * 3 + size + var.index) % 60
+  (var.name.key.toNat + var.index) % 60
 
 /-- The bindings of an environment by the key of their variables, in their order. -/
 private def envIndex (env : Bil.Env) : Array Bil.Env :=

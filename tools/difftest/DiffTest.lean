@@ -147,7 +147,7 @@ private def runServed (rules : Bap.Float.NaNRules) (state : Bil.State) (program 
       match stmt with
       | .move var value =>
         let value ← Bil.evalExp state.env value
-        let operands ← if var.name.startsWith "intrinsic:x" then do
+        let operands ← if var.name.str.startsWith "intrinsic:x" then do
             let bits ← Value.asBits value
             pure (operands ++ [bits.2.toNat])
           else pure operands

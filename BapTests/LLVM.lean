@@ -1654,7 +1654,7 @@ private def testArmMultipleAgree : IO Unit := do
     pure ((thumbMemVar, .memory memory) :: bit "ZF" flag :: bit "NF" 0 :: bit "CF" 0 :: bit "VF" 0 ::
       (List.range names.length |>.zip names).map fun (index, name) => word32 name (0x1200 + index * 16))
   let observe (state : Bil.State × Bil.Effect) : IO (List Nat × Option Nat) := do
-    let registers ← names.mapM fun name =>
+    let registers ← names.mapM fun (name : String) =>
       match Bil.lookup state.1.env ⟨name, .imm 32, 0, false⟩ with
       | .ok (.bits value) => pure value.toNat
       | _ => throw <| IO.userError s!"{name} is not a register"
@@ -1702,7 +1702,7 @@ private def testThumbMultipleAgree : IO Unit := do
     pure ((thumbMemVar, .memory memory) :: bit "ZF" 0 :: bit "NF" 0 :: bit "CF" 0 :: bit "VF" 0 ::
       (List.range names.length |>.zip names).map fun (index, name) => word32 name (0x1200 + index * 16))
   let observe (state : Bil.State × Bil.Effect) : IO (List Nat × Option Nat) := do
-    let registers ← names.mapM fun name =>
+    let registers ← names.mapM fun (name : String) =>
       match Bil.lookup state.1.env ⟨name, .imm 32, 0, false⟩ with
       | .ok (.bits value) => pure value.toNat
       | _ => throw <| IO.userError s!"{name} is not a register"

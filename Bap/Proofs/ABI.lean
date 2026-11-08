@@ -306,7 +306,7 @@ private theorem numberedName_inj (name : String) (a b : Nat)
 
 /-- Numbered register lists never repeat a name, for any prefix and range. -/
 theorem numbered_names_nodup (name : String) (width first last : Nat) :
-    ((numbered name width first last).map (·.name)).Nodup := by
+    ((numbered name width first last).map (·.name.str)).Nodup := by
   rw [numbered_eq, List.map_map]
   refine List.pairwise_map.2 (List.Pairwise.imp ?_ List.nodup_range)
   intro a b hne h
@@ -316,7 +316,7 @@ theorem numbered_names_nodup (name : String) (width first last : Nat) :
 theorem regs_typed (width : Nat) (names : List String) :
     ∀ v ∈ regs width names, v.typ = .imm width := by
   intro v hv
-  have hv' : v ∈ names.map fun name => (⟨name, .imm width, 0, false⟩ : Bap.Var) := hv
+  have hv' : v ∈ names.map fun (name : String) => (⟨name, .imm width, 0, false⟩ : Bap.Var) := hv
   rcases List.mem_map.1 hv' with ⟨_, _, rfl⟩
   rfl
 
@@ -386,8 +386,8 @@ structure WellTyped (c : Convention) : Prop where
 /-- Fixed shape of a convention produced for `arch`. -/
 structure Shape (arch : Image.Arch) (w : Nat) (c : Convention) : Prop where
   word : c.wordSize = expectedWordSize arch w
-  names : c.functionArguments.map (·.name) = argumentNames arch w
-  control : controlNames arch = some (c.stackPointer.name, c.returnAddress.map (·.name))
+  names : c.functionArguments.map (·.name.str) = argumentNames arch w
+  control : controlNames arch = some (c.stackPointer.name.str, c.returnAddress.map (·.name.str))
   syscallCount : c.syscallArguments.length = 6
   typed : WellTyped c
 
@@ -402,7 +402,7 @@ private theorem ra_some {u : Bap.Var} {w : Nat} (h : u.typ = .imm w) :
 private theorem nil_typed {P : Bap.Var → Prop} : ∀ v ∈ ([] : List Bap.Var), P v := by simp
 
 private theorem mips_names (w : Nat) :
-    (mips w).functionArguments.map (·.name) = argumentNames .mips w := by
+    (mips w).functionArguments.map (·.name.str) = argumentNames .mips w := by
   by_cases h : w = 32
   · subst h
     rfl
@@ -462,7 +462,7 @@ use word-spaced stack slots counted from `stackStart`. -/
 theorem convention_argumentLocation (arch : Image.Arch) (w index : Nat) (c : Convention)
     (h : convention arch w = some c) :
     (∀ hi : index < argumentRegisterCount arch w, ∃ var,
-        var.name = (argumentNames arch w)[index]'(by rwa [argumentNames_length]) ∧
+        var.name.str = (argumentNames arch w)[index]'(by rwa [argumentNames_length]) ∧
         var.typ = .imm (expectedWordSize arch w) ∧
         argumentLocation c index = .register var) ∧
       (argumentRegisterCount arch w ≤ index → argumentLocation c index =
