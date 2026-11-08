@@ -882,6 +882,30 @@ def testRangeLoopsAArch64 : IO Unit := do
   let _ ← Bap.Emu.run emu 3000
   assertEqual "A breakpoint that comes in a hot loop stops it there" 4 (← Bap.Emu.pc emu)
 
+/-- A read as a program may read goes across regions that are next to each other, and one across a hole, or what can't be read, says
+where that is and how much before it could be; `peek` reads it, with zeros in the hole. -/
+def testReadAcrossHoles : IO Unit := do
+  let emu ← Bap.Emu.riscv64 (← LLVM.assemble "riscv64" "nop") 0x10000 0x10000
+  let filled (size : Nat) (value : UInt8) : ByteArray := ByteArray.mk (List.replicate size value).toArray
+  Bap.Emu.map emu ⟨0x20000, filled 0x1000 1, ⟨true, true, false⟩⟩
+  Bap.Emu.map emu ⟨0x21000, filled 0x1000 2, ⟨true, false, false⟩⟩
+  Bap.Emu.map emu ⟨0x23000, filled 0x1000 3, ⟨false, false, false⟩⟩
+  let message (action : IO ByteArray) : IO String := do
+    try
+      let _ ← action
+      pure ""
+    catch error => pure (toString error)
+  assertEqual "A read goes across regions next to each other" ((filled 16 1).toList ++ (filled 16 2).toList)
+    (← Bap.Emu.read emu 0x20ff0 32).toList
+  assertEqual "A read across a hole says where it is and how much was before it"
+    "unmapped Emu address 139264 in 8208 bytes at 135152, after 4112 readable" (← message (Bap.Emu.read emu 0x20ff0 0x2010))
+  Bap.Emu.map emu ⟨0x22000, filled 0x1000 4, ⟨true, true, false⟩⟩
+  assertEqual "and one of what can't be read says that"
+    "unreadable Emu address 143360 in 16 bytes at 143352, after 8 readable" (← message (Bap.Emu.read emu 0x22ff8 16))
+  Bap.Emu.unmap emu 0x22000 0x1000
+  assertEqual "A peek reads across the hole, with zeros in it" ((filled 4 2).toList ++ (filled 4 0).toList)
+    (← Bap.Emu.peek emu 0x21ffc 8).toList
+
 /-- Loops of x86-64 that multiply with 64 bits and add to a byte of a register stay in their ranges: the high half of a product is of halves
 of 32 bits, with nothing of 128 bits, and a write to part of a register is a concatenation, which has its lowering. -/
 def testRangeLoopsX86 : IO Unit := do
@@ -5664,7 +5688,7 @@ private def runEmulator : IO Unit := do
   let narrowOutputText ← narrowText.get
   assertTrue "Emu shell reads a 32-bit register" ((narrowOutputText.splitOn "X10=32:0x7").length == 3)
   assertTrue "Emu shell refuses a value that does not fit" ((narrowOutputText.splitOn "does not fit").length > 1)
-  assertTrue "Emu shell fails on an absurd size" ((narrowOutputText.splitOn "unmapped Emu address in").length > 1)
+  assertTrue "Emu shell fails on an absurd size" ((narrowOutputText.splitOn "unmapped Emu address").length > 1)
   assertTrue "Emu shell refuses the bare prefix" ((narrowOutputText.splitOn "empty hexadecimal value").length == 3)
   assertEqual "Emu shell parses hexadecimal" (some (Bap.Emu.Command.breakAt 16))
     (Bap.Emu.parseCommand ["break", "0x10"]).toOption

@@ -1833,20 +1833,21 @@ def invalidateCode (emu : Emu) (first last : Nat) : IO Unit := do
 /-- Bytes of memory as a program may read them: what isn't mapped or readable is an error. -/
 def read (emu : Emu) (address size : Nat) : IO ByteArray := do
   let address := emu.config.untag address
-  -- An absurd size fails right here, instead of allocating before it fails.
+  -- An absurd size fails right here, instead of allocating before it fails. What fails says where, and how much before it could be
+  -- read, for a read across a hole, which `peek` reads as zeros.
   let regions ← regionsTouching emu address size
-  if !coversRange regions address (address + size) then
-    throw <| IO.userError s!"unmapped Emu address in {size} bytes at {address}"
+  let fail (what : String) (position : Nat) : IO Unit :=
+    throw <| IO.userError s!"{what} Emu address {position} in {size} bytes at {address}, after {position - address} readable"
   let rec check : Nat → Nat → IO Unit
-    | 0, _ => pure ()
+    | 0, position => if position < address + size then fail "unmapped" position else pure ()
     | fuel + 1, position => do
       if position < address + size then
         match lookupRegion regions position with
-        | none => throw <| IO.userError s!"unmapped Emu address {position}"
+        | none => fail "unmapped" position
         | some region =>
-          if !region.protection.readable then throw <| IO.userError s!"unreadable Emu address {position}"
-          check fuel (region.address + region.data.size)
-  check (regions.length + 1) address
+          if !region.protection.readable then fail "unreadable" position
+          else check fuel (region.address + region.data.size)
+  check regions.length address
   -- All at once, as what a worker of a parallel round stores is seen whole.
   rawBytes emu address size
 

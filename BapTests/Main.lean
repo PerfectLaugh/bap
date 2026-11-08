@@ -69,6 +69,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testNativeLimit,
     Bap.Tests.Emu.testRangeLoopsAArch64,
     Bap.Tests.Emu.testRangeLoopsX86,
+    Bap.Tests.Emu.testReadAcrossHoles,
     Bap.Tests.Emu.testChainCalls,
     Bap.Tests.Emu.testCheckpointTrace "aarch64",
     Bap.Tests.Emu.testCheckpointTrace "x86_64",
