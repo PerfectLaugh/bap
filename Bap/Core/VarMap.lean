@@ -268,7 +268,8 @@ private theorem indexes_push {entries : Array (Var × α)} {index : Std.HashMap 
         exact ⟨hlt, hqe⟩
       · exact absurd (by simpa using hqe) hv
 
-/-- `insert`, in the array where it can be and with the index that the map has, rather than a new one. -/
+/-- `insert`, in the array where it can be and with the index that the map has, rather than a new one. A variable that is bound
+already keeps the object that it has there. -/
 def insertFast (map : VarMap α) (var : Var) (value : α) : VarMap α :=
   match map with
   | ⟨entries, index⟩ =>
@@ -276,7 +277,8 @@ def insertFast (map : VarMap α) (var : Var) (value : α) : VarMap α :=
       match hp : index.1[var]? with
       | some p =>
         have hlt := ((index.2 var p).1 hp)
-        (⟨entries.set p (var, value) hlt.1, Squash.mk ⟨index.1, indexes_set index.2 hlt.1 hlt.2 value⟩⟩ : VarMap α)
+        -- The variable that is there stays, which is the same: what a later lookup compares is then the same object.
+        (⟨entries.set p ((entries[p]'hlt.1).1, value) hlt.1, Squash.mk ⟨index.1, indexes_set index.2 hlt.1 rfl value⟩⟩ : VarMap α)
       | none => ⟨entries.push (var, value), Squash.mk ⟨index.1.insert var entries.size, indexes_push index.2 hp value⟩⟩)
       (fun first second _ => by
         apply ext_entries
@@ -299,7 +301,8 @@ def insertFast (map : VarMap α) (var : Var) (value : α) : VarMap α :=
     · rename_i p h q hq
       have : p = q := by rw [hsame] at h; rw [h] at hq; exact Option.some.inj hq
       subst this
-      rfl
+      have he := ((index.2 var p).1 hq).2
+      simp only [he]
     · rename_i p h hq
       rw [hsame, hq] at h
       cases h

@@ -278,6 +278,10 @@ structure Engine where
   chainAt : IO.Ref (Std.HashMap Nat Nat)
   variableIds : IO.Ref (Std.HashMap Bap.Var Nat)
   variables : IO.Ref (Array Bap.Var)
+  /-- Of the bindings of the last state that a chain started from, by their place, the variable and its number for the chain plus one,
+  or 0 if it has none, with how many variables there were then: a state that has the same variables in the same places, as the same
+  objects, has them without a lookup. -/
+  chainIds : IO.Ref (Nat × Array Bap.Var × Array Nat)
   /-- What is being optimized on another thread, by where it starts, with the bytes it was compiled from and what it is of them (see
   `optimizedOf`): the run goes on with what there is until it is done. -/
   optimizing : IO.Ref (Std.HashMap Nat (ByteArray × (List (Nat × Nat) × Nat × List Nat × Nat) × List Jit.Op ×
@@ -336,6 +340,7 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimi
     chainAt := ← IO.mkRef {}
     variableIds := ← IO.mkRef {}
     variables := ← IO.mkRef #[]
+    chainIds := ← IO.mkRef (0, #[], #[])
     optimizing := ← IO.mkRef {}
   }
 
@@ -514,7 +519,7 @@ def discardMemory (engine : Engine) : IO Unit := do
   engine.persistentMemory.set none
   engine.persistentVariable.set none
 
-private def widthOf (var : Bap.Var) : Option Nat :=
+@[inline] private def widthOf (var : Bap.Var) : Option Nat :=
   match var.typ with
   | .imm width => if 0 < width && width ≤ 64 then some width else none
   | _ => none
@@ -1549,6 +1554,39 @@ private def optimizeFrom : Nat := 4096
 /-- How many runs of what is being optimized go by before it comes back to see whether that is done. -/
 private def optimizeCheck : Nat := 4096
 
+private unsafe def sameObjectImpl {α : Type} (left right : α) : Bool := ptrAddrUnsafe left == ptrAddrUnsafe right
+
+/-- Whether two things are one object. It may say no when they are only equal. -/
+@[implemented_by sameObjectImpl] private def sameObject {α : Type} (_ _ : α) : Bool := false
+
+/-- The variables of `entries` from `place` on that the chain has numbers for, each as its number and its value, after `out`, as
+`Jit.runChain` takes them; and of each place the variable and its number plus one, or 0, which `known` and `numbers` have of those that
+are the same objects in the same places as before, without a lookup. None if one that has a number has a value of the wrong kind, which
+is for Lean, as `encodeState` says. -/
+private def packChain (ids : Std.HashMap Bap.Var Nat) (entries : Array (Bap.Var × Value)) (known : Array Bap.Var)
+    (numbers : Array Nat) (place : Nat) (out : ByteArray) : Option (ByteArray × Array Bap.Var × Array Nat) :=
+  if h : place < entries.size then
+    let (var, value) := entries[place]
+    let cached := if hk : place < known.size then sameObject known[place] var else false
+    let (known, numbers, numbered) :=
+      if cached then (known, numbers, numbers[place]!)
+      else
+        let numbered := match ids[var]? with
+          | some number => number + 1
+          | none => 0
+        if place < known.size then (known.set! place var, numbers.set! place numbered, numbered)
+        else (known.push var, numbers.push numbered, numbered)
+    if numbered == 0 then packChain ids entries known numbers (place + 1) out
+    else
+      match value, widthOf var with
+      | @Value.bits width bits, some expected =>
+        if width != expected then none
+        else packChain ids entries known numbers (place + 1)
+          (Jit.pushWord (Jit.pushWord out (UInt64.ofNat (numbered - 1))) (immediate bits))
+      | _, _ => none
+  else some (out, known, numbers)
+termination_by entries.size - place
+
 /-- The number of a variable for the chain. -/
 private def variableId (engine : Engine) (var : Bap.Var) : IO Nat := do
   match (← engine.variableIds.get)[var]? with
@@ -2285,21 +2323,16 @@ private def runChained (engine : Engine) (pc : Nat) (entry : CachedBlock) (state
   let some id := (← engine.chainAt.get)[pc]? | return none
   -- The variables that the chain knows of, as the state has them: one of the wrong kind is for Lean, as `encodeState` says.
   let ids ← engine.variableIds.get
-  let mut variables : Array UInt64 := #[]
-  let mut values : Array UInt64 := #[]
-  for (var, value) in state.env do
-    match ids[var]? with
-    | none => pure ()
-    | some number =>
-      match value, widthOf var with
-      | @Value.bits width bits, some expected =>
-        if width != expected then return none
-        variables := variables.push (UInt64.ofNat number)
-        values := values.push (immediate bits)
-      | _, _ => return none
+  -- The numbers of the bindings by their places, as the last state had them, while no variable has been numbered since: those of the
+  -- same objects in the same places are what they were.
+  let (count, known, numbers) ← engine.chainIds.modifyGet fun cache => (cache, (0, #[], #[]))
+  let (known, numbers) := if count == ids.size then (known, numbers) else (#[], #[])
+  let some (variables, known, numbers) :=
+      packChain ids state.env.entries known numbers 0 (ByteArray.emptyWithCapacity (16 * state.env.size)) | return none
+  engine.chainIds.set (ids.size, known, numbers)
   recordNative engine
   let (next, slots, addresses, cells, info) ← Jit.runChain program slots memory filter quietSites observer codeObserver
-    engine.chain (UInt64.ofNat id) (UInt64.ofNat pc) (UInt64.ofNat budget) variables values
+    engine.chain (UInt64.ofNat id) (UInt64.ofNat pc) (UInt64.ofNat budget) variables
     (UInt64.ofNat (← engine.variables.get).size)
   let entries ← engine.chainEntries.get
   let at_ (index : Nat) : Nat := (info.getD index 0).toNat

@@ -326,6 +326,20 @@ static uint64_t getWord(const uint8_t *in) {
 // All of them are new to it after `reset`. Nothing outside of a site, of a run whose slots aren't one array, or at a site, `pc`, of
 // optimized code that wasn't made to leave its slots there.
 // `Jit.word`: the `index`th word of eight bytes of `bytes`, the least significant first, or 0 past its end.
+extern "C" lean_obj_res bap_jit_push_word(lean_obj_arg bytes, uint64_t value) {
+  size_t size = lean_sarray_size(bytes);
+  if (!lean_is_exclusive(bytes) || lean_sarray_capacity(bytes) < size + 8) {
+    size_t capacity = std::max<size_t>(2 * size + 8, 64);
+    lean_object *grown = lean_alloc_sarray(1, size, capacity);
+    std::memcpy(lean_sarray_cptr(grown), lean_sarray_cptr(bytes), size);
+    lean_dec(bytes);
+    bytes = grown;
+  }
+  putWord(lean_sarray_cptr(bytes) + size, value);
+  lean_to_sarray(bytes)->m_size = size + 8;
+  return bytes;
+}
+
 extern "C" uint64_t bap_jit_word(b_lean_obj_arg bytes, b_lean_obj_arg index) {
   if (!lean_is_scalar(index))
     return 0;
@@ -2462,7 +2476,7 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
                                             lean_obj_arg filterObject, uint8_t quietSites, lean_obj_arg observerObject,
                                             lean_obj_arg codeObserverObject, lean_obj_arg chainObject, uint64_t firstId,
                                             uint64_t firstPc, uint64_t firstBudget, lean_obj_arg variablesObject,
-                                            lean_obj_arg valuesObject, uint64_t variableCount, lean_obj_arg) {
+                                            uint64_t variableCount, lean_obj_arg) {
   try {
     auto *chain = static_cast<Chain *>(lean_get_external_data(chainObject));
     auto *persistent = static_cast<PagedMemory *>(lean_get_external_data(memoryObject));
@@ -2478,10 +2492,11 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
     };
     // All the numbers there are, so that the registers stay where they are while a program has them.
     if (variableCount != 0) ensure(variableCount - 1);
-    for (size_t index = 0; index != lean_array_size(variablesObject); ++index) {
-      uint64_t variable = lean_unbox_uint64(lean_array_get_core(variablesObject, index));
+    const uint8_t *pairs = lean_sarray_cptr(variablesObject);
+    for (size_t index = 0; index != lean_sarray_size(variablesObject) / 16; ++index) {
+      uint64_t variable = getWord(pairs + 16 * index);
       ensure(variable);
-      registers[variable] = lean_unbox_uint64(lean_array_get_core(valuesObject, index));
+      registers[variable] = getWord(pairs + 16 * index + 8);
       bound[variable] = 1;
     }
     ChainEntry *current = nullptr;

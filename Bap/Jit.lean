@@ -189,6 +189,12 @@ def word (bytes : @& ByteArray) (index : @& Nat) : UInt64 :=
     byte 0 ||| byte 1 <<< 8 ||| byte 2 <<< 16 ||| byte 3 <<< 24 ||| byte 4 <<< 32 ||| byte 5 <<< 40 ||| byte 6 <<< 48 ||| byte 7 <<< 56
   else 0
 
+/-- `bytes` with a word of eight bytes after it, the least significant first, as `word` reads it: in C, which writes it at once, in
+place where it can, rather than a byte at a time. -/
+@[extern "bap_jit_push_word"]
+def pushWord (bytes : ByteArray) (value : UInt64) : ByteArray :=
+  (List.range 8).foldl (fun bytes index => bytes.push (value >>> (8 * index).toUInt64).toUInt8) bytes
+
 /-- Runs a program on a state and on a memory image given as its cells, and gives back where it went, its state, and the cells of the
 image after it (obligation 6). -/
 @[extern "bap_jit_run_memory_code"]
@@ -284,11 +290,11 @@ opaque addToChain (chain : @& Chain) (pc id : UInt64) (program : @& Program) (da
 /-- A run that goes on from range to range of a chain in native code (obligation 17): where it went, the slots and the changed cells of
 the last range, and then that range's number, the blocks entered after the first, whether the last range's variables are among those
 written rather than in its slots, the count and pairs of the variables written, and the count and triples of each range, its runs and
-its executions. -/
+its executions. `variables` has the number and the value of each variable that the state has, as `pushWord` puts them. -/
 @[extern "bap_jit_run_chain"]
 opaque runChain (program : @& Program) (state : @& Array UInt64) (memory : @& Memory) (filter : @& MemoryFilter) (quietSites : Bool)
     (observer : @& Option MemoryObserver) (codeObserver : @& Option CodeObserver) (chain : @& Chain) (firstId firstPc firstBudget : UInt64)
-    (variables values : @& Array UInt64) (variableCount : UInt64) : IO (Nat × Array UInt64 × Array UInt64 × Array UInt8 × Array UInt64)
+    (variables : @& ByteArray) (variableCount : UInt64) : IO (Nat × Array UInt64 × Array UInt64 × Array UInt8 × Array UInt64)
 
 /-- What isn't zero of a memory, as its cells by address (obligation 8). -/
 @[extern "bap_jit_memory_dump"]
