@@ -906,6 +906,23 @@ def testReadAcrossHoles : IO Unit := do
   assertEqual "A peek reads across the hole, with zeros in it" ((filled 4 2).toList ++ (filled 4 0).toList)
     (← Bap.Emu.peek emu 0x21ffc 8).toList
 
+/-- A write as a program may write goes across writable regions that are next to each other, and writes nothing if any of it can't
+be written, which says where. -/
+def testWriteAcrossRegions : IO Unit := do
+  let emu ← Bap.Emu.riscv64 (← LLVM.assemble "riscv64" "nop") 0x10000 0x10000
+  let filled (size : Nat) (value : UInt8) : ByteArray := ByteArray.mk (List.replicate size value).toArray
+  Bap.Emu.map emu ⟨0x20000, filled 0x1000 0, ⟨true, true, false⟩⟩
+  Bap.Emu.map emu ⟨0x21000, filled 0x1000 0, ⟨true, true, false⟩⟩
+  Bap.Emu.map emu ⟨0x22000, filled 0x1000 0, ⟨true, false, false⟩⟩
+  Bap.Emu.write emu 0x20ffc (filled 8 7)
+  assertEqual "A write goes across writable regions next to each other" (filled 8 7).toList (← Bap.Emu.read emu 0x20ffc 8).toList
+  let refused ← try
+      Bap.Emu.write emu 0x21ffc (filled 8 9)
+      pure ""
+    catch error => pure (toString error)
+  assertEqual "and one into what can't be written says where" "read-only Emu address 139264" refused
+  assertEqual "and writes nothing" (filled 8 0).toList (← Bap.Emu.read emu 0x21ffc 8).toList
+
 /-- Loops of x86-64 that multiply with 64 bits and add to a byte of a register stay in their ranges: the high half of a product is of halves
 of 32 bits, with nothing of 128 bits, and a write to part of a register is a concatenation, which has its lowering. -/
 def testRangeLoopsX86 : IO Unit := do

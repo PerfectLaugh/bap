@@ -1886,27 +1886,35 @@ private def writeByte (emu : Emu) (address : Nat) (value : UInt8) : IO Unit := d
         { current with data := current.data.set! (address - current.address) value }
       else current)
 
-/-- Writes bytes as a program may, within one writable region, and drops what was compiled of code there. What hears of changes
-hears of it. -/
+/-- The parts of `address`..`upper` that are in executable regions, first to last, where all of it is mapped and writable, which is
+an error otherwise, at the first address that isn't. -/
+private def writableCode (regions : List Region) (address upper : Nat) : IO (List (Nat × Nat)) :=
+  let rec walk : Nat → Nat → List (Nat × Nat) → IO (List (Nat × Nat))
+    | 0, position, code =>
+      if position < upper then throw <| IO.userError s!"unmapped Emu address {position}" else pure code
+    | fuel + 1, position, code => do
+      if position ≥ upper then return code
+      match lookupRegion regions position with
+      | none => throw <| IO.userError s!"unmapped Emu address {position}"
+      | some region =>
+        if !region.protection.writable then throw <| IO.userError s!"read-only Emu address {position}"
+        let finish := region.address + region.data.size
+        walk fuel finish (if region.protection.executable then (position, min finish upper - 1) :: code else code)
+  walk regions.length address []
+
+/-- Writes bytes as a program may, in writable regions, which it may go across, and drops what was compiled of code there. Nothing
+is written unless all of it can be. What hears of changes hears of it. -/
 def write (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
   let address := emu.config.untag address
   if data.size > 0 then
-    let mapped ← regionsTouching emu address 1
-    match lookupRegion mapped address with
-    | none => throw <| IO.userError s!"unmapped Emu address {address}"
-    | some region =>
-      if !region.protection.writable then
-        throw <| IO.userError s!"read-only Emu address {address}"
-      if address + data.size > region.address + region.data.size then
-        throw <| IO.userError s!"Emu write exceeds region at {address}"
-      let state ← emu.state.get
-      let ⟨_, memory⟩ ← cells emu state
-      let updated := Bap.Memory.writeRegion memory address data
-      emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
-      if region.protection.executable then
-        Primus.Lifted.discardRange emu.engine address (address + data.size - 1)
-      synchronizeWrite emu address data
-      for changed in ← emu.memoryChanged.get do changed address data.size false
+    let code ← writableCode (← regionsTouching emu address data.size) address (address + data.size)
+    let state ← emu.state.get
+    let ⟨_, memory⟩ ← cells emu state
+    let updated := Bap.Memory.writeRegion memory address data
+    emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
+    for (first, last) in code do Primus.Lifted.discardRange emu.engine first last
+    synchronizeWrite emu address data
+    for changed in ← emu.memoryChanged.get do changed address data.size false
 
 /-- Puts bytes at an address, whatever a program may do with them there, as a kernel does. `known` is that they are what they were somewhere else that
 what hears of it has been told of, as what a shared mapping has when its file changed. -/
@@ -2049,34 +2057,24 @@ private def synchronizeBatch (emu : Emu) (writes : List (Nat × ByteArray)) : IO
 /-- `write` of each, at once. -/
 def writeBatch (emu : Emu) (writes : List (Nat × ByteArray)) : IO Unit := do
   let mapped ← emu.regions.get
-  writes.forM fun (address, data) => do
-    match lookupRegion mapped address with
-    | none => throw <| IO.userError s!"unmapped Emu address {address}"
-    | some region =>
-      if !region.protection.writable then
-        throw <| IO.userError s!"read-only Emu address {address}"
-      if address + data.size > region.address + region.data.size then
-        throw <| IO.userError s!"Emu write exceeds region at {address}"
+  let code ← writes.flatMapM fun (address, data) => writableCode mapped address (address + data.size)
   let state ← emu.state.get
   let ⟨_, memory⟩ ← cells emu state
   let updated := writes.foldl (init := memory) fun memory (address, data) =>
     Bap.Memory.writeRegion memory address data
   emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
-  writes.forM fun (address, data) => do
-    match lookupRegion mapped address with
-    | some region =>
-      if region.protection.executable && data.size > 0 then
-        Primus.Lifted.discardRange emu.engine address (address + data.size - 1)
-    | none => pure ()
+  for (first, last) in code do Primus.Lifted.discardRange emu.engine first last
   synchronizeBatch emu writes
   for changed in ← emu.memoryChanged.get do
     for (address, data) in writes do changed address data.size false
+  -- Each region has the part of each write that is in it.
   let updatedRegions := writes.foldl (init := mapped) fun regions (address, data) =>
     regions.map fun current =>
-      if current.contains address then
-        let offset := address - current.address
-        { current with data := current.data.extract 0 offset ++ data ++
-          current.data.extract (offset + data.size) current.data.size }
+      let low := max address current.address
+      let high := min (address + data.size) (current.address + current.data.size)
+      if low < high then
+        { current with data := current.data.extract 0 (low - current.address) ++ data.extract (low - address) (high - address) ++
+          current.data.extract (high - current.address) current.data.size }
       else current
   setRegions emu updatedRegions
 
