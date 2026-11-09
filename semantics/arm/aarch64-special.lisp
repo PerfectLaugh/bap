@@ -103,11 +103,13 @@
   (logor (lshift (cast-unsigned 64 NF) 31) (lshift (cast-unsigned 64 ZF) 30)
          (lshift (cast-unsigned 64 CF) 29) (lshift (cast-unsigned 64 VF) 28)))
 
-;; the virtual counter, which only Primus has, as the one of Unicorn is
-;; of the host, advances by 1000 ticks of CNTFRQ_EL0, i.e., by 16 us, at
-;; each read, so that the programs, that wait for it, see it advance
+;; the virtual counter, which what serves virtual-counter sets before
+;; it is read: of a Linux machine, the clock of its kernel in ticks of
+;; CNTFRQ_EL0, which goes on by the instructions that run, so that a
+;; difference between two reads is the work done between them, and
+;; clock_gettime never disagrees with it
 (defun a64-counter ()
-  (set CNTVCT_EL0 (+ CNTVCT_EL0 1000))
+  (intrinsic 'virtual-counter)
   CNTVCT_EL0)
 
 ;; the cache maintenance by the virtual address, which has no effect, as

@@ -37,6 +37,15 @@ open Bap.Tasks (ScheduleOutcome)
 private def word (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
 private def bits (width value : Nat) : Bap.Value := .bits (BitVec.ofNat width value)
 
+/-- The clock of the machine at boot, which `CNTVCT_EL0` and the uptime count from. -/
+private def bootClock : Nat := 1700000000 * 1000000000
+
+/-- How long an instruction takes, in nanoseconds, as on a device of 1 GHz that runs one each cycle. -/
+private def instructionNanos : Nat := 1
+
+/-- A tick of `CNTFRQ_EL0`, 62.5 MHz, in nanoseconds, which `CNTVCT_EL0` counts. -/
+private def counterNanos : Nat := 16
+
 /-- A model that a machine has, with what it holds. -/
 structure AttachedModel where
   id : String
@@ -110,6 +119,9 @@ structure Machine where
   /-- Of each library that an import of was redirected, by where it is and its path: the slots of each name that it imports, as where
   each is from its base and what is added to what goes there, which reading its file once says. -/
   importSlots : IO.Ref (Std.HashMap (Nat × String) (Std.HashMap String (List (Nat × Nat))))
+  /-- How many of the instructions that the emulator has run (`Emu.retired`) the clock of the kernel has gone on by: see
+  `Machine.advanceClock`. -/
+  clockCounted : IO.Ref Nat
 
 /-- A model of a runtime that isn't in the kernel or the emulator: pthreads served by hooks, a debugger, a managed language.
 `id` is what a checkpoint knows it by, so that it stays the same, and `version` says what its bytes mean.
@@ -547,7 +559,6 @@ private def viewOf (machine : Machine) (emu : Emu) (group : Nat) : IO ProcessVie
     else pure ((← emu.parkedRegions.get).getD space [])
   let architecture := machine.architecture
   let stackStart := stackTop architecture - stackSize
-  let bootClock := (1700000000 : Nat) * 1000000000
   -- Its mappings, with those of its program that nothing was mapped over, and the paths of their files, found in one pass.
   let mappings := programMappings kernel group process |>.flatMap (fun segment =>
     process.mappings.foldl (fun pieces mapping => pieces.flatMap (·.without mapping.start (mapping.start + mapping.size))) [segment])
@@ -2593,6 +2604,27 @@ private def inThread (emu : Emu) (target : ThreadId) (action : IO α) : IO α :=
     if let some value := targetMonitor then setThreadReg emu target monitorVar value
     emu.turnUsed.set turn
 
+/-- The clock of the kernel goes on by the instructions that have run since it last did, at `instructionNanos` each, as a device's does
+by the work that it does: what a program times is that work, and not the host or a step for each time that it looks. Every clock is
+this one, of `clock_gettime`, the deadlines of waits, the timers and `CNTVCT_EL0`, so that none disagrees with another; and it is in
+the kernel, which a checkpoint has. It goes on as each system call starts, as the counter is read, at the end of each turn and before
+the machine is kept, so that what reads it has every instruction up to it counted (`Emu.retired`). -/
+private def Machine.advanceClock (machine : Machine) : IO Unit := do
+  let retired ← machine.emu.retired.get
+  let counted ← machine.clockCounted.get
+  if retired > counted then
+    machine.kernel.modify fun kernel => { kernel with clock := kernel.clock + (retired - counted) * instructionNanos }
+    machine.clockCounted.set retired
+
+/-- `CNTVCT_EL0` and `CNTPCT_EL0`, which `a64-counter` reads once `virtual-counter` has set it: the clock of the kernel in ticks of
+`CNTFRQ_EL0` since boot. -/
+private def serveCounter (machine : Machine) (emu : Emu) : IO Unit := do
+  let _ ← onIntrinsic emu "virtual-counter" fun current _ => do
+    machine.advanceClock
+    setReg current (word "CNTVCT_EL0") (bits 64 (((← machine.kernel.get).clock - bootClock) / counterNanos))
+    pure .proceed
+  pure ()
+
 /-- What makes an emulator a machine: its kernel behind its system calls. None of it is in a checkpoint. -/
 private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel) (watch : Option (Nat → List Nat → IO Unit))
     (handler : Option SyscallHandler) (target : Nat) (models : List RuntimeModel) : IO Machine := do
@@ -2604,7 +2636,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   let ptrace ← Ptrace.make architecture signals
   let kernelRef ← IO.mkRef kernel
   let timers ← Timers.make architecture kernelRef signals
-  let machine : Machine := { architecture, emu, kernel := kernelRef, models := ← IO.mkRef [], target, handled := handler.isSome, signals, ptrace, timers, notifier := ← Notify.make, hostMounts := ← IO.mkRef [], hostSeen := ← IO.mkRef {}, rings := ← IO.mkRef {}, releases := ← IO.mkRef 0, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {} }
+  let machine : Machine := { architecture, emu, kernel := kernelRef, models := ← IO.mkRef [], target, handled := handler.isSome, signals, ptrace, timers, notifier := ← Notify.make, hostMounts := ← IO.mkRef [], hostSeen := ← IO.mkRef {}, rings := ← IO.mkRef {}, releases := ← IO.mkRef 0, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {}, clockCounted := ← IO.mkRef (← emu.retired.get) }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
@@ -2655,6 +2687,10 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
     pure (Identity.members (← kernelRef.get) present pgid)
   signals.interrupted.set (timers.interrupted)
   signals.taken.set timers.taken
+  -- The clock goes on first, so that the timers and the deadlines go by what ran.
+  emu.betweenTurns.modify (· ++ [machine.advanceClock])
+  emu.syscallStarts.modify (· ++ [fun (_ : Nat) (_ : List Nat) => machine.advanceClock])
+  if architecture == .aarch64 then serveCounter machine emu
   emu.betweenTurns.modify (· ++ [do let _ ← resumingCurrent (do timers.tick emu; pure true)])
   emu.betweenTurns.modify (· ++ [settleRings machine emu])
   let timeState : ModelState := { save := timers.save, load := timers.load }
@@ -2827,6 +2863,7 @@ private def Machine.modelBytes (machine : Machine) : IO (List (AttachedModel × 
 private def Machine.keep (machine : Machine) : IO Machine.Kept := do
   if (← machine.emu.serving.get) || machine.emu.engine.deferMemorySync then
     throw <| IO.userError "a machine can't be saved in the middle of an instruction, or by a worker of a parallel round: stop the thread, and save it once the run returns"
+  machine.advanceClock
   pure {
     emulator := ← snapshot machine.emu
     run := ← runState machine.emu
@@ -2847,6 +2884,8 @@ private def Machine.restoreKept (machine : Machine) (kept : Machine.Kept) : IO U
   -- Which breakpoints there are is up to who is debugging it now.
   setRunState machine.emu { kept.run with breakpoints := [] }
   machine.kernel.set kept.kernel
+  -- The clock is what was kept, from the instructions that have run now, which are more.
+  machine.clockCounted.set (← machine.emu.retired.get)
   for model in ← machine.models.get do
     if let some (_, _, bytes) := kept.models.find? (·.1 == model.id) then model.state.load bytes
 
@@ -3133,6 +3172,8 @@ def Machine.checkpoint (machine : Machine) : IO ByteArray := do
   let (number, bits, big, flags) := machine.architecture.elf
   -- First, as it refuses to save in the middle of an instruction, when the rest wouldn't be of one moment either.
   let emulator ← checkpointBytes machine.emu
+  -- The clock has what ran since it last went on, which only the emulator counts, and a checkpoint has none of it.
+  machine.advanceClock
   let out := Wire.putNat checkpointMagic checkpointFormat
   let out := Wire.putText out bapRevision
   let out := Wire.putNat out (← semanticsDigest)

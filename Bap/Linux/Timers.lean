@@ -150,12 +150,18 @@ def tick (timers : Timers) (emu : Emu) : IO Unit := do
   let _ ← timers.fire emu
   let _ ← timers.wakeDue emu
 
-/-- Nothing can run: time goes on to what happens next, a deadline or a timer, if anything does. Whether anything changed. -/
+/-- How late a thread that nothing but time woke runs, in nanoseconds: Linux's `timer_slack_ns` of a thread, 50 µs, by which a sleep may
+end late, which is more than a wake from an interrupt takes. What it ran before it slept, as what it timed from, is then before the time
+that it asked for, as on a device. -/
+def wakeLatency : Nat := 50000
+
+/-- Nothing can run: time goes on to what happens next, a deadline or a timer, if anything does, and `wakeLatency` after it. Whether
+anything changed. -/
 def idle (timers : Timers) (emu : Emu) : IO Bool := do
   let deadlines := (← emu.taskTable.get).futexes.filterMap (·.deadline)
   let expiries := (← timers.state.get).timers.toList.filterMap (·.2.expiry)
   let some next := (deadlines ++ expiries).min? | return false
-  if next > (← timers.now) then timers.kernel.modify fun kernel => { kernel with clock := next }
+  if next > (← timers.now) then timers.kernel.modify fun kernel => { kernel with clock := next + wakeLatency }
   let fired ← timers.fire emu
   let woke ← timers.wakeDue emu
   pure (fired || woke)

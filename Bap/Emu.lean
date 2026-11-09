@@ -329,6 +329,10 @@ structure Emu where
   breakpointsMuted : IO.Ref Bool
   /-- How many instructions `runProcesses` has run, as its fuel counts them. -/
   executed : IO.Ref Nat
+  /-- How many instructions have run, counted as each step ends, before a system call or an intrinsic that ends it is served, so
+  that what serves it knows how many ran up to and with it, which `executed` says only once a run is over. A step that fails and is
+  taken back isn't counted. Workers of a parallel round count here too. -/
+  retired : IO.Ref Nat
   threadsRef : IO.Ref (List ThreadContext)
   currentThreadRef : IO.Ref ThreadId
   nextThreadRef : IO.Ref ThreadId
@@ -525,6 +529,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     breakpointsRef := ← IO.mkRef []
     breakpointsMuted := ← IO.mkRef false
     executed := ← IO.mkRef 0
+    retired := ← IO.mkRef 0
     threadsRef := ← IO.mkRef [⟨1, initial, entry, false, none, none⟩]
     currentThreadRef := ← IO.mkRef 1
     nextThreadRef := ← IO.mkRef 2
@@ -2524,12 +2529,13 @@ private def fetch (emu : Emu) (address : Nat) : IO ByteArray := do
     recordFault emu .fetch address
     throw error
 
-/-- Whether a program calls an intrinsic of floating point, to this depth of branches. -/
+/-- Whether a program calls an intrinsic of floating point, or `virtual-counter`, whose hook sets what the rest of the instruction reads,
+to this depth of branches: those run as served programs, which go on after an intrinsic. -/
 private def namesFloat : Nat → List Bil.Stmt → Bool
   | 0, _ => false
   | fuel + 1, program => program.any fun stmt =>
     match stmt with
-    | .special name => (name.splitOn "ieee754").length > 1
+    | .special name => (name.splitOn "ieee754").length > 1 || name == "virtual-counter"
     | .ifElse _ yes no => namesFloat fuel yes || namesFloat fuel no
     | .while _ body => namesFloat fuel body
     | _ => false
@@ -3069,6 +3075,9 @@ private def gateAtomic (emu : Emu) (address : Nat) : IO Unit := do
     (fun address => do
       let result ← executeBlock emu address
       emu.nextPc.set result.1
+      -- A step that could chain ran as many after its first as it says.
+      let chained ← if (← emu.lastBudget.get) > 0 then emu.engine.chained.get else pure 0
+      emu.retired.modify (· + 1 + chained)
       pure result)
     (dispatchSpecial emu)
     (fun before => do

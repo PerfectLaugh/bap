@@ -1585,10 +1585,15 @@ private def testStatusRegisters : IO Unit := do
   -- mrs x0, fpcr and msr fpsr, x0
   assertReg "mrs reads FPCR" "X0" 0x400000 (← execute (← decodeA [0x00, 0x44, 0x3b, 0xd5]) [word32 "FPCR" 0x400000])
   assertReg32 "msr writes FPSR" "FPSR" 0x8 (← execute (← decodeA [0x20, 0x44, 0x1b, 0xd5]) [word64 "X0" 0x8])
-  -- mrs x0, cntvct_el0 advances the counter
-  let counted ← execute (← decodeA [0x40, 0xe0, 0x3b, 0xd5]) [word64 "CNTVCT_EL0" 5]
-  assertReg "the counter advances" "CNTVCT_EL0" 1005 counted
-  assertReg "mrs reads the counter" "X0" 1005 counted
+  -- mrs x0, cntvct_el0 asks for the counter, which what serves `virtual-counter` sets, and then reads it: with nothing to serve it, the
+  -- instruction ends there, and X0 is as it was.
+  let counter ← decodeA [0x40, 0xe0, 0x3b, 0xd5]
+  let (counted, effect) ← executeEffect counter [word64 "CNTVCT_EL0" 5, word64 "X0" 7]
+  assertTrue s!"the counter is asked for: {repr effect}" (effect matches .special "virtual-counter")
+  assertReg "nothing reads an unserved counter" "X0" 7 counted
+  assertTrue "the counter is read after it is asked for" (counter.bil.any fun stmt => match stmt with
+    | .move var _ => var.name.str == "X0"
+    | _ => false)
   -- riscv: csrr a0, fcsr; csrr a0, vxrm
   let riscv ← Target.LLVMLift.riscvEnvironment
   let riscv32 ← Target.LLVMLift.riscv32Environment

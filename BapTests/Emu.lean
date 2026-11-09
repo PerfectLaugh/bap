@@ -2019,6 +2019,28 @@ def testLinuxIllegal (triple : String) : IO Unit := do
     assertEqual s!"Linux {name} ends of SIGILL when it is {mode}"
       (Bap.Tasks.ScheduleOutcome.finished (Bap.Tasks.signaledStatus 4), "") (← run [mode])
 
+/-- What a program sees of the clocks of AArch64, as `testsuite/src/libc-clock.c` has them: the time between two readings is the work
+done between them, of `CNTVCT_EL0` and of `clock_gettime`, which agree, and which the deadlines of the kernel go by. A run in pieces,
+each from a checkpoint of the last, says the same, as the clock is in what a checkpoint keeps and doesn't go back. -/
+def testLinuxClock (triple : String) : IO Unit := do
+  let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-clock")
+  let expected ← IO.FS.readFile "testsuite/data/libc-clock.out"
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual s!"Linux {triple} the clocks say what a device does" (Bap.Tasks.ScheduleOutcome.finished 0, expected)
+    (outcome, String.fromUTF8! (← written.get))
+  let pieces ← IO.mkRef ByteArray.empty
+  let rec go : Nat → Bap.Linux.Machine → IO Bap.Tasks.ScheduleOutcome
+    | 0, _ => throw <| IO.userError "more pieces than a run should have"
+    | fuel + 1, machine => do
+      match ← machine.run (fuel := 700000) fun data => pieces.modify (· ++ data) with
+      | .outOfFuel => go fuel (← Bap.Linux.Machine.ofCheckpoint (← machine.checkpoint))
+      | other => pure other
+  let outcome ← go 100 (← Bap.Linux.start kernel "/test" ["/test"])
+  assertEqual s!"Linux {triple} the clocks say the same in pieces of checkpoints" (Bap.Tasks.ScheduleOutcome.finished 0, expected)
+    (outcome, String.fromUTF8! (← pieces.get))
+
 /-- A run with all of that stopped and saved goes on as it would have: what is pending, the frames of handlers and what a process does
 with a signal are in a checkpoint, in every piece. -/
 def testLinuxSignalCheckpoints (triple : String) (step : Nat) : IO Unit := do

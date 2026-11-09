@@ -1,0 +1,6 @@
+cntvct: proportional
+clocks: agree
+clock: proportional
+sleep: on time
+monotonic
+done

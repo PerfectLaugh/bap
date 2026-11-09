@@ -454,6 +454,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxSignals "aarch64",
     Bap.Tests.Emu.testUndefinedWords,
     Bap.Tests.Emu.testLinuxIllegal "aarch64",
+    Bap.Tests.Emu.testLinuxClock "aarch64",
     Bap.Tests.Emu.testLinuxIllegal "x86_64",
     Bap.Tests.Emu.testLinuxIllegal "i686",
     Bap.Tests.Emu.testLinuxIllegal "arm",
