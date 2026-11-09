@@ -1,3 +1,4 @@
+import Bap.Analysis.DynamicTaint
 import Bap.Emu.Tasks
 import Bap.Emu.Checkpoint
 import Bap.Linux.Calls
@@ -41,6 +42,8 @@ structure AttachedModel where
   id : String
   version : Nat
   state : ModelState
+  /-- The tracker of taint that the model holds, if it is that model: see `RuntimeModel.tracker?`. -/
+  tracker? : IO (Option Bap.Analysis.DynamicTaint.Tracker) := pure none
 
 /-- What is in the kernel, in the emulator and in the models at once. -/
 structure Machine.Kept where
@@ -118,6 +121,10 @@ structure RuntimeModel where
   id : String
   version : Nat := 1
   attach : Machine → IO ModelState
+  /-- The tracker of taint that the model holds once it is attached, for the model of taint. `ModelState` is only `save` and `load`,
+  and a machine that goes on from a checkpoint has attached the model and loaded what was kept into what it holds before a caller
+  sees it, so this is the only way to that tracker, rather than a second one that attaching again would make. -/
+  tracker? : IO (Option Bap.Analysis.DynamicTaint.Tracker) := pure none
 
 /-- Attaches a model, as `start` and `Machine.ofCheckpoint` do those that they are given, or to a machine that runs already: what it
 holds is in a checkpoint from then on, which then needs the model to go on from. Its id can't be one that the machine has. -/
@@ -125,7 +132,7 @@ def Machine.attachModel (machine : Machine) (model : RuntimeModel) : IO ModelSta
   if (← machine.models.get).any (·.id == model.id) then
     throw <| IO.userError s!"two models of a runtime are called {model.id}"
   let state ← model.attach machine
-  machine.models.modify (· ++ [{ id := model.id, version := model.version, state }])
+  machine.models.modify (· ++ [{ id := model.id, version := model.version, state, tracker? := model.tracker? }])
   pure state
 
 private unsafe def sameObjectImpl {α : Type} (left right : α) : Bool := ptrAddrUnsafe left == ptrAddrUnsafe right

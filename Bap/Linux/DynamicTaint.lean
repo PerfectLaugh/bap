@@ -195,6 +195,7 @@ def taintModel (cell : IO.Ref (Option Tracker)) (config : Config := {}) : Runtim
     let (tracker, opened) ← attachTracker machine config
     cell.set (some tracker)
     pure (taintState tracker opened)
+  tracker? := cell.get
 
 /-- Starts following where the bytes of a machine come from, from here on: what a system call returns or leaves in memory, other than what says nothing about the
 world such as `mmap` and `futex`, what JNI gives, what `Machine.write` writes, and what the host gives `Machine.call`. What a program sends to a file or a pipe has what it came
@@ -203,6 +204,15 @@ def Machine.track (machine : Machine) (config : Config := {}) : IO Tracker := do
   let cell ← IO.mkRef none
   let _ ← machine.attachModel (taintModel cell config)
   let some tracker ← cell.get | throw <| IO.userError "the tracker wasn't attached"
+  pure tracker
+
+/-- The tracker that a machine has, as `ofCheckpoint` or `start` attached it with `taintModel`, or `Machine.track` did: what a
+checkpoint kept is in it. It attaches nothing, as attaching again would put a second set of hooks on and give a new tracker that has
+nothing of the checkpoint and that no later checkpoint saves. -/
+def Machine.tracker (machine : Machine) : IO Tracker := do
+  let some model := (← machine.models.get).find? (·.id == taintModelId)
+    | throw <| IO.userError "the machine has no tracker"
+  let some tracker ← model.tracker? | throw <| IO.userError "the tracker wasn't attached"
   pure tracker
 
 /-! ### What a machine did -/

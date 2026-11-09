@@ -2463,6 +2463,16 @@ def testVerdict (triple : String) : IO Unit := do
   let restored ← Bap.Linux.Machine.ofCheckpoint verdict.data (models := models)
   let some again ← trackers.get | throw <| IO.userError "no tracker after the checkpoint"
   let some journal ← journals.get | throw <| IO.userError "no journal after the checkpoint"
+  -- The machine's tracker is the one that the checkpoint went into, which `ofCheckpoint` left in the cell: what is written through one
+  -- is read through the other. It has what was kept, and it is still a model, which a later checkpoint saves.
+  let same ← restored.tracker
+  let insn ← again.insn.get
+  same.insn.set (insn + 12345)
+  assertEqual s!"Verdict {triple} the machine's tracker is the one the checkpoint went into" (insn + 12345) (← again.insn.get)
+  same.insn.set insn
+  assertTrue s!"Verdict {triple} the tracker has what the checkpoint kept" ((← same.nodes.get).size > 0)
+  assertEqual s!"Verdict {triple} the tracker is a model once" 1
+    ((← restored.models.get).filter (·.id == Bap.Linux.taintModelId)).length
   let report ← Bap.Analysis.Verdict.explain again restored verdict
   let untouched := report.unresolved.filterMap fun unresolved => match unresolved.reason with
     | .untouched restoredFrom => if unresolved.criterion == 1 then some restoredFrom else none
