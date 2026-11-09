@@ -13,8 +13,8 @@ registers of floating point and the flags are, is kept here and comes back all t
 
 The offsets are those of the `ucontext_t` of musl, which are those of the kernel, as the compiler says them for each target, and what a
 program sees of all this agrees with qemu on `testsuite/src/libc-signals.c`. A signal that stops a process, as `SIGSTOP`, is ignored, as
-no process is ever stopped here. There are no timers, so nothing raises `SIGALRM`, and a fault of memory is the only exception that
-raises anything: not `SIGFPE` or `SIGILL`. -/
+no process is ever stopped here. There are no timers, so nothing raises `SIGALRM`. Of the exceptions, a fault of memory raises `SIGSEGV`
+and, on AArch64, an instruction that is UNDEFINED at EL0 raises `SIGILL` (`illNumber`); nothing raises `SIGFPE`. -/
 
 namespace Bap.Linux
 
@@ -161,6 +161,8 @@ private structure SignalNumbers where
   kill : Nat
   stop : Nat
   segv : Nat
+  /-- `SIGILL`, which is 4 on every architecture that Linux has. -/
+  ill : Nat := 4
   chld : Nat
   /-- What does nothing by default, of which those that stop are here too, as nothing is stopped. -/
   ignored : List Nat
@@ -477,6 +479,9 @@ structure Signals where
 namespace Signals
 
 private def numbers (signals : Signals) : SignalNumbers := numbersOf signals.architecture
+
+/-- `SIGILL` of the architecture. -/
+def illNumber (signals : Signals) : Nat := signals.numbers.ill
 
 private def threadOf (signals : Signals) (tid : Nat) : IO ThreadSignals := do
   pure ((← signals.table.get).threads.getD tid {})
@@ -1093,6 +1098,13 @@ def faulted (signals : Signals) (emu : Emu) (fault : MemoryFault) : IO Bool := d
     else fail "SIGSEGV is ignored"
   -- SIGSEGV doesn't stop by default.
   | .terminate | .stop => fail "nothing handles SIGSEGV"
+
+/-- The thread that runs takes what it has now, as if what it was running had been a system call that goes on at `resume`: an exception
+that an instruction raised, as `SIGILL`, has its handler see `resume` as where it was, which is the instruction, and go back there. If
+nothing is delivered, as when a tracer stops it, it goes on at `resume` too, which runs the instruction again, as on Linux. -/
+def deliverAt (signals : Signals) (emu : Emu) (resume : Nat) : IO Unit := do
+  emu.redirect.set (some resume)
+  deliver signals emu true
 
 /-- The parent of a process that is over hears of it, as Linux's `do_notify_parent` has it: it is sent the exit signal of the process,
 which is SIGCHLD unless `clone` asked for another, or for none, and SIGCHLD if the parent has run a program since it made it. -/

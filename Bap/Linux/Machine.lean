@@ -2024,6 +2024,21 @@ private def serveCpu (emu : Emu) (kernel : IO.Ref Kernel) (wide : Nat) : IO Unit
     pure .proceed
   pure ()
 
+/-- `ILL_ILLOPC`, the `si_code` of an opcode that is illegal, which arm64's `do_el0_undef` raises `SIGILL` with. -/
+private def illIllopc : Nat := 1
+
+/-- An instruction that is UNDEFINED at EL0 raises `SIGILL` at it, as arm64's `do_el0_undef` has `force_signal_inject` do: if the thread
+blocks it or its process ignores it, the process ends of it. A handler sees the instruction as where the thread was, and goes on after it
+only if it says so. This is the one place that raises it, and nothing outside the machine serves `undefined-instruction`. -/
+private def serveIllegalInstructions (machine : Machine) (emu : Emu) : IO Unit := do
+  let _ ← onIntrinsic emu "undefined-instruction" fun current pc => do
+    let tid ← thread current
+    let group := (← currentTask current).group
+    machine.signals.force current tid group ⟨machine.signals.illNumber, illIllopc, .fault pc⟩
+    machine.signals.deliverAt current pc
+    pure .proceed
+  pure ()
+
 /-- Registers hold zeros at the start, as the kernel leaves them, but for the state of the floating point units. -/
 private def resetRegisters (emu : Emu) : Architecture → IO Unit
   | .aarch64 => do
@@ -2689,6 +2704,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   let _ ← serveTaskCalls emu
   let _ ← serveRest machine
   if architecture == .x86_64 || architecture == .i686 then serveCpu emu machine.kernel architecture.bits
+  if architecture == .aarch64 then serveIllegalInstructions machine emu
   -- What was advised for a child of `fork`: what it leaves out isn't mapped there, and what it wipes is zeros, but a child that has its
   -- parent's memory, of `vfork`, has it as it is. This comes once the child is a process of the kernel.
   emu.processHooks.modify ((fun _ child => do

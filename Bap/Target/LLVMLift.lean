@@ -1240,6 +1240,18 @@ def decodeAArch64With (globals : Primus.Semantics.Environment) (base address : N
     bil := bil
   }
 
+/-- Of the words that LLVM doesn't decode, one that the architecture has UNDEFINED, or CONSTRAINED UNPREDICTABLE with UNDEFINED as what
+the processors that Linux runs on do, so that a program that runs it has `SIGILL` rather than nothing to run:
+- a load of a pair, `LDP`, `LDPSW` or `LDNP`, of integers, to the same register twice;
+- `CASP` and its orderings, of a pair whose first register is odd, of either of its pairs.
+More are to be added here as they are met. -/
+def aarch64Undefined (word : Nat) : Bool :=
+  let field (low size : Nat) : Nat := (word >>> low) % 2 ^ size
+  -- opc:101:V=0:0:mode:L=1, of 32 bits, LDPSW or 64 bits, with every mode: no-allocate, after, at and before.
+  let loadPair := field 27 3 == 0b101 && field 25 2 == 0 && field 22 1 == 1 && field 30 2 != 0b11
+  let casp := word &&& 0xbfa07c00 == 0x08207c00
+  (loadPair && field 0 5 == field 10 5) || (casp && (field 16 1 == 1 || field 0 1 == 1))
+
 def decodeAArch64 (base address : Nat) (data : ByteArray) : IO Disasm.Insn := do
   decodeAArch64With (← aarch64Environment) base address data
 

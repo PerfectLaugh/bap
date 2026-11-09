@@ -68,12 +68,24 @@ def ignoreTopByteProgram : List Bil.Stmt → List Bil.Stmt
   | stmt :: rest => ignoreTopByteStmt stmt :: ignoreTopByteProgram rest
 end
 
-/-- The decoder of a program that runs on Linux, where the top byte of an address is ignored. -/
+/-- The instruction at an address as a program that runs on Linux has it: the top byte of an address is ignored, and a word that LLVM
+doesn't decode but that is UNDEFINED (`LLVMLift.aarch64Undefined`) is an instruction of 4 bytes that raises the exception of undefined
+instructions, which is `SIGILL` there, rather than one that can't be run. `decodeAArch64With`, which the proofs are of, is as it was. -/
+def decodeForEmulator (globals : Primus.Semantics.Environment) (base address : Nat) (data : ByteArray) :
+    IO (Except String Disasm.Insn) := do
+  match ← decodeWith globals base address data with
+  | .ok insn => pure (.ok { insn with bil := ignoreTopByteProgram insn.bil })
+  | .error error =>
+    let offset := address - base
+    if address < base || data.size < offset + 4 then return .error error
+    let word := (List.range 4).foldl (fun word index => word + data[offset + index]!.toNat * 256 ^ index) 0
+    if !LLVMLift.aarch64Undefined word then return .error error
+    let hex := String.mk (Nat.toDigits 16 word)
+    pure (.ok { address, size := 4, asm := s!".inst 0x{hex}", flow := .normal, bil := [.special "undefined-instruction"] })
+
+/-- The decoder of a program that runs on Linux: `decodeForEmulator`. -/
 def emulatorDisassembler (base : Nat := 0) : IO Disasm.Disassembler := do
   let globals ← LLVMLift.aarch64Environment
-  pure {
-    name := "aarch64-llvm-primus-tbi"
-    decode := fun address data => do
-      pure ((← decodeWith globals base address data).map fun insn => { insn with bil := ignoreTopByteProgram insn.bil }) }
+  pure { name := "aarch64-llvm-primus-tbi", decode := decodeForEmulator globals base }
 
 end Bap.Target.AArch64

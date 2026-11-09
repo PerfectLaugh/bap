@@ -1,0 +1,8 @@
+dc isw: fault
+ic iallu: fault
+at s1e1r: fault
+mrs S3_0_c15_c0_0: fault
+msr SCTLR_EL1: fault
+dc civac: ok
+ldp x9,x9: fault
+done

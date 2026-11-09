@@ -1966,6 +1966,41 @@ def testLinuxSignals (triple : String) : IO Unit := do
   assertEqual s!"Linux {triple} signals say what they should" none different
   assertEqual s!"Linux {triple} signals end as they should" (Bap.Tasks.ScheduleOutcome.finished 0, expected.length) (outcome, actual.length)
 
+/-- What only EL1 may run, and encodings that are UNDEFINED, raise `SIGILL` at EL0, as `testsuite/src/libc-illegal.c` has them, whose
+output is what a device says, while `dc civac` runs. A handler is told `ILL_ILLOPC` at the instruction, and a process that doesn't handle
+it, or blocks it, ends of it. Outside of Linux, nothing serves the intrinsic, and the instruction doesn't run as if it did nothing. -/
+def testLinuxIllegal (triple : String) : IO Unit := do
+  let words : List Nat := [0xa9402549, 0x48217ca3, 0xa9c02549, 0x28c02d4b, 0x69402549, 0x48607c83]
+  assertEqual "AArch64 UNDEFINED words that LLVM doesn't decode" [true, true, true, true, true, true]
+    (words.map Bap.Target.LLVMLift.aarch64Undefined)
+  -- ldp x9, x10; casp x2, x3, x4, x5; stp x9, x9; and a data-processing word with the bits of a pair.
+  let others : List Nat := [0xa9402949, 0x48227c84, 0xa9002549, 0xab402549]
+  assertEqual "AArch64 words that aren't UNDEFINED" [false, false, false, false] (others.map Bap.Target.LLVMLift.aarch64Undefined)
+  let decoder ← Bap.Target.AArch64.emulatorDisassembler 0
+  for word in [0xa9402549, 0x48217ca3, 0xd508751f, 0xd5181000] do
+    let bytes := ByteArray.mk ((List.range 4).map fun index => UInt8.ofNat (word >>> (8 * index) % 256)).toArray
+    match ← decoder.decode 0 bytes with
+    | .ok insn =>
+      assertTrue s!"AArch64 {word} is undefined at EL0: {repr insn.bil}" (insn.size == 4 && insn.bil matches [.special "undefined-instruction"])
+    | .error error => throw <| IO.userError s!"AArch64 {word} doesn't decode: {error}"
+  let alone ← Bap.Emu.aarch64 (← LLVM.assemble "aarch64" "ic iallu") 0 0
+  let served ← (Bap.Emu.step alone).toBaseIO
+  assertTrue "Outside Linux an undefined instruction isn't served" (served matches .error _ || (← Bap.Emu.pc alone) == 0)
+  let name := s!"{triple}-linux-musl-libc-illegal"
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{name}"
+  let run (args : List String) : IO (Bap.Tasks.ScheduleOutcome × String) := do
+    let written ← IO.mkRef ByteArray.empty
+    let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ("/test" :: args)
+    let outcome ← machine.run fun data => written.modify (· ++ data)
+    pure (outcome, String.fromUTF8! (← written.get))
+  let expected := String.fromUTF8! (← IO.FS.readBinFile "testsuite/data/libc-illegal.out")
+  assertEqual s!"Linux {name} is what a device does" (Bap.Tasks.ScheduleOutcome.finished 0, expected) (← run [])
+  assertEqual s!"Linux {name} tells a handler ILL_ILLOPC at the instruction"
+    (Bap.Tasks.ScheduleOutcome.finished 0, "signal 4 code 1 at 1 pc 1\n") (← run ["info"])
+  for mode in ["default", "blocked"] do
+    assertEqual s!"Linux {name} ends of SIGILL when it is {mode}"
+      (Bap.Tasks.ScheduleOutcome.finished (Bap.Tasks.signaledStatus 4), "") (← run [mode])
+
 /-- A run with all of that stopped and saved goes on as it would have: what is pending, the frames of handlers and what a process does
 with a signal are in a checkpoint, in every piece. -/
 def testLinuxSignalCheckpoints (triple : String) (step : Nat) : IO Unit := do

@@ -452,6 +452,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testTaintSources,
     Bap.Tests.Emu.testLinuxSignals "x86_64",
     Bap.Tests.Emu.testLinuxSignals "aarch64",
+    Bap.Tests.Emu.testLinuxIllegal "aarch64",
     Bap.Tests.Emu.testLinuxSignals "riscv64",
     Bap.Tests.Emu.testLinuxSignals "riscv32",
     Bap.Tests.Emu.testLinuxSignals "arm",

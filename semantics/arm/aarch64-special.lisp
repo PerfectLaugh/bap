@@ -212,10 +212,13 @@
     0x04 (set PAN (extract 0 0 imm))
     (a64-undefined)))
 
-;; The cache maintenance, by op1:CRn:CRm:op2: DC ZVA zeroes its block,
-;; and DC CVAU, CIVAC, CVAC, CVAP, CVADP, IVAC, IC IVAU, IALLU, and
-;; IALLUIS have no effect, as the caches are not modeled, and the code,
-;; that the program writes, runs anew, when it is written.
+;; The cache maintenance, by op1:CRn:CRm:op2, that EL0 may run, as
+;; Linux sets SCTLR_EL1.UCI and DZE: DC ZVA zeroes its block, and DC
+;; CVAU, CIVAC, CVAC, CVAP, CVADP and IC IVAU have no effect, as the
+;; caches are not modeled, and the code, that the program writes, runs
+;; anew, when it is written. DC IVAC, which is of EL1, has no effect
+;; too, as it always had here. The rest, e.g., IC IALLU and IALLUIS, DC
+;; ISW and AT, are of EL1, and undefined at EL0.
 (defun SYSxt (op1 crn crm op2 rt)
   (case (logor (lshift op1 11) (lshift crn 7) (lshift crm 3) op2)
     0x1ba1 (a64-dc-zva rt)
@@ -226,6 +229,4 @@
     0x1be9 (empty)
     0x03b1 (empty)
     0x1ba9 (empty)
-    0x03a8 (empty)
-    0x0388 (empty)
     (a64-undefined)))
