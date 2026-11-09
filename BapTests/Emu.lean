@@ -2041,6 +2041,33 @@ def testLinuxClock (triple : String) : IO Unit := do
   assertEqual s!"Linux {triple} the clocks say the same in pieces of checkpoints" (Bap.Tasks.ScheduleOutcome.finished 0, expected)
     (outcome, String.fromUTF8! (← pieces.get))
 
+/-- A sleep ends only by time, which goes on only once nothing can run: a thread that is parked in its sleep isn't one to run, even once
+something has resumed it, as `Library`, `Verdict` and `Contract` resume a thread that a hook stopped. Resumed while it sleeps and the main
+thread works, as `testsuite/src/libc-sleepwake.c` has it, it neither runs on from its `nanosleep` as if that had returned, nor keeps time
+from going on once the main thread waits for it, which left the sleep never ending. -/
+def testLinuxSleepWake (triple : String) : IO Unit := do
+  let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-sleepwake")
+  let expected ← IO.FS.readFile "testsuite/data/libc-sleepwake.out"
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let print (data : ByteArray) : IO Unit := written.modify (· ++ data)
+  -- In short pieces until the thread sleeps, while the main thread still works.
+  let rec untilAsleep : Nat → IO (Option Nat)
+    | 0 => pure none
+    | fuel + 1 => do
+      let table ← machine.emu.taskTable.get
+      if let some waiter := table.futexes.find? (·.space == Bap.Linux.sleepSpace) then return some waiter.thread
+      match ← machine.run (fuel := 1000) print with
+      | .outOfFuel => untilAsleep fuel
+      | _ => pure none
+  let some sleeper ← untilAsleep 10000 | throw <| IO.userError s!"Linux {triple} the thread never slept"
+  assertTrue s!"Linux {triple} the main thread works while the thread sleeps"
+    (!(← machine.emu.taskTable.get).blocked (← Bap.Emu.thread machine.emu))
+  Bap.Emu.resumeThread machine.emu sleeper
+  let outcome ← machine.run print
+  assertEqual s!"Linux {triple} a sleeping thread that was resumed still sleeps its time"
+    (Bap.Tasks.ScheduleOutcome.finished 0, expected) (outcome, String.fromUTF8! (← written.get))
+
 /-- A run with all of that stopped and saved goes on as it would have: what is pending, the frames of handlers and what a process does
 with a signal are in a checkpoint, in every piece. -/
 def testLinuxSignalCheckpoints (triple : String) (step : Nat) : IO Unit := do
