@@ -1,5 +1,6 @@
 cntvct: proportional
 clocks: agree
+clocks: agree over a wait
 clock: proportional
 sleep: on time
 monotonic

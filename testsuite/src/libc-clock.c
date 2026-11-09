@@ -3,6 +3,8 @@
 //   cntvct: proportional: ten times the work is at least five times the ticks of CNTVCT_EL0, which a counter that steps by the same at
 //     each read, or that a read doesn't see move, isn't.
 //   clocks: agree: CNTVCT_EL0, by CNTFRQ_EL0, and clock_gettime say about the same of the same work, within a factor of two.
+//   clocks: agree over a wait: and of a sleep, which another thread or nothing runs in, as a clock that only counted the work of the
+//     thread, or that went on when the machine looked at its threads, wouldn't.
 //   clock: proportional: as of CNTVCT_EL0, of clock_gettime.
 //   sleep: on time: clock_nanosleep to a time of clock_gettime wakes at it, not before and not a second after, which it doesn't if the
 //     deadlines of the kernel go by another clock.
@@ -51,6 +53,16 @@ int main(void) {
 
   uint64_t counted = longTicks * 1000000000u / frequency();
   say(counted <= 2 * longNanos && longNanos <= 2 * counted ? "clocks: agree\n" : "clocks: disagree\n");
+
+  struct timespec pause = {0, 1000000};
+  start = counter();
+  startNanos = nanos();
+  nanosleep(&pause, 0);
+  uint64_t waitedTicks = counter() - start;
+  uint64_t waitedNanos = nanos() - startNanos;
+  uint64_t waitedCounted = waitedTicks * 1000000000u / frequency();
+  say(waitedCounted <= 2 * waitedNanos && waitedNanos <= 2 * waitedCounted ? "clocks: agree over a wait\n"
+                                                                          : "clocks: disagree over a wait\n");
 
   startNanos = nanos();
   work(20000);
