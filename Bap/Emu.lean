@@ -3157,7 +3157,10 @@ def measure (emu : Emu) (steps : Nat) : IO Measurement := do
 private def switchNextThread (emu : Emu) : IO Bool := do
   saveCurrentThread emu
   let current ← thread emu
-  match pickNext (← emu.threadsRef.get) current with
+  -- As `scheduleLoop` has it: a thread blocked where it waits, or over, isn't one to run, whatever its stopped flag
+  -- says, or it would run from after the call that blocked it as if the call had returned.
+  let table ← emu.taskTable.get
+  match pickNext ((← emu.threadsRef.get).filter fun context => runnableIn table context.id) current with
   | some id =>
     switchThread emu id
     pure true

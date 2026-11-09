@@ -511,6 +511,12 @@ def minRunnable (threads : List ThreadContext) (p : Nat → Bool) : Option Nat :
   threads.foldl (init := none) fun best context =>
     if !context.stopped && p context.id then lowerId best context.id else best
 
+/-- Whether a thread is a thread to run: not one blocked where it waits, nor one that is over. A blocked thread that a
+switch picks would run from after the call that blocked it, as if the call had returned. A thread with no entry of the
+task table is runnable, unlike for `blockedOrOver`, as a bare `Emu` that has threads and no tasks still switches. -/
+def runnableIn (table : Tasks.TaskTable) (id : Nat) : Bool :=
+  !(table.blocked id) && !(table.find? id).any (fun task => task.status.isSome)
+
 /-- Round robin: the runnable thread after `current` in id order, wrapping around. -/
 def pickNext (threads : List ThreadContext) (current : Nat) : Option Nat :=
   match minRunnable threads (fun id => current < id) with

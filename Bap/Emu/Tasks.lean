@@ -825,7 +825,9 @@ private def scheduleLoop (emu : Emu) (quantum : Nat) : Nat → Nat → IO Schedu
     let first := match table.tasks.head? with
       | some task => task.status
       | none => none
-    let next := pickNext (← emu.threadsRef.get) current
+    -- A thread blocked in a wait, or over, isn't one to run, whatever its stopped flag says: offering it as next would
+    -- skip idle, which is all that moves time on, so a sleep would never end.
+    let next := pickNext ((← emu.threadsRef.get).filter fun context => runnableIn table context.id) current
     let halted ← stopped emu
     let blocked ← blockedOrOver emu current
     -- With a clock, time goes on to what happens next, which may let something run.
