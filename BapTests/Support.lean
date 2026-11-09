@@ -1,4 +1,4 @@
-import Bap
+import Bap.Runtime
 
 namespace Bap.Tests
 

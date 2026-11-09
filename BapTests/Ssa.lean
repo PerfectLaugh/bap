@@ -1,3 +1,4 @@
+import Bap.Proofs.IR
 import BapTests.Support
 
 namespace Bap.Tests.Ssa

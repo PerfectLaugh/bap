@@ -1,3 +1,4 @@
+import Bap.Proofs.Theory
 import BapTests.Support
 
 namespace Bap.Tests.Theory

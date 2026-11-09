@@ -28,7 +28,6 @@ import BapTests.SymbolicMemory
 import BapTests.Emu
 import BapTests.Jni
 import BapTests.Parity
-import BapTests.Theorems
 
 def main : IO Unit := do
   -- What runs another process, first, while this one is small.
