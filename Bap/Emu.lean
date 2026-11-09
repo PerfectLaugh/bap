@@ -1129,6 +1129,16 @@ private def nextHookId (emu : Emu) : IO HookId := do
   emu.nextHook.set (id + 1)
   pure id
 
+/-- The hooks of the page of an address, in the order they came. -/
+private def hooksNear (emu : Emu) (address : Nat) : IO (List CodeHook) := do
+  let page := address / 4096
+  match (← emu.hooksByPage.get)[page]? with
+  | some hooks => pure hooks
+  | none =>
+    let hooks := hooksOnPage (·.first) (·.last) (← emu.hooks.get) page
+    emu.hooksByPage.modify (·.insert page hooks)
+    pure hooks
+
 /-- Calls `action emu address` before each instruction of the range. A thread that has stopped in it, where the hooks that were there
 fired, has this one fire when it goes on, and not those, unless `late` is false, as for a breakpoint, which stops it when it comes back. -/
 def onCode (emu : Emu) (range : Nat × Nat) (action : Emu → Nat → IO Unit) (late : Bool := true) : IO HookId := do
@@ -1138,7 +1148,8 @@ def onCode (emu : Emu) (range : Nat × Nat) (action : Emu → Nat → IO Unit) (
   let before ← emu.hooks.get
   emu.hooks.modify (· ++ [⟨id, range.1, range.2, fun context => action (withContext emu context)⟩])
   -- What is optimized from now on leaves its slots at the sites that hooks read the state at.
-  emu.engine.codeHooked.set fun pc => do pure ((← emu.hooks.get).any fun hook => hook.first ≤ pc && pc ≤ hook.last)
+  -- It is asked at each checkpoint of each block that is optimized, so it looks at the hooks of the page of `pc` rather than at all of them.
+  emu.engine.codeHooked.set fun pc => do pure ((← hooksNear emu pc).any fun hook => hook.first ≤ pc && pc ≤ hook.last)
   emu.hooksByPage.set {}
   emu.hookChanges.modify (· + 1)
   let inside (address : Nat) : Bool := range.1 ≤ address && address ≤ range.2
@@ -1677,16 +1688,6 @@ private def recordAccess (emu : Emu) (write : Bool) (address size value : Nat) :
       else
         let (accesses, accessRetained) := keepAccess options.accessCapacity access state.accesses state.accessRetained
         { state with accesses, accessRetained, accessCount := state.accessCount + 1 }
-
-/-- The hooks of the page of an address, in the order they came. -/
-private def hooksNear (emu : Emu) (address : Nat) : IO (List CodeHook) := do
-  let page := address / 4096
-  match (← emu.hooksByPage.get)[page]? with
-  | some hooks => pure hooks
-  | none =>
-    let hooks := hooksOnPage (·.first) (·.last) (← emu.hooks.get) page
-    emu.hooksByPage.modify (·.insert page hooks)
-    pure hooks
 
 private def notifyCode (emu : Emu) (address : Nat) : IO Unit := do
   -- Of a run that was taken back, the hooks of a site that fired as it ran don't fire again as it is run again, as long as it comes to
