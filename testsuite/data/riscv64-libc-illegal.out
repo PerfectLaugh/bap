@@ -1,0 +1,3 @@
+unimp: fault
+csrr mcycle: fault
+done

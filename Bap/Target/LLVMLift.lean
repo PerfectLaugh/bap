@@ -1252,6 +1252,17 @@ def aarch64Undefined (word : Nat) : Bool :=
   let casp := word &&& 0xbfa07c00 == 0x08207c00
   (loadPair && field 0 5 == field 10 5) || (casp && (field 16 1 == 1 || field 0 1 == 1))
 
+/-- Of the words that LLVM doesn't decode, one that MIPS before release 6 reserves, whose exception of a reserved instruction Linux raises
+`SIGILL` for: SPECIAL with the function 0x0e or 0x28, and the primary opcode 0x3b, which release 6 has as PCREL. More are to be added here
+as they are met. -/
+def mipsUndefined (variant : MipsVariant) (word : Nat) : Bool :=
+  let opcode := word >>> 26 % 64
+  !variant.release6 && ((opcode == 0 && (word % 64 == 0x0e || word % 64 == 0x28)) || opcode == 0x3b)
+
+/-- Of the words that LLVM doesn't decode, one of the primary opcode 0, which PowerPC has no instruction of, and which Linux raises
+`SIGILL` for as an illegal instruction. -/
+def powerpcUndefined (word : Nat) : Bool := word >>> 26 % 64 == 0
+
 def decodeAArch64 (base address : Nat) (data : ByteArray) : IO Disasm.Insn := do
   decodeAArch64With (← aarch64Environment) base address data
 

@@ -1966,10 +1966,10 @@ def testLinuxSignals (triple : String) : IO Unit := do
   assertEqual s!"Linux {triple} signals say what they should" none different
   assertEqual s!"Linux {triple} signals end as they should" (Bap.Tasks.ScheduleOutcome.finished 0, expected.length) (outcome, actual.length)
 
-/-- What only EL1 may run, and encodings that are UNDEFINED, raise `SIGILL` at EL0, as `testsuite/src/libc-illegal.c` has them, whose
-output is what a device says, while `dc civac` runs. A handler is told `ILL_ILLOPC` at the instruction, and a process that doesn't handle
-it, or blocks it, ends of it. Outside of Linux, nothing serves the intrinsic, and the instruction doesn't run as if it did nothing. -/
-def testLinuxIllegal (triple : String) : IO Unit := do
+/-- The words that LLVM doesn't decode, of which the decoders of the emulator have the ones that are undefined as instructions that raise
+the exception of undefined instructions, and not others. Outside of Linux, nothing serves that, and the instruction doesn't run as if it
+did nothing. -/
+def testUndefinedWords : IO Unit := do
   let words : List Nat := [0xa9402549, 0x48217ca3, 0xa9c02549, 0x28c02d4b, 0x69402549, 0x48607c83]
   assertEqual "AArch64 UNDEFINED words that LLVM doesn't decode" [true, true, true, true, true, true]
     (words.map Bap.Target.LLVMLift.aarch64Undefined)
@@ -1983,9 +1983,22 @@ def testLinuxIllegal (triple : String) : IO Unit := do
     | .ok insn =>
       assertTrue s!"AArch64 {word} is undefined at EL0: {repr insn.bil}" (insn.size == 4 && insn.bil matches [.special "undefined-instruction"])
     | .error error => throw <| IO.userError s!"AArch64 {word} doesn't decode: {error}"
+  -- SPECIAL 0x0e and 0x28 and the primary opcode 0x3b, which release 6 has as PCREL; and `addu`.
+  let release2 : Bap.Target.LLVMLift.MipsVariant := { bits := 32, release6 := false }
+  assertEqual "MIPS reserved words" [true, true, true, false]
+    ([0x0000000e, 0x00000028, 0xec000000, 0x00000021].map (Bap.Target.LLVMLift.mipsUndefined release2))
+  assertEqual "MIPS release 6 has PCREL" false (Bap.Target.LLVMLift.mipsUndefined { release2 with release6 := true } 0xec000000)
+  -- The primary opcode 0, and `li r3, 0`.
+  assertEqual "PowerPC words of no instruction" [true, false] ([0, 0x38600000].map Bap.Target.LLVMLift.powerpcUndefined)
   let alone ← Bap.Emu.aarch64 (← LLVM.assemble "aarch64" "ic iallu") 0 0
   let served ← (Bap.Emu.step alone).toBaseIO
   assertTrue "Outside Linux an undefined instruction isn't served" (served matches .error _ || (← Bap.Emu.pc alone) == 0)
+
+/-- What each architecture has as its undefined instruction raises `SIGILL` at it, as `testsuite/src/libc-illegal.c` has them, whose output
+is what a device says on AArch64, of what only EL1 may run, and what qemu says elsewhere. A handler is told what Linux tells it, which on
+ARM is `ILL_ILLOPC` where qemu says `ILL_ILLOPN`, at the instruction or, in a delay slot of MIPS, at the branch; and a process that doesn't
+handle it, or blocks it, ends of it. -/
+def testLinuxIllegal (triple : String) : IO Unit := do
   let name := s!"{triple}-linux-musl-libc-illegal"
   let program ← IO.FS.readBinFile s!"testsuite/bin/{name}"
   let run (args : List String) : IO (Bap.Tasks.ScheduleOutcome × String) := do
@@ -1993,10 +2006,15 @@ def testLinuxIllegal (triple : String) : IO Unit := do
     let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ("/test" :: args)
     let outcome ← machine.run fun data => written.modify (· ++ data)
     pure (outcome, String.fromUTF8! (← written.get))
-  let expected := String.fromUTF8! (← IO.FS.readBinFile "testsuite/data/libc-illegal.out")
-  assertEqual s!"Linux {name} is what a device does" (Bap.Tasks.ScheduleOutcome.finished 0, expected) (← run [])
-  assertEqual s!"Linux {name} tells a handler ILL_ILLOPC at the instruction"
-    (Bap.Tasks.ScheduleOutcome.finished 0, "signal 4 code 1 at 1 pc 1\n") (← run ["info"])
+  let fixture := if triple == "aarch64" then "testsuite/data/libc-illegal.out" else s!"testsuite/data/{triple}-libc-illegal.out"
+  let expected := String.fromUTF8! (← IO.FS.readBinFile fixture)
+  assertEqual s!"Linux {name} is what {if triple == "aarch64" then "a device" else "qemu"} does"
+    (Bap.Tasks.ScheduleOutcome.finished 0, expected) (← run [])
+  let info := if triple == "x86_64" || triple == "i686" then "code 2 at 1"
+    else if triple.startsWith "mips" then "code 128 at 0"
+    else "code 1 at 1"
+  assertEqual s!"Linux {name} tells a handler what Linux does"
+    (Bap.Tasks.ScheduleOutcome.finished 0, s!"signal 4 {info} pc 1\n") (← run ["info"])
   for mode in ["default", "blocked"] do
     assertEqual s!"Linux {name} ends of SIGILL when it is {mode}"
       (Bap.Tasks.ScheduleOutcome.finished (Bap.Tasks.signaledStatus 4), "") (← run [mode])

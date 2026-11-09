@@ -3504,6 +3504,25 @@ private def decodeAt (decode : Nat → Nat → ByteArray → IO Disasm.Insn) (ba
   catch error =>
     pure (.error (toString error))
 
+/-- A decoder that has a word of 4 bytes that it can't decode, but that `undefined` says the architecture has no instruction of, as an
+instruction that raises the exception of undefined instructions, which the semantics call `undefined-instruction`, rather than one that
+can't be run. What the decoder is, and what is proved of it, is as it was. -/
+def withUndefined (endian : Endian) (undefined : Nat → Bool) (disassembler : Disasm.Disassembler) (base : Nat) : Disasm.Disassembler :=
+  { disassembler with
+    decode := fun address data => do
+      match ← disassembler.decode address data with
+      | .ok insn => pure (.ok insn)
+      | .error error =>
+        let offset := address - base
+        if address < base || data.size < offset + 4 then return .error error
+        let bytes := (List.range 4).map fun index => data[offset + index]!.toNat
+        let word := (match endian with | .big => bytes | .little => bytes.reverse).foldl (fun word byte => word * 256 + byte) 0
+        if !undefined word then return .error error
+        let hex := String.mk (Nat.toDigits 16 word)
+        let insn : Disasm.Insn :=
+          { address := address, size := 4, asm := ".inst 0x" ++ hex, flow := .normal, bil := [.special "undefined-instruction"] }
+        pure (.ok insn) }
+
 /-- What is at `address` compiled now, rather than as it runs (`Config.compileAtLoad`). -/
 def compileAhead (emu : Emu) (address : Nat) : IO Unit := do
   let thumb := isThumb (← emu.state.get)
@@ -3554,7 +3573,8 @@ def riscv32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config :=
 
 /-- An emulator of a variant of PowerPC, as `riscv64`. -/
 def powerpc (code : ByteArray) (base entry : Nat) (variant : Target.LLVMLift.PowerPCVariant) (adjust : Config → Config := id) : IO Emu := do
-  let decoders (base : Nat) : IO Disasm.Disassembler := Target.PowerPC.disassembler base variant
+  let decoders (base : Nat) : IO Disasm.Disassembler := do
+    pure (withUndefined variant.endian Target.LLVMLift.powerpcUndefined (← Target.PowerPC.disassembler base variant) base)
   let disassembler ← decoders base
   let config : Config := {
     disassembler
@@ -3623,11 +3643,11 @@ def aarch64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config :=
 
 private def mipsOf (variant : Target.LLVMLift.MipsVariant) (code : ByteArray) (base entry : Nat) (adjust : Config → Config) : IO Emu := do
   let environment ← Target.LLVMLift.mipsEnvironmentOf variant
-  let decoders (base : Nat) : IO Disasm.Disassembler := pure {
+  let decoders (base : Nat) : IO Disasm.Disassembler := pure <| withUndefined variant.endian (Target.LLVMLift.mipsUndefined variant) {
     name := if variant.bits == 64 then "mips64-llvm-primus" else "mips-llvm-primus"
     decode := decodeAt (Target.LLVMLift.decodeMIPSOf variant environment) base
     hasDelaySlot := Target.LLVMLift.mipsHasDelaySlot
-    annulsSlot := Target.LLVMLift.mipsAnnulsSlot }
+    annulsSlot := Target.LLVMLift.mipsAnnulsSlot } base
   let disassembler ← decoders base
   let config : Config := {
     disassembler

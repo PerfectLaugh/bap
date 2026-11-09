@@ -400,6 +400,13 @@
    of the code at the top of the address space"
   (logor (logand (+ (get-program-counter) 4) (lnot 0x0fffffff)) target))
 
+;; CP0, which a program can't use: Linux has the exception of a
+;; coprocessor that isn't usable raise SIGILL for it, in do_cpu
+(defun MFC0 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun MTC0 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMFC0 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMTC0 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+
 (defun RDHWR (rt hwr sel)
   "reads the hardware register 29, UserLocal, e.g., the thread pointer
    of Linux, the other hardware registers are not modeled"

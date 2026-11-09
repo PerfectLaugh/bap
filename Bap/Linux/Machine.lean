@@ -2024,18 +2024,33 @@ private def serveCpu (emu : Emu) (kernel : IO.Ref Kernel) (wide : Nat) : IO Unit
     pure .proceed
   pure ()
 
-/-- `ILL_ILLOPC`, the `si_code` of an opcode that is illegal, which arm64's `do_el0_undef` raises `SIGILL` with. -/
-private def illIllopc : Nat := 1
+/-- What the semantics of an architecture call an instruction that is undefined where a program runs, and the `si_code` and the rest of
+the `siginfo_t` that Linux raises `SIGILL` with for it at an address:
+- AArch64, `do_el0_undef`; ARM, `do_undefinstr`; RISC-V, `do_trap_insn_illegal`; PowerPC, `program_check_exception`: `ILL_ILLOPC`, at
+  the instruction (qemu says `ILL_ILLOPN` on ARM, which Linux doesn't);
+- x86, `exc_invalid_op` of `ud2` and `ud1`: `ILL_ILLOPN`, at the instruction;
+- MIPS, `do_ri` and `do_cpu`: `force_sig`, which is `SI_KERNEL` with no address. -/
+private def illegalOf (architecture : Architecture) : String × (Nat → Nat × SignalDetail) :=
+  match architecture with
+  | .x86_64 | .i686 => ("__ud2", fun pc => (2, .fault pc))
+  | .mips .. => ("undefined-instruction", fun _ => (0x80, .sent 0 0 0))
+  | _ => ("undefined-instruction", fun pc => (1, .fault pc))
 
-/-- An instruction that is UNDEFINED at EL0 raises `SIGILL` at it, as arm64's `do_el0_undef` has `force_signal_inject` do: if the thread
-blocks it or its process ignores it, the process ends of it. A handler sees the instruction as where the thread was, and goes on after it
-only if it says so. This is the one place that raises it, and nothing outside the machine serves `undefined-instruction`. -/
+/-- An instruction that is undefined where a program runs raises `SIGILL` at it, forced as Linux forces it: if the thread blocks it or its
+process ignores it, the process ends of it. A handler sees the instruction as where the thread was, or, of one in the delay slot of a
+branch, the branch, as MIPS says in EPC with BD, and goes on after it only if it says so. This is the one place that raises it, and
+nothing outside the machine serves what the semantics call the instruction. -/
 private def serveIllegalInstructions (machine : Machine) (emu : Emu) : IO Unit := do
-  let _ ← onIntrinsic emu "undefined-instruction" fun current pc => do
+  let (name, info) := illegalOf machine.architecture
+  let _ ← onIntrinsic emu name fun current pc => do
     let tid ← thread current
     let group := (← currentTask current).group
-    machine.signals.force current tid group ⟨machine.signals.illNumber, illIllopc, .fault pc⟩
-    machine.signals.deliverAt current pc
+    let (code, detail) := info pc
+    machine.signals.force current tid group ⟨machine.signals.illNumber, code, detail⟩
+    let resume := match ← current.pendingRef.get with
+      | some pending => pending.branch
+      | none => pc
+    machine.signals.deliverAt current resume
     pure .proceed
   pure ()
 
@@ -2704,7 +2719,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   let _ ← serveTaskCalls emu
   let _ ← serveRest machine
   if architecture == .x86_64 || architecture == .i686 then serveCpu emu machine.kernel architecture.bits
-  if architecture == .aarch64 then serveIllegalInstructions machine emu
+  serveIllegalInstructions machine emu
   -- What was advised for a child of `fork`: what it leaves out isn't mapped there, and what it wipes is zeros, but a child that has its
   -- parent's memory, of `vfork`, has it as it is. This comes once the child is a process of the kernel.
   emu.processHooks.modify ((fun _ child => do

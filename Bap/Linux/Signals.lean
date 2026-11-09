@@ -14,7 +14,7 @@ registers of floating point and the flags are, is kept here and comes back all t
 The offsets are those of the `ucontext_t` of musl, which are those of the kernel, as the compiler says them for each target, and what a
 program sees of all this agrees with qemu on `testsuite/src/libc-signals.c`. A signal that stops a process, as `SIGSTOP`, is ignored, as
 no process is ever stopped here. There are no timers, so nothing raises `SIGALRM`. Of the exceptions, a fault of memory raises `SIGSEGV`
-and, on AArch64, an instruction that is UNDEFINED at EL0 raises `SIGILL` (`illNumber`); nothing raises `SIGFPE`. -/
+and an instruction that is undefined where a program runs raises `SIGILL` (`illNumber`); nothing raises `SIGFPE`. -/
 
 namespace Bap.Linux
 

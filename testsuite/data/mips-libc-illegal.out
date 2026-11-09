@@ -1,0 +1,5 @@
+special 0x0e: fault
+special 0x28: fault
+opcode 0x3b: fault
+mfc0 $2, $12: fault
+done
