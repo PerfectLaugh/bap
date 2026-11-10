@@ -313,6 +313,9 @@ structure Emu where
   hooks : IO.Ref (List CodeHook)
   /-- The hooks of each page that code has run on, which is what an instruction goes by. All that changes `hooks` empties it. -/
   hooksByPage : IO.Ref (Std.HashMap Nat (List CodeHook))
+  /-- The hooks that cover each address that code has run at, so that an instruction doesn't test the others of its page again. All
+  that changes `hooks` empties it. -/
+  hooksExact : IO.Ref (Std.HashMap Nat (List CodeHook))
   readHooks : IO.Ref (List ReadHook)
   writeHooks : IO.Ref (List WriteHook)
   syscallHooks : IO.Ref (List SyscallHook)
@@ -517,6 +520,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     stopped := ← IO.mkRef false
     hooks := ← IO.mkRef []
     hooksByPage := ← IO.mkRef {}
+    hooksExact := ← IO.mkRef {}
     readHooks := ← IO.mkRef []
     writeHooks := ← IO.mkRef []
     syscallHooks := ← IO.mkRef []
@@ -1134,15 +1138,19 @@ private def nextHookId (emu : Emu) : IO HookId := do
   emu.nextHook.set (id + 1)
   pure id
 
-/-- The hooks of the page of an address, in the order they came. -/
+/-- The hooks that cover an address, in the order they came, found among those of its page once and then kept for it. -/
 private def hooksNear (emu : Emu) (address : Nat) : IO (List CodeHook) := do
+  if let some here := (← emu.hooksExact.get)[address]? then return here
   let page := address / 4096
-  match (← emu.hooksByPage.get)[page]? with
-  | some hooks => pure hooks
-  | none =>
-    let hooks := hooksOnPage (·.first) (·.last) (← emu.hooks.get) page
-    emu.hooksByPage.modify (·.insert page hooks)
-    pure hooks
+  let hooks ← match (← emu.hooksByPage.get)[page]? with
+    | some hooks => pure hooks
+    | none =>
+      let hooks := hooksOnPage (·.first) (·.last) (← emu.hooks.get) page
+      emu.hooksByPage.modify (·.insert page hooks)
+      pure hooks
+  let here := hooks.filter fun hook => hook.first ≤ address && address ≤ hook.last
+  emu.hooksExact.modify (·.insert address here)
+  pure here
 
 /-- Calls `action emu address` before each instruction of the range. A thread that has stopped in it, where the hooks that were there
 fired, has this one fire when it goes on, and not those, unless `late` is false, as for a breakpoint, which stops it when it comes back. -/
@@ -1156,6 +1164,7 @@ def onCode (emu : Emu) (range : Nat × Nat) (action : Emu → Nat → IO Unit) (
   -- It is asked at each checkpoint of each block that is optimized, so it looks at the hooks of the page of `pc` rather than at all of them.
   emu.engine.codeHooked.set fun pc => do pure ((← hooksNear emu pc).any fun hook => hook.first ≤ pc && pc ≤ hook.last)
   emu.hooksByPage.set {}
+  emu.hooksExact.set {}
   emu.hookChanges.modify (· + 1)
   let inside (address : Nat) : Bool := range.1 ≤ address && address ≤ range.2
   if !late then
@@ -1218,6 +1227,7 @@ def onIntrinsic (emu : Emu) (name : String) (action : Emu → Nat → IO Intrins
 def removeHook (emu : Emu) (id : HookId) : IO Unit := do
   emu.hooks.modify fun hooks => hooks.filter fun hook => hook.id != id
   emu.hooksByPage.set {}
+  emu.hooksExact.set {}
   emu.hookChanges.modify (· + 1)
   forgetMemoryFilter emu
   emu.readHooks.modify fun hooks => hooks.filter fun hook => hook.id != id
@@ -1231,6 +1241,7 @@ def removeHook (emu : Emu) (id : HookId) : IO Unit := do
 def clearHooks (emu : Emu) : IO Unit := do
   emu.hooks.set []
   emu.hooksByPage.set {}
+  emu.hooksExact.set {}
   emu.hookChanges.modify (· + 1)
   forgetMemoryFilter emu
   emu.readHooks.set []

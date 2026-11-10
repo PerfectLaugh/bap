@@ -834,8 +834,9 @@ private def scheduleLoop (emu : Emu) (quantum : Nat) : Nat → Nat → IO Schedu
     if halted && blocked && next.isNone then
       if let some idle := ← emu.idle.get then
         if ← idle then return ← scheduleLoop emu quantum rounds fuel
-    let (table, timed) := table.timedOut
-    if halted && blocked && next.isNone && !timed.isEmpty then
+    -- Only a round that can run nothing looks for a timeout: a round that runs, which is almost every one, doesn't walk the waiters.
+    let (table, timed) := if halted && blocked && next.isNone then table.timedOut else (table, [])
+    if !timed.isEmpty then
       emu.taskTable.set table
       for id in timed do
         setSyscallResult emu id (.error (etimedout emu))

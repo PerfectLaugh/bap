@@ -701,12 +701,17 @@ private def complete (ptrace : Ptrace) (emu : Emu) (tid : Nat) (request : WaitRe
 
 /-- Gives each wait that waits what it waits for, of those that have it now, and lets it go on. One that a signal took is gone. -/
 private def settleWaits (ptrace : Ptrace) (emu : Emu) : IO Unit := do
+  -- The scheduler asks this of every round, and most rounds have nothing to settle: one read of the table says so, and
+  -- the rest of it (the task table, the waiters) is only read when something is waiting to be let go.
+  let state ← ptrace.table.get
+  if state.reaping.isEmpty && !(← ptrace.changed.get) then return
   -- A process that is over that no one waits for is left, for a thread of its parent if there is one, and goes.
-  if let some running := (← emu.taskTable.get).find? (← thread emu) then
-    if (← ptrace.table.get).reaping.contains running.group then
-      let tasks := (← emu.taskTable.get).tasks.filter (·.status.isNone)
-      if let some other := (tasks.find? (·.group == running.parent)).orElse fun _ => tasks.head? then switchThread emu other.tid
-  reapUnwaited ptrace emu
+  if !state.reaping.isEmpty then
+    if let some running := (← emu.taskTable.get).find? (← thread emu) then
+      if state.reaping.contains running.group then
+        let tasks := (← emu.taskTable.get).tasks.filter (·.status.isNone)
+        if let some other := (tasks.find? (·.group == running.parent)).orElse fun _ => tasks.head? then switchThread emu other.tid
+    reapUnwaited ptrace emu
   if !(← ptrace.changed.get) then return
   ptrace.changed.set false
   let blocked := ((← emu.taskTable.get).futexes.filter (·.space == waitSpace)).map (·.thread)
