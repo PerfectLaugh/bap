@@ -1,0 +1,4 @@
+regset: 0, of 48 words, pc in the program 1, sp at the stack 1
+getregs: 0, pc in the program 1, sp at the stack 1
+setregs of what getregs gave: 0
+exited 0

@@ -170,16 +170,42 @@ def opened (poller : Poller) (emu : Emu) (fd flags : Nat) : IO (Option SyscallAc
   pure none
 
 /-- Of a process that isn't in the foreground of its controlling terminal: it is sent `signal`, and the call is made again once it goes
-on, or gives `EIO` if the signal doesn't come to it. None if it is in the foreground, or this isn't its controlling terminal. -/
-private def background (poller : Poller) (emu : Emu) (number : Nat) (terminal : Terminal) (signal : Nat) : IO (Option SyscallAction) := do
+on. If the signal doesn't come to it, as it ignores or blocks it, a read (`reading`, of SIGTTIN) gives `EIO`, and anything else goes
+ahead, as Linux's `__tty_check_change` has it. None if it is in the foreground, or this isn't its controlling terminal. -/
+private def background (poller : Poller) (emu : Emu) (number : Nat) (terminal : Terminal) (signal : Nat) (reading : Bool) :
+    IO (Option SyscallAction) := do
   let group := (← currentTask emu).group
   let kernel ← poller.kernel.get
   if (kernel.process group).terminal != some number || terminal.foreground == kernel.pgidOf group || terminal.foreground == 0 then
     return none
-  if !(← poller.signals.comesTo (← thread emu) group signal) then return some (.returnValue (2 ^ 64 - 5))
+  if !(← poller.signals.comesTo (← thread emu) group signal) then return if reading then some (.returnValue (2 ^ 64 - 5)) else none
   for member in Identity.members kernel (← poller.live) (kernel.pgidOf group) do
     poller.signals.send emu none member ⟨signal, 0x80, .sent 0 0 0⟩
   pure (some (← Ptrace.again emu))
+
+/-- What hangs up as the last of a master is closed, as Linux's `__tty_hangup` has it: the leader of the session of its terminal hears
+SIGHUP and SIGCONT, and the terminal is of no session and its processes of no terminal from then on. Of each terminal that still has a
+session but not a master that anything holds, which is after a `close` and as a process ends. -/
+def hangUp (poller : Poller) (emu : Emu) : IO Unit := do
+  let kernel ← poller.kernel.get
+  let live ← poller.live
+  let masters := kernel.inodes.fold (init := ([] : List (Nat × Terminal))) fun found number inode =>
+    match inode.content with
+    | .ptyMaster terminal => if terminal.session != 0 then (number, terminal) :: found else found
+    | _ => found
+  for (number, terminal) in masters do
+    if kernel.inodeHeld live number then continue
+    let leader := terminal.session
+    let slave := kernel.paths.getD s!"/dev/pts/{terminal.index}" 0
+    poller.kernel.modify fun kernel =>
+      let kernel := kernel.setContent number (.ptyMaster { terminal with session := 0, foreground := 0 })
+      live.foldl (init := kernel) fun kernel group =>
+        if (kernel.process group).terminal == some slave then kernel.setProcess group { kernel.process group with terminal := none }
+        else kernel
+    if live.contains leader then
+      let cont := if poller.architecture matches .mips .. then 25 else 18
+      for signal in [1, cont] do
+        poller.signals.send emu none leader ⟨signal, 0x80, .sent 0 0 0⟩
 
 /-- `read`, `write` and the ioctls of a pseudo-terminal, if the descriptor is of one. -/
 def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Option SyscallAction) := do
@@ -232,7 +258,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       poller.wake emu
       succeed bytes.size
     | .read, false =>
-      if let some action ← background poller emu number terminal ttin then return some action
+      if let some action ← background poller emu number terminal ttin true then return some action
       let tid ← thread emu
       let least := terminal.cc.getD 6 1
       let span := terminal.cc.getD 5 0 * 100000000
@@ -256,7 +282,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     | .write, false =>
       if !masterHeld () then return ← fail 5
       if terminal.lflag &&& 0x100 != 0 then
-        if let some action ← background poller emu number terminal ttou then return some action
+        if let some action ← background poller emu number terminal ttou false then return some action
       let bytes ← read emu (arg 1) (arg 2)
       save { terminal with output := terminal.output ++ post terminal bytes }
       poller.wake emu
@@ -279,6 +305,8 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         write emu (arg 2) termios
         succeed
       | 0x5402 | 0x5403 | 0x5404 =>
+        -- What sets a terminal, of the background, as of `TOSTOP` or not: SIGTTOU, as Linux's `tty_check_change` has it.
+        if let some action ← background poller emu number terminal ttou false then return some action
         let bytes ← read emu (arg 2) 36
         let word (at_ : Nat) : Nat := numberOf big (bytes.extract at_ (at_ + 4))
         save { terminal with iflag := word 0, oflag := word 4, cflag := word 8, lflag := word 12
@@ -301,6 +329,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       | 0x540F => if terminal.session == 0 then fail 25 else int terminal.foreground
       | 0x5429 => if terminal.session == 0 then fail 25 else int terminal.session
       | 0x5410 =>
+        if let some action ← background poller emu number terminal ttou false then return some action
         let pgid ← readInt
         if (kernel.process group).terminal != some slaveNumber then return ← fail 25
         if !live.any fun other => kernel.pgidOf other == pgid && kernel.sidOf other == terminal.session then return ← fail 1

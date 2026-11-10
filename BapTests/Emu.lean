@@ -2225,6 +2225,90 @@ def testStepBackMount : IO Unit := do
   assertEqual "What it went back over opened the file of the host as it did" (Bap.Tasks.ScheduleOutcome.finished 0, "open ok\n")
     (outcome, String.fromUTF8! (← written.get))
 
+/-- What the disassemblers have of two branches whose flags of LLVM say less than they do: RV32's `c.jal`, a call with a target that
+it has only as a call, and PowerPC's `bdnzlr`, a return when the count isn't yet 0, which goes on past itself when it is. -/
+def testBranchFlows : IO Unit := do
+  let riscv ← Bap.Target.RISCV32.disassembler 0
+  -- `c.jal 16`.
+  match ← riscv.decode 0 (ByteArray.mk #[0x01, 0x28]) with
+  | .ok insn => assertEqual s!"c.jal of RV32 calls where it says: {insn.asm}" (some 16) insn.target
+  | .error error => throw <| IO.userError s!"c.jal: {error}"
+  let variant : Bap.Target.LLVMLift.PowerPCVariant := { bits := 64, endian := .little }
+  let powerpc ← Bap.Target.PowerPC.disassembler 0 variant
+  match ← powerpc.decode 0 (← LLVM.assemble variant.triple "bdnzlr") with
+  | .ok insn =>
+    assertTrue s!"bdnzlr of PowerPC goes on past itself: {insn.asm} {repr insn.flow}" (insn.successors.contains 4)
+  | .error error => throw <| IO.userError s!"bdnzlr: {error}"
+
+/-- What the taint of a machine says of memory that a call fills that isn't of the world, as `testsuite/src/libc-taintmove.c` has it: a
+constant of the program that `execve` ran comes from nothing, rather than from `execve`, and bytes of a file that `mremap` moves come
+from that file still. Each says where it is and then works, and the run stops there. -/
+def testLinuxTaintMoves (triple : String) : IO Unit := do
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-taintmove"
+  let file := ByteArray.mk ((Array.range 16).map fun index => (0x40 + index).toUInt8)
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" program).addFile "/data" file
+  let at_ (mode : String) : IO (Bap.Linux.Machine × Bap.Analysis.DynamicTaint.Tracker × Nat) := do
+    let written ← IO.mkRef ByteArray.empty
+    let machine ← Bap.Linux.start kernel "/test" ["/test", mode]
+    let tracker ← machine.track
+    let _ ← machine.run (fuel := 3000000) fun data => written.modify (· ++ data)
+    let text := String.fromUTF8! (← written.get)
+    let address := ((text.splitOn " ").headD "").trimAscii.toString.foldl
+      (fun value digit => value * 16 + (if digit.isDigit then digit.toNat - 48 else digit.toNat - 87)) 0
+    pure (machine, tracker, address)
+  let labels (explanation : Bap.Analysis.DynamicTaint.Tracker.Explanation) : List String :=
+    explanation.sources.filterMap fun (node, _, _) => match node.kind with
+      | .source label _ => some label
+      | _ => none
+  let (machine, tracker, address) ← at_ "exec"
+  let space ← Bap.Emu.spaceOf machine.emu (← Bap.Emu.thread machine.emu)
+  assertEqual s!"Linux {triple} a constant of what execve ran comes from nothing" ([] : List String)
+    (labels (← tracker.explainMemory address (some space)))
+  let (machine, tracker, address) ← at_ "mremap"
+  let space ← Bap.Emu.spaceOf machine.emu (← Bap.Emu.thread machine.emu)
+  assertEqual s!"Linux {triple} bytes of a file that mremap moved come from it still" ["pread /data"]
+    (labels (← tracker.explainMemory (address + 3) (some space)))
+
+/-- A function that waits, which a call gives too little fuel to come back, leaves nothing of its wait: the thread runs on from where it
+was, as it would have, rather than waiting where the call left it or being woken there. -/
+def testCallWaits : IO Unit := do
+  for name in ["waits_forever", "sleeps_long"] do
+    let data ← IO.FS.readBinFile "testsuite/bin/aarch64-linux-musl-libc-callwait"
+    let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" data) "/test" ["/test"]
+    let some symbol := (← IO.ofExcept (Image.Elf.decode data)).symbols.find? (·.name == name)
+      | throw <| IO.userError s!"no {name}"
+    let address := symbol.addr
+    expectThrow s!"A call of {name} doesn't come back" (machine.call address (fuel := 100000))
+    let before := (← machine.kernel.get).clock
+    let written ← IO.mkRef ByteArray.empty
+    let outcome ← machine.run (fuel := 100000000) fun data => written.modify (· ++ data)
+    assertEqual s!"After a call of {name} that didn't come back, the program runs as it would have"
+      (Bap.Tasks.ScheduleOutcome.finished 0, "ran to its end, a sleep of its own gave 0\n") (outcome, String.fromUTF8! (← written.get))
+    let took := (← machine.kernel.get).clock - before
+    assertTrue s!"and without waiting out what the call waited for ({took} ns)" (took < 10 * 1000000000)
+
+/-- What a program removed of a directory of the host that the machine mounts is gone, also once the machine is put back as it was
+then: what was brought in of the host is of the tree, and so of what is saved. -/
+def testHostDeleted : IO Unit := do
+  for viaCheckpoint in [false, true] do
+    let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile "testsuite/bin/aarch64-linux-musl-libc-hostgone")
+    let machine ← Bap.Linux.start kernel "/test" ["/test"]
+    machine.mountHost "testsuite/data/stepback-mount" "/mnt"
+    let written ← IO.mkRef ByteArray.empty
+    let print (data : ByteArray) : IO Unit := written.modify (· ++ data)
+    let outcome ← machine.run (fuel := 300000) print
+    assertEqual "A run of work stops in it" Bap.Tasks.ScheduleOutcome.outOfFuel outcome
+    let machine ← if viaCheckpoint then do
+        let again ← Bap.Linux.Machine.ofCheckpoint (← machine.checkpoint)
+        again.mountHost "testsuite/data/stepback-mount" "/mnt"
+        pure again
+      else do
+        machine.restore (← machine.save)
+        pure machine
+    let outcome ← machine.run print
+    assertEqual s!"What a program removed of the host is gone once it is put back (of a checkpoint {viaCheckpoint})"
+      (Bap.Tasks.ScheduleOutcome.finished 0, "what was removed is gone\n") (outcome, String.fromUTF8! (← written.get))
+
 /-- A run with all of that stopped and saved goes on as it would have: what is pending, the frames of handlers and what a process does
 with a signal are in a checkpoint, in every piece. -/
 def testLinuxSignalCheckpoints (triple : String) (step : Nat) : IO Unit := do
@@ -4186,6 +4270,23 @@ def testHostFunctions (triple : String) : IO Unit := do
     (some (← resumed.hostFunction "host_given" tripled))
   let some fromHost := ← resumed.findSymbol "from_host" | throw <| IO.userError s!"{label} has no from_host"
   assertEqual s!"{label} and is served again" 21 (signed32 (← resumed.call fromHost [7]))
+
+/-- What a library imports is found in the file that was loaded: once another is where it was, that is refused, rather than slots of
+the other being written; and of the library as it was, before the file changed, it is as it was. -/
+def testImportsOfLoadedFile (triple : String) : IO Unit := do
+  let label := s!"Imports of the loaded file {triple}"
+  let binary (name : String) : IO ByteArray := IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-{name}"
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" (← binary "libc-files"))
+    |>.addFile "/lib/libmain.so" (← binary "libmain")
+    |>.addFile "/lib/libdep.so" (← binary "libdep")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let stubs ← machine.importStubs [("host_given", fun _ arguments => pure (arguments.headD 0 * 3))]
+  let _ ← machine.loadLibrary "libdep.so"
+  let library ← machine.loadLibrary "libmain.so" (resolve := stubs)
+  let product ← machine.hostFunction "product" fun _ arguments => pure (arguments.headD 0 * arguments.getD 1 0)
+  -- Another file where it was, before anything asked what it imports.
+  machine.addFile "/lib/libmain.so" (← binary "libdep")
+  expectThrow s!"{label} what another file imports isn't taken for it" (machine.redirectImport library "dep_add" product)
 
 /-- Names of one function, each served as it is imported; initializers run after what they import is served, what is needed first, and
 once, also after a checkpoint; and what a checkpoint says of what it has. -/

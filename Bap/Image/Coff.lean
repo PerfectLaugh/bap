@@ -59,6 +59,14 @@ private structure ObjectSection where
   relocationOffset : Nat
   relocationCount : Nat
 
+/-- Where the relocations of a section are and how many: of `IMAGE_SCN_LNK_NRELOC_OVFL`, more than 16 bits can say, the count is the
+address of the first relocation, which is no relocation and is counted, as the specification and LLVM's `COFFObjectFile` have it. -/
+private def relocationTable (data : ByteArray) (flags offset count : Nat) : Except String (Nat × Nat) :=
+  if flags &&& 0x01000000 != 0 && count == 0xffff then do
+    let total ← IO.Reader.u32 data .little offset
+    if total == 0 then .error "COFF overflowed relocation count is 0" else .ok (offset + 10, total - 1)
+  else .ok (offset, count)
+
 private def parseSection (data : ByteArray) (header : Header) (offset : Nat) :
     Except String ObjectSection := do
   let name ← sectionName data header offset
@@ -69,6 +77,9 @@ private def parseSection (data : ByteArray) (header : Header) (offset : Nat) :
   let relocationOffset ← IO.Reader.u32 data .little (offset + 24)
   let relocationCount ← IO.Reader.u16 data .little (offset + 32)
   let flags ← IO.Reader.u32 data .little (offset + 36)
+  let table ← relocationTable data flags relocationOffset relocationCount
+  let relocationOffset := table.1
+  let relocationCount := table.2
   let fileSize := if rawOffset = 0 || flags &&& 0x80 != 0 then 0 else rawSize
   let fileBytes ← IO.Reader.slice data rawOffset fileSize
   if relocationOffset + relocationCount * 10 > data.size then

@@ -28,6 +28,9 @@ structure Program where
   headerCount : Nat
   segments : List Segment
   interpreter : Option String
+  /-- That its `PT_GNU_STACK` asks for a stack that runs, as `-z execstack` and the trampolines of GCC's nested functions have it, which
+  Linux gives it (`EXSTACK_ENABLE_X`). -/
+  executableStack : Bool := false
   deriving DecidableEq, Repr
 
 private def little (data : ByteArray) (offset size : Nat) : Nat :=
@@ -89,7 +92,8 @@ def parse (data : ByteArray) : Except String Program := do
     headerOffset := if wide then get 32 8 else get 28 4
     headerCount := if wide then get 56 2 else get 44 2
     segments
-    interpreter := (headers data 3).head?.map fun header => text data header.1 }
+    interpreter := (headers data 3).head?.map fun header => text data header.1
+    executableStack := (headers data 0x6474e551).any fun header => header.2.2.2.2 &&& 1 != 0 }
 
 /-- Where the address of a loaded file is in the file. -/
 private def fileOffset (segments : List Segment) (address : Nat) : Option Nat :=

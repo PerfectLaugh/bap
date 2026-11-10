@@ -28,6 +28,24 @@ private structure ParseState where
   mappings : List FileMapping := []
   symbolTables : List SymbolTable := []
   entryOffset : Option Nat := none
+  /-- Where `LC_UNIXTHREAD` has its thread start, an address, which is where the program starts if it has no `LC_MAIN`. -/
+  threadEntry : Option Nat := none
+
+/-- The pc that the first thread state of an `LC_UNIXTHREAD` from `start` to `stop` starts at, of the flavors of x86_64 and AArch64 that
+have one: `x86_THREAD_STATE64`, whose `rip` follows sixteen registers, the `x86_THREAD_STATE` that has one in it after its own flavor
+and count, and `ARM_THREAD_STATE64`, whose `pc` follows the 29 registers, `fp`, `lr` and `sp`. -/
+private def threadPc (data : ByteArray) (endian : Endian) (cpuType start stop : Nat) : Except String (Option Nat) := do
+  let flavor ← IO.Reader.u32 data endian start
+  let count ← IO.Reader.u32 data endian (start + 4)
+  let state := start + 8
+  if state + 4 * count > stop then .error "Mach-O thread state exceeds its command"
+  else match cpuType, flavor with
+    | 0x01000007, 4 => if count < 42 then .ok none else some <$> IO.Reader.u64 data endian (state + 128)
+    | 0x01000007, 7 => do
+      let inner ← IO.Reader.u32 data endian state
+      if inner == 4 && count ≥ 44 then some <$> IO.Reader.u64 data endian (state + 8 + 128) else .ok none
+    | 0x0100000c, 6 => if count < 68 then .ok none else some <$> IO.Reader.u64 data endian (state + 256)
+    | _, _ => .ok none
 
 private def parseHeader (data : ByteArray) : Except String Header := do
   let magic ← IO.Reader.read data .big 0 4
@@ -111,6 +129,12 @@ private def parseCommands (data : ByteArray) (header : Header) (offset : Nat) :
           else
             let entryOffset ← IO.Reader.u64 data header.endian (offset + 8)
             .ok { state with entryOffset := some entryOffset }
+        | 5 => do
+          if commandSize < 16 then
+            .error "Mach-O thread command is too small"
+          else
+            let pc ← threadPc data header.endian header.cpuType (offset + 8) (offset + commandSize)
+            .ok { state with threadEntry := pc }
         | 2 => do
           if commandSize < 24 then
             .error "Mach-O symbol table command is too small"
@@ -181,7 +205,7 @@ def decode (data : ByteArray) : Except String Image := do
     .error "Mach-O load command size mismatch"
   else
     let entryPoint ← match state.entryOffset with
-      | none => .ok 0
+      | none => .ok (state.threadEntry.getD 0)
       | some entryOffset =>
         match state.mappings.find? fun mapping =>
           mapping.offset ≤ entryOffset && entryOffset < mapping.offset + mapping.size with

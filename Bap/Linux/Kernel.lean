@@ -597,6 +597,10 @@ structure Kernel where
   cycles : Nat := 1000000
   /-- How many bytes `getrandom` has given, which is where the next of them are in `randomBytes`. -/
   randomGiven : Nat := 0
+  /-- The paths of what `Machine.mountHost` has brought into the tree from the host, and of directories ending in `/` whose entries it
+  has, which it doesn't bring again: what the program removed of them is gone. It is of the tree, so that what the tree goes back to,
+  of a checkpoint, a restore or `stepBack`, has as much of the host as it had. -/
+  hostSeen : Std.HashSet String := {}
   /-- What makes the generated files that aren't those of `/proc`, by name. A function can't go in a checkpoint: only the names do,
   and these are given again to go on from it. -/
   generators : Std.HashMap String Generator := {}

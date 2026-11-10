@@ -61,6 +61,41 @@ private def Machine.ensureReturnPage (machine : Machine) : IO Nat := do
     Bap.Emu.map machine.emu ⟨page, bytes ++ ByteArray.mk (Array.replicate (4096 - bytes.size) 0), ⟨true, false, true⟩⟩
   pure page
 
+/-- What a thread waits in, of every part of the machine that keeps that: what `Machine.call` puts back, so that a function that
+waited and didn't come back leaves the thread waiting in nothing that it wasn't waiting in. -/
+private structure CallWaits where
+  futexes : List Bap.Tasks.FutexWaiter
+  waiters : List Bap.Tasks.Waiter
+  deadline : Option Nat
+  site : Option Site
+  sleep : Option (Nat × Nat × Nat × Nat × Option Nat)
+  signals : Option (Option Nat × Option (Nat × Nat) × Option Nat)
+
+private def Machine.waitsOf (machine : Machine) (tid : Nat) : IO CallWaits := do
+  let table ← machine.emu.taskTable.get
+  let time ← machine.timers.state.get
+  pure {
+    futexes := table.futexes.filter (·.thread == tid)
+    waiters := table.waiters.filter (·.thread == tid)
+    deadline := time.deadlines.get? tid
+    site := time.sites.get? tid
+    sleep := time.sleeps.get? tid
+    signals := ((← machine.signals.table.get).threads.get? tid).map fun state => (state.suspended, state.waiting, state.waitingChild) }
+
+private def Machine.putWaits (machine : Machine) (tid : Nat) (waits : CallWaits) : IO Unit := do
+  machine.emu.taskTable.modify fun table => { table with
+    futexes := table.futexes.filter (·.thread != tid) ++ waits.futexes
+    waiters := table.waiters.filter (·.thread != tid) ++ waits.waiters }
+  let put {α : Type} (map : Std.HashMap Nat α) (value : Option α) : Std.HashMap Nat α :=
+    match value with
+    | some value => map.insert tid value
+    | none => map.erase tid
+  machine.timers.state.modify fun time => { time with
+    deadlines := put time.deadlines waits.deadline, sites := put time.sites waits.site, sleeps := put time.sleeps waits.sleep }
+  let (suspended, waiting, waitingChild) := waits.signals.getD (none, none, none)
+  machine.signals.table.modify fun table => { table with threads := table.threads.modify tid fun state =>
+    { state with suspended, waiting, waitingChild } }
+
 /-- Calls a function of the guest with these arguments, on the stack of the thread that runs and in it, and says what it gives back.
 Nothing else runs meanwhile, unless `threaded`: then the other threads run by turns until it comes back, as one that starts threads and
 waits for them needs. What it did to memory stays, and its registers go back. What doesn't return, by `fuel` instructions or
@@ -95,7 +130,11 @@ def Machine.call (machine : Machine) (address : Nat) (arguments : List Nat := []
   let savedStopped ← emu.stopped.get
   let savedFault ← emu.lastFault.get
   let returnTo ← machine.ensureReturnPage
+  -- What it waits in, which a function that waits and doesn't come back would leave it waiting in where it is back.
+  let caller ← thread emu
+  let savedWaits ← machine.waitsOf caller
   let restore : IO Unit := do
+    machine.putWaits caller savedWaits
     let current ← emu.state.get
     emu.state.set { env := saved ++ current.env.filter fun binding => binding.1 == memoryVar }
     emu.pc.set savedPc
@@ -143,7 +182,6 @@ def Machine.call (machine : Machine) (address : Nat) (arguments : List Nat := []
     emu.stopped.set false
     if threaded then
       -- The others run as well, by turns, until this one comes back.
-      let caller ← thread emu
       let mut left := fuel
       let mut done := false
       while left > 0 && !done do
@@ -804,6 +842,9 @@ private def importSlotsOf (machine : Machine) (library : LoadedLibrary) : IO (St
   let data ← match fileOf (← machine.kernel.get) library.path with
     | .ok data => pure data
     | .error errno => throw <| IO.userError s!"{library.path}: error {errno}"
+  -- What is there now has to be what was loaded, as the slots of another file are elsewhere.
+  if targetDigest architecture data != library.digest then
+    throw <| IO.userError s!"{library.path} isn't the file that was loaded at {library.base} any more, and what it imports is of that"
   let program ← IO.ofExcept (Elf.parse data)
   let image ← IO.ofExcept (Image.Elf.decode data)
   let symbols := (← IO.ofExcept (Image.Elf.allDynamicSymbols image)).toArray

@@ -54,6 +54,8 @@ structure Image where
   ipc : ByteArray := ByteArray.empty
   /-- How many bytes `getrandom` has given. -/
   randomGiven : Nat := 0
+  /-- What of the host has been brought into the tree: see `Kernel.hostSeen`. -/
+  hostSeen : List String := []
   deriving DecidableEq
 
 private def sorted (items : List (Nat × α)) : List (Nat × α) :=
@@ -337,6 +339,7 @@ def Kernel.image (kernel : Kernel) : Image where
   mounts := mountsBytes kernel.mounts
   ipc := ipcBytes kernel.ipc
   randomGiven := kernel.randomGiven
+  hostSeen := (kernel.hostSeen.toList.toArray.qsort (· < ·)).toList
 
 /-- The kernel of an image, or why there can't be one. -/
 def Image.kernel (image : Image) : Except String Kernel := do
@@ -425,7 +428,8 @@ def Image.kernel (image : Image) : Except String Kernel := do
     cycles := image.cycles
     mounts := ← mountsOfBytes image.mounts
     ipc := ← ipcOfBytes image.ipc
-    randomGiven := image.randomGiven : Kernel }.countLinks
+    randomGiven := image.randomGiven
+    hostSeen := Std.HashSet.ofList image.hostSeen : Kernel }.countLinks
 
 namespace Image
 
@@ -555,7 +559,7 @@ def encode (out : ByteArray) (image : Image) : ByteArray :=
   let out := putList putProcess out image.processes
   let out := putBytes out image.output
   let out := putBytes (putBytes (putNat (putNat out image.clock) image.cycles) image.mounts) image.ipc
-  putNat out image.randomGiven
+  putList putText (putNat out image.randomGiven) image.hostSeen
 
 /-- An image from bytes, and where they end. -/
 def decode : Decoder Image := fun data at_ => do
@@ -571,7 +575,8 @@ def decode : Decoder Image := fun data at_ => do
   let (mounts, at_) ← getBytes data at_
   let (ipc, at_) ← getBytes data at_
   let (randomGiven, at_) ← getNat data at_
-  .ok ({ paths, inodes, nextInode, openFiles, nextOpenFile, processes, output, clock, cycles, mounts, ipc, randomGiven }, at_)
+  let (hostSeen, at_) ← getList getText data at_
+  .ok ({ paths, inodes, nextInode, openFiles, nextOpenFile, processes, output, clock, cycles, mounts, ipc, randomGiven, hostSeen }, at_)
 
 end Image
 

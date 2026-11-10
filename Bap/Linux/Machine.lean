@@ -95,10 +95,9 @@ structure Machine where
   timers : Timers
   /-- What finds what `inotify` has to say after each call: see `Bap.Linux.Notify`. -/
   notifier : Notify.Notifier
-  /-- The directories of the host that it sees, each as the path of the host and that of the tree, and the paths under those that it
-  has looked for there, which it doesn't again, with a directory whose entries it took ending in `/`: see `Machine.mountHost`. -/
+  /-- The directories of the host that it sees, each as the path of the host and that of the tree: see `Machine.mountHost`, and
+  `Kernel.hostSeen` of what it has brought in from there. -/
   hostMounts : IO.Ref (List (String × String))
-  hostSeen : IO.Ref (Std.HashSet String)
   /-- What AIO and io_uring have: see `Bap.Linux.Ring`. -/
   rings : IO.Ref Ring.State
   /-- How many calls that may let go of something there were since what nothing holds was let go of: see `Kernel.collect`. -/
@@ -438,6 +437,8 @@ private def serveRemap (machine : Machine) (group old oldSize newSize flags targ
     if !mayMove then return errorOf Errno.enomem
     let data := (← peek emu old (min oldPages newPages)) ++ tail
     let start ← placeMapping emu target fixed data (protectionBits first.protection)
+    -- What hears of copies hears of this one, as of `realloc`: what the bytes were goes with them, before where they were goes.
+    for copied in ← emu.memoryCopied.get do copied old start (min oldPages newPages)
     if keep then clearMapped emu old oldPages else unmap emu old oldPages
     note start
     pure (.returnValue start)
@@ -1328,6 +1329,7 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
     | .close =>
       let action ← apply machine (·.close group (arg 0))
       wakePipeReaders emu
+      Tty.hangUp poller emu
       pure action
     | .pipe | .pipe2 =>
       let flags := if call == .pipe2 then architecture.openFlags (arg 1) else 0
@@ -1755,8 +1757,8 @@ private partial def fromHost (machine : Machine) (path : String) (links : Nat :=
     let isDirectory : IO Bool := do
       let kernel ← machine.kernel.get
       pure ((kernel.paths.get? guest).bind kernel.inodes.get? |>.any (·.content matches .directory))
-    if (← machine.hostSeen.get).contains guest || (← machine.kernel.get).paths.contains guest then return ← isDirectory
-    machine.hostSeen.modify (·.insert guest)
+    if (← machine.kernel.get).hostSeen.contains guest || (← machine.kernel.get).paths.contains guest then return ← isDirectory
+    machine.kernel.modify fun kernel => { kernel with hostSeen := kernel.hostSeen.insert guest }
     let real ← (IO.FS.realPath host).toBaseIO
     match real with
     | .error _ => return false
@@ -1790,8 +1792,8 @@ private partial def fromHost (machine : Machine) (path : String) (links : Nat :=
           fromHost machine (Path.ofParts (Path.parts (Path.parent guest) target ++ rest)) (links - 1)
       return
   -- What the directory at the end has.
-  if (← machine.hostSeen.get).contains (guest ++ "/") then return
-  machine.hostSeen.modify (·.insert (guest ++ "/"))
+  if (← machine.kernel.get).hostSeen.contains (guest ++ "/") then return
+  machine.kernel.modify fun kernel => { kernel with hostSeen := kernel.hostSeen.insert (guest ++ "/") }
   if let .ok entries ← (System.FilePath.mk host).readDir.toBaseIO then
     for entry in entries do
       let _ ← bring (child guest entry.fileName) (child host entry.fileName)
@@ -2230,8 +2232,8 @@ and then those of the environment, one after the other, with what `AT_PLATFORM` 
 word above the copy, and this 16 bytes: code that reads a string 16 bytes at a time, as `memchr` of musl does that clang 21 makes
 for 32 bits, faults on Linux reading past the top when a string that it looks at ends there. -/
 private def mapStack (emu : Emu) (architecture : Architecture) (path : String) (arguments environment : List String)
-    (auxiliary : List (Nat × Nat)) : IO (List (Nat × Nat)) := do
-  mapZeros emu (stackTop architecture - stackSize) stackSize ⟨true, true, false⟩
+    (auxiliary : List (Nat × Nat)) (executable : Bool := false) : IO (List (Nat × Nat)) := do
+  mapZeros emu (stackTop architecture - stackSize) stackSize ⟨true, true, executable⟩
   let wordSize := architecture.bits / 8
   let place (cursor : Nat) (text : ByteArray) : IO Nat := do
     let at_ := cursor - text.size
@@ -2309,7 +2311,7 @@ private def loadProgram (emu : Emu) (architecture : Architecture) (credentials :
     (7, if interpreter.isSome then interpreterBase architecture else 0), (8, 0), (9, base + program.entry), (11, credentials.uid),
     (12, credentials.euid), (13, credentials.gid), (14, credentials.egid), (16, capabilities), (17, 100), (23, if secure then 1 else 0),
     (26, 0)]
-  let auxiliary ← mapStack emu architecture path arguments environment auxiliary
+  let auxiliary ← mapStack emu architecture path arguments environment auxiliary program.executableStack
   -- On ARM, the low bit of where a program starts says that it is in Thumb.
   let entry ← if architecture == .arm then do
       setReg emu ⟨"ISET", .imm 1, 0, false⟩ (bits 1 (entry % 2))
@@ -2676,7 +2678,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   let ptrace ← Ptrace.make architecture signals
   let kernelRef ← IO.mkRef kernel
   let timers ← Timers.make architecture kernelRef signals
-  let machine : Machine := { architecture, emu, kernel := kernelRef, models := ← IO.mkRef [], target, handled := handler.isSome, signals, ptrace, timers, notifier := ← Notify.make, hostMounts := ← IO.mkRef [], hostSeen := ← IO.mkRef {}, rings := ← IO.mkRef {}, releases := ← IO.mkRef 0, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {}, clockCounted := ← IO.mkRef (← emu.retired.get) }
+  let machine : Machine := { architecture, emu, kernel := kernelRef, models := ← IO.mkRef [], target, handled := handler.isSome, signals, ptrace, timers, notifier := ← Notify.make, hostMounts := ← IO.mkRef [], rings := ← IO.mkRef {}, releases := ← IO.mkRef 0, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {}, clockCounted := ← IO.mkRef (← emu.retired.get) }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
@@ -2690,8 +2692,6 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   emu.leavingSpace.set (some (flushShared machine emu))
   -- What was found of the instances of `inotify` is of the kernel that was.
   machine.restored.modify ((fun _ => Notify.forget machine.notifier) :: ·)
-  -- And what was looked for on the host may not be in the kernel that was.
-  machine.restored.modify ((fun _ => machine.hostSeen.set {}) :: ·)
   emu.enteredSpace.set (some (refreshShared machine emu))
   emu.futexKey.set (some fun address => do
     let some group ← runningGroup emu | return none
@@ -2763,6 +2763,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
     Notify.forget machine.notifier
     released machine
     wakePipeReaders emu
+    Tty.hangUp (pollerOf machine) emu
     ptrace.processExited emu group status)
   -- So is what was allocated in it, as what has an address has to go on having it.
   machine.models.modify (· ++ [{

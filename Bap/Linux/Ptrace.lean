@@ -296,15 +296,25 @@ def jobControl (ptrace : Ptrace) (emu : Emu) (group signal : Nat) : IO Unit := d
     if parent != 0 then ptrace.signals.send emu none parent ⟨numbers.chld, 6, .child group 0 numbers.cont⟩
     wakeWaits ptrace
   else
-    let stopped := (← ptrace.table.get).stops
+    let table ← ptrace.table.get
+    let stopped := table.stops
     for tid in threads do
       unless stopped.contains tid do
-        ptrace.table.modify fun table =>
-          { table with stops := table.stops.insert tid { status := stoppedStatus signal, traced := false, signal, reported := tid != group } }
-        block emu tid
+        match table.tracees.get? tid with
+        -- A tracee's group stop is a stop for its tracer, which its wait says and `PTRACE_CONT` lets go, as Linux has it: of one that was
+        -- seized, as `PTRACE_EVENT_STOP`.
+        | some tracee =>
+          stopThread ptrace emu tid
+            { status := if tracee.seized then stoppedStatus signal 128 else stoppedStatus signal, traced := true, signal }
+        | none =>
+          ptrace.table.modify fun table =>
+            { table with stops := table.stops.insert tid { status := stoppedStatus signal, traced := false, signal, reported := tid != group } }
+          block emu tid
     ptrace.table.modify fun table => { table with continued := table.continued.erase group }
+    -- Its parent hears of the stop of what isn't traced, as the tracer has of what is.
     let parent := (((← emu.taskTable.get).find? group).map (·.parent)).getD 0
-    if parent != 0 then ptrace.signals.send emu none parent ⟨numbers.chld, 5, .child group 0 signal⟩
+    if parent != 0 && threads.any (!table.tracees.contains ·) then
+      ptrace.signals.send emu none parent ⟨numbers.chld, 5, .child group 0 signal⟩
     wakeWaits ptrace
 
 /-- A tracee that `execve` went to a new program stops, as `PTRACE_TRACEME` and `PTRACE_O_TRACEEXEC` have it, of which
@@ -514,6 +524,8 @@ private inductive Slot where
   | callArgument
   /-- A register that has the number of a system call at its start and its result at its end, as `rax` does. -/
   | result (name : String)
+  /-- A word of flags that are each a register of a bit, by where each is, as PowerPC's `ccr` and `xer` are. -/
+  | bits (fields : List (String × Nat))
 
 private def slotsOf : Architecture → Option (List Slot)
   | .x86_64 => some ((["R15", "R14", "R13", "R12", "RBP", "RBX", "R11", "R10", "R9", "R8"].map .register) ++ [.result "RAX"] ++
@@ -525,7 +537,29 @@ private def slotsOf : Architecture → Option (List Slot)
   | .aarch64 => some (((List.range 31).map fun index => .register s!"X{index}") ++ [.register "SP", .pc, .flags])
   | .riscv64 | .riscv32 => some (.pc :: (List.range 31).map fun index => .register s!"X{index + 1}")
   | .arm => some (((List.range 13).map fun index => .register s!"R{index}") ++ [.register "SP", .register "LR", .pc, .flags, .callArgument])
-  | _ => none
+  -- `elf_gregset_t` of MIPS: six of nothing, the registers, of which v0 has the number of a call and then its result, `lo`, `hi`,
+  -- `cp0_epc`, `cp0_badvaddr`, `cp0_status`, `cp0_cause` and one of nothing.
+  | .mips .. => some ((List.replicate 6 (.constant 0)) ++
+      ((List.range 32).map fun index => if index == 2 then .result "R2" else .register s!"R{index}") ++
+      [.register "LO", .register "HI", .pc, .constant 0, .constant 0, .constant 0, .constant 0])
+  -- `struct pt_regs` of PowerPC: `gpr`, `nip`, `msr`, `orig_gpr3`, `ctr`, `link`, `xer`, `ccr`, `softe` or `mq`, `trap` (of a system
+  -- call), `dar`, `dsisr` and `result`, and what `elf_gregset_t` has after them, to 48.
+  | .powerpc wide _ => some (((List.range 32).map fun index => .register s!"R{index}") ++
+      [.pc, .constant 0, .callArgument, .register "CTR", .register "LR", .bits [("SO", 31), ("OV", 30), ("CA", 29)],
+       .bits ((List.range 8).flatMap fun field =>
+         [(s!"CR{field}LT", 31 - 4 * field), (s!"CR{field}GT", 30 - 4 * field), (s!"CR{field}EQ", 29 - 4 * field),
+          (s!"CR{field}UN", 28 - 4 * field)]),
+       .constant (if wide == 64 then 1 else 0), .constant 0xc00, .constant 0, .constant 0, .register "R3"] ++
+      List.replicate 4 (.constant 0))
+
+/-- What `PTRACE_GETREGS` and `PTRACE_SETREGS` have of the slots of `slotsOf`, and how many bytes each is: of MIPS, its `struct
+user_pt_regs`, which is of 64 bits each on any MIPS and has none of the six that come before the registers; of PowerPC, `struct
+user_pt_regs`, which `elf_gregset_t` pads. -/
+private def requestSlots (architecture : Architecture) (slots : List Slot) (word : Nat) : List Slot × Nat :=
+  match architecture with
+  | .mips .. => ((slots.drop 6).take 38, 8)
+  | .powerpc .. => (slots.take 44, word)
+  | _ => (slots, word)
 
 /-- How big the kernel's `struct user` of a target is, which `PTRACE_PEEKUSER` and `PTRACE_POKEUSER` go into: none of a target that has
 neither, as AArch64 and RISC-V don't. -/
@@ -568,7 +602,12 @@ private def readSlots (ptrace : Ptrace) (emu : Emu) (tid : Nat) (slots : List Sl
     | .callArgument => do
       match ((← ptrace.table.get).calls.get? tid).map (·.2) with
       | some argument => pure argument
-      | none => threadValue emu tid "R0" width
+      | none => threadValue emu tid (if ptrace.architecture matches .powerpc .. then "R3" else "R0") width
+    | .bits fields => do
+      let mut word := 0
+      for (name, bit) in fields do
+        if (← threadValue emu tid name 1) != 0 then word := word ||| (1 <<< bit)
+      pure word
     | .pc => pcOf emu tid
     | .constant value => pure value
     | .flags => do
@@ -600,6 +639,9 @@ private def writeSlots (ptrace : Ptrace) (emu : Emu) (tid : Nat) (slots : List S
         if context.id == tid then { context with pc := value, pending := none, skip := none } else context
     | .flags =>
       for (name, bit) in flagBits ptrace.architecture do
+        setThreadReg emu tid ⟨name, .imm 1, 0, false⟩ (.bits (BitVec.ofNat 1 ((value >>> bit) &&& 1)))
+    | .bits fields =>
+      for (name, bit) in fields do
         setThreadReg emu tid ⟨name, .imm 1, 0, false⟩ (.bits (BitVec.ofNat 1 ((value >>> bit) &&& 1)))
     | _ => pure ()
 
@@ -946,17 +988,20 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
     -- PTRACE_GETREGS and PTRACE_SETREGS, of the targets that have them.
     if ptrace.architecture matches .aarch64 | .riscv64 | .riscv32 then return ← fail eio
     withRegisters fun slots => do
+      let (slots, size) := requestSlots ptrace.architecture slots word
+      -- Of 32 bits in a slot of 64, as MIPS has them, with the sign that they have.
+      let widen (value : Nat) : Nat := if size > word && value ≥ 2 ^ (8 * word - 1) then value + (2 ^ (8 * size) - 2 ^ (8 * word)) else value
       if request == 12 then
         let values ← readSlots ptrace emu pid slots
-        match ← (write emu data (values.foldl (fun out value => out ++ numberBytes big word value) ByteArray.empty)).toBaseIO with
+        match ← (write emu data (values.foldl (fun out value => out ++ numberBytes big size (widen value)) ByteArray.empty)).toBaseIO with
         | .ok () => ok
         | .error _ => fail efault
       else
-        match ← (read emu data (slots.length * word)).toBaseIO with
+        match ← (read emu data (slots.length * size)).toBaseIO with
         | .ok bytes =>
           let values := (List.range slots.length).map fun index =>
-            let piece := bytes.extract (index * word) (index * word + word)
-            (if big then piece.toList else piece.toList.reverse).foldl (fun value byte => value * 256 + byte.toNat) 0
+            let piece := bytes.extract (index * size) (index * size + size)
+            (if big then piece.toList else piece.toList.reverse).foldl (fun value byte => value * 256 + byte.toNat) 0 % 2 ^ (8 * word)
           writeSlots ptrace emu pid slots values
           ok
         | .error _ => fail efault
@@ -1008,9 +1053,13 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
     let union := if width == 64 then 16 else 12
     let put (bytes : ByteArray) (offset size value : Nat) : ByteArray := (numberBytes big size value).copySlice 0 bytes offset size
     let bytes := ByteArray.mk (Array.replicate 128 0)
-    let bytes := put bytes 0 4 stop.signal
-    let bytes := put bytes (if mips then 4 else 8) 4 stop.code
-    let bytes := if stop.fault then put bytes union word stop.detail else put bytes union 4 stop.detail
+    -- A stop at a call or of an event, which no signal was sent for, is one that Linux's `ptrace_notify` makes: SIGTRAP, of the code
+    -- that the stop's status has, `SIGTRAP | 0x80` or `SIGTRAP | event << 8`, and of the tracee.
+    let notified := stop.info.isNone && !stop.fault && stop.signal % 128 == ptrace.numbers.trap
+    let bytes := put bytes 0 4 (if notified then ptrace.numbers.trap else stop.signal)
+    let bytes := put bytes (if mips then 4 else 8) 4 (if notified then (stop.status >>> 8) % 0x10000 else stop.code)
+    let detail := if notified then pid else stop.detail
+    let bytes := if stop.fault then put bytes union word detail else put bytes union 4 detail
     match ← (write emu data bytes).toBaseIO with
     | .ok () => ok
     | .error _ => fail efault
@@ -1115,7 +1164,11 @@ def serve (ptrace : Ptrace) (emu : Emu) : IO Unit := do
       if tracee.syscalls && tracee.inSyscall && !(← ptrace.table.get).stops.contains tid && !(vforkWaiting (← emu.taskTable.get) tid) then
         ptrace.table.modify fun table => { table with tracees := table.tracees.insert tid { tracee with inSyscall := false } }
         let signal := numbers.trap ||| (if tracee.options &&& 1 != 0 then 0x80 else 0)
-        stopThread ptrace emu tid { status := stoppedStatus signal, traced := true, signal := numbers.trap }) :: ·)
+        stopThread ptrace emu tid { status := stoppedStatus signal, traced := true, signal := numbers.trap }
+      -- Of a call that it was let go from where it was entered, with `PTRACE_CONT`: it is over, and the next that it is traced at stops
+      -- where it is entered.
+      else if !tracee.syscalls && tracee.inSyscall && !(← ptrace.table.get).stops.contains tid then
+        ptrace.table.modify fun table => { table with tracees := table.tracees.insert tid { tracee with inSyscall := false } }) :: ·)
 
 /-! ### Checkpoints -/
 

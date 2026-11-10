@@ -1132,8 +1132,10 @@ private def powerpcMCTarget (bits address word : Nat) (operands : List LLVM.MCOp
 /-- LLVM has no flags for `JAL`, whose major opcode this is. -/
 private def riscvIsJal (word : Nat) : Bool := word % 0x80 == 0x6f
 
+/-- Of a direct branch or call of RISC-V, the byte displacement in its last operand: of `JAL`, of what LLVM flags as a branch that isn't
+indirect, and of a call that isn't, as `c.jal` of RV32 is, which it flags as a call only. -/
 private def riscvMCTarget (bits address word flags : Nat) (operands : List LLVM.MCOperand) : Option Nat :=
-  match riscvIsJal word || flags &&& 8 != 0 && flags &&& 16 == 0, operands.getLast? with
+  match riscvIsJal word || (flags &&& 8 != 0 || flags &&& 2 != 0) && flags &&& 16 == 0, operands.getLast? with
   | true, some (.imm displacement) => some (wrapAddress bits (Int.ofNat address + displacement))
   | _, _ => none
 
@@ -1145,6 +1147,11 @@ private def flow (flags : Nat) : Disasm.Flow :=
   else if flags &&& 64 != 0 then .jump
   else if flags &&& 4 != 0 || flags &&& 512 != 0 then .barrier
   else .normal
+
+/-- `flow`, of PowerPC: a return that isn't a barrier, as `bdnzlr` and `bdzlr` are, returns or goes on past itself, which is a
+conditional jump whose target isn't known. LLVM flags them so; `beqlr` and the like, of `gBCLR`, are conditional branches already. -/
+def powerpcFlow (flags : Nat) : Disasm.Flow :=
+  if flags &&& 1 != 0 && flags &&& 4 == 0 then .conditionalJump else flow flags
 
 /-- LLVM has no flags for `JAL` and `JALR`, their role comes from the registers, by the hints of the
 RISC-V specification: `X1` and `X5` are the link registers. -/
@@ -1818,7 +1825,7 @@ def decodePowerPCOf (variant : PowerPCVariant) (globals : Primus.Semantics.Envir
     address := address
     size := decoded.size
     asm := normalizeAssembly decoded.assembly
-    flow := flow decoded.flags
+    flow := powerpcFlow decoded.flags
     target := powerpcMCTarget variant.bits address word machineOperands
     bil := resolveAliases (powerpcAliases variant.bits) bil
   }

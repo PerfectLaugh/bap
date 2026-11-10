@@ -5289,7 +5289,7 @@ namespace MachoParser
 
 open_private Bap.Image.Macho Bap.Image.Macho Header Header.mk Header.endian Header.commandBytes Header.commandCount
   FileMapping FileMapping.offset FileMapping.size FileMapping.address
-  ParseState ParseState.mk ParseState.segments ParseState.regions ParseState.mappings ParseState.entryOffset
+  ParseState ParseState.mk ParseState.segments ParseState.regions ParseState.mappings ParseState.entryOffset ParseState.threadEntry
   parseHeader parseSegment parseCommands parseSymbol
 
 open Reader
@@ -5435,6 +5435,12 @@ theorem parseCommands_ok {data : ByteArray} {header : Header} :
       · split at h
         · simp only [error_bind] at h; cases h
         · simp only [bind_ok_iff] at h
+          rcases h with ⟨pc, _, _, he, h⟩
+          cases he
+          exact ⟨_, h, entries, hseg, hreg, hmap, hgood⟩
+      · split at h
+        · simp only [error_bind] at h; cases h
+        · simp only [bind_ok_iff] at h
           rcases h with ⟨a, _, b, _, c, _, d, _, h⟩
           split at h
           · simp only [error_bind] at h; cases h
@@ -5460,7 +5466,7 @@ theorem decode_ok {data : ByteArray} {image : Image} (h : Macho.decode data = .o
         image.memory.entries = (entries.map (·.2.1)).reverse.map (fun region => (region, ())) ∧
         (∀ entry ∈ entries, GoodEntry data entry) ∧
         ParseState.mappings state = entries.map (·.2.2) ∧
-        (ParseState.entryOffset state = none → image.entryPoint = 0) ∧
+        (ParseState.entryOffset state = none → image.entryPoint = (ParseState.threadEntry state).getD 0) ∧
         (∀ entry, ParseState.entryOffset state = some entry →
           ∃ mapping ∈ ParseState.mappings state, FileMapping.offset mapping ≤ entry ∧
             entry < FileMapping.offset mapping + FileMapping.size mapping ∧
@@ -5819,8 +5825,8 @@ theorem parseSection_ok {data : ByteArray} {header : Header} {offset : Nat} {obj
         ((ObjectSection.info object).flags &&& 0x80 != 0 → fileSize = 0) := by
   simp only [parseSection, bind_ok_iff] at h
   rcases h with ⟨name, _, virtualSize, _, address, _, rawSize, _, rawOffset, _, relocOffset, _, relocCount, _,
-    flags, _, file, hfile, h⟩
-  by_cases hr : relocOffset + relocCount * 10 > data.size
+    flags, _, table, _, file, hfile, h⟩
+  by_cases hr : table.1 + table.2 * 10 > data.size
   · rw [ite_eq_left hr] at h; cases h
   rw [ite_eq_right hr] at h
   cases h

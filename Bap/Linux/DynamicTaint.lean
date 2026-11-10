@@ -19,7 +19,9 @@ private def callName (call : Call) : String :=
 private def saysNothing : Call → Bool
   | .mmap | .mmap2 | .munmap | .mprotect | .madvise | .mremap | .brk | .succeeds | .close | .setThreadArea | .sigaltstack
   | .lseek | .llseek | .write | .pwrite | .writev | .fcntl | .dup | .dup2 | .dup3 | .umask | .pipe | .pipe2
-  | .fchmod | .fsync | .fdatasync | .syncfs | .sync | .fallocate | .fadvise64 | .fadvise6464 | .armFadvise6464 | .pwritev | .pwritev2 => true
+  | .fchmod | .fsync | .fdatasync | .syncfs | .sync | .fallocate | .fadvise64 | .fadvise6464 | .armFadvise6464 | .pwritev | .pwritev2
+  -- The program that `execve` maps, which is as it is in its file, not anything that it found out.
+  | .execve | .execveat => true
   | _ => false
 
 /-- What was opened, by open file, as what it was opened as. A path says the same of most, and nothing of what `/proc` makes. -/
@@ -156,6 +158,10 @@ private def attachTracker (machine : Machine) (config : Config) : IO (Tracker ×
     pure ((← readBacking machine number args).map fun (space, offset, _) => (space, offset))
   let called (number : Nat) (args : List Nat) (result : Option Nat) : IO Unit := do
     noteOpened machine opened number args result
+    -- A program that `execve` ran has its registers as the kernel set them, which are of nothing; one that failed gives an error.
+    if machine.architecture.call number matches some .execve | some .execveat then
+      if result.all (· < 2 ^ 63) then
+        if let some tracker ← started.get then tracker.registers.modify (·.erase (← Bap.Emu.thread emu))
     -- A private mapping of a file has a copy of what that came from. A shared one has it there.
     let isMap := match machine.architecture.call number with
       | some .mmap | some .mmap2 => true

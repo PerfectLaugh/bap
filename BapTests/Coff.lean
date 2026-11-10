@@ -179,6 +179,34 @@ private def fieldOf (data : ByteArray) (offset size : Nat) (big : Bool := false)
   (List.range size).foldl (init := 0) fun value index =>
     value + (data.get! (offset + (if big then size - 1 - index else index))).toNat * 256 ^ index
 
+/-- An object of AMD64 whose `.text` has more relocations than its 16 bits can say: `IMAGE_SCN_LNK_NRELOC_OVFL`, with the count in the
+first relocation, which is no relocation. Each is an `ADDR32` of a symbol at 0x10 to a slot that holds its index. -/
+private def overflowObject (count : Nat) : ByteArray :=
+  let le (size value : Nat) : ByteArray := ByteArray.mk ((List.range size).map fun index => (value >>> (8 * index)).toUInt8).toArray
+  let rawOffset := 60
+  let rawSize := 4 * count
+  let relocationOffset := rawOffset + rawSize
+  let symbolOffset := relocationOffset + 10 * (count + 1)
+  let header := le 2 0x8664 ++ le 2 1 ++ le 4 0 ++ le 4 symbolOffset ++ le 4 1 ++ le 2 0 ++ le 2 0
+  let sectionHeader := ".text".toUTF8 ++ le 3 0 ++ le 4 0 ++ le 4 0 ++ le 4 rawSize ++ le 4 rawOffset ++ le 4 relocationOffset ++
+    le 4 0 ++ le 2 0xffff ++ le 2 0 ++ le 4 (0x60000020 ||| 0x01000000)
+  let raw := (List.range count).foldl (fun out index => out ++ le 4 index) ByteArray.empty
+  let relocations := (List.range count).foldl (fun out index => out ++ le 4 (4 * index) ++ le 4 0 ++ le 2 2)
+    (le 4 (count + 1) ++ le 4 0 ++ le 2 0)
+  let symbol := "sym".toUTF8 ++ le 5 0 ++ le 4 0x10 ++ le 2 1 ++ le 2 0 ++ ByteArray.mk #[2, 0]
+  header ++ sectionHeader ++ raw ++ relocations ++ symbol ++ le 4 4
+
+/-- All of the relocations of a section that has more than 65535, and not the first, which says how many. -/
+def runRelocationOverflow : IO Unit := do
+  let count := 70000
+  match Coff.decodeReport (overflowObject count) with
+  | .error error => throw <| IO.userError error
+  | .ok (image, errors) =>
+    assertEqual "COFF of more relocations than 16 bits applies them all" ([] : List String) errors
+    let word (address : Nat) : Nat :=
+      (List.range 4).foldl (fun value index => value + ((image.memory.readByte (address + index)).getD 0).toNat * 256 ^ index) 0
+    assertEqual "COFF of more relocations than 16 bits: the first and the last" (0x10, 0x10 + count - 1) (word 0, word (4 * (count - 1)))
+
 def run : IO Unit := do
   -- Sections and commons whose headers ask for more zeros than a host can give, all together, aren't made.
   let table := 20 + fieldOf objectFixture 16 2

@@ -1,0 +1,7 @@
+group stop of a tracee: passed 0, stopped by 19, let go 0, exited 7
+a stop at a call: signal 133, code 0x85
+stops at calls from a signal to the end: 3, each entered and left
+a write of the background with SIGTTOU ignored: 1 
+tcsetattr of the background: stopped by 22
+the leader of a session when its master closes: SIGHUP
+done

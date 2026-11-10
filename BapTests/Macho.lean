@@ -70,6 +70,22 @@ private def fieldOf (data : ByteArray) (offset size : Nat) (big : Bool := false)
   (List.range size).foldl (init := 0) fun value index =>
     value + (data.get! (offset + (if big then size - 1 - index else index))).toNat * 256 ^ index
 
+/-- A Mach-O executable of x86_64 that starts as `LC_UNIXTHREAD` says, as one built for macOS 10.7 or before, a static one or `dyld` does:
+its `rip`, which is an address, rather than an offset of `LC_MAIN`. -/
+def runUnixThread : IO Unit := do
+  let le (size value : Nat) : ByteArray := ByteArray.mk ((List.range size).map fun index => (value >>> (8 * index)).toUInt8).toArray
+  let pad (bytes : ByteArray) (size : Nat) : ByteArray := bytes ++ ByteArray.mk (Array.replicate (size - bytes.size) 0)
+  let segment := le 4 0x19 ++ le 4 72 ++ pad "__TEXT".toUTF8 16 ++ le 8 0x100000000 ++ le 8 0x1000 ++ le 8 0 ++ le 8 0x200 ++
+    le 4 5 ++ le 4 5 ++ le 4 0 ++ le 4 0
+  -- x86_THREAD_STATE64, of 42 words: rax to r15, then rip.
+  let state := (List.range 21).foldl (fun out index => out ++ le 8 (if index == 16 then 0x100000100 else 0)) ByteArray.empty
+  let thread := le 4 5 ++ le 4 (16 + state.size) ++ le 4 4 ++ le 4 42 ++ state
+  let commands := segment ++ thread
+  let header := le 4 0xfeedfacf ++ le 4 0x01000007 ++ le 4 3 ++ le 4 2 ++ le 4 2 ++ le 4 commands.size ++ le 4 0 ++ le 4 0
+  match Macho.decode (pad (header ++ commands) 0x200) with
+  | .error error => throw <| IO.userError s!"Mach-O of LC_UNIXTHREAD: {error}"
+  | .ok image => assertEqual "Mach-O of LC_UNIXTHREAD starts at its rip" 0x100000100 image.entryPoint
+
 def run : IO Unit := do
   assertEqual "Mach-O fixture size" 260 fixture.size
   -- A segment whose command asks for more zeros than a host can give isn't made.
