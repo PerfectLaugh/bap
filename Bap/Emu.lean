@@ -3689,7 +3689,7 @@ private def mipsOf (variant : Target.LLVMLift.MipsVariant) (code : ByteArray) (b
   let decoders (base : Nat) : IO Disasm.Disassembler := pure <| withUndefined variant.endian (Target.LLVMLift.mipsUndefined variant) {
     name := if variant.bits == 64 then "mips64-llvm-primus" else "mips-llvm-primus"
     decode := decodeAt (Target.LLVMLift.decodeMIPSOf variant environment) base
-    hasDelaySlot := Target.LLVMLift.mipsHasDelaySlot
+    hasDelaySlot := Target.LLVMLift.mipsHasDelaySlotOf variant
     annulsSlot := Target.LLVMLift.mipsAnnulsSlot } base
   let disassembler ← decoders base
   let config : Config := {

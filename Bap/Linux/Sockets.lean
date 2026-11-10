@@ -159,7 +159,8 @@ def accept (kernel : Kernel) (group fd flags : Nat) : Result (Kernel × Option (
   let (number, socket) ← socketOf kernel group fd
   if !socket.listening then .error Errno.einval
   match socket.pending with
-  | [] => .ok (kernel, none)
+  -- A listener that `shutdown` shut takes no more: what waits there is `EINVAL`, as Linux's `unix_accept` and `inet_accept` have it.
+  | [] => if socket.readShut then .error Errno.einval else .ok (kernel, none)
   | server :: rest =>
     let kernel := kernel.setSocket number { socket with pending := rest }
     let kernel := match kernel.socketAt server with
@@ -204,12 +205,15 @@ structure Received where
 /-- `recv` and its kin: up to `count` bytes, or none if there is nothing yet and the other end may still send. A stream gives what has
 come in order, as far as the open files of a message that comes after the first: those come with the bytes that they came with. A
 message of the others comes whole, but for what doesn't fit, which is gone. At the end of a stream, it is nothing. With `peek` it stays. -/
-def receive (kernel : Kernel) (group fd count : Nat) (peek : Bool) (alive : Nat → Bool) : Result (Kernel × Option Received) := do
+def receive (kernel : Kernel) (group fd count : Nat) (peek : Bool) (alive : Nat → Bool) (all : Bool := false) :
+    Result (Kernel × Option Received) := do
   let (number, socket) ← socketOf kernel group fd
   let ended : Bool := socket.readShut ||
     (socket.type != 2 && match socket.peer with
       | some peer => !alive peer || (kernel.socketAt peer |>.any (·.writeShut))
       | none => false)
+  -- `MSG_WAITALL` of a stream that may have more: all that it asks for, or it waits, as Linux has it of one that may wait.
+  if all && !peek && socket.type == 1 && !ended && (socket.incoming.foldl (· + ·.data.size) 0) < count then return (kernel, none)
   if socket.incoming.isEmpty then
     if ended then return (kernel, some { data := ByteArray.empty, size := 0 })
     if socket.type != 2 && socket.peer.isNone then .error Errno.enotconn
@@ -241,7 +245,8 @@ def receive (kernel : Kernel) (group fd count : Nat) (peek : Bool) (alive : Nat 
 def shutdown (kernel : Kernel) (group fd how : Nat) : Result Kernel := do
   let (number, socket) ← socketOf kernel group fd
   if how > 2 then .error Errno.einval
-  if socket.peer.isNone && socket.type != 2 then .error Errno.enotconn
+  -- Linux's `unix_shutdown` has no `ENOTCONN`; `inet_shutdown` has it of what is neither connected nor listening.
+  if socket.family != 1 && socket.peer.isNone && socket.remote.isNone && socket.type != 2 && !socket.listening then .error Errno.enotconn
   .ok (kernel.setSocket number { socket with
     readShut := socket.readShut || how != 1, writeShut := socket.writeShut || how != 0 })
 

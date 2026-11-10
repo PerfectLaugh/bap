@@ -761,6 +761,11 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
   let typeOf (type : Nat) : Nat := if mips && (type == 1 || type == 2) then 3 - type else type
   let solSocket := if mips then 0xffff else 1
   let option (generic mipsValue : Nat) : Nat := if mips then mipsValue else generic
+  -- `SO_RCVTIMEO` and `SO_SNDTIMEO`, as their old numbers, of `struct timeval` of words.
+  let timeouts : Nat × Nat := match architecture with
+    | .mips .. => (0x1006, 0x1005)
+    | .powerpc .. => (18, 19)
+    | _ => (20, 21)
   let peerCred := match architecture with
     | .mips .. => 18
     | .powerpc .. => 21
@@ -822,13 +827,24 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
     if let some next := kernel.tellReset group fd alive then
       machine.kernel.set next
       return errorOf Errno.econnreset
-    match kernel.receive group fd total (flags &&& 2 != 0) alive with
+    let mayWait := flags &&& 0x40 == 0 && !kernel.nonblocking group fd
+    match kernel.receive group fd total (flags &&& 2 != 0) alive (all := flags &&& 0x100 != 0 && mayWait) with
     | .error errno => pure (errorOf errno)
     | .ok (_, none) =>
-      if flags &&& 0x40 != 0 || kernel.nonblocking group fd then pure (errorOf Errno.eagain)
+      if !mayWait then pure (errorOf Errno.eagain)
       else
         match kernel.socketOf group fd with
-        | .ok (number, _) => waitOn machine emu number
+        | .ok (number, socket) =>
+          if socket.receiveTimeout == 0 then waitOn machine emu number
+          else
+            -- Of `SO_RCVTIMEO`: until then, from when the call began, after which `EAGAIN`, as Linux has it.
+            let tid ← thread emu
+            let now ← machine.timers.now
+            let due ← machine.timers.deadlineOf tid (pure (now + socket.receiveTimeout))
+            if due ≤ now then
+              machine.timers.finish tid
+              pure (errorOf Errno.eagain)
+            else machine.timers.waitUntil emu (pipeSpace + number) 0 (some due) true
         | .error errno => pure (errorOf errno)
     | .ok (next, some received) =>
       machine.kernel.set next
@@ -989,7 +1005,26 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
   | .setsockopt =>
     match kernel.socketOf group (arg 0) with
     | .error errno => pure (errorOf errno)
-    | .ok _ => pure (.returnValue 0)
+    | .ok (number, socket) =>
+      -- `SO_RCVTIMEO` and `SO_SNDTIMEO`, of a `struct timeval` of words or, as the new ones, of 64 bits, which it keeps; the others
+      -- that it can be given it takes, and they change nothing.
+      let name := arg 2
+      let receiving := name == timeouts.1 || name == 66
+      let sending := name == timeouts.2 || name == 67
+      if arg 1 != solSocket || !(receiving || sending) then return .returnValue 0
+      let field := if name == 66 || name == 67 then 8 else wordSize
+      if arg 4 < 2 * field then return errorOf Errno.einval
+      match ← (read emu (arg 3) (2 * field)).toBaseIO with
+      | .error _ => pure (errorOf Errno.efault)
+      | .ok bytes =>
+        let seconds := numberAt bytes 0 field big
+        let micros := numberAt bytes field field big
+        -- `EDOM` of microseconds of a second or more; a time before 0 is as short as can be.
+        if micros ≥ 1000000 then return errorOf 33
+        let span := if seconds ≥ 2 ^ (8 * field - 1) then 1 else seconds * 1000000000 + micros * 1000
+        machine.kernel.set (kernel.setSocket number
+          (if receiving then { socket with receiveTimeout := span } else { socket with sendTimeout := span }))
+        pure (.returnValue 0)
   | .getsockopt =>
     match kernel.socketOf group (arg 0) with
     | .error errno => pure (errorOf errno)
@@ -1008,10 +1043,11 @@ private def socketCall (machine : Machine) (emu : Emu) (call : Call) (args : Lis
         else if name == option 4 0x1007 then some (Abi.field big 4 0)
         else if name == option 7 0x1001 || name == option 8 0x1002 then some (Abi.field big 4 212992)
         else if name == option 13 0x80 then some (Bap.zeroBytes 8)
-        -- `SO_RCVTIMEO` and `SO_SNDTIMEO`, which are none, of a `struct timeval` of words or, as the new ones, of 64 bits.
-        else if name ∈ (match architecture with | .mips .. => [0x1006, 0x1005] | .powerpc .. => [18, 19] | _ => [20, 21]) then
-          some (Bap.zeroBytes (2 * wordSize))
-        else if name == 66 || name == 67 then some (Bap.zeroBytes 16)
+        -- `SO_RCVTIMEO` and `SO_SNDTIMEO`, of a `struct timeval` of words or, as the new ones, of 64 bits.
+        else if name == timeouts.1 || name == timeouts.2 || name == 66 || name == 67 then
+          let span := if name == timeouts.1 || name == 66 then socket.receiveTimeout else socket.sendTimeout
+          let field := if name == 66 || name == 67 then 8 else wordSize
+          some (Abi.field big field (span / 1000000000) ++ Abi.field big field (span % 1000000000 / 1000))
         else if name == option 30 0x1009 then some (Abi.field big 4 (if socket.listening then 1 else 0))
         else if name == option 38 0x1028 then
           some (Abi.field big 4 (if socket.family == 1 then 0 else if socket.type == 1 then 6 else 17))
@@ -2194,7 +2230,7 @@ and then those of the environment, one after the other, with what `AT_PLATFORM` 
 word above the copy, and this 16 bytes: code that reads a string 16 bytes at a time, as `memchr` of musl does that clang 21 makes
 for 32 bits, faults on Linux reading past the top when a string that it looks at ends there. -/
 private def mapStack (emu : Emu) (architecture : Architecture) (path : String) (arguments environment : List String)
-    (auxiliary : List (Nat × Nat)) : IO Unit := do
+    (auxiliary : List (Nat × Nat)) : IO (List (Nat × Nat)) := do
   mapZeros emu (stackTop architecture - stackSize) stackSize ⟨true, true, false⟩
   let wordSize := architecture.bits / 8
   let place (cursor : Nat) (text : ByteArray) : IO Nat := do
@@ -2212,7 +2248,8 @@ private def mapStack (emu : Emu) (architecture : Architecture) (path : String) (
       pure (at_, [(15, at_)])
     | none => pure (start / 16 * 16, [])
   let random ← place cursor (ByteArray.mk ((List.range 16).map fun index => (index * 37 + 11).toUInt8).toArray)
-  let vector := auxiliary ++ platform ++ [(25, random), (31, execfn), (0, 0)]
+  let given := auxiliary ++ platform ++ [(25, random), (31, execfn)]
+  let vector := given ++ [(0, 0)]
   let cells := [arguments.length] ++ addresses.take arguments.length ++ [0] ++ addresses.drop arguments.length ++ [0] ++
     vector.flatMap fun entry => [entry.1, entry.2]
   -- It is aligned to 16 where the program starts.
@@ -2220,6 +2257,8 @@ private def mapStack (emu : Emu) (architecture : Architecture) (path : String) (
   for (cell, index) in cells.zipIdx do
     write emu (pointer + wordSize * index) (Abi.field architecture.big wordSize cell)
   setReg emu ⟨(threadRegisters emu.config.syscallAbi).1, .imm architecture.bits, 0, false⟩ (bits architecture.bits pointer)
+  -- All of it but its end, which is what `/proc/self/auxv` has too.
+  pure given
 
 /-- A parsed program and what interprets it in an emulator that has nothing mapped, for a process of `credentials` that ran it by
 `path`: its registers, its memory, its stack and where it starts. It gives where its heap starts and its auxiliary vector, as a type and
@@ -2270,7 +2309,7 @@ private def loadProgram (emu : Emu) (architecture : Architecture) (credentials :
     (7, if interpreter.isSome then interpreterBase architecture else 0), (8, 0), (9, base + program.entry), (11, credentials.uid),
     (12, credentials.euid), (13, credentials.gid), (14, credentials.egid), (16, capabilities), (17, 100), (23, if secure then 1 else 0),
     (26, 0)]
-  mapStack emu architecture path arguments environment auxiliary
+  let auxiliary ← mapStack emu architecture path arguments environment auxiliary
   -- On ARM, the low bit of where a program starts says that it is in Thumb.
   let entry ← if architecture == .arm then do
       setReg emu ⟨"ISET", .imm 1, 0, false⟩ (bits 1 (entry % 2))
@@ -2965,6 +3004,9 @@ def Machine.stepBack (machine : Machine) (count : Nat := 1) : IO Unit := do
     | throw <| IO.userError "nothing kept is before that"
   let some (at_, quantum, saved) := history.saved[index]? | throw <| IO.userError "nothing kept is before that"
   machine.restoreKept saved
+  -- What hears of it forgets what it knew of after what was kept, before that runs again: which files of the host it brought in, what
+  -- inotify watches, as the kernel that it goes back to has none of them.
+  for heard in ← machine.restored.get do heard s!"Machine.stepBack {count}"
   if target > at_ then
     let muted ← machine.emu.breakpointsMuted.get
     machine.emu.breakpointsMuted.set true
@@ -2974,7 +3016,6 @@ def Machine.stepBack (machine : Machine) (count : Nat := 1) : IO Unit := do
       machine.emu.breakpointsMuted.set muted
   -- What came after is what may not happen again.
   machine.history.set (some { history with position := target, saved := history.saved.extract 0 (index + 1) })
-  for heard in ← machine.restored.get do heard s!"Machine.stepBack {count}"
 
 /-! Memory of a guest for who runs it. -/
 

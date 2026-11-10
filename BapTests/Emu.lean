@@ -2178,6 +2178,53 @@ def testLinuxRewriteFloat (triple : String) : IO Unit := do
   assertEqual s!"Linux {triple} code written again runs as it is now" (Bap.Tasks.ScheduleOutcome.finished 0, "5\n6\n5\n")
     (outcome, String.fromUTF8! (← written.get))
 
+/-- A program whose interpreter is bigger than what is between where interpreters went and the stack, as musl's libc.so is when it is
+the interpreter, runs: `testsuite/src/big-interp/make.py` makes an interpreter of a segment of 1 MiB, which says so and exits. -/
+def testBigInterpreter : IO Unit := do
+  let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile "testsuite/bin/x86_64-linux-big-interp")
+    |>.addFile "/lib/ld-big.so" (← IO.FS.readBinFile "testsuite/bin/x86_64-linux-ld-big.so")
+  let written ← IO.mkRef ByteArray.empty
+  let started ← (Bap.Linux.start kernel "/test" ["/test"]).toBaseIO
+  match started with
+  | .error error => throw <| IO.userError s!"A program of a big interpreter doesn't start: {error}"
+  | .ok machine =>
+    let outcome ← machine.run fun data => written.modify (· ++ data)
+    assertEqual "A program of a big interpreter runs it" (Bap.Tasks.ScheduleOutcome.finished 0, "the interpreter ran\n")
+      (outcome, String.fromUTF8! (← written.get))
+
+/-- What the disassembler has of the branches of MIPS release 6: a compact branch has no delay slot, which one that isn't compact still
+has, and `jialc` goes where its register and its offset say, which is no target known at the branch. -/
+def testMipsRelease6Branches : IO Unit := do
+  let variant : Bap.Target.LLVMLift.MipsVariant := { bits := 32, release6 := true, endian := .big }
+  let disassembler ← Bap.Target.MIPS.disassembler 0 variant
+  let decode (source : String) : IO Bap.Disasm.Insn := do
+    match ← disassembler.decode 0 (← LLVM.assemble variant.triple source) with
+    | .ok insn => pure insn
+    | .error error => throw <| IO.userError s!"{source}: {error}"
+  let compact ← decode "beqzc $4, 8"
+  assertTrue s!"A compact branch of release 6 has no delay slot: {compact.asm}" (!disassembler.hasDelaySlot compact)
+  let delayed ← decode "beq $4, $5, 8"
+  assertTrue s!"A branch of release 6 that isn't compact has one: {delayed.asm}" (disassembler.hasDelaySlot delayed)
+  let call ← decode "jialc $1, 16"
+  assertEqual s!"jialc has no target at the branch: {call.asm}" none call.target
+
+/-- What `stepBack` goes back over runs as it ran: what the machine knew of the host, such as which files of a directory that it mounts it
+has brought in, is forgotten before that runs again, as the kernel that it goes back to has none of them. `libc-stepback` opens such a
+file at its start and then works. -/
+def testStepBackMount : IO Unit := do
+  let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile "testsuite/bin/aarch64-linux-musl-libc-stepback")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  machine.mountHost "testsuite/data/stepback-mount" "/mnt"
+  machine.keepHistory (every := 1000000000)
+  let written ← IO.mkRef ByteArray.empty
+  let print (data : ByteArray) : IO Unit := written.modify (· ++ data)
+  let outcome ← machine.run (fuel := 300000) print
+  assertEqual "A run of work stops in it" Bap.Tasks.ScheduleOutcome.outOfFuel outcome
+  machine.stepBack 1000
+  let outcome ← machine.run print
+  assertEqual "What it went back over opened the file of the host as it did" (Bap.Tasks.ScheduleOutcome.finished 0, "open ok\n")
+    (outcome, String.fromUTF8! (← written.get))
+
 /-- A run with all of that stopped and saved goes on as it would have: what is pending, the frames of handlers and what a process does
 with a signal are in a checkpoint, in every piece. -/
 def testLinuxSignalCheckpoints (triple : String) (step : Nat) : IO Unit := do
@@ -2620,6 +2667,9 @@ def testVerdict (triple : String) : IO Unit := do
     (report.sources.any fun (label, offset, _) => label == "pread /data" && offset == some 5)
   -- What no one wrote, after going on from the checkpoint.
   let restored ← Bap.Linux.Machine.ofCheckpoint verdict.data (models := models)
+  -- What stopped the run there was the capture's own, which a machine of its checkpoint has nothing of.
+  assertTrue s!"Verdict {triple} a machine of the checkpoint has no breakpoint of the capture"
+    (!(← Bap.Emu.breakpoints restored.emu).contains verdict.pc)
   let some again ← trackers.get | throw <| IO.userError "no tracker after the checkpoint"
   let some journal ← journals.get | throw <| IO.userError "no journal after the checkpoint"
   -- The machine's tracker is the one that the checkpoint went into, which `ofCheckpoint` left in the cell: what is written through one

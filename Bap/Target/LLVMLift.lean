@@ -1067,7 +1067,8 @@ private def mipsTarget (bits address : Nat) (decoded : LLVM.Decoded) : Option Na
   | some (.imm immediate) =>
     if ["J", "JAL", "JALX"].contains decoded.opcode then
       some (wrapAddress bits (Int.ofNat ((address + 4) / 0x10000000 * 0x10000000) + immediate))
-    else if directControl decoded.flags then
+    -- Not of a call that is an indirect branch too, as `jialc` is, which goes where a register and the offset say.
+    else if directControl decoded.flags && decoded.flags &&& 16 == 0 then
       some (wrapAddress bits (Int.ofNat address + immediate))
     else none
   | _ => none
@@ -1087,6 +1088,18 @@ through, which is where the callee returns past it. `ERET` has no delay slot. -/
 def mipsHasDelaySlot (insn : Disasm.Insn) : Bool :=
   (insn.flow == .jump || insn.flow == .indirectJump || insn.flow == .ret || insn.flow == .conditionalJump) &&
     !insn.asm.startsWith "eret" && !insn.asm.startsWith "deret"
+
+/-- The compact branches of release 6, which have no delay slot, nor a forbidden slot that this has to know of: what comes after one
+runs only as it falls through, if it does. -/
+def mipsCompactMnemonics : List String :=
+  ["bc", "balc", "beqzc", "bnezc", "beqc", "bnec", "bltc", "bgec", "bltuc", "bgeuc", "blezc", "bgezc", "bgtzc", "bltzc", "beqzalc",
+    "bnezalc", "blezalc", "bgezalc", "bgtzalc", "bltzalc", "bovc", "bnvc", "jic", "jialc"]
+
+/-- `mipsHasDelaySlot` of a variant: of release 6, a compact branch has none. Before it, that is all there is to it. -/
+def mipsHasDelaySlotOf (variant : MipsVariant) : Disasm.Insn → Bool :=
+  match variant.release6 with
+  | true => fun insn => mipsHasDelaySlot insn && !mipsCompactMnemonics.contains ((insn.asm.splitOn " ").headD "")
+  | false => mipsHasDelaySlot
 
 /-- The mnemonics of the branches that annul their delay slots when they are not taken, including LLVM's aliases. -/
 def mipsLikelyMnemonics : List String :=

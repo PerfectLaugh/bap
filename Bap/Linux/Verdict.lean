@@ -88,6 +88,8 @@ def captureVerdict (machine : Machine) (criteria : Criteria) : IO Checkpoint := 
             let position ← match ← machine.history.get with
               | some history => pure (some history.position)
               | none => pure none
+            -- The breakpoint is the capture's, which what goes on from the checkpoint has nothing of.
+            Bap.Emu.removeHook emu breakpoint
             return { pc := criteria.pc, thread, group, position, values, data := ← machine.checkpoint }
         Bap.Emu.resumeThread emu id
         fuel := fuel - 1

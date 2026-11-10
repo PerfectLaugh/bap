@@ -20,7 +20,7 @@ def disassembler (base : Nat := 0) (variant : MipsVariant := {}) : IO Disasm.Dis
   pure {
     name := s!"{variant.triple}-llvm-primus"
     decode := decodeWith variant globals base
-    hasDelaySlot := LLVMLift.mipsHasDelaySlot
+    hasDelaySlot := LLVMLift.mipsHasDelaySlotOf variant
     annulsSlot := LLVMLift.mipsAnnulsSlot }
 
 end Bap.Target.MIPS

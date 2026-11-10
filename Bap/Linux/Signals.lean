@@ -311,7 +311,8 @@ private def getValue : Decoder (Bap.Var × Bap.Value) := fun data at_ => do
     .ok ((⟨name, .imm width, index, isVirtual⟩, .bits (BitVec.ofNat width value)), at_)
   | _ => .ok ((⟨name, .imm 0, index, isVirtual⟩, .undefined), at_)
 
-private def putInfo (out : ByteArray) (info : SignalInfo) : ByteArray :=
+/-- A `SignalInfo` in a checkpoint, which `Bap.Linux.Ptrace` keeps of a stop too. -/
+def putInfo (out : ByteArray) (info : SignalInfo) : ByteArray :=
   let out := putNat (putNat out info.signal) info.code
   match info.detail with
   | .sent pid uid value => putNat (putNat (putNat (putNat out 0) pid) uid) value
@@ -320,7 +321,8 @@ private def putInfo (out : ByteArray) (info : SignalInfo) : ByteArray :=
   | .seccomp address syscall arch data => putNat (putNat (putNat (putNat (putNat out 3) address) syscall) arch) data
   | .timer id overrun value => putNat (putNat (putNat (putNat out 4) id) overrun) value
 
-private def getInfo : Decoder SignalInfo := fun data at_ => do
+/-- What `putInfo` put. -/
+def getInfo : Decoder SignalInfo := fun data at_ => do
   let (signal, at_) ← getNat data at_
   let (code, at_) ← getNat data at_
   let (tag, at_) ← getNat data at_

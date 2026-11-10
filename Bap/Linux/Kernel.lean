@@ -95,6 +95,9 @@ structure Socket where
   family : Nat := 1
   /-- Where datagrams of the Internet go when a send doesn't say: the address that it was connected to, whoever has it then. -/
   remote : Option String := none
+  /-- `SO_RCVTIMEO` and `SO_SNDTIMEO`, in nanoseconds, of which 0 is none: how long a receive or a send that waits waits. -/
+  receiveTimeout : Nat := 0
+  sendTimeout : Nat := 0
 
 /-- What an epoll instance watches of a descriptor: the descriptor that it was given, its open file, which is what is watched, the
 events that it asks for, the data that it gives back with them, and if it was told of and has been ready since, the events that it

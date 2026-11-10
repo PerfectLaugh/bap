@@ -583,24 +583,27 @@ theorem mips_region_target (bits address : Nat) (decoded : LLVM.Decoded) (i : In
     omega
 
 /-- All other direct branches and calls of MIPS, conditional or not, count from the branch: LLVM
-has already added the four bytes of the delay slot. -/
+has already added the four bytes of the delay slot. A call that is an indirect branch too, as `jialc` is, has none. -/
 theorem mips_relative_target (bits address : Nat) (decoded : LLVM.Decoded) (d : Int)
     (hj : ["J", "JAL", "JALX"].contains decoded.opcode = false)
-    (hf : directControl decoded.flags = true) (hl : decoded.operands.getLast? = some (.imm d)) :
+    (hf : directControl decoded.flags = true) (hi : decoded.flags &&& 16 = 0)
+    (hl : decoded.operands.getLast? = some (.imm d)) :
     mipsTarget bits address decoded = some (wrapAddress bits (Int.ofNat address + d)) := by
   lift_unfold mipsTarget
   rw [hl]
   have hne : ¬["J", "JAL", "JALX"].contains decoded.opcode = true := by simp only [hj]; decide
+  have hd : (directControl decoded.flags && decoded.flags &&& 16 == 0) = true := by simp [hf, hi]
   show (if _ then _ else (if _ then _ else _)) = _
-  rw [ite_eq_right hne, ite_eq_left hf]
+  rw [ite_eq_right hne, ite_eq_left hd]
 
 /-- Moving a MIPS branch that counts from itself moves its target. -/
 theorem mips_relative_shift (bits address k : Nat) (decoded : LLVM.Decoded) (d : Int)
     (hj : ["J", "JAL", "JALX"].contains decoded.opcode = false)
-    (hf : directControl decoded.flags = true) (hl : decoded.operands.getLast? = some (.imm d)) :
+    (hf : directControl decoded.flags = true) (hi : decoded.flags &&& 16 = 0)
+    (hl : decoded.operands.getLast? = some (.imm d)) :
     mipsTarget bits (address + k) decoded =
       some (wrapAddress bits (((wrapAddress bits (Int.ofNat address + d) + k : Nat) : Int))) := by
-  rw [mips_relative_target bits _ decoded d hj hf hl, wrapAddress_add]
+  rw [mips_relative_target bits _ decoded d hj hf hi hl, wrapAddress_add]
   congr 2
   simp only [Int.ofNat_eq_natCast, Int.natCast_add]
   omega

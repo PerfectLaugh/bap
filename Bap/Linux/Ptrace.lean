@@ -39,6 +39,9 @@ structure Stop where
   code : Nat := 0
   detail : Nat := 0
   fault : Bool := false
+  /-- What the signal that it stopped for was sent with, which goes on with it if the tracer lets that signal through, as Linux keeps
+  it in `last_siginfo`. -/
+  info : Option SignalInfo := none
   deriving DecidableEq, Repr
 
 /-- A wait that waits: of what, for what, and where what it finds goes, as `wait4` (its status and usage) or `waitid` has it. -/
@@ -237,6 +240,13 @@ private def toldTracer (ptrace : Ptrace) (emu : Emu) (tid status : Nat) : IO Uni
     ptrace.signals.notifyParent emu tid status
     markUnwaited ptrace emu tid
 
+/-- What a signal that a tracer lets the tracee have is sent with, as Linux's `ptrace_signal` has it: what it stopped for, as it was,
+if the tracer lets that signal through, and otherwise one of the tracer's own. -/
+private def letThrough (stop : Option Stop) (signal tracer : Nat) : SignalInfo :=
+  match stop.bind (·.info) with
+  | some info => if info.signal == signal then info else ⟨signal, 0, .sent tracer 0 0⟩
+  | none => ⟨signal, 0, .sent tracer 0 0⟩
+
 /-- A thread stops, which its tracer hears of, or its parent of a process that stopped. -/
 private def stopThread (ptrace : Ptrace) (emu : Emu) (tid : Nat) (stop : Stop) : IO Unit := do
   ptrace.table.modify fun table => { table with stops := table.stops.insert tid stop }
@@ -268,7 +278,8 @@ def intercept (ptrace : Ptrace) (emu : Emu) (tid : Nat) (info : SignalInfo) : IO
     -- Not a fault, which comes again by itself: what a tracer lets it have is sent again.
     | .seccomp address _ _ _ => (address, false)
     | .timer id _ _ => (id, false)
-  stopThread ptrace emu tid { status := stoppedStatus info.signal, traced := true, signal := info.signal, code := info.code, detail, fault }
+  stopThread ptrace emu tid
+    { status := stoppedStatus info.signal, traced := true, signal := info.signal, code := info.code, detail, fault, info := some info }
   pure true
 
 /-- SIGSTOP or the like stops a process, as its threads are, and SIGCONT lets one go on. -/
@@ -830,7 +841,7 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
       -- A fault comes again by itself, with its own signal; anything else, as another signal that a fault goes on with, is sent, to go
       -- through, and the fault comes again after it.
       unless stop.any (fun stop => stop.fault && stop.signal == data) do
-        ptrace.signals.send emu (some pid) (← groupOf emu pid) ⟨data, 0, .sent group 0 0⟩
+        ptrace.signals.send emu (some pid) (← groupOf emu pid) (letThrough stop data group)
     -- What it has yet to stop for, it stops for now: the next of an event, and then the end of the call that the event was in.
     match table.pending.getD pid [] with
     | next :: rest =>
@@ -888,7 +899,7 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
       { table with tracees := table.tracees.erase pid, pending := table.pending.erase pid, calls := table.calls.erase pid }
     disarmStep ptrace emu pid
     leaveEntry ptrace emu pid
-    if data != 0 then ptrace.signals.send emu (some pid) (← groupOf emu pid) ⟨data, 0, .sent group 0 0⟩
+    if data != 0 then ptrace.signals.send emu (some pid) (← groupOf emu pid) (letThrough (table.stops.get? pid) data group)
     release ptrace emu pid
     ok
   | 7 => goOn false false
@@ -1129,7 +1140,8 @@ open Wire in
 private def putStop (out : ByteArray) (entry : Nat × Stop) : ByteArray :=
   let (tid, stop) := entry
   let out := putNat (putNat (putNat out tid) stop.status) stop.signal
-  putFlag (putNat (putNat (putFlag (putFlag out stop.traced) stop.reported) stop.code) stop.detail) stop.fault
+  let out := putFlag (putNat (putNat (putFlag (putFlag out stop.traced) stop.reported) stop.code) stop.detail) stop.fault
+  putOption Bap.Linux.Encoding.putInfo out stop.info
 
 open Wire in
 private def getStop : Decoder (Nat × Stop) := fun data at_ => do
@@ -1141,7 +1153,8 @@ private def getStop : Decoder (Nat × Stop) := fun data at_ => do
   let (code, at_) ← getNat data at_
   let (detail, at_) ← getNat data at_
   let (fault, at_) ← getFlag data at_
-  .ok ((tid, { status, signal, traced, reported, code, detail, fault }), at_)
+  let (info, at_) ← getOption Bap.Linux.Encoding.getInfo data at_
+  .ok ((tid, { status, signal, traced, reported, code, detail, fault, info }), at_)
 
 open Wire in
 private def putPair (out : ByteArray) (entry : Nat × Nat) : ByteArray := putNat (putNat out entry.1) entry.2

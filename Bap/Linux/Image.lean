@@ -71,7 +71,8 @@ def socketBytes (socket : Socket) : ByteArray :=
   let out := Wire.putFlag out socket.waiting
   let out := Wire.putList putMessage out socket.incoming.toList
   let out := Wire.putFlag (Wire.putFlag out socket.readShut) socket.writeShut
-  Wire.putOption Wire.putText (Wire.putNat (Wire.putNat out socket.owner) socket.family) socket.remote
+  let out := Wire.putOption Wire.putText (Wire.putNat (Wire.putNat out socket.owner) socket.family) socket.remote
+  Wire.putNat (Wire.putNat out socket.receiveTimeout) socket.sendTimeout
 
 /-- A socket from the bytes of its inode. -/
 def socketOfBytes (data : ByteArray) : Except String Socket := do
@@ -95,8 +96,14 @@ def socketOfBytes (data : ByteArray) : Except String Socket := do
     let (family, at_) ← Wire.getNat data at_
     let (remote, at_) ← Wire.getOption Wire.getText data at_
     pure (family, remote, at_)
+  -- What a socket had before it had timeouts.
+  let (receiveTimeout, sendTimeout, at_) ← if at_ == data.size then pure (0, 0, at_) else do
+    let (receiveTimeout, at_) ← Wire.getNat data at_
+    let (sendTimeout, at_) ← Wire.getNat data at_
+    pure (receiveTimeout, sendTimeout, at_)
   Wire.expectEnd data at_
-  pure { type, name, peer, listening, pending, waiting, incoming := incoming.toArray, readShut, writeShut, owner, family, remote }
+  pure { type, name, peer, listening, pending, waiting, incoming := incoming.toArray, readShut, writeShut, owner, family, remote,
+         receiveTimeout, sendTimeout }
 
 /-- Of a process, its process group, session, terminal, credentials and capabilities, limits and nice value, whether it ended, its root,
 the barriers it registered for and what it advised of its memory for a child, as bytes. -/

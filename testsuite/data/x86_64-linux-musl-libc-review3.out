@@ -1,0 +1,7 @@
+a signal a tracer lets through: code -1 value 42
+shutdown of a listener: 0
+accept after shutdown: -1 EINVAL
+SO_RCVTIMEO of 200000 us, recv: -1 EAGAIN
+recv of MSG_WAITALL of 8: 8
+/proc/self/auxv has AT_RANDOM 1 and AT_EXECFN 1
+done
