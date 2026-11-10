@@ -103,14 +103,15 @@ private def callSends (machine : Machine) (opened : Opened) (number : Nat) (args
   let architecture := machine.architecture
   let some call := architecture.call number | return []
   let fd := args.getD 0 0
-  -- Where it writes, and whether that is the end, as `O_APPEND` has it.
+  -- Where it writes, and whether that is the end, as `O_APPEND` has it, and of `pwritev2`, `RWF_APPEND` too.
+  let flagAppends := call == .pwritev2 && args.getD 5 0 &&& 0x10 != 0
   let target : Option (Nat × Nat × Bool) ← match kernel.openFileOf group fd with
     | .error _ => pure none
     | .ok (_, file) =>
       match kernel.inodes.get? file.inode with
       | some { content := .pipe buffer head consumed _, .. } => pure (some (file.inode, consumed + (buffer.size - head), false))
       | some { content := .file data, .. } =>
-        let appends := file.flags &&& 0x400 != 0
+        let appends := file.flags &&& 0x400 != 0 || flagAppends
         pure (some (file.inode, if appends then data.size else file.offset, appends))
       | _ => pure none
   let some (inode, offset, appends) := target | return []
@@ -145,6 +146,43 @@ private def callSends (machine : Machine) (opened : Opened) (number : Nat) (args
     pure sends
   | _ => pure []
 
+/-- Of a call that copies in the kernel from one descriptor to another, `sendfile`, `splice`, `tee` or `copy_file_range`, where it reads
+and where it writes, each a space that keeps tags and where in it: of a pipe, what was read of it, and what was written, and of a file, its
+offset, or the one that the call is given. -/
+private def kernelCopy (machine : Machine) (number : Nat) (args : List Nat) : IO (Option ((Nat × Nat) × (Nat × Nat))) := do
+  let architecture := machine.architecture
+  let some call := architecture.call number | return none
+  let group := (← Bap.Emu.currentTask machine.emu).group
+  let kernel ← machine.kernel.get
+  let arg (index : Nat) : Nat := args.getD index 0
+  -- An offset that the call is given where it points, of `size` bytes, and none of NULL.
+  let given (pointer size : Nat) : IO (Option Nat) := do
+    if pointer == 0 then return none
+    let bytes ← Bap.Emu.peek machine.emu pointer size
+    let ordered := if architecture.big then bytes.toList else bytes.toList.reverse
+    pure (some (ordered.foldl (fun value byte => value * 256 + byte.toNat) 0))
+  let place (fd : Nat) (reading : Bool) (explicit : Option Nat) : Option (Nat × Nat) :=
+    match kernel.openFileOf group fd with
+    | .error _ => none
+    | .ok (_, file) =>
+      match kernel.inodes.get? file.inode with
+      | some { content := .pipe buffer head consumed _, .. } =>
+        some (Kernel.fileSpace + file.inode, if reading then consumed else consumed + (buffer.size - head))
+      | some { content := .file data, .. } =>
+        let appends := !reading && file.flags &&& 0x400 != 0
+        some (Kernel.fileSpace + file.inode, explicit.getD (if appends then data.size else file.offset))
+      | _ => none
+  let both (input : Nat) (inputAt : Option Nat) (output : Nat) (outputAt : Option Nat) :=
+    match place input true inputAt, place output false outputAt with
+    | some source, some target => some (source, target)
+    | _, _ => none
+  match call with
+  | .sendfile => pure (both (arg 1) (← given (arg 2) (architecture.bits / 8)) (arg 0) none)
+  | .sendfile64 => pure (both (arg 1) (← given (arg 2) 8) (arg 0) none)
+  | .splice | .copyFileRange => pure (both (arg 0) (← given (arg 1) 8) (arg 2) (← given (arg 3) 8))
+  | .tee => pure (both (arg 0) none (arg 1) none)
+  | _ => pure none
+
 /-- A `Tracker` of a machine, with what it knows of what was opened. What a checkpoint has is both. -/
 private def attachTracker (machine : Machine) (config : Config) : IO (Tracker × Opened) := do
   let opened : Opened ← IO.mkRef {}
@@ -158,8 +196,17 @@ private def attachTracker (machine : Machine) (config : Config) : IO (Tracker ×
     pure (some (label, (← readBacking machine number args).map (·.2.1)))
   let backing (number : Nat) (args : List Nat) : IO (Option (Nat × Nat)) := do
     pure ((← readBacking machine number args).map fun (space, offset, _) => (space, offset))
+  -- Of a copy in the kernel, where it reads and writes, as they are before it, for once it says how much it copied.
+  let copying : IO.Ref (Option ((Nat × Nat) × (Nat × Nat))) ← IO.mkRef none
+  let sends (number : Nat) (args : List Nat) : IO (List Send) := do
+    copying.set (← kernelCopy machine number args)
+    callSends machine opened number args
   let called (number : Nat) (args : List Nat) (result : Option Nat) : IO Unit := do
     noteOpened machine opened number args result
+    if let some ((fromSpace, fromOffset), (toSpace, toOffset)) := ← copying.get then
+      copying.set none
+      if let (some count, some tracker) := (result, ← started.get) then
+        if count < 2 ^ 63 then tracker.copySpace fromSpace fromOffset toSpace toOffset count
     -- A program that `execve` ran has its registers as the kernel set them, which are of nothing; one that failed gives an error.
     if machine.architecture.call number matches some .execve | some .execveat then
       if result.all (· < 2 ^ 63) then
@@ -174,7 +221,7 @@ private def attachTracker (machine : Machine) (config : Config) : IO (Tracker ×
         if let some mapping := ((← machine.kernel.get).process group).mappings.find? (·.start == start) then
           if !mapping.shared then
             tracker.mapped start mapping.size (Kernel.fileSpace + mapping.inode) mapping.offset none
-  let tracker ← Tracker.start emu { config with describe, backing, sends := callSends machine opened, called }
+  let tracker ← Tracker.start emu { config with describe, backing, sends, called }
   started.set (some tracker)
   machine.restored.modify (tracker.noteRestored :: ·)
   pure (tracker, opened)

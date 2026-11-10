@@ -430,7 +430,9 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       let .timerfd expiry interval := inode.content | return ← fail einval
       let spanBytes (nanoseconds : Nat) : ByteArray :=
         numberBytes big field (nanoseconds / 1000000000) ++ numberBytes big field (nanoseconds % 1000000000)
-      let current := spanBytes interval ++ spanBytes ((expiry.map fun at_ => at_ - min at_ now).getD 0)
+      -- Of one that repeats and expired, the time to when it expires next, as `hrtimer_forward_now` has it.
+      let left (at_ : Nat) : Nat := if interval > 0 && at_ ≤ now then interval - (now - at_) % interval else at_ - min at_ now
+      let current := spanBytes interval ++ spanBytes ((expiry.map left).getD 0)
       if !setting then
         write emu (arg 1) current
         return ← succeed

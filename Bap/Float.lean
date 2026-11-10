@@ -265,6 +265,12 @@ def convert (source target : Format) (mode : Mode) (bits : Nat) : Nat :=
   | .zero negative => packZero target negative
   | .finite negative m e => pack target mode negative m e
   | .nan _ =>
+    -- What x87 takes for an invalid operand, an unnormal, a pseudo-infinity or a pseudo-NaN, is the indefinite, negative and quiet with
+    -- nothing else, as the 387 and after store it.
+    if noncanonical source bits then
+      signBit target true + target.maxExponent * 2 ^ target.fieldBits + (if target.explicit then 2 ^ target.fractionBits else 0) +
+        2 ^ (target.fractionBits - 1)
+    else
     -- The sign and the top of the payload, made quiet.
     let negative := (bits >>> (source.width - 1)) % 2 == 1
     let fraction := bits % 2 ^ source.fractionBits
@@ -393,7 +399,7 @@ private def evaluateX86 (name : String) (inputs : List Nat) : Option (Nat × Nat
     pure (last, toInteger (← formatOf first) (mode.getD .rtz) last x)
   | "cast_sfloat", [x] => pure (last, ofSigned (← formatOf last) (mode.getD .rne) first x)
   | "cast_float", [x] => pure (last, ofUnsigned (← formatOf last) (mode.getD .rne) x)
-  | "forder", [x, y] => test fun format => pure ((compare format x y).any (·.1))
+  | "forder", [x, y] | "forders", [x, y] => test fun format => pure ((compare format x y).any (·.1))
   | "fgt", [x, y] => test fun format => pure ((compare format y x).any (·.1))
   | "fge", [x, y] => test fun format => pure ((compare format x y).any fun order => !order.1)
   | "feq", [x, y] => test fun format => pure ((compare format x y).any (·.2))
@@ -475,7 +481,7 @@ def formatsOf (name : String) : Option Format × Option Format :=
     let last := widths.getLast?.bind formatOf
     match parts.headD "" with
     | "fadd" | "fsub" | "fmul" | "fdiv" | "fsqrt" | "fmad" | "fmadh" | "fround" | "froundq" | "fconvert" => (first, last)
-    | "forder" | "fgt" | "fge" | "feq" => (first, none)
+    | "forder" | "forders" | "fgt" | "fge" | "feq" => (first, none)
     | "cast" =>
       match parts.getD 1 "" with
       | "sint" | "int" => (first, none)
@@ -548,12 +554,15 @@ def raisedBy (rules : NaNRules) (name : String) (inputs : List Nat) (result : Na
   let hasMode := (before.getLast?.bind Mode.ofName).isSome
   -- A step of what an instruction does, and not what it does.
   if before.getLast? == some "rni" then return {}
-  let comparing := ["forder", "fgt", "fge", "feq"].contains (before.headD "")
+  let comparing := ["forder", "forders", "fgt", "fge", "feq"].contains (before.headD "")
   if comparing then
     let widths := (parts.drop (at_ + 2)).filterMap String.toNat?
     let some format := widths.head?.bind formatOf | return {}
+    -- `forders` is a comparison that signals, as x86's `COMISD`, `MINSD` and the predicates of `CMPSD` that say so are: of any NaN,
+    -- quiet or not, rather than of one that signals.
     let signaling := inputs.any fun input =>
-      if rules.legacyMips then isNaN format input && !isSignaling format input else isSignaling format input
+      if before.headD "" == "forders" then isNaN format input
+      else if rules.legacyMips then isNaN format input && !isSignaling format input else isSignaling format input
     return { invalid := signaling, denormal := inputs.any (isDenormal format) && !inputs.any (isNaN format) }
   if !hasMode then return {}
   let operation := "_".intercalate before.dropLast
@@ -593,7 +602,8 @@ def raisedBy (rules : NaNRules) (name : String) (inputs : List Nat) (result : Na
     let some input := inputs.head? | return {}
     let signaling := if rules.legacyMips then isNaN source input && !isSignaling source input else isSignaling source input
     if isNaN source input then return { invalid := signaling }
-    return { inexact := operation == "fround" && rounded && result != input, denormal := isDenormal source input }
+    -- Of a denormal, only x87's FRNDINT, of 80 bits, says so: ROUNDSD doesn't.
+    return { inexact := operation == "fround" && rounded && result != input, denormal := source.explicit && isDenormal source input }
   | "fadd" | "fsub" | "fmul" | "fdiv" | "fsqrt" | "fmad" | "fmadh" | "fconvert" =>
     let target := if operation == "fconvert" then (formatOf last).getD source else source
     -- The quiet bit of the NaNs of legacy MIPS says the opposite.
@@ -636,6 +646,6 @@ def serves (name : String) : Bool :=
     let before := if (before.getLast?.bind Mode.ofName).isSome then before.dropLast else before
     ["fadd", "fsub", "fmul", "fdiv", "fsqrt", "fmad", "fmadh", "fround", "froundq", "fconvert", "cast_sint", "cast_int", "cast_sfloat",
       "cast_float",
-      "forder", "fgt", "fge", "feq", "is_nan", "is_inf", "is_fzero"].contains ("_".intercalate before)
+      "forder", "forders", "fgt", "fge", "feq", "is_nan", "is_inf", "is_fzero"].contains ("_".intercalate before)
 
 end Bap.Float

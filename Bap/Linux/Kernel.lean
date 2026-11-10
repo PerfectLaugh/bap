@@ -1,5 +1,6 @@
 import Std.Data.HashMap
 import Bap.Core.Zeros
+import Bap.Jit
 
 /-! # A virtual Linux kernel
 
@@ -22,6 +23,9 @@ gives MIPS its own numbers of, which differ above 34. -/
 
 namespace Errno
 def eperm : Nat := 1
+def enametoolong : Nat := 36
+def exdev : Nat := 18
+def e2big : Nat := 7
 def eacces : Nat := 13
 def enoent : Nat := 2
 def enoexec : Nat := 8
@@ -822,6 +826,10 @@ def resolve (kernel : Kernel) (base path : String) (follow : Bool := true) (link
   let slash := ending == .slash && !exact
   let follow := follow || slash
   let root := (Path.parts "/" kernel.walkRoot).reverse
+  -- Of `PATH_MAX` and `NAME_MAX`: a path of 4096 bytes or more, and a name of more than 255, are `ENAMETOOLONG`. The size of the text
+  -- is at least that of its bytes, which are counted only where it is more.
+  let bytesOf (text : String) : Nat := if text.utf8ByteSize ≤ 255 then text.utf8ByteSize else (Path.toBytes text).size
+  if bytesOf path ≥ 4096 || (Path.walkParts path).any (bytesOf · > 255) then .error Errno.enametoolong else
   let rec walk (done : List String) (todo : List String) : Nat → Nat → Result (String × Option Nat)
     | 0, _ => .error Errno.eloop
     | fuel + 1, links =>
@@ -1054,9 +1062,11 @@ parent's state, in its process group and session. -/
 def fork (kernel : Kernel) (parent child : Nat) : Kernel :=
   kernel.setProcess child { kernel.process parent with pgid := kernel.pgidOf parent, sid := kernel.sidOf parent }
 
-/-- A process is over, and what only it had open with it: of it, its process group and session stay. -/
+/-- A process is over, and holds nothing any more: its descriptors, which `Machine` has closed one by one, its mappings, its working
+directory and its root go, as `do_exit` has them; what a zombie has of it, its ids, its name and its groups, stays. -/
 def exitProcess (kernel : Kernel) (group : Nat) : Kernel :=
-  kernel.setProcess group { pgid := kernel.pgidOf group, sid := kernel.sidOf group, ended := true }
+  let process := kernel.process group
+  kernel.setProcess group { process with descriptors := {}, mappings := [], forkAdvice := [], cwd := {}, root := {}, ended := true }
 
 /-- The soft and hard limits of a resource of a process, as Linux numbers them besides MIPS. -/
 def limitOf (kernel : Kernel) (group resource : Nat) : Nat × Nat :=
@@ -1125,6 +1135,13 @@ def readOnly (kernel : Kernel) (path : String) : Bool :=
     mount.flags &&& 1 != 0 && mount.source.startsWith hiddenRoot && (path == mount.source || path.startsWith (mount.source ++ "/"))
 
 private def erofs : Nat := 30
+
+/-- The file system that a path of the tree is on: of a mount of its own, where its files are, and otherwise the tree's, `/`. -/
+def fileSystemOf (kernel : Kernel) (path : String) : String :=
+  let mounted := kernel.mounts.filter fun mount =>
+    mount.source.startsWith hiddenRoot && (path == mount.source || path.startsWith (mount.source ++ "/"))
+  (mounted.foldl (fun best mount => if mount.source.length > best.length then mount.source else best) "")
+    |> fun found => if found.isEmpty then "/" else found
 
 /-- The user and the group that a program runs as, as `bprm_fill_uid` has them: of one that is set-user-ID, its owner, and of one that is
 set-group-ID and that its group may run, its group; of one on a mount of `MS_NOSUID`, neither. -/
@@ -1727,9 +1744,11 @@ private def statOf (kernel : Kernel) (inode : Inode) : Stat :=
     changed := inode.details.changed, uid := inode.details.uid, gid := inode.details.gid, device := kernel.deviceOf inode.content }
 
 /-- `stat` and `lstat`. -/
-def statPath (kernel : Kernel) (base path : String) (follow : Bool := true) : Result Stat := do
+def statPath (kernel : Kernel) (base path : String) (follow : Bool := true) (searching : Option Credentials := none) : Result Stat := do
   if path == "" then .error Errno.enoent
-  let (_, found) ← kernel.resolve base path follow
+  let (normal, found) ← kernel.resolve base path follow
+  -- Of a process, what is in a directory that it may not search is `EACCES`; the host looks where it likes.
+  if let some credentials := searching then searchError kernel credentials normal
   match found with
   | none => .error Errno.enoent
   | some number => .ok (statOf kernel (← inodeOf kernel number))
@@ -1758,6 +1777,9 @@ def executable (kernel : Kernel) (group : Nat) (path : String) : Result ByteArra
   if !kernel.searchable credentials false normal then .error Errno.eacces
   let some number := found | .error Errno.enoent
   let inode ← inodeOf kernel number
+  -- Nothing runs of a mount of `MS_NOEXEC`, as `path_noexec` has it.
+  if kernel.mounts.any fun mount => mount.flags &&& 8 != 0 && (normal == mount.source || normal.startsWith (mount.source ++ "/")) then
+    .error Errno.eacces
   match inode.content with
   | .file data => if permits inode credentials false 1 then .ok data else .error Errno.eacces
   | _ => .error Errno.eacces
@@ -1775,8 +1797,11 @@ def baseOf (kernel : Kernel) (group directory : Nat) (atCwd : Bool) : Result Str
   if atCwd then .ok (kernel.cwdOf group)
   else
     let (_, file) ← openFileOf kernel group directory
-    match pathOfInode kernel file.inode, (← inodeOf kernel file.inode).content with
+    let inode ← inodeOf kernel file.inode
+    match pathOfInode kernel file.inode, inode.content with
     | some path, .directory => .ok path
+    -- One that was removed, as `baseIn` has a working directory that was: what is in it isn't there, and its `..` is where it was.
+    | none, .directory => .ok (kernel.baseIn { inode := file.inode, path := (inode.details.name.dropEnd " (deleted)".length).toString })
     | _, _ => .error Errno.enotdir
 
 /-- What is in a directory, sorted, without `.` and `..`. -/
@@ -1872,7 +1897,7 @@ def remove (kernel : Kernel) (group : Nat) (base path : String) (directory : Boo
     match inode.content, directory with
     | .directory, true =>
       -- Of the root, as of what is mounted, `EBUSY`, as Linux's `do_rmdir` has it of `LAST_ROOT`.
-      if normal == "/" then .error ebusy
+      if normal == "/" || normal == kernel.walkRoot then .error ebusy
       if !(children kernel normal).isEmpty then .error Errno.enotempty
     | .directory, false => .error Errno.eisdir
     | _, true => .error Errno.enotdir
@@ -1911,7 +1936,10 @@ def rename (kernel : Kernel) (group : Nat) (base source target : String) : Resul
   searchError kernel credentials to_
   let dots (path : String) : Bool := Path.ending path matches .dot | .dotdot
   if dots source || dots target then .error ebusy
+  -- Of the root, the tree's or the process's, as `LAST_ROOT` has it.
+  if [from_, to_].any fun path => path == "/" || path == kernel.walkRoot then .error ebusy
   let some number := found | .error Errno.enoent
+  if kernel.fileSystemOf from_ != kernel.fileSystemOf to_ then .error Errno.exdev
   if (Path.ending source == .slash || Path.ending target == .slash) && !((← inodeOf kernel number).content matches .directory) then
     .error Errno.enotdir
   if !parentIsDirectory kernel to_ then .error Errno.enoent
@@ -1956,6 +1984,9 @@ def linkInode (kernel : Kernel) (group : Nat) (number : Nat) (base target : Stri
   if !parentIsDirectory kernel normal then .error Errno.enoent
   if kernel.readOnly normal then .error erofs
   if !kernel.mayChangeIn credentials normal then .error Errno.eacces
+  -- Of another file system than where it is, as `do_linkat` has it.
+  if let some at_ := kernel.pathOfInode number then
+    if kernel.fileSystemOf at_ != kernel.fileSystemOf normal then .error Errno.exdev
   -- A file that has no name gets none, unless it is one of `O_TMPFILE` that may.
   if inode.content matches .file _ && kernel.links.getD number 0 == 0 && !inode.details.linkable then .error Errno.enoent
   .ok { kernel.bindPath normal number with
@@ -2022,8 +2053,9 @@ def symlink (kernel : Kernel) (group : Nat) (base target path : String) : Result
   .ok (addInode kernel normal (.symlink target) 0o120777 credentials).1
 
 /-- `readlink`. -/
-def readlink (kernel : Kernel) (base path : String) : Result String := do
-  let (_, found) ← kernel.resolve base path (follow := false)
+def readlink (kernel : Kernel) (base path : String) (searching : Option Credentials := none) : Result String := do
+  let (normal, found) ← kernel.resolve base path (follow := false)
+  if let some credentials := searching then searchError kernel credentials normal
   match found with
   | none => .error Errno.enoent
   | some number =>
@@ -2036,9 +2068,13 @@ def pathIn (kernel : Kernel) (group : Nat) (base path : String) : String × Stri
   let root := kernel.baseIn (kernel.process group).root
   if root == "/" then (base, path)
   else if path.startsWith "/" then
-    -- Within the root, and ending as it did.
-    let ending := match Path.ending path with | .slash => "/" | .dot => "/." | _ => ""
-    ("/", root ++ Path.ofParts (Path.parts "/" path) ++ ending)
+    -- From the root, as it is, so that its `..` are walked after the links before them: see `walkRoot`. A walk is from where the root
+    -- is in the tree, through what is mounted, as a root that `pivot_root` made is a mount.
+    let relative := (path.dropWhile (· == '/')).toString
+    let resolved := match kernel.resolve "/" root with
+      | .ok (normal, some _) => normal
+      | _ => root
+    if relative.isEmpty then ("/", root) else (resolved, relative)
   -- A walk doesn't go above the root of the process: see `walkRoot`.
   else (base, path)
 
@@ -2103,11 +2139,18 @@ def unmount (kernel : Kernel) (group : Nat) (base target : String) (flags : Nat)
   let (normal, _) ← kernel.resolve base target (follow := flags &&& 8 == 0) (mounted := false)
   let some mount := kernel.mounts.find? (·.target == normal) | .error Errno.einval
   let mounts := kernel.mounts.erase mount
-  if !mount.source.startsWith hiddenRoot || mounts.any (·.source == mount.source) then return { kernel with mounts }
   let within (path : String) : Bool := path == mount.source || path.startsWith (mount.source ++ "/")
-  -- What a process is in keeps it, unless `MNT_DETACH` lets it go later, which here is now.
-  if flags &&& 2 == 0 && kernel.processes.fold (fun busy _ process => busy || (!process.ended && (within process.cwd.path || within process.root.path))) false then
-    .error 16
+  -- What a process is in, has open or has mounted in it keeps it, as `do_umount` has it, unless `MNT_DETACH` lets it go later, which here
+  -- is now.
+  if flags &&& 2 == 0 then
+    let inside := kernel.processes.fold (fun busy _ process => busy || (!process.ended && (within process.cwd.path || within process.root.path))) false
+    let opened := kernel.processes.fold (init := false) fun busy _ process => busy || (!process.ended &&
+      process.descriptors.fold (init := false) fun busy _ descriptor => busy ||
+        ((kernel.openFiles.get? descriptor.openFile).bind fun file => kernel.pathOfInode file.inode).any within)
+    let mountedIn := mounts.any fun other => within other.target
+    if inside || opened || mountedIn then .error 16
+  -- What another mount still shows of it stays: one of the same, or a bind of what is in it.
+  if !mount.source.startsWith hiddenRoot || mounts.any (fun other => within other.source) then return { kernel with mounts }
   let kernel := kernel.paths.fold (init := kernel) fun kernel path number =>
     if within path then kernel.countName path number false else kernel
   .ok { kernel with mounts, paths := kernel.paths.filter fun path _ => !within path }
@@ -2117,8 +2160,11 @@ def chroot (kernel : Kernel) (group : Nat) (base path : String) : Result Kernel 
   let process := kernel.process group
   if !process.credentials.capable Capability.sysChroot then .error Errno.eperm
   let (normal, found) ← kernel.resolve base path
+  searchError kernel process.credentials normal
   let some number := found | .error Errno.enoent
-  let .directory := (← inodeOf kernel number).content | .error Errno.enotdir
+  let inode ← inodeOf kernel number
+  let .directory := inode.content | .error Errno.enotdir
+  if !permits inode process.credentials false 1 then .error Errno.eacces
   .ok (kernel.setProcess group { process with root := { inode := number, path := normal } })
 
 /-- `pivot_root`: what is mounted at `newRoot` is `/` of the processes whose `/` was the tree's, and in their working directory if they
@@ -2144,11 +2190,17 @@ def pivotRoot (kernel : Kernel) (group : Nat) (base newRoot putOld : String) : R
 /-- `chdir`. -/
 def chdir (kernel : Kernel) (group : Nat) (path : String) : Result Kernel := do
   let (normal, found) ← kernel.resolve (kernel.cwdOf group) path
+  -- Through directories that it may search, into one that it may, as `set_fs_pwd` after `MAY_EXEC | MAY_CHDIR` has it.
+  let credentials := (kernel.process group).credentials
+  searchError kernel credentials normal
   match found with
   | none => .error Errno.enoent
   | some number =>
-    match (← inodeOf kernel number).content with
-    | .directory => .ok (kernel.setProcess group { kernel.process group with cwd := { inode := number, path := normal } })
+    let inode ← inodeOf kernel number
+    match inode.content with
+    | .directory =>
+      if !permits inode credentials false 1 then .error Errno.eacces
+      .ok (kernel.setProcess group { kernel.process group with cwd := { inode := number, path := normal } })
     | _ => .error Errno.enotdir
 
 /-- `fchdir`: into the directory that a descriptor has open, wherever it is now, or if it was removed, where it was. -/
@@ -2156,6 +2208,7 @@ def fchdir (kernel : Kernel) (group fd : Nat) : Result Kernel := do
   let (_, file) ← openFileOf kernel group fd
   let inode ← inodeOf kernel file.inode
   let .directory := inode.content | .error Errno.enotdir
+  if !permits inode (kernel.process group).credentials false 1 then .error Errno.eacces
   let path := (kernel.pathOfInode file.inode).getD (inode.details.name.dropEnd " (deleted)".length).toString
   .ok (kernel.setProcess group { kernel.process group with cwd := { inode := file.inode, path } })
 
@@ -2300,9 +2353,14 @@ def addSeals (kernel : Kernel) (group fd seals : Nat) : Result Kernel := do
 def openTmpfile (kernel : Kernel) (group : Nat) (base path : String) (flags mode : Nat) : Result (Kernel × Nat) := do
   if !writable flags then .error Errno.einval
   let (normal, some number) ← kernel.resolve base path | .error Errno.enoent
-  let .directory := (← inodeOf kernel number).content | .error Errno.enotdir
-  let made := kernel.nextInode
+  let directory ← inodeOf kernel number
+  let .directory := directory.content | .error Errno.enotdir
   let process := kernel.process group
+  -- As what is made in it: of a directory that it may write and search, and not on what is read-only.
+  searchError kernel process.credentials normal
+  if !permits directory process.credentials false 3 then .error Errno.eacces
+  if kernel.readOnly normal then .error erofs
+  let made := kernel.nextInode
   let (gid, mode) := kernel.newGroup normal process.credentials (0o100000 ||| (mode &&& 0o7777 &&& (0o7777 - process.umask)))
   let (kernel, fd) := kernel.addObject group (.file ByteArray.empty) flags mode (access := flags &&& 3)
     (name := s!"{if normal == "/" then "" else normal}/#{made} (deleted)") (uid := process.credentials.fsuid) (gid := gid)
@@ -2367,8 +2425,9 @@ def writeChanges (kernel : Kernel) (number offset : Nat) (before memory : ByteAr
   | some inode =>
     match inode.content with
     | .file data =>
+      -- Of what something else has too, such as a file of 16 GiB that processes share, a copy of what isn't zeros (`Jit.patch`).
       let data := (List.range (min before.size memory.size)).foldl (init := data) fun data index =>
-        if before[index]! != memory[index]! then data.set! (offset + index) memory[index]! else data
+        if before[index]! != memory[index]! then Jit.patch data (offset + index) (ByteArray.mk #[memory[index]!]) else data
       { kernel with inodes := kernel.inodes.insert number ({ inode with content := .file data }.written kernel.clock) }
     | _ => kernel
   | none => kernel
@@ -2416,9 +2475,8 @@ mapped, which Linux says is `EACCES`. -/
 def mappedBytes (kernel : Kernel) (group fd offset size : Nat) : Result ByteArray := do
   let (_, file) ← openFileOf kernel group fd
   match (← inodeOf kernel file.inode).content with
-  | .file data =>
-    let bytes := readAt data offset size
-    .ok (bytes ++ Bap.zeroBytes (size - bytes.size))
+  -- What the file has of it, to which the rest is zeros, which the mapping has without them being made.
+  | .file data => .ok (readAt data offset size)
   | .directory => .error Errno.eacces
   | _ => .error Errno.einval
 

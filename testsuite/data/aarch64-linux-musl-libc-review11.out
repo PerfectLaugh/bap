@@ -1,0 +1,6 @@
+mmap of 16 GiB of a page: mapped
+of the file: ab
+mremap: moved, keeps ab
+shared anonymous of 16 GiB: mapped
+a write of its last byte: 1
+writev of 3 and 16 GiB to a pipe that doesn't wait: 65536

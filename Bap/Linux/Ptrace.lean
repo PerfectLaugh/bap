@@ -260,6 +260,11 @@ private def stopThread (ptrace : Ptrace) (emu : Emu) (tid : Nat) (stop : Stop) :
       ptrace.signals.send emu none to ⟨numbers.chld, if stop.traced then 4 else 5, .child group 0 stop.signal⟩
   wakeWaits ptrace
 
+/-- Whether a thread of a process is stopped by a signal that stops it, and not for a tracer. -/
+def jobStopped (ptrace : Ptrace) (emu : Emu) (group : Nat) : IO Bool := do
+  let stops := (← ptrace.table.get).stops
+  pure ((← emu.taskTable.get).tasks.any fun task => task.group == group && (stops.get? task.tid).any (!·.traced))
+
 /-- The process tracing a thread, if it is traced. -/
 def tracerOf (ptrace : Ptrace) (tid : Nat) : IO (Option Nat) := do
   pure (((← ptrace.table.get).tracees.get? tid).map (·.tracer))
@@ -456,7 +461,8 @@ private def find (ptrace : Ptrace) (emu : Emu) (group : Nat) (target : Option Na
     if let some stop := table.stops.get? tid then
       if stop.traced && !stop.reported then
         unless keep do ptrace.table.modify fun table => { table with stops := table.stops.insert tid { stop with reported := true } }
-        return some (some { pid := tid, status := stop.status, code := 4, value := stop.signal })
+        -- Of `waitid`, all that it stopped with, as `wait_task_stopped` has it of a tracee: 0x85 of a call, 0x105 of an event of a fork.
+        return some (some { pid := tid, status := stop.status, code := 4, value := stop.status >>> 8 % 0x10000 })
   -- A child that stopped or went on, to its parent that asked.
   for child in children do
     if stopped then
@@ -1065,6 +1071,37 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
     | .ok () => ok
     | .error _ => fail efault
   | 0x4203 => if mine.isSome then ok else fail esrch
+  | 0x420e =>
+    -- PTRACE_GET_SYSCALL_INFO: of a stop where a call is entered or left, or of seccomp, `struct ptrace_syscall_info`, of which as much as
+    -- `addr` asks for is written, and its size is given; of another stop, only its start.
+    let some tracee := mine | return ← fail esrch
+    let some stop := table.stops.get? pid | return ← fail esrch
+    let code := (stop.status >>> 8) % 0x10000
+    let trap := ptrace.numbers.trap
+    let (callNumber, arguments, result) := syscallRegisters emu.config.syscallAbi
+    let value (name : String) : IO Nat := threadValue emu pid name width
+    let number := (table.calls.get? pid).map (·.1) |>.getD 0
+    let (_, stackRegister) := threadRegisters emu.config.syscallAbi
+    let header (op : Nat) : IO ByteArray := do
+      pure (numberBytes big 1 op ++ ByteArray.mk #[0, 0, 0] ++ numberBytes big 4 0 ++ numberBytes big 8 (← pcOf emu pid) ++
+        numberBytes big 8 (← value stackRegister))
+    let entry : IO ByteArray := do
+      let values ← (arguments.take 6).mapM value
+      pure (numberBytes big 8 number ++ (values ++ List.replicate (6 - values.length) 0).foldl (fun out v => out ++ numberBytes big 8 v) .empty)
+    let _ := callNumber
+    let bytes ← if code == trap ||| (seccompEvent <<< 8) then do
+        pure ((← header 3) ++ (← entry) ++ numberBytes big 4 (table.messages.getD pid 0))
+      else if stop.signal == trap && (code == trap || code == trap ||| 0x80) && !stop.fault && stop.info.isNone then
+        if tracee.inSyscall then do pure ((← header 1) ++ (← entry))
+        else do
+          let returned ← value result
+          let signed := if returned ≥ 2 ^ (width - 1) then returned + 2 ^ 64 - 2 ^ width else returned
+          pure ((← header 2) ++ numberBytes big 8 signed ++ numberBytes big 1 (if signed ≥ 2 ^ 64 - 4095 then 1 else 0))
+      else header 0
+    let given := min address bytes.size
+    match ← (write emu data (bytes.extract 0 given)).toBaseIO with
+    | .ok () => ok bytes.size
+    | .error _ => fail efault
   | _ => fail eio
 
 /-- What a call that isn't made gives, with its registers as they were: the register of the result keeps what it had. -/
@@ -1087,7 +1124,10 @@ def seccompStop (ptrace : Ptrace) (emu : Emu) (tid data : Nat) : IO Bool := do
   let some tracee := (← ptrace.table.get).tracees.get? tid | return false
   if tracee.options &&& (1 <<< seccompEvent) == 0 then return false
   let numbers := ptrace.numbers
-  ptrace.table.modify fun table => { table with messages := table.messages.insert tid data }
+  -- It is in the call from here, which its tracer, if it goes on with `PTRACE_SYSCALL`, sees it leave and not enter again, as
+  -- `syscall_exit_work` has it.
+  ptrace.table.modify fun table =>
+    { table with messages := table.messages.insert tid data, tracees := table.tracees.insert tid { tracee with inSyscall := true } }
   stopThread ptrace emu tid { status := stoppedStatus numbers.trap seccompEvent, traced := true, signal := numbers.trap }
   pure true
 

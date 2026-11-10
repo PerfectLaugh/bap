@@ -1037,6 +1037,21 @@ def mapped (tracker : Tracker) (address size space offset : Nat) (label : Option
     if tag.isNode then setTag tracker current (address + index) tag
     else if let some id := source then setTag tracker current (address + index) (nodeTag id index)
 
+/-- What the kernel copied from one place that keeps tags to another, as `sendfile`, `splice`, `tee` and `copy_file_range` do, has what
+it came from: a page at a time, of which a page that neither has is passed over. -/
+def copySpace (tracker : Tracker) (fromSpace fromOffset toSpace toOffset size : Nat) : IO Unit := do
+  let mut done := 0
+  while done < size do
+    let at_ := fromOffset + done
+    let chunk := min (4096 - at_ % 4096) (size - done)
+    let pages ← tracker.pages.get
+    let source := pages[(fromSpace, at_ / 4096)]?
+    let target := (List.range chunk).any fun index => pages.contains (toSpace, (toOffset + done + index) / 4096)
+    if source.isSome || target then
+      for index in List.range chunk do
+        setRawTag tracker toSpace (toOffset + done + index) (← rawTag tracker fromSpace (at_ + index))
+    done := done + chunk
+
 /-- The tags of bytes that the host moved go with them. -/
 private def copied (tracker : Tracker) (from_ to size : Nat) : IO Unit := do
   let space ← Emu.spaceOf tracker.emu (← Emu.thread tracker.emu)

@@ -302,7 +302,9 @@ private def attempt (rings : Rings) (emu : Emu) (group : Nat) (ring : Uring) (pe
   let mut cancelling := false
   for item in pending do
     let data := numberOf big (item.entry.extract 32 40)
-    let linked := item.entry[1]! &&& 4 != 0
+    -- `IOSQE_IO_LINK`, or `IOSQE_IO_HARDLINK`, which a failure doesn't break.
+    let linked := item.entry[1]! &&& 12 != 0
+    let breaks := linked && item.entry[1]! &&& 8 == 0
     if cancelling then
       ring := complete architecture ring data (negative 125)
       cancelling := linked
@@ -318,7 +320,7 @@ private def attempt (rings : Rings) (emu : Emu) (group : Nat) (ring : Uring) (pe
       if item.count > 0 && ring.posted - item.start ≥ item.count then ring := complete architecture ring data 0
       else if item.deadline.any (· ≤ now) then
         ring := complete architecture ring data (negative 62)
-        cancelling := linked && numberOf big (item.entry.extract 28 32) &&& 0x20 == 0
+        cancelling := breaks && numberOf big (item.entry.extract 28 32) &&& 0x20 == 0
       else
         ring := { ring with pending := ring.pending ++ [item] }
         blocked := linked
@@ -349,7 +351,7 @@ private def attempt (rings : Rings) (emu : Emu) (group : Nat) (ring : Uring) (pe
           let sizes ← (List.range (min length 1024)).mapM fun index => numberAt rings emu (vectors + index * 2 * word + word) word
           pure (some (sizes.foldl (· + ·) 0))
         else pure none
-      cancelling := linked && (result ≥ 2 ^ 63 || asked.any (result < ·))
+      cancelling := breaks && (result ≥ 2 ^ 63 || asked.any (result < ·))
   pure ring
 
 /-- The completions of an io_uring go to its ring, as many as there is room for, which the `eventfd` of the process `group` that was

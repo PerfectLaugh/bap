@@ -35,7 +35,8 @@ def readString (emu : Emu) (address : Nat) : IO String := do
     | none =>
       out := out ++ chunk
       at_ := at_ + chunk.size
-  pure (textOf out)
+  -- No zero in `PATH_MAX`: that much of it, which the kernel makes `ENAMETOOLONG` of.
+  pure (textOf (out.extract 0 4096))
 
 /-- An inode of a kernel as it is now: its times set, or its owner, or its attributes. -/
 private def alter (kernel : Kernel) (number : Nat) (change : Meta → Meta) : Kernel :=

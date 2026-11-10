@@ -356,7 +356,9 @@ def serve (timers : Timers) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     | .alarm =>
       let left := ((← timers.state.get).timers.get? (group, 0)).map remaining |>.getD 0
       setTimer (group, 0) (itimer 0) (arg 0 * 1000000000) 0 false
-      succeed ((left + 999999999) / 1000000000)
+      -- To the nearest second, as `alarm_setitimer` has it, but none of what is left isn't 0.
+      let seconds := (left + 500000000) / 1000000000
+      succeed (if seconds == 0 && left > 0 then 1 else seconds)
     | .timerCreate =>
       if arg 0 > 11 then return ← fail einval
       let id := ((← timers.state.get).nextTimer.get? group).getD 0
@@ -386,6 +388,7 @@ def serve (timers : Timers) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       let some timer := (← timers.state.get).timers.get? key | return ← fail einval
       if arg 3 != 0 then write emu (arg 3) (current (some timer) field 1)
       setTimer key timer value interval (arg 1 &&& 1 != 0)
+      timers.signals.forgetTimer emu group timer.id
       succeed
     | .timerGettime | .timerGettime64 =>
       let field := if call == .timerGettime64 then 8 else word
@@ -397,8 +400,9 @@ def serve (timers : Timers) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       succeed timer.overrun
     | .timerDelete =>
       let key := (group, 3 + arg 0)
-      if !(← timers.state.get).timers.contains key then return ← fail einval
+      let some timer := (← timers.state.get).timers.get? key | return ← fail einval
       timers.state.modify fun state => { state with timers := state.timers.erase key }
+      timers.signals.forgetTimer emu group timer.id
       succeed
     | _ => pure none
   catch _ => fail 14

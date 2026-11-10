@@ -2048,7 +2048,7 @@ theorem decodeRISCVWith_lifted (globals : Primus.Semantics.Environment) (base ad
   fun s r s' he => ⟨(decodeRISCVWith_flow globals base address data s r s' he).1, _, rfl⟩
 
 theorem decodePowerPCWith_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
-    (data : ByteArray) : Holds (decodePowerPCWith globals base address data) (Lifted powerpcFlow address) := by
+    (data : ByteArray) : Holds (decodePowerPCWith globals base address data) (Lifted powerpcFlowOf address) := by
   unfold decodePowerPCWith
   lifted_decoder
 
@@ -2058,9 +2058,9 @@ theorem decodeMIPSWith_lifted (globals : Primus.Semantics.Environment) (base add
   lifted_decoder
 
 /-- A PowerPC instruction of any variant says how it goes on as its LLVM flags do, a return that isn't a barrier going on past
-itself too (`powerpcFlow`). -/
+itself too, and a branch that links is a call (`powerpcFlowOf`). -/
 theorem decodePowerPCOf_lifted (variant : PowerPCVariant) (globals : Primus.Semantics.Environment) (base address : Nat)
-    (data : ByteArray) : Holds (decodePowerPCOf variant globals base address data) (Lifted powerpcFlow address) := by
+    (data : ByteArray) : Holds (decodePowerPCOf variant globals base address data) (Lifted powerpcFlowOf address) := by
   unfold decodePowerPCOf
   lifted_decoder
 
@@ -2222,7 +2222,7 @@ theorem decodeMIPS32With_lifted (globals : Primus.Semantics.Environment) (base a
   lifted_decoder
 
 theorem decodePowerPC32With_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
-    (data : ByteArray) : Holds (decodePowerPC32With globals base address data) (Lifted powerpcFlow address) := by
+    (data : ByteArray) : Holds (decodePowerPC32With globals base address data) (Lifted powerpcFlowOf address) := by
   unfold decodePowerPC32With
   lifted_decoder
 
@@ -2302,19 +2302,27 @@ theorem decodeRISCV32With_fields (globals : Primus.Semantics.Environment) (base 
 
 theorem decodePowerPCWith_fields (globals : Primus.Semantics.Environment) (base address : Nat) (data : ByteArray) :
     Holds (decodePowerPCWith globals base address data)
-      (FromMC address (powerpcFlow ·.flags)
+      (FromMC address (fun decoded => powerpcFlowOf (riscvAddress address data base, decoded.flags))
         (fun _ operands => powerpcMCTarget 64 address (riscvAddress address data base) operands)
         (resolveAliases (powerpcAliases 64))) := by
-  unfold decodePowerPCWith
-  fields_decoder
+  unfold decodePowerPCWith decodePowerPCOf
+  refine Holds.bind fun decoded => ?_
+  refine Holds.bind fun machineOperands => ?_
+  refine Holds.bind fun _ => ?_
+  refine Holds.bind fun bil => ?_
+  exact Holds.pure ⟨rfl, decoded, machineOperands, bil, rfl, rfl, by dsimp only, by dsimp only, rfl⟩
 
 theorem decodePowerPC32With_fields (globals : Primus.Semantics.Environment) (base address : Nat) (data : ByteArray) :
     Holds (decodePowerPC32With globals base address data)
-      (FromMC address (powerpcFlow ·.flags)
+      (FromMC address (fun decoded => powerpcFlowOf (instructionWord .big (instructionBytes data (address - base)), decoded.flags))
         (fun _ operands => powerpcMCTarget 32 address (instructionWord .big (instructionBytes data (address - base))) operands)
         (resolveAliases (powerpcAliases 32))) := by
-  unfold decodePowerPC32With
-  fields_decoder
+  unfold decodePowerPC32With decodePowerPCOf
+  refine Holds.bind fun decoded => ?_
+  refine Holds.bind fun machineOperands => ?_
+  refine Holds.bind fun _ => ?_
+  refine Holds.bind fun bil => ?_
+  exact Holds.pure ⟨rfl, decoded, machineOperands, bil, rfl, rfl, by dsimp only, by dsimp only, rfl⟩
 
 /-- An instruction as it comes of the text of LLVM, with the opcode name that it is lifted by. -/
 def FromText (address : Nat) (flowOf : LLVM.Decoded → Bil.Program → Flow) (targetOf : LLVM.Decoded → Option Nat)

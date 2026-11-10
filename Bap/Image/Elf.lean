@@ -367,6 +367,9 @@ structure DynamicSymbol where
   /-- Of a version that isn't the default, as its entry of `.gnu.version` says with `VERSYM_HIDDEN`: `name@VERSION` rather than
   `name@@VERSION`, which a reference by its name alone isn't bound to. -/
   hidden : Bool := false
+  /-- The name of its version: of one that it defines, of `DT_VERDEF`, and of one that it needs, of `DT_VERNEED`, which is the version
+  that it was linked to; empty of none. -/
+  version : String := ""
   deriving Repr
 
 structure DynamicRelocation where
@@ -564,6 +567,43 @@ private def dynamicString (image : Image) (headers : List ProgramHeader) (string
         pure at_
       String.ofList ((image.data.extract fileOffset finish).toList.map fun byte => Char.ofNat byte.toNat)
 
+/-- The name of the version of the dynamic symbol at `index`, whose index `DT_VERSYM` has: of one that is `defined`, the name of that entry
+of `DT_VERDEF`, and of one that isn't, of the entry of `DT_VERNEED` that has it, which is the version that it was linked to. An index of
+0 or 1, local or global, has none. -/
+private def versionName (image : Image) (headers : List ProgramHeader) (tags : List (Nat × Nat)) (index : Nat) (defined : Bool) :
+    String := Id.run do
+  let u16 (at_ : Nat) : Nat := (IO.Reader.u16 image.data image.endian at_).toOption.getD 0
+  let u32 (at_ : Nat) : Nat := (IO.Reader.u32 image.data image.endian at_).toOption.getD 0
+  let some versions := tagValue tags 0x6ffffff0 | return ""
+  let some at_ := offsetOf headers image.data.size (versions + index * 2) 2 | return ""
+  let wanted := u16 at_ &&& 0x7fff
+  if wanted < 2 then return ""
+  let text (offset : Nat) : String := match tagValue tags 5, tagValue tags 10 with
+    | some strings, some size => dynamicString image headers strings size offset
+    | _, _ => ""
+  -- The entries, each `next` bytes after the one before it in the file, as they are in one section.
+  let (start, count, entrySize) := if defined then (tagValue tags 0x6ffffffc, (tagValue tags 0x6ffffffd).getD 0, 20)
+    else (tagValue tags 0x6ffffffe, (tagValue tags 0x6fffffff).getD 0, 16)
+  let some start := start | return ""
+  let some first := offsetOf headers image.data.size start entrySize | return ""
+  let mut entry := first
+  for _ in List.range (min count 4096) do
+    if defined then
+      -- `Elf_Verdef`: its index at 4, and its name in the first `Elf_Verdaux`, at `vd_aux` from it.
+      if u16 (entry + 4) == wanted then return text (u32 (entry + u32 (entry + 12)))
+      if u32 (entry + 16) == 0 then break
+      entry := entry + u32 (entry + 16)
+    else
+      -- `Elf_Verneed`, of a file, with its `Elf_Vernaux`, each of a version of it, whose index is `vna_other`.
+      let mut aux := entry + u32 (entry + 8)
+      for _ in List.range (min (u16 (entry + 2)) 4096) do
+        if u16 (aux + 6) == wanted then return text (u32 (aux + 8))
+        if u32 (aux + 12) == 0 then break
+        aux := aux + u32 (aux + 12)
+      if u32 (entry + 12) == 0 then break
+      entry := entry + u32 (entry + 12)
+  return ""
+
 def dynamicSymbol (image : Image) (headers : List ProgramHeader) (tags : List (Nat × Nat))
     (index : Nat) : Except String (Option DynamicSymbol) := do
   let header ← parseHeader image.data
@@ -591,7 +631,8 @@ def dynamicSymbol (image : Image) (headers : List ProgramHeader) (tags : List (N
             | some at_ => ((IO.Reader.u16 image.data image.endian at_).toOption.getD 0) &&& 0x8000 != 0
             | none => false
           | none => false
-        .ok (some ⟨name, value, size, info &&& 0xf, info >>> 4, sectionIndex, hidden⟩)
+        .ok (some ⟨name, value, size, info &&& 0xf, info >>> 4, sectionIndex, hidden,
+          versionName image headers tags index (sectionIndex != 0)⟩)
 
 def readRelocationTable (image : Image) (headers : List ProgramHeader) (addr size : Nat)
     (rela : Bool) : Except String (List DynamicRelocation) := do

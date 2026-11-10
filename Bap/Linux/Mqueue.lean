@@ -156,12 +156,13 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       let .ok (_, _, messages, capacity, limit, _) := queueOf (arg 0) | fail Errno.ebadf
       let .ok (id, file) := kernel.openFileOf group (arg 0) | fail Errno.ebadf
       let nonblocking := architecture.guestFlags Kernel.oNonblock
+      -- What is new is read before what was is written, as `mq_getsetattr` has it, so that both may be one struct.
+      let given ← if arg 1 != 0 then some <$> number (arg 1) word else pure none
       if arg 2 != 0 then
         let flags := if file.flags &&& Kernel.oNonblock != 0 then nonblocking else 0
         write emu (arg 2) ([flags, capacity, limit, messages.length, 0, 0, 0, 0].foldl (fun out value => out ++ Abi.field big word value)
           ByteArray.empty)
-      if arg 1 != 0 then
-        let given ← number (arg 1) word
+      if let some given := given then
         let flags := if given &&& nonblocking != 0 then file.flags ||| Kernel.oNonblock else file.flags - (file.flags &&& Kernel.oNonblock)
         poller.kernel.set { kernel with openFiles := kernel.openFiles.insert id { file with flags } }
       succeed

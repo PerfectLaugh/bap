@@ -935,6 +935,21 @@ private def runFieldChecks : IO Unit := do
   assertEqual "R_X86_64_8 of -129" true (outOfRange (oneRelocation 62 64 14 0 (addend := -129)))
   assertEqual "R_X86_64_32 of -1" true (outOfRange (oneRelocation 62 64 10 0 (addend := -1)))
   assertEqual "a relocation that doesn't fit is still stored, cut" 0x12 (relocatedBytes (oneRelocation 62 64 14 0x212) 1)
+  -- PowerPC32's REL16, GOT16 and PLTREL24, at `.text` of 0x1000: as `ld.lld` has them
+  let ppc32 (typ value : Nat) (addend : Int := 0) := oneRelocation 20 32 typ value (addend := addend) (little := false)
+  assertEqual "R_PPC_REL16_LO" 0x0234 (relocatedBytes (ppc32 250 0x1234) 2)
+  assertEqual "R_PPC_REL16_HA carries the sign" 2 (relocatedBytes (ppc32 252 0x19000) 2)
+  let got16 := ElfLinker.link (ppc32 14 0x1234)
+  assertEqual "R_PPC_GOT16 is applied" ([] : List String) got16.warnings
+  assertEqual "R_PPC_GOT16 is of an entry from the start of the GOT, which has the symbol" 0x1234
+    (ElfLinker.readNat got16.memory false (24 + ElfLinker.readNat got16.memory false 0 2) 4)
+  assertEqual "R_PPC_PLTREL24 leaves out the bit of its addend that chooses a stub" 0x1000 (relocatedBytes (ppc32 18 0x2000 0x8000) 4)
+  -- N32's GOT_PAGE and GOT_OFST, which a 32-bit file has as N64 has them
+  let gotPage := ElfLinker.link (oneRelocation 8 32 20 0x12345678)
+  assertEqual "R_MIPS_GOT_PAGE of N32 is applied" ([] : List String) gotPage.warnings
+  assertEqual "R_MIPS_GOT_PAGE of N32 is of an entry from gp, which has the page" 0x12340000
+    (ElfLinker.readNat gotPage.memory true (24 + ((ElfLinker.readNat gotPage.memory true 0 2 + 0x7ff0) % 65536)) 4)
+  assertEqual "R_MIPS_GOT_OFST of N32 is what is left of the page" 0x5678 (relocatedBytes (oneRelocation 8 32 21 0x12345678) 2)
   -- one warning per relocation
   let two := { oneRelocation 62 64 14 0x212 with relocations := [⟨0, 0, 14, 0, 0, true⟩, ⟨0, 8, 14, 0, 0, true⟩] }
   assertEqual "a warning for each relocation that doesn't fit" 2 (ElfLinker.link two).warnings.length

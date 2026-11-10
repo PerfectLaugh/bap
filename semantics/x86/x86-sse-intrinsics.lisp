@@ -80,17 +80,25 @@
              (cast-low rt y)
              :result 1))
 
+;; the same, of a comparison that signals: it raises invalid of any NaN,
+;; quiet or not, as COMISD, MINSD and the signaling predicates of CMPSD do
+(defun sse-forders (rt x y)
+  (intrinsic (symbol-concat 'forders *sse-format* (symbol-of-size rt) :sep '_)
+             (cast-low rt x)
+             (cast-low rt y)
+             :result 1))
+
 ;; MINSD and MAXSD return the second operand when the operands are
-;; unordered or equal
+;; unordered or equal, and signal of a NaN
 (defun sse-min (rt x y)
   (let ((a (cast-low rt x))
         (b (cast-low rt y)))
-    (if (sse-forder rt a b) a b)))
+    (if (sse-forders rt a b) a b)))
 
 (defun sse-max (rt x y)
   (let ((a (cast-low rt x))
         (b (cast-low rt y)))
-    (if (sse-forder rt b a) a b)))
+    (if (sse-forders rt b a) a b)))
 
 (defun sse-exponent (rs x)
   (cast-unsigned 64 (if (= rs 64) (extract 62 52 x) (extract 30 23 x))))
@@ -240,14 +248,27 @@
     (set SF 0:1)
     (set AF 0:1)))
 
+;; COMISD signals of any NaN, where UCOMISD signals of one that signals
+(defun compare-floats-signaling (rt x y)
+  (let ((is-nan-x (sse-is-nan rt x))
+        (is-nan-y (sse-is-nan rt y))
+        (x<y (sse-forders rt x y))
+        (y<x (sse-forders rt y x)))
+    (set PF (logor is-nan-x is-nan-y))
+    (set CF (logor PF x<y))
+    (set ZF (logor PF (not (logor x<y y<x))))
+    (set OF 0:1)
+    (set SF 0:1)
+    (set AF 0:1)))
+
 (defun UCOMISDrr (rn rm) (compare-floats 64 rn rm))
 (defun UCOMISSrr (rn rm) (compare-floats 32 rn rm))
-(defun COMISDrr (rn rm) (compare-floats 64 rn rm))
-(defun COMISSrr (rn rm) (compare-floats 32 rn rm))
+(defun COMISDrr (rn rm) (compare-floats-signaling 64 rn rm))
+(defun COMISSrr (rn rm) (compare-floats-signaling 32 rn rm))
 (defun UCOMISDrm (rn b s i off _) (compare-floats 64 rn (sse-load 64 b s i off)))
 (defun UCOMISSrm (rn b s i off _) (compare-floats 32 rn (sse-load 32 b s i off)))
-(defun COMISDrm (rn b s i off _) (compare-floats 64 rn (sse-load 64 b s i off)))
-(defun COMISSrm (rn b s i off _) (compare-floats 32 rn (sse-load 32 b s i off)))
+(defun COMISDrm (rn b s i off _) (compare-floats-signaling 64 rn (sse-load 64 b s i off)))
+(defun COMISSrm (rn b s i off _) (compare-floats-signaling 32 rn (sse-load 32 b s i off)))
 
 ;; the barriers have no effect, as LFENCE and SFENCE
 (defun MFENCE () (empty))
@@ -769,9 +790,17 @@
 ;; the bit 4 only selects the signaling of the exceptions, which are
 ;; not modeled, the result is a lane of ones, if the predicate holds
 
+;; whether a predicate signals of a quiet NaN: LT, LE, NLT and NLE, and of
+;; those of VEX, NGE, NGT, GE and GT, which have them the other way above 15
+(defun fp-signaling (imm)
+  (let ((low (logand imm 3)))
+    (if (< (logand imm 31) 16)
+        (logor (= low 1) (= low 2))
+      (logor (= low 0) (= low 3)))))
+
 (defun fp-predicate (rt x y imm)
-  (let ((less (sse-forder rt x y))
-        (more (sse-forder rt y x))
+  (let ((less (if (fp-signaling imm) (sse-forders rt x y) (sse-forder rt x y)))
+        (more (if (fp-signaling imm) (sse-forders rt y x) (sse-forder rt y x)))
         (unordered (logor (sse-is-nan rt x) (sse-is-nan rt y)))
         (equal (not (logor unordered less more))))
     (case (logand imm 15)

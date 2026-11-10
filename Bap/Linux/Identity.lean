@@ -224,9 +224,12 @@ def serve (identity : Identity) (emu : Emu) (call : Call) (args : List Nat) : IO
         return ← fail eperm
       setCredentials { credentials with effective, permitted, inheritable }
     | .getrlimit =>
+      -- Of `RLIM_NLIMITS` and past, `EINVAL`.
+      if resourceOf architecture (arg 0) ≥ 16 then return ← fail einval
       write emu (arg 1) (limitBytes word (kernel.limitOf group (resourceOf architecture (arg 0))))
       succeed
     | .setrlimit =>
+      if resourceOf architecture (arg 0) ≥ 16 then return ← fail einval
       let read (offset : Nat) : IO Nat := do
         let value := numberOf big (← Bap.Emu.read emu (arg 1 + offset) word)
         pure (if value == 2 ^ width - 1 then 2 ^ 64 - 1 else value)
@@ -234,10 +237,19 @@ def serve (identity : Identity) (emu : Emu) (call : Call) (args : List Nat) : IO
     | .prlimit =>
       let some target := processOf (arg 0) | return ← fail esrch
       let resource := resourceOf architecture (arg 1)
+      if resource ≥ 16 then return ← fail einval
+      -- Of another process, one whose ids are all the real ones of the caller, or with `CAP_SYS_RESOURCE`, as
+      -- `check_prlimit_permission` has it.
+      let ids := (kernel.process target).credentials
+      if target != group && !credentials.capable Capability.sysResource &&
+          !([ids.uid, ids.euid, ids.suid].all (· == credentials.uid) && [ids.gid, ids.egid, ids.sgid].all (· == credentials.gid)) then
+        return ← fail eperm
       if arg 3 != 0 then write emu (arg 3) (limitBytes 8 (kernel.limitOf target resource))
       if arg 2 == 0 then return ← succeed
       setLimit target resource (numberOf big (← read emu (arg 2) 8)) (numberOf big (← read emu (arg 2 + 8) 8))
     | .getrusage =>
+      -- `RUSAGE_SELF`, `RUSAGE_CHILDREN` and `RUSAGE_THREAD`, and no other.
+      if ![0, 1, 2 ^ 32 - 1].contains (arg 0 % 2 ^ 32) then return ← fail einval
       write emu (arg 1) (ByteArray.mk (Array.replicate (18 * word) 0))
       succeed
     | .times =>
@@ -278,6 +290,15 @@ def serve (identity : Identity) (emu : Emu) (call : Call) (args : List Nat) : IO
     | .schedSetparam | .schedSetscheduler =>
       let some target := processOf (arg 0) | return ← fail esrch
       if call == .schedSetscheduler && ![0, 1, 2, 3, 5].contains (arg 1 % 2 ^ 32 &&& 0xbfffffff) then return ← fail einval
+      -- Its `struct sched_param`, as `__sched_setscheduler` has it: there, of 0 for the policies of time sharing and of 1 to 99 for those of
+      -- real time, which a process may set only with `CAP_SYS_NICE` or as far as its `RLIMIT_RTPRIO` lets it.
+      let address := if call == .schedSetscheduler then arg 2 else arg 1
+      if address == 0 then return ← fail einval
+      let priority := numberOf big (← read emu address 4)
+      let policy := if call == .schedSetscheduler then arg 1 % 2 ^ 32 &&& 0xbfffffff else (kernel.process target).policy &&& 0xbfffffff
+      let realTime := policy == 1 || policy == 2
+      if (realTime && (priority < 1 || priority > 99)) || (!realTime && priority != 0) then return ← fail einval
+      if realTime && !credentials.capable Capability.sysNice && (kernel.limitOf group 14).1 < priority then return ← fail eperm
       -- What it is set to it is, with `SCHED_RESET_ON_FORK`, as `sched_getscheduler` says.
       if call == .schedSetscheduler then update target fun process => { process with policy := arg 1 % 2 ^ 32 }
       succeed

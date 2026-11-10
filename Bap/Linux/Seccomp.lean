@@ -131,14 +131,16 @@ def auditArch : Architecture → Nat
   | .powerpc 32 big => if big then 0x00000014 else 0x40000014
   | .powerpc _ big => if big then 0x80000015 else 0xC0000015
 
-/-- `exit` and the `sigreturn`s, which strict mode lets through with `read` and `write`. -/
+/-- `exit` and `__NR_seccomp_sigreturn`, which strict mode lets through with `read` and `write`: `sigreturn` of x86-32, as its
+`asm/seccomp.h` has it, and `rt_sigreturn` of the others, of `asm-generic`. -/
 private def strictCalls : Architecture → List Nat
   | .x86_64 => [60, 15]
   | .aarch64 | .riscv64 | .riscv32 => [93, 139]
-  | .arm | .i686 => [1, 119, 173]
-  | .mips 32 _ _ => [4001, 4119, 4193]
+  | .i686 => [1, 119]
+  | .arm => [1, 173]
+  | .mips 32 _ _ => [4001, 4193]
   | .mips _ _ _ => [5058, 5211]
-  | .powerpc 32 _ => [1, 119, 172]
+  | .powerpc 32 _ => [1, 172]
   | .powerpc _ _ => [1, 172]
 
 private def numberBytes (big : Bool) (size value : Nat) : ByteArray :=
@@ -296,8 +298,11 @@ def screen (seccomp : Seccomp) (emu : Emu) (tid number : Nat) (args : List Nat) 
   -- What a call makes has what this thread has.
   if has then seccomp.spawning.modify (·.insert tid (← emu.nextThreadRef.get))
   if state.strict.contains tid then
+    -- Of anything else, the thread is over, as `__secure_computing_strict` has it with `do_exit(SIGKILL)`.
     unless call == some .read || call == some .write || (strictCalls architecture).contains number do
-      kill emu tid 9
+      let table ← emu.taskTable.get
+      let group := (table.find? tid).map (·.group) |>.getD tid
+      if (table.tasks.filter fun task => task.group == group && task.status.isNone).length ≤ 1 then kill emu tid 9 else exitThread emu 0
       return some (.returnValue 0)
   if let some chain := state.filters.get? tid then
     let resumed := state.traced.contains tid

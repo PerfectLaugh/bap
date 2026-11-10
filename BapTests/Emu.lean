@@ -824,6 +824,8 @@ def testLinuxRaises (name : String) : IO Unit := do
   let written ← IO.mkRef ByteArray.empty
   let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
   let outcome ← machine.run fun data => written.modify (· ++ data)
+  -- What it said by then, of one that didn't end as it should, says where it was.
+  if outcome != .finished 0 then IO.eprintln s!"Linux {name} said, before it ended as {repr outcome}: {String.fromUTF8! (← written.get)}"
   assertEqual s!"Linux {name} ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
   assertEqual s!"Linux {name} is what qemu does" (String.fromUTF8! (← IO.FS.readBinFile s!"testsuite/data/{name}.out"))
     (String.fromUTF8! (← written.get))
@@ -2213,6 +2215,10 @@ def testMipsRelease6Branches : IO Unit := do
   assertTrue s!"A branch of release 6 that isn't compact has one: {delayed.asm}" (disassembler.hasDelaySlot delayed)
   let call ← decode "jialc $1, 16"
   assertEqual s!"jialc has no target at the branch: {call.asm}" none call.target
+  -- `jic` and `jialc` of no offset, which LLVM writes as `jrc` and `jalrc`, are as compact.
+  for source in ["jic $31, 0", "jialc $25, 0"] do
+    let insn ← decode source
+    assertTrue s!"{source}, which is {insn.asm}, has no delay slot" (!disassembler.hasDelaySlot insn)
 
 /-- What `stepBack` goes back over runs as it ran: what the machine knew of the host, such as which files of a directory that it mounts it
 has brought in, is forgotten before that runs again, as the kernel that it goes back to has none of them. `libc-stepback` opens such a
@@ -2245,6 +2251,12 @@ def testBranchFlows : IO Unit := do
   | .ok insn =>
     assertTrue s!"bdnzlr of PowerPC goes on past itself: {insn.asm} {repr insn.flow}" (insn.successors.contains 4)
   | .error error => throw <| IO.userError s!"bdnzlr: {error}"
+  -- A branch that links on a condition is a call, which goes on past itself, rather than a branch whose target is of the function.
+  for (source, target) in [("beql 16", some 16), ("beqctrl", none), ("bdnzl 16", some 16)] do
+    match ← powerpc.decode 0 (← LLVM.assemble variant.triple source) with
+    | .ok insn =>
+      assertEqual s!"{source} of PowerPC calls: {insn.asm}" (Disasm.Flow.call, target, [4]) (insn.flow, insn.target, insn.successors)
+    | .error error => throw <| IO.userError s!"{source}: {error}"
   -- The `jr` of release 6 of MIPS, which is `jalr` that links nothing, and RISC-V's `c.jr` and `c.jalr`.
   let flowOf (disassembler : Disasm.Disassembler) (name : String) (bytes : List UInt8) : IO Disasm.Flow := do
     match ← disassembler.decode 0 (ByteArray.mk bytes.toArray) with
@@ -2295,6 +2307,12 @@ def testLinuxTaintMoves (triple : String) : IO Unit := do
   let space ← Bap.Emu.spaceOf machine.emu (← Bap.Emu.thread machine.emu)
   assertEqual s!"Linux {triple} what pwrite wrote to a file opened to append is at its end, which comes from what it wrote" ["pread /data"]
     (labels (← tracker.explainMemory (address + 1) (some space)))
+  for (mode, said) in [("rwfappend", "what pwritev2 of RWF_APPEND wrote to the end"), ("sendfile", "what sendfile copied"),
+      ("splice", "what splice copied from a pipe"), ("tee", "what tee copied from a pipe to another"), ("copy", "what copy_file_range copied")] do
+    let (machine, tracker, address) ← at_ mode
+    let space ← Bap.Emu.spaceOf machine.emu (← Bap.Emu.thread machine.emu)
+    assertEqual s!"Linux {triple} {said} comes from where it came from" ["pread /data"]
+      (labels (← tracker.explainMemory (address + 1) (some space)))
 
 /-- What a library has of a name of two versions is the default, as a reference of the name alone is bound to, rather than the old one,
 which comes first, as glibc has them. -/
@@ -2305,6 +2323,47 @@ def testVersionedSymbols : IO Unit := do
   let library ← machine.loadLibrary "libversioned.so"
   let some address := ← machine.findSymbol "f" (some library) | throw <| IO.userError "libversioned has no f"
   assertEqual "Of a name of two versions, the default" 2 ((← machine.call address) % 2 ^ 32)
+  -- What was linked to the old one is bound to it, as `ld.so` has it.
+  let kernel := kernel.addFile "/lib/libuseold.so" (← binary "libuseold")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let library ← machine.loadLibrary "libuseold.so"
+  let some address := ← machine.findSymbol "use_old" (some library) | throw <| IO.userError "libuseold has no use_old"
+  assertEqual "What was linked to the old version is bound to it" 1 ((← machine.call address) % 2 ^ 32)
+
+/-- `libc-review11`, of mappings of 16 GiB, takes the host little more than it took before: what a mapping takes of it is what was written,
+not how large it is. The peak of what the process has is set to what it has now (`clear_refs` of 5), and is no more than 2 GiB past it
+after the run, where before it was 32 GiB past. -/
+def testMappingsTakeWhatIsWritten (triple : String) : IO Unit := do
+  let kilobytes (field : String) : IO Nat := do
+    let status ← IO.FS.readFile "/proc/self/status"
+    let some line := (status.splitOn "\n").find? (·.startsWith field) | throw <| IO.userError s!"no {field}"
+    pure ((line.drop field.length).trim.takeWhile Char.isDigit).toNat!
+  IO.FS.writeFile "/proc/self/clear_refs" "5"
+  let before ← kilobytes "VmRSS:"
+  testLinuxRaises s!"{triple}-libc-review11"
+  let peak ← kilobytes "VmHWM:"
+  assertTrue s!"Mappings of 16 GiB take the host {(peak - before) / 1024} MiB" (peak < before + 2 * 1024 * 1024)
+
+/-- A hook that maps memory as native code runs empties the chain that runs it, which goes on with what it had of the range that ran
+rather than with what was let go of, and stops there: the loop counts to its end as it would without the hook. Before, what the run went
+on with was freed, which `MALLOC_PERTURB_` made the run fail of. -/
+def testChainClearedByHook : IO Unit := do
+  let rv (source : String) : IO ByteArray := LLVM.assemble "riscv64" source
+  let code := (← rv "addi a0, a0, 1") ++ (← rv "sd a0, 0(a4)") ++ (← rv "bne a0, a3, -8") ++ (← rv "jal 0")
+  let emu ← Bap.Emu.riscv64 code 0 0 (adjust := fun config => { config with hotThreshold := 1, rangeLimit := 16 })
+  Bap.Emu.map emu ⟨0x1000, ByteArray.mk (List.replicate 8 0).toArray, ⟨true, true, false⟩⟩
+  let word (value : Nat) : Value := .bits (BitVec.ofNat 64 value)
+  Bap.Emu.setReg emu (reg "X10") (word 0)
+  Bap.Emu.setReg emu (reg "X13") (word 400)
+  Bap.Emu.setReg emu (reg "X14") (word 0x1000)
+  let mapped ← IO.mkRef 0
+  let _ ← Bap.Emu.onWrite emu (0x1000, 0x1007) fun _ _ _ _ => do
+    let count ← mapped.modifyGet fun count => (count, count + 1)
+    Bap.Emu.map emu ⟨0x100000 + count * 0x1000, ByteArray.mk (List.replicate 16 0).toArray, ⟨true, true, false⟩⟩
+  let _ ← Bap.Emu.run emu 1300
+  assertBits "A loop whose hook maps memory counts to its end" (BitVec.ofNat 64 400) (.ok (← Bap.Emu.reg emu (reg "X10")))
+  assertEqual "and maps as many times" 400 (← mapped.get)
+  assertEqual "and is at its end" 12 (← Bap.Emu.pc emu)
 
 /-- A function that waits, which a call gives too little fuel to come back, leaves nothing of its wait: the thread runs on from where it
 was, as it would have, rather than waiting where the call left it or being woken there. -/
@@ -3541,6 +3600,12 @@ def testContract (triple : String) : IO Unit := do
   let wrong ← Bap.Analysis.Contract.verify recorder profile (replacement 4)
   assertTrue s!"Contract {triple} one that doesn't is told apart: {wrong.differences}" (!wrong.differences.isEmpty)
   assertTrue s!"Contract {triple} verifying leaves the machine as it was" ((← stateOf machine) == before)
+  -- And a replacement that fails part of the way does too.
+  let failing ← (Bap.Analysis.Contract.verify recorder profile fun machine => do
+    machine.write state (word 9 4)
+    throw <| IO.userError "the replacement fails").toBaseIO
+  assertTrue s!"Contract {triple} a replacement that fails is an error" (failing matches .error _)
+  assertTrue s!"Contract {triple} which leaves the machine as it was" ((← stateOf machine) == before)
   -- The round that asks the kernel, two visits later.
   Bap.Emu.resumeThread machine.emu (← Bap.Emu.thread machine.emu)
   let _ ← Bap.Analysis.Verdict.captureVerdict machine { pc := dispatcher, criteria := [], hit := 2 }
@@ -3568,6 +3633,33 @@ def testContract (triple : String) : IO Unit := do
   let staying ← Bap.Analysis.Contract.verify recorder profile fun machine => machine.write state (word 7 4)
   assertTrue s!"Contract {triple} a replacement that doesn't end it is told apart: {staying.differences}"
     (staying.differences.contains "it ends the program with 0, which the replacement doesn't")
+
+/-- A resolver of a function that a library chooses at load is called as glibc's loader calls it: on ARM and RISC-V with `AT_HWCAP`,
+which the function that it chose says. PowerPC64 of ELFv1 isn't here, as a call of a descriptor isn't one here. -/
+def testIfuncArguments (triple : String) : IO Unit := do
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-files")).addFile
+    "/lib/libhwcap.so" (← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libhwcap")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let library ← machine.loadLibrary "libhwcap.so"
+  let auxiliary := ((← machine.kernel.get).process (← Bap.Emu.currentTask machine.emu).group).auxiliary
+  let hwcap := ((List.range (auxiliary.length / 2)).findSome? fun index =>
+    if auxiliary[2 * index]! == 16 then some auxiliary[2 * index + 1]! else none).getD 0
+  let some chosen := ← machine.findSymbol "hwcap_seen" (some library) | throw <| IO.userError "libhwcap has no hwcap_seen"
+  assertEqual s!"{triple} the resolver of an IFUNC is given AT_HWCAP" hwcap ((← machine.call chosen) % 2 ^ machine.architecture.bits)
+
+/-- A function of Thumb that a library doesn't export is where its symbol says, with the bit that says it is of Thumb, as one that it
+exports is and as a pointer to it is: what is called there runs as Thumb. -/
+def testThumbStaticSymbol : IO Unit := do
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile "testsuite/bin/arm-linux-musl-libc-files")).addFile
+    "/lib/libthumb.so" (← IO.FS.readBinFile "testsuite/bin/arm-linux-musl-libthumb")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let _ ← machine.loadLibrary "libthumb.so"
+  assertEqual "An exported function of Thumb is where it is exported" (← machine.findSymbol "thumb_twice")
+    (← machine.findStaticSymbol "thumb_twice")
+  let some pointer := ← machine.findSymbol "thumb_hidden" | throw <| IO.userError "libthumb has no thumb_hidden"
+  let some hidden := ← machine.findStaticSymbol "hidden_twice" | throw <| IO.userError "libthumb has no hidden_twice"
+  assertEqual "One that isn't exported is where a pointer to it is, with the Thumb bit" ((← machine.call pointer) % 2 ^ 32) hidden
+  assertEqual "and a call of it runs it" 10 ((← machine.call hidden [5]) % 2 ^ 32)
 
 /-- What a machine has loaded, by what the files were and whether their initializers ran, and a checkpoint that hasn't what is expected. -/
 def testManifest : IO Unit := do
@@ -4502,6 +4594,18 @@ def testBaseEnvironmentAbi (triple : String) : IO Unit := do
   assertEqual s!"{label} while it runs, it is running, and after, done" (1, 2) (← during.get, ← number once 4)
   started.set none
   assertEqual s!"{label} once" (0, none) (← callBase "pthread_once" [once, routine], ← started.get)
+  -- A routine of `pthread_once` that calls `pthread_once` of another: each is done, and the first comes back to where it was called.
+  if triple == "x86_64" then
+    let outerOnce ← machine.malloc 16
+    let innerOnce ← machine.malloc 16
+    machine.write outerOnce (ByteArray.mk #[0, 0, 0, 0])
+    machine.write innerOnce (ByteArray.mk #[0, 0, 0, 0])
+    let some onceAddress := base.resolve "pthread_once" | throw <| IO.userError s!"{label} has no pthread_once"
+    let code ← LLVM.assemble "x86_64"
+      s!"subq $8, %rsp; movabsq ${innerOnce}, %rdi; movabsq ${routine}, %rsi; movabsq ${onceAddress}, %rax; callq *%rax; addq $8, %rsp; movl $7, %eax; retq"
+    Bap.Emu.map machine.emu ⟨0x30000000, code ++ ByteArray.mk (Array.replicate (4096 - code.size) 0), ⟨true, false, true⟩⟩
+    assertEqual s!"{label} pthread_once of a routine that calls pthread_once of another" 0 (← callBase "pthread_once" [outerOnce, 0x30000000])
+    assertEqual s!"{label} and both are done" (2, 2) (← number outerOnce 4, ← number innerOnce 4)
   let thread ← machine.malloc 16
   assertEqual s!"{label} pthread_create" 0 (← callBase "pthread_create" [thread, 0, routine, 0])
   assertEqual s!"{label} and the thread is joined" 0 (← callBase "pthread_join" [← number thread word, 0] (threaded := true))
@@ -4524,6 +4628,32 @@ def testBaseEnvironmentAbi (triple : String) : IO Unit := do
   machine.write aligned (ByteArray.mk ((Array.range 32).map (·.toUInt8)))
   let moved ← callBase "realloc" [aligned, 100]
   assertEqual s!"{label} realloc of it has what it held" (List.range 32) ((← machine.read moved 32).toList.map (·.toNat))
+  -- memchr stops at what it looks for, and doesn't read what is past it, which here isn't there.
+  Bap.Emu.map machine.emu ⟨0x30010000, ByteArray.mk ((Array.replicate 4095 0x61).push 0x78), ⟨true, true, false⟩⟩
+  assertEqual s!"{label} memchr stops at what it finds" 0x30010fff (← callBase "memchr" [0x30010ffe, 0x78, 100])
+  -- Of attributes: a thread that is made detached isn't joined, and a stack too small isn't taken.
+  let attributes ← machine.malloc 64
+  assertEqual s!"{label} pthread_attr_init" 0 (← callBase "pthread_attr_init" [attributes])
+  assertEqual s!"{label} a stack too small" 22 (← callBase "pthread_attr_setstacksize" [attributes, 100])
+  assertEqual s!"{label} a stack of 64 KiB" 0 (← callBase "pthread_attr_setstacksize" [attributes, 65536])
+  let size ← machine.malloc 16
+  let _ ← callBase "pthread_attr_getstacksize" [attributes, size]
+  assertEqual s!"{label} which it says" 65536 (← number size word)
+  assertEqual s!"{label} detached" 0 (← callBase "pthread_attr_setdetachstate" [attributes, 1])
+  assertEqual s!"{label} pthread_create of it" 0 (← callBase "pthread_create" [thread, attributes, routine, 0])
+  assertEqual s!"{label} isn't joined" 22 (← callBase "pthread_join" [← number thread word, 0])
+  let edeadlk := 35
+  assertEqual s!"{label} a thread doesn't join itself" edeadlk (← callBase "pthread_join" [← Bap.Emu.thread machine.emu, 0])
+  -- A mutex that checks says that it is held, and a try of a normal one that is held is EBUSY.
+  let mutexAttributes ← machine.malloc 16
+  let checking ← machine.malloc 16
+  let _ ← callBase "pthread_mutexattr_init" [mutexAttributes]
+  assertEqual s!"{label} PTHREAD_MUTEX_ERRORCHECK" 0 (← callBase "pthread_mutexattr_settype" [mutexAttributes, 2])
+  let _ ← callBase "pthread_mutex_init" [checking, mutexAttributes]
+  assertEqual s!"{label} a mutex that checks locks" (0, edeadlk) (← callBase "pthread_mutex_lock" [checking], ← callBase "pthread_mutex_lock" [checking])
+  let normal ← machine.malloc 16
+  let _ ← callBase "pthread_mutex_init" [normal, 0]
+  assertEqual s!"{label} a try of a normal one that is held" (0, 16) (← callBase "pthread_mutex_lock" [normal], ← callBase "pthread_mutex_trylock" [normal])
   -- What can't be had.
   if bits == 64 then
     assertEqual s!"{label} malloc of more than there is is NULL" 0 (← callBase "malloc" [2 ^ 40])
@@ -5505,6 +5635,20 @@ private def regionAudit : IO Unit := do
   Bap.Emu.cloneProcessMemory forked child
   expectThrow "Emu faulting store fails" (Bap.Emu.step forked)
   assertEqual "Emu fault keeps forked process memory" 1 (← forked.processMemory.get).size
+  -- A diff is of the space that its snapshot has, whichever runs: what a child writes in its own isn't of it, and what was written in
+  -- that space is, while the child runs.
+  let spaces ← Tuned.riscv64 store 0 0
+  Bap.Emu.map spaces ⟨0x1000, ByteArray.mk (Array.replicate 8 0), ⟨true, true, false⟩⟩
+  let saved ← Bap.Emu.snapshot spaces
+  let first ← Bap.Emu.thread spaces
+  Bap.Emu.write spaces 0x1002 (ByteArray.mk #[5])
+  let child ← Bap.Emu.forkThread spaces 0
+  Bap.Emu.cloneProcessMemory spaces child
+  Bap.Emu.switchThread spaces child
+  Bap.Emu.write spaces 0x1000 (ByteArray.mk #[7])
+  assertEqual "Emu a diff is of the space of its snapshot while another runs" [(0x1002, 1)] (← Bap.Emu.diff spaces saved)
+  Bap.Emu.switchThread spaces first
+  assertEqual "Emu and the same when it runs" [(0x1002, 1)] (← Bap.Emu.diff spaces saved)
   -- A call does not disturb a pending delay slot.
   let calling ← Tuned.riscv64 ((← LLVM.assemble "riscv64" "addi a0, a0, 1") ++ (← LLVM.assemble "riscv64" "ret")) 0 0
   Bap.Emu.setReg calling a0 (.bits (BitVec.ofNat 64 0))
@@ -5794,6 +5938,24 @@ private def coreRegressions : IO Unit := do
   let _ ← Bap.Emu.onWrite ordered (0x1000, 0x1003) fun _ _ _ _ => order.modify (· ++ [4])
   let _ ← Bap.Emu.step ordered
   assertEqual "Emu hooks fire in registration order" [1, 2, 3, 4] (← order.get)
+  -- What a hook takes off doesn't fire after it, at the same instruction or access.
+  let taking ← Tuned.riscv64 (← rv "sw a0, 0(a1)") 0 0
+  Bap.Emu.map taking ⟨0x1000, zeros 8, rw⟩
+  Bap.Emu.setReg taking a0 (bits 0)
+  Bap.Emu.setReg taking a1 (bits 0x1000)
+  let fired ← IO.mkRef ([] : List Nat)
+  let laterCode ← IO.mkRef (none : Option Bap.Emu.HookId)
+  let laterWrite ← IO.mkRef (none : Option Bap.Emu.HookId)
+  let _ ← Bap.Emu.onCode taking (0, 0) fun emu _ => do
+    fired.modify (· ++ [1])
+    if let some id := ← laterCode.get then Bap.Emu.removeHook emu id
+  laterCode.set (some (← Bap.Emu.onCode taking (0, 0) fun _ _ => fired.modify (· ++ [2])))
+  let _ ← Bap.Emu.onWrite taking (0x1000, 0x1003) fun emu _ _ _ => do
+    fired.modify (· ++ [3])
+    if let some id := ← laterWrite.get then Bap.Emu.removeHook emu id
+  laterWrite.set (some (← Bap.Emu.onWrite taking (0x1000, 0x1003) fun _ _ _ _ => fired.modify (· ++ [4])))
+  let _ ← Bap.Emu.step taking
+  assertEqual "Emu hooks that one takes off don't fire after it" [1, 3] (← fired.get)
   -- A fork keeps its memory across a failed step of its own, and a checkpoint keeps both memories.
   let failing ← Tuned.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "sb a0, 0(a1)") ++ (← rv "lb a3, 0(a2)") ++ (← rv "jal -12")) 0 0
   Bap.Emu.map failing ⟨0x1000, zeros 8, rw⟩

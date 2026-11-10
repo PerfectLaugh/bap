@@ -1738,8 +1738,11 @@ private def notifyCode (emu : Emu) (address : Nat) : IO Unit := do
   if !near.any fires then return
   serialize emu <| do
   let context := hookContext emu
+  -- What one that fires takes off doesn't fire after it.
+  let changes ← emu.hookChanges.get
   for hook in near do
-    if fires hook then hook.action context address
+    if fires hook then
+      if (← emu.hookChanges.get) == changes || (← emu.hooks.get).any (·.id == hook.id) then hook.action context address
 
 /-- Whether nothing watches the code that runs. -/
 private def rangeIsQuiet (emu : Emu) : IO Bool := do
@@ -1772,11 +1775,16 @@ private def notifyMemory (emu : Emu) (write : Bool) (address size value : Nat) :
       | none => pure ()
       let hit := hooksForAccess (·.first) (·.last) (← emu.writeHooks.get) address size
       takeBack !hit.isEmpty
-      hit.forM fun hook => serialize emu <| serve emu <| hook.action (hookContext emu) address size value
+      -- What one that fires takes off doesn't fire after it.
+      hit.forM fun hook => do
+        if (← emu.writeHooks.get).any (·.id == hook.id) then
+          serialize emu <| serve emu <| hook.action (hookContext emu) address size value
     else do
       let hit := hooksForAccess (·.first) (·.last) (← emu.readHooks.get) address size
       takeBack !hit.isEmpty
-      hit.forM fun hook => serialize emu <| serve emu <| hook.action (hookContext emu) address size
+      hit.forM fun hook => do
+        if (← emu.readHooks.get).any (·.id == hook.id) then
+          serialize emu <| serve emu <| hook.action (hookContext emu) address size
   notifyAccess mapped write address size fault
     (Primus.Lifted.markDirtyRange emu.engine address (address + size - 1))
     (recordAccess emu write address size value) hooks
@@ -2809,6 +2817,26 @@ def refreshRegions (emu : Emu) : IO Unit := do
   let ⟨_, memory⟩ ← cells emu state
   setRegions emu (mapped.map fun region =>
     { region with data := Bap.Memory.readRegion memory region.address region.data.size })
+
+/-- The regions of an address space as they are now, with what its memory has: of the one that runs, its regions, and of another, those
+that it left when it was switched from, with what its own memory has now. -/
+def liveRegionsOf (emu : Emu) (space : Nat) : IO (List Region) := do
+  if space == (← emu.taskTable.get).spaceOf (← emu.currentThreadRef.get) then
+    refreshRegions emu
+    return ← emu.regions.get
+  let mapped := (← emu.parkedRegions.get).getD space []
+  match nativeFor (← emu.processMemory.get) (← emu.sharedMemory.get) space with
+  | some memory => regionsFromNative mapped memory
+  | none =>
+    -- Without native memory, of the state of a thread of it, which has its memory there while another runs.
+    let table ← emu.taskTable.get
+    match (← emu.threadsRef.get).find? fun context => table.spaceOf context.id == space with
+    | some context =>
+      match Bil.lookup context.state.env emu.config.memory with
+      | .ok (.memory memory) =>
+        pure (mapped.map fun region => { region with data := Bap.Memory.readRegion memory region.address region.data.size })
+      | _ => pure mapped
+    | none => pure mapped
 
 /-- Gives the regions the bytes of the native memory, or of the state if there is none. -/
 def refreshPersistentRegions (emu : Emu) : IO Unit := do

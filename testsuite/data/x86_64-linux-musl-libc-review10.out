@@ -1,0 +1,5 @@
+ringcancel: completed 2:ok 1:ECANCELED
+hardlink: after one that failed, of a hard link ok, of a link ECANCELED, after one that waits none
+timerfd: of one that repeats and expired, left before the next 1
+strict: of the only thread, ended by 9, of another thread, the process goes on
+done

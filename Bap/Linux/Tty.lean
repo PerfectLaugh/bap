@@ -207,6 +207,29 @@ def hangUp (poller : Poller) (emu : Emu) : IO Unit := do
       for signal in [1, cont] do
         poller.signals.send emu none leader ⟨signal, 0x80, .sent 0 0 0⟩
 
+/-- What the leader of a session does as it lets its terminal go, by `TIOCNOTTY` or as it exits, as Linux's `disassociate_ctty` has it:
+the foreground job of the terminal hears SIGHUP, and of `TIOCNOTTY` SIGCONT too, and the terminal is of no session, and of none of the
+processes of that session. -/
+def disassociate (poller : Poller) (emu : Emu) (leader : Nat) (exiting : Bool) : IO Unit := do
+  let kernel ← poller.kernel.get
+  let some slave := (kernel.process leader).terminal | return
+  let some { content := .ptySlave master, .. } := kernel.inodes.get? slave | return
+  let some { content := .ptyMaster terminal, .. } := kernel.inodes.get? master | return
+  if terminal.session != leader then return
+  let live ← poller.live
+  poller.kernel.modify fun kernel =>
+    let kernel := kernel.setContent master (.ptyMaster { terminal with session := 0, foreground := 0 })
+    (leader :: live).foldl (init := kernel) fun kernel group =>
+      if kernel.sidOf group == leader && (kernel.process group).terminal == some slave then
+        kernel.setProcess group { kernel.process group with terminal := none }
+      else kernel
+  if terminal.foreground == 0 then return
+  let cont := if poller.architecture matches .mips .. then 25 else 18
+  for group in live do
+    if kernel.pgidOf group == terminal.foreground then
+      for signal in (if exiting then [1] else [1, cont]) do
+        poller.signals.send emu none group ⟨signal, 0x80, .sent 0 0 0⟩
+
 /-- `read`, `write` and the ioctls of a pseudo-terminal, if the descriptor is of one. -/
 def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Option SyscallAction) := do
   let architecture := poller.architecture
@@ -309,9 +332,20 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         if let some action ← background poller emu number terminal ttou false then return some action
         let bytes ← read emu (arg 2) 36
         let word (at_ : Nat) : Nat := numberOf big (bytes.extract at_ (at_ + 4))
+        -- What waits goes on to the new mode, as `n_tty_set_termios` has it: made raw, the line that wasn't ended is input as it is; made
+        -- canonical, all that waits is a line. TCSETSF flushes all of it.
+        let wasCanonical := terminal.lflag &&& 2 != 0
+        let canonical := word 12 &&& 2 != 0
+        let all := terminal.input.foldl (· ++ ·) ByteArray.empty
+        let (input, line, ends) :=
+          if request == 0x5404 then ([], ByteArray.empty, 0)
+          else if wasCanonical && !canonical then
+            (terminal.input ++ (if terminal.line.isEmpty then [] else [terminal.line]), ByteArray.empty, terminal.ends)
+          else if !wasCanonical && canonical then
+            ((if all.isEmpty then [] else [all]), terminal.line, terminal.ends)
+          else (terminal.input, terminal.line, terminal.ends)
         save { terminal with iflag := word 0, oflag := word 4, cflag := word 8, lflag := word 12
-                             cc := (bytes.extract 17 36).toList.map (·.toNat)
-                             input := if request == 0x5404 then [] else terminal.input }
+                             cc := (bytes.extract 17 36).toList.map (·.toNat), input, line, ends }
         poller.wake emu
         succeed
       | 0x5413 =>
@@ -332,11 +366,14 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         if let some action ← background poller emu number terminal ttou false then return some action
         let pgid ← readInt
         if (kernel.process group).terminal != some slaveNumber then return ← fail 25
+        -- Of a group that there isn't, `ESRCH`, and of one of another session, `EPERM`, as `tiocspgrp` has it.
+        if !live.any fun other => kernel.pgidOf other == pgid then return ← fail 3
         if !live.any fun other => kernel.pgidOf other == pgid && kernel.sidOf other == terminal.session then return ← fail 1
         save { terminal with foreground := pgid }
         succeed
       | 0x540E =>
-        -- TIOCSCTTY: of a session leader with no terminal, of a terminal of no session.
+        -- TIOCSCTTY: of a session leader with no terminal, of a terminal of no session; of the leader of its session, nothing to do.
+        if kernel.sidOf group == group && terminal.session == group then return ← succeed
         if kernel.sidOf group != group || (kernel.process group).terminal.isSome then return ← fail 1
         if terminal.session != 0 && terminal.session != group then return ← fail 1
         save { terminal with session := group, foreground := kernel.pgidOf group }
@@ -344,8 +381,9 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         succeed
       | 0x5422 =>
         if (kernel.process group).terminal != some slaveNumber then return ← fail 25
-        poller.kernel.modify fun kernel => kernel.setProcess group { kernel.process group with terminal := none }
-        if kernel.sidOf group == group then save { terminal with session := 0, foreground := 0 }
+        -- Of the leader, it lets the terminal go for all of its session; of another, for itself.
+        if kernel.sidOf group == group then disassociate poller emu group false
+        else poller.kernel.modify fun kernel => kernel.setProcess group { kernel.process group with terminal := none }
         succeed
       | 0x541B => int (if isSlave then terminal.waiting else terminal.output.size)
       | 0x5411 => int (if isSlave then terminal.output.size else 0)

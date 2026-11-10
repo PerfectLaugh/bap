@@ -1093,7 +1093,9 @@ def mipsHasDelaySlot (insn : Disasm.Insn) : Bool :=
 runs only as it falls through, if it does. -/
 def mipsCompactMnemonics : List String :=
   ["bc", "balc", "beqzc", "bnezc", "beqc", "bnec", "bltc", "bgec", "bltuc", "bgeuc", "blezc", "bgezc", "bgtzc", "bltzc", "beqzalc",
-    "bnezalc", "blezalc", "bgezalc", "bgtzalc", "bltzalc", "bovc", "bnvc", "jic", "jialc"]
+    "bnezalc", "blezalc", "bgezalc", "bgtzalc", "bltzalc", "bovc", "bnvc", "jic", "jialc",
+    -- What LLVM writes `jic` and `jialc` of no offset as.
+    "jrc", "jalrc"]
 
 /-- `mipsHasDelaySlot` of a variant: of release 6, a compact branch has none. Before it, that is all there is to it. -/
 def mipsHasDelaySlotOf (variant : MipsVariant) : Disasm.Insn → Bool :=
@@ -1152,6 +1154,15 @@ private def flow (flags : Nat) : Disasm.Flow :=
 conditional jump whose target isn't known. LLVM flags them so; `beqlr` and the like, of `gBCLR`, are conditional branches already. -/
 def powerpcFlow (flags : Nat) : Disasm.Flow :=
   if flags &&& 1 != 0 && flags &&& 4 == 0 then .conditionalJump else flow flags
+
+/-- `powerpcFlow`, of the instruction word too: a branch that links, of a condition or not, `beql`, `bcctrl` or `bclrl`, is a call, which
+goes on past itself as one that isn't taken does, where LLVM flags those of a condition as conditional branches. -/
+def powerpcFlowOf (evidence : Nat × Nat) : Disasm.Flow :=
+  let word := evidence.1
+  let primary := word / 0x4000000
+  let extended := word / 2 % 1024
+  if word % 2 == 1 && (primary == 16 || primary == 19 && (extended == 16 || extended == 528 || extended == 560)) then .call
+  else powerpcFlow evidence.2
 
 /-- LLVM has no flags for `JAL` and `JALR`, their role comes from the registers, by the hints of the
 RISC-V specification: `X1` and `X5` are the link registers. Nor for `C.JR` and `C.JALR`, which are of 16 bits, whose low two bits
@@ -1833,7 +1844,7 @@ def decodePowerPCOf (variant : PowerPCVariant) (globals : Primus.Semantics.Envir
     address := address
     size := decoded.size
     asm := normalizeAssembly decoded.assembly
-    flow := powerpcFlow decoded.flags
+    flow := powerpcFlowOf (word, decoded.flags)
     target := powerpcMCTarget variant.bits address word machineOperands
     bil := resolveAliases (powerpcAliases variant.bits) bil
   }

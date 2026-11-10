@@ -35,17 +35,17 @@ def changedAddresses (saved live : List Region) : List Nat :=
 def diffRanges (saved live : List Region) : List (Nat × Nat) :=
   coalesce (changedAddresses saved live)
 
-/-- What changed since a snapshot was made: of the bytes that it has of its memory, which are those of the native memory of a space, or
+/-- What changed since a snapshot was made in the space that it has, which may not be the one that runs: of the bytes that it has of its memory, which are those of the native memory of a space, or
 else those of its state, which `restore` goes back to, rather than what the regions had the last time they were given them. -/
 def diff (emu : Emu) (saved : Snapshot) : IO (List (Nat × Nat)) := do
-  refreshRegions emu
   let regions := match saved.processMemory.lookup (snapshotSpace saved) with
     | some regions => regions
     | none => match Bil.lookup saved.state.env emu.config.memory with
       | .ok (.memory memory) =>
         saved.regions.map fun region => { region with data := Bap.Memory.readRegion memory region.address region.data.size }
       | _ => saved.regions
-  pure (diffRanges regions (← emu.regions.get))
+  -- Of the space that it has, whichever runs now.
+  pure (diffRanges regions (← liveRegionsOf emu (snapshotSpace saved)))
 
 def changedSince (emu : Emu) (path : String) : IO (List (Nat × Nat)) := do
   diff emu (← loadSnapshot emu path)

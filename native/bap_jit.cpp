@@ -2121,6 +2121,25 @@ extern "C" lean_obj_res bap_bytes_pieces(lean_obj_arg dataObject) {
   return list;
 }
 
+// `Jit.patch`: `data` with `bytes` at `offset`, of what is in it. Of `data` that only this has, in place; of what something else has too,
+// a copy, which of what is big copies only what isn't zeros into zeros that take no memory yet, as `sliceBytes` does: a file of what
+// processes share as much as they like takes the host what is written of it, however many have it.
+extern "C" lean_obj_res bap_bytes_patch(lean_obj_arg dataObject, lean_obj_arg offsetObject, lean_obj_arg bytesObject) {
+  const size_t size = lean_sarray_size(dataObject);
+  const size_t offset = lean_is_scalar(offsetObject) ? lean_unbox(offsetObject) : size;
+  const size_t count = offset < size ? std::min(lean_sarray_size(bytesObject), size - offset) : 0;
+  lean_obj_res result = dataObject;
+  if (count != 0 && !lean_is_exclusive(dataObject)) {
+    result = sliceBytes(dataObject, lean_box(0), lean_usize_to_nat(size));
+    lean_dec(dataObject);
+  }
+  if (count != 0)
+    std::memcpy(lean_sarray_cptr(result) + offset, lean_sarray_cptr(bytesObject), count);
+  lean_dec(offsetObject);
+  lean_dec(bytesObject);
+  return result;
+}
+
 // `Jit.resident`: the bytes of the pieces of `Jit.pieces`, counted without making them.
 extern "C" lean_obj_res bap_bytes_resident(lean_obj_arg dataObject) {
   const size_t size = lean_sarray_size(dataObject);
@@ -2177,6 +2196,20 @@ extern "C" lean_obj_res bap_jit_memory_region_bytes(lean_obj_arg memoryObject, u
   }
   return lean_io_result_mk_ok(result);
 }
+
+// The pages that a memory has of a range, which are all of it that was ever written, each by its address and its size.
+extern "C" lean_obj_res bap_jit_memory_pages_in(lean_obj_arg memoryObject, uint64_t first, uint64_t last, lean_obj_arg) {
+  auto *memory = static_cast<PagedMemory *>(lean_get_external_data(memoryObject));
+  lean_object *pages = lean_mk_empty_array();
+  memory->forEachPage([&](uint64_t address, const uint8_t *) {
+    if (address + (PagedMemory::pageSize - 1) >= first && address <= last)
+      pages = lean_array_push(pages, lean_box_uint64(address));
+  });
+  return lean_io_result_mk_ok(pages);
+}
+
+// The size of a page of `bap_jit_memory_pages_in`.
+extern "C" uint64_t bap_jit_memory_page_size(lean_obj_arg) { return PagedMemory::pageSize; }
 
 extern "C" lean_obj_res bap_jit_memory_zero(lean_obj_arg memoryObject, uint64_t first, uint64_t last, lean_obj_arg) {
   static_cast<PagedMemory *>(lean_get_external_data(memoryObject))->zeroRange(first, last);
@@ -2384,14 +2417,40 @@ struct ChainEntry {
 };
 
 struct Chain {
-  std::unordered_map<uint64_t, ChainEntry> entries;
+  using Entries = std::unordered_map<uint64_t, ChainEntry>;
+  Entries entries;
   // Which run of it this is, from 1.
   uint64_t run = 0;
-  ~Chain() { clear(); }
+  // How many runs of it there are, one in another as what a hook runs runs it, and what was taken out of it while they were: what they
+  // have of it stays until the last is over, as a hook may clear the chain or put another range where the one that runs is.
+  uint64_t active = 0;
+  std::vector<Entries::node_type> retired;
+  ~Chain() {
+    clear();
+    release();
+  }
+  void retire(Entries::iterator found) {
+    if (active == 0) {
+      lean_dec_ref(found->second.program);
+      entries.erase(found);
+    } else
+      retired.push_back(entries.extract(found));
+  }
   void clear() {
-    for (auto &entry : entries)
-      lean_dec_ref(entry.second.program);
-    entries.clear();
+    while (!entries.empty()) retire(entries.begin());
+  }
+  void release() {
+    for (auto &node : retired) lean_dec_ref(node.mapped().program);
+    retired.clear();
+  }
+};
+
+// That a run of a chain is on, to its end however it ends.
+struct ChainRun {
+  Chain *chain;
+  explicit ChainRun(Chain *chain) : chain(chain) { ++chain->active; }
+  ~ChainRun() {
+    if (--chain->active == 0) chain->release();
   }
 };
 
@@ -2491,8 +2550,7 @@ extern "C" lean_obj_res bap_jit_chain_add(lean_obj_arg chainObject, uint64_t pc,
   if (found != chain->entries.end()) {
     // What went to the one that goes is to look again.
     for (auto &other : chain->entries) other.second.lastTarget = nullptr;
-    lean_dec_ref(found->second.program);
-    chain->entries.erase(found);
+    chain->retire(found);
   }
   lean_inc_ref(programObject);
   entry.program = programObject;
@@ -2544,6 +2602,7 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
     const size_t firstSize = lean_array_size(stateObject);
     if (firstSize < current->slotCount)
       return ioError("JIT state has fewer slots than its program requires");
+    ChainRun running(chain);
     std::vector<uint64_t> state(firstSize);
     for (size_t index = 0; index != firstSize; ++index)
       state[index] = lean_unbox_uint64(lean_array_get_core(stateObject, index));
@@ -2608,7 +2667,8 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
       current->runs += 1;
       current->executed += executed;
       first = false;
-      if (effect != 1 || memory.leanRan || current->budgetSlot == ChainEntry::none || budget - ranChained < 1)
+      // What was taken out of the chain as it ran isn't gone on from: what it goes to may be too.
+      if (effect != 1 || memory.leanRan || !chain->retired.empty() || current->budgetSlot == ChainEntry::none || budget - ranChained < 1)
         break;
       ChainEntry *target = current->lastNext == next ? current->lastTarget : nullptr;
       if (target == nullptr) {

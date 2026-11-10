@@ -92,6 +92,17 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-review6",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-review7",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-review7",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-review8",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-review8",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-review8root",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-review8root",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-review9",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-review9",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-review10",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-review10",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-review12",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-review13",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-review12",
     Bap.Tests.Emu.testLinuxRaises "mips-linux-musl-libc-bigendian",
     Bap.Tests.Emu.testLinuxRaises "mips64-linux-musl-libc-bigendian",
     Bap.Tests.Emu.testLinuxRaises "powerpc-linux-musl-libc-bigendian",
@@ -496,6 +507,10 @@ def main : IO Unit := do
     Bap.Tests.Coff.runAuxiliaryRecords,
     Bap.Tests.Elf.runExtendedSections,
     Bap.Tests.Emu.testCallWaits,
+    Bap.Tests.Emu.testChainClearedByHook,
+    Bap.Tests.Emu.testThumbStaticSymbol,
+    Bap.Tests.Emu.testIfuncArguments "arm",
+    Bap.Tests.Emu.testIfuncArguments "riscv64",
     Bap.Tests.Emu.testVersionedSymbols,
     Bap.Tests.Emu.testImportsOfLoadedFile "aarch64",
     Bap.Tests.Emu.testImportsOfLoadedFile "x86_64",
@@ -635,6 +650,9 @@ def main : IO Unit := do
   Bap.Tests.Optimize.scaling
   Bap.Tests.Lifted.invalidationScales
   Bap.Tests.Emu.scaling
+  -- What a mapping takes of the host is of the process, which nothing else runs in then.
+  Bap.Tests.Emu.testMappingsTakeWhatIsWritten "x86_64-linux-musl"
+  Bap.Tests.Emu.testMappingsTakeWhatIsWritten "aarch64-linux-musl"
   -- More tests than the pool has threads would wait for each other, with processors to spare.
   -- A failure says which test it is, by its place in the list, as one that fails now and then says nothing else of where it was.
   let tasks ← tests.zipIdx.mapM fun (test, index) => liftM <| IO.asTask (prio := .dedicated) do

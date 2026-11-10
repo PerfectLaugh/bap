@@ -2425,17 +2425,19 @@ theorem ppc_data {env : Env} {site : Site} {n : Nat} {value : Int} (state : Link
   unfold ppcData at h
   split at h <;> cases h <;> (link_run [powerpc, ht]; try rfl)
 
-/-- The branches: `LI` and `BD`, in words, keeping `AA` and `LK`. -/
-def ppcCode (x p : Int) : Nat → Option (Nat → Nat)
+/-- The branches: `LI` and `BD`, in words, keeping `AA` and `LK`. `PLTREL24` goes to `plt`, which of PowerPC32 leaves out the bit of
+its addend that chooses a stub (`ppcPltX`). -/
+def ppcCode (x plt p : Int) : Nat → Option (Nat → Nat)
   | 2 => some fun i => setBits i 2 24 (x >>> 2)
   | 7 => some fun i => setBits i 2 14 (x >>> 2)
-  | 10 | 18 => some fun i => setBits i 2 24 ((x - p) >>> 2)
+  | 10 => some fun i => setBits i 2 24 ((x - p) >>> 2)
+  | 18 => some fun i => setBits i 2 24 ((plt - p) >>> 2)
   | 11 => some fun i => setBits i 2 14 ((x - p) >>> 2)
   | _ => none
 
 theorem ppc_code {env : Env} {site : Site} {f : Nat → Nat} {state : LinkState}
     (hb : inSection site 0 4 state.memory.size = true)
-    (h : ppcCode (site.s + site.a) site.p site.rel.typ = some f) :
+    (h : ppcCode (site.s + site.a) (ppcPltX env site) site.p site.rel.typ = some f) :
     (powerpc env site).run state =
       .ok (some [stiAt env site 0 4 (f (readNat state.memory env.codeLittle (site.off + 0) 4))]) state := by
   generalize ht : site.rel.typ = t at h

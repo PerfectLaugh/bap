@@ -42,10 +42,11 @@ structure BaseState where
   specific : Std.HashMap (Nat × Nat) Nat := {}
   aligned : Std.HashMap Nat Nat := {}
   errno : Std.HashMap Nat Nat := {}
-  /-- Of each thread in `pthread_once`, where it returns to after the routine. -/
-  onceReturns : Std.HashMap Nat Nat := {}
-  /-- Of each thread in `pthread_once`, the word of it, which says that the routine is done once it is. -/
-  onceWords : Std.HashMap Nat Nat := {}
+  /-- Of each thread in `pthread_once`, where it returns to after the routine, the innermost first: a routine may call `pthread_once` of
+  another. -/
+  onceReturns : Std.HashMap Nat (List Nat) := {}
+  /-- Of each thread in `pthread_once`, the word of it, which says that the routine is done once it is, the innermost first. -/
+  onceWords : Std.HashMap Nat (List Nat) := {}
   /-- The stack of each thread that it made, which goes when the thread is joined. -/
   stacks : Std.HashMap Nat (Nat × Nat) := {}
   /-- What else was allocated for each thread that it made, its thread-local storage, which goes with its stack. -/
@@ -55,6 +56,9 @@ structure BaseState where
   /-- How many times the thread that holds each mutex holds it, by its address: a mutex of bionic is a word, of the thread that holds
   it, on 32 bits. -/
   lockCounts : Std.HashMap Nat Nat := {}
+  /-- The type of each mutex that `pthread_mutex_init` was given an attribute of, by its address: 1 of one that is recursive and 2 of one
+  that checks, as bionic numbers them. What isn't here is normal. -/
+  mutexTypes : Std.HashMap Nat Nat := {}
 
 /-- The base environment of a machine: where each of its names is. -/
 structure BaseEnvironment where
@@ -144,6 +148,8 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
   let width := architecture.bits
   let word := width / 8
   let big := architecture.big
+  -- What a thread's stack is unless its attributes say otherwise.
+  let defaultStack := 1024 * 1024
   let wrap (value : Int) : Nat := (value % (2 ^ width : Int)).toNat
   let value (number : Nat) : IO BaseResult := pure (.value number)
   let readBytes (machine : Machine) (address size : Nat) : IO ByteArray := Bap.Emu.read machine.emu address size
@@ -165,6 +171,13 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
         out := out ++ bytes
         at_ := at_ + chunk
     pure out
+  -- `count` bytes of `byte` from `address`, a piece at a time, so that what the host makes of them is no more than a piece, whatever
+  -- count a guest gives.
+  let fillBytes (machine : Machine) (address count : Nat) (byte : UInt8) : IO Unit := do
+    let piece := 65536
+    for index in List.range ((count + piece - 1) / piece) do
+      writeBytes machine (address + index * piece) (ByteArray.mk (Array.replicate (min piece (count - index * piece)) byte))
+  let edeadlk : Nat := if architecture matches .mips .. then 45 else 35
   let tidOf (machine : Machine) : IO Nat := Bap.Emu.thread machine.emu
   -- A mutex is its first word, of the thread that holds it, which is all that bionic has of one on 32 bits; how many times it holds
   -- it is kept here.
@@ -176,9 +189,16 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
       state.modify fun state => { state with lockCounts := state.lockCounts.insert mutex 1 }
       value 0
     else if owner == me then
-      -- As a recursive mutex has it, of which the others don't come here twice.
-      state.modify fun state => { state with lockCounts := state.lockCounts.insert mutex (state.lockCounts.getD mutex 1 + 1) }
-      value 0
+      match (← state.get).mutexTypes.getD mutex 0 with
+      -- One that checks says so, and a try of one that is normal is `EBUSY`, as it is held.
+      | 2 => value edeadlk
+      | 0 => if try_ then value 16 else
+        -- A lock of a normal one that the thread holds would wait for ever, and goes on as of one that is recursive instead.
+        state.modify fun state => { state with lockCounts := state.lockCounts.insert mutex (state.lockCounts.getD mutex 1 + 1) }
+        value 0
+      | _ =>
+        state.modify fun state => { state with lockCounts := state.lockCounts.insert mutex (state.lockCounts.getD mutex 1 + 1) }
+        value 0
     else if try_ then value 16
     else pure (.wait mutex)
   let mutexUnlock (machine : Machine) (mutex : Nat) : IO BaseResult := do
@@ -274,15 +294,20 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
       if size > 0 then writeBytes machine (arguments.headD 0) (← readBytes machine (arguments.getD 1 0) size)
       value (arguments.headD 0)),
     ("memset", show BaseFunction from fun machine arguments _ => do
-      let size := arguments.getD 2 0
-      if size > 0 then writeBytes machine (arguments.headD 0) (ByteArray.mk (Array.replicate size (arguments.getD 1 0).toUInt8))
+      fillBytes machine (arguments.headD 0) (arguments.getD 2 0) (arguments.getD 1 0).toUInt8
       value (arguments.headD 0)),
     ("memcmp", show BaseFunction from fun machine arguments _ => do
       let size := arguments.getD 2 0
       value (compare (← readBytes machine (arguments.headD 0) size) (← readBytes machine (arguments.getD 1 0) size))),
     ("memchr", show BaseFunction from fun machine arguments _ => do
-      let bytes ← readBytes machine (arguments.headD 0) (arguments.getD 2 0)
-      value ((bytes.toList.findIdx? (·.toNat == (arguments.getD 1 0) % 256)).map ((arguments.headD 0) + ·) |>.getD 0)),
+      -- A page at a time, to the first that it looks for: what is past it isn't read, and may not be there.
+      let (start, wanted, size) := (arguments.headD 0, (arguments.getD 1 0) % 256, arguments.getD 2 0)
+      let mut at_ := start
+      while at_ < start + size do
+        let chunk := min (4096 - at_ % 4096) (start + size - at_)
+        if let some index := (← readBytes machine at_ chunk).toList.findIdx? (·.toNat == wanted) then return ← value (at_ + index)
+        at_ := at_ + chunk
+      value 0),
     ("strlen", show BaseFunction from fun machine arguments _ => do value (← stringAt machine (arguments.headD 0)).size),
     ("strnlen", show BaseFunction from fun machine arguments _ => do value (← stringAt machine (arguments.headD 0) (arguments.getD 1 0)).size),
     ("strcmp", show BaseFunction from fun machine arguments _ => do
@@ -296,7 +321,8 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
     ("strncpy", show BaseFunction from fun machine arguments _ => do
       let limit := arguments.getD 2 0
       let text ← stringAt machine (arguments.getD 1 0) limit
-      if limit > 0 then writeBytes machine (arguments.headD 0) (text ++ ByteArray.mk (Array.replicate (limit - text.size) 0))
+      writeBytes machine (arguments.headD 0) text
+      fillBytes machine (arguments.headD 0 + text.size) (limit - text.size) 0
       value (arguments.headD 0)),
     ("strcat", show BaseFunction from fun machine arguments _ => do
       let start := (arguments.headD 0) + (← stringAt machine (arguments.headD 0)).size
@@ -351,10 +377,14 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
     -- Threads.
     ("pthread_create", show BaseFunction from fun machine arguments _ => do
       let emu := machine.emu
-      let (out, start, argument) := (arguments.headD 0, arguments.getD 2 0, arguments.getD 3 0)
+      let (out, attributes, start, argument) := (arguments.headD 0, arguments.getD 1 0, arguments.getD 2 0, arguments.getD 3 0)
+      -- Of its attributes, as bionic has them: whether it is detached, of the flags, and the size of its stack, after where it is.
+      let (detached, asked) ← if attributes == 0 then pure (false, 0) else
+        pure ((← read32 machine attributes) &&& 1 != 0, ← readWord machine (attributes + 2 * word))
       let tid ← spawnThread emu start argument
+      if detached then state.modify fun state => { state with detached := state.detached.insert tid }
       -- A stack of its own, and where it goes when its routine returns.
-      let stackSize := 1024 * 1024
+      let stackSize := if asked == 0 then defaultStack else (asked + 4095) / 4096 * 4096
       let base ← placeZeros emu 0 false stackSize 3
       state.modify fun state => { state with stacks := state.stacks.insert tid (base, stackSize) }
       let top := (base + stackSize - 64) / 16 * 16
@@ -396,6 +426,9 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
       value 0),
     ("pthread_join", show BaseFunction from fun machine arguments _ => do
       let (tid, out) := (arguments.headD 0, arguments.getD 1 0)
+      -- Of itself, it would wait for ever; and of one that is detached, nothing is to be had.
+      if tid == (← tidOf machine) then return ← value edeadlk
+      if (← state.get).detached.contains tid then return ← value 22
       let table ← machine.emu.taskTable.get
       let over := match table.find? tid with
         | some task => task.status.isSome
@@ -420,18 +453,47 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
     ("pthread_exit", show BaseFunction from fun machine arguments _ => do finish machine (← tidOf machine) (arguments.headD 0)),
     ("pthread_self", show BaseFunction from fun machine _ _ => do value (← tidOf machine)),
     ("pthread_equal", show BaseFunction from fun _ arguments _ => value (if arguments.headD 0 == arguments.getD 1 0 then 1 else 0)),
-    ("pthread_attr_init", show BaseFunction from fun _ _ _ => value 0),
+    -- Attributes as bionic has them: its flags, of which 1 is that it is detached, where its stack is, and how large it is.
+    ("pthread_attr_init", show BaseFunction from fun machine arguments _ => do
+      let attributes := arguments.headD 0
+      write32 machine attributes 0
+      writeWord machine (attributes + word) 0
+      writeWord machine (attributes + 2 * word) defaultStack
+      value 0),
     ("pthread_attr_destroy", show BaseFunction from fun _ _ _ => value 0),
-    ("pthread_attr_setdetachstate", show BaseFunction from fun _ _ _ => value 0),
-    ("pthread_attr_setstacksize", show BaseFunction from fun _ _ _ => value 0),
-    ("pthread_mutexattr_init", show BaseFunction from fun _ _ _ => value 0),
-    ("pthread_mutexattr_settype", show BaseFunction from fun _ _ _ => value 0),
+    ("pthread_attr_setdetachstate", show BaseFunction from fun machine arguments _ => do
+      let (attributes, detach) := (arguments.headD 0, arguments.getD 1 0 % 2 ^ 32)
+      if detach > 1 then return ← value 22
+      let flags ← read32 machine attributes
+      write32 machine attributes (if detach == 1 then flags ||| 1 else flags &&& (2 ^ 32 - 2))
+      value 0),
+    ("pthread_attr_getdetachstate", show BaseFunction from fun machine arguments _ => do
+      write32 machine (arguments.getD 1 0) ((← read32 machine (arguments.headD 0)) &&& 1)
+      value 0),
+    ("pthread_attr_setstacksize", show BaseFunction from fun machine arguments _ => do
+      -- Less than `PTHREAD_STACK_MIN` is `EINVAL`.
+      if arguments.getD 1 0 < 16384 then return ← value 22
+      writeWord machine (arguments.headD 0 + 2 * word) (arguments.getD 1 0)
+      value 0),
+    ("pthread_attr_getstacksize", show BaseFunction from fun machine arguments _ => do
+      writeWord machine (arguments.getD 1 0) (← readWord machine (arguments.headD 0 + 2 * word))
+      value 0),
+    -- Of a mutex, its type, as bionic numbers them: normal, recursive and one that checks.
+    ("pthread_mutexattr_init", show BaseFunction from fun machine arguments _ => do write32 machine (arguments.headD 0) 0; value 0),
+    ("pthread_mutexattr_settype", show BaseFunction from fun machine arguments _ => do
+      if arguments.getD 1 0 % 2 ^ 32 > 2 then return ← value 22
+      write32 machine (arguments.headD 0) (arguments.getD 1 0 % 2 ^ 32)
+      value 0),
     ("pthread_mutexattr_destroy", show BaseFunction from fun _ _ _ => value 0),
     ("pthread_condattr_init", show BaseFunction from fun _ _ _ => value 0),
     ("pthread_condattr_destroy", show BaseFunction from fun _ _ _ => value 0),
     ("pthread_mutex_init", show BaseFunction from fun machine arguments _ => do
-      write32 machine (arguments.headD 0) 0
-      state.modify fun state => { state with lockCounts := state.lockCounts.erase (arguments.headD 0) }
+      let (mutex, attributes) := (arguments.headD 0, arguments.getD 1 0)
+      let type ← if attributes == 0 then pure 0 else pure ((← read32 machine attributes) % 4)
+      write32 machine mutex 0
+      state.modify fun state => { state with
+        lockCounts := state.lockCounts.erase mutex
+        mutexTypes := if type == 0 then state.mutexTypes.erase mutex else state.mutexTypes.insert mutex type }
       value 0),
     ("pthread_mutex_destroy", show BaseFunction from fun _ _ _ => value 0),
     ("pthread_mutex_lock", show BaseFunction from fun machine arguments _ => mutexLock machine (arguments.headD 0) false),
@@ -493,7 +555,7 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
       -- The routine runs as if it were called from here, and comes back to a stub that gives 0 to the caller.
       let emu := machine.emu
       let me ← tidOf machine
-      state.modify fun state => { state with onceWords := state.onceWords.insert me once }
+      state.modify fun state => { state with onceWords := state.onceWords.insert me (once :: state.onceWords.getD me []) }
       let back ← onceStub.get
       match architecture with
       | .x86_64 | .i686 =>
@@ -502,7 +564,7 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
           | .ok bits => pure bits.2.toNat
           | .error _ => pure 0
         let caller ← readWord machine sp
-        state.modify fun state => { state with onceReturns := state.onceReturns.insert me caller }
+        state.modify fun state => { state with onceReturns := state.onceReturns.insert me (caller :: state.onceReturns.getD me []) }
         writeWord machine sp back
       | _ =>
         let link := match architecture with
@@ -511,7 +573,8 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
           | .mips .. => "R31"
           | _ => "LR"
         match Value.asBits (← reg emu (register link)) with
-        | .ok bits => state.modify fun state => { state with onceReturns := state.onceReturns.insert me bits.2.toNat }
+        | .ok bits => state.modify fun state =>
+          { state with onceReturns := state.onceReturns.insert me (bits.2.toNat :: state.onceReturns.getD me []) }
         | .error _ => pure ()
         setReg emu (register link) (.bits (BitVec.ofNat width back))
         if architecture matches .mips .. then setReg emu (register "R25") (.bits (BitVec.ofNat width routine))
@@ -544,30 +607,30 @@ private def attachBase (machine : Machine) (state : IO.Ref BaseState) : IO BaseE
     let emu := machine.emu
     let tid ← Bap.Emu.thread emu
     -- It is done, which what waits for it hears.
-    if let some once := (← state.get).onceWords.get? tid then
+    if let some (once :: outer) := (← state.get).onceWords.get? tid then
       Bap.Emu.write emu once (numberBytes architecture.big 4 2)
-      state.modify fun state => { state with onceWords := state.onceWords.erase tid }
+      state.modify fun state => { state with onceWords := popped state.onceWords tid outer }
       wake emu once (2 ^ 32)
     match architecture with
     | .x86_64 | .i686 =>
       -- Where `pthread_once` was called from goes back on the stack, for the return.
-      if let some back := (← state.get).onceReturns.get? tid then
+      if let some (back :: outer) := (← state.get).onceReturns.get? tid then
         let stackVar : Bap.Var := ⟨(threadRegisters emu.config.syscallAbi).1, .imm width, 0, false⟩
         let sp ← match Value.asBits (← reg emu stackVar) with
           | .ok bits => pure bits.2.toNat
           | .error _ => pure 0
         Bap.Emu.write emu (sp - width / 8) (numberBytes architecture.big (width / 8) back)
         setReg emu stackVar (.bits (BitVec.ofNat width (sp - width / 8)))
-        state.modify fun state => { state with onceReturns := state.onceReturns.erase tid }
+        state.modify fun state => { state with onceReturns := popped state.onceReturns tid outer }
     | _ =>
       let link := match architecture with
         | .aarch64 => "X30"
         | .riscv64 | .riscv32 => "X1"
         | .mips .. => "R31"
         | _ => "LR"
-      if let some back := (← state.get).onceReturns.get? tid then
+      if let some (back :: outer) := (← state.get).onceReturns.get? tid then
         setReg emu ⟨link, .imm width, 0, false⟩ (.bits (BitVec.ofNat width back))
-        state.modify fun state => { state with onceReturns := state.onceReturns.erase tid }
+        state.modify fun state => { state with onceReturns := popped state.onceReturns tid outer }
     pure (.value 0)
   onceStub.set onceAt
   let mut symbols : List (String × Nat) := []
@@ -580,6 +643,9 @@ private def attachBase (machine : Machine) (state : IO.Ref BaseState) : IO BaseE
     poke machine.emu (guard + 8) (ByteArray.mk #[0x00, 0x5a, 0xa5, 0x3c, 0x00, 0x00, 0x00, 0x00])
   pure { symbols := ("__stack_chk_guard", guard + 8) :: symbols.reverse, state }
 where
+  /-- A stack of a thread without what was on top of it, `outer` being what is left. -/
+  popped (stacks : Std.HashMap Nat (List Nat)) (tid : Nat) (outer : List Nat) : Std.HashMap Nat (List Nat) :=
+    if outer.isEmpty then stacks.erase tid else stacks.insert tid outer
   /-- The result register of a call. -/
   callAbiOf : Architecture → String × String × String
     | .x86_64 => ("", "", "RAX")
@@ -602,15 +668,26 @@ private def getTable : Wire.Decoder (Std.HashMap Nat Nat) := fun data at_ => do
     .ok ((key, value), at_)) data at_
   .ok (Std.HashMap.ofList entries, at_)
 
+private def putStacks (out : ByteArray) (table : Std.HashMap Nat (List Nat)) : ByteArray :=
+  Wire.putSorted (fun out (key, stack) => Wire.putList Wire.putNat (Wire.putNat out key) stack) out table.toList
+
+private def getStacks : Wire.Decoder (Std.HashMap Nat (List Nat)) := fun data at_ => do
+  let (entries, at_) ← Wire.getList (fun data at_ => do
+    let (key, at_) ← Wire.getNat data at_
+    let (stack, at_) ← Wire.getList Wire.getNat data at_
+    .ok ((key, stack), at_)) data at_
+  .ok (Std.HashMap.ofList entries, at_)
+
 /-- What the environment keeps, as bytes: the same state makes the same bytes. -/
 def encode (state : BaseState) : ByteArray :=
   let out := putTable (putTable (Wire.putNat ByteArray.empty state.nextKey) state.results) state.joinWords
   let out := Wire.putSorted (fun out ((key, tid), value) => Wire.putNat (Wire.putNat (Wire.putNat out key) tid) value) out
     state.specific.toList
-  let out := putTable (putTable (putTable out state.aligned) state.errno) state.onceReturns
+  let out := putStacks (putTable (putTable out state.aligned) state.errno) state.onceReturns
   let out := Wire.putSorted (fun out (tid, (base, size)) => Wire.putNat (Wire.putNat (Wire.putNat out tid) base) size) out
     state.stacks.toList
-  putTable (putTable (Wire.putSorted Wire.putNat (putTable out state.blocks) state.detached.toList) state.lockCounts) state.onceWords
+  putTable (putStacks (putTable (Wire.putSorted Wire.putNat (putTable out state.blocks) state.detached.toList) state.lockCounts)
+    state.onceWords) state.mutexTypes
 
 def decode (data : ByteArray) : Except String BaseState := do
   let (nextKey, at_) ← Wire.getNat data 0
@@ -623,7 +700,7 @@ def decode (data : ByteArray) : Except String BaseState := do
     .ok (((key, tid), value), at_)) data at_
   let (aligned, at_) ← getTable data at_
   let (errno, at_) ← getTable data at_
-  let (onceReturns, at_) ← getTable data at_
+  let (onceReturns, at_) ← getStacks data at_
   let (stacks, at_) ← Wire.getList (fun data at_ => do
     let (tid, at_) ← Wire.getNat data at_
     let (base, at_) ← Wire.getNat data at_
@@ -632,11 +709,12 @@ def decode (data : ByteArray) : Except String BaseState := do
   let (blocks, at_) ← getTable data at_
   let (detached, at_) ← Wire.getList Wire.getNat data at_
   let (lockCounts, at_) ← getTable data at_
-  let (onceWords, at_) ← getTable data at_
+  let (onceWords, at_) ← getStacks data at_
+  let (mutexTypes, at_) ← getTable data at_
   Wire.expectEnd data at_
   pure { nextKey, results, joinWords, specific := Std.HashMap.ofList specific, aligned, errno, onceReturns,
          stacks := Std.HashMap.ofList stacks, blocks, detached := Std.HashSet.ofList detached, lockCounts,
-         onceWords }
+         onceWords, mutexTypes }
 
 end BaseState
 
@@ -647,8 +725,9 @@ def baseModelId : String := "bap.base"
 in a checkpoint, and is put back, all of it or, if the bytes aren't of it, none. -/
 def baseModel (cell : IO.Ref (Option BaseEnvironment)) : RuntimeModel where
   id := baseModelId
-  -- 2: with the thread-local storage of threads, and those that are detached.
-  version := 2
+  -- 2: with the thread-local storage of threads, and those that are detached; 3: of `pthread_once` in another, a stack of each, and the types of
+  -- mutexes.
+  version := 3
   attach := fun machine => do
     let state ← IO.mkRef ({} : BaseState)
     let base ← attachBase machine state

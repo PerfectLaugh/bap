@@ -45,6 +45,9 @@ structure LoadedLibrary where
   /-- Its initializers, in the order that they run, and whether they all have. -/
   initializers : List Nat := []
   initialized : Bool := false
+  /-- What it defines that has a version, by name and the name of the version, of the default and of the others: what was linked to one
+  is bound to it. -/
+  versions : List ((String × String) × Nat) := []
   deriving DecidableEq, Repr
 
 namespace LoadedLibrary
@@ -69,7 +72,8 @@ private def putLibrary (out : ByteArray) (library : LoadedLibrary) : ByteArray :
     putNat (putNat (putNat (putNat (putNat (putNat out tls.module) tls.offset) tls.image) tls.fileSize) tls.memorySize) tls.alignment) out library.tls
   let out := putList putSymbol out library.tlsSymbols
   let out := putList putNat (putNat out library.digest) library.initializers
-  putFlag out library.initialized
+  let out := putFlag out library.initialized
+  putList (fun out ((name, version), address) => putNat (putText (putText out name) version) address) out library.versions
 
 private def getLibrary : Decoder LoadedLibrary := fun data at_ => do
   let (path, at_) ← getText data at_
@@ -93,7 +97,13 @@ private def getLibrary : Decoder LoadedLibrary := fun data at_ => do
   let (digest, at_) ← getNat data at_
   let (initializers, at_) ← getList getNat data at_
   let (initialized, at_) ← getFlag data at_
-  .ok ({ path, name, base, start, span, symbols, needs, references, finalizers, tls, tlsSymbols, digest, initializers, initialized }, at_)
+  let (versions, at_) ← getList (fun data at_ => do
+    let (name, at_) ← getText data at_
+    let (version, at_) ← getText data at_
+    let (address, at_) ← getNat data at_
+    .ok (((name, version), address), at_)) data at_
+  .ok ({ path, name, base, start, span, symbols, needs, references, finalizers, tls, tlsSymbols, digest, initializers, initialized,
+         versions }, at_)
 
 private def putEntry (out : ByteArray) (entry : Nat × List LoadedLibrary) : ByteArray :=
   putList putLibrary (putNat out entry.1) entry.2

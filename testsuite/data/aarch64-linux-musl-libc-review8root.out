@@ -1,0 +1,7 @@
+rootname: rename of / Resource busy, in a chroot, rmdir of / Resource busy, rename of / Resource busy
+umount: of where what exited was ok, of what a bind shows, it stays ok, of a file open Resource busy, of something mounted in it Resource busy
+exdev: rename into another mount Cross-device link, link Cross-device link
+noexec: execve of what is on it EACCES
+chrootlink: /l/../m is of where the link led ok
+prlimit: of a process of another user EPERM
+done

@@ -404,18 +404,15 @@ def mipsSpec (env : Env) (site : Site) (rd : Bool → Nat → Nat → Nat) (slot
   | 10 => st 4 (setLo16 r ((s + addendOf site (sext ((r &&& 0xffff) <<< 2 : Nat) 18) - p) >>> 2))
   | 12 => st 4 (s + a32 + mipsGp0 env sym - gp)
   | 18 => if env.width == 64 then st 8 (s + a32) else none
+  -- Of N64 and of N32, whose files are of 32 bits.
   | 20 =>
-    if env.width == 64 then
-      let x := s + a16
-      if isLocal && sext x 32 == x then
-        st 4 ((0x3c000000 ||| (field r 16 5 <<< 16) ||| field (x + 0x8000) 16 16 : Nat) : Int)
-      else st 4 (setLo16 r (slot ((x + 0x8000) - (x + 0x8000) % 65536) - gp))
-    else none
+    let x := s + a16
+    if isLocal && sext x 32 == x then
+      st 4 ((0x3c000000 ||| (field r 16 5 <<< 16) ||| field (x + 0x8000) 16 16 : Nat) : Int)
+    else st 4 (setLo16 r (slot ((x + 0x8000) - (x + 0x8000) % 65536) - gp))
   | 21 =>
-    if env.width == 64 then
-      let x := s + a16
-      st 4 (setLo16 r (if isLocal && sext x 32 == x then x else x - ((x + 0x8000) - (x + 0x8000) % 65536)))
-    else none
+    let x := s + a16
+    st 4 (setLo16 r (if isLocal && sext x 32 == x then x else x - ((x + 0x8000) - (x + 0x8000) % 65536)))
   | 19 => st 4 (setLo16 r (slot (s + a16) - gp))
   | 22 | 30 => st 4 (setLo16 r (mipsHi (slot (s + a16) - gp)))
   | 23 | 31 => st 4 (setLo16 r (slot (s + a16) - gp))
@@ -532,7 +529,8 @@ def powerpcSpec (env : Env) (site : Site) (rd : Bool → Nat → Nat → Nat) (s
   | 5 => st 2 (ppcHi x)
   | 6 => st 2 (ppcHa x)
   | 7 => up fun i => setBits i 2 14 (x >>> 2)
-  | 10 | 18 => up fun i => setBits i 2 24 ((x - p) >>> 2)
+  | 10 => up fun i => setBits i 2 24 ((x - p) >>> 2)
+  | 18 => up fun i => setBits i 2 24 ((ppcPltX env site - p) >>> 2)
   | 11 => up fun i => setBits i 2 14 ((x - p) >>> 2)
   | 26 => st 4 (x - p)
   | 38 => st 8 x
@@ -545,11 +543,18 @@ def powerpcSpec (env : Env) (site : Site) (rd : Bool → Nat → Nat → Nat) (s
     if env.machine != emPpc64 then
       -- From `_GLOBAL_OFFSET_TABLE_`, where the GOT starts.
       let got := slot tp - env.gotBase
+      let gotX := slot x - env.gotBase
       match typ with
       | 73 => st 4 tp
       | 87 | 88 => st 2 got
       | 89 => st 2 (ppcHi got)
       | 90 => st 2 (ppcHa got)
+      | 14 | 15 => st 2 gotX
+      | 16 => st 2 (ppcHi gotX)
+      | 17 => st 2 (ppcHa gotX)
+      | 249 | 250 => st 2 (x - p)
+      | 251 => st 2 (ppcHi (x - p))
+      | 252 => st 2 (ppcHa (x - p))
       | _ => none
     else
       let toc := ppcToc env

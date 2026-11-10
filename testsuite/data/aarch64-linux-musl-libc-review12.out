@@ -1,0 +1,6 @@
+requeue waking -1: EINVAL
+requeue moving -1: EINVAL
+wait of the realtime clock: ENOSYS
+clone of a parent tid that can't be written: done, exited 3
+a wait where a thread of 1 clears its tid as it ends: ETIMEDOUT, the word 1
+a wait where a thread of 2 clears its tid as it ends: done, the word 0

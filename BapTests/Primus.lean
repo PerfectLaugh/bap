@@ -68,6 +68,16 @@ private def semanticsRegressions : IO Unit := do
   match (← Primus.Semantics.lift compiled.globals {} "op" []) with
   | [.move _ (.int value)] => assertEqual "compiled local shadows replicate" 7 value.toNat
   | code => throw <| IO.userError s!"compiled replicate shadow changed: {repr code}"
+  -- A signed comparison of a byte and a half-word has the byte's sign: -1 is less than 1.
+  for (source, expected) in [("(set R (if (s< 0xff:8 1:16) 1 0))", 1), ("(set R (if (s> 0xff:8 1:16) 1 0))", 0),
+      ("(set R (if (< 0xff:8 1:16) 1 0))", 0)] do
+    let state ← semanticsForms 64 source
+    match Bil.run state.code with
+    | .ok (after, _) =>
+      match Bil.lookup after.env (⟨"R", .imm 64, 0, false⟩ : Var) with
+      | .ok (.bits value) => assertEqual s!"{source} compares by the widest, with signs of what is signed" expected value.toNat
+      | other => throw <| IO.userError s!"{source}: {repr other}"
+    | .error error => throw <| IO.userError s!"{source}: {error}"
   assertEqual "word-width with no arguments is the machine word" 32
     (← assignedConstant (← semanticsForms 32 "(set R (word-width))"))
   assertEqual "word-width is the widest argument" 16

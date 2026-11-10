@@ -39,7 +39,33 @@ private def parseType (input : String) : Except String CType := do
   else
     .ok (pointers count (.named base))
 
-private def parseParameter (input : String) : Except String Parameter := do
+/-- Of text after a `(`, what is before the `)` that closes it, past those that close others that open in it. -/
+private def untilClose (input : String) : String :=
+  let rec go : List Char → Nat → List Char
+    | [], _ => []
+    | ')' :: _, 0 => []
+    | ')' :: rest, depth + 1 => ')' :: go rest depth
+    | '(' :: rest, depth => '(' :: go rest (depth + 1)
+    | c :: rest, depth => c :: go rest depth
+  String.ofList (go input.toList 0)
+
+/-- The pieces of text between the commas that no parenthesis is open across, as of the parameters of a function, of which one may be
+a pointer to a function with parameters of its own. -/
+private def splitTop (input : String) : List String :=
+  let rec go : List Char → Nat → List Char → List String
+    | [], _, piece => [String.ofList piece.reverse]
+    | ',' :: rest, 0, piece => String.ofList piece.reverse :: go rest 0 []
+    | '(' :: rest, depth, piece => go rest (depth + 1) ('(' :: piece)
+    | ')' :: rest, depth, piece => go rest (depth - 1) (')' :: piece)
+    | c :: rest, depth, piece => go rest depth (c :: piece)
+  go input.toList 0 []
+
+/-- A name that is an identifier, or none. -/
+private def identifier (candidate : String) : String :=
+  if !candidate.isEmpty && candidate.all identChar then candidate else ""
+
+/-- What a parameter is that is neither an array nor a pointer to a function. -/
+private def parsePlain (input : String) : Except String Parameter := do
   let tokens := words input
   match tokens with
   | [] => .error "empty C parameter"
@@ -58,12 +84,35 @@ private def parseParameter (input : String) : Except String Parameter := do
     else
       .ok ⟨"", ← parseType input⟩
 
+/-- A name of a type that isn't empty. -/
+private def orFunction (name : String) : String := if name.isEmpty then "function" else name
+
+/-- A pointer to a function, `int (*name)(int, char *)`: its name is in its first parentheses, and its type is named by the rest,
+`int (*)(int, char *)`. -/
+private def functionPointerName (input : String) : String :=
+  String.ofList ((untilClose ((input.splitOn "(").getD 1 "")).toList.filter identChar)
+
+private def functionPointerType (input : String) : String :=
+  let pieces := input.splitOn "("
+  s!"{trim (pieces.headD "")} (*)({trim (untilClose ("(".intercalate (pieces.drop 2)))})"
+
+private def parseFunctionPointer (input : String) : Parameter :=
+  ⟨identifier (functionPointerName input), .pointer (.named (orFunction (functionPointerType input)))⟩
+
+/-- A parameter: a pointer to a function; an array, `char name[16]`, which C takes for a pointer to what it holds; or what is neither. -/
+private def parseParameter (input : String) : Except String Parameter := do
+  if input.contains '(' then .ok (parseFunctionPointer input)
+  else if input.contains '[' then
+    let element ← parsePlain ((input.splitOn "[").headD input)
+    .ok { element with typ := .pointer element.typ }
+  else parsePlain input
+
 private def parseParameters (input : String) : Except String (List Parameter × Bool) := do
   let input := trim input
   if input.isEmpty || input = "void" then
     .ok ([], false)
   else
-    let parts := input.splitOn "," |>.map trim |>.filter fun part => !part.isEmpty
+    let parts := splitTop input |>.map trim |>.filter fun part => !part.isEmpty
     let variadic := parts.contains "..."
     let parts := parts.filter fun part => part != "..."
     let params ← parts.mapM parseParameter
@@ -71,9 +120,10 @@ private def parseParameters (input : String) : Except String (List Parameter × 
 
 def parsePrototype (input : String) : Except String Prototype := do
   let input := trim input
-  let halves := input.splitOn "("
-  match halves with
-  | [signature, rest] =>
+  -- What is before the first `(` is the result and the name, and the parameters go to the `)` that closes it.
+  match input.splitOn "(" with
+  | signature :: first :: others =>
+    let rest := "(".intercalate (first :: others)
     let signatureWords := words signature
     if signatureWords.length < 2 then
       .error "C prototype has no function name or result type"
@@ -85,10 +135,10 @@ def parsePrototype (input : String) : Except String Prototype := do
         .error "invalid C function name"
       else
         let result := signatureWords.take (signatureWords.length - 1) ++ [stars]
-        let arguments := rest.splitOn ")" |>.head!
+        let arguments := untilClose rest
         let (params, variadic) ← parseParameters arguments
         .ok ⟨name, ← parseType (unwords result), params, variadic⟩
-  | _ => .error "C prototype must contain one parameter list"
+  | _ => .error "C prototype must have a parameter list"
 
 private def stripLineComment : List Char → List Char
   | [] => []
@@ -124,7 +174,27 @@ def load (path : String) : IO (List Prototype) := do
   | .ok prototypes => pure prototypes
   | .error error => throw <| IO.userError error
 
+/-- How many words of the stack a parameter of a type takes: on 32 bits, two of what is of 64 bits, `long long` or `double`, and three of
+the `long double` of i386, as cdecl has them; and otherwise one. -/
+def stackWords (abi : ABI.Convention) (type : CType) : Nat :=
+  if abi.wordSize != 32 then 1 else
+  match type with
+  | .pointer _ => 1
+  | .named name =>
+    let name := " ".intercalate (words name)
+    if name == "long double" then 3
+    else if ["long long", "long long int", "signed long long", "unsigned long long", "unsigned long long int", "double", "int64_t",
+        "uint64_t", "off64_t", "loff_t"].contains name then 2
+    else 1
+
+/-- Where the parameters of a function are when it is called: in the registers of the convention, as many as there are, and then on the
+stack, each past the words of those before it there. -/
 def argumentLocations (abi : ABI.Convention) (prototype : Prototype) : List ABI.Location :=
-  (List.range prototype.params.length).map (ABI.argumentLocation abi)
+  let types := prototype.params.map (·.typ)
+  (List.range types.length).map fun index =>
+    match abi.functionArguments[index]? with
+    | some var => .register var
+    | none =>
+      .stack (abi.stackArgumentsStart + (((types.take index).drop abi.functionArguments.length).map (stackWords abi)).sum * (abi.wordSize / 8))
 
 end Bap.API

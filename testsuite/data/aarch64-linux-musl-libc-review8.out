@@ -1,0 +1,13 @@
+buffers: read of a file to NULL Bad address at 0, of a pipe Bad address with 5 left, pipe2(NULL) Bad address making nothing 1, stat Bad address, clock_gettime Bad address, uname Bad address, getcwd Bad address
+buffers: a read of a file into a buffer that ends early 10 at 10, of a pipe Bad address with 25 left
+ioctls: FIONREAD of a pipe ok 5, FIONBIO ok nonblocking 1, FIONREAD of a file ok of what is left 1, FIOCLEX ok 1, FIONCLEX ok 0
+order: read of no descriptor to what isn't there Bad file descriptor
+names: of 299 bytes Filename too long, a path of 4999 bytes Filename too long
+e2big: of an argument of 200 KiB E2BIG, of 3.8 MB of them E2BIG
+search: stat in what may not be searched Permission denied, readlink Permission denied, chdir Permission denied, O_TMPFILE where it may not write Permission denied
+removed: openat O_CREAT No such file or directory, mkdirat No such file or directory, fstatat . ok, .. ok
+utimes: 0x4 0x2 0x1
+mqattr: of one struct ok, the old flags 0, nonblocking now 1
+limits: getrlimit of 16 Invalid argument, setrlimit of 16 Invalid argument, getrusage of 5 Invalid argument, SCHED_OTHER of 5 Invalid argument, of no parameter Invalid argument, SCHED_FIFO of 0 Invalid argument, of 50 by a user Operation not permitted
+exits: inotify hears the close of what exited 1, a memfd that it mapped is sealed ok
+done

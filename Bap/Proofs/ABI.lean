@@ -213,13 +213,18 @@ private theorem namesOk_aarch64 : namesOk aarch64 = true := rfl
 private theorem mips_args (w : Nat) :
     (mips w).functionArguments = numbered "R" w 4 (if w = 32 then 7 else 11) := rfl
 
+private theorem mips_syscall (w : Nat) :
+    (mips w).syscallArguments = numbered "R" w 4 (if w = 32 then 7 else 9) := rfl
+
 private theorem namesOk_mips (w) : namesOk (mips w) = true := by
   by_cases h : w = 32
   · subst h
     rfl
-  · have hshape : mips w = { (mips w) with functionArguments := numbered "R" w 4 11 } := by
+  · have hshape : mips w = { (mips w) with functionArguments := numbered "R" w 4 11, syscallArguments := numbered "R" w 4 9 } := by
       rw [show (numbered "R" w 4 11) = (mips w).functionArguments by
         rw [mips_args, ite_eq_right h]]
+      rw [show (numbered "R" w 4 9) = (mips w).syscallArguments by
+        rw [mips_syscall, ite_eq_right h]]
     rw [hshape]
     rfl
 private theorem namesOk_arm : namesOk arm = true := rfl
@@ -383,12 +388,18 @@ structure WellTyped (c : Convention) : Prop where
   sp : c.stackPointer.typ = .imm c.wordSize
   ra : ∀ v ∈ c.returnAddress, v.typ = .imm c.wordSize
 
+/-- How many arguments of a system call are in registers: four of o32, whose others are on the stack of the caller, and six otherwise. -/
+def syscallRegisterCount (arch : Image.Arch) (w : Nat) : Nat :=
+  match arch with
+  | .mips => if w = 32 then 4 else 6
+  | _ => 6
+
 /-- Fixed shape of a convention produced for `arch`. -/
 structure Shape (arch : Image.Arch) (w : Nat) (c : Convention) : Prop where
   word : c.wordSize = expectedWordSize arch w
   names : c.functionArguments.map (·.name.str) = argumentNames arch w
   control : controlNames arch = some (c.stackPointer.name.str, c.returnAddress.map (·.name.str))
-  syscallCount : c.syscallArguments.length = 6
+  syscallCount : c.syscallArguments.length = syscallRegisterCount arch w
   typed : WellTyped c
 
 private theorem ra_none {P : Bap.Var → Prop} : ∀ v ∈ (none : Option Bap.Var), P v := by simp
@@ -420,8 +431,10 @@ theorem convention_shape (arch : Image.Arch) (w : Nat) (c : Convention)
       ra_some rfl⟩
   · exact ⟨rfl, rfl, rfl, rfl, numbered_typed "X" 64 0 7, numbered_typed "X" 64 0 5, rfl, rfl, rfl,
       ra_some rfl⟩
-  · exact ⟨rfl, mips_names w, rfl, rfl, numbered_typed "R" w 4 _, numbered_typed "R" w 4 9, rfl, rfl,
+  · refine ⟨rfl, mips_names w, rfl, ?_, numbered_typed "R" w 4 _, numbered_typed "R" w 4 _, rfl, rfl,
       rfl, ra_some rfl⟩
+    rw [mips_syscall, numbered_length]
+    by_cases h : w = 32 <;> simp [syscallRegisterCount, h]
   · exact ⟨rfl, rfl, rfl, rfl, numbered_typed "R" w 3 10, numbered_typed "R" w 3 8, rfl, rfl, rfl,
       ra_some rfl⟩
   · exact ⟨rfl, rfl, rfl, rfl, numbered_typed "X" w 10 17, numbered_typed "X" w 10 15, rfl, rfl, rfl,

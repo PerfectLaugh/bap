@@ -50,6 +50,18 @@ def run : IO Unit := do
   assertEqual "Lisp character literal" "<bil 8>" (← evaluate "?a")
   assertEqual "Lisp typed literal" "<bil 16>" (← evaluate "1:16")
   assertEqual "Lisp quoted malformed atom is data" "12x" (← evaluate "'12x")
+  -- `not` of more than a bit is whether it is zero, a bit, which a register of a bit takes.
+  for (source, expected) in [("(not 1:16)", 0), ("(not 0:16)", 1), ("(not 1:1)", 0)] do
+    match evalString source with
+    | .ok (.bil 1 exp, _) =>
+      match Bil.run [.move ⟨"r", .imm 1, 0, false⟩ exp] with
+      | .ok (after, _) =>
+        match Bil.lookup after.env ⟨"r", .imm 1, 0, false⟩ with
+        | .ok (.bits value) => assertEqual s!"Lisp {source} is a bit" expected value.toNat
+        | other => throw <| IO.userError s!"{source}: {repr other}"
+      | .error error => throw <| IO.userError s!"Lisp {source}: {error}"
+    | .ok (other, _) => throw <| IO.userError s!"Lisp {source}: {render other}"
+    | .error error => throw <| IO.userError s!"Lisp {source}: {error}"
   for source in ["12x", "0xzz", "1:2:3", "?ab", "?", "(defun f () 9z) (f)"] do
     match evalString source with
     | .error _ => IO.println s!"ok: Lisp rejects {source}"

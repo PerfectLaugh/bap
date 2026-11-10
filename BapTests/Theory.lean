@@ -301,6 +301,10 @@ def run : IO Unit := do
   -- From the stack pointer on entry, where the return address is first.
   assertEqual "x86 first argument is past the return address" (ABI.Location.stack 4) (ABI.argumentLocation i386 0)
   assertEqual "x86 stack slots are words" (ABI.Location.stack 8) (ABI.argumentLocation i386 1)
+  let some mips32 := ABI.convention .mips 32 | throw <| IO.userError "missing MIPS o32 ABI"
+  assertEqual "MIPS o32 has four syscall arguments in registers" ["R4", "R5", "R6", "R7"] (mips32.syscallArguments.map (·.name))
+  let some mips64 := ABI.convention .mips 64 | throw <| IO.userError "missing MIPS n64 ABI"
+  assertEqual "MIPS n64 has six" ["R4", "R5", "R6", "R7", "R8", "R9"] (mips64.syscallArguments.map (·.name))
   let arm ← convention .arm
   assertEqual "ARM syscall number register" "R7" arm.syscallNumber.name
   assertEqual "ARM return register" (some "LR") (arm.returnAddress.map (·.name.str))
@@ -318,6 +322,19 @@ def run : IO Unit := do
     assertEqual "API comment separates tokens, name" "add" glued.name
     assertEqual "API comment separates tokens, parameter" ["x"] (glued.params.map API.Parameter.name)
   | _ => throw <| IO.userError "a comment did not separate the tokens"
+  -- A pointer to a function, whose parameters have commas of their own, and an array, which is a pointer.
+  match API.parseHeader "void qsort(void *base, size_t count, size_t size, int (*compare)(const void *, const void *)); int sum(int values[16], int n);" with
+  | .ok [qsort, sum] =>
+    assertEqual "API a pointer to a function is one parameter" ["base", "count", "size", "compare"] (qsort.params.map API.Parameter.name)
+    assertEqual "API of a pointer to a function" (some (API.CType.pointer (.named "int (*)(const void *, const void *)")))
+      ((qsort.params.getLast?).map API.Parameter.typ)
+    assertEqual "API an array is a pointer" (some (API.Parameter.mk "values" (.pointer (.named "int")))) sum.params.head?
+  | other => throw <| IO.userError s!"a header of a pointer to a function and an array: {repr other}"
+  -- On i386, a double and a long long take two words of the stack, and what is after them is past both.
+  match API.parsePrototype "int f(double x, long long y, int z)" with
+  | .ok prototype =>
+    assertEqual "API i386 arguments by their sizes" [ABI.Location.stack 4, .stack 12, .stack 20] (API.argumentLocations i386 prototype)
+  | .error error => throw <| IO.userError error
   let header := "/* API fixture */\nint add(int x, int y);\nvoid *malloc(size_t size);\nint printf(const char *fmt, ...);\n"
   IO.FS.writeFile "native/build/api-test.h" header
   let prototypes ← API.load "native/build/api-test.h"

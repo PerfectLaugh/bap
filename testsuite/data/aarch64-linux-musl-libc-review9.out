@@ -1,0 +1,12 @@
+signalfd: a read that kill wakes 128, of SIGUSR1 1
+canon: what raw had, read as a line 3, what a line had, read raw 3
+leader: the foreground job hears SIGHUP as the leader exits yes
+seccomp: a stop of it 0x705, then 0x85 where the call is left
+alarm: no call of it
+altstack: of 100 bytes Out of memory, to disable ok, of 16 KiB ok
+waitid: of a stop at a call, code 4 status 0x85
+timerdrop: after it is armed again EAGAIN, after it is deleted EAGAIN
+cpuclock: clock_nanosleep of the clock of a thread Not supported
+tty: TIOCSCTTY of its own ok, TIOCSPGRP of a group that there isn't ESRCH
+queueinfo: of signal 0 ok, of a code of the kernel to another EPERM
+done

@@ -190,13 +190,20 @@ private def wakeThreads (emu : Emu) (threads : List ThreadId) : IO Unit :=
 writes 0 where `set_tid_address` says and wakes whoever waits there. -/
 def exitThread (emu : Emu) (code : Nat) : IO Unit := do
   let task ← currentTask emu
+  -- Only of memory that another thread still has, as `mm_release` has it: what the last of it leaves is of no one.
+  let shared := (← emu.taskTable.get).tasks.any fun other => other.space == task.space && other.tid != task.tid && other.status.isNone
   if let some address := task.clearTid then
-    try
-      write emu address (word32 emu 0)
-      let (table, woken) := (← emu.taskTable.get).futexWake task.space address (2 ^ 32 - 1) 1
-      emu.taskTable.set table
-      wakeThreads emu woken
-    catch _ => pure ()
+    if shared then
+      try
+        write emu address (word32 emu 0)
+        -- A wake that isn't private, as `mm_release` has it: of a word of a mapping that processes share, where they share it.
+        let (space, word) ← match ← emu.futexKey.get with
+          | some key => pure ((← key address).getD (task.space, address))
+          | none => pure (task.space, address)
+        let (table, woken) := (← emu.taskTable.get).futexWake space word (2 ^ 32 - 1) 1
+        emu.taskTable.set table
+        wakeThreads emu woken
+      catch _ => pure ()
   let table ← emu.taskTable.get
   emu.taskTable.set (table.exitTask (← thread emu) (exitedStatus code) (initTask table 0))
   emu.stopped.set true
@@ -244,9 +251,14 @@ def releaseLocks (emu : Emu) (space : Nat) : IO Unit := do
 
 /-- A signal ends the process. Nothing else of signals is modelled. -/
 def kill (emu : Emu) (target signal : Nat) : IO Unit := do
-  match (← emu.taskTable.get).find? target with
+  let table ← emu.taskTable.get
+  match table.find? target with
   | some { status := none, group, .. } => markExited emu group (signaledStatus signal)
-  | _ => throw <| IO.userError s!"no running Emu process {target}"
+  -- A process whose first thread ended runs on in the others, as Linux has it, and ends of a signal all the same.
+  | some { group, .. } =>
+    if table.tasks.any fun task => task.group == group && task.status.isNone then markExited emu group (signaledStatus signal)
+    else throw <| IO.userError s!"no running Emu process {target}"
+  | none => throw <| IO.userError s!"no running Emu process {target}"
 
 /-- Forgets the threads and the memory of what is no longer in the table. What runs stays until it switches away, since
 switching keeps the memory it leaves. -/
@@ -481,18 +493,22 @@ private def serveClone (emu : Emu) (flags signal stack parentTid threadPointer c
       sameGroup := has cloneThreadFlag
       vfork := has cloneVfork
       exitSignal := if has cloneThreadFlag || signal == sigchld emu then none else some signal }
+    -- What can't be written where it is to be isn't, as Linux's `put_user` of them goes on without it.
+    let quietly (action : IO Unit) : IO Unit := try action catch _ => pure ()
     let id ← if has cloneVm || !has setChildTid then do
         let id ← clone emu options
-        if has setChildTid then write emu childTid (word32 emu id)
+        if has setChildTid then quietly (write emu childTid (word32 emu id))
         pure id
       else do
         -- The copy holds the id of the child, and the parent keeps what was there.
-        let before ← read emu childTid 4
-        write emu childTid (word32 emu (← emu.nextThreadRef.get))
-        let id ← clone emu options
-        write emu childTid before
-        pure id
-    if has setParentTid then write emu parentTid (word32 emu id)
+        match ← (read emu childTid 4).toBaseIO with
+        | .ok before =>
+          write emu childTid (word32 emu (← emu.nextThreadRef.get))
+          let id ← clone emu options
+          write emu childTid before
+          pure id
+        | .error _ => clone emu options
+    if has setParentTid then quietly (write emu parentTid (word32 emu id))
     if has clearChildTid then emu.taskTable.modify (·.setClearTid id childTid)
     syscallReturn emu (.ok id)
 
@@ -545,12 +561,16 @@ private def serveFutex (emu : Emu) (address operation value timeout target compa
     wakeThreads emu woken
     syscallReturn emu (.ok woken.length)
   let requeue : IO SyscallAction := do
+    -- Counts of `int`s, which are of no use below 0.
+    if value % 2 ^ 32 ≥ 2 ^ 31 || timeout % 2 ^ 32 ≥ 2 ^ 31 then return ← syscallReturn emu (.error einval)
     let (space, word) ← keyOf address
     let (targetSpace, targetWord) ← keyOf target
     let (table, woken, moved) := (← emu.taskTable.get).futexRequeue space word targetWord value timeout targetSpace
     emu.taskTable.set table
     wakeThreads emu woken
     syscallReturn emu (.ok (woken.length + moved))
+  -- `FUTEX_CLOCK_REALTIME` is of a wait to a time, which `FUTEX_WAIT` isn't.
+  if operation &&& 0x100 != 0 && command != 9 then return ← syscallReturn emu (.error (enosys emu))
   match command with
   | 0 => wait all
   | 1 => wake all

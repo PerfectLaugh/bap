@@ -161,16 +161,18 @@ private def atCwd (value : Nat) : Bool := value == 2 ^ 64 - 100 || value == 2 ^ 
 private def pageUp (value : Nat) : Nat := (value + 4095) / 4096 * 4096
 private def pageDown (value : Nat) : Nat := value / 4096 * 4096
 
-/-- Bytes of a guest up to a zero, in as many pages as it takes. -/
-private def readString (emu : Emu) (address : Nat) : IO String := do
+/-- Bytes of a guest up to a zero, a page at a time, of at most `limit` bytes: one that has no zero by then is that much of it, which a path
+of `PATH_MAX` makes `ENAMETOOLONG` of. -/
+private def readString (emu : Emu) (address : Nat) (limit : Nat := 4096) : IO String := do
   let rec go : Nat → Nat → ByteArray → IO ByteArray
     | 0, _, out => pure out
     | fuel + 1, from_, out => do
+      if out.size ≥ limit then return out.extract 0 limit
       let bytes ← read emu from_ (pageUp (from_ + 1) - from_)
       match bytes.data.findIdx? (· == 0) with
-      | some index => pure (out ++ bytes.extract 0 index)
+      | some index => pure ((out ++ bytes.extract 0 index).extract 0 limit)
       | none => go fuel (from_ + bytes.size) (out ++ bytes)
-  pure (textOf (← go 16 address ByteArray.empty))
+  pure (textOf (← go (limit / 4096 + 2) address ByteArray.empty))
 
 /-- Writes across as many mappings as it takes, which a buffer on the program break or the stack may. -/
 private def writeGuest (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
@@ -183,12 +185,16 @@ private def writeGuest (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit 
         go fuel stop (done + stop - at_)
   go (data.size / 4096 + 2) address 0
 
-/-- A successful result, with the bytes it leaves at an address the guest gave, if it gave one. -/
+/-- A successful result, with the bytes it leaves at an address the guest gave: of one that isn't there, NULL too, `EFAULT`. -/
 private def returning (emu : Emu) (address : Nat) (data : ByteArray) (value : Nat := 0) : IO SyscallAction := do
   try
-    if address != 0 then writeGuest emu address data
+    if !data.isEmpty then writeGuest emu address data
     pure (.returnValue value)
   catch _ => pure (.returnValue (2 ^ 64 - Errno.efault))
+
+/-- `returning`, of a call that may be given NULL for what it says, which it then doesn't say. -/
+private def returningIf (emu : Emu) (address : Nat) (data : ByteArray) (value : Nat := 0) : IO SyscallAction :=
+  if address == 0 then pure (.returnValue value) else returning emu address data value
 
 private def errorOf (errno : Nat) : SyscallAction := .returnValue (2 ^ 64 - errno)
 
@@ -218,16 +224,41 @@ private def mapsShared (flags : Nat) : Bool := flags &&& 1 != 0
 private def runningGroup (emu : Emu) : IO (Option Nat) := do
   pure (((← emu.taskTable.get).find? (← thread emu)).map (·.group))
 
+/-- Pieces of `size` bytes from `start`, the last of what is left. -/
+private def chunksOf (start size : Nat) (piece : Nat := 65536) : List (Nat × Nat) :=
+  (List.range ((size + piece - 1) / piece)).map fun index => (start + index * piece, min piece (size - index * piece))
+
+/-- Where a mapping of `size` bytes at `start` may have something to look at: the `extent` of it that is of the file, a piece at a time,
+and of the rest, which is zeros but where it was written, the pages that native memory has, which are all that were. What the host has of
+a mapping is then of what the file has and of what was written, however large the mapping. -/
+private def piecesOf (emu : Emu) (start size extent : Nat) : IO (List (Nat × Nat)) := do
+  let extent := min extent size
+  let chunks := chunksOf start extent
+  if extent == size then return chunks
+  match ← emu.engine.persistentMemory.get with
+  | some memory =>
+    let pageSize := (Jit.pageSize ()).toNat
+    let pages ← Jit.pagesIn memory (UInt64.ofNat (start + extent)) (UInt64.ofNat (start + size - 1))
+    pure (chunks ++ pages.toList.map fun page =>
+      let first := max page.toNat (start + extent)
+      (first, min (page.toNat + pageSize) (start + size) - first))
+  | none => pure (chunks ++ chunksOf (start + extent) (size - extent))
+
 /-- A mapping has what the file has, in the pages where it has something else. -/
 private def refreshMapping (emu : Emu) (kernel : Kernel) (mapping : FileMapping) : IO Unit := do
-  let wanted := kernel.inodeBytes mapping.inode mapping.offset mapping.size
-  let memory ← peek emu mapping.start mapping.size
-  if wanted != memory then
-    for index in List.range ((mapping.size + 4095) / 4096) do
-      let first := index * 4096
-      let page := wanted.extract first (first + 4096)
-      if page != memory.extract first (first + 4096) then
-        poke emu (mapping.start + first) page (known := true)
+  let extent := kernel.inodeExtent mapping.inode mapping.offset mapping.size
+  for (at_, length) in ← piecesOf emu mapping.start mapping.size extent do
+    let wanted := kernel.inodeBytes mapping.inode (mapping.offset + (at_ - mapping.start)) length
+    let memory ← peek emu at_ length
+    if wanted != memory then
+      for (first, size) in chunksOf 0 length 4096 do
+        let page := wanted.extract first (first + size)
+        if page != memory.extract first (first + size) then
+          poke emu (at_ + first) page (known := true)
+
+/-- Where a mapping is of what is in a file, before or after: past that it is zeros of both. -/
+private def extentOfBoth (before after : Kernel) (mapping : FileMapping) : Nat :=
+  max (before.inodeExtent mapping.inode mapping.offset mapping.size) (after.inodeExtent mapping.inode mapping.offset mapping.size)
 
 /-- A private mapping has what the file has now in the pages that are as the file was, which are those that the process hasn't written,
 as Linux copies a page of one when it is written and until then has the file's. A page that was written with what was there is taken
@@ -236,40 +267,69 @@ private def refreshUntouched (emu : Emu) (before after : Kernel) (mapping : File
   -- What is the same object as it was is unchanged, which is what most calls leave a file.
   if let (some old, some new) := (before.inodes.get? mapping.inode, after.inodes.get? mapping.inode) then
     if sameObject old.content new.content then return
-  let was := before.inodeBytes mapping.inode mapping.offset mapping.size
-  let now := after.inodeBytes mapping.inode mapping.offset mapping.size
-  if was == now then return
-  let memory ← peek emu mapping.start mapping.size
-  for index in List.range ((mapping.size + 4095) / 4096) do
-    let first := index * 4096
-    let old := was.extract first (first + 4096)
-    let page := now.extract first (first + 4096)
-    if page != old && memory.extract first (first + 4096) == old then poke emu (mapping.start + first) page
+  for (at_, length) in chunksOf mapping.start (extentOfBoth before after mapping) do
+    let offset := mapping.offset + (at_ - mapping.start)
+    let was := before.inodeBytes mapping.inode offset length
+    let now := after.inodeBytes mapping.inode offset length
+    if was != now then
+      let memory ← peek emu at_ length
+      for (first, size) in chunksOf 0 length 4096 do
+        let old := was.extract first (first + size)
+        let page := now.extract first (first + size)
+        if page != old && memory.extract first (first + size) == old then poke emu (at_ + first) page
 
 /-- What a process wrote to its shared mappings goes to their files, which is how any other mapping or a `read` sees it. A running
 process is the only one that can have written since it came to run, and whatever else it has mapped of a file is as the file was, so
 that what differs from the file is what it wrote: it happens before any system call and when another process is to run. -/
 private def flushShared (machine : Machine) (emu : Emu) : IO Unit := do
   let some group ← runningGroup emu | return
-  let start ← machine.kernel.get
-  let shared := (start.process group).mappings.filter (·.shared)
-  if shared.isEmpty then return
-  let mut changed := false
-  for mapping in shared do
-    if mapping.mayWrite then
-      let size := start.inodeExtent mapping.inode mapping.offset mapping.size
-      if size > 0 then
-        let memory ← peek emu mapping.start size
-        let before := start.inodeBytes mapping.inode mapping.offset size
-        if memory != before then
-          machine.kernel.modify (·.writeChanges mapping.inode mapping.offset before memory)
-          changed := true
-  -- Another mapping of the same file sees it, and a private one where the process hasn't written it.
-  if changed then
-    let flushed ← machine.kernel.get
-    for mapping in shared do refreshMapping emu flushed mapping
-    for mapping in (start.process group).mappings do
-      if !mapping.shared then refreshUntouched emu start flushed mapping
+  -- What was written, of which file, where, what the file had there and what memory has: each of what the file had as the process
+  -- came to run, as another mapping of it that hasn't written there has that, and isn't to undo what one that has wrote.
+  let (mappings, changes) ← do
+    let start ← machine.kernel.get
+    let mappings := (start.process group).mappings
+    let mut changes : Array (Nat × Nat × ByteArray × ByteArray) := #[]
+    -- A piece at a time, and of native memory only the pages that it has, which are all that was written: what nothing wrote is as the
+    -- file was, and a large mapping that little of is written takes little.
+    let native ← emu.engine.persistentMemory.get
+    let pageSize := (Jit.pageSize ()).toNat
+    for mapping in mappings do
+      if mapping.shared && mapping.mayWrite then
+        let size := start.inodeExtent mapping.inode mapping.offset mapping.size
+        if size > 0 then
+          let pieces : List (Nat × Nat) ← match native with
+            | some memory => do
+              let pages ← Jit.pagesIn memory (UInt64.ofNat mapping.start) (UInt64.ofNat (mapping.start + size - 1))
+              pure (pages.toList.map fun page =>
+                let first := max page.toNat mapping.start
+                (first, min (page.toNat + pageSize) (mapping.start + size) - first))
+            | none => pure (chunksOf mapping.start size)
+          for (at_, length) in pieces do
+            let offset := mapping.offset + (at_ - mapping.start)
+            let memory ← peek emu at_ length
+            let before := start.inodeBytes mapping.inode offset length
+            if memory != before then changes := changes.push (mapping.inode, offset, before, memory)
+    pure (mappings, changes)
+  if changes.isEmpty then return
+  -- The kernel as it was is let go of before the files are written, so that what is written is written in place, rather than in a copy
+  -- of all of a file.
+  for (inode, offset, before, memory) in changes do
+    machine.kernel.modify (·.writeChanges inode offset before memory)
+  -- Another mapping of the same file sees it, and a private one where the process hasn't written it: a page of one that is as the file
+  -- was before has what it is now.
+  let flushed ← machine.kernel.get
+  for mapping in mappings do
+    if mapping.shared then refreshMapping emu flushed mapping
+    else
+      for (inode, offset, before, _) in changes do
+        let first := max offset mapping.offset
+        let last := min (offset + before.size) (mapping.offset + mapping.size)
+        if inode == mapping.inode && first < last then
+          for (at_, size) in chunksOf first (last - first) 4096 do
+            let old := before.extract (at_ - offset) (at_ - offset + size)
+            let page := flushed.inodeBytes inode at_ size
+            let address := mapping.start + (at_ - mapping.offset)
+            if page != old && (← peek emu address size) == old then poke emu address page
 
 /-- What the files of a process's shared mappings hold, for when it comes to run. -/
 private def refreshShared (machine : Machine) (emu : Emu) : IO Unit := do
@@ -284,7 +344,9 @@ private def refreshChanged (machine : Machine) (emu : Emu) (before : Kernel) : I
   let kernel ← machine.kernel.get
   for mapping in (kernel.process group).mappings do
     if !mapping.shared then refreshUntouched emu before kernel mapping
-    else if kernel.inodeBytes mapping.inode mapping.offset mapping.size != before.inodeBytes mapping.inode mapping.offset mapping.size then
+    else if (chunksOf mapping.start (extentOfBoth before kernel mapping)).any fun (at_, length) =>
+        let offset := mapping.offset + (at_ - mapping.start)
+        kernel.inodeBytes mapping.inode offset length != before.inodeBytes mapping.inode offset length then
       refreshMapping emu kernel mapping
 
 /-- Where a thread that waits on a pipe waits, which is no address space, of which there are as many as tasks. -/
@@ -293,7 +355,8 @@ private def pipeSpace : Nat := 2 ^ 61
 /-- Everyone that waits on a pipe tries again, as something has changed, whichever it was. -/
 private def wakePipeReaders (emu : Emu) : IO Unit := do
   let table ← emu.taskTable.get
-  let waiting := (table.futexes.filter (·.space ≥ pipeSpace)).map (·.space) |>.eraseDups
+  -- Not those of shared futexes, from `Kernel.fileSpace`, which only a wake of their word wakes.
+  let waiting := (table.futexes.filter fun waiter => pipeSpace ≤ waiter.space && waiter.space < Kernel.fileSpace).map (·.space) |>.eraseDups
   for space in waiting do
     let (table, woken) := (← emu.taskTable.get).futexWake space 0 (2 ^ 32 - 1) (2 ^ 32)
     emu.taskTable.set table
@@ -321,10 +384,14 @@ private def serveFileMap (machine : Machine) (group address size bits flags fd o
     | .error errno => pure (errorOf errno)
     | .ok data =>
       try
-        let start ← placeMapping emu address fixed data bits
+        -- Zeros that the host makes only as they are written, as of `mmap` of no file, with what the file has of it on them: a mapping
+        -- larger than its file costs the host no more than the file.
+        let pages := pageUp size
+        let start ← placeZeros emu address fixed pages bits
+        if !data.isEmpty then poke emu start data (known := shared)
         machine.kernel.modify fun kernel =>
-          (kernel.dropMappings group start (start + data.size)).addMapping group
-            { start, size := data.size, inode, offset, shared, mayWrite := canWrite }
+          (kernel.dropMappings group start (start + pages)).addMapping group
+            { start, size := pages, inode, offset, shared, mayWrite := canWrite }
         pure (.returnValue start)
       catch _ => pure (errorOf Errno.enomem)
 
@@ -387,7 +454,8 @@ private def serveRemap (machine : Machine) (group old oldSize newSize flags targ
       let offset := mapping.offset + (old - mapping.start)
       let some region := lookupRegion (← emu.regions.get) old | return errorOf Errno.efault
       try
-        let start ← placeMapping emu target fixed (kernel.inodeBytes mapping.inode offset newPages) (protectionBits region.protection)
+        let start ← placeZeros emu target fixed newPages (protectionBits region.protection)
+        poke emu start (kernel.inodeBytes mapping.inode offset (kernel.inodeExtent mapping.inode offset newPages)) (known := true)
         machine.kernel.modify fun kernel => (kernel.dropMappings group start (start + newPages)).addMapping group (placed start mapping offset)
         return .returnValue start
       catch _ => return errorOf Errno.enomem
@@ -413,10 +481,11 @@ private def serveRemap (machine : Machine) (group old oldSize newSize flags targ
   let offset := match mapping with
     | some mapping => mapping.offset + (old - mapping.start)
     | none => 0
+  -- What it grows by: zeros, and of a file, what the file has of it, which is all that the host makes of it.
   let tail : ByteArray := if newPages ≤ oldPages then ByteArray.empty else
     match mapping with
-    | some mapping => kernel.inodeBytes mapping.inode (offset + oldPages) (newPages - oldPages)
-    | none => Jit.zeros (newPages - oldPages)
+    | some mapping => kernel.inodeBytes mapping.inode (offset + oldPages) (kernel.inodeExtent mapping.inode (offset + oldPages) (newPages - oldPages))
+    | none => ByteArray.empty
   -- What was advised for a child goes with the pages, and stays where they were if they are kept there.
   let note (start : Nat) : IO Unit :=
     machine.kernel.modify fun kernel =>
@@ -431,18 +500,24 @@ private def serveRemap (machine : Machine) (group old oldSize newSize flags targ
   let free := !regions.any fun region => region.address < old + newPages && old + oldPages < region.address + region.data.size
   try
     if !fixed && !keep && free then
-      map emu ⟨old + oldPages, tail, first.protection⟩
+      mapZeros emu (old + oldPages) (newPages - oldPages) first.protection
+      poke emu (old + oldPages) tail (known := true)
       note old
       return .returnValue old
     if !mayMove then return errorOf Errno.enomem
-    let data := (← peek emu old (min oldPages newPages)) ++ tail
-    let start ← placeMapping emu target fixed data (protectionBits first.protection)
+    -- Zeros, and over them what was written of where it was, a piece at a time: what the host has of it is what it had.
+    let start ← placeZeros emu target fixed newPages (protectionBits first.protection)
+    let kept := min oldPages newPages
+    for (at_, length) in ← piecesOf emu old kept 0 do
+      poke emu (start + (at_ - old)) (← peek emu at_ length) (known := true)
+    if newPages > oldPages then poke emu (start + oldPages) tail (known := true)
     -- What hears of copies hears of this one, as of `realloc`: what the bytes were goes with them, before where they were goes.
     for copied in ← emu.memoryCopied.get do copied old start (min oldPages newPages)
     -- Of `MREMAP_DONTUNMAP`, where it was stays mapped without its pages, as Linux has it since 5.13: zeros, or of a file, the file.
     if keep then
       clearMapped emu old oldPages
-      if let some mapping := mapping then poke emu old (kernel.inodeBytes mapping.inode offset oldPages) (known := mapping.shared)
+      if let some mapping := mapping then
+        poke emu old (kernel.inodeBytes mapping.inode offset (kernel.inodeExtent mapping.inode offset oldPages)) (known := mapping.shared)
     else unmap emu old oldPages
     note start
     pure (.returnValue start)
@@ -483,15 +558,30 @@ private def maxCount : Nat := 0x7ffff000
 /-- `UIO_MAXIOV`, the most pieces of `readv` and `writev`. -/
 private def maxVectors : Nat := 1024
 
+/-- Whether a descriptor is one that a call of reading or writing goes on with as far as its buffer, as `ksys_read` and its kin have it:
+open, for that, and of `pread` and `pwrite` one that may be read or written where it says. -/
+private def ioReady (kernel : Kernel) (group : Nat) (call : Call) (fd : Nat) : Bool :=
+  match kernel.openFileOf group fd with
+  | .ok (_, file) =>
+    let reading := call == .read || call == .pread
+    let positioned := call == .pread || call == .pwrite
+    let seekable := match kernel.inodes.get? file.inode with
+      | some { content := .file _, .. } | some { content := .device _, .. } | some { content := .directory, .. } => true
+      | _ => false
+    (if reading then file.flags &&& 3 != 1 else file.flags &&& 3 != 0) && (!positioned || seekable)
+  | .error _ => false
+
 /-- The arguments of a call, as `vfs_read` and `vfs_write` have them: a buffer that isn't all in the memory of a process, without its
 tag, is `EFAULT`,
 and what asks for more than `MAX_RW_COUNT` asks for that; and as `import_iovec` has them, more pieces than `UIO_MAXIOV` is `EINVAL`. -/
-private def checkedArguments (architecture : Architecture) (untag : Nat → Nat) (call : Call) (args : List Nat) : Except Nat (List Nat) :=
+private def checkedArguments (architecture : Architecture) (untag : Nat → Nat) (ready : Nat → Bool) (call : Call) (args : List Nat) :
+    Except Nat (List Nat) :=
   match call, args with
   | .read, fd :: address :: count :: rest | .write, fd :: address :: count :: rest
   | .pread, fd :: address :: count :: rest | .pwrite, fd :: address :: count :: rest =>
-    -- Of an address without its tag, as `access_ok` has it of a process that tags them.
-    if untag address + count > userLimit architecture then .error Errno.efault
+    -- Of an address without its tag, as `access_ok` has it of a process that tags them, after the descriptor, which `ready` says is
+    -- one that the call may go on with: what it is wrong of comes first.
+    if ready fd && untag address + count > userLimit architecture then .error Errno.efault
     else .ok (fd :: address :: min count maxCount :: rest)
   | .readv, _ :: _ :: count :: _ | .writev, _ :: _ :: count :: _ | .preadv, _ :: _ :: count :: _
   | .pwritev, _ :: _ :: count :: _ | .preadv2, _ :: _ :: count :: _ | .pwritev2, _ :: _ :: count :: _ =>
@@ -716,14 +806,24 @@ private def writePipe (machine : Machine) (emu : Emu) (group fd number count : N
 /-- `writev` to the pipe `number` of a descriptor, of what its `count` pieces at `address` have together, as `writePipe` has it. -/
 private def writeVectorPipe (machine : Machine) (emu : Emu) (group fd number address count : Nat) (wait : Bool) : IO SyscallAction := do
   let word := machine.architecture.bits / 8
-  let gathered : IO ByteArray := do
-    let entries ← read emu address (2 * word * count)
-    let field (offset : Nat) : Nat := numberAt entries offset word machine.architecture.big
-    (List.range count).foldlM (init := ByteArray.empty) fun out index => do
-      pure (out ++ (← read emu (field (2 * word * index)) (field (2 * word * index + word))))
-  match ← gathered.toBaseIO with
+  match ← (read emu address (2 * word * count)).toBaseIO with
   | .error _ => pure (errorOf Errno.efault)
-  | .ok bytes => writePipe machine emu group fd number bytes.size (fun at_ size => pure (bytes.extract at_ (at_ + size))) wait
+  | .ok entries =>
+    let field (offset : Nat) : Nat := numberAt entries offset word machine.architecture.big
+    let pieces := (List.range count).map fun index => (field (2 * word * index), field (2 * word * index + word))
+    let total := min maxCount (pieces.foldl (· + ·.2) 0)
+    -- Of the pieces, only what goes into the pipe, when it goes: as much as a guest says it has isn't made of the host at once.
+    let bytesAt (at_ size : Nat) : IO ByteArray := do
+      let mut out := ByteArray.empty
+      let mut start := 0
+      for (place, length) in pieces do
+        let first := max at_ start
+        let last := min (at_ + size) (start + length)
+        if first < last then out := out ++ (← read emu (place + (first - start)) (last - first))
+        start := start + length
+        if start ≥ at_ + size then break
+      pure out
+    writePipe machine emu group fd number total bytesAt wait
 
 /-- A write that finds that nothing reads what it writes to any more, a pipe or a socket of a stream, sends `SIGPIPE` to the thread that
 made it, as `write`, `writev`, `pwritev2` at the offset of the file, `send`, `sendto`, `sendmsg`,
@@ -1180,7 +1280,7 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       | _, _ => args
     let machine : Machine := { machine with emu }
     let architecture := machine.architecture
-    let args ← match checkedArguments architecture emu.config.untag call args with
+    let args ← match checkedArguments architecture emu.config.untag (ioReady (← machine.kernel.get) (← currentTask emu).group call) call args with
       | .ok args => pure args
       | .error errno => return errorOf errno
     let wide := architecture.bits
@@ -1288,10 +1388,26 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       match kernel.read group fd count with
       | .error errno => pure (errorOf errno)
       | .ok (next, bytes) =>
+        -- What is read is what was copied: of a pipe, all of it or nothing, as `pipe_read` has it; of a file, what fits where the memory
+        -- ends, a page at a time, as `copy_to_user` gives up there.
+        let copied ← (writeGuest emu address bytes *> pure bytes.size).catchExceptions fun _ => pure 0
+        if copied < bytes.size && (kernel.pipeOf group fd).isSome then return errorOf Errno.efault
+        let copied ← if copied == bytes.size then pure copied else do
+          let mut done := 0
+          while done < bytes.size do
+            let size := min (4096 - (address + done) % 4096) (bytes.size - done)
+            try writeGuest emu (address + done) (bytes.extract done (done + size)) catch _ => break
+            done := done + size
+          pure done
+        if copied == 0 && bytes.size > 0 then return errorOf Errno.efault
+        let next := if copied == bytes.size then next else
+          match kernel.read group fd copied with
+          | .ok (next, _) => next
+          | .error _ => kernel
         machine.kernel.set next
         -- A writer that waits for room has some.
-        if bytes.size > 0 && (kernel.pipeOf group fd).isSome then wakePipeReaders emu
-        returning emu address bytes bytes.size
+        if copied > 0 && (kernel.pipeOf group fd).isSome then wakePipeReaders emu
+        pure (.returnValue copied)
     let writeOut (fd address count : Nat) : IO SyscallAction := do
       let current ← machine.kernel.get
       if let some number := current.pipeOf group fd then
@@ -1301,13 +1417,13 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       | .ok bytes => applyNat machine (·.write group fd bytes)
     let statAt (directory address out : Nat) (follow : Bool) : IO SyscallAction :=
       at_ directory address fun from_ path =>
-        match kernel.statPath from_ path follow with
+        match kernel.statPath from_ path follow (some (kernel.process group).credentials) with
         | .error errno => pure (errorOf errno)
         | .ok value => returning emu out (architecture.stat value)
     let clock (out scale : Nat) : IO SyscallAction := do
       let (next, now) := (← machine.kernel.get).tick
       machine.kernel.set next
-      returning emu out (Abi.time now scale big wordSize)
+      returningIf emu out (Abi.time now scale big wordSize)
     -- Anonymous and private is for `serveTaskCalls`, once what it takes the place of isn't mapped.
     let rings := ringsOf machine poller group (kernelCall machine emu)
     let mapMemory (offset : Nat) : IO SyscallAction := do
@@ -1418,6 +1534,10 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       pure action
     | .pipe | .pipe2 =>
       let flags := if call == .pipe2 then architecture.openFlags (arg 1) else 0
+      -- Where the descriptors go is there before they are made, as `do_pipe2` has it: no descriptor is left of `EFAULT`.
+      if !(mips && call == .pipe) then
+        let fits ← (do writeGuest emu (arg 0) (← read emu (arg 0) 8); pure true).catchExceptions fun _ => pure false
+        if !fits then return errorOf Errno.efault
       let (next, readFd, writeFd) := (← machine.kernel.get).pipe group flags
       machine.kernel.set next
       -- MIPS gives them in registers, for what is called the same.
@@ -1437,14 +1557,14 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       match path with
       | .ok "" =>
         if arg 3 &&& 0x1000 != 0 then
-          match (if atCwd (arg 0) then kernel.statPath cwd "." else kernel.statDescriptor group (arg 0)) with
+          match (if atCwd (arg 0) then kernel.statPath cwd "." (searching := some (kernel.process group).credentials) else kernel.statDescriptor group (arg 0)) with
           | .error errno => pure (errorOf errno)
           | .ok value => returning emu (arg 2) (architecture.stat value)
         else pure (errorOf Errno.enoent)
       | _ => statAt (arg 0) (arg 1) (arg 2) (arg 3 &&& 0x100 == 0)
     | .statfs | .statfs64 =>
       at_ here (arg 0) fun from_ path =>
-        match kernel.statPath from_ path with
+        match kernel.statPath from_ path (searching := some (kernel.process group).credentials) with
         | .error errno => pure (errorOf errno)
         | .ok _ =>
           let bytes := Abi.statfs (architecture.bits == 64) big mips
@@ -1465,10 +1585,10 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
         | .ok value => returning emu (arg 4) (Abi.statx value big)
       match path with
       | .ok "" =>
-        if arg 2 &&& 0x1000 != 0 then finish (if atCwd (arg 0) then kernel.statPath cwd "." else kernel.statDescriptor group (arg 0))
+        if arg 2 &&& 0x1000 != 0 then finish (if atCwd (arg 0) then kernel.statPath cwd "." (searching := some (kernel.process group).credentials) else kernel.statDescriptor group (arg 0))
         else pure (errorOf Errno.enoent)
       | _ =>
-        at_ (arg 0) (arg 1) fun from_ text => finish (kernel.statPath from_ text (arg 2 &&& 0x100 == 0))
+        at_ (arg 0) (arg 1) fun from_ text => finish (kernel.statPath from_ text (arg 2 &&& 0x100 == 0) (some (kernel.process group).credentials))
     | .lseek =>
       let (negative, distance) := signed wide (arg 1)
       applyNat machine (·.seek group (arg 0) negative distance (arg 2))
@@ -1571,7 +1691,37 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       -- No descriptor is a terminal but those of a pseudo-terminal.
       match ← Tty.serve poller emu call args with
       | some action => pure action
-      | none => pure (errorOf (match kernel.statDescriptor group (arg 0) with | .ok _ => Errno.enotty | .error errno => errno))
+      | none =>
+      match kernel.openFileOf group (arg 0) with
+      | .error errno => pure (errorOf errno)
+      | .ok (_, file) =>
+      -- What any descriptor takes, as `do_vfs_ioctl` has it, and what is waiting to be read of a file, a pipe or a socket, as `file_ioctl`,
+      -- `pipe_ioctl` and the sockets have it: FIONREAD, FIONBIO, FIOCLEX, FIONCLEX and FIOASYNC, by the numbers of each target.
+      let (fionread, fionbio, fioclex, fionclex, fioasync) : Nat × Nat × Nat × Nat × Nat := match architecture with
+        | .mips .. => (0x467f, 0x667e, 0x6601, 0x6602, 0x667d)
+        | .powerpc .. => (0x4004667f, 0x8004667e, 0x20006601, 0x20006602, 0x8004667d)
+        | _ => (0x541b, 0x5421, 0x5451, 0x5450, 0x5452)
+      let request := arg 1 % 2 ^ 32
+      let content : Option Content := (kernel.inodes.get? file.inode).map (·.content)
+      if request == fionread then
+        let waiting : Option Nat := match content with
+          | some (.file data) => some (data.size - min data.size file.offset)
+          | some (.pipe ..) => some (kernel.pipeWaiting file.inode)
+          | some (.socket socket) => some (socket.incoming.foldl (· + ·.data.size) 0)
+          | _ => none
+        match waiting with
+        | some waiting => returning emu (arg 2) (cell 4 waiting)
+        | none => pure (errorOf Errno.enotty)
+      else if request == fionbio then
+        match ← (read emu (arg 2) 4).toBaseIO with
+        | .error _ => pure (errorOf Errno.efault)
+        | .ok bytes =>
+          let on := numberAt bytes 0 4 big != 0
+          let flags := (if on then Kernel.oNonblock else 0) ||| (file.flags &&& Kernel.oAppend)
+          apply machine (·.setFlags group (arg 0) flags)
+      else if request == fioclex || request == fionclex then apply machine (·.setCloseOnExec group (arg 0) (request == fioclex))
+      else if request == fioasync then pure (.returnValue 0)
+      else pure (errorOf Errno.enotty)
     | .getdents =>
       -- What a directory has takes going through all paths, and a program may read it a little at a time.
       let found : Result (Nat × Array (Nat × Nat × String)) ← match kernel.openFileOf group (arg 0) with
@@ -1657,7 +1807,7 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       -- Its room is an `int`: none, or less, is `EINVAL`, before the path is looked at.
       if room % 2 ^ 32 == 0 || room % 2 ^ 32 ≥ 2 ^ 31 then pure (errorOf Errno.einval) else
       at_ directory address fun from_ path =>
-        match kernel.readlink from_ path with
+        match kernel.readlink from_ path (some (kernel.process group).credentials) with
         | .error errno => pure (errorOf errno)
         | .ok target =>
           let bytes := Path.toBytes target
@@ -1762,12 +1912,12 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
     | .time =>
       let (next, now) := (← machine.kernel.get).tick
       machine.kernel.set next
-      returning emu (arg 0) (cell wordSize (now / 1000000000)) (now / 1000000000)
+      returningIf emu (arg 0) (cell wordSize (now / 1000000000)) (now / 1000000000)
     | .clockGettime | .clockGetres | .clockGettime64 | .clockGetres64 =>
       let reading := call == .clockGettime || call == .clockGettime64
       let size := if call == .clockGettime || call == .clockGetres then wordSize else 8
       if !(← clockExists emu (arg 0) reading) then pure (errorOf Errno.einval)
-      else if !reading then returning emu (arg 1) (Abi.time 1 1 big size)
+      else if !reading then returningIf emu (arg 1) (Abi.time 1 1 big size)
       else
         let (next, now) := (← machine.kernel.get).tick
         machine.kernel.set next
@@ -1803,7 +1953,7 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
           let given := (← machine.kernel.get).randomGiven
           pure (some (Kernel.randomBytes given size, given + size)))
         fun given => machine.kernel.modify fun kernel => { kernel with randomGiven := given }
-    | .sigaltstack => returning emu (arg 1) (ByteArray.mk (Array.replicate (3 * wordSize) 0))
+    | .sigaltstack => returningIf emu (arg 1) (ByteArray.mk (Array.replicate (3 * wordSize) 0))
     | .schedGetaffinity => returning emu (arg 2) (cell wordSize 1) wordSize
     | .succeeds => pure (.returnValue 0)
     -- Served by `Bap.Linux.Seccomp` before it comes here.
@@ -2076,7 +2226,7 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
         | _ => false)
       -- And while `inotify` watches, what a write changes is found out from what it was before.
       let watching := !(← Notify.instancesOf machine.notifier (← machine.kernel.get)).isEmpty
-      let args ← match checkedArguments machine.architecture emu.config.untag call args with
+      let args ← match checkedArguments machine.architecture emu.config.untag (ioReady (← machine.kernel.get) group call) call args with
         | .error errno => return ← handOver machine emu (errorOf errno)
         | .ok args => pure args
       let action ← match call, mapped || socket || watching with
@@ -2488,19 +2638,24 @@ private def programFromHost (machine : Machine) (group : Nat) (path : String) : 
       if let some name := (Elf.parse data).toOption.bind (·.interpreter) then fromHost machine (treePath kernel group name)
       return
 
-/-- The strings of a list of pointers that a null ends, as `execve` is given them. -/
-private def readStrings (emu : Emu) (architecture : Architecture) (address : Nat) : IO (List String) := do
+/-- The strings of a list of pointers that a null ends, as `execve` is given them, as far as `room` bytes of them with their pointers: one
+more than that, which is `E2BIG`, ends it, so that no more of the guest's is read than a program may be given. -/
+private def readStrings (emu : Emu) (architecture : Architecture) (address : Nat) (room : Nat) : IO (List String) := do
   if address == 0 then return []
   let size := architecture.bits / 8
-  let rec go : Nat → Nat → List String → IO (List String)
-    | 0, _, found => pure found.reverse
-    | fuel + 1, at_, found => do
+  let rec go : Nat → Nat → Nat → List String → IO (List String)
+    | 0, _, _, found => pure found.reverse
+    | fuel + 1, at_, used, found => do
       let bytes ← read emu at_ size
       let bytes := if architecture.big then bytes.toList else bytes.toList.reverse
       let pointer := bytes.foldl (fun value byte => value * 256 + byte.toNat) 0
       if pointer == 0 then pure found.reverse
-      else go fuel (at_ + size) ((← readString emu pointer) :: found)
-  go 65536 address []
+      else
+        -- Of `MAX_ARG_STRLEN`, a byte more than it takes, which is `E2BIG`.
+        let text ← readString emu pointer (32 * 4096 + 1)
+        let used := used + text.utf8ByteSize + 1 + size
+        if used > room then pure (text :: found).reverse else go fuel (at_ + size) used (text :: found)
+  go 65536 address 0 []
 
 /-- `execve`, and `execveat`, whose path is from the directory that a descriptor is open on, or with `AT_EMPTY_PATH` is the file that
 it is open on when it is empty, and which with `AT_SYMLINK_NOFOLLOW` doesn't follow a link at its end: nothing of the process changes
@@ -2513,11 +2668,19 @@ private def execute (machine : Machine) (emu : Emu) (call : Call) (args : List N
   let kernel ← machine.kernel.get
   let group := (← currentTask emu).group
   let (directory, flags, args) := if call == .execveat then (some (args.getD 0 0), args.getD 4 0, args.drop 1) else (none, 0, args)
-  match ← (do pure (← readString emu (args.getD 0 0), ← readStrings emu architecture (args.getD 1 0),
-      ← readStrings emu architecture (args.getD 2 0)) : IO _).toBaseIO with
+  -- As much of them as there may be, and a string more, which the check of `E2BIG` below finds.
+  let room := (kernel.limitOf group 3).1 / 4
+  match ← (do pure (← readString emu (args.getD 0 0), ← readStrings emu architecture (args.getD 1 0) room,
+      ← readStrings emu architecture (args.getD 2 0) room) : IO _).toBaseIO with
   | .error _ => pure (errorOf Errno.efault)
   | .ok (given, arguments, environment) =>
     if flags ||| 0x1100 != 0x1100 then return errorOf Errno.einval
+    -- Of `MAX_ARG_STRLEN` each, and of a quarter of the stack all of them with their pointers, as `fs/exec.c` has it, before anything
+    -- of the process changes: more is `E2BIG`.
+    let strings := arguments ++ environment
+    let total := strings.foldl (fun total text => total + (Path.toBytes text).size + 1 + architecture.bits / 8) 0
+    if strings.any (fun text => (Path.toBytes text).size > 32 * 4096) || total > (kernel.limitOf group 3).1 / 4 then
+      return errorOf Errno.e2big
     if given.isEmpty && flags &&& 0x1000 == 0 then return errorOf Errno.enoent
     -- The descriptor that the path is from, if it is from one.
     let descriptor := directory.filter fun fd => !atCwd fd && !given.startsWith "/"
@@ -2731,7 +2894,7 @@ each tracee last started, 6 what a tracer said a call that a tracee is stopped a
 over that no one waits for; of the timers, 3 has the fraction of what is left of a wait that goes back as a `timespec` or a `timeval`,
 and 4 the semaphore that a call of `semop` waits for. -/
 private def builtinModels : List (String × Nat) :=
-  [(Signals.modelId, 2), (Ptrace.modelId, 8), (Seccomp.modelId, 1), (Timers.modelId, 4), (Ring.modelId, 2), (heapModelId, 1), (libraryModelId, 1),
+  [(Signals.modelId, 2), (Ptrace.modelId, 8), (Seccomp.modelId, 1), (Timers.modelId, 4), (Ring.modelId, 2), (heapModelId, 1), (libraryModelId, 2),
     (traceModelId, 6)]
 
 private def builtinVersion (id : String) : Nat := (builtinModels.lookup id).getD 1
@@ -2881,8 +3044,35 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   let heard ← emu.processExited.get
   emu.processExited.set (some fun group status => do
     if let some heard := heard then heard group status
-    -- What `SEM_UNDO` did of it is taken back, its timers end, and what `inotify` it had is looked for again.
+    -- Each descriptor that it had is closed, as `__fput` has it, which `inotify` hears of; and then it holds nothing.
+    let live ← liveProcesses emu
+    for (fd, _) in ((← kernelRef.get).process group).descriptors.toList do
+      let before ← kernelRef.get
+      if let .ok next := before.close group fd then
+        kernelRef.set next
+        let _ ← Notify.after machine.notifier kernelRef group .close [fd] before (.returnValue 0) live
+    -- The leader of a session lets its terminal go, of which its foreground job hears.
+    if (← kernelRef.get).sidOf group == group then Tty.disassociate (pollerOf machine) emu group true
+    -- What `SEM_UNDO` did of it is taken back, its segments are let go, its timers end, and what `inotify` it had is looked for again.
     kernelRef.modify (SysV.exited · group)
+    kernelRef.modify (·.exitProcess group)
+    -- A group that this leaves with no parent in another group of its session, of which something is stopped, hears SIGHUP and SIGCONT,
+    -- as Linux's `kill_orphaned_pgrp` has it: of its own session, as its children have another parent by now.
+    let kernel ← kernelRef.get
+    let table ← emu.taskTable.get
+    let alive := (← liveProcesses emu).filter (· != group)
+    let parentOf (other : Nat) : Option Nat := (table.find? other).map (·.parent)
+    let groups := (kernel.pgidOf group :: ((alive.filter (kernel.sidOf · == kernel.sidOf group)).map kernel.pgidOf)).eraseDups
+    for pgid in groups do
+      let members := alive.filter (kernel.pgidOf · == pgid)
+      if members.isEmpty then continue
+      let orphaned := members.all fun member => match parentOf member with
+        | some parent => parent == group || !alive.contains parent || kernel.pgidOf parent == pgid || kernel.sidOf parent != kernel.sidOf member
+        | none => true
+      if orphaned && (← members.anyM (ptrace.jobStopped emu)) then
+        let cont := if machine.architecture matches .mips .. then 25 else 18
+        for member in members do
+          for signal in [1, cont] do signals.send emu none member ⟨signal, 0x80, .sent 0 0 0⟩
     timers.exited emu group
     Notify.forget machine.notifier
     released machine

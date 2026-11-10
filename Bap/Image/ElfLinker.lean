@@ -738,23 +738,20 @@ def mips (env : Env) (site : Site) : Outcome := do
     store 4 (setLo16 insn ((s + a - p) >>> 2))
   | 12 => store 4 (s + (← a32) + mipsGp0 env sym - gp)
   | 18 => if env.width == 64 then store 8 (s + (← a32)) else pure none
+  -- Of N64 and N32, which are 64-bit and 32-bit files of the same calls: o32 has neither.
   | 20 =>
-    if env.width == 64 then
-      let x := s + (← a16)
-      let insn ← ld env site 0 4
-      if isLocal && sext x 32 == x then
-        let rt := field insn 16 5
-        store 4 ((0x3c000000 ||| (rt <<< 16) ||| field (x + 0x8000) 16 16 : Nat) : Int)
-      else
-        let page := x + 0x8000
-        store 4 (setLo16 insn ((← gotEntry env (page - page % 65536)) - gp))
-    else pure none
+    let x := s + (← a16)
+    let insn ← ld env site 0 4
+    if isLocal && sext x 32 == x then
+      let rt := field insn 16 5
+      store 4 ((0x3c000000 ||| (rt <<< 16) ||| field (x + 0x8000) 16 16 : Nat) : Int)
+    else
+      let page := x + 0x8000
+      store 4 (setLo16 insn ((← gotEntry env (page - page % 65536)) - gp))
   | 21 =>
-    if env.width == 64 then
-      let x := s + (← a16)
-      let page := (x + 0x8000) - (x + 0x8000) % 65536
-      store 4 (setLo16 (← ld env site 0 4) (if isLocal && sext x 32 == x then x else x - page))
-    else pure none
+    let x := s + (← a16)
+    let page := (x + 0x8000) - (x + 0x8000) % 65536
+    store 4 (setLo16 (← ld env site 0 4) (if isLocal && sext x 32 == x then x else x - page))
   | 19 => store 4 (setLo16 (← ld env site 0 4) (← gotOffset (gotEntry env (s + (← a16)))))
   | 22 | 30 => store 4 (setLo16 (← ld env site 0 4) (mipsHi (← gotOffset (gotEntry env (s + (← a16))))))
   | 23 | 31 => store 4 (setLo16 (← ld env site 0 4) (← gotOffset (gotEntry env (s + (← a16)))))
@@ -908,6 +905,11 @@ def ppcInsnOfHalf (env : Env) (site : Site) : LinkM Nat := do
   else if site.off < 2 then throw (outside site)
   else load { site with off := site.off - 2 } 0 4 false
 
+/-- Where `R_PPC_PLTREL24` goes: of PowerPC32, bit 15 of its addend only chooses the kind of stub, which `ld.lld` takes out of it before
+it adds it, as there is no stub here. -/
+def ppcPltX (env : Env) (site : Site) : Int :=
+  if env.machine != emPpc64 && site.a.emod 0x10000 ≥ 0x8000 then site.s + site.a - 0x8000 else site.s + site.a
+
 def powerpc (env : Env) (site : Site) : Outcome := do
   let p := site.p
   let x := site.s + site.a
@@ -924,7 +926,8 @@ def powerpc (env : Env) (site : Site) : Outcome := do
   | 5 => store 2 (ppcHi x)
   | 6 => store 2 (ppcHa x)
   | 7 => update fun i => setBits i 2 14 (x >>> 2)
-  | 10 | 18 => update fun i => setBits i 2 24 ((x - p) >>> 2)
+  | 10 => update fun i => setBits i 2 24 ((x - p) >>> 2)
+  | 18 => update fun i => setBits i 2 24 ((ppcPltX env site - p) >>> 2)
   | 11 => update fun i => setBits i 2 14 ((x - p) >>> 2)
   | 26 => store 4 (x - p)
   | 38 => store 8 x
@@ -937,11 +940,18 @@ def powerpc (env : Env) (site : Site) : Outcome := do
     if env.machine != emPpc64 then
       -- From `_GLOBAL_OFFSET_TABLE_`, which is where the GOT starts, as `ld.lld`'s `R_GOT_OFF` has it.
       let got : LinkM Int := do pure ((← gotEntry env (tpOff env site.s + site.a)) - env.gotBase)
+      let gotX : LinkM Int := do pure ((← gotEntry env x) - env.gotBase)
       match typ with
       | 73 => store 4 (tpOff env site.s + site.a)
       | 87 | 88 => store 2 (← got)
       | 89 => store 2 (ppcHi (← got))
       | 90 => store 2 (ppcHa (← got))
+      | 14 | 15 => store 2 (← gotX)
+      | 16 => store 2 (ppcHi (← gotX))
+      | 17 => store 2 (ppcHa (← gotX))
+      | 249 | 250 => store 2 (x - p)
+      | 251 => store 2 (ppcHi (x - p))
+      | 252 => store 2 (ppcHa (x - p))
       | _ => pure none
     else
       let toc := ppcToc env
@@ -1266,7 +1276,7 @@ def mipsField (env : Env) (state : LinkState) (site : Site) : Option FieldCheck 
   | 4 => some ⟨.unsigned, 28, mips26Target site insn - ((site.p + 4) >>> 28) * 2 ^ 28⟩
   | 9 => if site.sym.bind == stbLocal then none else some ⟨.signed, 16, slotOf state site.s - gp⟩
   | 20 =>
-    if env.width == 64 && !(site.sym.bind == stbLocal && sext x16 32 == x16) then
+    if !(site.sym.bind == stbLocal && sext x16 32 == x16) then
       some ⟨.signed, 16, slotOf state (page - page % 65536) - gp⟩
     else none
   | 7 | 8 => some ⟨.signed, 16, site.s + a16 + mipsGp0 env site.sym - gp⟩
@@ -1316,12 +1326,17 @@ def powerpcField (env : Env) (state : LinkState) (site : Site) : Option FieldChe
   | 2 => some ⟨.signed, 26, x⟩
   | 3 => some ⟨.either, 16, x⟩
   | 7 => some ⟨.signed, 16, x⟩
-  | 10 | 18 => some ⟨.signed, 26, x - p⟩
+  | 10 => some ⟨.signed, 26, x - p⟩
+  | 18 => some ⟨.signed, 26, ppcPltX env site - p⟩
   | 11 => some ⟨.signed, 16, x - p⟩
   | 69 => some ⟨.signed, 16, tp⟩
   | typ =>
     if env.machine != emPpc64 then
-      if typ == 87 then some ⟨.signed, 16, slotOf state tp - toc⟩ else none
+      match typ with
+      | 87 => some ⟨.signed, 16, slotOf state tp - env.gotBase⟩
+      | 14 => some ⟨.signed, 16, slotOf state x - env.gotBase⟩
+      | 249 => some ⟨.signed, 16, x - p⟩
+      | _ => none
     else
       let got := slotOf state x - toc
       let gotTp := slotOf state tp - toc

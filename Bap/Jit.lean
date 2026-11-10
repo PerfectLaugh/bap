@@ -73,10 +73,10 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
     since, once each, by ascending address, also for a program that failed: `some`, or `none` when it was too many or
     no step began. It may hold addresses that were written the same as they were. `endMemoryStep` stops it.
 
-**Byte arrays** (`zeros`, `regionBytes`, `sliceNative`, `piecesNative`, `fillNative`, `residentNative`)
+**Byte arrays** (`zeros`, `regionBytes`, `sliceNative`, `piecesNative`, `fillNative`, `residentNative`, `patchNative`)
 15. `zeros size` is `size` bytes of zeros, and `regionBytes memory address size` is `readMemoryRange memory address size`: they differ
-    only in how much memory of the host they take. `sliceNative`, `piecesNative`, `fillNative` and `residentNative` give what `slice`,
-    `pieces`, `fill` and `resident` define in Lean, which they are `implemented_by`: what is proved of those (`fill_pieces`) holds of the C++ by this obligation.
+    only in how much memory of the host they take. `sliceNative`, `piecesNative`, `fillNative`, `residentNative` and `patchNative` give
+    what `slice`, `pieces`, `fill`, `resident` and `patch` define in Lean, which they are `implemented_by`: what is proved of those (`fill_pieces`) holds of the C++ by this obligation.
 
 Everything else in `Bap.Emu`, from what the code hooks see to what a rollback restores, is proved against
 these. No theorem assumes anything of LLVM beyond them, and nothing depends on `memorySize`, which has no obligation.
@@ -344,6 +344,14 @@ opaque trimMemory (memory : @& Memory) (first last : UInt64) : IO Unit
 @[extern "bap_jit_memory_size"]
 opaque memorySize (memory : @& Memory) : IO Nat
 
+/-- The addresses of the pages that a memory has from `first` to `last`, which are all of it that was ever written there, of
+`pageSize` bytes each. -/
+@[extern "bap_jit_memory_pages_in"]
+opaque pagesIn (memory : @& Memory) (first last : UInt64) : IO (Array UInt64)
+
+@[extern "bap_jit_memory_page_size"]
+opaque pageSize : Unit → UInt64
+
 /-- The bytes of a range of a memory, which take memory of the host only for the pages of it that the memory has. -/
 @[extern "bap_jit_memory_region_bytes"]
 opaque regionBytes (memory : @& Memory) (address : UInt64) (size : @& Nat) : IO ByteArray
@@ -361,6 +369,16 @@ opaque sliceNative (data : ByteArray) (start stop : Nat) : ByteArray
 def slice (data : ByteArray) (start stop : Nat) : ByteArray := data.extract start stop
 
 @[simp] theorem slice_eq (data : ByteArray) (start stop : Nat) : slice data start stop = data.extract start stop := rfl
+
+/-- What `patch` is, in native code (obligation 15). -/
+@[extern "bap_bytes_patch"]
+opaque patchNative (data : ByteArray) (offset : Nat) (bytes : ByteArray) : ByteArray
+
+/-- `data` with `bytes` at `offset`, of what is in it. Of `data` that something else has too, the copy takes the host only what isn't
+zeros of it, as `slice` does, rather than all of it. -/
+@[implemented_by patchNative]
+def patch (data : ByteArray) (offset : Nat) (bytes : ByteArray) : ByteArray :=
+  (List.range bytes.size).foldl (init := data) fun data index => data.set! (offset + index) bytes[index]!
 
 /-- What a checkpoint can ask `fill` for, which is more than any host could give. -/
 def fillLimit : Nat := 2 ^ 48

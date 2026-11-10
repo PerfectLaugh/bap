@@ -943,6 +943,17 @@ def force (signals : Signals) (emu : Emu) (tid group : Nat) (info : SignalInfo) 
     if blocked then modifyThread signals tid fun state => { state with mask := state.mask ^^^ bitOf info.signal }
   signals.send emu (some tid) group info
 
+/-- What is pending of a timer of `timer_create` of a process is gone, as it was armed again or deleted: Linux, since 6.13, drops it when
+it would be delivered. -/
+def forgetTimer (signals : Signals) (emu : Emu) (group id : Nat) : IO Unit := do
+  let ofTimer (info : SignalInfo) : Bool := match info.detail with
+    | .timer which _ _ => which == id
+    | _ => false
+  signals.table.modify fun table =>
+    { table with groupPending := table.groupPending.insert group ((table.groupPending.getD group []).filter (!ofTimer ·)) }
+  for task in (← emu.taskTable.get).tasks do
+    if task.group == group then modifyThread signals task.tid fun state => { state with pending := state.pending.filter (!ofTimer ·) }
+
 /-- A timer of `timer_create` of a process expired `more` times again: if its signal is still pending, for the process or a thread of
 it, that signal says so, as Linux has one signal of a timer pending at most. Whether it was pending. -/
 def addOverrun (signals : Signals) (emu : Emu) (group signal id more : Nat) : IO Bool := do
@@ -1387,7 +1398,8 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
         else pure ((present.find? (·.tid == target)).map (·.group)).toList
       if groups.isEmpty then return ← fail current numbers.esrch
       if signal != 0 then
-        for group in groups do sendToGroup signals current group (← selfInfo current signal 0 0)
+        -- As any signal that is sent, which what waits to read one, of a `signalfd`, hears of.
+        for group in groups do signals.send current none group (← selfInfo current signal 0 0)
       syscallReturn current (.ok 0)
     else if number == calls.tkill || number == calls.tgkill then
       let (expected, target, signal) := if number == calls.tkill then (none, arg 0, arg 1) else (some (arg 0), arg 1, arg 2)
@@ -1396,12 +1408,13 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
       match (← current.taskTable.get).present.find? (·.tid == target) with
       | some { status, group, .. } =>
         if expected.isSome && expected != some group then return ← fail current numbers.esrch
-        if signal != 0 && status.isNone then sendToThread signals current target group (← selfInfo current signal (signedCode 6) 0)
+        if signal != 0 && status.isNone then signals.send current (some target) group (← selfInfo current signal (signedCode 6) 0)
         syscallReturn current (.ok 0)
       | none => fail current numbers.esrch
     else if number == calls.queueinfo then
       let (target, signal, address) := (arg 0, arg 1, arg 2)
-      if !valid signal then return ← fail current numbers.einval
+      -- Of 0, that it is there, as `kill` has it.
+      if signal != 0 && !valid signal then return ← fail current numbers.einval
       let word := width / 8
       let base := if word == 8 then 16 else 12
       try
@@ -1409,7 +1422,10 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
         let value ← readNumber current (address + base + 8) word
         match (← current.taskTable.get).present.find? (·.tid == target) with
         | some { group, .. } =>
-          sendToGroup signals current group ⟨signal, code, .sent task.group 0 value⟩
+          -- A code that only the kernel gives, of 0 or more or `SI_TKILL`, to another process is `EPERM`, as `do_rt_sigqueueinfo` has
+          -- it.
+          if (code < 2 ^ 31 || code == 2 ^ 32 - 6) && group != task.group then return ← fail current numbers.eperm
+          if signal != 0 then signals.send current none group ⟨signal, code, .sent task.group 0 value⟩
           syscallReturn current (.ok 0)
         | none => fail current numbers.esrch
       catch _ => fail current numbers.efault
@@ -1519,7 +1535,11 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
           let newFlags ← readNumber current (given + stackFlags) 4
           let newSize ← readNumber current (given + stackSize) word
           match givenAlternate newBase newSize newFlags with
-          | some alternate => modifyThread signals tid fun state => { state with alternate }
+          | some alternate =>
+            -- Of less than `MINSIGSTKSZ`, but to disable it, `ENOMEM`, as `do_sigaltstack` has it: 5120 bytes of arm64, 2048 else.
+            let least := if architecture matches .aarch64 then 5120 else 2048
+            if alternate.2.1 != 0 && newSize < least then return ← fail current 12
+            modifyThread signals tid fun state => { state with alternate }
           | none => return ← fail current numbers.einval
         syscallReturn current (.ok 0)
       catch _ => fail current numbers.efault

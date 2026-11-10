@@ -76,7 +76,8 @@ private def mips (width : Nat) : Convention := {
   functionArguments := numbered "R" width 4 (if width = 32 then 7 else 11)
   result := reg "R2" width
   syscallNumber := reg "R2" width
-  syscallArguments := numbered "R" width 4 9
+  -- Of o32, only four are in registers, and the rest are on the stack of the caller, as `syscall(2)` has it.
+  syscallArguments := numbered "R" width 4 (if width = 32 then 7 else 9)
   stackPointer := reg "R29" width
   returnAddress := some (reg "R31" width)
   stackArgumentsStart := if width = 32 then 16 else 0

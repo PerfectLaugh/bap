@@ -122,12 +122,17 @@ private def changeOf (before after : Option Inode) : Nat :=
       let written := match old.content, new.content with
         | .file data, .file data' => !sameObject data data'
         | _, _ => false
-      if written || old.details.modified != new.details.modified then inModify
-      else if old.mode != new.mode || old.details.uid != new.details.uid || old.details.gid != new.details.gid ||
-          old.details.changed != new.details.changed || old.details.accessed != new.details.accessed ||
-          old.details.attributes.length != new.details.attributes.length ||
-          (old.details.attributes.zip new.details.attributes).any (fun ((name, value), (name', value')) => name != name' || value.data != value'.data) then
-        inAttrib
+      -- Of the times, as `fsnotify_change` has it: both are `IN_ATTRIB`, the time it was read alone `IN_ACCESS`, and the time it was
+      -- written alone `IN_MODIFY`; and what else of it changed, `IN_ATTRIB`.
+      let modified := old.details.modified != new.details.modified
+      let accessed := old.details.accessed != new.details.accessed
+      let other := old.mode != new.mode || old.details.uid != new.details.uid || old.details.gid != new.details.gid ||
+        old.details.attributes.length != new.details.attributes.length ||
+        (old.details.attributes.zip new.details.attributes).any (fun ((name, value), (name', value')) => name != name' || value.data != value'.data)
+      let times := if modified && accessed then inAttrib else if accessed then inAccess else if modified then inModify else 0
+      if written then inModify
+      else if times != 0 || other then times ||| (if other then inAttrib else 0)
+      else if old.details.changed != new.details.changed then inAttrib
       else 0
   | _, _ => 0
 

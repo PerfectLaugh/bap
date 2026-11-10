@@ -27,6 +27,14 @@ private abbrev pointers : Nat → CType → CType := priv% Bap.API Bap.API.point
 private abbrev parseType : String → Except String CType := priv% Bap.API Bap.API.parseType
 private abbrev parseParameter : String → Except String Parameter :=
   priv% Bap.API Bap.API.parseParameter
+private abbrev parsePlain : String → Except String Parameter :=
+  priv% Bap.API Bap.API.parsePlain
+private abbrev identifier : String → String := priv% Bap.API Bap.API.identifier
+private abbrev splitTop : String → List String := priv% Bap.API Bap.API.splitTop
+private abbrev orFunction : String → String := priv% Bap.API Bap.API.orFunction
+private abbrev parseFunctionPointer : String → Parameter := priv% Bap.API Bap.API.parseFunctionPointer
+private abbrev functionPointerName : String → String := priv% Bap.API Bap.API.functionPointerName
+private abbrev functionPointerType : String → String := priv% Bap.API Bap.API.functionPointerType
 private abbrev parseParameters : String → Except String (List Parameter × Bool) :=
   priv% Bap.API Bap.API.parseParameters
 private abbrev stripLineComment : List Char → List Char := priv% Bap.API Bap.API.stripLineComment
@@ -36,10 +44,37 @@ private abbrev stripComments : List Char → List Char := priv% Bap.API Bap.API.
 
 /-! ## Argument locations -/
 
-private theorem location_stack_iff (abi : Convention) (index : Nat) :
-    (∃ offset, argumentLocation abi index = .stack offset) ↔
+/-- Where parameter `index` of parameters of `types` is. -/
+def locationAt (abi : Convention) (types : List CType) (index : Nat) : Location :=
+  match abi.functionArguments[index]? with
+  | some var => .register var
+  | none =>
+    .stack (abi.stackArgumentsStart + (((types.take index).drop abi.functionArguments.length).map (stackWords abi)).sum * (abi.wordSize / 8))
+
+theorem argumentLocations_eq (abi : Convention) (prototype : Prototype) :
+    argumentLocations abi prototype =
+      (List.range prototype.params.length).map (locationAt abi (prototype.params.map (·.typ))) := by
+  unfold argumentLocations
+  simp only [List.length_map]
+  rfl
+
+/-- A parameter takes a word of the stack at least. -/
+theorem stackWords_pos (abi : Convention) (type : CType) : 0 < stackWords abi type := by
+  unfold stackWords
+  split
+  · omega
+  · cases type with
+    | pointer _ => simp
+    | named name =>
+      simp only []
+      split
+      · omega
+      · split <;> omega
+
+private theorem location_stack_iff (abi : Convention) (types : List CType) (index : Nat) :
+    (∃ offset, locationAt abi types index = .stack offset) ↔
       abi.functionArguments.length ≤ index := by
-  unfold argumentLocation
+  unfold locationAt
   cases h : abi.functionArguments[index]? with
   | none => simpa using List.getElem?_eq_none_iff.1 h
   | some var =>
@@ -47,33 +82,71 @@ private theorem location_stack_iff (abi : Convention) (index : Nat) :
     simp only [reduceCtorEq, exists_false, false_iff]
     omega
 
+private theorem sum_map_one {α} (f : α → Nat) (l : List α) (h : ∀ x ∈ l, f x = 1) : (l.map f).sum = l.length := by
+  induction l with
+  | nil => rfl
+  | cons a l ih =>
+    simp only [List.map_cons, List.sum_cons, List.length_cons]
+    rw [h a (by simp), ih fun x hx => h x (List.mem_cons_of_mem _ hx)]
+    omega
+
+private theorem length_le_sum_map {α} (f : α → Nat) (l : List α) (h : ∀ x, 0 < f x) : l.length ≤ (l.map f).sum := by
+  induction l with
+  | nil => simp
+  | cons a l ih =>
+    simp only [List.map_cons, List.sum_cons, List.length_cons]
+    have := h a
+    omega
+
+/-- With parameters of a word each, as all are of 64 bits, each is where `argumentLocation` says. -/
 theorem argumentLocations_getElem (abi : Convention) (prototype : Prototype) (i : Nat)
-    (h : i < prototype.params.length) :
+    (h : i < prototype.params.length) (hw : ∀ q ∈ prototype.params, stackWords abi q.typ = 1) :
     (argumentLocations abi prototype)[i]'(by simpa [argumentLocations] using h) =
       argumentLocation abi i := by
-  simp [argumentLocations]
+  simp only [argumentLocations, List.getElem_map, List.getElem_range, argumentLocation]
+  cases hr : abi.functionArguments[i]? with
+  | some var => rfl
+  | none =>
+    have hge := List.getElem?_eq_none_iff.1 hr
+    have hone : ∀ x ∈ ((prototype.params.map (·.typ)).take i).drop abi.functionArguments.length, stackWords abi x = 1 := by
+      intro x hx
+      have hx := List.mem_of_mem_take (List.mem_of_mem_drop hx)
+      have ⟨q, hq, hqx⟩ := List.mem_map.1 hx
+      rw [← hqx]
+      exact hw q hq
+    rw [sum_map_one _ _ hone]
+    simp only [List.length_drop, List.length_take, List.length_map]
+    rw [Nat.min_eq_left (by omega)]
 
-/-- Locations depend on the number of parameters only, not their names, types or the result. -/
+/-- Locations depend on the types of the parameters only, not their names or the result. -/
 theorem argumentLocations_congr (abi : Convention) (p q : Prototype)
-    (h : p.params.length = q.params.length) :
+    (h : p.params.map (·.typ) = q.params.map (·.typ)) :
     argumentLocations abi p = argumentLocations abi q := by
-  simp [argumentLocations, h]
+  have hl : p.params.length = q.params.length := by
+    simpa using congrArg List.length h
+  rw [argumentLocations_eq, argumentLocations_eq, h, hl]
 
-/-- Appending parameters extends the list of locations without moving earlier ones. -/
+/-- Appending parameters doesn't move earlier ones. -/
 theorem argumentLocations_append (abi : Convention) (p : Prototype) (extra : List Parameter) :
-    argumentLocations abi { p with params := p.params ++ extra } =
-      argumentLocations abi p ++
-        (List.range extra.length).map fun i => argumentLocation abi (p.params.length + i) := by
-  simp [argumentLocations, List.range_add, List.map_map, Function.comp_def]
+    (argumentLocations abi { p with params := p.params ++ extra }).take p.params.length = argumentLocations abi p := by
+  rw [argumentLocations_eq, argumentLocations_eq]
+  simp only [List.length_append, List.range_add, List.map_append]
+  rw [List.take_append_of_le_length (by simp), List.take_of_length_le (by simp)]
+  apply List.map_congr_left
+  intro index hindex
+  have hlt := List.mem_range.1 hindex
+  unfold locationAt
+  rw [List.take_append_of_le_length (by simp; omega)]
 
 /-- Registers fill up first: no register location follows a stack location. -/
 theorem argumentLocations_registers_first (abi : Convention) (prototype : Prototype) :
     (argumentLocations abi prototype).Pairwise fun a b =>
       (∃ offset, a = .stack offset) → ∃ offset, b = .stack offset := by
+  rw [argumentLocations_eq]
   refine List.pairwise_map.2 (List.Pairwise.imp ?_ List.pairwise_lt_range)
   intro a b hab ha
-  have := (location_stack_iff abi a).1 ha
-  exact (location_stack_iff abi b).2 (by omega)
+  have := (location_stack_iff abi _ a).1 ha
+  exact (location_stack_iff abi _ b).2 (by omega)
 
 /-- Exactly the first `min` parameters are in registers; the rest are on the stack. -/
 theorem argumentLocations_stack_count (abi : Convention) (prototype : Prototype) :
@@ -82,51 +155,73 @@ theorem argumentLocations_stack_count (abi : Convention) (prototype : Prototype)
         | .stack _ => true
         | .register _ => false).length =
       prototype.params.length - abi.functionArguments.length := by
-  unfold argumentLocations
+  rw [argumentLocations_eq]
+  generalize prototype.params.map (·.typ) = types
   generalize prototype.params.length = n
   induction n with
   | zero => simp
   | succ n ih =>
     rw [List.range_succ, List.map_append, List.filter_append, List.length_append, ih]
     by_cases h : abi.functionArguments.length ≤ n
-    · have ⟨offset, ho⟩ := (location_stack_iff abi n).2 h
+    · have ⟨offset, ho⟩ := (location_stack_iff abi types n).2 h
       simp [ho]
       omega
-    · have hn : ¬∃ offset, argumentLocation abi n = .stack offset :=
-        fun hx => h ((location_stack_iff abi n).1 hx)
-      cases hl : argumentLocation abi n with
+    · have hn : ¬∃ offset, locationAt abi types n = .stack offset :=
+        fun hx => h ((location_stack_iff abi types n).1 hx)
+      cases hl : locationAt abi types n with
       | stack offset => exact absurd ⟨offset, hl⟩ hn
       | register var =>
         simp [hl]
         omega
 
+/-- What the stack has of the parameters before `j` is more than of those before `i`, where they are on the stack and `j` is one. -/
+private theorem stack_sum_lt (abi : Convention) (types : List CType) (i j : Nat)
+    (hr : abi.functionArguments.length ≤ i) (hij : i < j) (hj : j ≤ types.length) :
+    (((types.take i).drop abi.functionArguments.length).map (stackWords abi)).sum <
+      (((types.take j).drop abi.functionArguments.length).map (stackWords abi)).sum := by
+  have hsplit : types.take j = types.take i ++ (types.take j).drop i := by
+    conv => lhs; rw [← List.take_append_drop i (types.take j)]
+    rw [List.take_take, Nat.min_eq_left (by omega)]
+  rw [hsplit, List.drop_append_of_le_length (by simp; omega), List.map_append, List.sum_append]
+  have hlen : 0 < ((types.take j).drop i).length := by simp; omega
+  have := length_le_sum_map (stackWords abi) ((types.take j).drop i) (stackWords_pos abi)
+  omega
+
 /-- With distinct registers and non-empty words no two parameters share a location. -/
 theorem argumentLocations_nodup (abi : Convention) (prototype : Prototype)
     (hn : abi.functionArguments.Nodup) (hw : 8 ≤ abi.wordSize) :
     (argumentLocations abi prototype).Nodup := by
-  have hinj : ∀ i j, i < j → argumentLocation abi i ≠ argumentLocation abi j := by
-    intro i j hij he
+  rw [argumentLocations_eq]
+  generalize htypes : prototype.params.map (·.typ) = types
+  have hlen : prototype.params.length = types.length := by rw [← htypes]; simp
+  have hinj : ∀ i j, i < j → j < types.length → locationAt abi types i ≠ locationAt abi types j := by
+    intro i j hij hj he
     have hbyte : 0 < abi.wordSize / 8 := Nat.div_pos hw (by omega)
-    unfold argumentLocation at he
+    unfold locationAt at he
     cases hi : abi.functionArguments[i]? with
     | none =>
       have hge := List.getElem?_eq_none_iff.1 hi
-      have hj : abi.functionArguments[j]? = none := List.getElem?_eq_none_iff.2 (by omega)
-      rw [hi, hj] at he
-      have := Nat.eq_of_mul_eq_mul_right hbyte (Nat.add_left_cancel (Location.stack.inj he))
+      have hj' : abi.functionArguments[j]? = none := List.getElem?_eq_none_iff.2 (by omega)
+      rw [hi, hj'] at he
+      have heq := Nat.add_left_cancel (Location.stack.inj he)
+      have hlt := stack_sum_lt abi types i j hge hij (by omega)
+      have := Nat.mul_lt_mul_of_pos_right hlt hbyte
       omega
     | some a =>
-      cases hj : abi.functionArguments[j]? with
-      | none => rw [hi, hj] at he; cases he
+      cases hj' : abi.functionArguments[j]? with
+      | none => rw [hi, hj'] at he; cases he
       | some b =>
-        rw [hi, hj] at he
+        rw [hi, hj'] at he
         have heq := Location.register.inj he
         have ⟨h1, h2⟩ := List.getElem?_eq_some_iff.1 hi
-        have ⟨h3, h4⟩ := List.getElem?_eq_some_iff.1 hj
+        have ⟨h3, h4⟩ := List.getElem?_eq_some_iff.1 hj'
         exact List.pairwise_iff_getElem.1 hn i j h1 h3 hij (by rw [h2, h4, heq])
-  refine List.pairwise_map.2 (List.Pairwise.imp ?_ List.pairwise_lt_range)
-  intro a b hab
-  exact hinj a b hab
+  rw [hlen]
+  refine List.nodup_iff_pairwise_ne.2 (List.pairwise_map.2 ?_)
+  refine List.pairwise_iff_getElem.2 fun i j hi hj hij => ?_
+  simp only [List.length_range] at hi hj
+  simp only [List.getElem_range]
+  exact hinj i j hij hj
 
 /-! ## C types -/
 
@@ -263,10 +358,10 @@ private theorem parameter_of_parseType (input name : String) (p : Parameter)
   cases hp
   exact ⟨(parseType_shape input t ht).2.2, hn⟩
 
-theorem parseParameter_ok (input : String) (p : Parameter) (h : parseParameter input = .ok p) :
+theorem parsePlain_ok (input : String) (p : Parameter) (h : parsePlain input = .ok p) :
     ParameterOk p := by
-  dsimp only [parseParameter] at h
-  punfold Bap.API Bap.API.parseParameter at h
+  dsimp only [parsePlain] at h
+  punfold Bap.API Bap.API.parsePlain at h
   simp only [] at h
   split at h
   · cases h
@@ -283,6 +378,52 @@ theorem parseParameter_ok (input : String) (p : Parameter) (h : parseParameter i
       exact parameter_of_parseType _ _ _
         (.inr ⟨by simpa using hc'.1, hc'.2⟩) h
     · exact parameter_of_parseType _ _ _ (.inl rfl) h
+
+private theorem identifier_ok (candidate : String) :
+    identifier candidate = "" ∨ ((identifier candidate).isEmpty = false ∧ (identifier candidate).all identChar = true) := by
+  have heq : identifier candidate = if !candidate.isEmpty && candidate.all identChar then candidate else "" := rfl
+  rw [heq]
+  split
+  · rename_i hc
+    have hc' := Bool.and_eq_true_iff.1 hc
+    exact .inr ⟨by simpa using hc'.1, hc'.2⟩
+  · exact .inl rfl
+
+/-- A parameter, of a pointer to a function, of an array or neither, is well-formed. -/
+private theorem orFunction_nonempty (name : String) : (orFunction name).isEmpty = false := by
+  have heq : orFunction name = if name.isEmpty then "function" else name := rfl
+  rw [heq]
+  split
+  · rfl
+  · rename_i hd
+    simpa using hd
+
+private theorem parseFunctionPointer_ok (input : String) : ParameterOk (parseFunctionPointer input) := by
+  have heq : parseFunctionPointer input =
+      ⟨identifier (functionPointerName input), .pointer (.named (orFunction (functionPointerType input)))⟩ := rfl
+  rw [heq]
+  unfold ParameterOk
+  simp only [base]
+  exact ⟨orFunction_nonempty (functionPointerType input), identifier_ok (functionPointerName input)⟩
+
+theorem parseParameter_ok (input : String) (p : Parameter) (h : parseParameter input = .ok p) :
+    ParameterOk p := by
+  have heq : parseParameter input =
+      if input.contains '(' then .ok (parseFunctionPointer input)
+      else if input.contains '[' then
+        (parsePlain ((input.splitOn "[").headD input) >>= fun element => .ok { element with typ := .pointer element.typ })
+      else parsePlain input := rfl
+  rw [heq] at h
+  split at h
+  · injection h with h
+    rw [← h]
+    exact parseFunctionPointer_ok input
+  · split at h
+    · have ⟨element, he, hp⟩ := except_bind_ok h
+      cases hp
+      have := parsePlain_ok _ _ he
+      exact ⟨by simpa [base] using this.1, this.2⟩
+    · exact parsePlain_ok _ _ h
 
 private theorem mapM_ok {α β ε} {f : α → Except ε β} {l : List α} {r : List β}
     (h : l.mapM f = .ok r) : r.length = l.length ∧ ∀ y ∈ r, ∃ x ∈ l, f x = .ok y := by
@@ -321,7 +462,7 @@ private theorem mapM_error {α β ε} {f : α → Except ε β} {l : List α} {a
 
 /-- The comma-separated pieces of a parameter list. -/
 def parameterParts (input : String) : List String :=
-  ((trim input).splitOn "," |>.map trim).filter fun part => !part.isEmpty
+  (splitTop (trim input) |>.map trim).filter fun part => !part.isEmpty
 
 theorem parseParameters_blank (input : String) (h : (trim input).isEmpty = true) :
     parseParameters input = .ok ([], false) := by
@@ -380,17 +521,18 @@ theorem parsePrototype_ok (input : String) (p : Prototype) (h : parsePrototype i
         exact ⟨hn1, hn2, (parseType_shape _ _ ht).2.2, (parseParameters_ok _ _ _ hps).1⟩
   · cases h
 
-/-- Text whose trimmed form does not have exactly one `(` is always rejected. -/
-theorem parsePrototype_rejects_paren_count (input : String)
-    (h : ((trim input).splitOn "(").length ≠ 2) :
+/-- Text that has no `(` is always rejected. -/
+theorem parsePrototype_rejects_no_paren (input : String)
+    (h : ((trim input).splitOn "(").length < 2) :
     ∃ error, parsePrototype input = .error error := by
   unfold parsePrototype
   simp only []
   split
-  · rename_i signature rest hw
-    show ∃ error, _
-    exact absurd (by have hw' : (trim input).splitOn "(" = [signature, rest] := hw
-                     rw [hw']; rfl) h
+  · rename_i signature first others hw
+    have hw' : (trim input).splitOn "(" = signature :: first :: others := hw
+    rw [hw'] at h
+    simp only [List.length_cons] at h
+    omega
   · exact ⟨_, rfl⟩
 
 /-- A header parse succeeds only with well-formed prototypes, each parsed from some declaration. -/

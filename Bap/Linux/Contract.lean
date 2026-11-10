@@ -111,9 +111,16 @@ private def observe (recorder : Recorder) (profile : Cff.Profile) (act : IO Nat)
     if (← Bap.Emu.thread current) == thread then
       recorder.written.modify fun written => (List.range size).foldl (fun written offset => written.insert (address + offset)) written
   recorder.active.set (some thread)
-  let instructions ← try act finally
-    recorder.active.set none
-    Bap.Emu.removeHook emu hook
+  -- What fails part of the way leaves the machine as it was all the same.
+  let instructions ← try act
+    catch error =>
+      recorder.active.set none
+      Bap.Emu.removeHook emu hook
+      machine.restore saved (label := "Contract")
+      throw error
+    finally
+      recorder.active.set none
+      Bap.Emu.removeHook emu hook
   let exit ← exitOf machine thread
   let next ← if exit.isSome then pure none else pure (some (profile.decode (← Cff.readState emu profile.state)))
   -- What is below the stack pointer when the round is over is no one's any more, as a handler's frame is.

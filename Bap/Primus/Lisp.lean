@@ -223,8 +223,9 @@ private def evalPrimitive (name : String) (args : List Value) : Except String Va
     match args with
     | [value] =>
       if symbolic value then
-        let (_, value) ← expectBil value
-        .ok (.bil 1 (.un .not value))
+        -- Of more than a bit, whether it is zero, which is a bit.
+        let (width, value) ← expectBil value
+        .ok (.bil 1 (if width == 1 then .un .not value else .bin .eq value (.int (BitVec.ofNat width 0))))
       else
         .ok (.bool (!(← expectBool value)))
     | _ => .error "not expects one argument"

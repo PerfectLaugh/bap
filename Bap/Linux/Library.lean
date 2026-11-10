@@ -399,7 +399,12 @@ private partial def loadOne (machine : Machine) (path : String) (space : Nat) (s
           image := base + header.addr, fileSize := header.fileSize, memorySize := header.memorySize, alignment }
       let tlsSymbols := dynamic.filterMap fun symbol =>
         if symbol.sectionIndex != 0 && symbol.typ == 6 && !symbol.name.isEmpty then some (symbol.name, symbol.value) else none
-      let library : LoadedLibrary := { path, name, base, start, span, symbols, needs := [], tls, tlsSymbols, digest := targetDigest architecture data }
+      let versions := dynamic.filterMap fun symbol =>
+        if symbol.sectionIndex != 0 && symbol.typ != 6 && !symbol.name.isEmpty && symbol.binding != 0 && !symbol.version.isEmpty then
+          some ((symbol.name, symbol.version), base + symbol.value)
+        else none
+      let library : LoadedLibrary :=
+        { path, name, base, start, span, symbols, needs := [], tls, tlsSymbols, digest := targetDigest architecture data, versions }
       -- It is known of before what it needs is loaded, as they may need each other.
       machine.libraries.modify fun table => table.insert space (spaceHas space table ++ [library])
       loading.modify fun state => { state with mapped := library :: state.mapped }
@@ -419,7 +424,12 @@ private partial def loadOne (machine : Machine) (path : String) (space : Nat) (s
       let lookup (symbol : Image.Elf.DynamicSymbol) : Except String Nat :=
         let unversioned := (symbol.name.splitOn "@").headD symbol.name
         -- What is to be had first, whoever else has it, as the base environment's is of a libc that is loaded.
-        match prefer unversioned, scope.findSome? (fun library => library.symbols.lookup unversioned), resolve unversioned with
+        -- Of one that was linked to a version, that version, as `ld.so` binds it, whoever has it by default.
+        let linked := if symbol.sectionIndex == 0 && !symbol.version.isEmpty then
+            scope.findSome? fun library => library.versions.lookup (unversioned, symbol.version)
+          else none
+        let found := linked <|> scope.findSome? (fun library => library.symbols.lookup unversioned)
+        match prefer unversioned, found, resolve unversioned with
         | some address, _, _ => .ok address
         | none, some address, _ => .ok address
         | none, none, some address => .ok address
@@ -533,15 +543,18 @@ private partial def loadOne (machine : Machine) (path : String) (space : Nat) (s
               | none => pure ()
       unless missing.isEmpty do
         throw <| IO.userError s!"{path} needs what isn't there: {" ".intercalate missing.reverse}"
-      -- A resolver is called as the kernel's loader calls it: on AArch64 with `AT_HWCAP` and `_IFUNC_ARG_HWCAP`, and what has
-      -- `AT_HWCAP` and `AT_HWCAP2`, which is how one finds out what it may use.
+      -- A resolver is called as glibc's loader calls it, which is how one finds out what it may use: on AArch64 with `AT_HWCAP` and
+      -- `_IFUNC_ARG_HWCAP`, and what has `AT_HWCAP` and `AT_HWCAP2`; on ARM and PowerPC with `AT_HWCAP`; on RISC-V with that and
+      -- `__riscv_hwprobe`, which may be NULL, as it is here; and on x86 and MIPS with nothing.
       let callResolver (resolver : Nat) : IO Nat := do
+        let process := (← machine.kernel.get).process (← currentTask emu).group
+        let auxiliaryValue (key : Nat) : Nat :=
+          ((List.range (process.auxiliary.length / 2)).findSome? fun index =>
+            if process.auxiliary[2 * index]! == key then some process.auxiliary[2 * index + 1]! else none).getD 0
         match architecture with
+        | .arm | .powerpc .. => machine.call resolver [auxiliaryValue 16]
+        | .riscv64 | .riscv32 => machine.call resolver [auxiliaryValue 16, 0]
         | .aarch64 =>
-          let process := (← machine.kernel.get).process (← currentTask emu).group
-          let auxiliaryValue (key : Nat) : Nat :=
-            ((List.range (process.auxiliary.length / 2)).findSome? fun index =>
-              if process.auxiliary[2 * index]! == key then some process.auxiliary[2 * index + 1]! else none).getD 0
           let hwcap := auxiliaryValue 16
           let argument ← machine.calloc 1 24
           writeWord argument 24
@@ -678,7 +691,8 @@ def Machine.findStaticSymbol (machine : Machine) (name : String) (library : Opti
       | .error _ => pure ()
       | .ok image =>
         match image.symbols.find? fun symbol => symbol.name == name && symbol.addr != 0 with
-        | some symbol => return some (other.base + symbol.addr)
+        -- With the bit that says that a function is of Thumb, as its value has it and `findSymbol` does.
+        | some symbol => return some (other.base + symbol.addr + (if symbol.thumb then 1 else 0))
         | none => pure ()
   return none
 

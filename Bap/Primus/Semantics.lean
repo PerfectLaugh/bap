@@ -265,7 +265,9 @@ private def compare (context : Context) (op : Bil.BinOp) (args : List Value) :
     let (leftWidth, left) ← expectBil context left
     let (rightWidth, right) ← expectBil context right
     let width := max leftWidth rightWidth
-    .ok (.bil 1 (.bin op (extend width left) (extend width right)))
+    -- Of what is signed, the narrower has its sign, as `s<` of a byte and a word says of -1 and 1.
+    let widen : Bil.Exp → Bil.Exp := if [.slt, .sle, .sgt, .sge].contains op then .cast .signed width else extend width
+    .ok (.bil 1 (.bin op (widen left) (widen right)))
   | _ => .error "Primus comparison expects two arguments"
 
 private def unaryNot (context : Context) (args : List Value) : Except String Value := do
