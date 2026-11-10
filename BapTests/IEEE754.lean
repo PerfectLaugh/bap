@@ -65,4 +65,33 @@ def run : IO Unit := do
   assertEqual "round toward negative infinity" (some (-4)) (roundRatio .rtn (-7) 2)
   assertEqual "division by zero rejected" none (roundRatio .rne 1 0)
 
+/-- What conversions to an integer and rounding to one raise, as x86 and RISC-V have them: of the integer of the mode that the name
+says, also of what saturates, and of ROUNDSD, but for what its bit 3 keeps quiet. -/
+def runRaised : IO Unit := do
+  let raised (rules : Bap.Float.NaNRules) (name : String) (input : Nat) : Bap.Float.Raised :=
+    Bap.Float.raisedBy rules name [input] (((Bap.Float.evaluateWith rules name [input]).map (·.2)).getD 0)
+  let half := 0x41DFFFFFFFE00000
+  assertEqual "x86 cvtsd2si of 2147483647.5 to nearest is invalid, and no more" ({ invalid := true } : Bap.Float.Raised)
+    (raised .x86 "cast_sint_rne_ieee754_binary_64_32" half)
+  assertEqual "RISC-V fcvt.w.d of 2147483647.5 to nearest is invalid" ({ invalid := true } : Bap.Float.Raised)
+    (raised .riscv "cast_sint_rne_ieee754_binary_64_32" half)
+  assertEqual "-0.5 down to an unsigned integer is invalid" ({ invalid := true } : Bap.Float.Raised)
+    (raised .x86 "cast_int_rtn_ieee754_binary_64_32" 0xBFE0000000000000)
+  assertEqual "RISC-V fcvt.wu.d of -0.5 toward zero is 0 and inexact" ({ inexact := true } : Bap.Float.Raised)
+    (raised .riscv "cast_int_rtz_ieee754_binary_64_32" 0xBFE0000000000000)
+  assertEqual "RISC-V fcvt.wu.d of 4294967295.5 toward zero is inexact" ({ inexact := true } : Bap.Float.Raised)
+    (raised .riscv "cast_int_rtz_ieee754_binary_64_32" 0x41EFFFFFFFF00000)
+  assertEqual "roundsd of a signaling NaN is invalid" ({ invalid := true } : Bap.Float.Raised)
+    (raised .x86 "fround_rne_ieee754_binary_64" 0x7FF0000000000001)
+  assertEqual "roundsd of 1.5 is inexact" ({ inexact := true } : Bap.Float.Raised) (raised .x86 "fround_rne_ieee754_binary_64" 0x3FF8000000000000)
+  assertEqual "roundsd of 1.5 with bit 3 is quiet" ({} : Bap.Float.Raised) (raised .x86 "froundq_rne_ieee754_binary_64" 0x3FF8000000000000)
+  assertEqual "and gives 2" (some 0x4000000000000000) ((Bap.Float.evaluateWith .x86 "froundq_rne_ieee754_binary_64" [0x3FF8000000000000]).map (·.2))
+  -- An unnormal and a pseudo-infinity of x87, which the 387 and after take as invalid operands: the default NaN, the indefinite.
+  let one := (0x3fff <<< 64) ||| 0x8000000000000000
+  for (label, operand) in [("an unnormal", (0x3fff <<< 64) ||| 0x4000000000000000), ("a pseudo-infinity", 0x7fff <<< 64)] do
+    let given := [operand, one]
+    let result := ((Bap.Float.evaluateWith .x86 "fadd_rne_ieee754_binary_80" given).map (·.2)).getD 0
+    assertEqual s!"x87 fadd of {label} is invalid" true (Bap.Float.raisedBy .x86 "fadd_rne_ieee754_binary_80" given result).invalid
+    assertEqual s!"and gives the indefinite, of {label}" 0xFFFFC000000000000000 result
+
 end Bap.Tests.IEEE754

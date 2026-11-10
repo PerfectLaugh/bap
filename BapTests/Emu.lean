@@ -92,6 +92,12 @@ private def testDiff : IO Unit := do
   assertEqual "Emu checkpoint diff matches snapshot" [(0, 2), (4, 1)] (← Bap.Emu.changedSince emu "native/build/emu-diff.bin")
   Bap.Emu.restore emu saved
   assertEqual "Emu restored snapshot has no diff" [] (← Bap.Emu.diff emu saved)
+  -- Of a snapshot after a write: what it has is what was written then, which isn't a change since.
+  Bap.Emu.write emu 0 (ByteArray.mk #[9])
+  let later ← Bap.Emu.snapshot emu
+  Bap.Emu.write emu 4 (ByteArray.mk #[7])
+  assertEqual "Emu a diff is of what changed after its snapshot" [(4, 1)] (← Bap.Emu.diff emu later)
+  Bap.Emu.restore emu saved
   let memory := Bap.Memory.writeRegion (Bap.Memory.empty 64) 0xfe (ByteArray.mk #[1, 2, 3, 4])
   assertTrue "Memory bulk read crosses pages and preserves zeroes"
     (Bap.Memory.readRegion memory 0xfc 8 == ByteArray.mk #[0, 0, 1, 2, 3, 4, 0, 0])
@@ -2239,6 +2245,23 @@ def testBranchFlows : IO Unit := do
   | .ok insn =>
     assertTrue s!"bdnzlr of PowerPC goes on past itself: {insn.asm} {repr insn.flow}" (insn.successors.contains 4)
   | .error error => throw <| IO.userError s!"bdnzlr: {error}"
+  -- The `jr` of release 6 of MIPS, which is `jalr` that links nothing, and RISC-V's `c.jr` and `c.jalr`.
+  let flowOf (disassembler : Disasm.Disassembler) (name : String) (bytes : List UInt8) : IO Disasm.Flow := do
+    match ← disassembler.decode 0 (ByteArray.mk bytes.toArray) with
+    | .ok insn => pure insn.flow
+    | .error error => throw <| IO.userError s!"{name}: {error}"
+  let r6 ← Bap.Target.MIPS.disassembler 0 { bits := 32, endian := .big, release6 := true }
+  assertEqual "jr $ra of MIPS release 6 returns" Disasm.Flow.ret (← flowOf r6 "jr $ra" [0x03, 0xe0, 0x00, 0x09])
+  assertEqual "jr $t9 of MIPS release 6 jumps where it says" Disasm.Flow.indirectJump (← flowOf r6 "jr $t9" [0x03, 0x20, 0x00, 0x09])
+  assertEqual "jalr $t9 of MIPS release 6 calls" Disasm.Flow.call (← flowOf r6 "jalr $t9" [0x03, 0x20, 0xf8, 0x09])
+  let r664 ← Bap.Target.MIPS.disassembler 0 { bits := 64, endian := .big, release6 := true }
+  assertEqual "jr $ra of MIPS64 release 6 returns" Disasm.Flow.ret (← flowOf r664 "jr $ra" [0x03, 0xe0, 0x00, 0x09])
+  let r6el64 ← Bap.Target.MIPS.disassembler 0 { bits := 64, endian := .little, release6 := true }
+  assertEqual "jr $ra of MIPS64 release 6, little-endian, returns" Disasm.Flow.ret (← flowOf r6el64 "jr $ra" [0x09, 0x00, 0xe0, 0x03])
+  let rv64 ← Bap.Target.RISCV.disassembler 0
+  assertEqual "c.jr ra of RISC-V returns" Disasm.Flow.ret (← flowOf rv64 "c.jr ra" [0x82, 0x80])
+  assertEqual "c.jr a5 of RISC-V jumps where it says" Disasm.Flow.indirectJump (← flowOf rv64 "c.jr a5" [0x82, 0x87])
+  assertEqual "c.jalr a5 of RISC-V calls" Disasm.Flow.call (← flowOf rv64 "c.jalr a5" [0x82, 0x97])
 
 /-- What the taint of a machine says of memory that a call fills that isn't of the world, as `testsuite/src/libc-taintmove.c` has it: a
 constant of the program that `execve` ran comes from nothing, rather than from `execve`, and bytes of a file that `mremap` moves come
@@ -2268,6 +2291,20 @@ def testLinuxTaintMoves (triple : String) : IO Unit := do
   let space ← Bap.Emu.spaceOf machine.emu (← Bap.Emu.thread machine.emu)
   assertEqual s!"Linux {triple} bytes of a file that mremap moved come from it still" ["pread /data"]
     (labels (← tracker.explainMemory (address + 3) (some space)))
+  let (machine, tracker, address) ← at_ "append"
+  let space ← Bap.Emu.spaceOf machine.emu (← Bap.Emu.thread machine.emu)
+  assertEqual s!"Linux {triple} what pwrite wrote to a file opened to append is at its end, which comes from what it wrote" ["pread /data"]
+    (labels (← tracker.explainMemory (address + 1) (some space)))
+
+/-- What a library has of a name of two versions is the default, as a reference of the name alone is bound to, rather than the old one,
+which comes first, as glibc has them. -/
+def testVersionedSymbols : IO Unit := do
+  let binary (name : String) : IO ByteArray := IO.FS.readBinFile s!"testsuite/bin/aarch64-linux-musl-{name}"
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" (← binary "libc-files")).addFile "/lib/libversioned.so" (← binary "libversioned")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let library ← machine.loadLibrary "libversioned.so"
+  let some address := ← machine.findSymbol "f" (some library) | throw <| IO.userError "libversioned has no f"
+  assertEqual "Of a name of two versions, the default" 2 ((← machine.call address) % 2 ^ 32)
 
 /-- A function that waits, which a call gives too little fuel to come back, leaves nothing of its wait: the thread runs on from where it
 was, as it would have, rather than waiting where the call left it or being woken there. -/
@@ -3424,7 +3461,8 @@ def testHooksOnceAfterRollback : IO Unit := do
     | .bits bits => pure bits.toNat
     | _ => pure 0
   -- `words` words of the buffer, `count` rounds of the loop, which fault past the buffer where there are more of them than words.
-  let run (ranges : Bool) (words count : Nat) (watched : Bool) : IO (Nat × Array Nat × Nat × Bool) := do
+  -- Of `narrow`, a hook of one instruction of the loop, which the others between it and where it fired again don't count against.
+  let run (ranges : Bool) (words count : Nat) (watched : Bool) (narrow : Bool := false) : IO (Nat × Array Nat × Nat × Bool) := do
     let adjust (config : Bap.Emu.Config) : Bap.Emu.Config :=
       if ranges then { config with hotThreshold := 1, rangeLimit := 16 } else { config with rangeLimit := 1 }
     let emu ← Bap.Emu.riscv64 code base base (adjust := adjust)
@@ -3432,7 +3470,7 @@ def testHooksOnceAfterRollback : IO Unit := do
     for (name, initial) in [("X10", 0), ("X11", count), ("X12", buffer)] do
       Bap.Emu.setReg emu (register name) (.bits (BitVec.ofNat 64 initial))
     let fired ← IO.mkRef (#[] : Array Nat)
-    let _ ← Bap.Emu.onCode emu (base, base + code.size - 1) fun emu address => do
+    let _ ← Bap.Emu.onCode emu (if narrow then (base + 4, base + 4) else (base, base + code.size - 1)) fun emu address => do
       fired.modify (·.push address)
       if address == base + 20 then Bap.Emu.stop emu
     let reads ← IO.mkRef 0
@@ -3462,9 +3500,10 @@ def testHooksOnceAfterRollback : IO Unit := do
     let _ ← Bap.Emu.run emu 10000
     pure (← reads.get, ← value emu "X10")
   assertEqual "Reads after a hook added a hook of them are heard in ranges as in single steps" (← adding false) (← adding true)
-  for (label, words, count, watched) in [("a read that a hook watches", 64, 50, true), ("a fault", 40, 50, false)] do
-    let (stepCount, stepFired, stepSum, stepOdd) ← run false words count watched
-    let (rangeCount, rangeFired, rangeSum, rangeOdd) ← run true words count watched
+  for (label, words, count, watched, narrow) in [("a read that a hook watches", 64, 50, true, false), ("a fault", 40, 50, false, false),
+      ("a fault, of a hook of one instruction", 40, 50, false, true)] do
+    let (stepCount, stepFired, stepSum, stepOdd) ← run false words count watched narrow
+    let (rangeCount, rangeFired, rangeSum, rangeOdd) ← run true words count watched narrow
     assertEqual s!"After {label}, hooks fire in ranges as often as in single steps" stepCount rangeCount
     assertTrue s!"and at the same instructions, with the same result, after {label}"
       (stepFired == rangeFired && stepSum == rangeSum && stepOdd == rangeOdd)
@@ -4422,6 +4461,74 @@ def testBaseEnvironment (triple : String) : IO Unit := do
   assertEqual s!"{label} and what was linked against it runs as it would have" (← call "run")
     ((← again.call run (threaded := true)) % 2 ^ 32)
 
+/-- Of the base environment, as bionic and the ABIs have it: a mutex is a word, which is all of one on 32 bits; the routine of
+`pthread_once` and of `pthread_create` starts with its stack as a call leaves it; `pthread_cond_timedwait` ends at its time; a block that
+was aligned is reallocated with what it held; and what can't be had is NULL, with ENOMEM. -/
+def testBaseEnvironmentAbi (triple : String) : IO Unit := do
+  let label := s!"Base ABI {triple}"
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-files"
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let base ← machine.baseEnvironment
+  let bits := machine.architecture.bits
+  let word := bits / 8
+  let callBase (name : String) (arguments : List Nat) (threaded : Bool := false) : IO Nat := do
+    let some address := base.resolve name | throw <| IO.userError s!"{label} has no {name} of the base"
+    pure ((← machine.call address arguments (threaded := threaded)) % 2 ^ bits)
+  let number (address size : Nat) : IO Nat := do
+    pure ((← machine.read address size).toList.foldr (fun byte value => value * 256 + byte.toNat) 0)
+  -- A mutex, and what is after it.
+  let mutex ← machine.malloc 16
+  machine.write mutex (ByteArray.mk #[0, 0, 0, 0, 0x55, 0x55, 0x55, 0x55])
+  assertEqual s!"{label} a mutex locks" 0 (← callBase "pthread_mutex_lock" [mutex])
+  assertEqual s!"{label} and again, as one that is recursive" 0 (← callBase "pthread_mutex_lock" [mutex])
+  assertEqual s!"{label} what is after the word of a mutex stays" 0x55555555 (← number (mutex + 4) 4)
+  assertEqual s!"{label} it unlocks as often" (0, 0) (← callBase "pthread_mutex_unlock" [mutex], ← callBase "pthread_mutex_unlock" [mutex])
+  assertEqual s!"{label} and nobody has it" 0 (← number mutex 4)
+  -- Where the stack is as a routine starts: as a call leaves it, 8 past 16 of x86-64 and 12 of i686.
+  let stackName := if bits == 64 then "RSP" else "ESP"
+  let started ← IO.mkRef (none : Option Nat)
+  let once ← machine.malloc 16
+  machine.write once (ByteArray.mk #[0, 0, 0, 0])
+  -- What its word says while its routine runs, which another that comes waits for.
+  let during ← IO.mkRef 0
+  let routine ← machine.hostFunction "routine" fun machine _ => do
+    match ← Bap.Emu.reg machine.emu ⟨stackName, .imm bits, 0, false⟩ with
+    | .bits value => started.set (some (value.toNat % 16))
+    | _ => pure ()
+    during.set (← number once 4)
+    pure 0
+  assertEqual s!"{label} pthread_once" 0 (← callBase "pthread_once" [once, routine])
+  assertEqual s!"{label} runs its routine with the stack as a call leaves it" (some (if bits == 64 then 8 else 12)) (← started.get)
+  assertEqual s!"{label} while it runs, it is running, and after, done" (1, 2) (← during.get, ← number once 4)
+  started.set none
+  assertEqual s!"{label} once" (0, none) (← callBase "pthread_once" [once, routine], ← started.get)
+  let thread ← machine.malloc 16
+  assertEqual s!"{label} pthread_create" 0 (← callBase "pthread_create" [thread, 0, routine, 0])
+  assertEqual s!"{label} and the thread is joined" 0 (← callBase "pthread_join" [← number thread word, 0] (threaded := true))
+  assertEqual s!"{label} whose routine starts with the stack as a call leaves it" (some (if bits == 64 then 8 else 12)) (← started.get)
+  -- A wait for a condition that nothing signals, until a second from now.
+  let cond ← machine.malloc 64
+  machine.write cond (ByteArray.mk (Array.replicate 64 0))
+  let time ← machine.malloc 16
+  let now := (← machine.kernel.get).clock
+  let field (value : Nat) : ByteArray := ByteArray.mk ((List.range word).map fun index => (value >>> (8 * index)).toUInt8).toArray
+  machine.write time (field (now / 1000000000 + 1) ++ field (now % 1000000000))
+  let _ ← callBase "pthread_mutex_lock" [mutex]
+  assertEqual s!"{label} pthread_cond_timedwait ends at its time" 110 (← callBase "pthread_cond_timedwait" [cond, mutex, time] (threaded := true))
+  assertEqual s!"{label} with the mutex" (← Bap.Emu.thread machine.emu) (← number mutex 4)
+  let _ ← callBase "pthread_mutex_unlock" [mutex]
+  -- A block that was aligned, and what it holds after realloc.
+  let pointer ← machine.malloc 16
+  assertEqual s!"{label} posix_memalign" 0 (← callBase "posix_memalign" [pointer, 64, 32])
+  let aligned ← number pointer word
+  machine.write aligned (ByteArray.mk ((Array.range 32).map (·.toUInt8)))
+  let moved ← callBase "realloc" [aligned, 100]
+  assertEqual s!"{label} realloc of it has what it held" (List.range 32) ((← machine.read moved 32).toList.map (·.toNat))
+  -- What can't be had.
+  if bits == 64 then
+    assertEqual s!"{label} malloc of more than there is is NULL" 0 (← callBase "malloc" [2 ^ 40])
+    assertEqual s!"{label} with ENOMEM" 12 (← number (← callBase "__errno_location" []) 4)
+
 /-- What a wait says of the process that it found, for a host that gives the guest ids of its own: the machine's own until it is told,
 and what the host says once it is, both of a wait that is answered at once and of one that waited. A checkpoint doesn't have it: a
 machine that goes on from one is told again. -/
@@ -4811,6 +4918,9 @@ def testLinuxLibraryTls (triple : String) (runsByModule : Bool := true) : IO Uni
   assertEqual s!"{label} and that far from a thread pointer"
     (if below then modulus - firstBlock.offset else (firstBlock.offset + modulus - bias) % modulus) fromPointer
   let first ← enter
+  -- Of x86, the thread pointer points at itself, which is where `%fs:0` has it for code of the initial-exec model and of TLSDESC.
+  if below then
+    assertEqual s!"{label} the thread pointer points at itself" (number first).toList (← Bap.Emu.read machine.emu first wordBytes).toList
   assertEqual s!"{label} what a block starts with" 3 (← call "get")
   assertEqual s!"{label} what a block has as zeros" 0 (← call "get_zero")
   assertEqual s!"{label} what is aligned is" 1 (← call "aligned_right")
@@ -4922,11 +5032,11 @@ private def testKernel : IO Unit := do
   let (written, _) ← unwrap (written.writeTo 1 out "abc".toUTF8 5)
   let hole ← unwrap (written.readFrom 1 out 8 3)
   assertEqual "Kernel a write past the end leaves zeros" [0, 0, 97, 98, 99] (hole.toList.map (·.toNat))
-  let renamed ← unwrap (start.rename "/" "/etc" "/conf")
+  let renamed ← unwrap (start.rename 1 "/" "/etc" "/conf")
   assertTrue "Kernel a directory moves with what is in it" ((renamed.statPath "/" "/conf/name").toOption).isSome
   assertTrue "Kernel it isn't where it was" ((renamed.statPath "/" "/etc/name").toOption).isNone
   assertEqual "Kernel a directory with something in it stays" (some Bap.Linux.Errno.enotempty)
-    (errnoOf (start.remove "/" "/etc" true))
+    (errnoOf (start.remove 1 "/" "/etc" true))
   assertEqual "Kernel the entries are sorted" ["etc", "link"] ((start.children "/").map (·.1))
   assertEqual "Kernel struct stat" 144 (Bap.Linux.Abi.stat { inode := 1, mode := 0, size := 0, links := 1, accessed := 0, modified := 0, changed := 0 }).size
   match Bap.Linux.Elf.parse "not an elf".toUTF8 with

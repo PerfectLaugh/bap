@@ -245,6 +245,14 @@ private def languageRegressions : IO Unit := do
   | .ok (.bits value) => assertEqual "while runs until the condition fails" 3 value.toNat
   | _ => throw <| IO.userError "while has no result"
   assertEqual "a false loop condition has no code" 0 (← semanticsForms 64 "(while false (set R 1))").code.length
+  -- A shift of a byte by an amount of a word, which is past the byte when the word is, however many of its bits the byte has.
+  for (source, expected) in [("(lshift (cast-low 8 1) 256)", 0), ("(lshift (cast-low 8 1) 7)", 128), ("(rshift (cast-low 8 0x80) 263)", 0),
+      ("(arshift (cast-low 8 0x80) 256)", 255)] do
+    let shifted ← semanticsForms 64 s!"(set R (cast-unsigned 64 {source}))"
+    let final ← runProgram shifted.code {}
+    match Bil.lookup final.env ⟨"R", .imm 64, 0, false⟩ with
+    | .ok (.bits value) => assertEqual s!"{source} shifts by all of its amount" expected value.toNat
+    | _ => throw <| IO.userError s!"{source} has no result"
   let compiledLoop ← semanticsForms 64 "(defun op () (let ((i 0)) (while (< i 3) (set i (+ i 1))) (set R i)))"
   let final ← runProgram (← Primus.Semantics.lift compiledLoop.globals {} "op" []) {}
   match Bil.lookup final.env ⟨"R", .imm 64, 0, false⟩ with

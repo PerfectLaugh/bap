@@ -99,14 +99,23 @@ private def parseProgramHeader (data : ByteArray) (header : Header) (offset : Na
       .ok (some (⟨"LOAD", address, memorySize, readable, writable, executable⟩,
         ⟨address, bytes, readable, writable, executable⟩))
 
+/-- How many sections there are: what `e_shnum` says, or of 0 there with section headers, of more than it can say, the size of the
+first of them, as ELF's extended numbering has it, as many as the file has room for. -/
+private def sectionCountOf (data : ByteArray) (header : Header) : Nat :=
+  if header.sectionCount != 0 || header.sectionOffset == 0 then header.sectionCount
+  else
+    let first := (word data header.endian header.is64 (header.sectionOffset + if header.is64 then 32 else 20)).toOption.getD 0
+    min first ((data.size - min data.size header.sectionOffset) / max header.sectionEntrySize 1)
+
 private def parseSections (data : ByteArray) (header : Header) : Except String (List SectionHeader) := do
   let minimum := if header.is64 then 64 else 40
-  if header.sectionCount = 0 then
+  let count := sectionCountOf data header
+  if count = 0 then
     .ok []
   else if header.sectionEntrySize < minimum then
     .error "ELF section entries are too small"
   else
-    (List.range header.sectionCount).mapM fun index => do
+    (List.range count).mapM fun index => do
       let offset := header.sectionOffset + index * header.sectionEntrySize
       let nameOffset ← IO.Reader.u32 data header.endian offset
       let kind ← IO.Reader.u32 data header.endian (offset + 4)
@@ -136,8 +145,10 @@ private def resolveSectionNames (data : ByteArray) (header : Header) (sections :
     Except String (List Section) := do
   match sections with
   | [] => .ok []
-  | _ =>
-    match sections[header.stringSectionIndex]? with
+  | first :: _ =>
+    -- Of `SHN_XINDEX`, the index is the link of the first section.
+    let index := if header.stringSectionIndex == 0xffff then first.link else header.stringSectionIndex
+    match sections[index]? with
     | none => .error "missing ELF section-name string table"
     | some strings =>
       sections.mapM fun sh => do
@@ -353,6 +364,9 @@ structure DynamicSymbol where
   typ : Nat
   binding : Nat
   sectionIndex : Nat
+  /-- Of a version that isn't the default, as its entry of `.gnu.version` says with `VERSYM_HIDDEN`: `name@VERSION` rather than
+  `name@@VERSION`, which a reference by its name alone isn't bound to. -/
+  hidden : Bool := false
   deriving Repr
 
 structure DynamicRelocation where
@@ -500,7 +514,7 @@ def zeroFill (data : ByteArray) : Nat :=
     let field (offset : Nat) : Nat := (word data header.endian header.is64 offset).toOption.getD 0
     if header.fileType == 1 then
       -- Of each section that is laid out, all of it, as `regionBytes` makes it.
-      let entries := min header.sectionCount (data.size / max header.sectionEntrySize 1 + 1)
+      let entries := min (sectionCountOf data header) (data.size / max header.sectionEntrySize 1 + 1)
       (List.range entries).foldl (init := 0) fun total index =>
         let at_ := header.sectionOffset + index * header.sectionEntrySize
         let flags := field (at_ + 8)
@@ -571,7 +585,13 @@ def dynamicSymbol (image : Image) (headers : List ProgramHeader) (tags : List (N
         let name := match tagValue tags 5, tagValue tags 10 with
           | some strings, some size => dynamicString image headers strings size nameOffset
           | _, _ => ""
-        .ok (some ⟨name, value, size, info &&& 0xf, info >>> 4, sectionIndex⟩)
+        -- `DT_VERSYM`, of a half-word for each symbol.
+        let hidden := match tagValue tags 0x6ffffff0 with
+          | some versions => match offsetOf headers image.data.size (versions + index * 2) 2 with
+            | some at_ => ((IO.Reader.u16 image.data image.endian at_).toOption.getD 0) &&& 0x8000 != 0
+            | none => false
+          | none => false
+        .ok (some ⟨name, value, size, info &&& 0xf, info >>> 4, sectionIndex, hidden⟩)
 
 def readRelocationTable (image : Image) (headers : List ProgramHeader) (addr size : Nat)
     (rela : Bool) : Except String (List DynamicRelocation) := do

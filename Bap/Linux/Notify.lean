@@ -210,12 +210,19 @@ def after (notifier : Notifier) (kernelRef : IO.Ref Kernel) (group : Nat) (call 
       else if pathsChanged && counts.getD inode 0 != counts'.getD inode 0 &&
           !isDirectory (after.inodes.get? inode) && !(call == .rename || call == .renameat || call == .renameat2) then
         kernel := say kernel inode inAttrib entriesAfter false
-  -- What is watched and has no path any more was deleted, and isn't watched, before its directory hears that its name went.
-  if pathsChanged then
-    for inode in (watches.map (·.2.inode)).eraseDups do
-      if counts'.getD inode 0 == 0 && counts.getD inode 0 > 0 then
-        kernel := say kernel inode inDeleteSelf {} false
-        kernel := instances.foldl (init := kernel) fun kernel listener => unwatch kernel listener inode
+  -- What is watched and is gone, as Linux evicts an inode once it has no path and nothing has it open or mapped, was deleted, and isn't
+  -- watched, before its directory hears that its name went: of `unlink` of what is closed, or of the close of what was unlinked.
+  -- A close is said before what it deleted.
+  if call == .close then
+    if let some (inode, mask) := ofCall then kernel := say kernel inode mask entriesAfter true
+  let alive (kernel : Kernel) (inode : Nat) : Bool :=
+    kernel.links.getD inode 0 > 0 || kernel.processes.any fun _ process =>
+      process.mappings.any (·.inode == inode) || process.descriptors.any fun _ descriptor =>
+        (kernel.openFiles.get? descriptor.openFile).any (·.inode == inode)
+  for inode in (watches.map (·.2.inode)).eraseDups do
+    if alive before inode && !alive after inode then
+      kernel := say kernel inode inDeleteSelf {} false
+      kernel := instances.foldl (init := kernel) fun kernel listener => unwatch kernel listener inode
   -- Names that directories have that they hadn't, and that they had that they haven't: of `rename`, the two sides of a move, after which
   -- what moved and is watched hears of it.
   if pathsChanged then
@@ -248,7 +255,8 @@ def after (notifier : Notifier) (kernelRef : IO.Ref Kernel) (group : Nat) (call 
       for inode in (watches.map (·.2.inode)).eraseDups do
         if counts'.getD inode 0 > 0 && before.pathOfInode inode != after.pathOfInode inode then
           kernel := say kernel inode inMoveSelf {} false
-  if let some (inode, mask) := ofCall then kernel := say kernel inode mask entriesAfter true
+  if call != .close then
+    if let some (inode, mask) := ofCall then kernel := say kernel inode mask entriesAfter true
   let told := instances.any fun listener =>
     match before.inodes.get? listener, kernel.inodes.get? listener with
     -- That it has more to say, rather than that a read took some.

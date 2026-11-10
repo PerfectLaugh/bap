@@ -1,0 +1,3 @@
+signalfd of a mask of 4 bytes: EINVAL
+signalfd of SIGUSR1: read 128, of SIGUSR1 1
+semctl SETVAL of 1: 0, GETVAL 1

@@ -86,6 +86,8 @@ int main(int argc, char **argv) {
   if (getuid() == 0) {
     const char *made[] = {"perms", "perms/copy", "perms/script", "perms/file", "perms/link"};
     for (int index = 0; index < 5; index++) syscall(SYS_fchownat, AT_FDCWD, made[index], 65534, 65534, AT_SYMLINK_NOFOLLOW);
+    // And where it is, which it takes what it made away from at the end, as anyone may of their own.
+    syscall(SYS_fchownat, AT_FDCWD, ".", 65534, 65534, 0);
     syscall(SYS_setgroups, 0, NULL);
     syscall(SYS_setresgid, 65534, 65534, 65534);
     syscall(SYS_setresuid, 65534, 65534, 65534);

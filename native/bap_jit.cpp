@@ -2587,8 +2587,11 @@ extern "C" lean_obj_res bap_jit_run_chain(lean_obj_arg programObject, lean_obj_a
       auto *program = static_cast<Program *>(lean_get_external_data(current->program));
       memory.pendingSite = false;
       memory.registers = current->direct ? registers.data() : nullptr;
-      if (program->resumes && program->fallback == nullptr)
-        return ioError("an optimized program without the program that it goes on in");
+      // An error of a range that isn't the first, after others ran, takes them back with the rest, as a failed run is.
+      if (program->resumes && program->fallback == nullptr) {
+        error = lean_mk_io_error_other_error(0, lean_mk_string("an optimized program without the program that it goes on in"));
+        break;
+      }
       memory.fallback = program->fallback;
       memory.resume = 0;
       next = program->function(state.data(), &memory);

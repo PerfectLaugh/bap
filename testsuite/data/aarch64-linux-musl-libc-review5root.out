@@ -1,0 +1,6 @@
+chroot: ../etc/f inside, /../../etc/f inside, a link to /etc/f inside
+mount: .. of its root is where it is mounted 1, and chdir there is to r5-mount
+nofile: of RLIM_INFINITY -1 EPERM
+nice: of a process of another user EPERM
+suid: runs as euid 0, AT_SECURE 1
+done

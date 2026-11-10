@@ -1,0 +1,18 @@
+startstack: just below argv 1
+comm: of the main thread main, /proc/self/comm main
+tracer: TracerPid is the tracer 1
+perms: open of mode 0 EACCES, truncate EACCES, creat in 555 EACCES, mkdir EACCES, unlink EACCES, rename EACCES, link EACCES, symlink EACCES
+counts: writev of 1025 -1 EINVAL, of -1 -1 EINVAL, read of /dev/zero of 2^48 -1 Bad address, of 2^20 8192, getrandom of 2^40 8192
+shmat: where it is mapped EINVAL, it has precious, of SHM_REMAP attached, of SHM_REMAP and no address EINVAL
+readdir: unlinked 3000, rmdir ok
+inotify: at unlink ATTRIB, at close CLOSE_WRITE DELETE_SELF IGNORED
+copyrange: of 100 from 0 to 10 of 10 bytes 10
+utime: of another's at 1 EPERM, now EACCES, of UTIME_OMIT ok
+chown: of another's to -1 -1 ok
+statx: the device of stat 1
+cwd: stat of . ok, open of . ok
+msgsnd: of none to 10 bytes 10 EAGAIN
+sempid: after the undo at exit, of the child 1
+mqnotify: after its process exits ok, a receiver that waits took it: notified 0, registered still EBUSY
+names: entries 3, of the byte e9 1, inside a directory of text made
+done

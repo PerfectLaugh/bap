@@ -270,8 +270,8 @@ def run : IO Unit := do
     (ABI.Location.register ⟨"RDI", .imm 64, 0, false⟩) (ABI.argumentLocation amd64 0)
   assertEqual "x86-64 sixth argument register"
     (ABI.Location.register ⟨"R9", .imm 64, 0, false⟩) (ABI.argumentLocation amd64 5)
-  assertEqual "x86-64 seventh argument uses stack" (ABI.Location.stack 0) (ABI.argumentLocation amd64 6)
-  assertEqual "x86-64 eighth argument stack offset" (ABI.Location.stack 8) (ABI.argumentLocation amd64 7)
+  assertEqual "x86-64 seventh argument uses the stack, past the return address" (ABI.Location.stack 8) (ABI.argumentLocation amd64 6)
+  assertEqual "x86-64 eighth argument stack offset" (ABI.Location.stack 16) (ABI.argumentLocation amd64 7)
   assertEqual "x86-64 stack pointer" "RSP" amd64.stackPointer.name
   assertEqual "x86-64 return address is on stack" none amd64.returnAddress
   assertEqual "x86-64 syscall register" (some "R10") ((amd64.syscallArguments.map (·.name.str))[3]?)
@@ -298,7 +298,9 @@ def run : IO Unit := do
   | none => throw <| IO.userError "missing MIPS o32 ABI"
   let i386 ← convention .x86
   assertEqual "x86 word size" 32 i386.wordSize
-  assertEqual "x86 stack slots are words" (ABI.Location.stack 4) (ABI.argumentLocation i386 1)
+  -- From the stack pointer on entry, where the return address is first.
+  assertEqual "x86 first argument is past the return address" (ABI.Location.stack 4) (ABI.argumentLocation i386 0)
+  assertEqual "x86 stack slots are words" (ABI.Location.stack 8) (ABI.argumentLocation i386 1)
   let arm ← convention .arm
   assertEqual "ARM syscall number register" "R7" arm.syscallNumber.name
   assertEqual "ARM return register" (some "LR") (arm.returnAddress.map (·.name.str))
@@ -306,6 +308,11 @@ def run : IO Unit := do
   let ppc ← convention .powerpc
   assertEqual "PowerPC result register" "R3" ppc.result.name
   assertEqual "PowerPC stack pointer" "R1" ppc.stackPointer.name
+  assertEqual "PowerPC ELFv2 ninth argument is past the header and the save area" (ABI.Location.stack 96) (ABI.argumentLocation ppc 8)
+  let some ppc32 := ABI.convention .powerpc 32 | throw <| IO.userError "missing PowerPC SysV ABI"
+  assertEqual "PowerPC SysV ninth argument is past the back chain and LR's word" (ABI.Location.stack 8) (ABI.argumentLocation ppc32 8)
+  let s390x ← convention .systemz
+  assertEqual "s390x sixth argument is past the save area" (ABI.Location.stack 160) (ABI.argumentLocation s390x 5)
   match API.parseHeader "int/* no space */add(int/**/x);" with
   | .ok [glued] =>
     assertEqual "API comment separates tokens, name" "add" glued.name

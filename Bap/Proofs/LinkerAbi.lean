@@ -543,7 +543,8 @@ def powerpcSpec (env : Env) (site : Site) (rd : Bool → Nat → Nat → Nat) (s
   | 72 => st 2 (ppcHa tp)
   | typ =>
     if env.machine != emPpc64 then
-      let got := slot tp - (env.gotBase + 0x8000)
+      -- From `_GLOBAL_OFFSET_TABLE_`, where the GOT starts.
+      let got := slot tp - env.gotBase
       match typ with
       | 73 => st 4 tp
       | 87 | 88 => st 2 got

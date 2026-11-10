@@ -26,10 +26,11 @@ open Bap.Emu Bap.Tasks
 /-- Where what waits for a descriptor to be ready waits: whatever changes, it looks again. It is the first space of those of pipes. -/
 def readySpace : Nat := 2 ^ 61
 
-/-- Text of bytes of a guest, as a path or a name: of UTF-8 if they are, and otherwise a character of each byte, so that the same bytes
-are the same text. -/
+/-- Text of bytes of a guest, as a path or a name: see `Path.ofBytes`, of which other bytes are another text. -/
 def textOf (bytes : ByteArray) : String :=
-  (String.fromUTF8? bytes).getD (String.ofList (bytes.toList.map fun byte => Char.ofNat byte.toNat))
+  match String.fromUTF8? bytes with
+  | some text => if text.any (fun char : Char => char.toNat ≥ Path.escaped) then Path.ofBytes bytes else text
+  | none => Path.ofBytes bytes
 
 /-- What is ready of an open file. -/
 structure Ready where
@@ -209,14 +210,21 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     | .ok (id, _) => pure (some id)
     | .error _ => pure none
   let nonblocking (fd : Nat) : IO Bool := do pure ((← poller.kernel.get).nonblocking group fd)
-  -- The mask that the call waits with, a word at a time, and whether that lets through a signal that is pending, which ends it now.
+  -- The mask that the call waits with, a word at a time, and whether that lets through a signal that is pending, which ends it with
+  -- `EINTR` if it would wait, as Linux's `do_poll` and `ep_poll` look at what is ready first.
   let mask (address size : Nat) : IO Bool := do
     if address == 0 then return false
     poller.signals.suspendWith tid (← poller.signals.readMask emu address (min size 16 / word * word))
-    if ← poller.signals.unblockedPending tid group then
-      timers.finish tid
-      return true
-    pure false
+    poller.signals.unblockedPending tid group
+  -- What doesn't wait, or is interrupted: of what is ready, the mask from before, without what it let in being delivered, as
+  -- `restore_saved_sigmask_unless` has it; and of a signal, `EINTR`, with the mask it waited with for the handler.
+  let over (result : Nat) : IO (Option SyscallAction) := do
+    timers.finish tid
+    poller.signals.unsuspend tid
+    succeed result
+  let interrupt : IO (Option SyscallAction) := do
+    timers.finish tid
+    fail eintr
   let flags (given : Nat) : Nat := architecture.openFlags given
   let eventSize := if architecture == .x86_64 || architecture == .i686 then 12 else 16
   let eventData := if eventSize == 12 then 4 else 8
@@ -237,17 +245,18 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       write emu (at_ + 6) (numberBytes big 2 revents)
       if revents != 0 then readyCount := readyCount + 1
     pure (readyCount, files)
-  let poll (address count : Nat) (timeout : Option Nat) (back : Option (Nat × Nat × Nat) := none) : IO (Option SyscallAction) := do
+  let poll (address count : Nat) (timeout : Option Nat) (back : Option (Nat × Nat × Nat) := none) (interrupted : Bool := false) :
+      IO (Option SyscallAction) := do
     let due ← deadline timeout
     let (found, files) ← pollOnce address count
     let waits := !(found > 0 || timeout == some 0 || due.any (· ≤ now))
+    if waits && interrupted then return ← interrupt
     giveBack timeout due back waits
     if waits then wait due files
-    else
-      timers.finish tid
-      succeed found
+    else over found
   -- The sets of `select`: what is ready of each, as sets that say only that, how many, and the files to watch.
-  let select (count : Nat) (sets : List Nat) (timeout : Option Nat) (back : Option (Nat × Nat × Nat)) : IO (Option SyscallAction) := do
+  let select (count : Nat) (sets : List Nat) (timeout : Option Nat) (back : Option (Nat × Nat × Nat)) (interrupted : Bool := false) :
+      IO (Option SyscallAction) := do
     let due ← deadline timeout
     let words := (count + width - 1) / width
     let readSet (address : Nat) : IO (List Nat) := do
@@ -276,16 +285,16 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         out := out ++ [kept]
       results := results ++ [out]
     let waits := !(found > 0 || timeout == some 0 || due.any (· ≤ now))
+    if waits && interrupted then return ← interrupt
     giveBack timeout due back waits
     if waits then wait due files
     else
-      timers.finish tid
       for (address, set) in sets.zip results do
         if address != 0 then
           for (value, index) in set.zipIdx do write emu (address + index * word) (numberBytes big word value)
-      succeed found
+      over found
   -- What an epoll instance has ready, up to `limit`, which goes to `address`, and its items as they are after.
-  let epollWait (epfd address limit : Nat) (timeout : Option Nat) : IO (Option SyscallAction) := do
+  let epollWait (epfd address limit : Nat) (timeout : Option Nat) (interrupted : Bool := false) : IO (Option SyscallAction) := do
     let kernel ← poller.kernel.get
     let .ok (number_, _, inode) := kernel.objectOf group epfd | return ← fail ebadf
     let .epoll items := inode.content | return ← fail einval
@@ -318,12 +327,12 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     kept := kept ++ reported
     poller.kernel.modify (·.setContent number_ (.epoll kept))
     if !events.isEmpty || timeout == some 0 || due.any (· ≤ now) then
-      timers.finish tid
       for ((revents, data), index) in events.zipIdx do
         let at_ := address + index * eventSize
         write emu at_ (numberBytes big 4 revents)
         write emu (at_ + eventData) (numberBytes big 8 data)
-      succeed events.length
+      over events.length
+    else if interrupted then interrupt
     else wait due (kept.map (·.file))
   -- A timeout in milliseconds, of which less than 0 is none.
   let millis (value : Nat) : Option Nat :=
@@ -338,8 +347,8 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     | .ppoll | .ppoll64 =>
       let field := if call == .ppoll64 then 8 else word
       let some timeout ← timespec (arg 2) field | fail einval
-      if ← mask (arg 3) (arg 4) then return ← fail eintr
-      poll (arg 0) (arg 1) timeout (some (arg 2, field, 1))
+      let interrupted ← mask (arg 3) (arg 4)
+      poll (arg 0) (arg 1) timeout (some (arg 2, field, 1)) interrupted
     | .select =>
       -- Microseconds of a second or more are seconds, and of a negative time, `EINVAL`.
       let timeout ← if arg 4 == 0 then pure none else do
@@ -350,9 +359,8 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     | .pselect6 | .pselect664 =>
       let field := if call == .pselect664 then 8 else word
       let some timeout ← timespec (arg 4) field | fail einval
-      if arg 5 != 0 then
-        if ← mask (← number (arg 5) word) (← number (arg 5 + word) word) then return ← fail eintr
-      select (arg 0) [arg 1, arg 2, arg 3] timeout (some (arg 4, field, 1))
+      let interrupted ← if arg 5 != 0 then mask (← number (arg 5) word) (← number (arg 5 + word) word) else pure false
+      select (arg 0) [arg 1, arg 2, arg 3] timeout (some (arg 4, field, 1)) interrupted
     | .epollCreate =>
       if arg 0 == 0 || arg 0 ≥ 2 ^ 31 then return ← fail einval
       let (kernel, fd) := (← poller.kernel.get).addObject group (.epoll []) 0
@@ -390,12 +398,12 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       succeed
     | .epollWait => epollWait (arg 0) (arg 1) (arg 2) (millis (arg 3))
     | .epollPwait =>
-      if ← mask (arg 4) (arg 5) then return ← fail eintr
-      epollWait (arg 0) (arg 1) (arg 2) (millis (arg 3))
+      let interrupted ← mask (arg 4) (arg 5)
+      epollWait (arg 0) (arg 1) (arg 2) (millis (arg 3)) interrupted
     | .epollPwait2 =>
       let some timeout ← timespec (arg 3) 8 | fail einval
-      if ← mask (arg 4) (arg 5) then return ← fail eintr
-      epollWait (arg 0) (arg 1) (arg 2) timeout
+      let interrupted ← mask (arg 4) (arg 5)
+      epollWait (arg 0) (arg 1) (arg 2) timeout interrupted
     | .eventfd | .eventfd2 =>
       let given := if call == .eventfd then 0 else arg 1
       let semaphore := given &&& 1 != 0
@@ -434,7 +442,9 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     | .signalfd | .signalfd4 =>
       let given := if call == .signalfd then 0 else flags (arg 3)
       if given &&& (0x80000 ||| 0x800) != given then return ← fail einval
-      let signals ← number (arg 1) (min (arg 2) 16)
+      -- A `sigset_t` of the kernel, of its size, a word at a time with the low one first, as `sigprocmask` has it.
+      if arg 2 != (if mips then 16 else 8) then return ← fail einval
+      let signals ← poller.signals.readMask emu (arg 1) (arg 2)
       let kernel ← poller.kernel.get
       if arg 0 % 2 ^ 32 == 2 ^ 32 - 1 then
         let (kernel, fd) := kernel.addObject group (.signalfd signals) given

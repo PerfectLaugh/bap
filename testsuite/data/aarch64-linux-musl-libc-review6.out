@@ -1,0 +1,15 @@
+ringlink: completed 3:ok, then 1:ok 2:ok
+ringtimeout: after a while 1: 1:ETIME 2:ECANCELED, the pipe has nothing
+ringshort: completed 1:ok 2:ECANCELED
+tracedwait: poll 1 , nanosleep 0 
+ppoll: of what is ready 1, handled 0, pselect 1, epoll_pwait 1, handled 0
+timedrestart: recv -1 Interrupted system call after 1 s, futex -1 Interrupted system call after 1 s
+nocldstop: heard at the stop 0, the continue 0, the exit 1
+contdiscard: exited 7
+order: of the thread's and the process's, handlers ran UT
+dflstop: SIGTSTP pending still 1
+chldmerge: of two exits, handled 1
+timers: of signal 0 EINVAL, of 65 EINVAL, of a thread that isn't EINVAL, setitimer of none leaves 0
+futexwake: of 0 woke 1
+wait4fault: -1 Bad address, again -1 No child process
+done

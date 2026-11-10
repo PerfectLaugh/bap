@@ -411,10 +411,20 @@ def zeroFill (data : ByteArray) : Nat :=
       let rawSize := number (IO.Reader.u32 data .little (at_ + 16))
       let size := if virtualSize = 0 then rawSize else virtualSize
       total + max size rawSize
-    -- What a common symbol has, which is of no section and of a value that is its size.
-    let commons := (List.range (min header.symbolCount (data.size / 18 + 1))).foldl (init := 0) fun total index =>
-      let at_ := header.symbolOffset + index * 18
-      if number (IO.Reader.u16 data .little (at_ + 12)) == 0 then total + number (IO.Reader.u32 data .little (at_ + 8)) else total
+    -- What a common symbol has, which is external, of no section and of a value that is its size; the auxiliary records that follow a
+    -- symbol, as many as its last byte says, are no symbols, as of a section's definition, whose checksum is where a value would be.
+    let limit := min header.symbolCount (data.size / 18 + 1)
+    let commons := Id.run do
+      let mut total := 0
+      let mut index := 0
+      for _ in [0:limit] do
+        if index ≥ limit then break
+        let at_ := header.symbolOffset + index * 18
+        let external := number (IO.Reader.read data .little (at_ + 16) 1) == 2
+        if external && number (IO.Reader.u16 data .little (at_ + 12)) == 0 then
+          total := total + number (IO.Reader.u32 data .little (at_ + 8))
+        index := index + 1 + number (IO.Reader.read data .little (at_ + 17) 1)
+      total
     sections + commons
 
 /-- Decodes an object file, with the relocations that could not be applied. Like upstream's linker for ELF files,

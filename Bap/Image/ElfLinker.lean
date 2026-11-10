@@ -372,9 +372,10 @@ def aarch64Lo12 (shift : Nat) (value : Int) (insn : Nat) : Nat :=
   setBits insn 10 12 (field value 0 12 >>> shift : Nat)
 
 /-- A signed MOVW: the sign bit above the 16 bits of the value says whether the instruction is a MOVZ of the value or a
-MOVN, which takes it inverted. -/
+MOVN, which takes it inverted. A MOVK, of bit 29, takes the 16 bits as they are, as `ld.lld`'s `writeSMovWImm` has it. -/
 def aarch64SMov (value : Int) (insn : Nat) : Nat :=
-  if field value 16 1 == 1 then setBits (setBits insn 30 1 0) 5 16 ((field value 0 16 ^^^ 0xffff : Nat) : Int)
+  if field insn 29 1 == 1 then setBits insn 5 16 value
+  else if field value 16 1 == 1 then setBits (setBits insn 30 1 0) 5 16 ((field value 0 16 ^^^ 0xffff : Nat) : Int)
   else setBits (setBits insn 30 1 1) 5 16 value
 
 def aarch64 (env : Env) (site : Site) : Outcome := do
@@ -934,7 +935,8 @@ def powerpc (env : Env) (site : Site) : Outcome := do
   | 72 => store 2 (ppcHa (tpOff env site.s + site.a))
   | typ =>
     if env.machine != emPpc64 then
-      let got : LinkM Int := do pure ((← gotEntry env (tpOff env site.s + site.a)) - (env.gotBase + 0x8000))
+      -- From `_GLOBAL_OFFSET_TABLE_`, which is where the GOT starts, as `ld.lld`'s `R_GOT_OFF` has it.
+      let got : LinkM Int := do pure ((← gotEntry env (tpOff env site.s + site.a)) - env.gotBase)
       match typ with
       | 73 => store 4 (tpOff env site.s + site.a)
       | 87 | 88 => store 2 (← got)

@@ -221,7 +221,11 @@ def waitUntil (timers : Timers) (emu : Emu) (space address : Nat) (deadline : Op
 futexes: a write that wrote some of what it was given goes on past the call with that, and otherwise it runs again with the registers
 that it had, of a handler of `SA_RESTART` and a call that it restarts, or goes on past the call with `EINTR`, which the signals gave it,
 and its deadline is gone either way. -/
-def interrupted (timers : Timers) (emu : Emu) (tid : Nat) (restart : Bool) (spaces : List Nat) : IO Unit := do
+def interrupted (timers : Timers) (emu : Emu) (tid : Nat) (restart : Bool) (spaces : List Nat) (traced : Bool := false) : IO Unit := do
+  -- Of a tracee, the call runs again as it was, to the deadline that it had, as no handler ends it.
+  if traced then
+    timers.state.modify fun state => { state with sites := state.sites.erase tid }
+    return
   -- A sleep, or a wait with a timeout to give back, that a signal ended has what was left of it then.
   if spaces.any hasResult then
     let now ← timers.now
@@ -335,7 +339,8 @@ def serve (timers : Timers) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       -- What is left of a sleep until a time is nothing to say.
       sleep (if arg 1 &&& 1 != 0 then given else now + given) (if arg 1 &&& 1 != 0 then none else some (arg 3, field))
     | .setitimer =>
-      let given ← if arg 1 == 0 then pure none else do
+      -- Of no value, none: the timer is disarmed, as Linux has it of a NULL.
+      let given ← if arg 1 == 0 then pure (some (0, 0)) else do
         let (some interval, some value) := (← readSpan emu (arg 1) word 1000, ← readSpan emu (arg 1 + 2 * word) word 1000)
           | return ← fail einval
         pure (some (interval, value))
@@ -363,6 +368,12 @@ def serve (timers : Timers) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         let thread ← if notify == 4 then some <$> number (arg 1 + word + 8) 4 else pure none
         pure (if notify == 1 then none else some signal, value, thread, notify)
       if notify != 0 && notify != 1 && notify != 4 then return ← fail einval
+      -- As `good_sigevent` has it: a signal that there is, and a thread of the process.
+      if notify != 1 && arg 1 != 0 && (signal.getD 0 == 0 || signal.getD 0 > (if timers.mips then 128 else 64)) then
+        return ← fail einval
+      if let some tid := thread then
+        unless (← emu.taskTable.get).tasks.any fun task => task.tid == tid && task.group == group && task.status.isNone do
+          return ← fail einval
       write emu (arg 2) (numberBytes big 4 id)
       timers.state.modify fun state => { state with
         nextTimer := state.nextTimer.insert group (id + 1)

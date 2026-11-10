@@ -87,6 +87,8 @@ def serve (identity : Identity) (emu : Emu) (call : Call) (args : List Nat) : IO
     let (_, current) := kernel.limitOf target resource
     if soft > hard then return ← fail einval
     if hard > current && !credentials.capable Capability.sysResource then return ← fail eperm
+    -- Of descriptors, no more than `/proc/sys/fs/nr_open` says, even with the capability, as `do_prlimit` has it.
+    if resource == 7 && hard > 1048576 then return ← fail eperm
     update target fun process => { process with limits := (resource, soft, hard) :: process.limits.filter (·.1 != resource) }
     succeed
   try
@@ -256,6 +258,11 @@ def serve (identity : Identity) (emu : Emu) (call : Call) (args : List Nat) : IO
       else
         let given : Int := if arg 2 % 2 ^ 32 ≥ 2 ^ 31 then Int.ofNat (arg 2 % 2 ^ 32) - 2 ^ 32 else Int.ofNat (arg 2 % 2 ^ 32)
         let nice := (max (-20) (min 19 given) + 20).toNat
+        -- As `set_one_prio` has it: of a process of another user, as it goes by its effective one, `EPERM`.
+        let others := targets.any fun target =>
+          let ids := (kernel.process target).credentials
+          ids.uid != credentials.euid && ids.euid != credentials.euid
+        if !credentials.capable Capability.sysNice && others then return ← fail Errno.eperm
         if !credentials.capable Capability.sysNice && targets.any fun target => nice < (kernel.process target).nice then
           return ← fail eacces
         for target in targets do update target fun process => { process with nice }
@@ -269,10 +276,15 @@ def serve (identity : Identity) (emu : Emu) (call : Call) (args : List Nat) : IO
       writeWords (arg 1) [0]
       succeed
     | .schedSetparam | .schedSetscheduler =>
-      if (processOf (arg 0)).isNone then return ← fail esrch
+      let some target := processOf (arg 0) | return ← fail esrch
       if call == .schedSetscheduler && ![0, 1, 2, 3, 5].contains (arg 1 % 2 ^ 32 &&& 0xbfffffff) then return ← fail einval
+      -- What it is set to it is, with `SCHED_RESET_ON_FORK`, as `sched_getscheduler` says.
+      if call == .schedSetscheduler then update target fun process => { process with policy := arg 1 % 2 ^ 32 }
       succeed
-    | .schedGetscheduler => if (processOf (arg 0)).isNone then fail esrch else succeed 0
+    | .schedGetscheduler =>
+      match processOf (arg 0) with
+      | some target => succeed (kernel.process target).policy
+      | none => fail esrch
     | .schedGetPriorityMax | .schedGetPriorityMin =>
       match arg 0 % 2 ^ 32 with
       | 1 | 2 => succeed (if call == .schedGetPriorityMax then 99 else 1)

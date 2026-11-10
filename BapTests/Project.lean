@@ -93,8 +93,9 @@ private def targetSelection : IO Unit := do
   for (name, variant, count) in [
       ("mipsisa32r6el-linux-gnu-r6", ({ bits := 32, endian := .little, release6 := true } : Target.LLVMLift.MipsVariant), 12),
       ("mipsisa32r6-linux-gnu-r6", { bits := 32, endian := .big, release6 := true }, 12),
-      ("mipsisa64r6el-linux-gnuabi64-r6", { bits := 64, endian := .little, release6 := true }, 14),
-      ("mipsisa64r6-linux-gnuabi64-r6", { bits := 64, endian := .big, release6 := true }, 14),
+      -- Not the padding after `pick`, which only falling through its `jr $ra`, as if that were a call, came to.
+      ("mipsisa64r6el-linux-gnuabi64-r6", { bits := 64, endian := .little, release6 := true }, 13),
+      ("mipsisa64r6-linux-gnuabi64-r6", { bits := 64, endian := .big, release6 := true }, 13),
       ("mips-linux-gnu-echo", { bits := 32, endian := .big, release6 := false }, 0)] do
     let project ← Project.load (bin name)
     assertTrue s!"{name}: the variant of its header"

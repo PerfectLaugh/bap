@@ -63,12 +63,12 @@ def status (view : ProcessView) : ByteArray :=
   let memory := view.ranges.foldl (fun total range => total + range.size) 0
   let ids := view.credentials
   let groups := " ".intercalate (ids.groups.map toString)
-  text s!"Name:\t{view.name}\nUmask:\t{octal4 view.umask}\nState:\tR (running)\nTgid:\t{view.pid}\nNgid:\t0\nPid:\t{view.pid}\nPPid:\t{view.parent}\nTracerPid:\t0\nUid:\t{ids.uid}\t{ids.euid}\t{ids.suid}\t{ids.fsuid}\nGid:\t{ids.gid}\t{ids.egid}\t{ids.sgid}\t{ids.fsgid}\nFDSize:\t64\nGroups:\t{groups}\nVmSize:\t{memory / 1024} kB\nVmRSS:\t{memory / 1024} kB\nThreads:\t{view.threads.length}\nCpus_allowed:\t1\nCpus_allowed_list:\t0\n"
+  text s!"Name:\t{view.name}\nUmask:\t{octal4 view.umask}\nState:\tR (running)\nTgid:\t{view.pid}\nNgid:\t0\nPid:\t{view.pid}\nPPid:\t{view.parent}\nTracerPid:\t{view.tracer}\nUid:\t{ids.uid}\t{ids.euid}\t{ids.suid}\t{ids.fsuid}\nGid:\t{ids.gid}\t{ids.egid}\t{ids.sgid}\t{ids.fsgid}\nFDSize:\t64\nGroups:\t{groups}\nVmSize:\t{memory / 1024} kB\nVmRSS:\t{memory / 1024} kB\nThreads:\t{view.threads.length}\nCpus_allowed:\t1\nCpus_allowed_list:\t0\n"
 
 /-- `/proc/PID/stat`, with what isn't modelled at zero. -/
 def stat (view : ProcessView) : ByteArray :=
   let memory := view.ranges.foldl (fun total range => total + range.size) 0
-  text s!"{view.pid} ({view.name}) R {view.parent} {view.pgid} {view.sid} 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 {view.threads.length} 0 0 {memory} {memory / 4096} 18446744073709551615 0 0 {view.stackStart} 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 {view.breakStart} 0 0 0 0 0\n"
+  text s!"{view.pid} ({view.name}) R {view.parent} {view.pgid} {view.sid} 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 {view.threads.length} 0 0 {memory} {memory / 4096} 18446744073709551615 0 0 {view.startStack} 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 {view.breakStart} 0 0 0 0 0\n"
 
 def statm (view : ProcessView) : ByteArray :=
   let pages := view.ranges.foldl (fun total range => total + range.size) 0 / 4096

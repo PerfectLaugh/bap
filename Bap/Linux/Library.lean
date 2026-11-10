@@ -377,8 +377,9 @@ private partial def loadOne (machine : Machine) (path : String) (space : Nat) (s
       let (base, start, span) ← mapLibrary machine path data program
       let dynamic ← IO.ofExcept (Image.Elf.allDynamicSymbols image)
       let symbols := dynamic.filterMap fun symbol =>
-        -- Those that it defines, of a type that has an address, and not those of thread-local storage.
-        if symbol.sectionIndex != 0 && symbol.typ != 6 && !symbol.name.isEmpty && symbol.binding != 0 then
+        -- Those that it defines, of a type that has an address, and not those of thread-local storage; of a name that has versions,
+        -- the default, as a reference of the name alone is bound to it, rather than an old one that is kept for what was linked to it.
+        if symbol.sectionIndex != 0 && symbol.typ != 6 && !symbol.name.isEmpty && symbol.binding != 0 && !symbol.hidden then
           some (symbol.name, base + symbol.value)
         else none
       let tags := Image.Elf.dynamicTagsOf image
@@ -640,6 +641,9 @@ def Machine.threadTlsBlock (machine : Machine) (reserved : Nat := 256) (thread :
   for tls in modules do
     let image ← Bap.Emu.read machine.emu tls.image tls.fileSize
     machine.write (machine.threadLocalAddress tls threadPointer) image
+  -- Of x86, where the blocks are below it, the thread pointer points at itself, as the psABI has it, so that `%fs:0` is where the
+  -- thread pointer is, as code of the initial-exec model and of TLSDESC reads it.
+  if tlsBelow architecture then machine.write threadPointer (Abi.field architecture.big (width / 8) threadPointer)
   setThreadReg machine.emu ((← thread.getDM (Bap.Emu.thread machine.emu))) ⟨register, .imm width, 0, false⟩
     (.bits (BitVec.ofNat width threadPointer))
   pure (block, threadPointer)

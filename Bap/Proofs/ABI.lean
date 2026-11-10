@@ -446,10 +446,16 @@ theorem functionArguments_length (arch : Image.Arch) (w : Nat) (c : Convention)
   rw [List.length_map, argumentNames_length] at this
   exact this
 
-/-- Where the arguments in memory start: above the home area under o32, and at the stack pointer otherwise. -/
+/-- Where the arguments in memory start, from the stack pointer on entry: above the home area under o32, past the return address of
+x86, past the back chain and the save of LR of 32-bit PowerPC and the header and save area of ELFv2, past the save area of s390x, and
+at the stack pointer otherwise. -/
 def stackStart (arch : Image.Arch) (w : Nat) : Nat :=
   match arch with
   | .mips => if w = 32 then 16 else 0
+  | .x86 => 4
+  | .x86_64 => 8
+  | .powerpc => if w = 32 then 8 else 96
+  | .systemz => 160
   | _ => 0
 
 theorem convention_stackStart (arch : Image.Arch) (w : Nat) (c : Convention) (h : convention arch w = some c) :
@@ -560,12 +566,12 @@ theorem mips_n64_stack_arguments (w index : Nat) (hw : w ≠ 32) (c : Convention
 are 32 bits wide and the arguments, all on the stack, take four bytes each. -/
 theorem x86_is_32_bit (w index : Nat) (c : Convention) (h : convention .x86 w = some c) :
     c.wordSize = 32 ∧ c.result.typ = .imm 32 ∧ c.stackPointer.typ = .imm 32 ∧
-      argumentLocation c index = .stack (index * 4) := by
+      argumentLocation c index = .stack (4 + index * 4) := by
   simp only [convention, Option.some.injEq] at h
   subst h
   exact ⟨rfl, rfl, rfl, by
     rw [argumentLocation_of_ge _ _ (Nat.zero_le index)]
-    show Location.stack (0 + (index - 0) * (32 / 8)) = _
+    show Location.stack (4 + (index - 0) * (32 / 8)) = _
     simp⟩
 
 end Bap.Proofs.ABI

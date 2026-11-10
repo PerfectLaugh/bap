@@ -655,9 +655,9 @@ theorem riscvFlow_spec (word flags : Nat) :
       (word % 0x80 = 0x67 → word / 0x80 % 0x20 = 0 →
         riscvFlow word flags =
           if word / 0x8000 % 0x20 = 1 ∨ word / 0x8000 % 0x20 = 5 then .ret else .indirectJump) ∧
-      (word % 0x80 ≠ 0x6f → word % 0x80 ≠ 0x67 → riscvFlow word flags = flow flags) := by
+      (word % 4 = 3 → word % 0x80 ≠ 0x6f → word % 0x80 ≠ 0x67 → riscvFlow word flags = flow flags) := by
   lift_unfold riscvFlow
-  refine ⟨fun h => ?_, fun h h2 => ?_, fun h h2 => ?_, fun h h2 => ?_⟩ <;> simp [*]
+  refine ⟨fun h => ?_, fun h h2 => ?_, fun h h2 => ?_, fun h4 h h2 => ?_⟩ <;> simp [*]
 
 /-- `Bcc` with the condition `AL` is a plain jump, and any other ARM instruction goes by its flags. -/
 theorem arm32Flow_spec (assembly : String) (size flags : Nat) (d : LLVM.Operand)
@@ -702,16 +702,27 @@ theorem mipsFlow_bgez (assembly : String) (size flags : Nat) (opcode zero : Stri
     mipsFlow ⟨assembly, size, flags, opcode, [.reg zero, immediate]⟩ = .jump := by
   rcases h with rfl | rfl <;> rcases hz with rfl | rfl <;> lift_unfold mipsFlow <;> rfl
 
+/-- `JALR` that links nothing, `jr` of release 6, returns of `$ra` and otherwise jumps where its register says. -/
+theorem mipsFlow_jr (assembly : String) (size flags : Nat) (target : String) :
+    mipsFlow ⟨assembly, size, flags, "JALR", [.reg "ZERO", .reg target]⟩ =
+      if target = "RA" ∨ target = "RA_64" then .ret else .indirectJump := by
+  lift_unfold mipsFlow
+  simp
+
 /-- Everything else goes by its flags. -/
 theorem mipsFlow_other (decoded : LLVM.Decoded)
     (h1 : (decoded.opcode = "BEQ" ∨ decoded.opcode = "BEQL") → decoded.operands.length ≠ 3)
     (h2 : (decoded.opcode = "BGEZ" ∨ decoded.opcode = "BGEZL") →
-      ∀ zero immediate, decoded.operands = [.reg zero, immediate] → zero ≠ "ZERO" ∧ zero ≠ "ZERO_64") :
+      ∀ zero immediate, decoded.operands = [.reg zero, immediate] → zero ≠ "ZERO" ∧ zero ≠ "ZERO_64")
+    (h3 : (decoded.opcode = "JALR" ∨ decoded.opcode = "JALR64") →
+      ∀ link target, decoded.operands = [.reg link, .reg target] → link ≠ "ZERO" ∧ link ≠ "ZERO_64") :
     mipsFlow decoded = flow decoded.flags := by
   obtain ⟨assembly, size, flags, opcode, operands⟩ := decoded
   lift_unfold mipsFlow
-  simp only at h1 h2
+  simp only at h1 h2 h3
   split
+  · simp_all
+  · simp_all
   · simp_all
   · simp_all
   · simp_all

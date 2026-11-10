@@ -45,7 +45,13 @@ inductive Number where
   | finite (negative : Bool) (mantissa : Nat) (exponent : Int)
   deriving DecidableEq, Repr
 
+/-- Of a format with its integer bit, as x87's, an encoding that the 387 and after take as an invalid operand: one whose exponent isn't
+0 and whose integer bit is, an unnormal, a pseudo-infinity or a pseudo-NaN. -/
+def noncanonical (format : Format) (bits : Nat) : Bool :=
+  format.explicit && (bits >>> format.fieldBits) % 2 ^ format.exponentBits != 0 && (bits >>> format.fractionBits) % 2 == 0
+
 def unpack (format : Format) (bits : Nat) : Number :=
+  if noncanonical format bits then .nan bits else
   let negative := (bits >>> (format.width - 1)) % 2 == 1
   let exponent := (bits >>> format.fieldBits) % 2 ^ format.exponentBits
   let field := bits % 2 ^ format.fieldBits
@@ -339,7 +345,7 @@ private def isNaN (format : Format) (bits : Nat) : Bool :=
   | _ => false
 
 private def isSignaling (format : Format) (bits : Nat) : Bool :=
-  isNaN format bits && (bits >>> (format.fractionBits - 1)) % 2 == 0
+  isNaN format bits && (noncanonical format bits || (bits >>> (format.fractionBits - 1)) % 2 == 0)
 
 /-- The result of an operation with a NaN among its operands, by these rules. -/
 def chooseNaN (rules : NaNRules) (format : Format) (operands : List Nat) : Nat :=
@@ -347,8 +353,10 @@ def chooseNaN (rules : NaNRules) (format : Format) (operands : List Nat) : Nat :
   else
   let positive := if rules.negativeDefault then defaultNaN format else defaultNaN format - 2 ^ (format.width - 1)
   if rules.canonical then positive else
-  let signaling := if rules.signalingFirst then operands.find? (isSignaling format) else none
-  match signaling, operands.find? (isNaN format) with
+  -- What isn't an operand at all, of x87, gives the default, as an invalid operation does.
+  let given := operands.filter (!noncanonical format ·)
+  let signaling := if rules.signalingFirst then given.find? (isSignaling format) else none
+  match signaling, given.find? (isNaN format) with
   | some bits, _ | none, some bits => quiet format bits
   | none, none => positive
 
@@ -378,7 +386,7 @@ private def evaluateX86 (name : String) (inputs : List Nat) : Option (Nat × Nat
   | "fsqrt", [x] => same fun format mode => sqrt format mode x
   | "fmad", [x, y, z] => same fun format mode => fma format mode x y z
   | "fmadh", [x, y, z] => same fun format mode => fmaHalved format mode x y z
-  | "fround", [x] => same fun format mode => round format mode x
+  | "fround", [x] | "froundq", [x] => same fun format mode => round format mode x
   | "fconvert", [x] =>
     pure (last, convert (← formatOf first) (← formatOf last) (mode.getD .rne) x)
   | "cast_sint", [x] | "cast_int", [x] =>
@@ -426,7 +434,7 @@ def evaluateWith (rules : NaNRules) (name : String) (inputs : List Nat) : Option
           return (target, chooseNaN rules to_ [])
         if isNaN from_ input && rules.legacyMips then
           return (target, chooseNaN rules to_ [])
-  let arithmetic := ["fadd", "fsub", "fmul", "fdiv", "fsqrt", "fmad", "fmadh", "fround"].contains (parts.headD "")
+  let arithmetic := ["fadd", "fsub", "fmul", "fdiv", "fsqrt", "fmad", "fmadh", "fround", "froundq"].contains (parts.headD "")
   match formatOf width with
   | some format =>
     if arithmetic && (inputs.any (isNaN format) || bits == defaultNaN format) then
@@ -466,7 +474,7 @@ def formatsOf (name : String) : Option Format × Option Format :=
     let first := widths.head?.bind formatOf
     let last := widths.getLast?.bind formatOf
     match parts.headD "" with
-    | "fadd" | "fsub" | "fmul" | "fdiv" | "fsqrt" | "fmad" | "fmadh" | "fround" | "fconvert" => (first, last)
+    | "fadd" | "fsub" | "fmul" | "fdiv" | "fsqrt" | "fmad" | "fmadh" | "fround" | "froundq" | "fconvert" => (first, last)
     | "forder" | "fgt" | "fge" | "feq" => (first, none)
     | "cast" =>
       match parts.getD 1 "" with
@@ -514,6 +522,23 @@ private def tiny (format : Format) : Number → Bool
   | .finite _ mantissa exponent => exponent + Nat.log2 mantissa < 1 - (format.bias : Int)
   | _ => false
 
+/-- A number of a sign, `m * 2 ^ e`, rounded to an integer in a mode: its magnitude, and whether it wasn't one already. -/
+private def roundToInteger (negative : Bool) (m : Nat) (e : Int) (mode : Mode) : Nat × Bool :=
+  if e ≥ 0 then (m <<< e.toNat, false)
+  else
+    let shift := (-e).toNat
+    let kept := m >>> shift
+    let rest := m % 2 ^ shift
+    let half := 2 ^ (shift - 1)
+    let up := match mode with
+      | .rne => rest > half || (rest == half && kept % 2 == 1)
+      | .rna => rest ≥ half
+      | .rtz => false
+      | .rtp => !negative && rest != 0
+      | .rtn => negative && rest != 0
+      | .rod => rest != 0 && kept % 2 == 0
+    (if up then kept + 1 else kept, rest != 0)
+
 /-- What an operation that gave `result` raises. Whether a result was rounded is whether rounding up and down come to
 something else, which takes evaluating it twice, so that `known` says not to when `inexact` won't change anything. -/
 def raisedBy (rules : NaNRules) (name : String) (inputs : List Nat) (result : Nat) (known : Bool := false) : Raised := Id.run do
@@ -549,15 +574,26 @@ def raisedBy (rules : NaNRules) (name : String) (inputs : List Nat) (result : Na
   match operation with
   | "cast_sfloat" | "cast_float" => return { inexact := rounded && differs }
   | "cast_sint" | "cast_int" =>
+    -- Of the integer that it rounds to in its mode, as x86 and RISC-V have it: out of range is invalid, whatever is given for it, and
+    -- otherwise what isn't an integer is inexact, also of what saturates.
     let signed := operation == "cast_sint"
     let some input := inputs.head? | return {}
-    let invalid := match unpack source input with
-      | .nan _ | .infinity _ => true
-      | .zero _ => false
-      | .finite negative m e =>
-        let exact := if e ≥ 0 then m <<< e.toNat else m >>> (-e).toNat
-        if negative then (if signed then exact > 2 ^ (last - 1) else exact > 0) else exact ≥ (if signed then 2 ^ (last - 1) else 2 ^ last)
-    return { invalid, inexact := !invalid && rounded && differs }
+    let mode := (before.getLast?.bind Mode.ofName).getD .rtz
+    match unpack source input with
+    | .nan _ | .infinity _ => return { invalid := true }
+    | .zero _ => return {}
+    | .finite negative m e =>
+      let (integer, notExact) := roundToInteger negative m e mode
+      let invalid := if negative && integer != 0 then !signed || integer > 2 ^ (last - 1)
+        else integer ≥ (if signed then 2 ^ (last - 1) else 2 ^ last)
+      return { invalid, inexact := !invalid && rounded && notExact }
+  | "fround" | "froundq" =>
+    -- To an integer of the format: a signaling NaN is invalid, and what wasn't an integer inexact, but of `froundq`, which says
+    -- nothing of that, as ROUNDSD of its bit 3.
+    let some input := inputs.head? | return {}
+    let signaling := if rules.legacyMips then isNaN source input && !isSignaling source input else isSignaling source input
+    if isNaN source input then return { invalid := signaling }
+    return { inexact := operation == "fround" && rounded && result != input, denormal := isDenormal source input }
   | "fadd" | "fsub" | "fmul" | "fdiv" | "fsqrt" | "fmad" | "fmadh" | "fconvert" =>
     let target := if operation == "fconvert" then (formatOf last).getD source else source
     -- The quiet bit of the NaNs of legacy MIPS says the opposite.
@@ -598,7 +634,8 @@ def serves (name : String) : Bool :=
   | some at_ =>
     let before := parts.take at_
     let before := if (before.getLast?.bind Mode.ofName).isSome then before.dropLast else before
-    ["fadd", "fsub", "fmul", "fdiv", "fsqrt", "fmad", "fmadh", "fround", "fconvert", "cast_sint", "cast_int", "cast_sfloat", "cast_float",
+    ["fadd", "fsub", "fmul", "fdiv", "fsqrt", "fmad", "fmadh", "fround", "froundq", "fconvert", "cast_sint", "cast_int", "cast_sfloat",
+      "cast_float",
       "forder", "fgt", "fge", "feq", "is_nan", "is_inf", "is_fzero"].contains ("_".intercalate before)
 
 end Bap.Float

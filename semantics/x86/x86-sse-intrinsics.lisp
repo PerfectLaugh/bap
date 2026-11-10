@@ -253,19 +253,22 @@
 (defun MFENCE () (empty))
 
 ;; rounding to integral values, the rounding mode is the bits 1:0 of
-;; the immediate, or the one of MXCSR if its bit 2 is set
-(defun sse-round (rm rt x)
-  (intrinsic (symbol-concat 'fround rm *sse-format* (symbol-of-size rt) :sep '_)
+;; the immediate, or the one of MXCSR if its bit 2 is set, and its bit 3
+;; says that what isn't exact raises nothing: froundq, which is fround
+;; but for that
+(defun sse-round (op rm rt x)
+  (intrinsic (symbol-concat op rm *sse-format* (symbol-of-size rt) :sep '_)
              (cast-low rt x)
              :result rt))
 
 (defun sse-round-imm (rt x imm)
-  (if (= (logand imm 4) 4) (sse-round *sse-rmode* rt x)
-    (case (logand imm 3)
-      0 (sse-round 'rnx rt x)
-      1 (sse-round 'rtn rt x)
-      2 (sse-round 'rtp rt x)
-      3 (sse-round 'rtz rt x))))
+  (let ((op (if (= (logand imm 8) 8) 'froundq 'fround)))
+    (if (= (logand imm 4) 4) (sse-round op *sse-rmode* rt x)
+      (case (logand imm 3)
+        0 (sse-round op 'rnx rt x)
+        1 (sse-round op 'rtn rt x)
+        2 (sse-round op 'rtp rt x)
+        3 (sse-round op 'rtz rt x)))))
 
 (defun ROUNDSDri_Int (rd _ rm imm) (set-sse rd (sse-round-imm 64 rm imm)))
 (defun ROUNDSSri_Int (rd _ rm imm) (set-sse rd (sse-round-imm 32 rm imm)))

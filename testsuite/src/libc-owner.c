@@ -86,6 +86,8 @@ int main(void) {
   say("chmod setgid", result(syscall(SYS_fchmodat, AT_FDCWD, "owner/setgid", 02777)));
   if (root) {
     syscall(SYS_fchownat, AT_FDCWD, "owner", 65534, 65534, 0);
+    // And where it is, which it takes what it made away from at the end, as anyone may of their own.
+    syscall(SYS_fchownat, AT_FDCWD, ".", 65534, 65534, 0);
     syscall(SYS_fchownat, AT_FDCWD, "owner/first", 65534, 65534, 0);
     unsigned besides[] = {100};
     syscall(SYS_setgroups, 1, besides);

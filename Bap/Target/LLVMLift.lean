@@ -1154,7 +1154,8 @@ def powerpcFlow (flags : Nat) : Disasm.Flow :=
   if flags &&& 1 != 0 && flags &&& 4 == 0 then .conditionalJump else flow flags
 
 /-- LLVM has no flags for `JAL` and `JALR`, their role comes from the registers, by the hints of the
-RISC-V specification: `X1` and `X5` are the link registers. -/
+RISC-V specification: `X1` and `X5` are the link registers. Nor for `C.JR` and `C.JALR`, which are of 16 bits, whose low two bits
+aren't 11: `C.JR` of a link register returns, and of another jumps where it says, and `C.JALR` calls. -/
 private def riscvFlow (word flags : Nat) : Disasm.Flow :=
   let rd := word / 0x80 % 0x20
   let rs := word / 0x8000 % 0x20
@@ -1165,6 +1166,10 @@ private def riscvFlow (word flags : Nat) : Disasm.Flow :=
     if rd != 0 then .call
     else if rs == 1 || rs == 5 then .ret
     else .indirectJump
+  else if word % 4 != 3 && word % 0x10000 / 0x2000 == 4 && word % 4 == 2 && rd != 0 && word / 4 % 0x20 == 0 then
+    if word / 0x1000 % 2 == 1 then .call
+    else if rd == 1 || rd == 5 then .ret
+    else .indirectJump
   else flow flags
 
 /-- LLVM marks `Bcc` as conditional even with the condition code `AL`, which is the plain `b`. -/
@@ -1174,9 +1179,12 @@ private def arm32Flow (decoded : LLVM.Decoded) : Disasm.Flow :=
   | _, _ => flow decoded.flags
 
 /-- `BEQ` of a register with itself and `BGEZ` of the zero register are the assembler's `b`, which
-always branches. -/
+always branches. `JALR` that links nothing, to the zero register, is `jr` of release 6, which has no `JR`: of `$ra` a return, and
+otherwise an indirect jump, with a delay slot either way. -/
 private def mipsFlow (decoded : LLVM.Decoded) : Disasm.Flow :=
   match decoded.opcode, decoded.operands with
+  | "JALR", [.reg "ZERO", .reg target] | "JALR64", [.reg "ZERO_64", .reg target] =>
+    if target == "RA" || target == "RA_64" then .ret else .indirectJump
   | "BEQ", [left, right, _] | "BEQL", [left, right, _] =>
     if left == right then .jump else flow decoded.flags
   | "BGEZ", [.reg "ZERO", _] | "BGEZ", [.reg "ZERO_64", _]

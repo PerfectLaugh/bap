@@ -42,11 +42,14 @@ def exited (kernel : Kernel) (group : Nat) : Kernel :=
   if mine.isEmpty then collect kernel
   else
     let sets := kernel.ipc.sets.map fun set =>
+      let changeOf (number : Nat) : Int :=
+        mine.foldl (fun total (_, id, which, change) => if id == set.id && which == number then total + change else total) 0
       let values := (List.range set.values.length).map fun number =>
-        let change := mine.foldl (fun total (_, id, which, change) => if id == set.id && which == number then total + change else total) 0
-        let value : Int := (set.values.getD number 0 : Int) + change
+        let value : Int := (set.values.getD number 0 : Int) + changeOf number
         (max 0 (min value 32767)).toNat
-      { set with values }
+      -- What it takes back is the last that it did of each, as `exit_sem` has it.
+      let pids := set.pids.zipIdx.map fun (pid, number) => if changeOf number != 0 then group else pid
+      { set with values, pids }
     collect { kernel with ipc := { kernel.ipc with sets, undo := others } }
 
 /-- Of `*get`: the object of `key` that there is, or none to make one, or why neither. -/
@@ -127,6 +130,11 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
       else if flags &&& 0x2000 != 0 then pure (address - address % 4096) else return .error Errno.einval
     let readOnly := flags &&& 0x1000 != 0
     let size := (segment.size + 4095) / 4096 * 4096
+    -- As `do_shmat` has it: where something is mapped is `EINVAL` but of `SHM_REMAP`, which replaces it, and which needs an address.
+    if flags &&& 0x4000 != 0 && address == 0 then return .error Errno.einval
+    if address != 0 && flags &&& 0x4000 == 0 &&
+        (← emu.regions.get).any fun region => region.address < address + size && address < region.address + region.data.size then
+      return .error Errno.einval
     let bits := 1 ||| (if readOnly then 0 else 2) ||| (if flags &&& 0x8000 != 0 then 4 else 0)
     try
       let start ← placeMapping emu address (address != 0) (kernel.inodeBytes segment.inode 0 size) bits
@@ -273,7 +281,8 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
       succeed waiting
     | 16 =>
       if !(← single) then return ← fail Errno.einval
-      let value := value % 2 ^ 32
+      -- The `int` of `union semun`, which on a 64-bit machine that is big-endian is the high half of the word, as `ksys_semctl` has it.
+      let value := if word == 8 && big then value / 2 ^ 32 % 2 ^ 32 else value % 2 ^ 32
       if value > 32767 then return ← fail Errno.erange
       update (fun other => { other with values := other.values.set which value, pids := other.pids.set which group, ctime := seconds })
         (ipc.undo.filter fun (_, setId, number, _) => setId != id || number != which)
@@ -301,7 +310,8 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
     let type ← number address word
     if type == 0 || type ≥ 2 ^ (8 * word - 1) then return ← fail Errno.einval
     let held := queue.messages.foldl (fun total (_, text) => total + text.size) 0
-    if held + size > queue.qbytes then
+    -- As `msg_fits_inqueue` has it, of bytes and of messages too, each of which counts as one of `msg_qbytes`.
+    if held + size > queue.qbytes || queue.messages.length + 1 > queue.qbytes then
       if flags &&& ipcNowait != 0 then return ← fail Errno.eagain
       return ← wait none
     let text ← read emu (address + word) size
@@ -319,7 +329,7 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
     if copy && (except || flags &&& ipcNowait == 0) then return ← fail Errno.einval
     let indexed := queue.messages.zipIdx
     let chosen : Option ((Nat × ByteArray) × Nat) :=
-      if copy then indexed[signed.toNat]?
+      if copy then (if signed < 0 then none else indexed[signed.toNat]?)
       else if signed == 0 then indexed.head?
       else if signed > 0 then indexed.find? fun ((kind, _), _) => if except then kind != signed.toNat else kind == signed.toNat
       else

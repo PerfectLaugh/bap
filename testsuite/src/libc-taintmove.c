@@ -1,5 +1,7 @@
 // What the taint of a machine says of memory that a call fills that isn't of the world (testLinuxTaintMoves): of `exec`, the program
-// that execve runs, whose constants come from nothing; of `mremap`, bytes of a file that a mapping moves with, which still come from it.
+// that execve runs, whose constants come from nothing; of `mremap`, bytes of a file that a mapping moves with, which still come from it;
+// of `append`, bytes of a file that pwrite wrote to one opened to append, which go to its end, whatever pwrite says, and come back from
+// there.
 // Each says where what it is about is, and then works, for the test to look there.
 #define _GNU_SOURCE
 #include <fcntl.h>
@@ -34,6 +36,18 @@ int main(int argc, char **argv) {
     pread(fd, block, 16, 0);
     char *moved = mremap(block, 65536, 131072, MREMAP_MAYMOVE);
     printf("%lx %d\n", (unsigned long)moved, moved != block);
+    hold();
+  }
+  if (argc > 1 && strcmp(argv[1], "append") == 0) {
+    static char from[16], back[16];
+    int data = open("/data", O_RDONLY);
+    pread(data, from, 16, 0);
+    int log = open("/log", O_CREAT | O_WRONLY | O_APPEND, 0644);
+    write(log, "abcd", 4);
+    pwrite(log, from, 4, 0);
+    int again = open("/log", O_RDONLY);
+    pread(again, back, 4, 4);
+    printf("%lx %d\n", (unsigned long)back, memcmp(back, from, 4) == 0);
     hold();
   }
   return 0;

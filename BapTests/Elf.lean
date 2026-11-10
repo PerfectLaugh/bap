@@ -800,6 +800,22 @@ private def relaxedCode (input : ElfLinker.Input) (size : Nat) : List UInt8 :=
   let output := ElfLinker.link (ElfLinker.relaxTls input)
   ((output.memory.extract 0 size).toList)
 
+/-- Of the extended numbering of sections, which a file of 65280 or more of them has: the count in the size of the first section and
+the index of the names in its link, with 0 and `SHN_XINDEX` in the header. An object written so is what it is otherwise. -/
+def runExtendedSections : IO Unit := do
+  let data := aarch64TlsObject
+  let le (offset size : Nat) : Nat := (List.range size).foldl (fun value index => value + (data.get! (offset + index)).toNat * 256 ^ index) 0
+  let set (data : ByteArray) (offset size value : Nat) : ByteArray :=
+    (List.range size).foldl (init := data) fun data index => data.set! (offset + index) (UInt8.ofNat (value / 256 ^ index % 256))
+  let sectionOffset := le 0x28 8
+  let extended := set (set (set (set data (sectionOffset + 32) 8 (le 60 2)) (sectionOffset + 40) 4 (le 62 2)) 60 2 0) 62 2 0xffff
+  match Image.Elf.decode data, Image.Elf.decode extended with
+  | .ok plain, .ok numbered =>
+    assertEqual "ELF of extended numbering has its sections" (plain.sections.map (·.name)) (numbered.sections.map (·.name))
+    assertTrue "ELF of extended numbering has some" (plain.sections.length > 2)
+    assertEqual "and its symbols" (plain.symbols.map (·.name)) (numbered.symbols.map (·.name))
+  | .error error, _ | _, .error error => throw <| IO.userError s!"ELF of extended numbering: {error}"
+
 /-- The relaxations of thread-local accesses, against the bytes `ld.lld -static` leaves of each. -/
 private def runTlsRelax : IO Unit := do
   let gd : List UInt8 := [0x66, 0x48, 0x8d, 0x3d, 0, 0, 0, 0, 0x66, 0x66, 0x48, 0xe8, 0, 0, 0, 0]
@@ -832,6 +848,19 @@ private def runTlsRelax : IO Unit := do
   -- the `_NC` halves of AArch64 leave the opcode: a bit 16 doesn't make the `movk` a `movn`
   let big := { tlsInput 183 64 [0x00, 0x00, 0x80, 0xf2] [⟨0, 0, 0x224, 0, 0x10000, true⟩] with little := true }
   assertEqual "R_AARCH64_TLSLE_MOVW_TPREL_G0_NC keeps a movk" [0x00, 0x02, 0x80, 0xf2] (relaxedCode big 4)
+  -- and so do those of PC-relative values, of a value with bit 16 and of one that is negative
+  let prel (typ : Nat) (insn : List UInt8) (addend : Int) := { tlsInput 183 64 insn [⟨0, 0, typ, 1, addend, true⟩] with little := true }
+  assertEqual "R_AARCH64_MOVW_PREL_G0_NC keeps a movk" [0x00, 0x00, 0x80, 0xf2] (relaxedCode (prel 0x120 [0x00, 0x00, 0x80, 0xf2] 0x11000) 4)
+  assertEqual "R_AARCH64_MOVW_PREL_G1_NC keeps a movk of what is behind" [0xe0, 0xff, 0xbf, 0xf2]
+    (relaxedCode (prel 0x122 [0x00, 0x00, 0xa0, 0xf2] 0) 4)
+  -- PPC32's GOT_TPREL16 is from `_GLOBAL_OFFSET_TABLE_`, where the GOT starts: what it says there is the offset from the thread pointer
+  let ppc := { tlsInput 20 32 [0x80, 0x63, 0x00, 0x00] [⟨0, 2, 87, 0, 0, true⟩] with little := false }
+  let output := ElfLinker.link (ElfLinker.relaxTls ppc)
+  let offset := (output.memory.get! 2).toNat * 256 + (output.memory.get! 3).toNat
+  -- The GOT is in the memory after the input.
+  let entry := output.memory.extract (ppc.data.size + offset) (ppc.data.size + offset + 4)
+  assertEqual "R_PPC_GOT_TPREL16 is of the entry from the start of the GOT, which has the offset of x from the thread pointer"
+    [0xff, 0xff, 0x90, 0x00] entry.toList
   -- ARM has no relaxation in `ld.lld`: what needs a loader stays
   let arm := tlsInput 40 32 (List.replicate 4 0) [⟨0, 0, 0x68, 0, 0, false⟩]
   assertEqual "R_ARM_TLS_GD32 warns" 1 (ElfLinker.link (ElfLinker.relaxTls arm)).warnings.length

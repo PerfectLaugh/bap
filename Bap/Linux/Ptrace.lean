@@ -256,7 +256,7 @@ private def stopThread (ptrace : Ptrace) (emu : Emu) (tid : Nat) (stop : Stop) :
   let notified ← if stop.traced then pure (((← ptrace.table.get).tracees.get? tid).map (·.tracer))
     else pure (((← emu.taskTable.get).find? group).map (·.parent))
   if let some to := notified then
-    if to != 0 then
+    if to != 0 && !(← ptrace.signals.noChildStops to) then
       ptrace.signals.send emu none to ⟨numbers.chld, if stop.traced then 4 else 5, .child group 0 stop.signal⟩
   wakeWaits ptrace
 
@@ -293,7 +293,8 @@ def jobControl (ptrace : Ptrace) (emu : Emu) (group signal : Nat) : IO Unit := d
     for tid in held do release ptrace emu tid
     ptrace.table.modify fun table => { table with continued := group :: table.continued.erase group }
     let parent := (((← emu.taskTable.get).find? group).map (·.parent)).getD 0
-    if parent != 0 then ptrace.signals.send emu none parent ⟨numbers.chld, 6, .child group 0 numbers.cont⟩
+    if parent != 0 && !(← ptrace.signals.noChildStops parent) then
+      ptrace.signals.send emu none parent ⟨numbers.chld, 6, .child group 0 numbers.cont⟩
     wakeWaits ptrace
   else
     let table ← ptrace.table.get
@@ -313,7 +314,7 @@ def jobControl (ptrace : Ptrace) (emu : Emu) (group signal : Nat) : IO Unit := d
     ptrace.table.modify fun table => { table with continued := table.continued.erase group }
     -- Its parent hears of the stop of what isn't traced, as the tracer has of what is.
     let parent := (((← emu.taskTable.get).find? group).map (·.parent)).getD 0
-    if parent != 0 && threads.any (!table.tracees.contains ·) then
+    if parent != 0 && threads.any (!table.tracees.contains ·) && !(← ptrace.signals.noChildStops parent) then
       ptrace.signals.send emu none parent ⟨numbers.chld, 5, .child group 0 signal⟩
     wakeWaits ptrace
 

@@ -292,7 +292,12 @@ private def shift (context : Context) (op : Bil.BinOp) (args : List Value) : Exc
   | [value, amount] =>
     let (width, value) ← expectBil context value
     let (amountWidth, amount) ← expectBil context amount
-    let amount := if amountWidth = width then amount else .cast .unsigned width amount
+    -- The amount is a number of its own width, as BAP has it: one wider than the value that is as wide as the value or more shifts all
+    -- of it out, rather than its low bits shifting less.
+    let amount :=
+      if amountWidth = width then amount
+      else if amountWidth < width then .cast .unsigned width amount
+      else .ite (.bin .lt amount (.int (BitVec.ofNat amountWidth width))) (.cast .low width amount) (.int (BitVec.ofNat width width))
     .ok (.bil width (.bin op value amount))
   | _ => .error "Primus shift expects two arguments"
 

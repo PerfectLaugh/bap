@@ -1,0 +1,7 @@
+emptypath: ok, of the working directory 1
+msgcopy: past what there is ENOMSG, of -1 ENOMSG
+rwfappend: ok, the file has abcdxy
+scheduler: of SCHED_BATCH ok, it is 3
+dontunmap: of a file moved
+trusted: of another than root EPERM
+done

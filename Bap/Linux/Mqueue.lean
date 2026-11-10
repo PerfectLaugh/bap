@@ -22,6 +22,10 @@ private def numberOf (big : Bool) (bytes : ByteArray) : Nat :=
   let ordered := if big then bytes.toList else bytes.toList.reverse
   ordered.foldl (fun value byte => value * 256 + byte.toNat) 0
 
+/-- Where a thread waits that receives from the queue of an inode, which `Poller.wake` wakes as it wakes what waits to read, and which
+says that a receiver waits. -/
+private def receiveSpace (number : Nat) : Nat := readySpace + 2 ^ 56 + number
+
 /-- The calls of POSIX message queues, if the call is one of them. -/
 def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Option SyscallAction) := do
   let architecture := poller.architecture
@@ -52,9 +56,15 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
   let deadlineAt (address size : Nat) : IO (Option (Option Nat)) := do
     if address == 0 then return some none
     pure ((← readSpan emu address size).map some)
-  let wait (due : Option Nat) : IO (Option SyscallAction) := do
+  let wait (due : Option Nat) (space : Nat := readySpace) : IO (Option SyscallAction) := do
     if due.any (· ≤ now) then fail etimedout
-    else pure (some (← poller.timers.waitUntil emu readySpace 0 due true))
+    else pure (some (← poller.timers.waitUntil emu space 0 due true))
+  -- A registration of `mq_notify` is of a process while it has the queue open, as `mqueue_flush_file` lets it go when it closes it,
+  -- which it does as it ends.
+  let live ← poller.live
+  let registered (number_ : Nat) (notify : Option (Nat × Nat × Nat × Nat)) : Option (Nat × Nat × Nat × Nat) :=
+    notify.filter fun (owner, _) => live.contains owner && (kernel.process owner).descriptors.toList.any fun (_, descriptor) =>
+      (kernel.openFiles.get? descriptor.openFile).any (·.inode == number_)
   let send (fd address size priority timeout timeSize : Nat) : IO (Option SyscallAction) := do
     let some due ← deadlineAt timeout timeSize | fail Errno.einval
     let .ok (number_, file, messages, capacity, limit, notify) := queueOf fd | fail Errno.ebadf
@@ -66,8 +76,11 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       return ← wait due
     let text ← read emu address size
     let (before, after) := messages.span (·.1 ≥ priority)
-    -- A message to the queue empty is what `mq_notify` asked to hear of, once.
-    let (notify, told) := if messages.isEmpty then (none, notify) else (notify, none)
+    -- A message to the queue empty is what `mq_notify` asked to hear of, once; but one that a receiver that waits takes is said to
+    -- nobody, and what was asked stays, as `do_mq_timedsend` has it.
+    let notify := registered number_ notify
+    let receiving := (← emu.taskTable.get).futexes.any (·.space == receiveSpace number_)
+    let (notify, told) := if messages.isEmpty && !receiving then (none, notify) else (notify, none)
     poller.kernel.set (kernel.setContent number_ (.mqueue (before ++ [(priority, text)] ++ after) capacity limit notify))
     if let some (owner, 0, signal, value) := told then
       poller.signals.send emu none owner ⟨signal, 2 ^ 32 - 3, .sent group (kernel.process group).credentials.uid value⟩
@@ -81,7 +94,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     match messages with
     | [] =>
       if file.flags &&& Kernel.oNonblock != 0 then return ← fail Errno.eagain
-      wait due
+      wait due (receiveSpace number_)
     | (priority, text) :: rest =>
       write emu address text
       if priorityAt != 0 then write emu priorityAt (Abi.field big 4 priority)
@@ -136,7 +149,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       let signal ← number (arg 1 + word) 4
       let how ← number (arg 1 + word + 4) 4
       if how > 1 || (how == 0 && (signal == 0 || signal > 64)) then return ← fail Errno.einval
-      if notify.isSome then return ← fail 16
+      if (registered number_ notify).isSome then return ← fail 16
       poller.kernel.set (kernel.setContent number_ (.mqueue messages capacity limit (some (group, how, signal, value))))
       succeed
     | .mqGetsetattr =>

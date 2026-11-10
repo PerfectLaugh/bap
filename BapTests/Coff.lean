@@ -207,6 +207,26 @@ def runRelocationOverflow : IO Unit := do
       (List.range 4).foldl (fun value index => value + ((image.memory.readByte (address + index)).getD 0).toNat * 256 ^ index) 0
     assertEqual "COFF of more relocations than 16 bits: the first and the last" (0x10, 0x10 + count - 1) (word 0, word (4 * (count - 1)))
 
+/-- An object of AMD64 with the symbols of its sections, as MSVC makes them, each with an auxiliary record of its definition: a
+checksum where a symbol has its value, and no section where a symbol has its section, as it isn't of an associative COMDAT. -/
+private def auxiliaryObject : ByteArray :=
+  let le (size value : Nat) : ByteArray := ByteArray.mk ((List.range size).map fun index => (value >>> (8 * index)).toUInt8).toArray
+  let rawOffset := 60
+  let symbolOffset := rawOffset + 4
+  let header := le 2 0x8664 ++ le 2 1 ++ le 4 0 ++ le 4 symbolOffset ++ le 4 4 ++ le 2 0 ++ le 2 0
+  let sectionHeader := ".text".toUTF8 ++ le 3 0 ++ le 4 0 ++ le 4 0 ++ le 4 4 ++ le 4 rawOffset ++ le 4 0 ++ le 4 0 ++ le 2 0 ++ le 2 0 ++
+    le 4 0x60000020
+  -- A static symbol of the section, and its definition: its size, no relocations, its checksum, and no section that it goes with.
+  let symbol := ".text".toUTF8 ++ le 3 0 ++ le 4 0 ++ le 2 1 ++ le 2 0 ++ ByteArray.mk #[3, 1]
+  let definition := le 4 4 ++ le 2 0 ++ le 2 0 ++ le 4 0xf0000000 ++ le 2 0 ++ ByteArray.mk #[2] ++ le 3 0
+  header ++ sectionHeader ++ le 4 0xc3c3c3c3 ++ symbol ++ definition ++ symbol ++ definition ++ le 4 4
+
+/-- What follows a symbol as its auxiliary records is no symbol: no common, however large what is where its value would be. -/
+def runAuxiliaryRecords : IO Unit := do
+  match Coff.decodeReport auxiliaryObject with
+  | .error error => throw <| IO.userError s!"COFF of auxiliary records of sections: {error}"
+  | .ok (image, _) => assertEqual "COFF of auxiliary records of sections has its section" [".text"] (image.segments.map (·.name))
+
 def run : IO Unit := do
   -- Sections and commons whose headers ask for more zeros than a host can give, all together, aren't made.
   let table := 20 + fieldOf objectFixture 16 2

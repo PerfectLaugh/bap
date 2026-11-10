@@ -538,7 +538,9 @@ private def serveFutex (emu : Emu) (address operation value timeout target compa
   let wake (bitset : Nat) : IO SyscallAction := do
     if bitset == 0 then return ← syscallReturn emu (.error einval)
     let (space, word) ← keyOf address
-    let (table, woken) := (← emu.taskTable.get).futexWake space word bitset value
+    -- Of an `int`, as `futex_wake` has it: the first that waits is woken before the count is looked at, so that 0 or less is one.
+    let count := if value % 2 ^ 32 == 0 || value % 2 ^ 32 ≥ 2 ^ 31 then 1 else value % 2 ^ 32
+    let (table, woken) := (← emu.taskTable.get).futexWake space word bitset count
     emu.taskTable.set table
     wakeThreads emu woken
     syscallReturn emu (.ok woken.length)

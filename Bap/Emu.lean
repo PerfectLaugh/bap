@@ -728,6 +728,9 @@ mapped and hasn't written. -/
 private def regionsFromNative (mapped : List Region) (native : Jit.Memory) : IO (List Region) :=
   mapped.mapM fun region => do pure { region with data := ← Jit.regionBytes native (UInt64.ofNat region.address) region.data.size }
 
+/-- The space whose regions a snapshot has as `regions`. -/
+def snapshotSpace (saved : Snapshot) : Nat := firstSpace saved.table
+
 /-- All that the emulator is, of every thread and address space, as plain data: what `restore` and a checkpoint take. -/
 def snapshot (emu : Emu) : IO Snapshot := do
   let processes ← emu.processMemory.get
@@ -1718,7 +1721,8 @@ private def notifyCode (emu : Emu) (address : Nat) : IO Unit := do
     if site == address then
       emu.replaySites.set rest
       return
-    emu.replaySites.set []
+    -- Of the sites, only those that have a hook count: an instruction between them that has none doesn't end it.
+    if (← hooksNear emu address).any fun hook => hook.first ≤ address && address ≤ hook.last then emu.replaySites.set []
   | [] => pure ()
   -- What fired before the thread stopped here doesn't again, the first time that it goes on, and of the first instruction that it runs
   -- after it stopped, wherever that is: one that was sent elsewhere, by `setPc` or a signal, comes back to where it stopped later, where

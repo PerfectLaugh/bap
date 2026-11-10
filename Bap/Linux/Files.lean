@@ -105,27 +105,36 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
   let credentials := (kernel.process group).credentials
   -- Times of `timespec`, or of `timeval` of `scale` 1000, two of them, of which `UTIME_NOW` and `UTIME_OMIT` are now and none, or
   -- `EINVAL` of a fraction that is negative or of a second or more.
-  let times (address field scale : Nat) : IO (Result (Option Nat × Option Nat)) := do
-    if address == 0 then return .ok (some now, some now)
-    let one (at_ : Nat) : IO (Result (Option Nat)) := do
+  -- Each is of a time that was given, which is `TIMES_SET_FLAGS` of Linux, or not.
+  let times (address field scale : Nat) : IO (Result ((Option Nat × Bool) × (Option Nat × Bool))) := do
+    if address == 0 then return .ok ((some now, false), (some now, false))
+    let one (at_ : Nat) : IO (Result (Option Nat × Bool)) := do
       let seconds := numberOf big (← read emu at_ field)
       let (_, fraction) ← readTime emu at_ field
-      if scale == 1 && fraction == 0x3fffffff then return .ok (some now)
-      if scale == 1 && fraction == 0x3ffffffe then return .ok none
+      if scale == 1 && fraction == 0x3fffffff then return .ok (some now, false)
+      if scale == 1 && fraction == 0x3ffffffe then return .ok (none, false)
       if fraction < 0 || fraction * scale ≥ 1000000000 then return .error Errno.einval
-      pure (.ok (some (seconds * 1000000000 + fraction.toNat * scale)))
+      pure (.ok (some (seconds * 1000000000 + fraction.toNat * scale), true))
     let first ← one address
     let second ← one (address + 2 * field)
     pure (do pure (← first, ← second))
   -- Of the file, or why there is none, and then of the times.
-  let setTimes (number : Result Nat) (given : Result (Option Nat × Option Nat)) : IO (Option SyscallAction) := do
+  -- As `vfs_utimes` and `setattr_prepare` have it: times that are given, only of the owner or with `CAP_FOWNER`, else `EPERM`; now, of
+  -- them or of one that may write it, else `EACCES`; and neither, nothing at all.
+  let setTimes (number : Result Nat) (given : Result ((Option Nat × Bool) × (Option Nat × Bool))) : IO (Option SyscallAction) := do
     match number, given with
     | .error errno, _ | _, .error errno => fail errno
-    | .ok number, .ok given =>
+    | .ok number, .ok ((accessed, givenAccessed), (modified, givenModified)) =>
+      let some inode := kernel.inodes.get? number | return ← fail Errno.enoent
+      if accessed.isNone && modified.isNone then return ← succeed
+      let owner := credentials.fsuid == inode.details.uid || credentials.capable Capability.fowner
+      if (givenAccessed || givenModified) && !owner then return ← fail Errno.eperm
+      if !owner && !Kernel.permits inode credentials false 2 then return ← fail Errno.eacces
       poller.kernel.set (alter kernel number fun details =>
-        { details with accessed := given.1.getD details.accessed, modified := given.2.getD details.modified, changed := now })
+        { details with accessed := accessed.getD details.accessed, modified := modified.getD details.modified, changed := now })
       succeed
-  -- Of `chown`: -1 leaves either as it is, and only one with `CAP_CHOWN` gives a file to another, or to a group that it isn't in.
+  -- Of `chown`, as `chown_ok` and `chgrp_ok` have it: -1 leaves either as it is, which anyone may; else its owner, by the user that it
+  -- goes by on files, may leave its owner as it is and give it to a group that it is in or that it has; and with `CAP_CHOWN`, anything.
   let chown (number : Result Nat) (uid gid : Nat) : IO (Option SyscallAction) := do
     let unset := 2 ^ 32 - 1
     let (uid, gid) := (uid % 2 ^ 32, gid % 2 ^ 32)
@@ -133,9 +142,10 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     | .error errno => fail errno
     | .ok number =>
       let some inode := kernel.inodes.get? number | return ← fail Errno.enoent
+      let owner := credentials.fsuid == inode.details.uid
       let mayGive := credentials.capable Capability.chown ||
-        ((uid == unset || uid == inode.details.uid) && credentials.euid == inode.details.uid &&
-          (gid == unset || gid == credentials.egid || credentials.groups.contains gid))
+        (uid == unset || owner && uid == inode.details.uid) &&
+        (gid == unset || owner && (gid == inode.details.gid || gid == credentials.fsgid || credentials.groups.contains gid))
       if !mayGive then return ← fail 1
       let kernel := alter kernel number fun details =>
         { details with uid := if uid == unset then details.uid else uid, gid := if gid == unset then details.gid else gid
@@ -168,10 +178,24 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     match ← named nameAt with
     | .ok name => action name
     | .error errno => fail errno
+  -- As Linux's `xattr_permission` has it: `trusted.` is of `CAP_SYS_ADMIN`, and `user.` of a file or a directory that it may read, or write
+  -- to change; what it may not see is as if it weren't there.
+  let denied (number : Nat) (name : String) (writing : Bool) : Option Nat :=
+    match kernel.inodes.get? number with
+    | none => none
+    | some inode =>
+      if name.startsWith "trusted." && !credentials.capable Capability.sysAdmin then
+        some (if writing then Errno.eperm else enodata)
+      else if name.startsWith "user." then
+        if !(inode.content matches .file _ | .directory) then some (if writing then Errno.eperm else enodata)
+        else if !Kernel.permits inode credentials false (if writing then 2 else 4) then some Errno.eacces
+        else none
+      else none
   let attributesOf (number : Nat) : List (String × ByteArray) := ((kernel.inodes.get? number).map (·.details.attributes)).getD []
   let setAttribute (number : Result Nat) (nameAt valueAt size flags : Nat) : IO (Option SyscallAction) :=
     onNumber number fun number => onName nameAt fun name => do
       if size > 65536 then return ← fail e2big
+      if let some errno := denied number name true then return ← fail errno
       let there := (attributesOf number).any (·.1 == name)
       if flags &&& 1 != 0 && there then return ← fail Errno.eexist
       if flags &&& 2 != 0 && !there then return ← fail enodata
@@ -181,6 +205,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       succeed
   let getAttribute (number : Result Nat) (nameAt valueAt size : Nat) : IO (Option SyscallAction) :=
     onNumber number fun number => onName nameAt fun name => do
+      if let some errno := denied number name false then return ← fail errno
       let some (_, value) := (attributesOf number).find? (·.1 == name) | return ← fail enodata
       if size == 0 then return ← succeed value.size
       if size < value.size then return ← fail erange
@@ -188,13 +213,16 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       succeed value.size
   let listAttributes (number : Result Nat) (listAt size : Nat) : IO (Option SyscallAction) :=
     onNumber number fun number => do
-      let names := (attributesOf number).foldl (fun out (name, _) => (out ++ name.toUTF8).push 0) ByteArray.empty
+      -- Of what it may see: `trusted.` only of `CAP_SYS_ADMIN`.
+      let seen := (attributesOf number).filter fun (name, _) => !name.startsWith "trusted." || credentials.capable Capability.sysAdmin
+      let names := seen.foldl (fun out (name, _) => (out ++ name.toUTF8).push 0) ByteArray.empty
       if size == 0 then return ← succeed names.size
       if size < names.size then return ← fail erange
       write emu listAt names
       succeed names.size
   let removeAttribute (number : Result Nat) (nameAt : Nat) : IO (Option SyscallAction) :=
     onNumber number fun number => onName nameAt fun name => do
+      if let some errno := denied number name true then return ← fail errno
       if !(attributesOf number).any (·.1 == name) then return ← fail enodata
       poller.kernel.set (alter kernel number fun details =>
         { details with attributes := details.attributes.filter (·.1 != name), changed := now })
@@ -248,7 +276,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       let target ← match ← pathAt here (arg 1) with
         | .ok path => pure path
         | .error errno => return ← fail errno
-      fromResult (kernel.link "/" source target false)
+      fromResult (kernel.link group "/" source target false)
     | .linkat =>
       -- AT_EMPTY_PATH of a descriptor, and AT_SYMLINK_FOLLOW.
       let target ← match ← pathAt (arg 2) (arg 3) with
@@ -256,13 +284,13 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         | .error errno => return ← fail errno
       if arg 4 &&& 0x1000 != 0 && (← readString emu (arg 1)).isEmpty then
         match ofFd (arg 0) with
-        | .ok number => fromResult (kernel.linkInode number "/" target)
+        | .ok number => fromResult (kernel.linkInode group number "/" target)
         | .error errno => fail errno
       else
         let source ← match ← pathAt (arg 0) (arg 1) with
         | .ok path => pure path
         | .error errno => return ← fail errno
-        fromResult (kernel.link "/" source target (arg 4 &&& 0x400 != 0))
+        fromResult (kernel.link group "/" source target (arg 4 &&& 0x400 != 0))
     | .renameat2 =>
       let source ← match ← pathAt (arg 0) (arg 1) with
         | .ok path => pure path
@@ -270,7 +298,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       let target ← match ← pathAt (arg 2) (arg 3) with
         | .ok path => pure path
         | .error errno => return ← fail errno
-      fromResult (kernel.renameWith "/" source target (arg 4))
+      fromResult (kernel.renameWith group "/" source target (arg 4))
     | .utimensat | .utimensat64 =>
       let field := if call == .utimensat64 then 8 else word
       let number ← if arg 1 == 0 then pure (ofFd (arg 0)) else inodeAt (arg 0) (arg 1) (arg 3 &&& 0x100 == 0) (arg 3 &&& 0x1000 != 0)
@@ -282,8 +310,9 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       if let .error errno := given then return ← fail errno
       setTimes (← inodeAt directory path true false) given
     | .utime =>
-      let given ← if arg 1 == 0 then pure (some now, some now) else do
-        pure (some ((numberOf big (← read emu (arg 1) word)) * 1000000000), some ((numberOf big (← read emu (arg 1 + word) word)) * 1000000000))
+      let given ← if arg 1 == 0 then pure ((some now, false), (some now, false)) else do
+        pure ((some ((numberOf big (← read emu (arg 1) word)) * 1000000000), true),
+          (some ((numberOf big (← read emu (arg 1 + word) word)) * 1000000000), true))
       setTimes (← inodeAt here (arg 0) true false) (.ok given)
     | .chown => chown (← inodeAt here (arg 0) true false) (arg 1) (arg 2)
     | .lchown => chown (← inodeAt here (arg 0) false false) (arg 1) (arg 2)
@@ -380,7 +409,12 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         -- An offset that the count takes past the end of 64 bits is `EOVERFLOW`, and another negative one `EINVAL`, as `transfer` has it.
         if [from_, to].any (·.any (· + arg 4 ≥ 2 ^ 64)) then return ← fail 75
         let (first, second) := (from_.getD input.offset, to.getD output.offset)
-        if source == target && first < second + arg 4 && second < first + arg 4 then return ← fail Errno.einval
+        -- What overlaps is of what there is to copy, as `generic_copy_file_checks` has it: no more than is there from where it starts.
+        let size := match kernel.inodes.get? source with
+          | some { content := .file data, .. } => data.size
+          | _ => 0
+        let count := min (arg 4) (size - min size first)
+        if source == target && first < second + count && second < first + count then return ← fail Errno.einval
         transfer (arg 0) (arg 2) (arg 4) from_ to false fun count => do
           moveOffset (arg 1) 8 from_ count
           moveOffset (arg 3) 8 to count

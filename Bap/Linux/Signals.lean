@@ -466,9 +466,10 @@ structure Signals where
   tracer : IO.Ref (Nat → IO (Option Nat))
   /-- A process that a signal stops, by what does that by default, or that SIGCONT lets go on: the process and the signal. -/
   jobControl : IO.Ref (Emu → Nat → Nat → IO Unit)
-  /-- A thread that a signal woke from what it waited in: the thread, whether its handler has `SA_RESTART`, and the spaces that it
-  waited in, as a call that runs again when it is woken has to hear of it. -/
-  interrupted : IO.Ref (Emu → Nat → Bool → List Nat → IO Unit)
+  /-- A thread that a signal woke from what it waited in: the thread, whether its handler has `SA_RESTART`, the spaces that it waited
+  in, as a call that runs again when it is woken has to hear of it, and whether it is a tracee, whose call runs again as it was, to its
+  deadline, as no handler is run for it then. -/
+  interrupted : IO.Ref (Emu → Nat → Bool → List Nat → Bool → IO Unit)
   /-- A signal was sent, as what waits to read one, as of `signalfd`, has to look again. -/
   sent : IO.Ref (Emu → IO Unit)
   /-- A signal of a process was taken from what was pending, as delivery or a wait takes it, as a timer of `timer_create` has to hear
@@ -732,12 +733,18 @@ private def enterHandler (signals : Signals) (emu : Emu) (tid : Nat) (info : Sig
     set "R12" handler
   pure handler
 
-/-- The next signal for a thread that doesn't block it: the lowest, and of one number the first. -/
+/-- The next signal for a thread that doesn't block it, as Linux's `dequeue_signal` has it: of its own before those of its process, and
+of each, what a fault sends first, `SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGTRAP`, `SIGFPE` and `SIGSYS`, then the lowest, and of one number
+the first. -/
 private def nextSignal (signals : Signals) (tid group : Nat) : IO (Option SignalInfo) := do
   let table ← signals.table.get
   let thread := table.threads.getD tid {}
   let shared := table.groupPending.getD group []
-  let candidates := (thread.pending ++ shared).filter fun info => bitOf info.signal &&& thread.mask == 0
+  let synchronous := if isMipsArchitecture signals.architecture then [4, 5, 8, 10, 11, 12] else [4, 5, 7, 8, 11, 31]
+  let open_ (list : List SignalInfo) : List SignalInfo := list.filter fun info => bitOf info.signal &&& thread.mask == 0
+  let candidates := if (open_ thread.pending).isEmpty then open_ shared else open_ thread.pending
+  let candidates := if candidates.any (synchronous.contains ·.signal) then candidates.filter (synchronous.contains ·.signal)
+    else candidates
   match candidates with
   | [] => pure none
   | first :: rest =>
@@ -810,15 +817,18 @@ def deliverPending (signals : Signals) (emu : Emu) : IO Unit :=
   deliver signals emu false
 
 /-- A thread that has to wake for a signal: it isn't waiting any longer, and what it was doing says so, or starts again if it may. A
-stop of its tracer and the wait of the parent of `vfork` aren't for a signal to end, and it goes on once nothing else holds it. -/
-private def interrupt (signals : Signals) (emu : Emu) (tid : Nat) (restart : Bool) : IO Unit := do
+stop of its tracer and the wait of the parent of `vfork` aren't for a signal to end, and it goes on once nothing else holds it. A wait
+with a time isn't started again, even of a handler of `SA_RESTART`, as `ERESTART_RESTARTBLOCK` has it then; and the call of a tracee,
+which stops for its tracer rather than running a handler, starts again whatever it is, as it was. -/
+private def interrupt (signals : Signals) (emu : Emu) (tid : Nat) (restart : Bool) (traced : Bool := false) : IO Unit := do
   let table ← emu.taskTable.get
   let interruptible (waiter : FutexWaiter) : Bool := waiter.thread == tid && !uninterruptible waiter.space
   if !table.futexes.any interruptible && !table.waiters.any (·.thread == tid) then return
   emu.taskTable.set { table with futexes := table.futexes.filter (!interruptible ·), waiters := table.waiters.filter (·.thread != tid) }
   let spaces := (table.futexes.filter interruptible).map (·.space)
+  let timed := (table.futexes.filter interruptible).any (·.deadline.isSome)
   let state ← threadOf signals tid
-  match state.last, restart && (state.last.map (·.restartable)).getD false with
+  match state.last, traced || restart && !timed && (state.last.map (·.restartable)).getD false with
   | some last, true =>
     let width := signals.architecture.bits
     let (_, _, result) := syscallRegisters emu.config.syscallAbi
@@ -834,19 +844,38 @@ private def interrupt (signals : Signals) (emu : Emu) (tid : Nat) (restart : Boo
       let shared := (← signals.table.get).groupPending.getD group []
       unless (state.pending ++ shared).any fun info => bitOf info.signal &&& set != 0 do
         modifyThread signals tid fun state => { state with waiting := none }
-  (← signals.interrupted.get) emu tid restart spaces
+  (← signals.interrupted.get) emu tid restart spaces traced
   wakeThread emu tid
+
+/-- SIGCONT takes away the stop signals that are pending for a process, and a stop signal SIGCONT, as `prepare_signal` has it of what is
+sent. -/
+private def prepare (signals : Signals) (emu : Emu) (group : Nat) (info : SignalInfo) : IO Unit := do
+  let numbers := signals.numbers
+  let gone : Option (Nat → Bool) :=
+    if info.signal == numbers.cont then some numbers.stops.contains
+    else if numbers.stops.contains info.signal then some (· == numbers.cont)
+    else none
+  if let some gone := gone then
+    let kept (pending : SignalInfo) : Bool := !gone pending.signal
+    signals.table.modify fun table =>
+      { table with groupPending := table.groupPending.insert group ((table.groupPending.getD group []).filter kept) }
+    for task in (← emu.taskTable.get).tasks do
+      if task.group == group then modifyThread signals task.tid fun state => { state with pending := state.pending.filter kept }
 
 /-- A signal is sent to a thread. -/
 private def sendToThread (signals : Signals) (emu : Emu) (tid group : Nat) (info : SignalInfo) : IO Unit := do
+  prepare signals emu group info
   -- SIGCONT lets a stopped process go on as it is sent, whatever becomes of it after.
   if info.signal == (signals.numbers).cont then (← signals.jobControl.get) emu group info.signal
   let state ← threadOf signals tid
   let bit := bitOf info.signal
-  -- What is sent to a tracee waits to be delivered, as that stops it, whatever it would have come to.
+  -- What is sent to a tracee waits to be delivered, as that stops it, whatever it would have come to; one that it blocks doesn't wake
+  -- it, as Linux's `wants_signal` has it, and one of a kind that is pending already is that one, but of real time.
   if info.signal != (signals.numbers).kill && ((← (← signals.tracer.get) tid).isSome) then
-    modifyThread signals tid fun state => { state with pending := state.pending ++ [info] }
-    if (← thread emu) != tid || (← emu.taskTable.get).blocked tid then interrupt signals emu tid true
+    unless info.signal < 32 && state.pending.any (·.signal == info.signal) do
+      modifyThread signals tid fun state => { state with pending := state.pending ++ [info] }
+    if bit &&& state.mask == 0 && ((← thread emu) != tid || (← emu.taskTable.get).blocked tid) then
+      interrupt signals emu tid true (traced := true)
     return
   let realTime := info.signal ≥ 32
   -- Of one that isn't of real time one at most is pending.
@@ -880,6 +909,7 @@ zombie, takes nothing. -/
 private def sendToGroup (signals : Signals) (emu : Emu) (group : Nat) (info : SignalInfo) : IO Unit := do
   let tasks := (← emu.taskTable.get).tasks.filter fun task => task.group == group && task.status.isNone
   if tasks.isEmpty then return
+  prepare signals emu group info
   let bit := bitOf info.signal
   let leaderFirst := (tasks.filter (·.tid == group)) ++ tasks.filter (·.tid != group)
   let table ← signals.table.get
@@ -965,6 +995,14 @@ over, as `sigsuspend` has it. -/
 def suspendWith (signals : Signals) (tid mask : Nat) : IO Unit :=
   modifyThread signals tid fun state =>
     if state.suspended.isSome then state else { state with suspended := some state.mask, mask := blockable signals mask }
+
+/-- The mask that a thread had before `suspendWith` is its mask again, as a call that took one and is over without being ended by a
+signal has it: what is pending stays so. -/
+def unsuspend (signals : Signals) (tid : Nat) : IO Unit :=
+  modifyThread signals tid fun state =>
+    match state.suspended with
+    | some mask => { state with mask, suspended := none }
+    | none => state
 
 /-- What is pending for a thread that its mask lets through and that its process ignores is gone, as delivery would have it, unless
 a tracer has it stop for that. -/
@@ -1138,7 +1176,9 @@ def notifyParent (signals : Signals) (emu : Emu) (group status : Nat) : IO Unit 
     pure (table.waiters.any (·.thread == other.tid)) <||> answered emu other.tid
   if waiting then
     match parents.find? (·.tid == task.parent) with
-    | some leader => modifyThread signals leader.tid fun state => { state with pending := state.pending ++ [info] }
+    -- One that isn't of real time is pending once at most.
+    | some leader => modifyThread signals leader.tid fun state =>
+      if signal < 32 && state.pending.any (·.signal == signal) then state else { state with pending := state.pending ++ [info] }
     | none => pure ()
   else sendToGroup signals emu task.parent info
 
@@ -1148,6 +1188,11 @@ def processExited (signals : Signals) (emu : Emu) (group status : Nat) : IO Unit
   if let some tracer := ← (← signals.tracer.get) group then
     if ((← emu.taskTable.get).find? group).all (·.parent != tracer) then return
   notifyParent signals emu group status
+
+/-- Whether a process hears nothing of its children that stop or go on, as its action of SIGCHLD has `SA_NOCLDSTOP`, which is 1 on each
+target: Linux's `do_notify_parent_cldstop` sends nothing then. -/
+def noChildStops (signals : Signals) (group : Nat) : IO Bool := do
+  pure ((← actionOf signals group (signals.numbers).chld).flags &&& 1 != 0)
 
 /-- Whether a process doesn't wait for its children, which go as they end without a wait, as Linux has it: it ignores `SIGCHLD`, or its
 action has `SA_NOCLDWAIT`. What it does by default is to ignore it, which isn't this. -/
@@ -1266,11 +1311,11 @@ def leaveHandler (signals : Signals) (emu : Emu) : IO SyscallAction := do
 /-- A system call starts, which a signal that interrupts it starts again from, of one that may be: what serves a call before `serve` does
 says so. -/
 def noteCall (signals : Signals) (emu : Emu) (number : Nat) : IO Unit := do
-  if (callsOf signals.architecture).restartable.contains number then
-    let (_, _, resultRegister) := syscallRegisters emu.config.syscallAbi
-    let result ← registerValue emu signals.architecture.bits resultRegister
-    let pc ← emu.pc.get
-    modifyThread signals (← thread emu) fun state => { state with last := some { pc, result, restartable := true } }
+  let (_, _, resultRegister) := syscallRegisters emu.config.syscallAbi
+  let result ← registerValue emu signals.architecture.bits resultRegister
+  let pc ← emu.pc.get
+  let restartable := (callsOf signals.architecture).restartable.contains number
+  modifyThread signals (← thread emu) fun state => { state with last := some { pc, result, restartable } }
 
 /-- What serves the system calls of signals, before those of the kernel and of tasks. -/
 def serve (signals : Signals) (emu : Emu) : IO Unit := do
@@ -1288,12 +1333,11 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
     let signedCode (value : Nat) : Nat := 2 ^ 32 - value
     let tid ← thread current
     let task ← currentTask current
-    if calls.restartable.contains number then
-      let result ← registerValue current width resultRegister
-      let pc ← current.pc.get
-      modifyThread signals tid fun state => { state with last := some { pc, result, restartable := true } }
-    -- What started a call before this isn't where this one starts again.
-    else if (← threadOf signals tid).last.isSome then modifyThread signals tid fun state => { state with last := none }
+    -- Where each call starts again from, which of a tracee is any, and of a handler of `SA_RESTART`, those that may.
+    let result ← registerValue current width resultRegister
+    let pc ← current.pc.get
+    let restartable := calls.restartable.contains number
+    modifyThread signals tid fun state => { state with last := some { pc, result, restartable } }
     if number == calls.sigaction then
       let signal := arg 0
       let (act, old, size) := (arg 1, arg 2, arg 3)
@@ -1310,8 +1354,9 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
               -- What is all the default goes; SIG_DFL with flags or a mask keeps them, as `SA_NOCLDWAIT` of SIGCHLD has to be.
               actions := if action == {} then table.actions.erase (task.group, signal)
                 else table.actions.insert (task.group, signal) action }
-          -- What is ignored now isn't pending any more.
-          if ((action.handler == 1) || (action.handler == 0 && numbers.ignored.contains signal)) then
+          -- What is ignored now isn't pending any more: of the default, what the kernel ignores, as `sig_handler_ignored` has it, which
+          -- a stop signal isn't.
+          if ((action.handler == 1) || (action.handler == 0 && numbers.ignored.contains signal && !numbers.stops.contains signal)) then
             let notThis (info : SignalInfo) : Bool := info.signal != signal
             signals.table.modify fun table =>
               { table with

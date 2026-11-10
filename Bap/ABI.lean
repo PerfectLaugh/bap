@@ -32,6 +32,8 @@ private def x86 : Convention := {
   syscallArguments := regs 32 ["EBX", "ECX", "EDX", "ESI", "EDI", "EBP"]
   stackPointer := reg "ESP" 32
   returnAddress := none
+  -- Past the return address.
+  stackArgumentsStart := 4
 }
 
 private def x86_64 : Convention := {
@@ -42,6 +44,8 @@ private def x86_64 : Convention := {
   syscallArguments := regs 64 ["RDI", "RSI", "RDX", "R10", "R8", "R9"]
   stackPointer := reg "RSP" 64
   returnAddress := none
+  -- Past the return address.
+  stackArgumentsStart := 8
 }
 
 private def riscv (width : Nat) : Convention := {
@@ -96,6 +100,9 @@ private def powerpc (width : Nat) : Convention := {
   syscallArguments := numbered "R" width 3 8
   stackPointer := reg "R1" width
   returnAddress := some (reg "LR" width)
+  -- Past the back chain and the word where the callee saves LR, of SysV; and of ELFv2, as musl has it of both orders, past the header
+  -- of 32 bytes and the save area of the eight arguments in registers.
+  stackArgumentsStart := if width = 32 then 8 else 96
 }
 
 private def systemz : Convention := {
@@ -106,6 +113,8 @@ private def systemz : Convention := {
   syscallArguments := numbered "R" 64 2 7
   stackPointer := reg "R15" 64
   returnAddress := some (reg "R14" 64)
+  -- Past the save area of the registers.
+  stackArgumentsStart := 160
 }
 
 def convention (arch : Image.Arch) (wordSize : Nat := 64) : Option Convention :=

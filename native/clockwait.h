@@ -2,6 +2,7 @@
 
 #ifdef __linux__
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <time.h>
 
@@ -17,11 +18,32 @@ extern "C" int pthread_cond_clockwait(pthread_cond_t *condition,
   struct timespec monotonic, realtime;
   clock_gettime(CLOCK_MONOTONIC, &monotonic);
   clock_gettime(CLOCK_REALTIME, &realtime);
-  long long left = (timeout->tv_sec - monotonic.tv_sec) * 1000000000LL + (timeout->tv_nsec - monotonic.tv_nsec);
-  if (left < 0)
-    left = 0;
-  long long due = realtime.tv_sec * 1000000000LL + realtime.tv_nsec + left;
-  struct timespec deadline = {(time_t)(due / 1000000000LL), (long)(due % 1000000000LL)};
+  // In seconds and nanoseconds apart, and what overflows the seconds as far off as they go: a time far off, as
+  // `steady_clock::time_point::max()`, is one that hasn't come, rather than a negative one that has.
+  long long seconds;
+  if (__builtin_sub_overflow((long long)timeout->tv_sec, (long long)monotonic.tv_sec, &seconds))
+    seconds = timeout->tv_sec < monotonic.tv_sec ? LLONG_MIN : LLONG_MAX;
+  long long nanos = (long long)timeout->tv_nsec - monotonic.tv_nsec;
+  if (nanos < 0 && seconds != LLONG_MIN) {
+    nanos += 1000000000LL;
+    seconds -= 1;
+  }
+  if (seconds < 0) {
+    seconds = 0;
+    nanos = 0;
+  }
+  nanos += realtime.tv_nsec;
+  if (nanos >= 1000000000LL) {
+    nanos -= 1000000000LL;
+    if (seconds < LLONG_MAX)
+      seconds += 1;
+  }
+  long long due;
+  if (__builtin_add_overflow((long long)realtime.tv_sec, seconds, &due)) {
+    due = LLONG_MAX;
+    nanos = 999999999LL;
+  }
+  struct timespec deadline = {(time_t)due, (long)nanos};
   return pthread_cond_timedwait(condition, mutex, &deadline);
 }
 #endif

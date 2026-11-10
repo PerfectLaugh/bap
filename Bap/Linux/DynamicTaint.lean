@@ -124,7 +124,8 @@ private def callSends (machine : Machine) (opened : Opened) (number : Nat) (args
         let base := architecture.pairBase
         let (low, high) := if architecture.big then (args.getD (base + 1) 0, args.getD base 0) else (args.getD base 0, args.getD (base + 1) 0)
         high * 2 ^ 32 + low
-    pure [send (args.getD 1 0) (args.getD 2 0) at_]
+    -- Of what was opened to append, at the end, whatever it says, as Linux has it.
+    pure [send (args.getD 1 0) (args.getD 2 0) (if appends then offset else at_)]
   | .writev | .pwritev | .pwritev2 =>
     let word := architecture.bits / 8
     let count := args.getD 2 0
@@ -135,7 +136,8 @@ private def callSends (machine : Machine) (opened : Opened) (number : Nat) (args
       pure (ordered.foldl (fun value byte => value * 256 + byte.toNat) 0)
     let mut sends : List Send := []
     let mut at_ := if call == .writev || appends then offset else (vectorOffset architecture call args).getD offset
-    for index in List.range count do
+    -- No more than `UIO_MAXIOV`, as a call of more fails.
+    for index in List.range (min count 1024) do
       let base ← readWord (vector + 2 * word * index)
       let size ← readWord (vector + 2 * word * index + word)
       sends := sends ++ [send base size at_]

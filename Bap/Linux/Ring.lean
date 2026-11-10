@@ -307,14 +307,21 @@ private def attempt (rings : Rings) (emu : Emu) (group : Nat) (ring : Uring) (pe
       ring := complete architecture ring data (negative 125)
       cancelling := linked
       continue
+    -- What comes after what waits in its chain waits too, to the end of the chain, which is the first that isn't linked.
     if blocked then
       ring := { ring with pending := ring.pending ++ [item] }
+      blocked := linked
       continue
     if item.entry[0]! == 11 then
-      -- A timeout: done with its count of completions, or, at its time, with `ETIME`.
+      -- A timeout: done with its count of completions, or, at its time, with `ETIME`, which fails what is linked after it unless it
+      -- has `IORING_TIMEOUT_ETIME_SUCCESS`; and until then, what is linked after it waits.
       if item.count > 0 && ring.posted - item.start ≥ item.count then ring := complete architecture ring data 0
-      else if item.deadline.any (· ≤ now) then ring := complete architecture ring data (negative 62)
-      else ring := { ring with pending := ring.pending ++ [item] }
+      else if item.deadline.any (· ≤ now) then
+        ring := complete architecture ring data (negative 62)
+        cancelling := linked && numberOf big (item.entry.extract 28 32) &&& 0x20 == 0
+      else
+        ring := { ring with pending := ring.pending ++ [item] }
+        blocked := linked
       continue
     if item.entry[0]! == 14 then
       -- What `IORING_OP_ASYNC_CANCEL` cancels: what is pending of that number.
@@ -332,7 +339,17 @@ private def attempt (rings : Rings) (emu : Emu) (group : Nat) (ring : Uring) (pe
       blocked := linked
     | some result =>
       ring := complete architecture ring data result
-      cancelling := linked && result ≥ 2 ^ 63
+      -- What failed, and a read or a write of less than it asked for, as `__io_complete_rw_common` has it, cancels what it is linked to.
+      let opcode := item.entry[0]!.toNat
+      let length := numberOf big (item.entry.extract 24 28)
+      let asked ← if [22, 23, 4, 5].contains opcode then pure (some length)
+        else if opcode == 1 || opcode == 2 then do
+          let word := architecture.bits / 8
+          let vectors := numberOf big (item.entry.extract 16 24)
+          let sizes ← (List.range (min length 1024)).mapM fun index => numberAt rings emu (vectors + index * 2 * word + word) word
+          pure (some (sizes.foldl (· + ·) 0))
+        else pure none
+      cancelling := linked && (result ≥ 2 ^ 63 || asked.any (result < ·))
   pure ring
 
 /-- The completions of an io_uring go to its ring, as many as there is room for, which the `eventfd` of the process `group` that was

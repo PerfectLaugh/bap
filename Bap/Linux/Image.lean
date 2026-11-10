@@ -56,6 +56,9 @@ structure Image where
   randomGiven : Nat := 0
   /-- What of the host has been brought into the tree: see `Kernel.hostSeen`. -/
   hostSeen : List String := []
+  /-- The open files of `Kernel.cursors`, and their names, in that order. -/
+  cursorFiles : List Nat := []
+  cursorNames : List String := []
   deriving DecidableEq
 
 private def sorted (items : List (Nat × α)) : List (Nat × α) :=
@@ -108,7 +111,7 @@ def socketOfBytes (data : ByteArray) : Except String Socket := do
          receiveTimeout, sendTimeout }
 
 /-- Of a process, its process group, session, terminal, credentials and capabilities, limits and nice value, whether it ended, its root,
-the barriers it registered for and what it advised of its memory for a child, as bytes. -/
+the barriers it registered for, what it advised of its memory for a child and the names of its threads, as bytes. -/
 def identityBytes (process : Process) : ByteArray :=
   let out := Wire.putOption Wire.putNat (Wire.putNat (Wire.putNat ByteArray.empty process.pgid) process.sid) process.terminal
   let ids := process.credentials
@@ -119,7 +122,9 @@ def identityBytes (process : Process) : ByteArray :=
     process.limits
   let out := Wire.putText (Wire.putNat (Wire.putFlag (Wire.putNat out process.nice) process.ended) process.root.inode) process.root.path
   let out := Wire.putNat out process.barriers
-  Wire.putList (fun out advice => Wire.putFlag (Wire.putNat (Wire.putNat out advice.start) advice.size) advice.wipe) out process.forkAdvice
+  let out := Wire.putList (fun out advice => Wire.putFlag (Wire.putNat (Wire.putNat out advice.start) advice.size) advice.wipe) out
+    process.forkAdvice
+  Wire.putNat (Wire.putList (fun out (tid, name) => Wire.putText (Wire.putNat out tid) name) out process.threadNames) process.policy
 
 /-- What `identityBytes` made, on a process that has the rest; nothing at all is what a process starts with. -/
 def withIdentity (process : Process) (data : ByteArray) : Except String Process := do
@@ -144,9 +149,15 @@ def withIdentity (process : Process) (data : ByteArray) : Except String Process 
     let (size, at_) ← Wire.getNat data at_
     let (wipe, at_) ← Wire.getFlag data at_
     .ok ({ start, size, wipe : ForkAdvice }, at_)) data at_
+  let (threadNames, at_) ← Wire.getList (fun data at_ => do
+    let (tid, at_) ← Wire.getNat data at_
+    let (name, at_) ← Wire.getText data at_
+    .ok ((tid, name), at_)) data at_
+  let (policy, at_) ← Wire.getNat data at_
   Wire.expectEnd data at_
   let id (index : Nat) : Nat := ids.getD index 0
-  pure { process with pgid, sid, terminal, limits, nice, ended, root := { inode := rootInode, path := rootPath }, barriers, forkAdvice
+  pure { process with pgid, sid, terminal, limits, nice, ended, root := { inode := rootInode, path := rootPath }, barriers, forkAdvice,
+                      threadNames, policy
                       credentials := { uid := id 0, euid := id 1, suid := id 2, fsuid := id 3, gid := id 4, egid := id 5, sgid := id 6
                                        fsgid := id 7, groups, effective := id 8, permitted := id 9, inheritable := id 10
                                        bounding := id 11 } }
@@ -340,6 +351,8 @@ def Kernel.image (kernel : Kernel) : Image where
   ipc := ipcBytes kernel.ipc
   randomGiven := kernel.randomGiven
   hostSeen := (kernel.hostSeen.toList.toArray.qsort (· < ·)).toList
+  cursorFiles := (kernel.cursors.toList.toArray.qsort (·.1 < ·.1)).toList.map (·.1)
+  cursorNames := (kernel.cursors.toList.toArray.qsort (·.1 < ·.1)).toList.map (·.2)
 
 /-- The kernel of an image, or why there can't be one. -/
 def Image.kernel (image : Image) : Except String Kernel := do
@@ -429,7 +442,8 @@ def Image.kernel (image : Image) : Except String Kernel := do
     mounts := ← mountsOfBytes image.mounts
     ipc := ← ipcOfBytes image.ipc
     randomGiven := image.randomGiven
-    hostSeen := Std.HashSet.ofList image.hostSeen : Kernel }.countLinks
+    hostSeen := Std.HashSet.ofList image.hostSeen
+    cursors := Std.HashMap.ofList (image.cursorFiles.zip image.cursorNames) : Kernel }.countLinks
 
 namespace Image
 
@@ -559,7 +573,8 @@ def encode (out : ByteArray) (image : Image) : ByteArray :=
   let out := putList putProcess out image.processes
   let out := putBytes out image.output
   let out := putBytes (putBytes (putNat (putNat out image.clock) image.cycles) image.mounts) image.ipc
-  putList putText (putNat out image.randomGiven) image.hostSeen
+  let out := putList putText (putNat out image.randomGiven) image.hostSeen
+  putList putText (putList putNat out image.cursorFiles) image.cursorNames
 
 /-- An image from bytes, and where they end. -/
 def decode : Decoder Image := fun data at_ => do
@@ -576,7 +591,10 @@ def decode : Decoder Image := fun data at_ => do
   let (ipc, at_) ← getBytes data at_
   let (randomGiven, at_) ← getNat data at_
   let (hostSeen, at_) ← getList getText data at_
-  .ok ({ paths, inodes, nextInode, openFiles, nextOpenFile, processes, output, clock, cycles, mounts, ipc, randomGiven, hostSeen }, at_)
+  let (cursorFiles, at_) ← getList getNat data at_
+  let (cursorNames, at_) ← getList getText data at_
+  .ok ({ paths, inodes, nextInode, openFiles, nextOpenFile, processes, output, clock, cycles, mounts, ipc, randomGiven, hostSeen,
+         cursorFiles, cursorNames }, at_)
 
 end Image
 

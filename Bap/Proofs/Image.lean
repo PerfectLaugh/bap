@@ -3835,8 +3835,8 @@ private theorem xor_ones {x : Nat} (hx : x < 65536) : x ^^^ 0xffff = 65535 - x :
     rw [BitVec.xor_allOnes, BitVec.toNat_not, BitVec.toNat_ofNat, Nat.mod_eq_of_lt (by omega)]
   exact h1.symm.trans h2
 
-/-- A signed MOVW is a MOVZ of a value that fits and isn't negative. -/
-theorem aarch64SMov_movz {value : Int} {insn : Nat} (h : 0 ≤ value) (hl : value < 65536) :
+/-- A signed MOVW of a MOVZ or a MOVN, whose bit 29 is clear, is a MOVZ of a value that fits and isn't negative. -/
+theorem aarch64SMov_movz {value : Int} {insn : Nat} (hm : field (insn : Int) 29 1 = 0) (h : 0 ≤ value) (hl : value < 65536) :
     field (aarch64SMov value insn) 30 1 = 1 ∧ (field (aarch64SMov value insn) 5 16 : Int) = value := by
   obtain ⟨k, rfl⟩ := Int.eq_ofNat_of_zero_le h
   have hk : k < 65536 := by omega
@@ -3847,15 +3847,15 @@ theorem aarch64SMov_movz {value : Int} {insn : Nat} (h : 0 ≤ value) (hl : valu
     rw [this]
     rfl
   have hmov : aarch64SMov (k : Int) insn = setBits (setBits insn 30 1 1) 5 16 k := by
-    simp [aarch64SMov, hsign]
+    simp [aarch64SMov, hm, hsign]
   rw [hmov]
   refine ⟨?_, ?_⟩
   · rw [field_setBits_other _ _ _ _ 30 1 (.inr (by omega)), field_setBits_self]
     rfl
   · rw [field_setBits_self, field_of_lt (show k < 2 ^ 16 from hk)]
 
-/-- A signed MOVW is a MOVN of a value that fits and is negative: the instruction holds the complement. -/
-theorem aarch64SMov_movn {value : Int} {insn : Nat} (h : value < 0) (hl : -65536 ≤ value) :
+/-- A signed MOVW of a MOVZ or a MOVN is a MOVN of a value that fits and is negative: the instruction holds the complement. -/
+theorem aarch64SMov_movn {value : Int} {insn : Nat} (hm : field (insn : Int) 29 1 = 0) (h : value < 0) (hl : -65536 ≤ value) :
     field (aarch64SMov value insn) 30 1 = 0 ∧ (-1 - (field (aarch64SMov value insn) 5 16 : Nat) : Int) = value := by
   have hsign : field value 16 1 = 1 := by
     unfold field
@@ -3871,7 +3871,7 @@ theorem aarch64SMov_movn {value : Int} {insn : Nat} (h : value < 0) (hl : -65536
     omega
   have hmov : aarch64SMov value insn =
       setBits (setBits insn 30 1 0) 5 16 ((field value 0 16 ^^^ 0xffff : Nat) : Int) := by
-    simp [aarch64SMov, hsign]
+    simp [aarch64SMov, hm, hsign]
   have hlt : field value 0 16 < 65536 := field_lt value 0 16
   rw [hmov]
   refine ⟨?_, ?_⟩
