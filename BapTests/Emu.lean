@@ -2182,7 +2182,7 @@ def testLinuxRewriteFloat (triple : String) : IO Unit := do
 the interpreter, runs: `testsuite/src/big-interp/make.py` makes an interpreter of a segment of 1 MiB, which says so and exits. -/
 def testBigInterpreter : IO Unit := do
   let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile "testsuite/bin/x86_64-linux-big-interp")
-    |>.addFile "/lib/ld-big.so" (← IO.FS.readBinFile "testsuite/bin/x86_64-linux-ld-big.so")
+    |>.addFile "/lib/ld-big.so" (← IO.FS.readBinFile "testsuite/bin/x86_64-linux-ld-big")
   let written ← IO.mkRef ByteArray.empty
   let started ← (Bap.Linux.start kernel "/test" ["/test"]).toBaseIO
   match started with

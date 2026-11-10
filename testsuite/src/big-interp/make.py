@@ -2,6 +2,8 @@
 # Makes a program of x86_64 whose interpreter is bigger than 252 KiB, as musl's libc.so is when it is the interpreter: a program that does
 # nothing, and an interpreter of one segment of 1 MiB that says so and exits, which Linux runs as the program starts (testBigInterpreter).
 #   make.py OUTPUT-DIRECTORY [INTERPRETER-PATH]
+# which writes ld-big.so and big-interp there; the test has them as testsuite/bin/x86_64-linux-ld-big, as .so is ignored, and
+# testsuite/bin/x86_64-linux-big-interp.
 import struct, sys
 
 def elf(kind, entry, segments, interp=None):
