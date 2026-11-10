@@ -1701,7 +1701,8 @@ def mkdir (kernel : Kernel) (group : Nat) (base path : String) (mode : Nat) : Re
   if !parentIsDirectory kernel normal then .error Errno.enoent
   if kernel.readOnly normal then .error erofs
   let process := kernel.process group
-  .ok (addInode kernel normal .directory (0o40000 ||| (mode &&& 0o7777 &&& (0o7777 - process.umask))) process.credentials).1
+  -- Of its mode, only what Linux's `vfs_mkdir` keeps, the permissions and the sticky bit: setgid comes of a parent that has it.
+  .ok (addInode kernel normal .directory (0o40000 ||| (mode &&& 0o1777 &&& (0o7777 - process.umask))) process.credentials).1
 
 /-- `unlink`, and `rmdir` with `directory`. What is open stays open: its inode is still there. A slash at the end is of a directory,
 and the link that it may be isn't followed: `ENOTDIR` of anything else. Of a path that ends in `.`, `rmdir` is `EINVAL`, and in `..`,
@@ -1720,7 +1721,8 @@ def remove (kernel : Kernel) (base path : String) (directory : Bool) : Result Ke
     let inode ← inodeOf kernel number
     match inode.content, directory with
     | .directory, true =>
-      if normal == "/" then .error Errno.eperm
+      -- Of the root, as of what is mounted, `EBUSY`, as Linux's `do_rmdir` has it of `LAST_ROOT`.
+      if normal == "/" then .error ebusy
       if !(children kernel normal).isEmpty then .error Errno.enotempty
     | .directory, false => .error Errno.eisdir
     | _, true => .error Errno.enotdir
@@ -2327,13 +2329,14 @@ def genericStat (value : Kernel.Stat) : ByteArray :=
     bytesOf 8 (deviceNumber value.device) ++ bytesOf 8 0 ++ bytesOf 8 value.size ++ bytesOf 4 4096 ++ bytesOf 4 0 ++ bytesOf 8 ((value.size + 511) / 512) ++
     time value.accessed ++ time value.modified ++ time value.changed ++ bytesOf 8 0
 
-/-- `struct stat` of 64-bit MIPS, which holds its times in 32 bits. -/
+/-- `struct stat` of 64-bit MIPS, which holds its times in 32 bits and ends at `st_blocks`, 104 bytes, as the kernel's of n64 does:
+the padding after it is glibc's, of its own `struct stat`, which the kernel never writes. -/
 def mips64Stat (value : Kernel.Stat) (big : Bool) : ByteArray :=
   let get := field big
   let time (at_ : Nat) : ByteArray := get 4 (at_ / 1000000000) ++ get 4 (at_ % 1000000000)
   get 4 1 ++ bytesOf 12 0 ++ get 8 value.inode ++ get 4 value.mode ++ get 4 value.links ++ get 4 value.uid ++ get 4 value.gid ++
     get 4 (deviceNumber value.device) ++ bytesOf 12 0 ++ get 8 value.size ++ time value.accessed ++ time value.modified ++
-    time value.changed ++ get 4 4096 ++ bytesOf 4 0 ++ get 8 ((value.size + 511) / 512) ++ bytesOf 56 0
+    time value.changed ++ get 4 4096 ++ bytesOf 4 0 ++ get 8 ((value.size + 511) / 512)
 
 /-- `struct stat64` of i686, which is packed. -/
 def stat64 (value : Kernel.Stat) : ByteArray :=

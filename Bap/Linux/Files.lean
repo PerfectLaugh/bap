@@ -137,9 +137,19 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         ((uid == unset || uid == inode.details.uid) && credentials.euid == inode.details.uid &&
           (gid == unset || gid == credentials.egid || credentials.groups.contains gid))
       if !mayGive then return ← fail 1
-      poller.kernel.set (alter kernel number fun details =>
+      let kernel := alter kernel number fun details =>
         { details with uid := if uid == unset then details.uid else uid, gid := if gid == unset then details.gid else gid
-                       changed := now })
+                       changed := now }
+      -- What isn't a directory loses setuid, and setgid if its group may run it, whoever changes its owner, as Linux's
+      -- `chown_common` and `notify_change` have it: setgid without that is of locking, and stays.
+      let kept (mode : Nat) : Nat :=
+        let mode := mode - (mode &&& 0o4000)
+        if mode &&& 0o010 != 0 then mode - (mode &&& 0o2000) else mode
+      let kernel := match kernel.inodes.get? number with
+        | some { content := .directory, .. } => kernel
+        | some inode => { kernel with inodes := kernel.inodes.insert number { inode with mode := kept inode.mode } }
+        | none => kernel
+      poller.kernel.set kernel
       succeed
   -- Extended attributes: a name of a namespace, set of `XATTR_CREATE` only if it isn't there and of `XATTR_REPLACE` only if it is.
   let named (address : Nat) : IO (Except Nat String) := do

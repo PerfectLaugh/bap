@@ -1145,6 +1145,46 @@ def testCodeControl : IO Unit := do
   assertEqual "A hook that came after it was put back fires when it goes on" (1, 8) (← fired.get, ← Bap.Emu.pc emu)
   Bap.Emu.removeHook emu breakpoint
 
+/-- What fired where a thread stopped doesn't fire again when it goes on there, once: that holds whatever another thread does in the
+meantime, as a step of it that is rolled back, and goes once the thread runs elsewhere, as `setPc` sends it, so that what is where it
+stopped fires when it comes back. -/
+def testHookSuppression : IO Unit := do
+  let code ← LLVM.assemble "riscv64" "addi a0, a0, 1\naddi a1, a1, -1\nbnez a1, -8\nld a2, 0(a3)\nnop"
+  let emu ← Bap.Emu.riscv64 code 0 0
+  let set (name : String) (value : Nat) : IO Unit := Bap.Emu.setReg emu (reg name) (.bits (BitVec.ofNat 64 value))
+  let value (name : String) : IO Nat := do
+    match ← Bap.Emu.reg emu (reg name) with
+    | .bits bits => pure bits.toNat
+    | _ => pure 0
+  set "X10" 0
+  set "X11" 100
+  let _ ← Bap.Emu.addBreakpoint emu 4
+  let _ ← Bap.Emu.run emu 10
+  assertEqual "A breakpoint stops the thread" 4 (← Bap.Emu.pc emu)
+  let fired ← IO.mkRef 0
+  let _ ← Bap.Emu.onCode emu (4, 4) fun _ _ => fired.modify (· + 1)
+  -- Sent elsewhere, it stops where the breakpoint is when it comes back there, after one round of the first instruction.
+  Bap.Emu.setPc emu 0
+  set "X10" 0
+  Bap.Emu.resumeThread emu (← Bap.Emu.thread emu)
+  let _ ← Bap.Emu.run emu 10
+  assertEqual "A thread sent away from where it stopped stops there when it comes back" (4, 1) (← Bap.Emu.pc emu, ← value "X10")
+  -- Stopped there again, where a hook comes after: a step of another thread that is rolled back leaves what fired.
+  let later ← IO.mkRef 0
+  let _ ← Bap.Emu.onCode emu (4, 4) fun _ _ => later.modify (· + 1)
+  let first ← Bap.Emu.thread emu
+  let other ← Bap.Emu.spawnThread emu 12 0
+  Bap.Emu.switchThread emu other
+  set "X13" 0x50000
+  let faulted ← (Bap.Emu.run emu 1).toBaseIO
+  assertTrue "A load of nothing faults" (faulted matches .error _)
+  Bap.Emu.switchThread emu first
+  Bap.Emu.resumeThread emu first
+  fired.set 0
+  let _ ← Bap.Emu.run emu 1
+  assertEqual "A rolled back step of another thread leaves what fired where this one stopped" (8, 0, 1)
+    (← Bap.Emu.pc emu, ← fired.get, ← later.get)
+
 /-- What the rounding modes of a machine do, as qemu has it. -/
 def testLinuxRound (triple : String) : IO Unit := do
   let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-round"
@@ -1589,6 +1629,38 @@ def testLinuxServedCheckpoint (triple : String) (getcwd : Nat) : IO Unit := do
   let (outcome, after) ← runOn second
   assertEqual s!"Linux {triple} a call that stopped goes on as it would have" (wholeOutcome, wholeText) (outcome, before ++ after)
 
+/-- Code that a thread writes in a parallel round is what every thread runs after it: what another thread compiled of it, in the engine of
+its worker, which goes on from round to round, goes too, as what the main engine has does. A loop adds 1 to a0 and counts in a1 until a
+writer makes it add 2. -/
+def testParallelCodeWrite : IO Unit := do
+  let code ← LLVM.assemble "riscv64" "addi a0, a0, 1\naddi a1, a1, 1\nj -8\nsw a5, 0(a4)\nj 0"
+  let addTwo ← LLVM.assemble "riscv64" "addi a0, a0, 2"
+  let emu ← Bap.Emu.riscv64 code 0 0
+  let word (value : Nat) : Bap.Value := .bits (BitVec.ofNat 64 value)
+  let looping ← Bap.Emu.thread emu
+  for name in ["X10", "X11"] do Bap.Emu.setReg emu (reg name) (word 0)
+  let writer ← Bap.Emu.spawnThread emu 12 0
+  Bap.Emu.setThreadReg emu writer (reg "X14") (word 0)
+  Bap.Emu.setThreadReg emu writer (reg "X15")
+    (word ((List.range 4).foldl (fun value index => value + addTwo[index]!.toNat * 256 ^ index) 0))
+  -- The loop runs, and is compiled, before the writer does.
+  Bap.Emu.stopThread emu writer
+  for _ in [0:60] do
+    let _ ← Bap.Emu.runPreemptiveParallel emu 5000
+  Bap.Emu.resumeThread emu writer
+  for _ in [0:3] do
+    let _ ← Bap.Emu.runPreemptiveParallel emu 5000
+  assertEqual "The writer wrote" (addTwo.toList) ((← Bap.Emu.read emu 0 4).toList)
+  let value (name : String) : IO Nat := do
+    match ← Bap.Emu.threadReg emu looping (reg name) with
+    | .bits bits => pure bits.toNat
+    | _ => pure 0
+  let (sum, count) := (← value "X10", ← value "X11")
+  for _ in [0:5] do
+    let _ ← Bap.Emu.runPreemptiveParallel emu 5000
+  let (added, counted) := ((← value "X10") - sum, (← value "X11") - count)
+  assertTrue s!"A loop that another thread wrote adds what it says now: {added} of {counted} rounds" (counted > 0 && added + 2 ≥ 2 * counted)
+
 /-- What is atomic on a machine is atomic in a parallel round, against each other and against plain stores: each thread adds 1 many
 times to one counter, and nothing is lost. -/
 def testParallelAtomics : IO Unit := do
@@ -1965,6 +2037,18 @@ def testLinuxSignals (triple : String) : IO Unit := do
   let different := ((expected.splitOn "\n").zip (actual.splitOn "\n")).find? fun (left, right) => left != right
   assertEqual s!"Linux {triple} signals say what they should" none different
   assertEqual s!"Linux {triple} signals end as they should" (Bap.Tasks.ScheduleOutcome.finished 0, expected.length) (outcome, actual.length)
+
+/-- What a step counts of `retired` it takes back when it is taken back: stopped at a special that nothing serves, which runs again from
+there, and rolled back of a hook that fails, which runs again too. Counted then, it would be counted twice. -/
+def testRetiredTakenBack : IO Unit := do
+  let unserved ← Bap.Emu.aarch64 (← LLVM.assemble "aarch64" "ic iallu") 0 0
+  let _ ← (Bap.Emu.step unserved).toBaseIO
+  assertEqual "a step stopped at a special that nothing serves counts nothing" 0 (← unserved.retired.get)
+  let failing ← Bap.Emu.aarch64 (← LLVM.assemble "aarch64" "ic iallu") 0 0
+  let _ ← Bap.Emu.onIntrinsic failing "undefined-instruction" fun _ _ => throw <| IO.userError "a hook that fails"
+  let result ← (Bap.Emu.step failing).toBaseIO
+  assertTrue "a step whose hook fails fails" (result matches .error _)
+  assertEqual "a step that is rolled back counts nothing" 0 (← failing.retired.get)
 
 /-- The words that LLVM doesn't decode, of which the decoders of the emulator have the ones that are undefined as instructions that raise
 the exception of undefined instructions, and not others. Outside of Linux, nothing serves that, and the instruction doesn't run as if it

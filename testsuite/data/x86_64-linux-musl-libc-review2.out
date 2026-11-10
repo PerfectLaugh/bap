@@ -1,0 +1,8 @@
+sigtimedwait of an unblocked fatal signal: killed by 14
+alarm left after 2.7 s of 10: 8
+sigaltstack of 1 KiB: -1 ENOMEM
+chown leaves the mode 755
+mkdir of 6777 makes 777
+rmdir of the root: -1 EBUSY
+timerfd of a CPU clock: EINVAL
+done

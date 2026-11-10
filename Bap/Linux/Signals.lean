@@ -852,7 +852,11 @@ private def sendToThread (signals : Signals) (emu : Emu) (tid group : Nat) (info
   let waitingFor := match state.waiting with
     | some (set, _) => set &&& bit != 0
     | none => false
-  if bit &&& state.mask != 0 || waitingFor then
+  -- A wait doesn't take a signal that it wasn't blocking and that ends the process: Linux's `complete_signal` ends the process of it,
+  -- as it goes by the mask from before `rt_sigtimedwait`, which this is.
+  let fatal ← if waitingFor && bit &&& state.mask == 0 then pure ((← dispositionOf signals group info.signal) matches .terminate)
+    else pure false
+  if !fatal && (bit &&& state.mask != 0 || waitingFor) then
     unless already do modifyThread signals tid fun state => { state with pending := state.pending ++ [info] }
     if waitingFor then
       let table ← emu.taskTable.get

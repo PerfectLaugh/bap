@@ -336,6 +336,9 @@ structure Emu where
   that what serves it knows how many ran up to and with it, which `executed` says only once a run is over. A step that fails and is
   taken back isn't counted. Workers of a parallel round count here too. -/
   retired : IO.Ref Nat
+  /-- How many of `retired` the step that runs counted, which it takes back if it is taken back: rolled back, or stopped at a special
+  that nothing serves, whose step runs again from its start. Each worker of a parallel round has its own. -/
+  stepRetired : IO.Ref Nat
   threadsRef : IO.Ref (List ThreadContext)
   currentThreadRef : IO.Ref ThreadId
   nextThreadRef : IO.Ref ThreadId
@@ -534,6 +537,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     breakpointsMuted := ← IO.mkRef false
     executed := ← IO.mkRef 0
     retired := ← IO.mkRef 0
+    stepRetired := ← IO.mkRef 0
     threadsRef := ← IO.mkRef [⟨1, initial, entry, false, none, none⟩]
     currentThreadRef := ← IO.mkRef 1
     nextThreadRef := ← IO.mkRef 2
@@ -854,8 +858,6 @@ private def restoreThreads (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   emu.nextThreadRef.set snapshot.nextThread
   emu.pendingRef.set snapshot.pending
   emu.skipCode.set snapshot.skip
-  -- What is there already fired before the stop that this was saved at; what comes after it hasn't.
-  emu.suppressed.set []
   emu.taskTable.set snapshot.table
 
 /-- A native memory with the bytes of the memory variable of `state`. -/
@@ -985,6 +987,9 @@ compiled again as they get hot. A snapshot that no thread can go on from is refu
 def restore (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   if let some problem := snapshot.unrunnable then throw <| IO.userError problem
   restoreThreads emu snapshot
+  -- What is there already fired before the stop that this was saved at; what comes after it hasn't. A step that is rolled back keeps
+  -- what other threads have of it, which a step of one thread has nothing to do with.
+  emu.suppressed.set []
   emu.memorySwitched.set true
   -- A compiled range holds the code of all of its blocks. A version of it stays, for when those come back.
   Primus.Lifted.forgetRanges emu.engine
@@ -1715,12 +1720,15 @@ private def notifyCode (emu : Emu) (address : Nat) : IO Unit := do
       return
     emu.replaySites.set []
   | [] => pure ()
+  -- What fired before the thread stopped here doesn't again, the first time that it goes on, and of the first instruction that it runs
+  -- after it stopped, wherever that is: one that was sent elsewhere, by `setPc` or a signal, comes back to where it stopped later, where
+  -- what is there fires. That goes even with no hooks left, so that one that comes later finds none of it.
+  let thread ← emu.currentThreadRef.get
+  let held := (← emu.suppressed.get).filter fun (owner, _, _) => owner == thread
+  let suppressed := held.find? fun (_, at_, _) => at_ == address
+  if !held.isEmpty then emu.suppressed.modify (·.filter fun (owner, _, _) => owner != thread)
   if (← emu.hooks.get).isEmpty then return
   let near ← hooksNear emu address
-  -- What fired before the thread stopped here doesn't again, the first time that it goes on.
-  let thread ← emu.currentThreadRef.get
-  let suppressed := (← emu.suppressed.get).find? fun (owner, at_, _) => owner == thread && at_ == address
-  if suppressed.isSome then emu.suppressed.modify (·.filter fun (owner, _, _) => owner != thread)
   let fires (hook : CodeHook) : Bool := hook.first ≤ address && address ≤ hook.last &&
     !(suppressed.any fun (_, _, ids) => ids.contains hook.id)
   if !near.any fires then return
@@ -3083,6 +3091,8 @@ private def gateAtomic (emu : Emu) (address : Nat) : IO Unit := do
   stepOpsOf (controlCells emu) (fun address => do notifyCode emu address; gateAtomic emu address)
     (do
       beginStepMemory emu
+      -- Nothing of this step is counted yet, so that one that fails before it ran takes back nothing.
+      emu.stepRetired.set 0
       pure (← snapshotBlock emu, ← emu.trace.get)) (delayFor emu)
     (recordTrace emu)
     (fun address => do
@@ -3090,10 +3100,17 @@ private def gateAtomic (emu : Emu) (address : Nat) : IO Unit := do
       emu.nextPc.set result.1
       -- A step that could chain ran as many after its first as it says.
       let chained ← if (← emu.lastBudget.get) > 0 then emu.engine.chained.get else pure 0
+      emu.stepRetired.set (1 + chained)
       emu.retired.modify (· + 1 + chained)
       pure result)
-    (dispatchSpecial emu)
+    (fun name => do
+      let handled ← dispatchSpecial emu name
+      -- Not served, the step stops where it started, and runs again from there: what it counted is counted then.
+      unless handled do emu.retired.modify (· - (← emu.stepRetired.get))
+      pure handled)
     (fun before => do
+      emu.retired.modify (· - (← emu.stepRetired.get))
+      emu.stepRetired.set 0
       rollbackBlock emu before.1
       forgetMemoryFilter emu
       emu.trace.set before.2)
@@ -3238,6 +3255,7 @@ private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared :
     mappingTop := ← IO.mkRef none
     -- What it loaded exclusively before the round may change in it, as when a thread is switched to.
     state := ← StateCell.new { env := clearMonitor emu.config context.state.env }
+    stepRetired := ← IO.mkRef 0
     pc := ← IO.mkRef context.pc
     stopped := ← IO.mkRef context.stopped
     currentThreadRef := ← IO.mkRef context.id

@@ -99,8 +99,8 @@ theorem powerpcCalls_nodup : (powerpcCalls.map (·.1)).Nodup := by decide +kerne
 /-- No number of n64 means two calls. -/
 theorem n64Calls_nodup : (n64Calls.map (·.1)).Nodup := by decide +kernel
 
-/-- `struct stat` of 64-bit MIPS has its 160 bytes, in either order. -/
-theorem mips64Stat_size (value : Kernel.Stat) (big : Bool) : (Abi.mips64Stat value big).size = 160 := by
+/-- `struct stat` of 64-bit MIPS has the kernel's 104 bytes, in either order. -/
+theorem mips64Stat_size (value : Kernel.Stat) (big : Bool) : (Abi.mips64Stat value big).size = 104 := by
   simp [Abi.mips64Stat, ByteArray.size_append]
 
 /-- Translating the flags of `open` twice gives them back, for each of the bits that move, on their own and with others. -/

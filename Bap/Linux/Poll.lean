@@ -406,7 +406,8 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       succeed fd
     | .timerfdCreate =>
       let given := flags (arg 1)
-      if arg 0 > 11 || given &&& (0x80000 ||| 0x800) != given then return ← fail einval
+      -- Of the clocks that it has timers of, as Linux's `timerfd_create` has them: REALTIME, MONOTONIC, BOOTTIME and their ALARMs.
+      if ![0, 1, 7, 8, 9].contains (arg 0) || given &&& (0x80000 ||| 0x800) != given then return ← fail einval
       let (kernel, fd) := (← poller.kernel.get).addObject group (.timerfd none 0) given
       poller.kernel.set kernel
       succeed fd

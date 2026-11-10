@@ -250,6 +250,17 @@ static void failCells(BapCells *cells, lean_object *error) {
   forgetQuiet(cells);
 }
 
+// What compiled code calls mustn't throw: what it unwinds through has no frames that say how, and Lean's frames under them would
+// be left without their cleanup. Memory that the host hasn't for a page or a cell is an error of the run instead, as any other is,
+// which its caller gives as an `IO` error.
+static void failAllocation(BapCells *cells) noexcept {
+  if (cells->error != nullptr)
+    return;
+  lean_object *error = lean_mk_io_user_error(lean_mk_string("the host has no memory for what a compiled run stores"));
+  failCells(cells, error);
+  lean_dec_ref(error);
+}
+
 static uint64_t callCodeObserver(BapCells *cells, uint64_t pc) {
   forgetQuiet(cells);
   lean_inc_ref(cells->codeObserver);
@@ -452,46 +463,66 @@ static void storeByte(BapCells *cells, uint64_t address, uint8_t value) {
 
 // The way of what no instruction does: an access that isn't aligned or that has a size no instruction has, or one on a page that
 // isn't there, or a run without pages.
-extern "C" uint64_t bap_jit_memory_load_bytes(BapCells *cells, uint64_t address, uint64_t size, uint8_t bigEndian) {
+extern "C" uint64_t bap_jit_memory_load_bytes(BapCells *cells, uint64_t address, uint64_t size, uint8_t bigEndian) noexcept {
   if (cells->error != nullptr)
     return 0;
   uint8_t bytes[8];
-  if (cells->pages != nullptr)
-    cells->pages->load(address, static_cast<size_t>(size), bytes);
-  else
-    for (uint64_t index = 0; index != size; ++index)
-      bytes[index] = loadByte(cells, address + index);
+  try {
+    if (cells->pages != nullptr)
+      cells->pages->load(address, static_cast<size_t>(size), bytes);
+    else
+      for (uint64_t index = 0; index != size; ++index)
+        bytes[index] = loadByte(cells, address + index);
+  } catch (...) {
+    failAllocation(cells);
+    return 0;
+  }
   uint64_t result = 0;
   for (uint64_t index = 0; index != size; ++index)
     result |= static_cast<uint64_t>(bytes[index]) << ((bigEndian != 0 ? size - 1 - index : index) * 8);
   return result;
 }
 
-extern "C" void bap_jit_memory_note(BapCells *cells, uint64_t address, uint64_t size, uint8_t bigEndian, uint64_t value) {
-  if (cells->changes != nullptr)
-    cells->changes->note(address, size, bigEndian != 0, value);
+extern "C" void bap_jit_memory_note(BapCells *cells, uint64_t address, uint64_t size, uint8_t bigEndian, uint64_t value) noexcept {
+  try {
+    if (cells->changes != nullptr)
+      cells->changes->note(address, size, bigEndian != 0, value);
+  } catch (...) {
+    failAllocation(cells);
+  }
 }
 
-extern "C" void bap_jit_memory_store_bytes(BapCells *cells, uint64_t address, uint64_t size, uint8_t bigEndian, uint64_t value) {
+extern "C" void bap_jit_memory_store_bytes(BapCells *cells, uint64_t address, uint64_t size, uint8_t bigEndian, uint64_t value) noexcept {
   if (cells->error != nullptr)
     return;
   uint8_t bytes[8];
   for (uint64_t index = 0; index != size; ++index)
     bytes[index] = static_cast<uint8_t>(value >> ((bigEndian != 0 ? size - 1 - index : index) * 8));
-  if (cells->pages != nullptr)
-    cells->pages->store(address, static_cast<size_t>(size), bytes);
-  else
-    for (uint64_t index = 0; index != size; ++index)
-      storeByte(cells, address + index, bytes[index]);
+  try {
+    if (cells->pages != nullptr)
+      cells->pages->store(address, static_cast<size_t>(size), bytes);
+    else
+      for (uint64_t index = 0; index != size; ++index)
+        storeByte(cells, address + index, bytes[index]);
+  } catch (...) {
+    failAllocation(cells);
+    return;
+  }
   bap_jit_memory_note(cells, address, size, bigEndian, value);
 }
 
 // The page of an address for the code of a run, which remembers it, or nothing if it has to go the other way. Only a store makes a
 // page: reading what was never written doesn't need one, and a program that reads a lot of nothing shouldn't come to hold a lot of it.
-extern "C" uint8_t *bap_jit_memory_page(BapCells *cells, uint64_t address, uint8_t write) {
+extern "C" uint8_t *bap_jit_memory_page(BapCells *cells, uint64_t address, uint8_t write) noexcept {
   if (cells->pages == nullptr || cells->error != nullptr)
     return nullptr;
-  uint8_t *page = write != 0 ? cells->pages->ensure(address) : cells->pages->find(address);
+  uint8_t *page = nullptr;
+  try {
+    page = write != 0 ? cells->pages->ensure(address) : cells->pages->find(address);
+  } catch (...) {
+    failAllocation(cells);
+    return nullptr;
+  }
   if (page == nullptr)
     return nullptr;
   uint64_t number = address >> PagedMemory::pageBits;

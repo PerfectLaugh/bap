@@ -270,7 +270,10 @@ private def perform (rings : Rings) (emu : Emu) (group : Nat) (ring : Uring) (en
     match ← readiness rings emu group fd with
     | none => pure (some (negative Errno.ebadf))
     | some state =>
-      let revents := Poller.bits state 0x100 &&& (opFlags % 2 ^ 16 ||| 0x18)
+      -- `poll32_events`, whose halves a big-endian machine has swapped, as liburing puts them and the kernel's `io_poll_parse_events`
+      -- swaps them back: the mask is its low half after that.
+      let events := if poller.architecture.big then (opFlags >>> 16) ||| (opFlags % 2 ^ 16 <<< 16) else opFlags
+      let revents := Poller.bits state 0x100 &&& (events % 2 ^ 16 ||| 0x18)
       pure (if revents == 0 then none else some revents)
   | 9 => whenReady true (system .sendmsg [fd, address, opFlags])
   | 10 => whenReady false (system .recvmsg [fd, address, opFlags])

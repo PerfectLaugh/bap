@@ -3,20 +3,7 @@
 
 #include <string>
 
-#ifdef __linux__
-#include <errno.h>
-#include <pthread.h>
-#include <time.h>
-
-extern "C" int pthread_cond_clockwait(pthread_cond_t *condition,
-                                       pthread_mutex_t *mutex,
-                                       clockid_t clock,
-                                       const struct timespec *timeout) {
-  if (clock != CLOCK_MONOTONIC)
-    return EINVAL;
-  return pthread_cond_timedwait(condition, mutex, timeout);
-}
-#endif
+#include "clockwait.h"
 
 namespace {
 
