@@ -2068,6 +2068,32 @@ def testLinuxSleepWake (triple : String) : IO Unit := do
   assertEqual s!"Linux {triple} a sleeping thread that was resumed still sleeps its time"
     (Bap.Tasks.ScheduleOutcome.finished 0, expected) (outcome, String.fromUTF8! (← written.get))
 
+/-- A run of `fuel` instructions runs that many, of a program whose faults a handler takes, as `testsuite/src/libc-faultloop.c` has
+them, after some work each: what ran before a fault in a turn counts, as the fault itself does, rather than one instruction for all of
+it, which let a run go on far past its fuel and `executed` say far less than ran. -/
+def testLinuxFaultFuel (triple : String) : IO Unit := do
+  let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-faultloop")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let fuel := 200000
+  let retired ← machine.emu.retired.get
+  let executed ← machine.emu.executed.get
+  let outcome ← machine.run (fuel := fuel) fun _ => pure ()
+  let ran := (← machine.emu.retired.get) - retired
+  let counted := (← machine.emu.executed.get) - executed
+  assertEqual s!"Linux {triple} a run of faults that are taken ends at its fuel" Bap.Tasks.ScheduleOutcome.outOfFuel outcome
+  assertTrue s!"Linux {triple} a run of faults that are taken runs no more than its fuel: {ran} of {fuel}" (ran ≤ fuel)
+  assertTrue s!"Linux {triple} what a run of faults counts is what ran: {counted} of {ran}" (ran ≤ counted && counted ≤ ran + 1000)
+
+/-- Code that a program writes again at the same place, as a JIT does, runs as what it is now: `testsuite/src/libc-rewrite.c` writes
+`fadd`, then `fmul`, then `fadd` again where it runs them, which are served programs of floating point, each by a number of its own. -/
+def testLinuxRewriteFloat (triple : String) : IO Unit := do
+  let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-rewrite")
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual s!"Linux {triple} code written again runs as it is now" (Bap.Tasks.ScheduleOutcome.finished 0, "5\n6\n5\n")
+    (outcome, String.fromUTF8! (← written.get))
+
 /-- A run with all of that stopped and saved goes on as it would have: what is pending, the frames of handlers and what a process does
 with a signal are in a checkpoint, in every piece. -/
 def testLinuxSignalCheckpoints (triple : String) (step : Nat) : IO Unit := do

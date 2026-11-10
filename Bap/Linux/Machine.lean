@@ -2632,7 +2632,8 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
                              failures := ← IO.mkRef #[], skipIgnoredFaults := ← IO.mkRef false
                              intercept := ← IO.mkRef fun _ _ _ => pure false, tracer := ← IO.mkRef fun _ => pure none
                              jobControl := ← IO.mkRef fun _ _ _ => pure (), interrupted := ← IO.mkRef fun _ _ _ _ => pure ()
-                             sent := ← IO.mkRef fun _ => pure (), taken := ← IO.mkRef fun _ _ => pure (), pgidOf := ← IO.mkRef pure, members := ← IO.mkRef fun _ => pure [] }
+                             sent := ← IO.mkRef fun _ => pure (), taken := ← IO.mkRef fun _ _ => pure (), pgidOf := ← IO.mkRef pure, members := ← IO.mkRef fun _ => pure []
+                             waitAnswered := ← IO.mkRef fun _ _ => pure false }
   let ptrace ← Ptrace.make architecture signals
   let kernelRef ← IO.mkRef kernel
   let timers ← Timers.make architecture kernelRef signals

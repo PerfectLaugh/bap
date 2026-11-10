@@ -616,6 +616,17 @@ def parts (base path : String) : List String :=
     else part :: kept
   kept.reverse
 
+/-- The parts of a path to walk, from `base` if it is relative, with `.` gone. A `..` that comes before any part of `path` is of `base`,
+which is where a process is and has no links in it, and goes there, as it does of a directory that was removed, whose `..` is still
+its parent; one after a part of `path` is kept, for the walk to take from where it has got to, which is where a symbolic link before it
+led rather than where the link is, as Linux has it. -/
+def walkParts (base path : String) : List String :=
+  let from_ := if path.startsWith "/" then [] else (parts "/" base).reverse
+  let rec go : List String → List String → List String
+    | at_, ".." :: rest => go (at_.drop 1) rest
+    | at_, rest => at_.reverse ++ rest
+  go from_ ((path.splitOn "/").filter fun part => part != "" && part != ".")
+
 /-- How a path ends: in a name, in a name and a slash, or in `.` or `..`. What ends in other than a name is of a directory, as Linux has
 it, and `parts` loses how it ends. -/
 inductive Ending where
@@ -755,6 +766,8 @@ def resolve (kernel : Kernel) (base path : String) (follow : Bool := true) (link
       | [] =>
         let path := Path.ofParts done.reverse
         .ok (path, kernel.paths.get? path)
+      -- Of where it has got to, which a link before it has already led to; of the root, the root.
+      | ".." :: rest => walk (done.drop 1) rest fuel links
       | part :: rest =>
         let path := Path.ofParts (part :: done).reverse
         -- Where something is mounted, what is seen is what it mounted, but for the place itself when `mounted` says not.
@@ -782,10 +795,10 @@ def resolve (kernel : Kernel) (base path : String) (follow : Bool := true) (link
                   | _, _, _ => .error Errno.enotdir
                 | none =>
                   let from_ := if target.startsWith "/" then [] else done.reverse
-                  walk [] (Path.parts (Path.ofParts from_) target ++ rest) fuel (links - 1)
+                  walk [] (Path.walkParts (Path.ofParts from_) target ++ rest) fuel (links - 1)
             | .directory => walk (part :: done) rest fuel links
             | _ => if rest.isEmpty then .ok (path, some number) else .error Errno.enotdir
-  match walk [] (Path.parts base path) (links * 256 + 4096) links with
+  match walk [] (Path.walkParts base path) (links * 256 + 4096) links with
   | .ok (path, none) => if ending == .dot || ending == .dotdot then .error Errno.enoent else .ok (path, none)
   | .ok (path, some number) =>
     if (slash || ending == .dot || ending == .dotdot) && !(kernel.inodes.get? number matches some { content := .directory, .. }) then
@@ -1129,6 +1142,10 @@ def read (kernel : Kernel) (group fd count : Nat) : Result (Kernel × ByteArray)
   let bytes := readAt data file.offset count
   .ok ({ kernel with openFiles := kernel.openFiles.insert id { file with offset := file.offset + bytes.size } }, bytes)
 
+/-- Whether a device is one of memory, `null`, `zero`, `full`, `random` or `urandom`, which Linux reads and writes at an offset and
+seeks, rather than a terminal, which is a stream. -/
+private def memoryDevice (kind : Nat) : Bool := [0, 1, 2, 3, 6].contains kind
+
 /-- `pread`, which leaves the offset: what would end past 2^63 bytes is `EINVAL`. -/
 def readFrom (kernel : Kernel) (group fd count offset : Nat) : Result ByteArray := do
   if negativeOffset (offset + count) then .error Errno.einval
@@ -1137,7 +1154,14 @@ def readFrom (kernel : Kernel) (group fd count offset : Nat) : Result ByteArray 
   let inode ← inodeOf kernel file.inode
   match inode.content with
   | .file data => .ok (readAt data offset count)
-  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ | .inotify .. | .mqueue .. => .error Errno.espipe
+  -- As `read` has it, at the offset given.
+  | .device kind =>
+    if !memoryDevice kind then .error Errno.espipe
+    else .ok (match kind with
+      | 1 | 2 => Bap.zeroBytes count
+      | 3 | 6 => randomBytes offset count
+      | _ => ByteArray.empty)
+  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .inotify .. | .mqueue .. => .error Errno.espipe
   | .directory => .error Errno.eisdir
   | .symlink _ | .generated _ => .error Errno.einval
 
@@ -1231,6 +1255,7 @@ def writeAtError (kernel : Kernel) (group fd count offset : Nat) : Option Nat :=
       | some inode@{ content := .file data, .. } => inode.writeRefused data.size (pwriteOffset file data.size offset) count
       | some { content := .directory, .. } => some Errno.eisdir
       | some { content := .symlink _, .. } | some { content := .generated _, .. } => some Errno.einval
+      | some { content := .device kind, .. } => if kind == 2 then some 28 else if memoryDevice kind then none else some Errno.espipe
       | some _ => some Errno.espipe
       | none => some Errno.eio
 
@@ -1258,7 +1283,9 @@ def writeTo (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Nat
     if let some errno := inode.writeRefused data.size offset bytes.size then .error errno
     .ok ({ kernel with inodes := kernel.inodes.insert file.inode ({ inode with content := .file (writeAt data offset bytes) }.written kernel.clock) },
       bytes.size)
-  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ | .inotify .. | .mqueue .. => .error Errno.espipe
+  -- As `write` has it: `full` has no room, and the others of memory take all of it.
+  | .device kind => if kind == 2 then .error 28 else if memoryDevice kind then .ok (kernel, bytes.size) else .error Errno.espipe
+  | .console _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .inotify .. | .mqueue .. => .error Errno.espipe
   | .directory => .error Errno.eisdir
   | .symlink _ | .generated _ => .error Errno.einval
 
@@ -1266,6 +1293,11 @@ def writeTo (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Nat
 def seek (kernel : Kernel) (group fd : Nat) (negative : Bool) (distance whence : Nat) : Result (Kernel × Nat) := do
   let (id, file) ← openFileOf kernel group fd
   let inode ← inodeOf kernel file.inode
+  -- Of a device of memory, as Linux has it: `null`, `zero` and `full` go to 0 whatever is asked, and `random` and `urandom` stay.
+  if let .device kind := inode.content then
+    if memoryDevice kind then
+      if kind == 3 || kind == 6 then return (kernel, file.offset)
+      return ({ kernel with openFiles := kernel.openFiles.insert id { file with offset := 0 } }, 0)
   let size ← match inode.content with
     | .file data => .ok data.size
     | .directory => .ok 0

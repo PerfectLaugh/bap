@@ -1269,6 +1269,12 @@ def install (ptrace : Ptrace) (emu : Emu) : IO Unit := do
   let signals := ptrace.signals
   emu.betweenTurns.modify (· ++ [settleWaits ptrace emu])
   signals.intercept.set (intercept ptrace)
+  -- What a wait finds now, without taking it, as it will when it is settled.
+  signals.waitAnswered.set fun emu tid => do
+    let some request := (← ptrace.table.get).waiting.get? tid | return false
+    let found ← find ptrace emu (← groupOf emu tid) request.target request.exited request.stopped request.continued true request.clones
+      request.all
+    pure (found matches some (some _))
   signals.tracer.set (tracerOf ptrace)
   signals.jobControl.set (jobControl ptrace)
   emu.vforkReleased.modify (· ++ [vforkReleased ptrace emu])

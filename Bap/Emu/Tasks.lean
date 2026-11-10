@@ -788,17 +788,20 @@ private def blockedOrOver (emu : Emu) (id : ThreadId) : IO Bool := do
 
 /-- A guest that faults gets SIGSEGV, which ends its process and not the others. Anything else isn't the guest's doing. -/
 private def runGuest (emu : Emu) (quantum fuel : Nat) : IO Nat := do
+  let before ← emu.retired.get
   try
     runPreemptive emu quantum fuel
   catch error =>
     if let some fault := ← failure emu then
+      -- What ran before the fault ran, and counts, as the fault itself does: `retired` has all but that, which was taken back.
+      let ran := (← emu.retired.get) - before + 1
       -- Unless something takes it, which runs a handler there.
       let taken ← match ← emu.faultHandler.get with
         | some handler => handler fault
         | none => pure false
       unless taken do markExited emu (← currentTask emu).group (signaledStatus 11)
       emu.lastFault.set none
-      pure 1
+      pure ran
     else
       throw error
 

@@ -590,8 +590,10 @@ static size_t compileThreads() {
   return cores == 0 ? 4 : cores;
 }
 
-extern "C" lean_obj_res bap_jit_compile_threads(lean_obj_arg) {
-  return lean_io_result_mk_ok(lean_usize_to_nat(compileThreads()));
+// `BaseIO`, whose extern takes no world and gives the value itself, as `bap_jit_live_available` does, rather than the result of an
+// `IO`, which Lean would read as the number.
+extern "C" lean_obj_res bap_jit_compile_threads() {
+  return lean_usize_to_nat(compileThreads());
 }
 
 // What compiles quickly, one for each thread that does, as that is mostly the one that runs; and what optimizes, a few that the threads

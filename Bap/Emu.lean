@@ -391,7 +391,7 @@ structure Emu where
   intrinsicRaises : IO.Ref (Bil.Env → String → List Nat → Nat → List (Bap.Var × Bap.Value))
   /-- What the controls of the machine make of the operands and of the result of an intrinsic. -/
   intrinsicControls : IO.Ref (Bil.Env → String → (List Nat → List Nat) × (Nat → Nat))
-  /-- The programs of the instructions that have such an intrinsic, by address. -/
+  /-- The programs of the instructions that have such an intrinsic, each by the number that its `served:` special says. -/
   servedPrograms : IO.Ref (Std.HashMap Nat Bil.Program)
   /-- What wants to know of a new process: of the one that made it, and of it. -/
   processHooks : IO.Ref (List (Nat → Nat → IO Unit))
@@ -2584,8 +2584,10 @@ private def lift (emu : Emu) (thumb : Bool) (address : Nat) (code : ByteArray) :
       | some _ => pure (namesFloat 64 insn.bil)
       | none => pure false
     if served then
-      emu.servedPrograms.modify (·.insert insn.address insn.bil)
-      pure ⟨insn.address, insn.next, [.special s!"served:{insn.address}"]⟩
+      -- By a number of its own, not its address: a block that is kept, and run again as its bytes come back, runs the program it was
+      -- lifted with, rather than the one lifted at that address last. One step takes the number and puts the program there.
+      let id ← emu.servedPrograms.modifyGet fun programs => (programs.size, programs.insert programs.size insn.bil)
+      pure ⟨insn.address, insn.next, [.special s!"served:{id}"]⟩
     else
       -- What a lifter loads again of the same bytes is loaded once, as the instruction does.
       pure ⟨insn.address, insn.next, Bil.shareLoads insn.bil⟩
@@ -2947,7 +2949,7 @@ private def dispatchSpecial (emu : Emu) (name : String) : IO Bool := do
   if name.startsWith "served:" then
     let some address := (name.drop 7).toString.toNat? | throw <| IO.userError s!"bad special {name}"
     let some serve := ← emu.intrinsicServer.get | throw <| IO.userError "no intrinsic server"
-    let some program := (← emu.servedPrograms.get).get? address | throw <| IO.userError s!"no program at {address}"
+    let some program := (← emu.servedPrograms.get).get? address | throw <| IO.userError s!"no served program {address}"
     runServed emu serve program
     pure true
   else if name == "syscall" || name == "svc" || (name == "interrupt" && emu.config.syscallAbi == .x86_32) then

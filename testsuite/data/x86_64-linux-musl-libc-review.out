@@ -1,0 +1,7 @@
+waitpid with a handler: the child, status 3
+in a handler of sigsuspend the other signal is not blocked
+SIG_DFL keeps SA_NOCLDWAIT: 1
+SA_NOCLDWAIT reaps: ECHILD
+.. after a symbolic link: where it leads
+pread of /dev/zero 16, lseek of /dev/null 0, pwrite of /dev/null 4
+done

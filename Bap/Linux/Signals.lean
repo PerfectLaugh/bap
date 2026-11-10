@@ -472,6 +472,10 @@ structure Signals where
   /-- A signal of a process was taken from what was pending, as delivery or a wait takes it, as a timer of `timer_create` has to hear
   of what its signal said. -/
   taken : IO.Ref (Nat → SignalInfo → IO Unit)
+  /-- Whether a thread waits for a child, with `wait4` or `waitid`, and that wait would be answered now, which `Bap.Linux.Ptrace` serves:
+  the exit of a child that it waits for wakes it, rather than its signal ending the wait, as Linux's `do_wait` looks at the children
+  before at what is pending. -/
+  waitAnswered : IO.Ref (Emu → Nat → IO Bool)
   /-- The process group of a process, and the processes of a process group that aren't reaped, as the kernel has them, for `kill` of a group. -/
   pgidOf : IO.Ref (Nat → IO Nat)
   members : IO.Ref (Nat → IO (List Nat))
@@ -656,7 +660,9 @@ private def enterHandler (signals : Signals) (emu : Emu) (tid : Nat) (info : Sig
   modifyThread signals tid fun thread =>
     { thread with
       frames := frame :: withoutStale
-      mask := blockable signals (oldMask ||| addedMask)
+      -- What the handler runs with is the mask that the thread has now, which of `sigsuspend` is the one it was given, and what the
+      -- action adds, as Linux's `signal_delivered` has it: the mask from before is what the frame keeps, for `sigreturn`.
+      mask := blockable signals (thread.mask ||| addedMask)
       -- `SS_AUTODISARM` takes it away until `sigreturn` sets what the context has again.
       alternate := if hasFlag alternateFlags ssAutoDisarm then noAlternate else thread.alternate
       suspended := none }
@@ -1121,7 +1127,9 @@ def notifyParent (signals : Signals) (emu : Emu) (group status : Nat) : IO Unit 
     ⟨signal, if signaled then 2 else 1, .child group 0 (if signaled then status % 128 else status / 256 % 256)⟩
   -- One that waits for it is woken by that, and hears of it when it runs.
   let parents := (table.tasks.filter fun other => other.group == task.parent && other.status.isNone)
-  let waiting := parents.any fun other => table.waiters.any (·.thread == other.tid)
+  let answered ← signals.waitAnswered.get
+  let waiting ← parents.anyM fun other => do
+    pure (table.waiters.any (·.thread == other.tid)) <||> answered emu other.tid
   if waiting then
     match parents.find? (·.tid == task.parent) with
     | some leader => modifyThread signals leader.tid fun state => { state with pending := state.pending ++ [info] }
@@ -1293,7 +1301,8 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
           let action := { action with mask := blockable signals action.mask }
           signals.table.modify fun table =>
             { table with
-              actions := if action.handler == 0 then table.actions.erase (task.group, signal)
+              -- What is all the default goes; SIG_DFL with flags or a mask keeps them, as `SA_NOCLDWAIT` of SIGCHLD has to be.
+              actions := if action == {} then table.actions.erase (task.group, signal)
                 else table.actions.insert (task.group, signal) action }
           -- What is ignored now isn't pending any more.
           if ((action.handler == 1) || (action.handler == 0 && numbers.ignored.contains signal)) then

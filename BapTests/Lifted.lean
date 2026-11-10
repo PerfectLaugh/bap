@@ -244,6 +244,12 @@ def testNativeMemoryModel : IO Unit := do
     ((Bap.Memory.cells held).map (fun cell => (cell.1.toNat, cell.2)))
     ((madeAddresses.toList.map (·.toNat)).zip madeValues.toList)
 
+/-- How many threads compile with optimization at once is a count, of the cores of the host, which bounds how many are started:
+`Jit.compileThreads` is `BaseIO`, whose extern gives the number itself rather than the result of an `IO`. -/
+def testCompileThreads : IO Unit := do
+  let threads ← Bap.Jit.compileThreads
+  assertTrue s!"compile threads are a count of cores: {threads}" (0 < threads && threads ≤ 65536)
+
 set_option maxRecDepth 4000 in
 def run : IO Unit := do
   let program ← Jit.compile [.set 0 40, .add 1 0 2, .jumpSlot 1]
