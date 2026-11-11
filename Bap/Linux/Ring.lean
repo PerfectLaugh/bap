@@ -37,6 +37,8 @@ structure Pending where
   deadline : Option Nat := none
   count : Nat := 0
   start : Nat := 0
+  /-- Whether it was the last that its call submitted, which ends a chain that it links, as `io_submit_state_end` has it. -/
+  last : Bool := false
 
 /-- An io_uring: its inode, the process that made it, the sizes of its rings, where `mmap` put them, the head of its submissions and
 the tail of its completions as the kernel has them, how many completions it has made, those that don't fit yet, what is pending, and
@@ -85,7 +87,8 @@ def save (state : IO.Ref State) : IO ByteArray := do
       ring.group]
     let out := putList (fun out (data, result) => numbers out [data, result]) out ring.overflow
     let out := putList (fun out (pending : Pending) =>
-      numbers (putOption putNat (putBytes out pending.entry) pending.deadline) [pending.count, pending.start]) out ring.pending
+      numbers (putOption putNat (putBytes out pending.entry) pending.deadline)
+        [pending.count, pending.start, if pending.last then 1 else 0]) out ring.pending
     let out := putList (fun out (address, size) => numbers out [address, size]) out ring.buffers
     putOption putNat (numbers out ring.files) ring.eventfd) out state.rings
   pure (putList (fun out (tid, at_, count) => numbers out [tid, at_, count]) out state.submitted)
@@ -109,7 +112,7 @@ def load (state : IO.Ref State) (data : ByteArray) : IO Unit := do
         let (entry, at_) ← getBytes data at_
         let (deadline, at_) ← getOption getNat data at_
         let (more, at_) ← numbers data at_
-        .ok ({ entry, deadline, count := more.getD 0 0, start := more.getD 1 0 : Pending }, at_)) data at_
+        .ok ({ entry, deadline, count := more.getD 0 0, start := more.getD 1 0, last := more.getD 2 0 == 1 : Pending }, at_)) data at_
       let (buffers, at_) ← getList (fun data at_ => do
         let (pair, at_) ← numbers data at_
         .ok ((pair.getD 0 0, pair.getD 1 0), at_)) data at_
@@ -302,8 +305,8 @@ private def attempt (rings : Rings) (emu : Emu) (group : Nat) (ring : Uring) (pe
   let mut cancelling := false
   for item in pending do
     let data := numberOf big (item.entry.extract 32 40)
-    -- `IOSQE_IO_LINK`, or `IOSQE_IO_HARDLINK`, which a failure doesn't break.
-    let linked := item.entry[1]! &&& 12 != 0
+    -- `IOSQE_IO_LINK`, or `IOSQE_IO_HARDLINK`, which a failure doesn't break, but of the last that a call submitted.
+    let linked := item.entry[1]! &&& 12 != 0 && !item.last
     let breaks := linked && item.entry[1]! &&& 8 == 0
     if cancelling then
       ring := complete architecture ring data (negative 125)
@@ -328,11 +331,15 @@ private def attempt (rings : Rings) (emu : Emu) (group : Nat) (ring : Uring) (pe
     if item.entry[0]! == 14 then
       -- What `IORING_OP_ASYNC_CANCEL` cancels: what is pending of that number.
       let target := numberOf big (item.entry.extract 16 24)
-      let found := ring.pending.find? fun other => numberOf big (other.entry.extract 32 40) == target
-      match found with
-      | some other =>
-        ring := complete architecture { ring with pending := ring.pending.filter fun entry => entry.entry != other.entry } data 0
-        ring := complete architecture ring target (negative 125)
+      match ring.pending.findIdx? fun other => numberOf big (other.entry.extract 32 40) == target with
+      | some index =>
+        -- And what is linked after it, to the end of its chain, which waits behind it, as `io_fail_links` has it.
+        let rest := ring.pending.drop index
+        let chain := (rest.zip (none :: rest.map some)).takeWhile (fun (_, before) =>
+          before.all fun (previous : Pending) => previous.entry[1]! &&& 12 != 0 && !previous.last) |>.map (·.1)
+        ring := complete architecture { ring with pending := ring.pending.take index ++ rest.drop chain.length } data 0
+        for cancelled in chain do
+          ring := complete architecture ring (numberOf big (cancelled.entry.extract 32 40)) (negative 125)
       | none => ring := complete architecture ring data (negative Errno.enoent)
       continue
     match ← perform rings emu group ring item.entry with
@@ -439,6 +446,8 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
     let some context := state.contexts.find? fun context => context.group == group && context.id == arg 0 | fail Errno.einval
     let count := arg 1
     if count ≥ 2 ^ (8 * word - 1) then return ← fail Errno.einval
+    -- No more than the context has room for, as `io_submit` has it, rather than as many as a guest says.
+    let count := min count context.capacity
     let mut events := context.events
     let mut done := 0
     for index in List.range count do
@@ -500,7 +509,10 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
     let completions ← if flags &&& 8 == 0 then pure (2 * entries) else do
       let given ← number (arg 1 + 4) 4
       if given == 0 || (given > 65536 && flags &&& 16 == 0) then return ← fail Errno.einval
-      pure (max entries (power (min given 65536)))
+      -- Fewer than it has entries is `EINVAL`, as `io_uring_create` has it.
+      let completions := power (min given 65536)
+      if completions < entries then return ← fail Errno.einval
+      pure completions
     let kernel ← poller.kernel.get
     let (kernel, fd) := kernel.addObject group (.generated "io_uring") Kernel.oCloexec
     poller.kernel.set kernel
@@ -523,6 +535,8 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
     match arg 1 with
     | 0 =>
       if !ring.buffers.isEmpty then return ← fail 16
+      -- None, or more than `IORING_MAX_REG_BUFFERS`, is `EINVAL`.
+      if arg 3 == 0 || arg 3 > 16384 then return ← fail Errno.einval
       update fun other => { other with buffers := [] }
       let buffers ← iovecs rings emu (arg 2) (arg 3)
       update fun other => { other with buffers }
@@ -530,6 +544,9 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
     | 1 => if ring.buffers.isEmpty then fail Errno.enxio else do update fun other => { other with buffers := [] }; succeed
     | 2 =>
       if !ring.files.isEmpty then return ← fail 16
+      -- None is `EINVAL`, and more than `IORING_MAX_FIXED_FILES` `EMFILE`.
+      if arg 3 == 0 then return ← fail Errno.einval
+      if arg 3 > 2 ^ 20 then return ← fail Errno.emfile
       let files ← (List.range (arg 3)).mapM fun index => number (arg 2 + 4 * index) 4
       update fun other => { other with files }
       succeed
@@ -541,8 +558,10 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
       succeed
     | 5 => if ring.eventfd.isNone then fail Errno.enxio else do update fun other => { other with eventfd := none }; succeed
     | 8 =>
-      -- `struct io_uring_probe`, of what operations there are.
-      let ops := (List.range (arg 3)).foldl (fun out op => out ++ field 1 op ++ field 1 0 ++ field 2 (if operations.contains op then 1 else 0) ++ field 4 0)
+      -- `struct io_uring_probe`, of what operations there are: more than 256 is `EINVAL`, as `io_probe` has it.
+      if arg 3 > 256 then return ← fail Errno.einval
+      -- Of no more operations than there are, as `io_probe` has it.
+      let ops := (List.range (min (arg 3) 40)).foldl (fun out op => out ++ field 1 op ++ field 1 0 ++ field 2 (if operations.contains op then 1 else 0) ++ field 4 0)
         ByteArray.empty
       write emu (arg 2) (field 1 39 ++ field 1 (min (arg 3) 40) ++ field 2 0 ++ field 4 0 ++ field 4 0 ++ field 4 0 ++ ops)
       succeed
@@ -557,7 +576,8 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
     let mut ring ← attempt rings emu group ring ring.pending
     -- What was submitted: from the head that the kernel has to the tail that the program wrote.
     let tail ← number (ring.sq + 4) 4
-    let count := min (arg 1) ((tail + 2 ^ 32 - ring.head) % 2 ^ 32)
+    -- No more than the ring has entries, as `io_sqring_entries` has it, whatever the tail says.
+    let count := min (arg 1) (min ring.entries ((tail + 2 ^ 32 - ring.head) % 2 ^ 32))
     let mut submitted : List Pending := []
     for index in List.range count do
       let slot ← number (ring.sq + 64 + 4 * ((ring.head + index) % ring.entries)) 4
@@ -574,6 +594,10 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
       let span := seconds.toNat * 1000000000 + nanoseconds.toNat
       let absolute := numberOf big (item.entry.extract 28 32) &&& 1 != 0
       pure { item with deadline := some (if absolute then span else now + span) }
+    -- The last that it submitted ends a chain, which goes no further than this call.
+    submitted := match submitted.getLast? with
+      | some final => submitted.dropLast ++ [{ final with last := true }]
+      | none => submitted
     ring := { ring with head := (ring.head + count) % 2 ^ 32 }
     write emu ring.sq (field 4 ring.head)
     let finished ← post rings emu group (← attempt rings emu group ring (ring.pending ++ submitted))

@@ -907,7 +907,19 @@
   (set$ rt (pick (logand (not (is-nan ra)) (logor (not (msb ra)) (is-fzero ra))) rc rb)))
 (defun FSELD (rt ra rc rb) (FSELS rt ra rc rb))
 
-;; the comparisons set the field of CR and FPCC, FL, FG, FE and FU
+;; the comparisons set the field of CR and FPCC, FL, FG, FE and FU. Of
+;; FCMPO, ordered, a NaN of either is invalid, VXVC, as forders says
+(defun fp-less-ordered (x y) (intrinsic 'forders_ieee754_binary_64 x y :result 1))
+(defun fp-compare-ordered (crf x y)
+  (let ((un (logor (is-nan x) (is-nan y)))
+        (lt (logand (not un) (fp-less-ordered x y)))
+        (gt (logand (not un) (<. y x)))
+        (eq (logand (not un) (not lt) (not gt))))
+    (set FL lt)
+    (set FG gt)
+    (set FE eq)
+    (set FU un)
+    (set$ crf (concat lt gt eq un))))
 (defun fp-compare (crf x y)
   (let ((un (logor (is-nan x) (is-nan y)))
         (lt (logand (not un) (<. x y)))
@@ -921,8 +933,8 @@
 
 (defun FCMPUS (crf ra rb) (fp-compare crf ra rb))
 (defun FCMPUD (crf ra rb) (fp-compare crf ra rb))
-(defun FCMPOS (crf ra rb) (fp-compare crf ra rb))
-(defun FCMPOD (crf ra rb) (fp-compare crf ra rb))
+(defun FCMPOS (crf ra rb) (fp-compare-ordered crf ra rb))
+(defun FCMPOD (crf ra rb) (fp-compare-ordered crf ra rb))
 
 ;; the conversions to words: X is integral, the words out of range
 ;; saturate, a NaN is the most negative word; the word is sign-extended
@@ -951,11 +963,19 @@
                 (pick (msb x) (cast-signed 64 0x80000000:32) (cast-unsigned 64 0x7fffffff:32))
                 (pick (msb x) (neg mag) mag)))))
 
-;; What a conversion of X, rounded to R, to a word raises: FPSCR has VX and XX, as bits from the right.
+;; What a conversion of X, rounded to R, to a word raises, as bits of FPSCR from the right: VXCVI, and VXSNAN of a signaling NaN, with
+;; VX of them, of what is invalid; XX and FI of what isn't exact; and FX of any of those that comes to be.
 (defun fp-to-int-raises (x r low high)
   "the integral double R is invalid outside of LOW and HIGH, which are doubles"
-  (let ((bad (logor (is-nan r) (is-inf r) (not (logand (>=. r low) (>=. high r))))))
-    (set FPSCR (logor FPSCR (lshift (u64 bad) 29) (lshift (u64 (logand (not bad) (not (= r x)))) 25)))))
+  (let ((bad (logor (is-nan r) (is-inf r) (not (logand (>=. r low) (>=. high r)))))
+        (inexact (logand (not bad) (not (= r x))))
+        (snan (logand (is-nan x) (not (select 51 x))))
+        (old FPSCR)
+        (new (logor (logand old (lnot 0x60000:64))
+                    (lshift (u64 bad) 29) (lshift (u64 bad) 8) (lshift (u64 snan) 24)
+                    (lshift (u64 inexact) 25) (lshift (u64 inexact) 17)))
+        (fresh (logand new (lnot old) 0x1ff80700:64)))
+    (set FPSCR (logor new (lshift (u64 (non-zero fresh)) 31)))))
 (defun raises-signed-word (x r) (fp-to-int-raises x r 0xC1E0000000000000:64 0x41DFFFFFFFC00000:64))
 (defun raises-signed-dword (x r) (fp-to-int-raises x r 0xC3E0000000000000:64 0x43DFFFFFFFFFFFFF:64))
 (defun raises-unsigned-word (x r) (fp-to-int-raises x r 0x0000000000000000:64 0x41EFFFFFFFE00000:64))
@@ -1555,7 +1575,9 @@
                     (cast-signed 32 (extract 15 0 vb)))))
 
 ;; FLOATING-POINT OPERATIONS, on singles, rounded to nearest, a NaN
-;; operand is the result, quiet, the first one of VA, VB and VC
+;; operand is the result, quiet, the first one of VA, VB and VC. They go
+;; by no mode of FPSCR and say nothing to it: the modes rnq, rzq, rpq and
+;; rmq are those, of what is quiet
 
 (defun nj (x)
   "(nj X) is the single X, the denormals are zeros"
@@ -1563,8 +1585,8 @@
 
 (defun quiet32 (x) (logor x 0x00400000:32))
 
-(defun addfp (x y) (nj (+. :rne (nj x) (nj y))))
-(defun subfp (x y) (nj (-. :rne (nj x) (nj y))))
+(defun addfp (x y) (nj (+. :rnq (nj x) (nj y))))
+(defun subfp (x y) (nj (-. :rnq (nj x) (nj y))))
 
 ;; the NaN of the addend Z comes before that of the multiplier Y, as VB
 ;; comes before VC
@@ -1572,7 +1594,7 @@
   (pick (is-nan x) (quiet32 x)
     (pick (is-nan z) (quiet32 z)
       (pick (is-nan y) (quiet32 y)
-        (nj (intrinsic (symbol-concat 'fmad 'rne 'ieee754_binary '32 :sep '_)
+        (nj (intrinsic (symbol-concat 'fmad 'rnq 'ieee754_binary '32 :sep '_)
                        (nj x) (nj y) (nj z) :result 32))))))
 
 (defun fp-negate32 (x) (pick (is-nan x) x (fp-neg x)))
@@ -1609,15 +1631,15 @@
 
 ;; the conversions from the fixed-point words, of UIMM fraction bits
 (defun scale (uimm) (concat (cast-low 9 (- 127 (logand uimm 31))) (cast-unsigned 23 0)))
-(defun cfsx (s x) (nj (*. :rne (cast-sfloat :rne 32 x) s)))
-(defun cfux (s x) (nj (*. :rne (cast-float :rne 32 x) s)))
+(defun cfsx (s x) (nj (*. :rnq (cast-sfloat :rnq 32 x) s)))
+(defun cfux (s x) (nj (*. :rnq (cast-float :rnq 32 x) s)))
 (defun VCFSX (vd uimm vb) (let ((s (scale uimm))) (set$ vd (lanes32-e cfsx s vb))))
 (defun VCFUX (vd uimm vb) (let ((s (scale uimm))) (set$ vd (lanes32-e cfux s vb))))
 
-(defun rfin (x) (fround :rne (nj x)))
-(defun rfiz (x) (fround :rtz (nj x)))
-(defun rfip (x) (fround :rtp (nj x)))
-(defun rfim (x) (fround :rtn (nj x)))
+(defun rfin (x) (fround :rnq (nj x)))
+(defun rfiz (x) (fround :rzq (nj x)))
+(defun rfip (x) (fround :rpq (nj x)))
+(defun rfim (x) (fround :rmq (nj x)))
 (defun VRFIN (vd vb) (set$ vd (lanes32-1 rfin vb)))
 (defun VRFIZ (vd vb) (set$ vd (lanes32-1 rfiz vb)))
 (defun VRFIP (vd vb) (set$ vd (lanes32-1 rfip vb)))

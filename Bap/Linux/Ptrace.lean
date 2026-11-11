@@ -815,6 +815,10 @@ private def serveRequest (ptrace : Ptrace) (emu : Emu) (request : WaitRequest) (
 for what serves a system call of the thread that runs, and what it gives is what that gives back: one that waits stops the thread,
 which the call is made again for, or given its result, when it goes on. -/
 def serveWait (ptrace : Ptrace) (emu : Emu) (target status options usage : Nat) : IO SyscallAction := do
+  -- Of the flags, only `WNOHANG`, `WUNTRACED`, `WCONTINUED`, `__WNOTHREAD`, `__WCLONE` and `__WALL`, as `kernel_wait4` has them: not
+  -- `WNOWAIT`, which only `waitid` takes.
+  if options % 2 ^ 32 &&& (2 ^ 32 - 1 - (1 ||| 2 ||| 8 ||| 0x20000000 ||| 0x40000000 ||| 0x80000000)) != 0 then
+    return ← syscallReturn emu (.error einval)
   let own ← (← ptrace.signals.pgidOf.get) (← groupOf emu (← thread emu))
   serveRequest ptrace emu { target := targetOf target own, exited := true, stopped := options &&& 2 != 0, continued := options &&& 8 != 0
                             keep := false, waitid := false, clones := options &&& 0x80000000 != 0, all := options &&& 0x40000000 != 0
@@ -822,7 +826,11 @@ def serveWait (ptrace : Ptrace) (emu : Emu) (target status options usage : Nat) 
 
 /-- `waitid`, of all (0), a process (1) or a group (2), which is all, as there is one. -/
 private def serveWaitid (ptrace : Ptrace) (emu : Emu) (kind id info options : Nat) : IO SyscallAction := do
-  if kind > 2 || options &&& (4 ||| 2 ||| 8) == 0 then return ← syscallReturn emu (.error einval)
+  -- Of the flags, those of `wait4` and `WNOWAIT`, `WEXITED` and `WSTOPPED`, as `kernel_waitid` has them, and one of what it waits
+  -- for.
+  let known := 1 ||| 2 ||| 4 ||| 8 ||| 0x1000000 ||| 0x20000000 ||| 0x40000000 ||| 0x80000000
+  if kind > 2 || options % 2 ^ 32 &&& (2 ^ 32 - 1 - known) != 0 || options &&& (4 ||| 2 ||| 8) == 0 then
+    return ← syscallReturn emu (.error einval)
   -- P_PID, P_PGID, of which 0 is its own, and P_ALL.
   let own ← (← ptrace.signals.pgidOf.get) (← groupOf emu (← thread emu))
   let target := match kind with

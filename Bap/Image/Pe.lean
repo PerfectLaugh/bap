@@ -119,8 +119,9 @@ private def parseSymbol (data : ByteArray) (header : Header) (sections : List Se
     | none => value
   .ok ⟨name, address, 0, sectionIndex != 0 && symbolType &&& 0x30 = 0x20, storageClass = 103, false⟩
 
+/-- The symbols, after those it has, one at a time: in an array, as so many of them are, which a list would copy for each. -/
 private def parseSymbols (data : ByteArray) (header : Header) (sections : List Section) :
-    Nat → Nat → List Symbol → Except String (List Symbol)
+    Nat → Nat → Array Symbol → Except String (Array Symbol)
   | _, 0, symbols => .ok symbols
   | index, remaining + 1, symbols => do
     let offset := header.symbolOffset + index * 18
@@ -130,7 +131,7 @@ private def parseSymbols (data : ByteArray) (header : Header) (sections : List S
       .error "PE auxiliary symbol exceeds symbol table"
     else
       parseSymbols data header sections (index + auxiliaryCount + 1)
-        (remaining - auxiliaryCount) (symbols ++ [symbol])
+        (remaining - auxiliaryCount) (symbols.push symbol)
 
 private def architecture (machine : Nat) : Arch :=
   match machine with
@@ -154,7 +155,7 @@ def zeroFill (data : ByteArray) : Nat :=
 def decode (data : ByteArray) : Except String Image := do
   let header ← parseHeader data
   let (sections, segments, regions) ← parseSections data header
-  let symbols ← parseSymbols data header sections 0 header.symbolCount []
+  let symbols := (← parseSymbols data header sections 0 header.symbolCount #[]).toList
   let memory := regions.foldl (fun memory region => MemoryMap.add region () memory) {}
   .ok {
     arch := architecture header.machine

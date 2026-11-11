@@ -224,7 +224,8 @@ private def getRegionBin (reader : Reader) : Except String (Region × Reader) :=
   let (size, reader) ← getNat reader
   if size ≥ Jit.fillLimit then .error "a region of the binary checkpoint is too big" else
   let (pieces, reader) ← getList reader getPieceBin
-  .ok (⟨address, Jit.fill size pieces, ⟨readable, writable, executable⟩⟩, reader)
+  let some data := Jit.fillChecked size pieces | .error "a region of the binary checkpoint is more than the host has"
+  .ok (⟨address, data, ⟨readable, writable, executable⟩⟩, reader)
 
 /-- A region as `BAPCKPT5` has it, with all its bytes. -/
 private def getRegionV5 (reader : Reader) : Except String (Region × Reader) := do

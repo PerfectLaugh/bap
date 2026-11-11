@@ -144,11 +144,11 @@
 (defun TILEMOVROWrti (rd x t r) (tile-move-row rd x t r))
 (defun TILEMOVROWrte (rd x t r) (tile-move-row rd x t r))
 
-;; the conversions of a row, whose rounding mode is RNE, of which the half
+;; the conversions of a row, whose rounding mode is RNE whatever MXCSR says, which rnx is, of which the half
 ;; that isn't converted to is clear
 
-(defun tile-to-float (x) (sse-convert 'cast_sfloat 'rne 32 32 x))
-(defun tile-to-half (x) (sse-convert 'fconvert 'rne 32 16 x))
+(defun tile-to-float (x) (sse-convert 'cast_sfloat 'rnx 32 32 x))
+(defun tile-to-half (x) (sse-convert 'fconvert 'rnx 32 16 x))
 (defun tile-to-bf16 (x) (intrinsic 'fconvert_rne_bfloat_32_16 (cast-low 32 x) :result 16))
 
 (defun tile-lane-float (row cols _ _ _ _ _ i)

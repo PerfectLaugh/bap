@@ -35,6 +35,9 @@ private def conventionOf : Architecture → CallConvention
   | .powerpc 32 _ => { arguments := (List.range 8).map (s!"R{3 + ·}"), link := some "LR", result := "R3" }
   | .powerpc _ _ => { arguments := (List.range 8).map (s!"R{3 + ·}"), link := some "LR", result := "R3", self := some "R12" }
 
+/-- The register that a function returns a word in. -/
+def resultRegisterOf (architecture : Architecture) : String := (conventionOf architecture).result
+
 /-- Where a function called from outside returns to, which is a page that nothing runs. -/
 private def callReturnPage (machine : Machine) : Nat := machine.signals.returnPage + 4096
 
@@ -217,6 +220,8 @@ private inductive RelocationKind where
   | absolute
   /-- A symbol, as a table of them has it. -/
   | slot
+  /-- A symbol and what is added, from where it is, as text that isn't position-independent has it of 32 bits: `S + A - P`. -/
+  | pcRelative
   /-- The number of a module, its offset, what that is from a thread pointer, as x86 has that the other way round, and a descriptor. -/
   | tlsModule
   | tlsOffset
@@ -241,7 +246,8 @@ private def relocationKind (machine typ : Nat) (is64 : Bool) : RelocationKind :=
     else .unknown
   match machine with
   | 62 => types [0] [8] [37] [1] [6, 7] [16] [17] [18] [36]
-  | 3 => types [0] [8] [42] [1] [6, 7] [35] [36] [14] [41] [37]
+  -- R_386_PC32 of text that isn't position-independent, as GNU ld leaves it by default and glibc's loader takes it.
+  | 3 => if typ == 2 then .pcRelative else types [0] [8] [42] [1] [6, 7] [35] [36] [14] [41] [37]
   | 183 => types [0] [1027] [1032] [257] [1025, 1026] [1028] [1029] [1030] [1031]
   | 40 => types [0] [23] [160] [2] [21, 22] [17] [18] [19]
   | 243 => types [0] [3] [58] [if is64 then 2 else 1] [5] [if is64 then 7 else 6] [if is64 then 9 else 8] [if is64 then 11 else 10]
@@ -292,6 +298,11 @@ private def nextTlsOffset (architecture : Architecture) (loaded : List LoadedLib
       max used ((library.tls.map fun tls => tls.offset + tls.memorySize).getD 0)) (tlsGap architecture)
     alignUp used alignment
 
+private def baseName (path : String) : String := (path.splitOn "/").getLast?.getD path
+
+private def spaceHas (space : Nat) (table : Std.HashMap Nat (List LoadedLibrary)) : List LoadedLibrary :=
+  table.getD space []
+
 /-- How far a byte of a module's block is from a thread pointer, as what is added to it. It wraps as a word does, as it can be below it. -/
 private def tlsPointerValue (architecture : Architecture) (tls : LibraryTls) (value : Nat) : Nat :=
   let modulus := 2 ^ architecture.bits
@@ -302,21 +313,21 @@ private def sameMachine (architecture : Architecture) (program : Elf.Program) : 
   let (number, bits, big, _) := architecture.elf
   program.machine == number && program.bits == bits && program.big == big
 
-private def baseName (path : String) : String := (path.splitOn "/").getLast?.getD path
-
-private def spaceHas (space : Nat) (table : Std.HashMap Nat (List LoadedLibrary)) : List LoadedLibrary :=
-  table.getD space []
-
-/-- What it needs, found in the machine: by a path, by what a library says to look in, by what is asked, and where libraries are. -/
-private def findLibrary (machine : Machine) (name origin : String) (runPaths search : List String) : IO (Option String) := do
+/-- What it needs, found in the machine, as `ld.so` looks: by a path, or else in what the library says of `DT_RPATH` if it says nothing of
+`DT_RUNPATH`, in what is asked, in its `DT_RUNPATH`, and where libraries are. What is there of another class or machine is passed over,
+as `open_verify` has it. -/
+private def findLibrary (machine : Machine) (name origin : String) (rpath runpath search : List String) : IO (Option String) := do
   let kernel ← machine.kernel.get
   let exists_ (path : String) : Bool := match Kernel.resolve kernel "/" path with
     | .ok (_, some _) => true
     | _ => false
   if name.contains '/' then return if exists_ name then some name else none
-  let expanded := runPaths.map fun path => (path.replace "$ORIGIN" origin).replace "${ORIGIN}" origin
-  let places := expanded ++ search ++ ["/lib", "/usr/lib", "/lib64", "/usr/lib64"]
-  pure ((places.map (· ++ "/" ++ name)).find? exists_)
+  let fits (path : String) : Bool := exists_ path && match fileOf kernel path with
+    | .ok data => (Elf.parse data).toOption.any (sameMachine machine.architecture)
+    | .error _ => false
+  let expand (paths : List String) : List String := paths.map fun path => (path.replace "$ORIGIN" origin).replace "${ORIGIN}" origin
+  let places := (if runpath.isEmpty then expand rpath else []) ++ search ++ expand runpath ++ ["/lib", "/usr/lib", "/lib64", "/usr/lib64"]
+  pure ((places.map (· ++ "/" ++ name)).find? fits)
 
 /-- What makes up a load, to undo it as a whole. -/
 private structure Loading where
@@ -357,255 +368,330 @@ private def protectLibrary (machine : Machine) (image : Image.Image) (base : Nat
     let stop := down (relro.addr + relro.memorySize)
     if start < stop then protect emu (base + start) (stop - start) ⟨true, false, false⟩
 
-/-- A library and all that it needs: mapped, known of, relocated and with its initializers noted, those of what it needs before its own. -/
-private partial def loadOne (machine : Machine) (path : String) (space : Nat) (search : List String) (resolve : String → Option Nat)
-    (prefer : String → Option Nat)
-    (ignoreMissing : Bool) (loading : IO.Ref Loading) : IO LoadedLibrary := do
+/-- A library that is mapped and known of, as `_dl_map_object` has it, with the names of what it needs, where it finds one of them, and
+what relocates it and notes its initializers once all that it needs is mapped and relocated, given the paths of what it needs. -/
+private structure Prepared where
+  library : LoadedLibrary
+  names : List String
+  locate : String → IO (Option String)
+  finish : List String → IO LoadedLibrary
+
+/-- Maps a library that isn't loaded, and makes it known of, as what is mapped after it may need it. -/
+private def prepare (machine : Machine) (path : String) (space : Nat) (search : List String) (resolve : String → Option Nat)
+    (prefer : String → Option Nat) (loading : IO.Ref Loading) : IO Prepared := do
   let architecture := machine.architecture
   let emu := machine.emu
-  let some existing := (spaceHas space (← machine.libraries.get)).find? (fun library => library.path == path)
-    | do
-      let kernel ← machine.kernel.get
-      let data ← match fileOf kernel path with
-        | .ok data => pure data
-        | .error errno => throw <| IO.userError s!"{path}: error {errno}"
-      let program ← IO.ofExcept (Elf.parse data)
-      unless program.relocatable do throw <| IO.userError s!"{path} isn't a library that can go anywhere"
-      unless sameMachine architecture program do
-        throw <| IO.userError s!"{path} is of ELF machine {program.machine} of {program.bits} bits, which isn't this machine"
-      let image ← IO.ofExcept (Image.Elf.decode data)
-      let (base, start, span) ← mapLibrary machine path data program
-      let dynamic ← IO.ofExcept (Image.Elf.allDynamicSymbols image)
-      let symbols := dynamic.filterMap fun symbol =>
-        -- Those that it defines, of a type that has an address, and not those of thread-local storage; of a name that has versions,
-        -- the default, as a reference of the name alone is bound to it, rather than an old one that is kept for what was linked to it.
-        if symbol.sectionIndex != 0 && symbol.typ != 6 && !symbol.name.isEmpty && symbol.binding != 0 && !symbol.hidden then
-          some (symbol.name, base + symbol.value)
+  let kernel ← machine.kernel.get
+
+  let data ← match fileOf kernel path with
+    | .ok data => pure data
+    | .error errno => throw <| IO.userError s!"{path}: error {errno}"
+  let program ← IO.ofExcept (Elf.parse data)
+  unless program.relocatable do throw <| IO.userError s!"{path} isn't a library that can go anywhere"
+  unless sameMachine architecture program do
+    throw <| IO.userError s!"{path} is of ELF machine {program.machine} of {program.bits} bits, which isn't this machine"
+  let image ← IO.ofExcept (Image.Elf.decode data)
+  let (base, start, span) ← mapLibrary machine path data program
+  let dynamic ← IO.ofExcept (Image.Elf.allDynamicSymbols image)
+  -- Where a symbol that it defines is: of `SHN_ABS`, its value, wherever the library is, as `SYMBOL_ADDRESS` has it.
+  let at_ (symbol : Image.Elf.DynamicSymbol) : Nat := if symbol.sectionIndex == 0xfff1 then symbol.value else base + symbol.value
+  let symbols := dynamic.filterMap fun symbol =>
+    -- Those that it defines, of a type that has an address, and not those of thread-local storage; of a name that has versions,
+    -- the default, as a reference of the name alone is bound to it, rather than an old one that is kept for what was linked to it.
+    if symbol.sectionIndex != 0 && symbol.typ != 6 && !symbol.name.isEmpty && symbol.binding != 0 && !symbol.hidden then
+      some (symbol.name, at_ symbol)
+    else none
+  let tags := Image.Elf.dynamicTagsOf image
+  let name := ((tags.find? (·.1 == 14)).bind fun tag => Image.Elf.dynamicText image tag.2).getD (baseName path)
+  let pathsOf (key : Nat) : List String :=
+    (tags.filterMap fun tag => if tag.1 == key then Image.Elf.dynamicText image tag.2 else none).flatMap (·.splitOn ":")
+  let (rpath, runpath) := (pathsOf 15, pathsOf 29)
+  let origin := "/" ++ "/".intercalate ((path.splitOn "/").dropLast.filter (· != ""))
+  -- Its thread-local storage, after what is there.
+  let tlsHeader := Image.Elf.programHeaderOf image 7
+  let loadedNow := spaceHas space (← machine.libraries.get)
+  let nextModule := loadedNow.foldl (fun next other => max next ((other.tls.map fun info => info.module + 1).getD next)) 1
+  let tls : Option LibraryTls := tlsHeader.map fun header =>
+    -- A header has no alignment here, and a block that has more than a word's goes by what its variables say.
+    let alignment := Image.Elf.tlsAlignment image
+    { module := nextModule, offset := nextTlsOffset architecture loadedNow header.memorySize alignment,
+      image := base + header.addr, fileSize := header.fileSize, memorySize := header.memorySize, alignment }
+  let tlsSymbols := dynamic.filterMap fun symbol =>
+    if symbol.sectionIndex != 0 && symbol.typ == 6 && !symbol.name.isEmpty then some (symbol.name, symbol.value) else none
+  let versions := dynamic.filterMap fun symbol =>
+    if symbol.sectionIndex != 0 && symbol.typ != 6 && !symbol.name.isEmpty && symbol.binding != 0 && !symbol.version.isEmpty then
+      some ((symbol.name, symbol.version), at_ symbol)
+    else none
+  let library : LoadedLibrary :=
+    { path, name, base, start, span, symbols, needs := [], tls, tlsSymbols, digest := targetDigest architecture data, versions }
+  -- It is known of before what it needs is loaded, as they may need each other.
+  machine.libraries.modify fun table => table.insert space (spaceHas space table ++ [library])
+  loading.modify fun state => { state with mapped := library :: state.mapped }
+  let locate (needed : String) : IO (Option String) := findLibrary machine needed origin rpath runpath search
+  -- Relocated with all there is to find.
+  let finish (needs : List String) : IO LoadedLibrary := do
+    let table ← machine.libraries.get
+    let scope := spaceHas space table
+    let is64 := architecture.bits == 64
+    let word := architecture.bits / 8
+    let big := architecture.big
+    let machineNumber := program.machine
+    let lookup (symbol : Image.Elf.DynamicSymbol) : Except String Nat :=
+      let unversioned := (symbol.name.splitOn "@").headD symbol.name
+      -- What is to be had first, whoever else has it, as the base environment's is of a libc that is loaded.
+      -- Of one that was linked to a version, that version, as `ld.so` binds it, whoever has it by default.
+      let linked := if symbol.sectionIndex == 0 && !symbol.version.isEmpty then
+          scope.findSome? fun library => library.versions.lookup (unversioned, symbol.version)
         else none
-      let tags := Image.Elf.dynamicTagsOf image
-      let name := ((tags.find? (·.1 == 14)).bind fun tag => Image.Elf.dynamicText image tag.2).getD (baseName path)
-      let runPaths := tags.filterMap fun tag =>
-        if tag.1 == 15 || tag.1 == 29 then Image.Elf.dynamicText image tag.2 else none
-      let runPaths := runPaths.flatMap (·.splitOn ":")
-      let origin := "/" ++ "/".intercalate ((path.splitOn "/").dropLast.filter (· != ""))
-      -- Its thread-local storage, after what is there.
-      let tlsHeader := Image.Elf.programHeaderOf image 7
-      let loadedNow := spaceHas space (← machine.libraries.get)
-      let nextModule := loadedNow.foldl (fun next other => max next ((other.tls.map fun info => info.module + 1).getD next)) 1
-      let tls : Option LibraryTls := tlsHeader.map fun header =>
-        -- A header has no alignment here, and a block that has more than a word's goes by what its variables say.
-        let alignment := Image.Elf.tlsAlignment image
-        { module := nextModule, offset := nextTlsOffset architecture loadedNow header.memorySize alignment,
-          image := base + header.addr, fileSize := header.fileSize, memorySize := header.memorySize, alignment }
-      let tlsSymbols := dynamic.filterMap fun symbol =>
-        if symbol.sectionIndex != 0 && symbol.typ == 6 && !symbol.name.isEmpty then some (symbol.name, symbol.value) else none
-      let versions := dynamic.filterMap fun symbol =>
-        if symbol.sectionIndex != 0 && symbol.typ != 6 && !symbol.name.isEmpty && symbol.binding != 0 && !symbol.version.isEmpty then
-          some ((symbol.name, symbol.version), base + symbol.value)
-        else none
-      let library : LoadedLibrary :=
-        { path, name, base, start, span, symbols, needs := [], tls, tlsSymbols, digest := targetDigest architecture data, versions }
-      -- It is known of before what it needs is loaded, as they may need each other.
-      machine.libraries.modify fun table => table.insert space (spaceHas space table ++ [library])
-      loading.modify fun state => { state with mapped := library :: state.mapped }
-      let needs ← (Elf.needed data).filterMapM fun needed => do
-        match ← findLibrary machine needed origin runPaths search with
-        | some found => pure (some (← loadOne machine found space search resolve prefer ignoreMissing loading).path)
-        | none =>
-          if ignoreMissing then pure none
-          else throw <| IO.userError s!"{path} needs {needed}, which isn't in this machine"
-      -- Relocated with all there is to find.
-      let table ← machine.libraries.get
-      let scope := spaceHas space table
-      let is64 := architecture.bits == 64
-      let word := architecture.bits / 8
-      let big := architecture.big
-      let machineNumber := program.machine
-      let lookup (symbol : Image.Elf.DynamicSymbol) : Except String Nat :=
-        let unversioned := (symbol.name.splitOn "@").headD symbol.name
-        -- What is to be had first, whoever else has it, as the base environment's is of a libc that is loaded.
-        -- Of one that was linked to a version, that version, as `ld.so` binds it, whoever has it by default.
-        let linked := if symbol.sectionIndex == 0 && !symbol.version.isEmpty then
-            scope.findSome? fun library => library.versions.lookup (unversioned, symbol.version)
-          else none
-        let found := linked <|> scope.findSome? (fun library => library.symbols.lookup unversioned)
-        match prefer unversioned, found, resolve unversioned with
-        | some address, _, _ => .ok address
-        | none, some address, _ => .ok address
-        | none, none, some address => .ok address
-        | none, none, none =>
-          -- Not found and it has its own, which is local, or it may go without.
-          if symbol.sectionIndex != 0 then .ok (base + symbol.value)
-          else if symbol.binding == 2 then .ok 0
-          else .error unversioned
-      let symbolList := dynamic.toArray
-      let readWord (address : Nat) : IO Nat := do
-        let bytes ← Bap.Emu.read emu address word
-        pure ((if big then bytes.toList else bytes.toList.reverse).foldl (fun value byte => value * 256 + byte.toNat) 0)
-      let writeWord (address value : Nat) : IO Unit := Bap.Emu.write emu address (numberBytes big word (value % 2 ^ architecture.bits))
-      let relocations ← IO.ofExcept (Image.Elf.allDynamicRelocations image)
-      let mut missing : List String := []
-      let mut indirect : List (Nat × Nat) := []
-      for relocation in relocations do
-        let place := base + relocation.offset
-        let symbolEntry : Option Image.Elf.DynamicSymbol := if relocation.symbol == 0 then none else symbolList[relocation.symbol]?
-        let addend ← if relocation.explicitAddend then pure relocation.addend else
-          match relocationKind machineNumber relocation.typ is64 with
-          | .relative | .absolute | .indirect => readWord place
-          | _ => pure 0
-        let kind := relocationKind machineNumber relocation.typ is64
-        match kind with
-        | .none => pure ()
-        | .unknown => throw <| IO.userError s!"{path} has a relocation of type {relocation.typ}, which this can't do"
-        | .tlsModule | .tlsOffset | .tlsPointer | .tlsPointerNegated | .tlsDescriptor =>
-          -- Of its own, or of what has that name, first in the order that symbols are looked for. One that is weak and nowhere is at
-          -- nothing, of no module.
-          let owner : Except String (Option (LibraryTls × Nat)) :=
-            match symbolEntry with
-            | none => .ok (tls.map fun info => (info, 0))
-            | some symbol =>
-              let unversioned := (symbol.name.splitOn "@").headD symbol.name
-              let inOther (other : LoadedLibrary) : Option (LibraryTls × Nat) :=
-                match other.tlsSymbols.lookup unversioned, other.tls with
-                | some value, some info => some (info, value)
-                | _, _ => none
-              match scope.findSome? inOther with
-              | some found => .ok (some found)
-              | none =>
-                if symbol.sectionIndex != 0 then .ok (tls.map fun info => (info, symbol.value))
-                else if symbol.binding == 2 then .ok none
-                else .error unversioned
-          match owner with
-          | .error name => unless missing.contains name do missing := name :: missing
-          | .ok found =>
-            let tlsAddend := if relocation.explicitAddend then relocation.addend else 0
-            -- On MIPS these are slots of the GOT, which has nothing to add to a symbol: `ld.lld` leaves the value of that symbol there.
-            let gotSlot := (architecture matches .mips ..) && symbolEntry.isSome
-            let storedAddend ← if relocation.explicitAddend || gotSlot then pure 0 else
-              -- A word of its own holds what is added, but for a module, which has nothing to add.
-              match kind with
-              | .tlsModule => pure 0
-              | .tlsDescriptor => readWord (place + word)
-              | _ => readWord place
-            let plus := tlsAddend + storedAddend
-            match kind, found with
-            | .tlsModule, some (info, _) => writeWord place info.module
-            | .tlsModule, none => writeWord place 0
-            | .tlsOffset, some (_, value) => writeWord place (value + plus + 2 ^ architecture.bits - tlsOffsetBias architecture)
-            | .tlsOffset, none => writeWord place 0
-            | .tlsPointer, some (info, value) => writeWord place (tlsPointerValue architecture info (value + plus))
-            | .tlsPointer, none => writeWord place 0
-            | .tlsPointerNegated, some (info, value) => writeWord place (info.offset + 2 ^ architecture.bits - (value + plus))
-            | .tlsPointerNegated, none => writeWord place 0
-            | .tlsDescriptor, _ =>
-              let some _ := tlsDescriptorCode architecture
-                | throw <| IO.userError s!"{path} has a descriptor of thread-local storage, which this can't do on this target"
-              let page ← machine.ensureReturnPage
-              let value := match found with
-                | some (info, value) => tlsPointerValue architecture info (value + plus)
-                | none => 0
-              writeWord place (page + tlsDescriptorOffset)
-              writeWord (place + word) value
-            | _, _ => pure ()
-        | .relative => writeWord place (base + addend)
-        | .indirect => indirect := (place, base + addend) :: indirect
-        | _ =>
-          match symbolEntry, kind with
-          | none, _ =>
-            -- REL32 of MIPS without a symbol is relative.
-            writeWord place (base + addend)
-          | some symbol, _ =>
-            if symbol.typ == 10 && symbol.sectionIndex != 0 then
-              indirect := (place, base + symbol.value) :: indirect
+      let found := linked <|> scope.findSome? (fun library => library.symbols.lookup unversioned)
+      match prefer unversioned, found, resolve unversioned with
+      | some address, _, _ => .ok address
+      | none, some address, _ => .ok address
+      | none, none, some address => .ok address
+      | none, none, none =>
+        -- Not found and it has its own, which is local, or it may go without.
+        if symbol.sectionIndex != 0 then .ok (at_ symbol)
+        else if symbol.binding == 2 then .ok 0
+        else .error unversioned
+    let symbolList := dynamic.toArray
+    let readWord (address : Nat) : IO Nat := do
+      let bytes ← Bap.Emu.read emu address word
+      pure ((if big then bytes.toList else bytes.toList.reverse).foldl (fun value byte => value * 256 + byte.toNat) 0)
+    let writeWord (address value : Nat) : IO Unit := Bap.Emu.write emu address (numberBytes big word (value % 2 ^ architecture.bits))
+    let relocations ← IO.ofExcept (Image.Elf.allDynamicRelocations image)
+    let mut missing : List String := []
+    let mut indirect : List (Nat × Nat) := []
+    for relocation in relocations do
+      let place := base + relocation.offset
+      let symbolEntry : Option Image.Elf.DynamicSymbol := if relocation.symbol == 0 then none else symbolList[relocation.symbol]?
+      let addend ← if relocation.explicitAddend then pure relocation.addend else
+        match relocationKind machineNumber relocation.typ is64 with
+        | .relative | .absolute | .indirect | .pcRelative => readWord place
+        | _ => pure 0
+      let kind := relocationKind machineNumber relocation.typ is64
+      match kind with
+      | .none => pure ()
+      | .unknown => throw <| IO.userError s!"{path} has a relocation of type {relocation.typ}, which this can't do"
+      | .tlsModule | .tlsOffset | .tlsPointer | .tlsPointerNegated | .tlsDescriptor =>
+        -- Of its own, or of what has that name, first in the order that symbols are looked for. One that is weak and nowhere is at
+        -- nothing, of no module.
+        let owner : Except String (Option (LibraryTls × Nat)) :=
+          match symbolEntry with
+          | none => .ok (tls.map fun info => (info, 0))
+          | some symbol =>
+            let unversioned := (symbol.name.splitOn "@").headD symbol.name
+            let inOther (other : LoadedLibrary) : Option (LibraryTls × Nat) :=
+              match other.tlsSymbols.lookup unversioned, other.tls with
+              | some value, some info => some (info, value)
+              | _, _ => none
+            match scope.findSome? inOther with
+            | some found => .ok (some found)
+            | none =>
+              if symbol.sectionIndex != 0 then .ok (tls.map fun info => (info, symbol.value))
+              else if symbol.binding == 2 then .ok none
+              else .error unversioned
+        match owner with
+        | .error name => unless missing.contains name do missing := name :: missing
+        | .ok found =>
+          let tlsAddend := if relocation.explicitAddend then relocation.addend else 0
+          -- On MIPS these are slots of the GOT, which has nothing to add to a symbol: `ld.lld` leaves the value of that symbol there.
+          let gotSlot := (architecture matches .mips ..) && symbolEntry.isSome
+          let storedAddend ← if relocation.explicitAddend || gotSlot then pure 0 else
+            -- A word of its own holds what is added, but for a module, which has nothing to add.
+            match kind with
+            | .tlsModule => pure 0
+            | .tlsDescriptor => readWord (place + word)
+            | _ => readWord place
+          let plus := tlsAddend + storedAddend
+          match kind, found with
+          | .tlsModule, some (info, _) => writeWord place info.module
+          | .tlsModule, none => writeWord place 0
+          | .tlsOffset, some (_, value) => writeWord place (value + plus + 2 ^ architecture.bits - tlsOffsetBias architecture)
+          | .tlsOffset, none => writeWord place 0
+          | .tlsPointer, some (info, value) => writeWord place (tlsPointerValue architecture info (value + plus))
+          | .tlsPointer, none => writeWord place 0
+          | .tlsPointerNegated, some (info, value) => writeWord place (info.offset + 2 ^ architecture.bits - (value + plus))
+          | .tlsPointerNegated, none => writeWord place 0
+          | .tlsDescriptor, _ =>
+            let some _ := tlsDescriptorCode architecture
+              | throw <| IO.userError s!"{path} has a descriptor of thread-local storage, which this can't do on this target"
+            let page ← machine.ensureReturnPage
+            let value := match found with
+              | some (info, value) => tlsPointerValue architecture info (value + plus)
+              | none => 0
+            writeWord place (page + tlsDescriptorOffset)
+            writeWord (place + word) value
+          | _, _ => pure ()
+      | .relative => writeWord place (base + addend)
+      | .indirect => indirect := (place, base + addend) :: indirect
+      | _ =>
+        match symbolEntry, kind with
+        | none, _ =>
+          -- REL32 of MIPS without a symbol is relative.
+          writeWord place (base + addend)
+        | some symbol, _ =>
+          match lookup symbol with
+          | .ok address =>
+            -- What it is bound to is its own indirect function, what the resolver picks, as `elf_ifunc_invoke` has it: not of one that
+            -- is to be had first or is found before it, which goes before its own as any other definition does.
+            if symbol.typ == 10 && symbol.sectionIndex != 0 && address == base + symbol.value then
+              indirect := (place, address) :: indirect
             else
+              match kind with
+              | .slot => writeWord place (address + (if relocation.explicitAddend then relocation.addend else 0))
+              | .pcRelative => writeWord place (address + addend + 2 ^ architecture.bits - place)
+              | _ => writeWord place (address + addend)
+          | .error name => unless missing.contains name do missing := name :: missing
+    -- The GOT of MIPS, which has no relocations: its local entries are moved, and the rest are its symbols from where the table says.
+    if architecture matches .mips .. then
+      let tag (key : Nat) : Option Nat := (tags.find? (·.1 == key)).map (·.2)
+      if let (some got, some locals) := (tag 3, tag 0x7000000a) then
+        for index in [0:locals] do
+          let place := base + got + index * word
+          writeWord place ((← readWord place) + base)
+        if let (some first, some total) := (tag 0x70000013, tag 0x70000011) then
+          for index in [first:total] do
+            let place := base + got + (locals + index - first) * word
+            let symbol := symbolList[index]?
+            match symbol with
+            | some symbol =>
               match lookup symbol with
-              | .ok address =>
-                match kind with
-                | .slot => writeWord place (address + (if relocation.explicitAddend then relocation.addend else 0))
-                | _ => writeWord place (address + addend)
+              | .ok address => writeWord place address
               | .error name => unless missing.contains name do missing := name :: missing
-      -- The GOT of MIPS, which has no relocations: its local entries are moved, and the rest are its symbols from where the table says.
-      if architecture matches .mips .. then
-        let tag (key : Nat) : Option Nat := (tags.find? (·.1 == key)).map (·.2)
-        if let (some got, some locals) := (tag 3, tag 0x7000000a) then
-          for index in [0:locals] do
-            let place := base + got + index * word
-            writeWord place ((← readWord place) + base)
-          if let (some first, some total) := (tag 0x70000013, tag 0x70000011) then
-            for index in [first:total] do
-              let place := base + got + (locals + index - first) * word
-              let symbol := symbolList[index]?
-              match symbol with
-              | some symbol =>
-                match lookup symbol with
-                | .ok address => writeWord place address
-                | .error name => unless missing.contains name do missing := name :: missing
-              | none => pure ()
-      unless missing.isEmpty do
-        throw <| IO.userError s!"{path} needs what isn't there: {" ".intercalate missing.reverse}"
-      -- A resolver is called as glibc's loader calls it, which is how one finds out what it may use: on AArch64 with `AT_HWCAP` and
-      -- `_IFUNC_ARG_HWCAP`, and what has `AT_HWCAP` and `AT_HWCAP2`; on ARM and PowerPC with `AT_HWCAP`; on RISC-V with that and
-      -- `__riscv_hwprobe`, which may be NULL, as it is here; and on x86 and MIPS with nothing.
-      let callResolver (resolver : Nat) : IO Nat := do
-        let process := (← machine.kernel.get).process (← currentTask emu).group
-        let auxiliaryValue (key : Nat) : Nat :=
-          ((List.range (process.auxiliary.length / 2)).findSome? fun index =>
-            if process.auxiliary[2 * index]! == key then some process.auxiliary[2 * index + 1]! else none).getD 0
-        match architecture with
-        | .arm | .powerpc .. => machine.call resolver [auxiliaryValue 16]
-        | .riscv64 | .riscv32 => machine.call resolver [auxiliaryValue 16, 0]
-        | .aarch64 =>
-          let hwcap := auxiliaryValue 16
-          let argument ← machine.calloc 1 24
-          writeWord argument 24
-          writeWord (argument + 8) hwcap
-          writeWord (argument + 16) (auxiliaryValue 26)
-          try machine.call resolver [hwcap + 2 ^ 62, argument]
-          finally machine.free argument
-        | _ => machine.call resolver []
-      -- What chooses an implementation runs now, with all that it could call relocated, as far as they can be.
-      for (place, resolver) in indirect.reverse do
-        writeWord place (← callResolver resolver)
-      protectLibrary machine image base program
-      -- Its initializers, and what undoes them.
-      let tagged (key : Nat) : Option Nat := (tags.find? (·.1 == key)).map (·.2)
-      let arrayOf (start size : Nat) : IO (List Nat) := do
-        match tagged start, tagged size with
-        | some address, some bytes =>
-          (List.range (bytes / word)).filterMapM fun index => do
-            let value ← readWord (base + address + index * word)
-            -- 0 and all ones mean nothing, as linkers have them.
-            pure (if value == 0 || value == 2 ^ architecture.bits - 1 then none else some value)
-        | _, _ => pure []
-      let single (key : Nat) : List Nat := (tagged key).toList.map (base + ·)
-      let initializers := single 12 ++ (← arrayOf 25 27)
-      let finalizers := (← arrayOf 26 28).reverse ++ single 13
-      loading.modify fun state => { state with initializers := state.initializers ++ initializers }
-      -- What a resolver chooses is what it is to anyone who asks for it.
-      let chosen ← dynamic.filterMapM fun symbol => do
-        if symbol.typ == 10 && symbol.sectionIndex != 0 && symbol.binding != 0 && !symbol.name.isEmpty then
-          pure (some (symbol.name, ← callResolver (base + symbol.value)))
-        else pure none
-      let symbols := symbols.map fun entry => (entry.1, (chosen.lookup entry.1).getD entry.2)
-      let finished : LoadedLibrary := { library with needs, finalizers, symbols, initializers }
-      -- What it needs is held by it already, as each was counted when it was found.
-      machine.libraries.modify fun table => table.insert space ((spaceHas space table).map fun other =>
-        if other.path == path then finished else other)
-      pure finished
-  machine.libraries.modify fun table => table.insert space ((spaceHas space table).map fun other =>
-    if other.path == path then { other with references := other.references + 1 } else other)
-  pure existing
+            | none => pure ()
+    unless missing.isEmpty do
+      throw <| IO.userError s!"{path} needs what isn't there: {" ".intercalate missing.reverse}"
+    -- A resolver is called as glibc's loader calls it, which is how one finds out what it may use: on AArch64 with `AT_HWCAP` and
+    -- `_IFUNC_ARG_HWCAP`, and what has `AT_HWCAP` and `AT_HWCAP2`; on ARM and PowerPC with `AT_HWCAP`; on RISC-V with that and
+    -- `__riscv_hwprobe`, which may be NULL, as it is here; and on x86 and MIPS with nothing.
+    let callResolver (resolver : Nat) : IO Nat := do
+      let process := (← machine.kernel.get).process (← currentTask emu).group
+      let auxiliaryValue (key : Nat) : Nat :=
+        ((List.range (process.auxiliary.length / 2)).findSome? fun index =>
+          if process.auxiliary[2 * index]! == key then some process.auxiliary[2 * index + 1]! else none).getD 0
+      match architecture with
+      | .arm | .powerpc .. => machine.call resolver [auxiliaryValue 16]
+      | .riscv64 | .riscv32 => machine.call resolver [auxiliaryValue 16, 0]
+      | .aarch64 =>
+        let hwcap := auxiliaryValue 16
+        let argument ← machine.calloc 1 24
+        writeWord argument 24
+        writeWord (argument + 8) hwcap
+        writeWord (argument + 16) (auxiliaryValue 26)
+        try machine.call resolver [hwcap + 2 ^ 62, argument]
+        finally machine.free argument
+      | _ => machine.call resolver []
+    -- What chooses an implementation runs now, with all that it could call relocated, as far as they can be.
+    for (place, resolver) in indirect.reverse do
+      writeWord place (← callResolver resolver)
+    protectLibrary machine image base program
+    -- Its initializers, and what undoes them.
+    let tagged (key : Nat) : Option Nat := (tags.find? (·.1 == key)).map (·.2)
+    let arrayOf (start size : Nat) : IO (List Nat) := do
+      match tagged start, tagged size with
+      | some address, some bytes =>
+        (List.range (bytes / word)).filterMapM fun index => do
+          let value ← readWord (base + address + index * word)
+          -- 0 and all ones mean nothing, as linkers have them.
+          pure (if value == 0 || value == 2 ^ architecture.bits - 1 then none else some value)
+      | _, _ => pure []
+    let single (key : Nat) : List Nat := (tagged key).toList.map (base + ·)
+    let initializers := single 12 ++ (← arrayOf 25 27)
+    let finalizers := (← arrayOf 26 28).reverse ++ single 13
+    loading.modify fun state => { state with initializers := state.initializers ++ initializers }
+    -- What a resolver chooses is what it is to anyone who asks for it.
+    let chosen ← dynamic.filterMapM fun symbol => do
+      if symbol.typ == 10 && symbol.sectionIndex != 0 && symbol.binding != 0 && !symbol.name.isEmpty then
+        pure (some (symbol.name, ← callResolver (base + symbol.value)))
+      else pure none
+    let symbols := symbols.map fun entry => (entry.1, (chosen.lookup entry.1).getD entry.2)
+    -- And to what was linked to a version of it.
+    let versions := versions.map fun ((name, version), address) => ((name, version), (chosen.lookup name).getD address)
+    let finished : LoadedLibrary := { library with needs, finalizers, symbols, initializers, versions }
+    -- What it needs is held by it already, as each was counted when it was found.
+    machine.libraries.modify fun table => table.insert space ((spaceHas space table).map fun other =>
+      if other.path == path then finished else other)
+    pure finished
+  pure { library, names := Elf.needed data, locate, finish }
+
+/-- A library and all that it needs, as `_dl_map_object_deps` has them: each that isn't loaded is mapped and known of, breadth first, as
+the order that symbols are looked for in is, and what one needs is first what is loaded of that name (`DT_SONAME`), and else what it
+finds; then each is relocated and has its initializers noted, what it needs before it. Each that it needs, and what is asked, holds what
+it is of once more. -/
+private def loadTree (machine : Machine) (root : String) (space : Nat) (search : List String) (resolve : String → Option Nat)
+    (prefer : String → Option Nat) (ignoreMissing : Bool) (loading : IO.Ref Loading) : IO LoadedLibrary := do
+  let loaded (path : String) : IO (Option LoadedLibrary) := do
+    pure ((spaceHas space (← machine.libraries.get)).find? (·.path == path))
+  let hold (path : String) (count : Nat) : IO Unit :=
+    machine.libraries.modify fun table => table.insert space ((spaceHas space table).map fun other =>
+      if other.path == path then { other with references := other.references + count } else other)
+  if let some existing ← loaded root then
+    hold root 1
+    return existing
+  let mut queue : Array String := #[root]
+  let mut prepared : Std.HashMap String Prepared := {}
+  let mut needsOf : Std.HashMap String (List String) := {}
+  let mut held : Std.HashMap String Nat := {}
+  let mut index := 0
+  while index < queue.size do
+    let path := queue[index]!
+    index := index + 1
+    let ready ← prepare machine path space search resolve prefer loading
+    prepared := prepared.insert path ready
+    let mut needs : List String := []
+    for name in ready.names do
+      let table := spaceHas space (← machine.libraries.get)
+      let found ← match table.find? (·.name == name) with
+        | some other => pure (some other.path)
+        | none => ready.locate name
+      match found with
+      | none =>
+        if !ignoreMissing then throw <| IO.userError s!"{path} needs {name}, which isn't in this machine"
+      | some found =>
+        needs := needs ++ [found]
+        if (table.find? (·.path == found)).isSome || queue.contains found then held := held.insert found (held.getD found 0 + 1)
+        else queue := queue.push found
+    needsOf := needsOf.insert path needs
+  for (path, count) in held.toList do hold path count
+  -- What it needs before it, of what this maps, as `_dl_sort_maps` has them for their initializers.
+  let mut order : Array String := #[]
+  let mut stack : List (String × Bool) := [(root, false)]
+  let mut seen : Std.HashSet String := {}
+  let edges := needsOf.fold (fun total _ needs => total + needs.length) 0
+  for _ in [0:2 * (queue.size + edges) + 4] do
+    match stack with
+    | [] => break
+    | (path, true) :: rest =>
+      stack := rest
+      order := order.push path
+    | (path, false) :: rest =>
+      if seen.contains path || !prepared.contains path then
+        stack := rest
+      else
+        seen := seen.insert path
+        let children := ((needsOf.getD path []).filter fun child => prepared.contains child && !seen.contains child).map ((·, false))
+        stack := children ++ (path, true) :: rest
+  let mut finished : Option LoadedLibrary := none
+  for path in order do
+    let some ready := prepared.get? path | continue
+    let library ← ready.finish (needsOf.getD path [])
+    if path == root then finished := some library
+  match finished with
+  | some library => pure library
+  | none => throw <| IO.userError s!"{root} wasn't loaded"
 
 /-- Loads a shared library from the files of the machine, with all that it needs, into the process that runs, and runs its initializers,
 as `dlopen`. What it imports is found in what is loaded, in the order that it was, and then by `resolve`, which is for what a host wants
 to give it, such as a stub. A weak one that nowhere has is 0, and one that isn't is an error, with nothing left of the load. A library
 that is here already just has one more hold on it. `ignoreMissing` goes on without a library that it needs, which only works if `resolve`
-has what that would have given. Libraries that are named look in `search`, then its own `DT_RUNPATH`, then where libraries are. -/
+has what that would have given. Libraries that are named look in what a library says of `DT_RPATH` if it says nothing of `DT_RUNPATH`,
+then in `search`, then in its `DT_RUNPATH`, then where libraries are; one that is loaded of the name that is needed is it. What it needs
+is loaded breadth first, as symbols are looked for in that order, and its initializers run with the arguments of the program. -/
 def Machine.loadLibrary (machine : Machine) (path : String) (search : List String := []) (resolve : String → Option Nat := fun _ => none)
     (ignoreMissing : Bool := false) (runInitializers : Bool := true) (prefer : String → Option Nat := fun _ => none) : IO LoadedLibrary := do
   if ← machine.emu.serving.get then
     throw <| IO.userError "a library can't be loaded in the middle of an instruction: stop the thread, and load it once the run returns"
-  let some found ← findLibrary machine path "/" [] search
+  let some found ← findLibrary machine path "/" [] [] search
     | throw <| IO.userError s!"{path} isn't in this machine"
   let space := (← currentTask machine.emu).space
   let before ← machine.libraries.get
@@ -615,10 +701,22 @@ def Machine.loadLibrary (machine : Machine) (path : String) (search : List Strin
       unmap machine.emu library.start library.span
     machine.libraries.set before
   try
-    let library ← loadOne machine found space search resolve prefer ignoreMissing loading
+    let library ← loadTree machine found space search resolve prefer ignoreMissing loading
     if runInitializers then
+      -- Each with the count of the arguments of the program, their addresses and those of its environment, as glibc's `call_init`
+      -- has them: where they are on the stack that it started with, below the bytes of `AT_RANDOM`, as `mapStack` put them.
+      let process := (← machine.kernel.get).process (← currentTask machine.emu).group
+      let word := machine.architecture.bits / 8
+      let pairs := (List.range (process.auxiliary.length / 2)).map fun index =>
+        (process.auxiliary.getD (2 * index) 0, process.auxiliary.getD (2 * index + 1) 0)
+      let arguments := match pairs.lookup 25 with
+        | some random =>
+          let cells := 3 + process.command.length + process.environment.length + process.auxiliary.length + 2
+          let top := (random - word * cells) / 16 * 16
+          [process.command.length, top + word, top + word * (2 + process.command.length)]
+        | none => []
       for initializer in (← loading.get).initializers do
-        let _ ← machine.call initializer []
+        let _ ← machine.call initializer arguments
       -- They have all run, of what this loaded.
       let loaded := (← loading.get).mapped.map (·.path)
       machine.libraries.modify fun table => table.insert space ((spaceHas space table).map fun other =>

@@ -1,0 +1,20 @@
+fdiv 0/0               a0211000
+fdiv inf/inf           a0411000
+fsub inf-inf           a0811000
+fmul inf*0             a0111000
+fadd snan              a1011000
+fadd qnan              00011000
+fadd 1+2^-60           82024000
+fadd 1+3*2^-53         82024000
+fadd 3+(-5)            00008000
+fdiv 1/0               84005000
+fmul huge              92025000
+fmul tiny              00014000
+fsub 2-2               00002000
+fsqrt -1               a0011200
+fctiwz qnan            a0000100
+fcmpo qnan             a0081000
+fcmpu qnan             00001000
+fcmpu snan             a1001000
+0/0, then mtfsb0 31    a0211000
+fdiv. 0/0 CR1          a

@@ -51,10 +51,15 @@ def locationAt (abi : Convention) (types : List CType) (index : Nat) : Location 
   | none =>
     .stack (abi.stackArgumentsStart + (((types.take index).drop abi.functionArguments.length).map (stackWords abi)).sum * (abi.wordSize / 8))
 
-theorem argumentLocations_eq (abi : Convention) (prototype : Prototype) :
-    argumentLocations abi prototype =
+/-- Of a convention of no ABI that it knows, what is placed by words alone, as the theorems of `wordLocations` here say. -/
+theorem argumentLocations_unknown (abi : Convention) (prototype : Prototype) (h : abi.arch = .unknown) :
+    argumentLocations abi prototype = wordLocations abi prototype := by
+  simp [argumentLocations, h]
+
+theorem wordLocations_eq (abi : Convention) (prototype : Prototype) :
+    wordLocations abi prototype =
       (List.range prototype.params.length).map (locationAt abi (prototype.params.map (·.typ))) := by
-  unfold argumentLocations
+  unfold wordLocations
   simp only [List.length_map]
   rfl
 
@@ -99,11 +104,11 @@ private theorem length_le_sum_map {α} (f : α → Nat) (l : List α) (h : ∀ x
     omega
 
 /-- With parameters of a word each, as all are of 64 bits, each is where `argumentLocation` says. -/
-theorem argumentLocations_getElem (abi : Convention) (prototype : Prototype) (i : Nat)
+theorem wordLocations_getElem (abi : Convention) (prototype : Prototype) (i : Nat)
     (h : i < prototype.params.length) (hw : ∀ q ∈ prototype.params, stackWords abi q.typ = 1) :
-    (argumentLocations abi prototype)[i]'(by simpa [argumentLocations] using h) =
+    (wordLocations abi prototype)[i]'(by simpa [wordLocations] using h) =
       argumentLocation abi i := by
-  simp only [argumentLocations, List.getElem_map, List.getElem_range, argumentLocation]
+  simp only [wordLocations, List.getElem_map, List.getElem_range, argumentLocation]
   cases hr : abi.functionArguments[i]? with
   | some var => rfl
   | none =>
@@ -119,17 +124,17 @@ theorem argumentLocations_getElem (abi : Convention) (prototype : Prototype) (i 
     rw [Nat.min_eq_left (by omega)]
 
 /-- Locations depend on the types of the parameters only, not their names or the result. -/
-theorem argumentLocations_congr (abi : Convention) (p q : Prototype)
+theorem wordLocations_congr (abi : Convention) (p q : Prototype)
     (h : p.params.map (·.typ) = q.params.map (·.typ)) :
-    argumentLocations abi p = argumentLocations abi q := by
+    wordLocations abi p = wordLocations abi q := by
   have hl : p.params.length = q.params.length := by
     simpa using congrArg List.length h
-  rw [argumentLocations_eq, argumentLocations_eq, h, hl]
+  rw [wordLocations_eq, wordLocations_eq, h, hl]
 
 /-- Appending parameters doesn't move earlier ones. -/
-theorem argumentLocations_append (abi : Convention) (p : Prototype) (extra : List Parameter) :
-    (argumentLocations abi { p with params := p.params ++ extra }).take p.params.length = argumentLocations abi p := by
-  rw [argumentLocations_eq, argumentLocations_eq]
+theorem wordLocations_append (abi : Convention) (p : Prototype) (extra : List Parameter) :
+    (wordLocations abi { p with params := p.params ++ extra }).take p.params.length = wordLocations abi p := by
+  rw [wordLocations_eq, wordLocations_eq]
   simp only [List.length_append, List.range_add, List.map_append]
   rw [List.take_append_of_le_length (by simp), List.take_of_length_le (by simp)]
   apply List.map_congr_left
@@ -139,23 +144,23 @@ theorem argumentLocations_append (abi : Convention) (p : Prototype) (extra : Lis
   rw [List.take_append_of_le_length (by simp; omega)]
 
 /-- Registers fill up first: no register location follows a stack location. -/
-theorem argumentLocations_registers_first (abi : Convention) (prototype : Prototype) :
-    (argumentLocations abi prototype).Pairwise fun a b =>
+theorem wordLocations_registers_first (abi : Convention) (prototype : Prototype) :
+    (wordLocations abi prototype).Pairwise fun a b =>
       (∃ offset, a = .stack offset) → ∃ offset, b = .stack offset := by
-  rw [argumentLocations_eq]
+  rw [wordLocations_eq]
   refine List.pairwise_map.2 (List.Pairwise.imp ?_ List.pairwise_lt_range)
   intro a b hab ha
   have := (location_stack_iff abi _ a).1 ha
   exact (location_stack_iff abi _ b).2 (by omega)
 
 /-- Exactly the first `min` parameters are in registers; the rest are on the stack. -/
-theorem argumentLocations_stack_count (abi : Convention) (prototype : Prototype) :
-    ((argumentLocations abi prototype).filter fun location =>
+theorem wordLocations_stack_count (abi : Convention) (prototype : Prototype) :
+    ((wordLocations abi prototype).filter fun location =>
         match location with
         | .stack _ => true
         | .register _ => false).length =
       prototype.params.length - abi.functionArguments.length := by
-  rw [argumentLocations_eq]
+  rw [wordLocations_eq]
   generalize prototype.params.map (·.typ) = types
   generalize prototype.params.length = n
   induction n with
@@ -188,10 +193,10 @@ private theorem stack_sum_lt (abi : Convention) (types : List CType) (i j : Nat)
   omega
 
 /-- With distinct registers and non-empty words no two parameters share a location. -/
-theorem argumentLocations_nodup (abi : Convention) (prototype : Prototype)
+theorem wordLocations_nodup (abi : Convention) (prototype : Prototype)
     (hn : abi.functionArguments.Nodup) (hw : 8 ≤ abi.wordSize) :
-    (argumentLocations abi prototype).Nodup := by
-  rw [argumentLocations_eq]
+    (wordLocations abi prototype).Nodup := by
+  rw [wordLocations_eq]
   generalize htypes : prototype.params.map (·.typ) = types
   have hlen : prototype.params.length = types.length := by rw [← htypes]; simp
   have hinj : ∀ i j, i < j → j < types.length → locationAt abi types i ≠ locationAt abi types j := by
@@ -539,16 +544,10 @@ theorem parsePrototype_rejects_no_paren (input : String)
 theorem parseHeader_ok (input : String) (ps : List Prototype) (h : parseHeader input = .ok ps) :
     ∀ p ∈ ps, PrototypeOk p ∧ ∃ declaration, parsePrototype declaration = .ok p := by
   unfold parseHeader at h
-  simp only [] at h
   intro p hp
   have ⟨_, hmem⟩ := mapM_ok h
   have ⟨d, _, hd⟩ := hmem p hp
   exact ⟨parsePrototype_ok _ _ hd, d, hd⟩
-
-/-- The declarations `parseHeader` hands to `parsePrototype`. -/
-def headerDeclarations (input : String) : List String :=
-  ((String.ofList (stripComments input.toList)).splitOn ";" |>.map trim).filter fun declaration =>
-    !declaration.isEmpty && declaration.contains '(' && !declaration.contains '{'
 
 /-- Header parsing is all-or-nothing: one bad declaration fails the whole header. -/
 theorem parseHeader_fails_on_bad_declaration (input declaration error : String)

@@ -89,11 +89,13 @@ private def byteAt (machine : Machine) (address : Nat) : IO (Option UInt8) := do
   | .ok bytes => pure bytes[0]?
   | .error _ => pure none
 
-/-- The status that the process of a thread ended with, if it has. -/
+/-- The status that the process of a thread ended with, if it has: once none of its threads runs, as its first may have left by
+`pthread_exit` while the others go on; of the thread, or else of the first. -/
 private def exitOf (machine : Machine) (thread : ThreadId) : IO (Option Nat) := do
   let table ← machine.emu.taskTable.get
   let group := ((table.tasks.find? (·.tid == thread)).map (·.group)).getD thread
-  pure ((table.tasks.find? (·.tid == group)).bind (·.status))
+  if (table.tasks.filter (·.group == group)).any (·.status.isNone) then return none
+  pure (((table.tasks.find? (·.tid == thread)).bind (·.status)).or ((table.tasks.find? (·.tid == group)).bind (·.status)))
 
 /-- What happens from here while `act` runs, for the thread that runs, which is then put back as it was. -/
 private def observe (recorder : Recorder) (profile : Cff.Profile) (act : IO Nat) : IO Contract := do

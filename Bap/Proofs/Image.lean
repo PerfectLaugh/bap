@@ -5694,9 +5694,9 @@ theorem parseSections_ok {data : ByteArray} {header : Header} {sections : List S
 
 /-- Auxiliary records are skipped: symbols only accumulate, by at most the declared number. -/
 theorem parseSymbols_ok {data : ByteArray} {header : Header} {sections : List Section} :
-    ∀ {fuel index remaining : Nat} {symbols result : List Symbol}, remaining ≤ fuel →
+    ∀ {fuel index remaining : Nat} {symbols result : Array Symbol}, remaining ≤ fuel →
       parseSymbols data header sections index remaining symbols = .ok result →
-      ∃ added, result = symbols ++ added ∧ added.length ≤ remaining
+      ∃ added, result.toList = symbols.toList ++ added ∧ added.length ≤ remaining
   | _, index, 0, symbols, result, _, h => by
     rw [parseSymbols] at h
     cases h
@@ -5710,7 +5710,7 @@ theorem parseSymbols_ok {data : ByteArray} {header : Header} {sections : List Se
     · rw [ite_eq_left ha] at h; cases h
     rw [ite_eq_right ha] at h
     have ⟨added, he, hl⟩ := parseSymbols_ok (fuel := fuel) (by omega) h
-    exact ⟨symbol :: added, by simpa using he, by simp; omega⟩
+    exact ⟨symbol :: added, by simpa [Array.toList_push] using he, by simp; omega⟩
 
 /-- Everything `Pe.decode` promises about an accepted file. -/
 theorem decode_ok {data : ByteArray} {image : Image} (h : Pe.decode data = .ok image) :
@@ -5855,9 +5855,9 @@ theorem parseSection_uninitialized_reads_zero {data : ByteArray} {header : Heade
   exact hl.readByte_zero (by rw [hz hf]; omega) hi
 
 theorem symbols_ok {data : ByteArray} {header : Header} {sections : List Section} :
-    ∀ {fuel index remaining : Nat} {symbols result : List (Nat × Symbol)}, remaining ≤ fuel →
+    ∀ {fuel index remaining : Nat} {symbols result : Array (Nat × Symbol)}, remaining ≤ fuel →
       parseSymbols data header sections index remaining symbols = .ok result →
-      ∃ added, result = symbols ++ added ∧ added.length ≤ remaining ∧ ∀ entry ∈ added, index ≤ entry.1
+      ∃ added, result.toList = symbols.toList ++ added ∧ added.length ≤ remaining ∧ ∀ entry ∈ added, index ≤ entry.1
   | _, index, 0, symbols, result, _, h => by
     rw [parseSymbols] at h
     cases h
@@ -5871,7 +5871,7 @@ theorem symbols_ok {data : ByteArray} {header : Header} {sections : List Section
     · rw [ite_eq_left ha] at h; cases h
     rw [ite_eq_right ha] at h
     have ⟨added, he, hl, hi⟩ := symbols_ok (fuel := fuel) (by omega) h
-    refine ⟨(index, symbol) :: added, by simpa using he, by simp; omega, ?_⟩
+    refine ⟨(index, symbol) :: added, by simpa [Array.toList_push] using he, by simp; omega, ?_⟩
     intro entry hm
     simp only [List.mem_cons] at hm
     rcases hm with rfl | hm

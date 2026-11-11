@@ -1,0 +1,9 @@
+erofs: remount ok, chmod Read-only file system, chown Read-only file system, utimensat Read-only file system, setxattr Read-only file system
+erofs: removexattr Read-only file system, truncate Read-only file system, open to write Read-only file system, mkdir Read-only file system
+bind: bind read-only ok, written ok, remount ok, written Read-only file system, of the source ok
+bind: rename across Cross-device link, link across Read-only file system, rename into a writable bind Cross-device link, within it ok
+noexec: X_OK Permission denied, R_OK ok, execve Permission denied
+order: chroot of nothing No such file or directory, of a file Not a directory, of a directory Operation not permitted, mount on nothing No such file or directory, on a directory Operation not permitted
+order: umount2 of a flag Invalid argument, of nothing No such file or directory, of a directory Operation not permitted
+setuid: another's Operation not permitted, still 4755, its owner's ok, then 755
+done

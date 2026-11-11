@@ -29,6 +29,8 @@ inductive BaseResult where
   /-- A wait that its time ends, if nothing woke it before: a time of the kernel's clock, which is that of `CLOCK_REALTIME`. -/
   | waitUntil (address deadline : Nat)
   | finished
+  /-- It returned to where it was called from itself, and said that the host is done with it. -/
+  | returned
 
 /-- A function of the base environment: of the machine as it is at the call, its arguments, and whether it is asked again after it
 waited. -/
@@ -105,23 +107,28 @@ private def serveStubs (machine : Machine) (table : IO.Ref Dispatch) : IO Unit :
     let here := { machine with emu }
     let arguments ← callArguments here emu
     for starts in ← emu.hostStarts.get do starts s!"base {name}"
+    -- Each start has its end, whatever comes of it: of a call that waits, as it is asked again once it is woken, which starts it again.
+    let ended (register : Option String) : IO Unit := do for ends in ← emu.hostEnds.get do ends register
     match ← function here arguments (at_ != entry) with
     | .value value =>
       returnFromCall here emu value
-      for ends in ← emu.hostEnds.get do ends none
+      ended (some (resultRegisterOf machine.architecture))
     | .wait address =>
+      ended none
       let thread ← Bap.Emu.thread emu
       let space := (← currentTask emu).space
       emu.taskTable.modify (·.futexWait { thread, space, address, bitset := 2 ^ 32 - 1 })
       setPc emu (if at_ == entry + 8 then entry + 4 else entry + 8)
       emu.stopped.set true
     | .waitUntil address deadline =>
+      ended none
       let thread ← Bap.Emu.thread emu
       let space := (← currentTask emu).space
       emu.taskTable.modify (·.futexWait { thread, space, address, bitset := 2 ^ 32 - 1, timed := true, deadline := some deadline })
       setPc emu (if at_ == entry + 8 then entry + 4 else entry + 8)
       emu.stopped.set true
-    | .finished => pure ()
+    | .finished => ended none
+    | .returned => pure ()
 
 /-- All that a thread that the environment made had, once it is over and nothing is to join it: its stack, its thread-local storage,
 the word that `pthread_join` waits on and its `errno`. -/
@@ -152,25 +159,49 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
   let defaultStack := 1024 * 1024
   let wrap (value : Int) : Nat := (value % (2 ^ width : Int)).toNat
   let value (number : Nat) : IO BaseResult := pure (.value number)
-  let readBytes (machine : Machine) (address size : Nat) : IO ByteArray := Bap.Emu.read machine.emu address size
+  -- What it reads of the guest, which what it gives back comes from.
+  let readBytes (machine : Machine) (address size : Nat) : IO ByteArray := do
+    let bytes ← Bap.Emu.read machine.emu address size
+    for reads in ← machine.emu.hostReads.get do reads address size
+    pure bytes
   let writeBytes (machine : Machine) (address : Nat) (bytes : ByteArray) : IO Unit := Bap.Emu.write machine.emu address bytes
   let read32 (machine : Machine) (address : Nat) : IO Nat := do pure (numberOf big (← readBytes machine address 4))
   let readWord (machine : Machine) (address : Nat) : IO Nat := do pure (numberOf big (← readBytes machine address word))
   let write32 (machine : Machine) (address value : Nat) : IO Unit := writeBytes machine address (numberBytes big 4 value)
   let writeWord (machine : Machine) (address value : Nat) : IO Unit := writeBytes machine address (numberBytes big word value)
-  -- A string of C, read a page at a time.
+  -- A string of C, read a page at a time, of which what was read is the string and the zero that ends it, and not what is after.
   let stringAt (machine : Machine) (address : Nat) (limit : Nat := 2 ^ 32) : IO ByteArray := do
     let mut out := ByteArray.empty
     let mut at_ := address
+    let mut ended := false
     while out.size < limit do
       let chunk := min (4096 - at_ % 4096) (limit - out.size)
-      let bytes ← readBytes machine at_ chunk
+      let bytes ← Bap.Emu.read machine.emu at_ chunk
       match bytes.toList.findIdx? (· == 0) with
-      | some index => return out ++ bytes.extract 0 index
+      | some index =>
+        out := out ++ bytes.extract 0 index
+        ended := true
+        break
       | none =>
         out := out ++ bytes
         at_ := at_ + chunk
+    for reads in ← machine.emu.hostReads.get do reads address (out.size + (if ended then 1 else 0))
     pure out
+  -- What a function copies has what it came from: it is written a piece at a time, of no more than how far apart they are, from the end
+  -- when it goes up as `memmove` has it, so that no piece is written over what is yet to be copied, and each piece is said to be copied.
+  let copyBytes (machine : Machine) (target source : Nat) (bytes : ByteArray) : IO Unit := do
+    let size := bytes.size
+    if size == 0 then return
+    let hearers ← machine.emu.memoryCopied.get
+    if hearers.isEmpty then return ← writeBytes machine target bytes
+    let apart := if target > source then target - source else source - target
+    let piece := if apart == 0 then size else min size apart
+    let count := (size + piece - 1) / piece
+    for step in List.range count do
+      let index := if target > source then count - 1 - step else step
+      let (start, stop) := (index * piece, min size (index * piece + piece))
+      writeBytes machine (target + start) (bytes.extract start stop)
+      for copied in hearers do copied (source + start) (target + start) (stop - start)
   -- `count` bytes of `byte` from `address`, a piece at a time, so that what the host makes of them is no more than a piece, whatever
   -- count a guest gives.
   let fillBytes (machine : Machine) (address count : Nat) (byte : UInt8) : IO Unit := do
@@ -181,17 +212,29 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
   let tidOf (machine : Machine) : IO Nat := Bap.Emu.thread machine.emu
   -- A mutex is its first word, of the thread that holds it, which is all that bionic has of one on 32 bits; how many times it holds
   -- it is kept here.
+  -- Of a mutex that nobody holds, its type, as bionic keeps it in bits 14 and 15 of its word, of which its static initializers of one that
+  -- is recursive and of one that checks are 0x4000 and 0x8000, with 0x2000 of one that processes share: this keeps it, of one that is
+  -- held, whose word is of the thread that holds it.
+  let unheld (word : Nat) : Bool := word &&& (2 ^ 32 - 1 - 0xe000) == 0
+  let mutexTypeOf (mutex word : Nat) : IO Nat := do
+    if unheld word && word != 0 then
+      let type := (word >>> 14) &&& 3
+      state.modify fun state => { state with mutexTypes := state.mutexTypes.insert mutex type }
+      pure type
+    else pure ((← state.get).mutexTypes.getD mutex 0)
   let mutexLock (machine : Machine) (mutex : Nat) (try_ : Bool) : IO BaseResult := do
     let me ← tidOf machine
-    let owner ← read32 machine mutex
+    let word ← read32 machine mutex
+    let _ ← mutexTypeOf mutex word
+    let owner := if unheld word then 0 else word
     if owner == 0 then
       write32 machine mutex me
       state.modify fun state => { state with lockCounts := state.lockCounts.insert mutex 1 }
       value 0
     else if owner == me then
       match (← state.get).mutexTypes.getD mutex 0 with
-      -- One that checks says so, and a try of one that is normal is `EBUSY`, as it is held.
-      | 2 => value edeadlk
+      -- One that checks says so, and a try of it, or of one that is normal, is `EBUSY`, as it is held.
+      | 2 => value (if try_ then 16 else edeadlk)
       | 0 => if try_ then value 16 else
         -- A lock of a normal one that the thread holds would wait for ever, and goes on as of one that is recursive instead.
         state.modify fun state => { state with lockCounts := state.lockCounts.insert mutex (state.lockCounts.getD mutex 1 + 1) }
@@ -202,11 +245,15 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
     else if try_ then value 16
     else pure (.wait mutex)
   let mutexUnlock (machine : Machine) (mutex : Nat) : IO BaseResult := do
+    let word ← read32 machine mutex
+    let type ← mutexTypeOf mutex word
+    -- One that is recursive or checks, that the thread doesn't hold, is `EPERM`, as bionic has it; one that is normal isn't looked at.
+    if type != 0 && (unheld word || word != (← tidOf machine)) then return ← value 1
     let count := (← state.get).lockCounts.getD mutex 1
     if count > 1 then
       state.modify fun state => { state with lockCounts := state.lockCounts.insert mutex (count - 1) }
     else
-      write32 machine mutex 0
+      write32 machine mutex (type <<< 14)
       state.modify fun state => { state with lockCounts := state.lockCounts.erase mutex }
       wake machine.emu mutex 1
     value 0
@@ -250,7 +297,7 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
     returnFromCall machine emu result
     for ends in ← emu.hostEnds.get do ends none
     machine.signals.deliverPending emu
-    pure .finished
+    pure .returned
   let (stack, _) := threadRegisters machine.emu.config.syscallAbi
   let register (name : String) : Bap.Var := ⟨name, .imm width, 0, false⟩
   -- What the machine can't give is NULL, with `ENOMEM`, as of an allocator that has no more, rather than the end of the run.
@@ -259,8 +306,12 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
     catch _ =>
       write32 machine (← errnoOf machine) 12
       value 0
-  -- Of a block that was aligned, what it holds from where it was given, to the end of its block, goes to one that isn't.
+  -- Of a block that was aligned, what it holds from where it was given, to the end of its block, goes to one that isn't. Of a size of 0, it
+  -- is let go of, and NULL, as bionic's allocator has it.
   let reallocate (machine : Machine) (address size : Nat) : IO Nat := do
+    if address != 0 && size == 0 then
+      release machine address
+      return 0
     match (← state.get).aligned.get? address with
     | some block =>
       let held := ((← machine.allocationSize block).getD 0) - (address - block)
@@ -275,11 +326,21 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
     ("calloc", show BaseFunction from fun machine arguments _ => orNull machine (machine.calloc (arguments.headD 0) (arguments.getD 1 0))),
     ("realloc", show BaseFunction from fun machine arguments _ => orNull machine (reallocate machine (arguments.headD 0) (arguments.getD 1 0))),
     ("free", show BaseFunction from fun machine arguments _ => do release machine (arguments.headD 0); value 0),
-    ("memalign", show BaseFunction from fun machine arguments _ => orNull machine (allocate machine (arguments.headD 0) (arguments.getD 1 0))),
-    ("aligned_alloc", show BaseFunction from fun machine arguments _ =>
-      orNull machine (allocate machine (arguments.headD 0) (arguments.getD 1 0))),
+    -- Of an alignment that isn't a power of two, the next that is, as bionic's `memalign` has it.
+    ("memalign", show BaseFunction from fun machine arguments _ =>
+      orNull machine (allocate machine (Nat.nextPowerOfTwo (arguments.headD 0)) (arguments.getD 1 0))),
+    -- Of one that isn't, NULL with `EINVAL`.
+    ("aligned_alloc", show BaseFunction from fun machine arguments _ => do
+      let alignment := arguments.headD 0
+      if alignment == 0 || alignment &&& (alignment - 1) != 0 then
+        write32 machine (← errnoOf machine) 22
+        return ← value 0
+      orNull machine (allocate machine alignment (arguments.getD 1 0))),
     ("posix_memalign", show BaseFunction from fun machine arguments _ => do
-      -- What it can't give is `ENOMEM`, of which it writes nothing.
+      -- Of an alignment that isn't a power of two of words, `EINVAL`, and what it can't give is `ENOMEM`, of both of which it writes
+      -- nothing.
+      let alignment := arguments.getD 1 0
+      if alignment < word || alignment &&& (alignment - 1) != 0 then return ← value 22
       try
         writeWord machine (arguments.headD 0) (← allocate machine (arguments.getD 1 0) (arguments.getD 2 0))
         value 0
@@ -287,11 +348,11 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
     -- Memory and strings.
     ("memcpy", show BaseFunction from fun machine arguments _ => do
       let size := arguments.getD 2 0
-      if size > 0 then writeBytes machine (arguments.headD 0) (← readBytes machine (arguments.getD 1 0) size)
+      if size > 0 then copyBytes machine (arguments.headD 0) (arguments.getD 1 0) (← readBytes machine (arguments.getD 1 0) size)
       value (arguments.headD 0)),
     ("memmove", show BaseFunction from fun machine arguments _ => do
       let size := arguments.getD 2 0
-      if size > 0 then writeBytes machine (arguments.headD 0) (← readBytes machine (arguments.getD 1 0) size)
+      if size > 0 then copyBytes machine (arguments.headD 0) (arguments.getD 1 0) (← readBytes machine (arguments.getD 1 0) size)
       value (arguments.headD 0)),
     ("memset", show BaseFunction from fun machine arguments _ => do
       fillBytes machine (arguments.headD 0) (arguments.getD 2 0) (arguments.getD 1 0).toUInt8
@@ -316,17 +377,17 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
       let limit := arguments.getD 2 0
       value (compare (← stringAt machine (arguments.headD 0) limit) (← stringAt machine (arguments.getD 1 0) limit))),
     ("strcpy", show BaseFunction from fun machine arguments _ => do
-      writeBytes machine (arguments.headD 0) ((← stringAt machine (arguments.getD 1 0)).push 0)
+      copyBytes machine (arguments.headD 0) (arguments.getD 1 0) ((← stringAt machine (arguments.getD 1 0)).push 0)
       value (arguments.headD 0)),
     ("strncpy", show BaseFunction from fun machine arguments _ => do
       let limit := arguments.getD 2 0
       let text ← stringAt machine (arguments.getD 1 0) limit
-      writeBytes machine (arguments.headD 0) text
+      copyBytes machine (arguments.headD 0) (arguments.getD 1 0) text
       fillBytes machine (arguments.headD 0 + text.size) (limit - text.size) 0
       value (arguments.headD 0)),
     ("strcat", show BaseFunction from fun machine arguments _ => do
       let start := (arguments.headD 0) + (← stringAt machine (arguments.headD 0)).size
-      writeBytes machine start ((← stringAt machine (arguments.getD 1 0)).push 0)
+      copyBytes machine start (arguments.getD 1 0) ((← stringAt machine (arguments.getD 1 0)).push 0)
       value (arguments.headD 0)),
     ("strchr", show BaseFunction from fun machine arguments _ => do
       let text ← stringAt machine (arguments.headD 0)
@@ -346,12 +407,13 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
     ("strdup", show BaseFunction from fun machine arguments _ => do
       let text ← stringAt machine (arguments.headD 0)
       let copy ← machine.malloc (text.size + 1)
-      writeBytes machine copy (text.push 0)
+      copyBytes machine copy (arguments.headD 0) (text.push 0)
       value copy),
     ("strndup", show BaseFunction from fun machine arguments _ => do
       let text ← stringAt machine (arguments.headD 0) (arguments.getD 1 0)
       let copy ← machine.malloc (text.size + 1)
-      writeBytes machine copy (text.push 0)
+      copyBytes machine copy (arguments.headD 0) text
+      writeBytes machine (copy + text.size) (ByteArray.mk #[0])
       value copy),
     -- What is of the process.
     ("__errno_location", show BaseFunction from fun machine _ _ => do value (← errnoOf machine)),
@@ -430,13 +492,12 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
       if tid == (← tidOf machine) then return ← value edeadlk
       if (← state.get).detached.contains tid then return ← value 22
       let table ← machine.emu.taskTable.get
+      -- One that isn't there, or was joined, is `ESRCH`.
+      let some joinWord := (← state.get).joinWords.get? tid | return ← value 3
       let over := match table.find? tid with
         | some task => task.status.isSome
         | none => true
-      if !over then
-        match (← state.get).joinWords.get? tid with
-        | some joinWord => return .wait joinWord
-        | none => return .value 3
+      if !over then return .wait joinWord
       if out != 0 then writeWord machine out ((← state.get).results.getD tid 0)
       -- What it had goes with it, as nothing of it runs any more.
       reap machine tid
@@ -472,7 +533,7 @@ private def functions (machine : Machine) (state : IO.Ref BaseState) (exitStub :
       value 0),
     ("pthread_attr_setstacksize", show BaseFunction from fun machine arguments _ => do
       -- Less than `PTHREAD_STACK_MIN` is `EINVAL`.
-      if arguments.getD 1 0 < 16384 then return ← value 22
+      if arguments.getD 1 0 < (if width == 32 then 8192 else 16384) then return ← value 22
       writeWord machine (arguments.headD 0 + 2 * word) (arguments.getD 1 0)
       value 0),
     ("pthread_attr_getstacksize", show BaseFunction from fun machine arguments _ => do

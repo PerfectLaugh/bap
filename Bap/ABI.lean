@@ -12,6 +12,10 @@ structure Convention where
   returnAddress : Option Bap.Var
   /-- From the stack pointer on entry to the first argument in memory: what the caller reserves below them. -/
   stackArgumentsStart : Nat := 0
+  /-- What it is the convention of, which says how arguments of floating point and of more than a word go. -/
+  arch : Image.Arch := .unknown
+  /-- The registers that arguments of floating point go in, in order. -/
+  floatArguments : List Bap.Var := []
   deriving Repr
 
 inductive Location where
@@ -34,6 +38,7 @@ private def x86 : Convention := {
   returnAddress := none
   -- Past the return address.
   stackArgumentsStart := 4
+  arch := .x86
 }
 
 private def x86_64 : Convention := {
@@ -46,6 +51,8 @@ private def x86_64 : Convention := {
   returnAddress := none
   -- Past the return address.
   stackArgumentsStart := 8
+  arch := .x86_64
+  floatArguments := numbered "ZMM" 512 0 7
 }
 
 private def riscv (width : Nat) : Convention := {
@@ -56,6 +63,9 @@ private def riscv (width : Nat) : Convention := {
   syscallArguments := numbered "X" width 10 15
   stackPointer := reg "X2" width
   returnAddress := some (reg "X1" width)
+  arch := .riscv
+  -- Of the D extension, as Linux's LP64D and ILP32D have it.
+  floatArguments := numbered "F" 64 10 17
 }
 
 private def aarch64 : Convention := {
@@ -66,6 +76,8 @@ private def aarch64 : Convention := {
   syscallArguments := numbered "X" 64 0 5
   stackPointer := reg "SP" 64
   returnAddress := some (reg "X30" 64)
+  arch := .aarch64
+  floatArguments := numbered "Q" 128 0 7
 }
 
 /-- o32 passes four arguments in registers, n32 and n64 pass eight. Under o32 the caller also reserves a home for each
@@ -81,6 +93,9 @@ private def mips (width : Nat) : Convention := {
   stackPointer := reg "R29" width
   returnAddress := some (reg "R31" width)
   stackArgumentsStart := if width = 32 then 16 else 0
+  arch := .mips
+  -- Of o32, the first two, if they are of floating point; of n32 and n64, the one of each argument's place.
+  floatArguments := if width = 32 then [reg "F12" 64, reg "F14" 64] else numbered "F" 64 12 19
 }
 
 private def arm : Convention := {
@@ -91,6 +106,9 @@ private def arm : Convention := {
   syscallArguments := numbered "R" 32 0 5
   stackPointer := reg "SP" 32
   returnAddress := some (reg "LR" 32)
+  arch := .arm
+  -- Of the VFP variant, as Linux's EABI of hard floating point has it: `D0` to `D7`, of which a `float` is half.
+  floatArguments := numbered "D" 64 0 7
 }
 
 private def powerpc (width : Nat) : Convention := {
@@ -104,6 +122,8 @@ private def powerpc (width : Nat) : Convention := {
   -- Past the back chain and the word where the callee saves LR, of SysV; and of ELFv2, as musl has it of both orders, past the header
   -- of 32 bytes and the save area of the eight arguments in registers.
   stackArgumentsStart := if width = 32 then 8 else 96
+  arch := .powerpc
+  floatArguments := numbered "F" 64 1 (if width = 32 then 8 else 13)
 }
 
 private def systemz : Convention := {
@@ -116,8 +136,15 @@ private def systemz : Convention := {
   returnAddress := some (reg "R14" 64)
   -- Past the save area of the registers.
   stackArgumentsStart := 160
+  arch := .systemz
+  floatArguments := regs 64 ["F0", "F2", "F4", "F6"]
 }
 
+/-- The first ABI of 64-bit PowerPC, ELFv1, as glibc has it of big-endian, whose arguments in memory are past a header of 48 bytes and
+the save area of the eight in registers; `convention` has ELFv2, as musl has it of both orders. -/
+def powerpc64ElfV1 : Convention := { powerpc 64 with stackArgumentsStart := 112 }
+
+/-- The convention of an architecture: of 64-bit PowerPC, ELFv2. -/
 def convention (arch : Image.Arch) (wordSize : Nat := 64) : Option Convention :=
   match arch with
   | .x86 => some x86

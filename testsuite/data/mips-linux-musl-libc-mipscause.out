@@ -1,0 +1,7 @@
+add 1+1e-30      fcsr 00001004
+add 1+1          fcsr 00000004
+div 1/0          fcsr 00008024
+mul big          fcsr 00005034
+mul tiny         fcsr 0000303c
+sub inf-inf      fcsr 0001007c
+mul 2*3          fcsr 0000007c

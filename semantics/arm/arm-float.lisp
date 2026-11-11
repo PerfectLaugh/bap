@@ -92,6 +92,21 @@
                 (fp-select (<. x y) 0b1000
                   (fp-select (<. y x) 0b0010 0b0110)))))
 
+(defun fp-less-signaling (x y)
+  "(fp-less-signaling X Y) is (<. X Y), which raises invalid of any NaN,
+   quiet or not, as an ordered comparison does"
+  (case (word-width x)
+    16 (intrinsic 'forders_ieee754_binary_16 x y :result 1)
+    32 (intrinsic 'forders_ieee754_binary_32 x y :result 1)
+    (intrinsic 'forders_ieee754_binary_64 x y :result 1)))
+
+(defun fp-nzcv-signaling (x y)
+  "(fp-nzcv-signaling X Y) is (fp-nzcv X Y) of an ordered comparison, as
+   FCMPE and VCMPE are"
+  (cast-low 4 (fp-select (logor (is-nan x) (is-nan y)) 0b0011
+                (fp-select (fp-less-signaling x y) 0b1000
+                  (fp-select (<. y x) 0b0010 0b0110)))))
+
 (defun fp-trunc (x e f)
   "(fp-trunc X E F) rounds X to an integral value toward zero"
   (let ((bias (fp-bias e))

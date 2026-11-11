@@ -257,6 +257,11 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
   -- The sets of `select`: what is ready of each, as sets that say only that, how many, and the files to watch.
   let select (count : Nat) (sets : List Nat) (timeout : Option Nat) (back : Option (Nat × Nat × Nat)) (interrupted : Bool := false) :
       IO (Option SyscallAction) := do
+    -- An `int`, of which below 0 is `EINVAL`, and more than the table of descriptors has is as many as it has, as `core_sys_select`
+    -- has it: of a power of two of them, a word at least, and nothing past that is read.
+    if count % 2 ^ 32 ≥ 2 ^ 31 then return ← fail einval
+    let highest := ((← poller.kernel.get).process group).descriptors.fold (fun top fd _ => max top (fd + 1)) 0
+    let count := min (count % 2 ^ 32) (max width (Nat.nextPowerOfTwo highest))
     let due ← deadline timeout
     let words := (count + width - 1) / width
     let readSet (address : Nat) : IO (List Nat) := do

@@ -1,0 +1,7 @@
+fmin denormal, 1 with FZ   0000000000000000 flags 80
+fminnm denormal, 1 with FZ 0000000000000000 flags 80
+fmaxnm -1, denormal with FZ 0000000000000000 flags 80
+fmin denormal, 1           0008000000000000 flags 0
+fmin signaling, 1 with DN  7ff8000000000000 flags 1
+fmin signaling, 1          7ff8000000000001 flags 1
+frintx denormal with FZ: flags 80

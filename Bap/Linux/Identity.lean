@@ -45,6 +45,15 @@ private def resourceOf (architecture : Architecture) (resource : Nat) : Nat :=
 def members (kernel : Kernel) (live : List Nat) (pgid : Nat) : List Nat :=
   live.filter fun group => kernel.pgidOf group == pgid
 
+/-- Whether a process group is orphaned, as `will_become_orphaned_pgrp` has it: none of what is alive of it has a parent in another
+group of its session. The first process has a parent as a shell would be, of another group of its session, as the programs that it
+runs are started; and a parent that is gone is none of its session, as what it had is the first process's or init's then. -/
+def orphaned (kernel : Kernel) (live : List Nat) (parentOf : Nat → Option Nat) (pgid : Nat) : Bool :=
+  (members kernel live pgid).all fun member => match parentOf member with
+    | some parent =>
+      parent != 0 && (!live.contains parent || kernel.pgidOf parent == pgid || kernel.sidOf parent != kernel.sidOf member)
+    | none => false
+
 /-- The calls of this module, if the call is one of them. -/
 def serve (identity : Identity) (emu : Emu) (call : Call) (args : List Nat) : IO (Option SyscallAction) := do
   let architecture := identity.architecture
@@ -101,11 +110,15 @@ def serve (identity : Identity) (emu : Emu) (call : Call) (args : List Nat) : IO
       let some target := processOf (arg 0) | return ← fail esrch
       succeed (kernel.sidOf target)
     | .setpgid =>
+      -- As `setpgid` has it: a group below 0 is `EINVAL` before what it is of is looked for; a child of another session is `EPERM`,
+      -- and one that has run a program `EACCES`; what isn't a child `ESRCH`; and a leader of a session `EPERM`.
+      if arg 1 % 2 ^ 32 ≥ 2 ^ 31 then return ← fail einval
       let some target := processOf (arg 0) | return ← fail esrch
       let isChild := tasks.any fun task => task.tid == target && task.parent == group
       if target != group && !isChild then return ← fail esrch
       let pgid := if arg 1 % 2 ^ 32 == 0 then target else arg 1 % 2 ^ 32
-      if pgid ≥ 2 ^ 31 then return ← fail einval
+      if isChild && kernel.sidOf target != kernel.sidOf group then return ← fail eperm
+      if isChild && (kernel.process target).executed then return ← fail eacces
       if kernel.sidOf target == target || kernel.sidOf target != kernel.sidOf group then return ← fail eperm
       -- Another group that it goes to is one of its session.
       if pgid != target && !live.any fun other => kernel.pgidOf other == pgid && kernel.sidOf other == kernel.sidOf group then
@@ -284,25 +297,31 @@ def serve (identity : Identity) (emu : Emu) (call : Call) (args : List Nat) : IO
       let first ← read emu (arg 2) 1
       if (first.get! 0).toNat &&& 1 == 0 then fail einval else succeed
     | .schedGetparam =>
-      if (processOf (arg 0)).isNone then return ← fail esrch
-      writeWords (arg 1) [0]
+      -- Of a pid below 0, or nowhere to say it, `EINVAL`, before what it is of is looked for.
+      if arg 0 % 2 ^ 32 ≥ 2 ^ 31 || arg 1 == 0 then return ← fail einval
+      let some target := processOf (arg 0) | return ← fail esrch
+      writeWords (arg 1) [(kernel.process target).priority]
       succeed
     | .schedSetparam | .schedSetscheduler =>
+      -- Its `struct sched_param`, as `do_sched_setscheduler` has it: none, or a pid below 0, is `EINVAL`, and it is read before what it
+      -- is of is looked for; then, as `__sched_setscheduler` has it, a policy that there isn't, and a priority of 0 for the policies of
+      -- time sharing and of 1 to 99 for those of real time, which a process may set only with `CAP_SYS_NICE` or as far as its
+      -- `RLIMIT_RTPRIO` lets it.
+      let address := if call == .schedSetscheduler then arg 2 else arg 1
+      if address == 0 || arg 0 % 2 ^ 32 ≥ 2 ^ 31 then return ← fail einval
+      let priority := numberOf big (← read emu address 4)
       let some target := processOf (arg 0) | return ← fail esrch
       if call == .schedSetscheduler && ![0, 1, 2, 3, 5].contains (arg 1 % 2 ^ 32 &&& 0xbfffffff) then return ← fail einval
-      -- Its `struct sched_param`, as `__sched_setscheduler` has it: there, of 0 for the policies of time sharing and of 1 to 99 for those of
-      -- real time, which a process may set only with `CAP_SYS_NICE` or as far as its `RLIMIT_RTPRIO` lets it.
-      let address := if call == .schedSetscheduler then arg 2 else arg 1
-      if address == 0 then return ← fail einval
-      let priority := numberOf big (← read emu address 4)
       let policy := if call == .schedSetscheduler then arg 1 % 2 ^ 32 &&& 0xbfffffff else (kernel.process target).policy &&& 0xbfffffff
       let realTime := policy == 1 || policy == 2
       if (realTime && (priority < 1 || priority > 99)) || (!realTime && priority != 0) then return ← fail einval
       if realTime && !credentials.capable Capability.sysNice && (kernel.limitOf group 14).1 < priority then return ← fail eperm
       -- What it is set to it is, with `SCHED_RESET_ON_FORK`, as `sched_getscheduler` says.
-      if call == .schedSetscheduler then update target fun process => { process with policy := arg 1 % 2 ^ 32 }
+      update target fun process =>
+        { process with policy := if call == .schedSetscheduler then arg 1 % 2 ^ 32 else process.policy, priority }
       succeed
     | .schedGetscheduler =>
+      if arg 0 % 2 ^ 32 ≥ 2 ^ 31 then return ← fail einval
       match processOf (arg 0) with
       | some target => succeed (kernel.process target).policy
       | none => fail esrch

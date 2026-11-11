@@ -1,0 +1,2 @@
+minsd denormal, 1 with DAZ: 0000000000000000
+maxsd 1, -denormal with DAZ: 3ff0000000000000, flags 0

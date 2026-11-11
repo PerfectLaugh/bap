@@ -671,7 +671,8 @@ private def enterHandler (signals : Signals) (emu : Emu) (tid : Nat) (info : Sig
       suspended := none }
   if hasFlag action.flags saResetHand then
     let group := (← emu.taskTable.get).find? tid |>.map (·.group) |>.getD tid
-    signals.table.modify fun table => { table with actions := table.actions.erase (group, info.signal) }
+    -- Only the handler is the default again, as `handle_signal` has `SA_ONESHOT`: the flags and the mask stay.
+    signals.table.modify fun table => { table with actions := table.actions.insert (group, info.signal) { action with handler := 0 } }
   -- The registers of the handler.
   let set (name : String) (value : Nat) : IO Unit := setReg emu ⟨name, .imm width, 0, false⟩ (wordOfWidth width value)
   let returning ← match actionOffsets architecture with
@@ -1056,11 +1057,12 @@ private def finishWait (signals : Signals) (emu : Emu) : IO Unit := do
   match ← takePending signals tid task.group set with
   | none => setSyscallResult emu tid (.error (signals.numbers).eagain)
   | some info =>
+    -- What can't be written is `EFAULT`, and the signal is gone all the same, as `do_sigtimedwait` took it.
     if address != 0 then
       try
         write emu address (ByteArray.mk (Array.replicate 128 0))
         writeInfo signals emu address info
-      catch _ => pure ()
+      catch _ => return ← setSyscallResult emu tid (.error (signals.numbers).efault)
     setSyscallResult emu tid (.ok info.signal)
 
 /-- Fills in a `siginfo_t` from what `waitpid` reports of a child. -/
@@ -1388,7 +1390,6 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
       -- A `pid_t`: a process, its own process group of 0, every process but the first and itself of -1, and a group of the rest.
       let target := arg 0 % 2 ^ 32
       let signal := arg 1 % 2 ^ 32
-      if signal != 0 && !valid signal then return ← fail current numbers.einval
       -- A process that has exited is there until it is reaped, a zombie, which takes nothing that is sent.
       let present := (← current.taskTable.get).present
       let groups ← if target == 0 then (← signals.members.get) ((← (← signals.pgidOf.get) task.group))
@@ -1396,40 +1397,48 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
         else if target ≥ 2 ^ 31 then (← signals.members.get) (2 ^ 32 - target)
         -- A thread's id is its process's, as Linux has it.
         else pure ((present.find? (·.tid == target)).map (·.group)).toList
+      -- What isn't there is `ESRCH` before a signal that isn't, as `check_kill_permission` has that of what is.
       if groups.isEmpty then return ← fail current numbers.esrch
+      if signal != 0 && !valid signal then return ← fail current numbers.einval
       if signal != 0 then
         -- As any signal that is sent, which what waits to read one, of a `signalfd`, hears of.
         for group in groups do signals.send current none group (← selfInfo current signal 0 0)
       syscallReturn current (.ok 0)
     else if number == calls.tkill || number == calls.tgkill then
       let (expected, target, signal) := if number == calls.tkill then (none, arg 0, arg 1) else (some (arg 0), arg 1, arg 2)
-      if signal != 0 && !valid signal then return ← fail current numbers.einval
+      -- Ids of no thread, 0 or less, are `EINVAL`, and then one that isn't there `ESRCH`, before a signal that isn't, as `do_tkill`
+      -- and `do_send_specific` have them.
+      let positive (id : Nat) : Bool := id % 2 ^ 32 != 0 && id % 2 ^ 32 < 2 ^ 31
+      if !positive target || expected.any (!positive ·) then return ← fail current numbers.einval
       -- A leader that has exited is there until it is reaped, and takes nothing that is sent.
       match (← current.taskTable.get).present.find? (·.tid == target) with
       | some { status, group, .. } =>
         if expected.isSome && expected != some group then return ← fail current numbers.esrch
+        if signal != 0 && !valid signal then return ← fail current numbers.einval
         if signal != 0 && status.isNone then signals.send current (some target) group (← selfInfo current signal (signedCode 6) 0)
         syscallReturn current (.ok 0)
       | none => fail current numbers.esrch
     else if number == calls.queueinfo then
       let (target, signal, address) := (arg 0, arg 1, arg 2)
-      -- Of 0, that it is there, as `kill` has it.
-      if signal != 0 && !valid signal then return ← fail current numbers.einval
       let word := width / 8
       let base := if word == 8 then 16 else 12
-      try
-        let code ← readNumber current (address + (if isMipsArchitecture architecture then 4 else 8)) 4
-        let value ← readNumber current (address + base + 8) word
-        match (← current.taskTable.get).present.find? (·.tid == target) with
-        | some { group, .. } =>
-          -- A code that only the kernel gives, of 0 or more or `SI_TKILL`, to another process is `EPERM`, as `do_rt_sigqueueinfo` has
-          -- it.
-          if (code < 2 ^ 31 || code == 2 ^ 32 - 6) && group != task.group then return ← fail current numbers.eperm
-          if signal != 0 then signals.send current none group ⟨signal, code, .sent task.group 0 value⟩
-          syscallReturn current (.ok 0)
-        | none => fail current numbers.esrch
-      catch _ => fail current numbers.efault
+      -- As `rt_sigqueueinfo` has it: all of the info is copied first, `EFAULT`; a code that only the kernel gives, of 0 or more or
+      -- `SI_TKILL`, to another than itself is `EPERM`; and then, as `kill` has it, what isn't there before a signal that isn't, of
+      -- which 0 is only that it is there.
+      let some info ← (try pure (some (← read current address 128)) catch _ => pure none) | return ← fail current numbers.efault
+      let at_ (offset size : Nat) : Nat := decodeNumber current (info.extract offset (offset + size))
+      let code := at_ (if isMipsArchitecture architecture then 4 else 8) 4
+      let value := at_ (base + 8) word
+      if (code < 2 ^ 31 || code == 2 ^ 32 - 6) && target % 2 ^ 32 != tid then return ← fail current numbers.eperm
+      match (← current.taskTable.get).present.find? (·.tid == target) with
+      | some { group, .. } =>
+        if signal != 0 && !valid signal then return ← fail current numbers.einval
+        if signal != 0 then signals.send current none group ⟨signal, code, .sent task.group 0 value⟩
+        syscallReturn current (.ok 0)
+      | none => fail current numbers.esrch
     else if number == calls.pending then
+      -- What is more than a set is `EINVAL`, as `do_sigpending` has it; less is the first of it.
+      if arg 1 > maskBytes architecture then return ← fail current numbers.einval
       let state ← threadOf signals tid
       let shared := (← signals.table.get).groupPending.getD task.group []
       let bits := (state.pending ++ shared).foldl (fun mask info => mask ||| bitOf info.signal) 0

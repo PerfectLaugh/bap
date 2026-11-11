@@ -88,16 +88,23 @@
              (cast-low rt y)
              :result 1))
 
+;; X, or the zero of its sign if it is denormal and MXCSR says DAZ
+(defun sse-daz (rt x)
+  (let ((v (cast-low rt x)))
+    (if (logand (select 6 MXCSR) (is-zero (sse-exponent rt v)))
+        (logand v (lshift (cast-unsigned rt 1) (- rt 1)))
+      v)))
+
 ;; MINSD and MAXSD return the second operand when the operands are
-;; unordered or equal, and signal of a NaN
+;; unordered or equal, and signal of a NaN, of operands as DAZ has them
 (defun sse-min (rt x y)
-  (let ((a (cast-low rt x))
-        (b (cast-low rt y)))
+  (let ((a (sse-daz rt x))
+        (b (sse-daz rt y)))
     (if (sse-forders rt a b) a b)))
 
 (defun sse-max (rt x y)
-  (let ((a (cast-low rt x))
-        (b (cast-low rt y)))
+  (let ((a (sse-daz rt x))
+        (b (sse-daz rt y)))
     (if (sse-forders rt b a) a b)))
 
 (defun sse-exponent (rs x)
@@ -671,7 +678,8 @@
 
 (defun FSCALE ()
   (let ((n (x87-to-int 'rtz 32 ST1))
-        (n (if (< 40000 n) 40000 (if (< n -40000) -40000 n)))
+        ;; signed, and each half of it an exponent of the format
+        (n (if (s< 32000:32 n) 32000:32 (if (s< n (neg 32000:32)) (neg 32000:32) n)))
         (h (arshift n 1)))
     (set ST0 (x87-binary 'fmul (x87-binary 'fmul ST0 (x87-pow2 h))
                          (x87-pow2 (- n h))))))
@@ -680,8 +688,8 @@
 
 (defun UCOM_FIr (r) (compare-floats 80 ST0 r))
 (defun UCOM_FIPr (r) (compare-floats 80 ST0 r) (x87-pop))
-(defun COM_FIr (r) (compare-floats 80 ST0 r))
-(defun COM_FIPr (r) (compare-floats 80 ST0 r) (x87-pop))
+(defun COM_FIr (r) (compare-floats-signaling 80 ST0 r))
+(defun COM_FIPr (r) (compare-floats-signaling 80 ST0 r) (x87-pop))
 
 ;; the conditional moves by the flags
 
@@ -1444,7 +1452,7 @@
 (defun fp-float-to-half (x imm)
   (if (= (logand imm 4) 4) (fp-float-to-half-by *sse-rmode* x)
     (case (logand imm 3)
-      0 (fp-float-to-half-by 'rne x)
+      0 (fp-float-to-half-by 'rnx x)
       1 (fp-float-to-half-by 'rtn x)
       2 (fp-float-to-half-by 'rtp x)
       (fp-float-to-half-by 'rtz x))))

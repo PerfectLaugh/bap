@@ -322,8 +322,10 @@ def serve (timers : Timers) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
   let setTimer (key : Nat × Nat) (fresh : Timer) (value : Nat) (interval : Nat) (absolute : Bool) : IO Unit :=
     timers.state.modify fun state =>
       let timer := (state.timers.get? key).getD fresh
+      -- What is disarmed goes on with nothing, as `common_timer_set` and `do_setitimer` have it.
       { state with timers := state.timers.insert key { timer with
-          expiry := if value == 0 then none else some (if absolute then value else now + value), interval, overrun := 0 } }
+          expiry := if value == 0 then none else some (if absolute then value else now + value)
+          interval := if value == 0 then 0 else interval, overrun := 0 } }
   let itimer (which : Nat) : Timer := { group, signal := some (timers.itimerSignal which), code := 0x80 }
   try
     match call with
@@ -360,7 +362,12 @@ def serve (timers : Timers) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       let seconds := (left + 500000000) / 1000000000
       succeed (if seconds == 0 && left > 0 then 1 else seconds)
     | .timerCreate =>
-      if arg 0 > 11 then return ← fail einval
+      -- Of the clocks, as `do_timer_create` has them: one that isn't is `EINVAL`, the coarse and raw ones have no timers,
+      -- `EOPNOTSUPP`, and an alarm is of `CAP_WAKE_ALARM`, `EPERM`.
+      let clock := arg 0 % 2 ^ 32
+      if clock > 11 || clock == 10 then return ← fail einval
+      if 4 ≤ clock && clock ≤ 6 then return ← fail Errno.eopnotsupp
+      if (clock == 8 || clock == 9) && !((← timers.kernel.get).process group).credentials.capable 35 then return ← fail Errno.eperm
       let id := ((← timers.state.get).nextTimer.get? group).getD 0
       -- `struct sigevent`: the value, the signal, how it is told, and the thread of SIGEV_THREAD_ID; without one, SIGALRM with the id.
       let (signal, value, thread, notify) ← if arg 1 == 0 then pure (some 14, id, none, 0) else do

@@ -1,6 +1,7 @@
 // What the taint of a machine says of memory that a call fills that isn't of the world (testLinuxTaintMoves): of `exec`, the program
 // that execve runs, whose constants come from nothing; of `mremap`, bytes of a file that a mapping moves with, which still come from it;
-// of `append`, bytes of a file that pwrite wrote to one opened to append, which go to its end, whatever pwrite says, and come back from
+// of `failed`, a write that fails, which sends nothing, so that what is read back comes from nothing; of `append`, bytes of a file
+// that pwrite wrote to one opened to append, which go to its end, whatever pwrite says, and come back from
 // there; of `rwfappend`, the same of pwritev2 with RWF_APPEND; and of `sendfile`, `splice`, `tee` and `copy`, bytes that the kernel
 // copied from a file or a pipe to another, which come from what they were copied from.
 // Each says where what it is about is, and then works, for the test to look there.
@@ -52,6 +53,18 @@ int main(int argc, char **argv) {
     int again = open("/log", O_RDONLY);
     pread(again, back, 4, 4);
     printf("%lx %d\n", (unsigned long)back, memcmp(back, from, 4) == 0);
+    hold();
+  }
+  if (argc > 1 && strcmp(argv[1], "failed") == 0) {
+    static char from[16], back[16];
+    int data = open("/data", O_RDONLY);
+    pread(data, from, 16, 0);
+    int log = open("/log", O_CREAT | O_RDWR, 0644);
+    write(log, "abcd", 4);
+    int reading = open("/log", O_RDONLY);
+    long failed = write(reading, from, 4);
+    pread(log, back, 4, 0);
+    printf("%lx %d\n", (unsigned long)back, failed < 0);
     hold();
   }
   if (argc > 1 && strcmp(argv[1], "rwfappend") == 0) {

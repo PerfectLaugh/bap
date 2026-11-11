@@ -124,6 +124,8 @@ structure Config where
   backing : Nat → List Nat → IO (Option (Nat × Nat)) := fun _ _ => pure none
   /-- What a system call is about to send to where bytes keep their tags. -/
   sends : Nat → List Nat → IO (List Send) := fun _ _ => pure []
+  /-- Of a system call that sends, by its result, how many bytes of what it was to send went, in order: none of one that failed. -/
+  sent : Nat → List Nat → Option Nat → IO (Option Nat) := fun _ _ result => pure (result.filter (· < 2 ^ 63))
   /-- What sees a call and its result, such as to know what was opened. -/
   called : Nat → List Nat → Option Nat → IO Unit := fun _ _ _ => pure ()
 
@@ -221,6 +223,11 @@ structure Tracker where
   backing : IO.Ref (Option (Nat × Nat))
   /-- What was being served when the host started on something else. -/
   outer : IO.Ref (List (Option (String × Option Nat)))
+  /-- Of each call that the host serves, as `outer` has them, what it read, if it computes rather than brings in: the tags of those bytes
+  that are of a node, which what it gives back comes from. -/
+  hostInputs : IO.Ref (List (Option (Array Tag)))
+  /-- What the system call that runs is to send, which goes once it is over, as far as it went. -/
+  sending : IO.Ref (List Send)
   /-- How many bytes of what the current call read have gone by. -/
   written : IO.Ref Nat
   /-- Where instructions were that this couldn't follow all of, with how many times. -/
@@ -1083,10 +1090,20 @@ private def callStarts (tracker : Tracker) (number : Nat) (args : List Nat) : IO
   tracker.written.set 0
   tracker.label.set (← tracker.config.describe number args)
   tracker.backing.set (← tracker.config.backing number args)
-  for send in ← tracker.config.sends number args do carry tracker send
+  -- What it sends goes once it is over, as far as it went: what fails sends nothing.
+  tracker.sending.set (← tracker.config.sends number args)
 
 private def callEnds (tracker : Tracker) (result : Option Nat) : IO Unit := do
   if let some (number, args) := ← tracker.calling.get then
+    let sending ← tracker.sending.get
+    tracker.sending.set []
+    if !sending.isEmpty then
+      if let some count ← tracker.config.sent number args result then
+        let mut left := count
+        for send in sending do
+          if left == 0 then break
+          carry tracker { send with size := min send.size left }
+          left := left - min send.size left
     tracker.config.called number args result
   if let some (label, _) := ← tracker.label.get then
     let (_, _, register) := Emu.syscallRegisters tracker.emu.config.syscallAbi
@@ -1127,6 +1144,8 @@ def start (emu : Emu) (config : Config := {}) : IO Tracker := do
     label := ← IO.mkRef none
     backing := ← IO.mkRef none
     outer := ← IO.mkRef []
+    hostInputs := ← IO.mkRef []
+    sending := ← IO.mkRef []
     written := ← IO.mkRef 0
     gaps := ← IO.mkRef {}
     restores := ← IO.mkRef []
@@ -1148,14 +1167,48 @@ def start (emu : Emu) (config : Config := {}) : IO Tracker := do
   emu.syscallEnds.modify (callEnds tracker :: ·)
   emu.memoryChanged.modify (externalWrite tracker :: ·)
   emu.memoryCopied.modify (copied tracker :: ·)
+  -- A function of the base environment computes, as the guest's own code would: it brings nothing in, so that what it writes is clean
+  -- but for what it copies, which `memoryCopied` says, and what it gives back comes from what it read.
   emu.hostStarts.modify ((fun label => do
     tracker.written.set 0
     let held ← tracker.label.get
     tracker.outer.modify (held :: ·)
-    tracker.label.set (some (label, none))) :: ·)
+    let computes := label.startsWith "base "
+    tracker.hostInputs.modify ((if computes then some #[] else none) :: ·)
+    tracker.label.set (if computes then none else some (label, none))) :: ·)
+  emu.hostReads.modify ((fun address size => do
+    let some found :: rest := ← tracker.hostInputs.get | return
+    let space ← Emu.spaceOf emu (← Emu.thread emu)
+    let mut found := found
+    -- Of what it reads, a few: as many as a node keeps of what one byte came from.
+    for index in List.range size do
+      if found.size ≥ 64 then break
+      let tag ← tagAt tracker space (address + index)
+      if tag.isNode && !found.contains tag then found := found.push tag
+    tracker.hostInputs.set (some found :: rest)) :: ·)
   emu.hostEnds.modify ((fun register => do
-    if let (some (label, _), some register) := (← tracker.label.get, register) then
-      markRegister tracker (← wordVar emu register) s!"{label} result"
+    let inputs := (← tracker.hostInputs.get).headD none
+    tracker.hostInputs.modify (·.drop 1)
+    match inputs, register with
+    | some found, some name =>
+      let var ← wordVar emu name
+      let thread ← Emu.thread emu
+      let size := bytesOf (widthOfTyp var.typ)
+      if found.isEmpty then
+        setRegisterTags tracker thread name (Array.replicate size (cleanTag (← emu.pc.get)))
+      else
+        let id ← nextId tracker
+        let bits := match Bil.lookup (← emu.state.get).env var with
+          | .ok value => (Bap.Value.asBits value).toOption
+          | .error _ => none
+        push tracker {
+          id, insn := ← tracker.insn.get, pc := ← emu.pc.get, thread, space := ← Emu.spaceOf emu thread, kind := .compute
+          place := .register name, values := valueBytes bits size
+          inputs := Array.replicate size (found.toList.map fun tag => { tag, edge := .data }) }
+        setRegisterTags tracker thread name ((Array.range size).map (nodeTag id))
+    | _, _ =>
+      if let (some (label, _), some register) := (← tracker.label.get, register) then
+        markRegister tracker (← wordVar emu register) s!"{label} result"
     match ← tracker.outer.get with
     | previous :: rest =>
       tracker.label.set previous

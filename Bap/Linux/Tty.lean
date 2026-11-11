@@ -135,7 +135,8 @@ def openDevice (poller : Poller) (emu : Emu) (path : String) (flags : Nat) : IO 
     let index := (List.range (used.length + 1)).find? (!used.contains ·) |>.getD used.length
     let (kernel, fd) := kernel.addObject group (.ptyMaster { index }) (flags &&& (Kernel.oCloexec ||| Kernel.oNonblock))
     let master := kernel.nextInode - 1
-    let (kernel, _) := kernel.addDevice s!"/dev/pts/{index}" (.ptySlave master) 0o20620
+    -- Of who opened it, as devpts has it, so that what it opens of it, it may.
+    let (kernel, _) := kernel.addDevice s!"/dev/pts/{index}" (.ptySlave master) 0o20620 (kernel.process group).credentials
     poller.kernel.set kernel
     succeed fd
   else if path == "/dev/tty" then
@@ -171,7 +172,8 @@ def opened (poller : Poller) (emu : Emu) (fd flags : Nat) : IO (Option SyscallAc
 
 /-- Of a process that isn't in the foreground of its controlling terminal: it is sent `signal`, and the call is made again once it goes
 on. If the signal doesn't come to it, as it ignores or blocks it, a read (`reading`, of SIGTTIN) gives `EIO`, and anything else goes
-ahead, as Linux's `__tty_check_change` has it. None if it is in the foreground, or this isn't its controlling terminal. -/
+ahead, as Linux's `__tty_check_change` has it; of a group that is orphaned, `EIO`. None if it is in the foreground, or this isn't its
+controlling terminal. -/
 private def background (poller : Poller) (emu : Emu) (number : Nat) (terminal : Terminal) (signal : Nat) (reading : Bool) :
     IO (Option SyscallAction) := do
   let group := (← currentTask emu).group
@@ -179,6 +181,10 @@ private def background (poller : Poller) (emu : Emu) (number : Nat) (terminal : 
   if (kernel.process group).terminal != some number || terminal.foreground == kernel.pgidOf group || terminal.foreground == 0 then
     return none
   if !(← poller.signals.comesTo (← thread emu) group signal) then return if reading then some (.returnValue (2 ^ 64 - 5)) else none
+  -- Of a group that is orphaned, which nothing would let go on, `EIO`.
+  let table ← emu.taskTable.get
+  if Identity.orphaned kernel (← poller.live) (fun member => (table.find? member).map (·.parent)) (kernel.pgidOf group) then
+    return some (.returnValue (2 ^ 64 - 5))
   for member in Identity.members kernel (← poller.live) (kernel.pgidOf group) do
     poller.signals.send emu none member ⟨signal, 0x80, .sent 0 0 0⟩
   pure (some (← Ptrace.again emu))

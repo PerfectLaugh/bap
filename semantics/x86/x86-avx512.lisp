@@ -155,7 +155,7 @@
 
 ;; the sources
 
-(defun evex-rc-mode (c) (case (logand c 3) 0 'rne 1 'rdn 2 'rup 'rtz))
+(defun evex-rc-mode (c) (case (logand c 3) 0 'rnx 1 'rdn 2 'rup 'rtz))
 
 ;; `Bap.Target.LLVMLift` binds *sse-rmode* to a static rounding mode, the last
 ;; operand of a form that has one. The same form with {sae} of what doesn't

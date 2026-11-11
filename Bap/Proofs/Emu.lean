@@ -2003,7 +2003,7 @@ theorem getRegion_decodes (region : Bap.Emu.Region) (h : RegionSafe region) :
       omega
   have hbig : ¬ bytes.size ≥ Jit.fillLimit := by omega
   simp only [ByteArray.size_append, Nat.add_assoc, List.map_id] at d1 d2 d3 d4 d5 d6
-  simp only [getRegionBin, bind, Except.bind, d1, d2, d3, d4, d5, d6, hbig, ↓reduceIte, Jit.fill_pieces, encRegion,
+  simp only [getRegionBin, bind, Except.bind, d1, d2, d3, d4, d5, d6, hbig, ↓reduceIte, Jit.fillChecked_eq, Jit.fill_pieces, encRegion,
     ByteArray.size_append, Nat.add_assoc]
 
 private def encThread (context : ThreadContext) : ByteArray :=

@@ -1,0 +1,11 @@
+select of -1: -22
+select of 100000: 1
+rt_sigpending of 16: -22
+rt_sigpending of 4: 0
+probe of 2^32-1: -22
+probe of 256: 1
+no buffers: -22
+too many files: -24
+enter of 20 on 8 entries: 8
+io_setup: 0
+io_submit of 2^40 submits some: 1

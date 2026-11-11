@@ -2331,10 +2331,12 @@ private def runChained (engine : Engine) (pc : Nat) (entry : CachedBlock) (state
       packChain ids state.env.entries known numbers 0 (ByteArray.emptyWithCapacity (16 * state.env.size)) | return none
   engine.chainIds.set (ids.size, known, numbers)
   recordNative engine
+  -- The ranges by the ids that the chain gave them, as they are before it runs: a hook that clears the chain as it runs, and adds others
+  -- with the same ids, leaves the chain saying those of before, which it keeps until the run is over.
+  let entries ← engine.chainEntries.get
   let (next, slots, addresses, cells, info) ← Jit.runChain program slots memory filter quietSites observer codeObserver
     engine.chain (UInt64.ofNat id) (UInt64.ofNat pc) (UInt64.ofNat budget) variables
     (UInt64.ofNat (← engine.variables.get).size)
-  let entries ← engine.chainEntries.get
   let at_ (index : Nat) : Nat := (info.getD index 0).toNat
   let some last := entries[at_ 0]? | throw <| IO.userError "native chain ended at no range of it"
   let .native lowering _ _ := last.plan | throw <| IO.userError "native chain ended at what isn't native"

@@ -76,7 +76,8 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
 **Byte arrays** (`zeros`, `regionBytes`, `sliceNative`, `piecesNative`, `fillNative`, `residentNative`, `patchNative`)
 15. `zeros size` is `size` bytes of zeros, and `regionBytes memory address size` is `readMemoryRange memory address size`: they differ
     only in how much memory of the host they take. `sliceNative`, `piecesNative`, `fillNative`, `residentNative` and `patchNative` give
-    what `slice`, `pieces`, `fill`, `resident` and `patch` define in Lean, which they are `implemented_by`: what is proved of those (`fill_pieces`) holds of the C++ by this obligation.
+    what `slice`, `pieces`, `fill`, `resident` and `patch` define in Lean, and `fillCheckedNative` what `fillChecked` does, or `none` where
+    the host can't give that many bytes, rather than ending the process, which they are `implemented_by`: what is proved of those (`fill_pieces`) holds of the C++ by this obligation.
 
 Everything else in `Bap.Emu`, from what the code hooks see to what a rollback restores, is proved against
 these. No theorem assumes anything of LLVM beyond them, and nothing depends on `memorySize`, which has no obligation.
@@ -411,6 +412,10 @@ def byteOf (pieces : List (Nat × ByteArray)) (index : Nat) : UInt8 :=
   | some (start, bytes) => bytes[index - start]!
   | none => 0
 
+/-- What `fillChecked` is, in native code (obligation 15). -/
+@[extern "bap_bytes_fill_checked"]
+opaque fillCheckedNative (size : Nat) (pieces : List (Nat × ByteArray)) : Option ByteArray
+
 /-- What `fill` is, in native code (obligation 15). -/
 @[extern "bap_bytes_fill"]
 opaque fillNative (size : Nat) (pieces : List (Nat × ByteArray)) : ByteArray
@@ -419,6 +424,13 @@ opaque fillNative (size : Nat) (pieces : List (Nat × ByteArray)) : ByteArray
 @[implemented_by fillNative]
 def fill (size : Nat) (pieces : List (Nat × ByteArray)) : ByteArray :=
   ⟨Array.ofFn (n := size) fun index => byteOf pieces index⟩
+
+/-- `fill`, of what a checkpoint asks for: what the host can't give is `none` in native code (obligation 15), which a checkpoint is refused
+of, where `fill` would end the process. Of Lean, which has no end to what it can give, it is always `fill`. -/
+@[implemented_by fillCheckedNative]
+def fillChecked (size : Nat) (pieces : List (Nat × ByteArray)) : Option ByteArray := some (fill size pieces)
+
+@[simp] theorem fillChecked_eq (size : Nat) (pieces : List (Nat × ByteArray)) : fillChecked size pieces = some (fill size pieces) := rfl
 
 /-- Each piece of `pieces` is of `data`, from where it starts, which is in `data`. -/
 theorem mem_pieces {data : ByteArray} {piece : Nat × ByteArray} (h : piece ∈ pieces data) :

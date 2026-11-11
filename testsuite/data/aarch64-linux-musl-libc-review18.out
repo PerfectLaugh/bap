@@ -1,0 +1,9 @@
+script:
+  [first\targ]
+  [./script]
+  [last]
+interp: of 32 bits of i386:
+  execve errno 80
+interp: of what isn't ELF:
+  execve errno 80
+done

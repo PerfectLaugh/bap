@@ -1434,8 +1434,9 @@ private def evexFamilyCode (globals : Primus.Semantics.Environment) (context : P
   -- a static rounding mode is the last operand of the forms that have it, and BF16 is a format of its own
   let rounding := match opcode.memory, opcode.immediate, operands.getLast? with
     | 4, 0, some (.bil _ (.int mode)) =>
+      -- To nearest of the instruction, which `rnx` is, rather than of MXCSR.
       let name := match mode.toNat % 4 with
-        | 0 => "rne"
+        | 0 => "rnx"
         | 1 => "rdn"
         | 2 => "rup"
         | _ => "rtz"

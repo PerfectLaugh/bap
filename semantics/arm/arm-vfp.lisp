@@ -22,6 +22,12 @@
   "(vfp-compare X Y) sets the NZCV bits of FPSCR"
   (set FPSCR (concat (fp-nzcv x y) (cast-low 28 FPSCR))))
 
+(defun vfp-compare-signaling (x y)
+  "(vfp-compare-signaling X Y) is vfp-compare of VCMPE, which raises
+   invalid of a quiet NaN too"
+  (let ((nzcv (fp-nzcv-signaling x y)))
+    (set FPSCR (concat nzcv (cast-low 28 FPSCR)))))
+
 ;; ARITHMETIC
 
 (defun VADDD (rd rn rm cnd _) (vfp cnd (set$ rd (vfp-add rn rm))))
@@ -244,12 +250,12 @@
 
 (defun VCMPD (dd dm cnd _) (vfp cnd (vfp-compare dd dm)))
 (defun VCMPS (sd sm cnd _) (vfp cnd (vfp-compare sd sm)))
-(defun VCMPED (dd dm cnd _) (vfp cnd (vfp-compare dd dm)))
-(defun VCMPES (sd sm cnd _) (vfp cnd (vfp-compare sd sm)))
+(defun VCMPED (dd dm cnd _) (vfp cnd (vfp-compare-signaling dd dm)))
+(defun VCMPES (sd sm cnd _) (vfp cnd (vfp-compare-signaling sd sm)))
 (defun VCMPZD (dd cnd _) (vfp cnd (vfp-compare dd (fp-zero dd))))
 (defun VCMPZS (sd cnd _) (vfp cnd (vfp-compare sd (fp-zero sd))))
-(defun VCMPEZD (dd cnd _) (vfp cnd (vfp-compare dd (fp-zero dd))))
-(defun VCMPEZS (sd cnd _) (vfp cnd (vfp-compare sd (fp-zero sd))))
+(defun VCMPEZD (dd cnd _) (vfp cnd (vfp-compare-signaling dd (fp-zero dd))))
+(defun VCMPEZS (sd cnd _) (vfp cnd (vfp-compare-signaling sd (fp-zero sd))))
 
 ;; LOADS AND STORES
 
@@ -1256,10 +1262,10 @@
       'cgez (neon-mask (s>= x (fp-zero x)) e)
       'clez (neon-mask (s<= x (fp-zero x)) e)
       'cltz (neon-mask (s< x (fp-zero x)) e)
-      'f2s (fp-to-int true 32 (neon-fz x) 8 23)
-      'f2u (fp-to-int false 32 (neon-fz x) 8 23)
-      's2f (cast-sfloat :rne 32 x)
-      'u2f (cast-float :rne 32 x)
+      'f2s (neon-to-int true x)
+      'f2u (neon-to-int false x)
+      's2f (cast-sfloat :rns 32 x)
+      'u2f (cast-float :rns 32 x)
       'rshrs (cast-low e (arshift (+ (cast-signed (+ e 1) x)
                                      (lshift (cast-unsigned (+ e 1) 1) (- k 1)))
                                   k))
@@ -1281,13 +1287,13 @@
       'qshlsu (neon-sat-unsigned (lshift (cast-signed (+ (* 2 e) 1) x) k) e)
       'f2xs (fp-to-fixed true 32 (neon-fz x) 8 23 k)
       'f2xu (fp-to-fixed false 32 (neon-fz x) 8 23 k)
-      'xs2f (fp-from-fixed (cast-sfloat :rne 32 x) k 23)
-      'xu2f (fp-from-fixed (cast-float :rne 32 x) k 23)
+      'xs2f (fp-from-fixed (cast-sfloat :rnx 32 x) k 23)
+      'xu2f (fp-from-fixed (cast-float :rnx 32 x) k 23)
       'h2f (neon-half-to-single x)
       'recpe (neon-recpe x)
       'rsqrte (neon-rsqrte x)
-      'frecpe (intrinsic 'frecpe_ieee754_binary_32 x :result 32)
-      'frsqrte (intrinsic 'frsqrte_ieee754_binary_32 x :result 32))))
+      'frecpe (intrinsic 'frecpe_rns_ieee754_binary_32 x :result 32)
+      'frsqrte (intrinsic 'frsqrte_rns_ieee754_binary_32 x :result 32))))
 
 (defun neon-sat-signed (r e)
   "(neon-sat-signed R E) is the wider signed R saturated to E bits"
@@ -1668,7 +1674,10 @@
    z x y))
 
 ;; the single-precision operations of NEON use the standard FPSCR
-;; value, they flush the denormals to zero and give the default NaN
+;; value, they flush the denormals to zero and give the default NaN. The
+;; rounding mode rns is to nearest of that value, whatever FPSCR says,
+;; which the machine flushes by and gives the default NaN of, with the
+;; flags of that; rnx is to nearest without them
 
 (defun neon-fz (x)
   "(neon-fz X) is X, or the zero of its sign if X is denormal"
@@ -1684,8 +1693,9 @@
     (neon-mask (logand (not (is-nan a)) (not (is-nan b))
                        (case op
                          'eq (=. a b)
-                         'ge (>=. a b)
-                         'gt (>. a b)))
+                         ;; ordered, which raise invalid of a quiet NaN
+                         'ge (not (fp-less-signaling a b))
+                         'gt (fp-less-signaling b a)))
                32)))
 
 ;; the half-precision conversions of NEON take the standard FPSCR
@@ -1695,10 +1705,10 @@
 (defun neon-half-to-single (h)
   (fp-select (logand (= (extract 14 10 h) 0x1f) (not (is-zero (extract 9 0 h))))
              (cast-unsigned 32 0x7fc00000)
-             (fconvert :rne 32 h)))
+             (fconvert :rnx 32 h)))
 
 (defun neon-single-to-half (x)
-  (fp-select (is-nan x) (cast-unsigned 16 0x7e00) (fconvert :rne 16 (neon-fz x))))
+  (fp-select (is-nan x) (cast-unsigned 16 0x7e00) (fconvert :rnx 16 (neon-fz x))))
 
 ;; the estimates of the reciprocal and of the reciprocal square root.
 ;; Those of the unsigned integers are the functions UnsignedRecipEstimate
@@ -1735,22 +1745,34 @@
 (defun neon-inf-times-zero (a b)
   (logor (logand (is-inf a) (is-fzero b)) (logand (is-fzero a) (is-inf b))))
 
+(defun neon-to-int (signed x)
+  "the conversion of NEON of X toward zero, with what it raises of its
+   standard FPSCR, of which FZ is set"
+  (let ((r (fp-trunc (neon-fz x) 8 23)))
+    (set FPSCR (logor FPSCR (fp-cvt-flags signed 32 x r 8 23 0 4 1:1)))
+    (fp-to-int signed 32 r 8 23)))
+
+;; of an infinity and a zero, which is no invalid operation here, the
+;; product is of a zero instead, which is never used
+(defun neon-step-product (a b)
+  (neon-fmul (fp-select (neon-inf-times-zero a b) (fp-zero a) a) b))
+
 (defun neon-frecps (x y)
   (let ((a (neon-fz x)) (b (neon-fz y)))
     (fp-select (neon-inf-times-zero a b)
                (cast-unsigned 32 0x40000000)
-               (neon-fsub (cast-unsigned 32 0x40000000) (neon-fmul a b)))))
+               (neon-fsub (cast-unsigned 32 0x40000000) (neon-step-product a b)))))
 
 (defun neon-frsqrts (x y)
   (let ((a (neon-fz x)) (b (neon-fz y)))
     (fp-select (neon-inf-times-zero a b)
                (cast-unsigned 32 0x3fc00000)
-               (neon-fres (/. :rne (neon-fsub (cast-unsigned 32 0x40400000) (neon-fmul a b))
+               (neon-fres (/. :rns (neon-fsub (cast-unsigned 32 0x40400000) (neon-step-product a b))
                               (cast-unsigned 32 0x40000000))))))
 
-(defun neon-fadd (x y) (neon-fres (+. :rne (neon-fz x) (neon-fz y))))
-(defun neon-fsub (x y) (neon-fres (-. :rne (neon-fz x) (neon-fz y))))
-(defun neon-fmul (x y) (neon-fres (*. :rne (neon-fz x) (neon-fz y))))
+(defun neon-fadd (x y) (+. :rns x y))
+(defun neon-fsub (x y) (-. :rns x y))
+(defun neon-fmul (x y) (*. :rns x y))
 
 ;; the other helpers of the instructions
 

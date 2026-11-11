@@ -1067,8 +1067,19 @@
   (declare (visibility :private))
   (case rm 0 'rnx 1 'rtz 2 'rtn 3 'rtp 4 'rna 'rne))
 
+(defun fcheck (rm)
+  "an instruction of a rounding mode that is reserved is illegal: of rm 5
+   or 6, and of the dynamic one, 7, while frm is 5 to 7"
+  (declare (visibility :private))
+  (if (logor (= rm 5) (= rm 6))
+      (intrinsic 'undefined-instruction :aborts)
+    (when (= rm 7)
+      (when (>= (logand (rshift FCSR 5) 7:32) 5:32)
+        (intrinsic 'undefined-instruction :aborts)))))
+
 (defun fcall (name rm n x y)
   (declare (visibility :private))
+  (fcheck rm)
   (intrinsic (symbol-concat name (frm rm) 'ieee754_binary (fsize n) :sep '_)
              x y :result n))
 
@@ -1078,6 +1089,7 @@
 
 (defun fsquare-root (n rd rs1 rm)
   (declare (visibility :private))
+  (fcheck rm)
   (fset n rd (intrinsic (symbol-concat 'fsqrt (frm rm) 'ieee754_binary
                                        (fsize n) :sep '_)
                         (fget n rs1) :result n)))
@@ -1089,6 +1101,7 @@
 (defun ffused (n rd x y z rm)
   "RD is X * Y + Z, rounded once"
   (declare (visibility :private))
+  (fcheck rm)
   (fset n rd (intrinsic (symbol-concat 'fmad (frm rm) 'ieee754_binary
                                        (fsize n) :sep '_)
                         x y z :result n)))
@@ -1115,17 +1128,24 @@
   (declare (visibility :private))
   (logand (not (fnan x)) (not (fnan y))))
 
+;; FLT and FLE are ordered, which raise invalid of any NaN, and FEQ quiet,
+;; which raises it of a signaling one: of the intrinsics, which say so
+(defun forder-by (signaling x y)
+  (declare (visibility :private))
+  (intrinsic (symbol-concat (if signaling 'forders 'forder) 'ieee754_binary (if (= (word-width x) 64) '64 '32) :sep '_)
+             x y :result 1))
+
 (defun flt (x y)
   (declare (visibility :private))
-  (logand (fordered x y) (s< (fkey x) (fkey y))))
+  (logand (fordered x y) (forder-by true x y)))
 
 (defun feq (x y)
   (declare (visibility :private))
-  (logand (fordered x y) (= (fkey x) (fkey y))))
+  (logand (fordered x y) (not (forder-by false x y)) (not (forder-by false y x))))
 
 (defun fle (x y)
   (declare (visibility :private))
-  (logand (fordered x y) (s<= (fkey x) (fkey y))))
+  (logand (fordered x y) (not (forder-by true y x))))
 
 (defun fcompare (cmp n rd rs1 rs2)
   (declare (visibility :private))
@@ -1197,6 +1217,7 @@
   "converts the N-bit number to the M-bit integer, which is extended by
    its sign to the width of the register"
   (declare (visibility :private))
+  (fcheck rm)
   (set$ rd (cast-signed
             (word-width)
             (intrinsic (symbol-concat (if signed 'cast_sint 'cast_int)
@@ -1207,6 +1228,7 @@
 (defun ffrom-int (signed m n rd rs1 rm)
   "converts the lower M bits of the register to the N-bit number"
   (declare (visibility :private))
+  (fcheck rm)
   (fset n rd (intrinsic (symbol-concat (if signed 'cast_sfloat 'cast_float)
                                        (frm rm) 'ieee754_binary
                                        (fsize m) (fsize n) :sep '_)
@@ -1215,6 +1237,7 @@
 (defun fp-convert (m n rd rs1 rm)
   "converts the M-bit number to the N-bit one"
   (declare (visibility :private))
+  (fcheck rm)
   (fset n rd (intrinsic (symbol-concat 'fconvert (frm rm) 'ieee754_binary
                                        (fsize m) (fsize n) :sep '_)
                         (fget m rs1) :result n)))

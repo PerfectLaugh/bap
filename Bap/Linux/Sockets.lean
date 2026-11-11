@@ -134,6 +134,8 @@ def listen (kernel : Kernel) (group fd : Nat) : Result Kernel := do
   let (number, socket) ← socketOf kernel group fd
   if socket.type == 2 then .error Errno.eopnotsupp
   if socket.peer.isSome then .error Errno.einval
+  -- No listens on an unbound socket, as `unix_listen` has it.
+  if socket.name.isNone then .error Errno.einval
   .ok (kernel.setSocket number { socket with listening := true, owner := group })
 
 /-- `connect` to the socket `target`. Of datagrams, it is where they go when a send doesn't say. Otherwise the listener has a new

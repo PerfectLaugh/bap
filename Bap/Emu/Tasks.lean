@@ -648,7 +648,8 @@ private def serveMmap (emu : Emu) (address size bits flags : Nat) : IO SyscallAc
   let anonymous := flags &&& (if isMips emu then 0x800 else 0x20) != 0
   if !anonymous then
     syscallReturn emu (.error (enosys emu))
-  else if size == 0 then
+  -- Of nothing, or neither shared nor private, as `do_mmap` has `MAP_TYPE`, `EINVAL`.
+  else if size == 0 || flags &&& 3 == 0 then
     syscallReturn emu (.error einval)
   else
     let pages := (size + 4095) / 4096 * 4096
@@ -661,6 +662,8 @@ private def serveMmap (emu : Emu) (address size bits flags : Nat) : IO SyscallAc
 
 /-- `mprotect`. -/
 private def serveProtect (emu : Emu) (address size bits : Nat) : IO SyscallAction := do
+  -- What doesn't start on a page is `EINVAL`, as `do_mprotect_pkey` has it.
+  if address % 4096 != 0 then return ← syscallReturn emu (.error einval)
   try
     protect emu address ((size + 4095) / 4096 * 4096) (protectionOf bits)
     syscallReturn emu (.ok 0)

@@ -1,0 +1,61 @@
+f2xm1 0.5: 0x1.a827999fcef32p-2
+f2xm1 1: 0x1p+0
+f2xm1 -0.75: -0x1.9f203eb9c91d6p-2
+f2xm1 1e-10: 0x1.30d96f4242212p-34
+fsin 0.5: 0x1.eaee8744b05fp-2
+fsin 1: 0x1.aed548f090ceep-1
+fsin -0.75: -0x1.5cffc16bf8f0dp-1
+fsin 1e-10: 0x1.b7cdfd9d7bdbbp-34
+fsin 3: 0x1.210386db6d55bp-3
+fcos 0.5: 0x1.c1528065b7d5p-1
+fcos 1: 0x1.14a280fb5068cp-1
+fcos -0.75: 0x1.769fec655211fp-1
+fcos 1e-10: 0x1p+0
+fcos 3: -0x1.fae04be85e5d2p-1
+fptan 0.5: 0x1.17b4f5bf3474ap-1
+fptan 1: 0x1.8eb245cbee3a6p+0
+fptan -0.75: -0x1.dcfa36110eeecp-1
+fptan 1e-10: 0x1.b7cdfd9d7bdbbp-34
+fptan 3: -0x1.23ef71254b86fp-3
+fpatan 1 2: 0x1.dac670561bb4fp-2
+fpatan -3 0.5: -0x1.67d8863bc99bdp+0
+fpatan 2 10: 0x1.94441f8f7260bp-3
+fpatan 0.5 0.25: 0x1.1b6e192ebbe44p+0
+fyl2x 1 2: 0x1p+0
+fyl2x -3 0.5: 0x1.8p+1
+fyl2x 2 10: 0x1.a934f0979a371p+2
+fyl2x 0.5 0.25: -0x1p+0
+fyl2xp1 1 2: 0x1.95c01a39fbd68p+0
+fyl2xp1 -3 0.5: -0x1.c1404eadf3839p+0
+fyl2xp1 2 10: 0x1.bacea7c065d42p+2
+fyl2xp1 0.5 0.25: 0x1.49a784bcd1b8bp-3
+fxtract -12: 3 -1.5
+fprem 10 3: 0x1p+0, C0 0 C1 1 C2 0 C3 1
+fprem1 10 3: 0x1p+0, C0 0 C1 1 C2 0 C3 1
+fprem -7.5 2: -0x1.8p+0, C0 0 C1 1 C2 0 C3 1
+fprem1 11 2: -0x1p+0, C0 1 C1 0 C2 0 C3 1
+fprem 1e+30 3: 0x1.19d4p+62, C0 0 C1 0 C2 1 C3 0
+fscale 1 0: 0x1p+0
+fscale 1 -1: 0x1p-1
+fscale 0.5 3: 0x1p+2
+fscale 3 100: 0x1.8p+101
+fscale 1 70000: inf
+fscale 1 -70000: 0x0p+0
+fscale 1.5 2.9: 0x1.8p+2
+fist -9.22337e+18: 8000 80000000 8000000000000000 fisttp 8000000000000000 cvtsd2si 80000000
+fist -2.14748e+09: 8000 80000000 ffffffff7fffffff fisttp ffffffff7fffffff cvtsd2si 80000000
+fist 40000: 8000 00009c40 0000000000009c40 fisttp 0000000000009c40 cvtsd2si 00009c40
+fist 2.14748e+09: 8000 80000000 0000000080000000 fisttp 000000007fffffff cvtsd2si 80000000
+fist -9.22337e+18: 8000 80000000 8000000000000000 fisttp 8000000000000000 cvtsd2si 80000000
+fist 1e+300: 8000 80000000 8000000000000000 fisttp 8000000000000000 cvtsd2si 80000000
+control 037f: 1/3 3ffdaaaaaaaaaaaaaaab status 20
+control 027f: 1/3 3ffdaaaaaaaaaaaaa800 status 20
+control 007f: 1/3 3ffdaaaaab0000000000 status 20
+control 0a7f: 1/3 3ffdaaaaaaaaaaaab000 status 20
+fld of a signaling NaN: status 01, flds 01
+fbstp -1234567: 67 45 23 01 00 00 00 00 00 80
+fbld: -1.23457e+06
+rcpss 2 within: 1, rsqrtss within: 1
+rcpss 3 within: 1, rsqrtss within: 1
+rcpss 0.1 within: 1, rsqrtss within: 1
+rcpss 1e+30 within: 1, rsqrtss within: 1

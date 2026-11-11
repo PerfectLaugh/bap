@@ -335,6 +335,32 @@ def run : IO Unit := do
   | .ok prototype =>
     assertEqual "API i386 arguments by their sizes" [ABI.Location.stack 4, .stack 12, .stack 20] (API.argumentLocations i386 prototype)
   | .error error => throw <| IO.userError error
+  -- Floating point, and what is of 64 bits, as each ABI has them.
+  let locations (arch : Image.Arch) (width : Nat) (source : String) : IO (List String) := do
+    let some abi := ABI.convention arch width | throw <| IO.userError s!"no ABI of {repr arch}"
+    let .ok prototype := API.parsePrototype source | throw <| IO.userError s!"no prototype of {source}"
+    pure ((API.argumentLocations abi prototype).map fun
+      | .register var => var.name.str
+      | .stack offset => s!"stack {offset}")
+  assertEqual "API x86-64 a double in XMM0" ["ZMM0", "RDI"] (← locations .x86_64 64 "int f(double x, int y)")
+  assertEqual "API x86-64 a long double on the stack" ["stack 8", "RDI", "ZMM0"] (← locations .x86_64 64 "int f(long double x, int y, float z)")
+  assertEqual "API AArch64 floating point in V0 on" ["Q0", "X0", "Q1"] (← locations .aarch64 64 "int f(double x, int y, long double z)")
+  assertEqual "API RISC-V in FA0 on" ["F10", "X10"] (← locations .riscv 64 "int f(double x, int y)")
+  assertEqual "API RV32 a long double by its address" ["X10", "X11"] (← locations .riscv 32 "int f(long double x, int y)")
+  assertEqual "API ARM a long double is a double, in D0" ["R0", "R1", "R2", "R3", "D0", "stack 0"]
+    (← locations .arm 32 "int g(int a, int b, int c, int d, long double x, int y)")
+  assertEqual "API ARM a float back-fills" ["S0", "D1", "S1"] (← locations .arm 32 "int f(float a, double b, float c)")
+  assertEqual "API ARM 64 bits of integers in an even pair" ["R0", "R2"] (← locations .arm 32 "int f(int a, long long b)")
+  assertEqual "API MIPS o32 leading floating point in F12 and F14" ["F12", "F14", "stack 16"]
+    (← locations .mips 32 "int f(double a, double b, int c)")
+  assertEqual "API MIPS o32 a double after an integer, in an even pair" ["R4", "R6"] (← locations .mips 32 "int f(int a, double b)")
+  assertEqual "API i386 a long double of 12 bytes" ["stack 4", "stack 16"] (← locations .x86 32 "int f(long double x, int y)")
+  assertEqual "API PowerPC ELFv1 ninth argument is past its header and the save area" (ABI.Location.stack 112)
+    (ABI.argumentLocation ABI.powerpc64ElfV1 8)
+  -- A type that is named and what the preprocessor has are no prototypes.
+  match API.parseHeader "typedef int (*handler)(int);\n#define TWICE(x) \\\n  ((x) * 2)\nint f(void);" with
+  | .ok prototypes => assertEqual "API a typedef and a #define are no prototypes" ["f"] (prototypes.map (·.name))
+  | .error error => throw <| IO.userError s!"a header of a typedef and a #define: {error}"
   let header := "/* API fixture */\nint add(int x, int y);\nvoid *malloc(size_t size);\nint printf(const char *fmt, ...);\n"
   IO.FS.writeFile "native/build/api-test.h" header
   let prototypes ← API.load "native/build/api-test.h"

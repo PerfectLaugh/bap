@@ -441,6 +441,9 @@ structure Emu where
   left what it returns in a register, by name of that, if it returns something. -/
   hostStarts : IO.Ref (List (String → IO Unit))
   hostEnds : IO.Ref (List (Option String → IO Unit))
+  /-- What hears of the bytes of the guest that the host reads as it serves a call, by address and size, as what it gives back comes from
+  them. -/
+  hostReads : IO.Ref (List (Nat → Nat → IO Unit))
   /-- What runs before a thread of another address space takes over, in the one that it leaves, and after, in the one that it is in. -/
   leavingSpace : IO.Ref (Option (IO Unit))
   enteredSpace : IO.Ref (Option (IO Unit))
@@ -590,6 +593,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     memoryCopied := ← IO.mkRef []
     hostStarts := ← IO.mkRef []
     hostEnds := ← IO.mkRef []
+    hostReads := ← IO.mkRef []
     leavingSpace := ← IO.mkRef none
     enteredSpace := ← IO.mkRef none
     futexKey := ← IO.mkRef none
@@ -1028,6 +1032,9 @@ private def switchNativeMemory (emu : Emu) (current next : ThreadId) : IO Unit :
   let currentSpace ← spaceOf emu current
   let nextSpace ← spaceOf emu next
   if currentSpace != nextSpace then
+    -- What was compiled of ranges goes by the bytes of their first block only, and another space may have others after it: they are
+    -- versions, then, which are taken again only where all that they were made of is as it was.
+    Primus.Lifted.forgetRanges emu.engine
     let mapped ← emu.regions.get
     let parked ← emu.parkedRegions.get
     setRegions emu (parked.getD nextSpace mapped)
@@ -2744,6 +2751,11 @@ they added or took off hooks. -/
 private def hookAtSite (emu : Emu) (address : Nat) (say : IO Bil.State) : IO Bool := do
   let before ← emu.state.get
   let hooks ← emu.hookChanges.get
+  -- What the run goes on with besides: the regions and what may be done there, the filter of the native memory, which a trace that
+  -- starts forgets, and the code that was compiled, which a write or a change of protection discards.
+  let regions ← emu.regions.get
+  let filtered := (← emu.engine.memoryFilter.get).isSome
+  let invalidations := (← emu.engine.statistics.get).invalidations
   -- The state there, said when a hook first reads it: a hook that reads nothing of it doesn't have it made.
   let said ← IO.mkRef (none : Option Bil.State)
   emu.state.defer do
@@ -2758,7 +2770,9 @@ private def hookAtSite (emu : Emu) (address : Nat) (say : IO Bil.State) : IO Boo
   let pc ← emu.pc.get
   -- Hooks that a hook added or took off are of what the run goes on with too, as what it has of the native memory's filter is of those
   -- that there were.
-  if pc == address && !(← emu.stopped.get) && (← emu.redirect.get).isNone && (← emu.hookChanges.get) == hooks then
+  let unchanged := sameObject (← emu.regions.get) regions && (!filtered || (← emu.engine.memoryFilter.get).isSome) &&
+    (← emu.engine.statistics.get).invalidations == invalidations
+  if pc == address && !(← emu.stopped.get) && (← emu.redirect.get).isNone && (← emu.hookChanges.get) == hooks && unchanged then
     if ← emu.state.deferred then
       emu.state.set before
       return false
@@ -2818,11 +2832,19 @@ def refreshRegions (emu : Emu) : IO Unit := do
   setRegions emu (mapped.map fun region =>
     { region with data := Bap.Memory.readRegion memory region.address region.data.size })
 
+/-- Gives the regions the bytes of the native memory, or of the state if there is none. -/
+def refreshPersistentRegions (emu : Emu) : IO Unit := do
+  match ← emu.engine.persistentMemory.get with
+  | none => refreshRegions emu
+  | some native =>
+    setRegions emu <| (← regionsFromNative (← emu.regions.get) native)
+
 /-- The regions of an address space as they are now, with what its memory has: of the one that runs, its regions, and of another, those
 that it left when it was switched from, with what its own memory has now. -/
 def liveRegionsOf (emu : Emu) (space : Nat) : IO (List Region) := do
   if space == (← emu.taskTable.get).spaceOf (← emu.currentThreadRef.get) then
-    refreshRegions emu
+    -- Of the native memory, if there is one, which takes what it has of them rather than how large they are.
+    refreshPersistentRegions emu
     return ← emu.regions.get
   let mapped := (← emu.parkedRegions.get).getD space []
   match nativeFor (← emu.processMemory.get) (← emu.sharedMemory.get) space with
@@ -2837,13 +2859,6 @@ def liveRegionsOf (emu : Emu) (space : Nat) : IO (List Region) := do
         pure (mapped.map fun region => { region with data := Bap.Memory.readRegion memory region.address region.data.size })
       | _ => pure mapped
     | none => pure mapped
-
-/-- Gives the regions the bytes of the native memory, or of the state if there is none. -/
-def refreshPersistentRegions (emu : Emu) : IO Unit := do
-  match ← emu.engine.persistentMemory.get with
-  | none => refreshRegions emu
-  | some native =>
-    setRegions emu <| (← regionsFromNative (← emu.regions.get) native)
 
 /-- Refreshes the regions with the bytes of the memory that threads without their own memory share. -/
 def refreshSharedRegions (emu : Emu) : IO Unit := do

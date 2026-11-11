@@ -97,6 +97,15 @@ private def testDiff : IO Unit := do
   let later ← Bap.Emu.snapshot emu
   Bap.Emu.write emu 4 (ByteArray.mk #[7])
   assertEqual "Emu a diff is of what changed after its snapshot" [(4, 1)] (← Bap.Emu.diff emu later)
+  -- Of a large mapping, a diff takes what was written, not how large it is.
+  let large ← Tuned.riscv64 code 0 0
+  Bap.Emu.mapZeros large 0x10000000 (256 * 1024 * 1024) ⟨true, true, false⟩
+  let before ← Bap.Emu.snapshot large
+  Bap.Emu.write large 0x10001234 (ByteArray.mk #[5])
+  let started ← IO.monoMsNow
+  assertEqual "Emu a diff of 256 MiB of which a byte was written" [(0x10001234, 1)] (← Bap.Emu.diff large before)
+  let took := (← IO.monoMsNow) - started
+  assertTrue s!"Emu which takes less than a second, not {took} ms" (took < 1000)
   Bap.Emu.restore emu saved
   let memory := Bap.Memory.writeRegion (Bap.Memory.empty 64) 0xfe (ByteArray.mk #[1, 2, 3, 4])
   assertTrue "Memory bulk read crosses pages and preserves zeroes"
@@ -2200,6 +2209,18 @@ def testBigInterpreter : IO Unit := do
     assertEqual "A program of a big interpreter runs it" (Bap.Tasks.ScheduleOutcome.finished 0, "the interpreter ran\n")
       (outcome, String.fromUTF8! (← written.get))
 
+/-- An interpreter that is `ET_EXEC` is where its segments say, as `load_elf_interp` has it, rather than at a base of its own: one at
+0x20000000 that says so by the absolute address of what it says (`testsuite/src/exec-interp/make.py`). -/
+def testExecInterpreter : IO Unit := do
+  let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile "testsuite/bin/x86_64-linux-exec-interp")
+    |>.addFile "/lib/ld-exec.so" (← IO.FS.readBinFile "testsuite/bin/x86_64-linux-ld-exec")
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual "An interpreter of ET_EXEC runs where it says" (Bap.Tasks.ScheduleOutcome.finished 0, "the interpreter ran where it said
+")
+    (outcome, String.fromUTF8! (← written.get))
+
 /-- What the disassembler has of the branches of MIPS release 6: a compact branch has no delay slot, which one that isn't compact still
 has, and `jialc` goes where its register and its offset say, which is no target known at the branch. -/
 def testMipsRelease6Branches : IO Unit := do
@@ -2277,7 +2298,8 @@ def testBranchFlows : IO Unit := do
 
 /-- What the taint of a machine says of memory that a call fills that isn't of the world, as `testsuite/src/libc-taintmove.c` has it: a
 constant of the program that `execve` ran comes from nothing, rather than from `execve`, and bytes of a file that `mremap` moves come
-from that file still. Each says where it is and then works, and the run stops there. -/
+from that file still, and what a write that failed was to send isn't where it was to go. Each says where it is and then works, and the
+run stops there. -/
 def testLinuxTaintMoves (triple : String) : IO Unit := do
   let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-taintmove"
   let file := ByteArray.mk ((Array.range 16).map fun index => (0x40 + index).toUInt8)
@@ -2303,6 +2325,10 @@ def testLinuxTaintMoves (triple : String) : IO Unit := do
   let space ← Bap.Emu.spaceOf machine.emu (← Bap.Emu.thread machine.emu)
   assertEqual s!"Linux {triple} bytes of a file that mremap moved come from it still" ["pread /data"]
     (labels (← tracker.explainMemory (address + 3) (some space)))
+  let (machine, tracker, address) ← at_ "failed"
+  let space ← Bap.Emu.spaceOf machine.emu (← Bap.Emu.thread machine.emu)
+  assertEqual s!"Linux {triple} a write that failed sent nothing, so that what is read back is of the file" ["pread /log"]
+    (labels (← tracker.explainMemory address (some space)))
   let (machine, tracker, address) ← at_ "append"
   let space ← Bap.Emu.spaceOf machine.emu (← Bap.Emu.thread machine.emu)
   assertEqual s!"Linux {triple} what pwrite wrote to a file opened to append is at its end, which comes from what it wrote" ["pread /data"]
@@ -2330,6 +2356,74 @@ def testVersionedSymbols : IO Unit := do
   let some address := ← machine.findSymbol "use_old" (some library) | throw <| IO.userError "libuseold has no use_old"
   assertEqual "What was linked to the old version is bound to it" 1 ((← machine.call address) % 2 ^ 32)
 
+/-- A reference of a version to an IFUNC, `f@VER_1` of `libifveruse`, is bound to what its resolver picks, as `ld.so` has it, rather than
+to the resolver. -/
+def testVersionedIfunc : IO Unit := do
+  let binary (name : String) : IO ByteArray := IO.FS.readBinFile s!"testsuite/bin/{name}"
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" (← binary "aarch64-linux-musl-libc-files"))
+    |>.addFile "/lib/libifver.so" (← binary "aarch64-linux-gnu-libifver")
+    |>.addFile "/lib/libifveruse.so" (← binary "aarch64-linux-gnu-libifveruse")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let library ← machine.loadLibrary "libifveruse.so"
+  let some address := ← machine.findSymbol "g" (some library) | throw <| IO.userError "libifveruse has no g"
+  assertEqual "A reference of a version to an IFUNC is of what it picks" 42 ((← machine.call address) % 2 ^ 32)
+
+/-- What a library needs is loaded as `ld.so` loads it (`testsuite/src/loader.sh`): breadth first, as symbols are looked for in that
+order; what is loaded of the name that is needed is it; what is of another machine is passed over; `DT_RPATH` is looked in before what
+is asked and `DT_RUNPATH` after; a symbol of `SHN_ABS` is its value; text of i386 that isn't position-independent is relocated; and
+initializers are given the arguments of the program. -/
+def testLinuxLoaderOrder : IO Unit := do
+  let binary (name : String) : IO ByteArray := IO.FS.readBinFile s!"testsuite/bin/aarch64-linux-musl-{name}"
+  let base := Bap.Linux.Kernel.empty.addFile "/test" (← binary "libc-files")
+  let callWhich (machine : Bap.Linux.Machine) (library : Bap.Linux.LoadedLibrary) : IO Nat := do
+    let some address := ← machine.findSymbol "call_which" (some library) | throw <| IO.userError s!"{library.path} has no call_which"
+    pure ((← machine.call address) % 2 ^ 32)
+  let mut breadth := base
+  for name in ["libbfsroot", "libbfsa", "libbfsb", "libbfsc"] do
+    breadth := breadth.addFile s!"/lib/{name}.so" (← binary name)
+  let machine ← Bap.Linux.start breadth "/test" ["/test"]
+  assertEqual "What a library needs is looked in breadth first" 2 (← callWhich machine (← machine.loadLibrary "libbfsroot.so"))
+  let kernel := ((base.addFile "/opt/x/libsn.so" (← binary "libsn7")).addFile "/lib/libsn.so" (← binary "libsn9"))
+    |>.addFile "/lib/libsnuser.so" (← binary "libsnuser")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let _ ← machine.loadLibrary "/opt/x/libsn.so"
+  let _ ← machine.loadLibrary "libsnuser.so"
+  assertEqual "What is loaded of the name that is needed is it" ["/opt/x/libsn.so", "/lib/libsnuser.so"]
+    ((← machine.loadedLibraries).map (·.path))
+  let kernel := ((base.addFile "/lib/libwc.so" (← IO.FS.readBinFile "testsuite/bin/x86_64-linux-musl-libwc"))
+    |>.addFile "/usr/lib/libwc.so" (← binary "libwcarm")).addFile "/lib/libwcuser.so" (← binary "libwcuser")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  assertEqual "What is of another machine is passed over" 6 (← callWhich machine (← machine.loadLibrary "libwcuser.so"))
+  let kernel := (((base.addFile "/rp/libpathv.so" (← binary "libpathv11")).addFile "/sp/libpathv.so" (← binary "libpathv12"))
+    |>.addFile "/lib/librp.so" (← binary "librp")).addFile "/lib/librun.so" (← binary "librun")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  assertEqual "DT_RPATH is before what is asked" 11 (← callWhich machine (← machine.loadLibrary "librp.so" (search := ["/sp"])))
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  assertEqual "DT_RUNPATH is after what is asked" 12 (← callWhich machine (← machine.loadLibrary "librun.so" (search := ["/sp"])))
+  let kernel := (base.addFile "/lib/libabs.so" (← binary "libabs")).addFile "/lib/libabsuse.so" (← binary "libabsuse")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let user ← machine.loadLibrary "libabsuse.so"
+  let some where_ := ← machine.findSymbol "where_magic" (some user) | throw <| IO.userError "libabsuse has no where_magic"
+  assertEqual "A symbol of SHN_ABS is its value, wherever its library is" (0x1234, some 0x1234)
+    (← machine.call where_, ← machine.findSymbol "magic")
+  -- Of i386, text that isn't position-independent, as GNU ld leaves it, with a call of R_386_PC32 to what libother has.
+  let i686 (name : String) : IO ByteArray := IO.FS.readBinFile s!"testsuite/bin/i686-linux-musl-{name}"
+  let kernel := ((Bap.Linux.Kernel.empty.addFile "/test" (← i686 "libc-files")).addFile "/lib/libother.so" (← i686 "libother"))
+    |>.addFile "/lib/libtextrel.so" (← i686 "libtextrel")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let _ ← machine.loadLibrary "libother.so"
+  let textrel ← machine.loadLibrary "libtextrel.so"
+  let some callOther := ← machine.findSymbol "call_other" (some textrel) | throw <| IO.userError "libtextrel has no call_other"
+  assertEqual "A relocation of text of R_386_PC32" 3 ((← machine.call callOther) % 2 ^ 32)
+  let kernel := base.addFile "/lib/libinitargs.so" (← binary "libinitargs")
+  let machine ← Bap.Linux.start kernel "/test" ["/test", "arg1"]
+  let library ← machine.loadLibrary "libinitargs.so"
+  let said (name : String) : IO Nat := do
+    let some address := ← machine.findSymbol name (some library) | throw <| IO.userError s!"libinitargs has no {name}"
+    pure ((← machine.call address) % 2 ^ 32)
+  assertEqual "An initializer is given the arguments of the program" [2, 'a'.toNat, 1]
+    [← said "init_count", ← said "init_second_letter", ← said "init_environment_ends"]
+
 /-- `libc-review11`, of mappings of 16 GiB, takes the host little more than it took before: what a mapping takes of it is what was written,
 not how large it is. The peak of what the process has is set to what it has now (`clear_refs` of 5), and is no more than 2 GiB past it
 after the run, where before it was 32 GiB past. -/
@@ -2343,6 +2437,94 @@ def testMappingsTakeWhatIsWritten (triple : String) : IO Unit := do
   testLinuxRaises s!"{triple}-libc-review11"
   let peak ← kilobytes "VmHWM:"
   assertTrue s!"Mappings of 16 GiB take the host {(peak - before) / 1024} MiB" (peak < before + 2 * 1024 * 1024)
+
+/-- A range compiled in one address space doesn't run in another whose code is other past its first block: a child that a fork made
+writes the third instruction of a loop and runs it, and its parent then runs its own, as the interpreter has it. -/
+def testRangesOfOtherSpaces : IO Unit := do
+  let rv (source : String) : IO ByteArray := LLVM.assemble "riscv64" source
+  let code := (← rv "addi a0, a0, 1") ++ (← rv "jal 4") ++ (← rv "addi a1, a1, 1") ++ (← rv "blt a0, a3, -12") ++ (← rv "jal 0")
+  let patch ← rv "addi a1, a1, 100"
+  let run (interpret : Bool) : IO Nat := do
+    let emu ← Bap.Emu.riscv64 code 0 0 (adjust := fun config => { config with hotThreshold := 1, rangeLimit := 16 })
+    if interpret then Bap.Emu.setExecutionMode emu .interpret
+    let word (value : Nat) : Value := .bits (BitVec.ofNat 64 value)
+    for name in ["X10", "X11", "X12"] do Bap.Emu.setReg emu (reg name) (word 0)
+    Bap.Emu.setReg emu (reg "X13") (word 50)
+    let child ← Bap.Emu.fork emu 0
+    Bap.Emu.stopThread emu 1
+    Bap.Emu.switchThread emu child
+    Bap.Emu.resumeThread emu child
+    Bap.Emu.write emu 8 patch
+    let _ ← Bap.Emu.run emu 300
+    Bap.Emu.stopThread emu child
+    Bap.Emu.switchThread emu 1
+    Bap.Emu.resumeThread emu 1
+    let _ ← Bap.Emu.run emu 300
+    match ← Bap.Emu.reg emu (reg "X11") with
+    | .bits value => pure value.toNat
+    | _ => throw <| IO.userError "a1 is not a word"
+  assertEqual "A parent runs its own code after its child compiled other code at the same place" (← run true) (← run false)
+  assertEqual "which counts 50" 50 (← run false)
+
+/-- What a code hook in a compiled range changes of what the range goes on with ends the range there, as single steps have it: a hook
+that takes execute permission off a block after it faults there, rather than the range running on into it; and a hook that starts a
+trace of accesses has the accesses after it traced. -/
+def testHookChangesRange : IO Unit := do
+  let rv (source : String) : IO ByteArray := LLVM.assemble "riscv64" source
+  let word (value : Nat) : Value := .bits (BitVec.ofNat 64 value)
+  let protecting (interpret : Bool) : IO (Option Nat × Nat) := do
+    let code := (← rv "addi a0, a0, 1") ++ (← rv "jal 4") ++ (← rv "addi a2, a2, 0") ++ (← rv "jal 4")
+      ++ (← rv "addi a1, a1, 1") ++ (← rv "blt a0, a3, -20") ++ (← rv "jal 0")
+    let emu ← Bap.Emu.riscv64 code 0 0 (adjust := fun config => { config with hotThreshold := 1, rangeLimit := 16 })
+    if interpret then Bap.Emu.setExecutionMode emu .interpret
+    for name in ["X10", "X11", "X12"] do Bap.Emu.setReg emu (reg name) (word 0)
+    Bap.Emu.setReg emu (reg "X13") (word 50)
+    let fires ← IO.mkRef 0
+    let _ ← Bap.Emu.onCode emu (8, 8) fun current _ => do
+      let count ← fires.modifyGet fun count => (count, count + 1)
+      if count == 10 then Bap.Emu.protect current 16 4 ⟨true, true, false⟩
+    let _ ← (Bap.Emu.run emu 2000).toBaseIO
+    let a0 ← match ← Bap.Emu.reg emu (reg "X10") with
+      | .bits value => pure value.toNat
+      | _ => pure 0
+    pure ((← Bap.Emu.failure emu).map (·.address), a0)
+  assertEqual "A hook that takes execute permission off a block of its range faults there, as single steps do" (← protecting true)
+    (← protecting false)
+  let tracing (interpret : Bool) : IO Nat := do
+    let code := (← rv "addi a0, a0, 1") ++ (← rv "jal 4") ++ (← rv "addi a2, a2, 0") ++ (← rv "jal 4")
+      ++ (← rv "sd a0, 0(a4)") ++ (← rv "ld a5, 0(a4)") ++ (← rv "blt a0, a3, -24") ++ (← rv "jal 0")
+    let emu ← Bap.Emu.riscv64 code 0 0 (adjust := fun config => { config with hotThreshold := 1, rangeLimit := 16 })
+    if interpret then Bap.Emu.setExecutionMode emu .interpret
+    Bap.Emu.map emu ⟨0x1000, ByteArray.mk (List.replicate 8 0).toArray, ⟨true, true, false⟩⟩
+    for name in ["X10", "X11", "X12", "X15"] do Bap.Emu.setReg emu (reg name) (word 0)
+    Bap.Emu.setReg emu (reg "X13") (word 50)
+    Bap.Emu.setReg emu (reg "X14") (word 0x1000)
+    let fires ← IO.mkRef 0
+    let _ ← Bap.Emu.onCode emu (8, 8) fun current _ => do
+      let count ← fires.modifyGet fun count => (count, count + 1)
+      if count == 0 then Bap.Emu.traceStartAccesses current 1000
+    let _ ← Bap.Emu.run emu 1000
+    Bap.Emu.traceAccessesCount emu
+  assertEqual "A hook that starts a trace of accesses has those after it, as single steps have them" (← tracing true) (← tracing false)
+
+/-- A checkpoint of a region larger than the host can give is refused with an error, rather than ending the process where its bytes are
+allocated: the size of a region, written as 2^47. -/
+def testHugeCheckpointRegion : IO Unit := do
+  let code ← LLVM.assemble "riscv64" "addi a0, a0, 1"
+  let emu ← Bap.Emu.riscv64 code 0 0
+  Bap.Emu.map emu ⟨0x77770000, ByteArray.mk (Array.replicate 4096 1), ⟨true, true, false⟩⟩
+  Bap.Emu.save emu "native/build/emu-huge.bin"
+  let data ← IO.FS.readBinFile "native/build/emu-huge.bin"
+  let word (value : Nat) : List UInt8 := (List.range 8).map fun index => UInt8.ofNat (value / 256 ^ index % 256)
+  let wanted := word 0x77770000 ++ [1, 1, 0] ++ word 4096
+  let bytes := data.toList
+  let some at_ := (List.range bytes.length).find? fun index => (bytes.drop index).take wanted.length == wanted
+    | throw <| IO.userError "the region isn't in the checkpoint"
+  let patched := (bytes.take (at_ + 11)) ++ word (2 ^ 47) ++ bytes.drop (at_ + 19)
+  IO.FS.writeBinFile "native/build/emu-huge.bin" (ByteArray.mk patched.toArray)
+  match ← (Bap.Emu.load emu "native/build/emu-huge.bin").toBaseIO with
+  | .error error => IO.println s!"ok: A checkpoint of a region of 2^47 bytes is refused: {error}"
+  | .ok _ => throw <| IO.userError "a checkpoint of a region of 2^47 bytes was loaded"
 
 /-- A hook that maps memory as native code runs empties the chain that runs it, which goes on with what it had of the range that ran
 rather than with what was let go of, and stops there: the loop counts to its end as it would without the hook. Before, what the run went
@@ -3634,6 +3816,18 @@ def testContract (triple : String) : IO Unit := do
   assertTrue s!"Contract {triple} a replacement that doesn't end it is told apart: {staying.differences}"
     (staying.differences.contains "it ends the program with 0, which the replacement doesn't")
 
+/-- A round of a thread whose first thread left by `pthread_exit` doesn't end the program, which goes on without it: `libc-cff` of an
+argument runs the rounds in another thread once the first is over. -/
+def testContractAfterLeader (triple : String) : IO Unit := do
+  let (dispatcher, state, _, _, _) ← cffAddresses triple
+  let profile : Bap.Analysis.Cff.Profile := { dispatcher, state := .memory state 4 }
+  let machine ← Bap.Linux.start (← cffKernel triple 'C') "/test" ["/test", "leader"]
+  let _ ← Bap.Analysis.Verdict.captureVerdict machine { pc := dispatcher, criteria := [] }
+  let recorder ← Bap.Analysis.Contract.Recorder.attach machine
+  let first ← Bap.Analysis.Contract.capture recorder profile
+  assertEqual s!"Contract {triple} a round after the first thread left is of state 1, leaves 2 and ends nothing" (1, some 2, none)
+    (first.state, first.next, first.exit)
+
 /-- A resolver of a function that a library chooses at load is called as glibc's loader calls it: on ARM and RISC-V with `AT_HWCAP`,
 which the function that it chose says. PowerPC64 of ELFv1 isn't here, as a call of a descriptor isn't one here. -/
 def testIfuncArguments (triple : String) : IO Unit := do
@@ -3795,6 +3989,28 @@ def testSparseMapping (triple : String) : IO Unit := do
   assertEqual s!"Sparse {triple} it finds what it wrote and zeros elsewhere" (some "y")
     (((String.fromUTF8! (← written.get)).splitOn "\n")[1]?)
 
+/-- A PE of x86-64 of one section of `ret`s and of `count` symbols in it, as a file of very many symbols has them. -/
+private def peOfSymbols (count : Nat) : ByteArray := Id.run do
+  let le (size value : Nat) : ByteArray := ByteArray.mk ((List.range size).map fun index => (value / 256 ^ index % 256).toUInt8).toArray
+  let mut dos := ByteArray.mk (Array.replicate 64 0)
+  dos := (dos.set! 0 0x4d).set! 1 0x5a
+  dos := dos.set! 60 64
+  -- The optional header of PE32+, of 240 bytes: its magic, its image base and its section alignment.
+  let optional := le 2 0x20b ++ ByteArray.mk (Array.replicate 14 0) ++ le 4 0x1000 ++ ByteArray.mk (Array.replicate 4 0) ++
+    le 8 0x140000000 ++ ByteArray.mk (Array.replicate 208 0)
+  let rawOffset := 0x400
+  let symbolOffset := rawOffset + 0x200
+  let coff := le 2 0x8664 ++ le 2 1 ++ le 4 0 ++ le 4 symbolOffset ++ le 4 count ++ le 2 optional.size ++ le 2 0x22
+  let section_ := ".text".toUTF8 ++ ByteArray.mk (Array.replicate 3 0) ++ le 4 0x10 ++ le 4 0x1000 ++ le 4 0x200 ++ le 4 rawOffset ++
+    le 4 0 ++ le 4 0 ++ le 2 0 ++ le 2 0 ++ le 4 0x60000020
+  let mut out := dos ++ "PE\x00\x00".toUTF8 ++ coff ++ optional ++ section_
+  out := out ++ ByteArray.mk (Array.replicate (rawOffset - out.size) 0) ++ ByteArray.mk (Array.replicate 0x200 0xc3)
+  for index in [0:count] do
+    let digits := toString index
+    let name := ("s" ++ "".pushn '0' (7 - digits.length) ++ digits).toUTF8
+    out := out ++ name ++ le 4 (index % 16) ++ le 2 1 ++ le 2 0x20 ++ ByteArray.mk #[2, 0]
+  pure (out ++ le 4 4)
+
 /-- What takes time in proportion to what it does and not to what it has done before: when the work is four times as much it takes about four times as long, and sixteen if it goes through all that
 went before. Each is run alone, as what a test measures isn't to be what the others are doing. -/
 def scaling : IO Unit := do
@@ -3846,6 +4062,17 @@ def scaling : IO Unit := do
   let first ← grouping 64000
   let second ← grouping 256000
   assertTrue s!"grouping what a contract changed takes about 4 times as long for 4 times as much: {first} ms and {second} ms" (second ≤ 9 * max first 50)
+  -- What a PE file has of symbols is read one at a time, however many came before.
+  let symbolsOf (count : Nat) : IO Nat := do
+    let file := peOfSymbols count
+    let started ← IO.monoMsNow
+    match Bap.Image.Pe.decode file with
+    | .ok image => assertEqual s!"a PE of {count} symbols has them all" count image.symbols.length
+    | .error error => throw <| IO.userError s!"a PE of {count} symbols: {error}"
+    pure ((← IO.monoMsNow) - started)
+  let first ← symbolsOf 20000
+  let second ← symbolsOf 80000
+  assertTrue s!"reading the symbols of a PE takes about 4 times as long for 4 times as much: {first} ms and {second} ms" (second ≤ 9 * max first 50)
   -- Comparing runs goes through what ran once, however many threads ran it.
   let comparing (threads : Nat) : IO Nat := do
     let history := (Array.range 400000).map fun seq =>
@@ -4553,6 +4780,61 @@ def testBaseEnvironment (triple : String) : IO Unit := do
   assertEqual s!"{label} and what was linked against it runs as it would have" (← call "run")
     ((← again.call run (threaded := true)) % 2 ^ 32)
 
+/-- Taint through the functions of the base environment, which compute as the guest's own code would and bring nothing in: what
+`memcpy` and `memmove` copy, of a part that overlaps too, comes from where it came from; what `strcmp` gives comes from what it
+compared, and `strlen` of what nothing marked from nothing; and what `memset` writes is clean. Each call that the host serves ends, of
+one that waited too. -/
+def testBaseTaint : IO Unit := do
+  let program ← IO.FS.readBinFile "testsuite/bin/x86_64-linux-musl-libc-files"
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let base ← machine.baseEnvironment
+  let tracker ← machine.track
+  let callBase (name : String) (arguments : List Nat) : IO Nat := do
+    let some address := base.resolve name | throw <| IO.userError s!"the base has no {name}"
+    machine.call address arguments
+  let labels (explanation : Bap.Analysis.DynamicTaint.Tracker.Explanation) : List String :=
+    (explanation.sources.filterMap fun (node, _, _) => match node.kind with
+      | .source label _ => some label
+      | _ => none).eraseDups
+  let input ← machine.malloc 32
+  machine.write input "secret ".toUTF8
+  let other ← machine.malloc 32
+  machine.write other "public ".toUTF8
+  -- Made before anything is marked, as what is written after a branch on what is is guarded by it.
+  let clean ← machine.malloc 32
+  let _ ← callBase "memset" [clean, 0x41, 8]
+  let _ ← callBase "memset" [clean + 8, 0, 1]
+  let target ← machine.malloc 32
+  let _ ← callBase "memset" [target, 0, 32]
+  assertEqual "What memset writes is clean" ([] : List String) (labels (← tracker.explainMemory target))
+  -- Of what is said of each, what was written, and nothing of the base, which isn't a source; what the arguments that `Machine.call` gave
+  -- came from may be there too, as it is of the host.
+  let from_ (said : List String) : List String :=
+    (said.filter fun label => label.startsWith "Machine.write" || label.startsWith "base").mergeSort
+  let _ ← callBase "memcpy" [target, input, 7]
+  assertEqual "What memcpy copies comes from where it came from" [s!"Machine.write {input} 7"]
+    (from_ (labels (← tracker.explainMemory (target + 2))))
+  let _ ← callBase "memmove" [input + 1, input, 6]
+  assertEqual "So does what memmove copies over itself" [s!"Machine.write {input} 7"] (from_ (labels (← tracker.explainMemory (input + 6))))
+  let _ ← callBase "strcmp" [target, other]
+  assertEqual "What strcmp gives comes from what it compared" [s!"Machine.write {input} 7", s!"Machine.write {other} 7"].mergeSort
+    (from_ (labels (← tracker.explainRegister "RAX")))
+  let _ ← callBase "strlen" [clean]
+  assertEqual "What strlen gives of what nothing marked comes from nothing" ([] : List String) (labels (← tracker.explainRegister "RAX"))
+  -- Each call of the base that the host serves ends, of one that waited too: a journal has none of them left as being served.
+  let journal ← machine.journal
+  let mutex ← machine.malloc 16
+  let cond ← machine.malloc 64
+  let _ ← callBase "memset" [cond, 0, 64]
+  let time ← machine.malloc 16
+  let now := (← machine.kernel.get).clock
+  let field (value : Nat) : ByteArray := ByteArray.mk ((List.range 8).map fun index => (value >>> (8 * index)).toUInt8).toArray
+  machine.write time (field (now / 1000000000 + 1) ++ field (now % 1000000000))
+  let _ ← callBase "pthread_mutex_lock" [mutex]
+  let some wait := base.resolve "pthread_cond_timedwait" | throw <| IO.userError "the base has no pthread_cond_timedwait"
+  assertEqual "A wait for a condition that nothing signals ends at its time" 110 ((← machine.call wait [cond, mutex, time] (threaded := true)) % 2 ^ 32)
+  assertEqual "and what was served of it is over" 0 (← journal.serving.get).length
+
 /-- Of the base environment, as bionic and the ABIs have it: a mutex is a word, which is all of one on 32 bits; the routine of
 `pthread_once` and of `pthread_create` starts with its stack as a call leaves it; `pthread_cond_timedwait` ends at its time; a block that
 was aligned is reallocated with what it held; and what can't be had is NULL, with ENOMEM. -/
@@ -4654,6 +4936,38 @@ def testBaseEnvironmentAbi (triple : String) : IO Unit := do
   let normal ← machine.malloc 16
   let _ ← callBase "pthread_mutex_init" [normal, 0]
   assertEqual s!"{label} a try of a normal one that is held" (0, 16) (← callBase "pthread_mutex_lock" [normal], ← callBase "pthread_mutex_trylock" [normal])
+  -- A try of one that checks is EBUSY too, and an unlock of it that nobody holds EPERM.
+  assertEqual s!"{label} a try of one that checks that is held" 16 (← callBase "pthread_mutex_trylock" [checking])
+  assertEqual s!"{label} it unlocks once" (0, 1) (← callBase "pthread_mutex_unlock" [checking], ← callBase "pthread_mutex_unlock" [checking])
+  -- bionic's static initializers: of one that is recursive, 0x4000, and of one that checks, 0x8000, which they are once unlocked again.
+  let recursive ← machine.malloc 16
+  machine.write recursive (ByteArray.mk #[0, 0x40, 0, 0])
+  assertEqual s!"{label} PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP locks twice"
+    (0, 0, 0, 0, 0x4000) (← callBase "pthread_mutex_lock" [recursive], ← callBase "pthread_mutex_lock" [recursive],
+      ← callBase "pthread_mutex_unlock" [recursive], ← callBase "pthread_mutex_unlock" [recursive], ← number recursive 4)
+  let statically ← machine.malloc 16
+  machine.write statically (ByteArray.mk #[0, 0x80, 0, 0])
+  assertEqual s!"{label} PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP checks"
+    (0, edeadlk, 0, 1) (← callBase "pthread_mutex_lock" [statically], ← callBase "pthread_mutex_lock" [statically],
+      ← callBase "pthread_mutex_unlock" [statically], ← callBase "pthread_mutex_unlock" [statically])
+  -- `PTHREAD_STACK_MIN`, of 8192 on 32 bits and 16384 on 64.
+  assertEqual s!"{label} a stack of 12 KiB" (if bits == 32 then 0 else 22) (← callBase "pthread_attr_setstacksize" [attributes, 12288])
+  -- Alignments: of `posix_memalign` a power of two of words, else EINVAL with nothing written; of `aligned_alloc` a power of two, else
+  -- NULL with EINVAL; and `memalign` rounds up to one.
+  let pointer ← machine.malloc 16
+  machine.write pointer (ByteArray.mk (Array.replicate word 0x77))
+  assertEqual s!"{label} posix_memalign of 24 and of 2" (22, 22) (← callBase "posix_memalign" [pointer, 24, 32], ← callBase "posix_memalign" [pointer, 2, 32])
+  assertEqual s!"{label} writes nothing" (List.replicate word 0x77) ((← machine.read pointer word).toList.map (·.toNat))
+  assertEqual s!"{label} aligned_alloc of 24" (0, 22) (← callBase "aligned_alloc" [24, 32], ← number (← callBase "__errno_location" []) 4)
+  assertEqual s!"{label} memalign of 48 is of 64" 0 ((← callBase "memalign" [48, 100]) % 64)
+  -- `realloc` of nothing frees what it is given, and is NULL.
+  assertEqual s!"{label} realloc of 0" 0 (← callBase "realloc" [← callBase "malloc" [32], 0])
+  -- A thread that isn't there, or was joined, is ESRCH.
+  assertEqual s!"{label} pthread_join of a thread that isn't there" 3 (← callBase "pthread_join" [99999, 0])
+  let joined ← machine.malloc 16
+  let _ ← callBase "pthread_create" [joined, 0, routine, 0]
+  let _ ← callBase "pthread_join" [← number joined word, 0] (threaded := true)
+  assertEqual s!"{label} of one that was joined" 3 (← callBase "pthread_join" [← number joined word, 0])
   -- What can't be had.
   if bits == 64 then
     assertEqual s!"{label} malloc of more than there is is NULL" 0 (← callBase "malloc" [2 ^ 40])
@@ -4995,6 +5309,19 @@ def testLinuxLibraries (triple : String) (ifunc : Bool := false) : IO Unit := do
     assertEqual s!"{label} by its table" 77 (signed32 (← picking.call plt []))
     let some pointer := ← picking.findSymbol "through_pointer" (some loaded) | throw <| IO.userError "no through_pointer"
     assertEqual s!"{label} by a pointer" 77 (signed32 (← picking.call pointer []))
+    -- What a library calls of its own by its table is what its resolver picks, unless something is to be had first, as of any other
+    -- name: `either_one` of libother, which gives 2.
+    let own := chosen.addFile "/lib/libifuncown.so" (← binary "libifuncown")
+    let plain ← Bap.Linux.start own "/test" ["/test"]
+    let loaded ← plain.loadLibrary "libifuncown.so"
+    let some call := ← plain.findSymbol "call_own" (some loaded) | throw <| IO.userError "no call_own"
+    assertEqual s!"{label} its own by its table" 77 (signed32 (← plain.call call []))
+    let preferring ← Bap.Linux.start own "/test" ["/test"]
+    let other ← preferring.loadLibrary "libother.so"
+    let some either := ← preferring.findSymbol "either_one" (some other) | throw <| IO.userError "no either_one"
+    let loaded ← preferring.loadLibrary "libifuncown.so" (prefer := fun name => if name == "own" then some either else none)
+    let some call := ← preferring.findSymbol "call_own" (some loaded) | throw <| IO.userError "no call_own"
+    assertEqual s!"{label} its own is had after what is to be had first" 2 (signed32 (← preferring.call call []))
 
 /-- Thread-local storage of libraries, by what code reads through the thread pointer, so that it only comes to what it should where the
 offsets are right, with a block for each of two threads. -/

@@ -1,0 +1,16 @@
+opath: open ok, read Bad file descriptor, write Bad file descriptor, fstat ok of 5, mmap Bad file descriptor, fchmod ok, ioctl Bad file descriptor, dup ok
+opath: O_CREAT of what isn't there No such file or directory, a link itself ok is a link 1, fchdir ok, openat of it ok
+seals: O_TRUNC of what may not shrink Operation not permitted, size 5, of what may not be written ok
+partial: write 10, pwrite 10, writev 5, of one that ends early 15, pwritev 15
+partial: pread 10, preadv 15, readv 15, a pipe Bad address
+devzero: private ok of 0, shared ok that a child wrote 9, a pipe No such device, a directory Permission denied
+pipe0: of nothing 0, with no reader 0, SIGPIPE 0, of something Broken pipe, SIGPIPE 1
+utimes: of another's that it may write: none ok, both now ok, now and omit Operation not permitted, set Operation not permitted, omit ok
+utimes: flags Invalid argument, AT_EMPTY_PATH ok, a name of nothing No such file or directory, nanoseconds Invalid argument
+madvise: REMOVE of shared ok of 0, of private Invalid argument of 5, DONTNEED of a hole Out of memory of 0, GUARD_INSTALL ok, reading it SIGSEGV, GUARD_REMOVE ok, then read 0
+limits: FSIZE of 100: 150 100, then File too large, pwrite below 10, ftruncate past File too large, of SIGXFSZ killed
+limits: AS of 64 MiB: 1 GiB Out of memory, 1 MiB ok
+small: RWF_NOAPPEND 1, of Jello, sendfile to O_APPEND Invalid argument, splice Invalid argument
+small: mmap of 0 Invalid argument, of no kind Invalid argument, of an offset Invalid argument, shared writable of O_RDONLY Permission denied, of O_WRONLY Permission denied, mprotect writable of it Permission denied, unaligned Invalid argument, of nothing Out of memory
+small: O_TMPFILE read-only Invalid argument, of a file Not a directory, linked of O_EXCL No such file or directory, of none ok, O_DIRECTORY|O_CREAT Invalid argument, O_RDONLY|O_TRUNC of what may not be written Permission denied, of what may ok of 0
+done

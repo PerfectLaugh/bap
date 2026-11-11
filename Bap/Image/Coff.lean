@@ -119,8 +119,10 @@ private def parseSymbol (data : ByteArray) (header : Header) (sections : List Se
     | none => value
   .ok ⟨name, address, 0, sectionIndex != 0 && symbolType &&& 0x30 = 0x20, storageClass = 103, false⟩
 
+/-- The symbols, with their indices, after those it has, one at a time: in an array, as so many of them are, which a list would copy
+for each. -/
 private def parseSymbols (data : ByteArray) (header : Header) (sections : List Section) :
-    Nat → Nat → List (Nat × Symbol) → Except String (List (Nat × Symbol))
+    Nat → Nat → Array (Nat × Symbol) → Except String (Array (Nat × Symbol))
   | _, 0, symbols => .ok symbols
   | index, remaining + 1, symbols => do
     let offset := header.symbolOffset + index * 18
@@ -130,7 +132,7 @@ private def parseSymbols (data : ByteArray) (header : Header) (sections : List S
       .error "COFF auxiliary symbol exceeds symbol table"
     else
       parseSymbols data header sections (index + auxiliaryCount + 1)
-        (remaining - auxiliaryCount) (symbols ++ [(index, symbol)])
+        (remaining - auxiliaryCount) (symbols.push (index, symbol))
 
 private def writeNat (data : ByteArray) (offset size value : Nat) : Except String ByteArray :=
   if offset + size > data.size then
@@ -439,7 +441,7 @@ def decodeReport (data : ByteArray) : Except String (Image × List String) := do
   let placed := placeObjects 0 parsed
   let sections := placed.map fun object => object.info
   let word := (architecture header.machine).2 / 8
-  let parsedSymbols ← parseSymbols data header sections 0 header.symbolCount []
+  let parsedSymbols := (← parseSymbols data header sections 0 header.symbolCount #[]).toList
   let commonsStart := alignUp (placed.foldl (fun cursor object =>
     if isMapped object then max cursor (object.info.addr + object.segment.size) else cursor) 0) word
   let (commons, commonsEnd) := placeUndefined data header word (· != 0) id commonsStart parsedSymbols

@@ -91,18 +91,34 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       if given.isEmpty then return .error Errno.enoent
       let (base, path) := kernel.pathIn group base given
       pure (.ok (if path.startsWith "/" then path else base ++ "/" ++ path))
-  -- The inode of a path, or of what a descriptor has of `AT_EMPTY_PATH` with an empty path.
-  let inodeAt (directory address : Nat) (follow empty : Bool) : IO (Result Nat) := do
+  -- Of what has no path that it was found by, whether it is on what is mounted read-only, by the path that it has.
+  let readOnlyInode (number : Nat) : Bool := (kernel.pathOfInode number).any kernel.readOnly
+  -- The inode of a path, or of what a descriptor has of `AT_EMPTY_PATH` with an empty path, and whether it is on what is mounted
+  -- read-only, as what writes to it is `EROFS`.
+  let placeAt (directory address : Nat) (follow empty : Bool) : IO (Result (Nat × Bool)) := do
     if empty && (← readString emu address).isEmpty then
-      return (kernel.openFileOf group directory).map (·.2.inode)
+      -- Of `AT_FDCWD`, the working directory.
+      if atCwd directory then
+        return match kernel.resolveVia "/" (kernel.cwdOf group) with
+          | .ok (normal, some number, via) => .ok (number, kernel.readOnlyVia via normal)
+          | .ok (_, none, _) => .error Errno.enoent
+          | .error errno => .error errno
+      return (kernel.openFileOf group directory).map fun (_, file) => (file.inode, readOnlyInode file.inode)
     match ← pathAt directory address with
     | .error errno => pure (.error errno)
     | .ok path =>
-      match kernel.resolve "/" path follow with
-      | .ok (_, some number) => pure (.ok number)
-      | .ok (_, none) => pure (.error Errno.enoent)
+      match kernel.resolveVia "/" path follow with
+      | .ok (normal, some number, via) => pure (.ok (number, kernel.readOnlyVia via normal))
+      | .ok (_, none, _) => pure (.error Errno.enoent)
       | .error errno => pure (.error errno)
+  let inodeAt (directory address : Nat) (follow empty : Bool) : IO (Result Nat) := do
+    pure ((← placeAt directory address follow empty).map (·.1))
   let ofFd (fd : Nat) : Result Nat := (kernel.openFileOf group fd).map (·.2.inode)
+  let placeOfFd (fd : Nat) : Result (Nat × Bool) := (ofFd fd).map fun number => (number, readOnlyInode number)
+  -- Whether a descriptor that may be written isn't a pipe and was opened to append.
+  let appends (fd : Nat) : Bool := (kernel.pipeOf group fd).isNone && match kernel.openFileOf group fd with
+    | .ok (_, file) => file.flags &&& 3 != 0 && file.flags &&& Kernel.oAppend != 0
+    | .error _ => false
   let credentials := (kernel.process group).credentials
   -- Times of `timespec`, or of `timeval` of `scale` 1000, two of them, of which `UTIME_NOW` and `UTIME_OMIT` are now and none, or
   -- `EINVAL` of a fraction that is negative or of a second or more.
@@ -120,34 +136,41 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     let second ← one (address + 2 * field)
     pure (do pure (← first, ← second))
   -- Of the file, or why there is none, and then of the times.
-  -- As `vfs_utimes` and `setattr_prepare` have it: times that are given, only of the owner or with `CAP_FOWNER`, else `EPERM`; now, of
-  -- them or of one that may write it, else `EACCES`; and neither, nothing at all.
-  let setTimes (number : Result Nat) (given : Result ((Option Nat × Bool) × (Option Nat × Bool))) : IO (Option SyscallAction) := do
-    match number, given with
+  -- As `vfs_utimes` and `setattr_prepare` have it: times that are given, or now of one and not the other, only of the owner or with
+  -- `CAP_FOWNER`, else `EPERM`; now of both, of them or of one that may write it, else `EACCES`; and neither, nothing at all.
+  let setTimes (place : Result (Nat × Bool)) (given : Result ((Option Nat × Bool) × (Option Nat × Bool))) : IO (Option SyscallAction) := do
+    match place, given with
     | .error errno, _ | _, .error errno => fail errno
-    | .ok number, .ok ((accessed, givenAccessed), (modified, givenModified)) =>
+    | .ok (number, readOnly), .ok ((accessed, givenAccessed), (modified, givenModified)) =>
       let some inode := kernel.inodes.get? number | return ← fail Errno.enoent
       if accessed.isNone && modified.isNone then return ← succeed
+      if readOnly then return ← fail 30
       let owner := credentials.fsuid == inode.details.uid || credentials.capable Capability.fowner
-      if (givenAccessed || givenModified) && !owner then return ← fail Errno.eperm
+      if (givenAccessed || givenModified || accessed.isNone || modified.isNone) && !owner then return ← fail Errno.eperm
       if !owner && !Kernel.permits inode credentials false 2 then return ← fail Errno.eacces
       poller.kernel.set (alter kernel number fun details =>
         { details with accessed := accessed.getD details.accessed, modified := modified.getD details.modified, changed := now })
       succeed
   -- Of `chown`, as `chown_ok` and `chgrp_ok` have it: -1 leaves either as it is, which anyone may; else its owner, by the user that it
   -- goes by on files, may leave its owner as it is and give it to a group that it is in or that it has; and with `CAP_CHOWN`, anything.
-  let chown (number : Result Nat) (uid gid : Nat) : IO (Option SyscallAction) := do
+  let chown (place : Result (Nat × Bool)) (uid gid : Nat) : IO (Option SyscallAction) := do
     let unset := 2 ^ 32 - 1
     let (uid, gid) := (uid % 2 ^ 32, gid % 2 ^ 32)
-    match number with
+    match place with
     | .error errno => fail errno
-    | .ok number =>
+    | .ok (number, readOnly) =>
       let some inode := kernel.inodes.get? number | return ← fail Errno.enoent
+      if readOnly then return ← fail 30
       let owner := credentials.fsuid == inode.details.uid
       let mayGive := credentials.capable Capability.chown ||
         (uid == unset || owner && uid == inode.details.uid) &&
         (gid == unset || owner && (gid == inode.details.gid || gid == credentials.fsgid || credentials.groups.contains gid))
       if !mayGive then return ← fail 1
+      -- What loses setuid or setgid has its mode changed, which only its owner may, or with `CAP_FOWNER`, as `setattr_prepare` has it
+      -- of what `chown_common` asks: of -1 and -1 too.
+      let killed := !(inode.content matches .directory) &&
+        (inode.mode &&& 0o4000 != 0 || inode.mode &&& 0o2010 == 0o2010)
+      if killed && !owner && !credentials.capable Capability.fowner then return ← fail 1
       let kernel := alter kernel number fun details =>
         { details with uid := if uid == unset then details.uid else uid, gid := if gid == unset then details.gid else gid
                        changed := now }
@@ -193,9 +216,10 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         else none
       else none
   let attributesOf (number : Nat) : List (String × ByteArray) := ((kernel.inodes.get? number).map (·.details.attributes)).getD []
-  let setAttribute (number : Result Nat) (nameAt valueAt size flags : Nat) : IO (Option SyscallAction) :=
-    onNumber number fun number => onName nameAt fun name => do
+  let setAttribute (place : Result (Nat × Bool)) (nameAt valueAt size flags : Nat) : IO (Option SyscallAction) :=
+    onNumber (place.map (·.1)) fun number => onName nameAt fun name => do
       if size > 65536 then return ← fail e2big
+      if place.toOption.any (·.2) then return ← fail 30
       if let some errno := denied number name true then return ← fail errno
       let there := (attributesOf number).any (·.1 == name)
       if flags &&& 1 != 0 && there then return ← fail Errno.eexist
@@ -221,8 +245,9 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       if size < names.size then return ← fail erange
       write emu listAt names
       succeed names.size
-  let removeAttribute (number : Result Nat) (nameAt : Nat) : IO (Option SyscallAction) :=
-    onNumber number fun number => onName nameAt fun name => do
+  let removeAttribute (place : Result (Nat × Bool)) (nameAt : Nat) : IO (Option SyscallAction) :=
+    onNumber (place.map (·.1)) fun number => onName nameAt fun name => do
+      if place.toOption.any (·.2) then return ← fail 30
       if let some errno := denied number name true then return ← fail errno
       if !(attributesOf number).any (·.1 == name) then return ← fail enodata
       poller.kernel.set (alter kernel number fun details =>
@@ -302,35 +327,41 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       fromResult (kernel.renameWith group "/" source target (arg 4))
     | .utimensat | .utimensat64 =>
       let field := if call == .utimensat64 then 8 else word
-      let number ← if arg 1 == 0 then pure (ofFd (arg 0)) else inodeAt (arg 0) (arg 1) (arg 3 &&& 0x100 == 0) (arg 3 &&& 0x1000 != 0)
-      setTimes number (← times (arg 2) field 1)
+      -- Times that aren't are `EINVAL` first, and then, of a path, flags but `AT_SYMLINK_NOFOLLOW` and `AT_EMPTY_PATH`, and of a
+      -- descriptor without one, any, as `do_utimes` has them.
+      let given ← times (arg 2) field 1
+      if let .error errno := given then return ← fail errno
+      let flags := arg 3 % 2 ^ 32
+      if (if arg 1 == 0 && !atCwd (arg 0) then flags != 0 else flags &&& (2 ^ 32 - 1 - 0x1100) != 0) then return ← fail Errno.einval
+      let place ← if arg 1 == 0 then pure (placeOfFd (arg 0)) else placeAt (arg 0) (arg 1) (flags &&& 0x100 == 0) (flags &&& 0x1000 != 0)
+      setTimes place given
     -- Of a `timeval`, `EINVAL` is before the file is looked for.
     | .utimes | .futimesat =>
       let (directory, path, address) := if call == .utimes then (here, arg 0, arg 1) else (arg 0, arg 1, arg 2)
       let given ← times address word 1000
       if let .error errno := given then return ← fail errno
-      setTimes (← inodeAt directory path true false) given
+      setTimes (← placeAt directory path true false) given
     | .utime =>
       let given ← if arg 1 == 0 then pure ((some now, false), (some now, false)) else do
         pure ((some ((numberOf big (← read emu (arg 1) word)) * 1000000000), true),
           (some ((numberOf big (← read emu (arg 1 + word) word)) * 1000000000), true))
-      setTimes (← inodeAt here (arg 0) true false) (.ok given)
-    | .chown => chown (← inodeAt here (arg 0) true false) (arg 1) (arg 2)
-    | .lchown => chown (← inodeAt here (arg 0) false false) (arg 1) (arg 2)
-    | .fchown => chown (ofFd (arg 0)) (arg 1) (arg 2)
-    | .fchownat => chown (← inodeAt (arg 0) (arg 1) (arg 4 &&& 0x100 == 0) (arg 4 &&& 0x1000 != 0)) (arg 2) (arg 3)
-    | .setxattr => setAttribute (← inodeAt here (arg 0) true false) (arg 1) (arg 2) (arg 3) (arg 4)
-    | .lsetxattr => setAttribute (← inodeAt here (arg 0) false false) (arg 1) (arg 2) (arg 3) (arg 4)
-    | .fsetxattr => setAttribute (ofFd (arg 0)) (arg 1) (arg 2) (arg 3) (arg 4)
+      setTimes (← placeAt here (arg 0) true false) (.ok given)
+    | .chown => chown (← placeAt here (arg 0) true false) (arg 1) (arg 2)
+    | .lchown => chown (← placeAt here (arg 0) false false) (arg 1) (arg 2)
+    | .fchown => chown (placeOfFd (arg 0)) (arg 1) (arg 2)
+    | .fchownat => chown (← placeAt (arg 0) (arg 1) (arg 4 &&& 0x100 == 0) (arg 4 &&& 0x1000 != 0)) (arg 2) (arg 3)
+    | .setxattr => setAttribute (← placeAt here (arg 0) true false) (arg 1) (arg 2) (arg 3) (arg 4)
+    | .lsetxattr => setAttribute (← placeAt here (arg 0) false false) (arg 1) (arg 2) (arg 3) (arg 4)
+    | .fsetxattr => setAttribute (placeOfFd (arg 0)) (arg 1) (arg 2) (arg 3) (arg 4)
     | .getxattr => getAttribute (← inodeAt here (arg 0) true false) (arg 1) (arg 2) (arg 3)
     | .lgetxattr => getAttribute (← inodeAt here (arg 0) false false) (arg 1) (arg 2) (arg 3)
     | .fgetxattr => getAttribute (ofFd (arg 0)) (arg 1) (arg 2) (arg 3)
     | .listxattr => listAttributes (← inodeAt here (arg 0) true false) (arg 1) (arg 2)
     | .llistxattr => listAttributes (← inodeAt here (arg 0) false false) (arg 1) (arg 2)
     | .flistxattr => listAttributes (ofFd (arg 0)) (arg 1) (arg 2)
-    | .removexattr => removeAttribute (← inodeAt here (arg 0) true false) (arg 1)
-    | .lremovexattr => removeAttribute (← inodeAt here (arg 0) false false) (arg 1)
-    | .fremovexattr => removeAttribute (ofFd (arg 0)) (arg 1)
+    | .removexattr => removeAttribute (← placeAt here (arg 0) true false) (arg 1)
+    | .lremovexattr => removeAttribute (← placeAt here (arg 0) false false) (arg 1)
+    | .fremovexattr => removeAttribute (placeOfFd (arg 0)) (arg 1)
     | .flock =>
       -- `LOCK_SH`, `LOCK_EX` or `LOCK_UN`, and `LOCK_NB`, of all of the file, for the open file.
       let operation := arg 1 - (arg 1 &&& 4)
@@ -364,12 +395,17 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       succeed fd
     | .sendfile | .sendfile64 =>
       let size := if call == .sendfile64 then 8 else word
+      -- What isn't a pipe and was opened to append is `EINVAL` to send to, as `do_splice_direct` has it, once both may be read and
+      -- written.
+      if appends (arg 0) && (kernel.openFileOf group (arg 1)).toOption.any (·.2.flags &&& 3 != 1) then return ← fail Errno.einval
       let start ← offsetAt (arg 2) size
       transfer (arg 1) (arg 0) (arg 3) start none (kernel.nonblocking group (arg 1)) (moveOffset (arg 2) size start)
     | .splice =>
       let (input, output) := (pipeOf (arg 0), pipeOf (arg 2))
       if input.isNone && output.isNone then return ← fail Errno.einval
       if (input.isSome && arg 1 != 0) || (output.isSome && arg 3 != 0) then return ← fail Errno.espipe
+      -- And to what was opened to append, as `do_splice` has it.
+      if output.isNone && appends (arg 2) then return ← fail Errno.einval
       let (from_, to) := (← offsetAt (arg 1) 8, ← offsetAt (arg 3) 8)
       transfer (arg 0) (arg 2) (arg 4) from_ to (arg 5 &&& 2 != 0 || kernel.nonblocking group (arg 0)) fun count => do
         moveOffset (arg 1) 8 from_ count

@@ -13,6 +13,8 @@
 ;; helpers are in arm-float.lisp.
 
 (defun fp-compare (x y) (set-nzcv (fp-nzcv x y)))
+;; of FCMPE and FCCMPE, which raise invalid of a quiet NaN too
+(defun fp-compare-signaling (x y) (set-nzcv (fp-nzcv-signaling x y)))
 
 ;; ARITHMETIC
 
@@ -93,14 +95,14 @@
 (defun FNEGSr (rd rn) (setd rd (fp-neg rn)))
 (defun FNEGDr (rd rn) (setd rd (fp-neg rn)))
 
-(defun FMINSrr (rd rn rm) (setd rd (fp-min rn rm 23)))
-(defun FMINDrr (rd rn rm) (setd rd (fp-min rn rm 52)))
-(defun FMAXSrr (rd rn rm) (setd rd (fp-max rn rm 23)))
-(defun FMAXDrr (rd rn rm) (setd rd (fp-max rn rm 52)))
-(defun FMINNMSrr (rd rn rm) (setd rd (fp-minnm rn rm 23)))
-(defun FMINNMDrr (rd rn rm) (setd rd (fp-minnm rn rm 52)))
-(defun FMAXNMSrr (rd rn rm) (setd rd (fp-maxnm rn rm 23)))
-(defun FMAXNMDrr (rd rn rm) (setd rd (fp-maxnm rn rm 52)))
+(defun FMINSrr (rd rn rm) (setd rd (a64-minmax 'fmin rn rm)))
+(defun FMINDrr (rd rn rm) (setd rd (a64-minmax 'fmin rn rm)))
+(defun FMAXSrr (rd rn rm) (setd rd (a64-minmax 'fmax rn rm)))
+(defun FMAXDrr (rd rn rm) (setd rd (a64-minmax 'fmax rn rm)))
+(defun FMINNMSrr (rd rn rm) (setd rd (a64-minmax 'fminnm rn rm)))
+(defun FMINNMDrr (rd rn rm) (setd rd (a64-minmax 'fminnm rn rm)))
+(defun FMAXNMSrr (rd rn rm) (setd rd (a64-minmax 'fmaxnm rn rm)))
+(defun FMAXNMDrr (rd rn rm) (setd rd (a64-minmax 'fmaxnm rn rm)))
 
 ;; ROUNDING TO INTEGRAL. FRINTX and FRINTI use the FPCR rounding
 ;; mode, which is assumed to be to nearest.
@@ -138,10 +140,10 @@
 (defun FCMPDrr (rn rm) (fp-compare rn rm))
 (defun FCMPSri (rn) (fp-compare rn (fp-zero rn)))
 (defun FCMPDri (rn) (fp-compare rn (fp-zero rn)))
-(defun FCMPESrr (rn rm) (fp-compare rn rm))
-(defun FCMPEDrr (rn rm) (fp-compare rn rm))
-(defun FCMPESri (rn) (fp-compare rn (fp-zero rn)))
-(defun FCMPEDri (rn) (fp-compare rn (fp-zero rn)))
+(defun FCMPESrr (rn rm) (fp-compare-signaling rn rm))
+(defun FCMPEDrr (rn rm) (fp-compare-signaling rn rm))
+(defun FCMPESri (rn) (fp-compare-signaling rn (fp-zero rn)))
+(defun FCMPEDri (rn) (fp-compare-signaling rn (fp-zero rn)))
 
 (defmacro FCCMP** (rn rm nzcv cnd)
   (if (condition-holds cnd)
@@ -150,8 +152,13 @@
 
 (defun FCCMPSrr (rn rm nzcv cnd) (FCCMP** rn rm nzcv cnd))
 (defun FCCMPDrr (rn rm nzcv cnd) (FCCMP** rn rm nzcv cnd))
-(defun FCCMPESrr (rn rm nzcv cnd) (FCCMP** rn rm nzcv cnd))
-(defun FCCMPEDrr (rn rm nzcv cnd) (FCCMP** rn rm nzcv cnd))
+(defmacro FCCMPE** (rn rm nzcv cnd)
+  (if (condition-holds cnd)
+      (fp-compare-signaling rn rm)
+    (set-nzcv nzcv)))
+
+(defun FCCMPESrr (rn rm nzcv cnd) (FCCMPE** rn rm nzcv cnd))
+(defun FCCMPEDrr (rn rm nzcv cnd) (FCCMPE** rn rm nzcv cnd))
 
 (defun FCSELSrrr (rd rn rm cnd) (setd rd (if (condition-holds cnd) rn rm)))
 (defun FCSELDrrr (rd rn rm cnd) (setd rd (if (condition-holds cnd) rn rm)))
@@ -530,10 +537,39 @@
              (fp-select (= rmode 2) (a64-frint-as 'm a) (a64-frint-as 'z a)))))
     (a64-frint-as mode a)))
 
+(defun a64-fz (a)
+  "A, or the zero of its sign if it is denormal and FPCR says FZ, or FZ16
+   of half precision"
+  (let ((f (a64-frac-bits a))
+        (on (if (= (word-width a) 16) (select 19 FPCR) (select 24 FPCR)))
+        (den (logand on (is-zero (fp-exponent a (a64-fexp-bits a) f)) (not (is-zero (cast-low f a))))))
+    (fp-select den (logand a (lshift (cast-unsigned (word-width a) 1) (- (word-width a) 1))) a)))
+
+(defun a64-fz-input (a)
+  "(a64-fz A), which says in IDC that it flushed"
+  (let ((z (a64-fz a)))
+    (set FPSR (logor FPSR (lshift (cast-unsigned 32 (not (= z a))) 7)))
+    z))
+
+(defun a64-dn (r)
+  "R, or the default NaN if it is a NaN and FPCR says DN"
+  (fp-select (logand (select 25 FPCR) (is-nan r)) (a64-default-nan r) r))
+
+;; FMIN, FMAX, FMINNM and FMAXNM pick an operand, of the operands as FZ has
+;; them, and a NaN as DN has it
+(defun a64-minmax (op a b)
+  (let ((x (a64-fz-input a)) (y (a64-fz-input b)) (f (a64-frac-bits a)))
+    (a64-dn (case op
+              'fmin (fp-min x y f)
+              'fmax (fp-max x y f)
+              'fminnm (fp-minnm x y f)
+              (fp-maxnm x y f)))))
+
 (defun a64-frintx (a)
-  "FRINTX, which raises inexact for what it changes, unlike FRINTI"
+  "FRINTX, which raises inexact for what it changes, unlike FRINTI, of
+   what FZ leaves of it"
   (let ((r (a64-frint 'x a)))
-    (set FPSR (logor FPSR (lshift (cast-unsigned 32 (logand (not (is-nan a)) (not (= r a)))) 4)))
+    (set FPSR (logor FPSR (lshift (cast-unsigned 32 (logand (not (is-nan a)) (not (= r (a64-fz a))))) 4)))
     r))
 
 (defun a64-fcvt-int (signed mode a)
@@ -615,19 +651,20 @@
     'fsub (a64-dnan (-. :rne a b) a b)
     'fmul (a64-dnan (*. :rne a b) a b)
     'fdiv (a64-dnan (/. :rne a b) a b)
-    'fmax (fp-max a b (a64-frac-bits a))
-    'fmin (fp-min a b (a64-frac-bits a))
-    'fmaxnm (fp-maxnm a b (a64-frac-bits a))
-    'fminnm (fp-minnm a b (a64-frac-bits a))
+    'fmax (a64-minmax 'fmax a b)
+    'fmin (a64-minmax 'fmin a b)
+    'fmaxnm (a64-minmax 'fmaxnm a b)
+    'fminnm (a64-minmax 'fminnm a b)
     'fabd (fp-abs (a64-dnan (-. :rne a b) a b))
     'fmulx (a64-fmulx a b)
     'frecps (a64-frecps a b)
     'frsqrts (a64-frsqrts a b)
     'fcmeq (a64-fcmp (logand (a64-ordered a b) (=. a b)) a)
-    'fcmge (a64-fcmp (logand (a64-ordered a b) (>=. a b)) a)
-    'fcmgt (a64-fcmp (logand (a64-ordered a b) (>. a b)) a)
-    'facge (a64-fcmp (logand (a64-ordered a b) (>=. (fp-abs a) (fp-abs b))) a)
-    'facgt (a64-fcmp (logand (a64-ordered a b) (>. (fp-abs a) (fp-abs b))) a)
+    ;; ordered, which raise invalid of a quiet NaN, as FCMEQ doesn't
+    'fcmge (a64-fcmp (logand (a64-ordered a b) (not (fp-less-signaling a b))) a)
+    'fcmgt (a64-fcmp (logand (a64-ordered a b) (fp-less-signaling b a)) a)
+    'facge (a64-fcmp (logand (a64-ordered a b) (not (fp-less-signaling (fp-abs a) (fp-abs b)))) a)
+    'facgt (a64-fcmp (logand (a64-ordered a b) (fp-less-signaling (fp-abs b) (fp-abs a))) a)
     'scvtf-fixed (a64-fixed-to-fp true a b)
     'ucvtf-fixed (a64-fixed-to-fp false a b)
     'fcvtzs-fixed (a64-fcvt-int true 'z (*. :rne a (a64-fpow2 a b)))
@@ -1112,10 +1149,10 @@
 (defun FSQRTHr (rd rn) (setd rd (a64-fsqrt rn)))
 (defun FABSHr (rd rn) (setd rd (fp-abs rn)))
 (defun FNEGHr (rd rn) (setd rd (fp-neg rn)))
-(defun FMINHrr (rd rn rm) (setd rd (fp-min rn rm 10)))
-(defun FMAXHrr (rd rn rm) (setd rd (fp-max rn rm 10)))
-(defun FMINNMHrr (rd rn rm) (setd rd (fp-minnm rn rm 10)))
-(defun FMAXNMHrr (rd rn rm) (setd rd (fp-maxnm rn rm 10)))
+(defun FMINHrr (rd rn rm) (setd rd (a64-minmax 'fmin rn rm)))
+(defun FMAXHrr (rd rn rm) (setd rd (a64-minmax 'fmax rn rm)))
+(defun FMINNMHrr (rd rn rm) (setd rd (a64-minmax 'fminnm rn rm)))
+(defun FMAXNMHrr (rd rn rm) (setd rd (a64-minmax 'fmaxnm rn rm)))
 (defun FRINTNHr (rd rn) (setd rd (a64-frint 'n rn)))
 (defun FRINTAHr (rd rn) (setd rd (a64-frint 'a rn)))
 (defun FRINTPHr (rd rn) (setd rd (a64-frint 'p rn)))

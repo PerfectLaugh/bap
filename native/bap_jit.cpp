@@ -2061,6 +2061,17 @@ static bool allZero(const uint8_t *bytes, size_t count) {
   return count == 0 || (bytes[0] == 0 && std::memcmp(bytes, bytes + 1, count - 1) == 0);
 }
 
+// Whether the host can give as many bytes as `size`, as an allocation of that many would map them, mapped and let go of at once.
+static bool reservable(size_t size) {
+  if (size < (size_t{1} << 24)) return true;
+#if defined(__linux__)
+  void *mapped = mmap(nullptr, size + 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (mapped == MAP_FAILED) return false;
+  munmap(mapped, size + 4096);
+#endif
+  return true;
+}
+
 extern "C" lean_obj_res bap_zero_bytes(b_lean_obj_arg sizeObject) {
   return lazyZeros(lean_usize_of_nat(sizeObject));
 }
@@ -2151,6 +2162,20 @@ extern "C" lean_obj_res bap_bytes_resident(lean_obj_arg dataObject) {
   }
   lean_dec(dataObject);
   return lean_usize_to_nat(total);
+}
+
+extern "C" lean_obj_res bap_bytes_fill(lean_obj_arg sizeObject, lean_obj_arg piecesObject);
+
+// `Jit.fillChecked`: `Jit.fill`, or none of what the host can't give, which a checkpoint is refused of rather than the process ending.
+extern "C" lean_obj_res bap_bytes_fill_checked(lean_obj_arg sizeObject, lean_obj_arg piecesObject) {
+  if (!lean_is_scalar(sizeObject) || !reservable(lean_usize_of_nat(sizeObject))) {
+    lean_dec(sizeObject);
+    lean_dec(piecesObject);
+    return lean_box(0);
+  }
+  lean_obj_res result = lean_alloc_ctor(1, 1, 0);
+  lean_ctor_set(result, 0, bap_bytes_fill(sizeObject, piecesObject));
+  return result;
 }
 
 // `Jit.fill`: zeros that take no memory yet, with each piece in them where it starts, the first of those that have a byte giving it.

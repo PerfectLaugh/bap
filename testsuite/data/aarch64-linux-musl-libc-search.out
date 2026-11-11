@@ -1,0 +1,5 @@
+open Permission denied, creat Permission denied, missing Permission denied, mkdir Permission denied, unlink Permission denied, rename Permission denied
+symlink Permission denied, through a link to it Permission denied, .. of it Permission denied, of inner Permission denied, openat Permission denied, the directory itself ok
+searched only: open ok, ..ok, listed Permission denied
+from within: .. ok, ../.. Permission denied, here ok
+done

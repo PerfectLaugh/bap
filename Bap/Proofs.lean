@@ -262,9 +262,21 @@ end Passes
 
 namespace CLI
 
+/-- `placeAll` places each parameter once. -/
+theorem placeAll_length (abi : Bap.ABI.Convention) (prototype : Bap.API.Prototype) :
+    ∀ (placing : Bap.API.Placing) (params : List Bap.API.Parameter) (index : Nat),
+      (Bap.API.placeAll abi prototype placing params index).length = params.length
+  | _, [], _ => by simp [Bap.API.placeAll]
+  | placing, param :: rest, index => by
+    simp only [Bap.API.placeAll, List.length_cons]
+    rw [placeAll_length]
+
 theorem argumentLocations_length (abi : Bap.ABI.Convention) (prototype : Bap.API.Prototype) :
     (Bap.API.argumentLocations abi prototype).length = prototype.params.length := by
-  simp [Bap.API.argumentLocations]
+  unfold Bap.API.argumentLocations
+  split
+  · simp [Bap.API.wordLocations]
+  · exact placeAll_length abi prototype _ _ _
 
 end CLI
 

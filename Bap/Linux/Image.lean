@@ -111,7 +111,8 @@ def socketOfBytes (data : ByteArray) : Except String Socket := do
          receiveTimeout, sendTimeout }
 
 /-- Of a process, its process group, session, terminal, credentials and capabilities, limits and nice value, whether it ended, its root,
-the barriers it registered for, what it advised of its memory for a child and the names of its threads, as bytes. -/
+the barriers it registered for, what it advised of its memory for a child, the names of its threads, its policy, its guards, its
+priority and whether it ran a program, as bytes. -/
 def identityBytes (process : Process) : ByteArray :=
   let out := Wire.putOption Wire.putNat (Wire.putNat (Wire.putNat ByteArray.empty process.pgid) process.sid) process.terminal
   let ids := process.credentials
@@ -124,7 +125,11 @@ def identityBytes (process : Process) : ByteArray :=
   let out := Wire.putNat out process.barriers
   let out := Wire.putList (fun out advice => Wire.putFlag (Wire.putNat (Wire.putNat out advice.start) advice.size) advice.wipe) out
     process.forkAdvice
-  Wire.putNat (Wire.putList (fun out (tid, name) => Wire.putText (Wire.putNat out tid) name) out process.threadNames) process.policy
+  let out := Wire.putNat (Wire.putList (fun out (tid, name) => Wire.putText (Wire.putNat out tid) name) out process.threadNames)
+    process.policy
+  let out := Wire.putList (fun out guard => Wire.putNat (Wire.putNat (Wire.putNat out guard.start) guard.size) guard.bits) out
+    process.guards
+  Wire.putFlag (Wire.putNat out process.priority) process.executed
 
 /-- What `identityBytes` made, on a process that has the rest; nothing at all is what a process starts with. -/
 def withIdentity (process : Process) (data : ByteArray) : Except String Process := do
@@ -154,10 +159,21 @@ def withIdentity (process : Process) (data : ByteArray) : Except String Process 
     let (name, at_) ← Wire.getText data at_
     .ok ((tid, name), at_)) data at_
   let (policy, at_) ← Wire.getNat data at_
+  -- What had no guards then has none.
+  let getGuard (data : ByteArray) (at_ : Nat) : Except String (Guard × Nat) := do
+    let (start, at_) ← Wire.getNat data at_
+    let (size, at_) ← Wire.getNat data at_
+    let (bits, at_) ← Wire.getNat data at_
+    .ok ({ start, size, bits }, at_)
+  let (guards, at_) ← if at_ == data.size then pure ([], at_) else Wire.getList getGuard data at_
+  let (priority, executed, at_) ← if at_ == data.size then pure (0, false, at_) else do
+    let (priority, at_) ← Wire.getNat data at_
+    let (executed, at_) ← Wire.getFlag data at_
+    pure (priority, executed, at_)
   Wire.expectEnd data at_
   let id (index : Nat) : Nat := ids.getD index 0
   pure { process with pgid, sid, terminal, limits, nice, ended, root := { inode := rootInode, path := rootPath }, barriers, forkAdvice,
-                      threadNames, policy
+                      threadNames, policy, guards, priority, executed
                       credentials := { uid := id 0, euid := id 1, suid := id 2, fsuid := id 3, gid := id 4, egid := id 5, sgid := id 6
                                        fsgid := id 7, groups, effective := id 8, permitted := id 9, inheritable := id 10
                                        bounding := id 11 } }
@@ -532,7 +548,8 @@ def getSparse : Decoder ByteArray := fun data at_ => do
     let (size, at_) ← getNat data at_
     if size ≥ Bap.Jit.fillLimit then .error "a Linux checkpoint with bytes too many to be" else
     let (pieces, at_) ← getList getPiece data at_
-    .ok (Bap.Jit.fill size pieces, at_)
+    let some bytes := Bap.Jit.fillChecked size pieces | .error "a Linux checkpoint with more bytes than the host has"
+    .ok (bytes, at_)
   | _ => .error "a Linux checkpoint with bytes of an unknown kind"
 
 def putInode (out : ByteArray) (inode : InodeImage) : ByteArray :=

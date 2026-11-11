@@ -1,0 +1,22 @@
+uring: a link of one call, then another: 2:0 1:1 
+uring: cancelled at its head: 5:0 3:-125 4:-125 
+uring: a CQ smaller than the SQ Invalid argument
+orphan: after SIGTSTP, SIGTTIN, SIGTTOU, it exited
+orphan: a read of the terminal from the background of a group that is orphaned: EIO
+stopped: SIGTERM while stopped: it waits, after SIGCONT killed by 15
+wait: wait4 WNOWAIT Invalid argument, of 0x100 Invalid argument, waitid of 0x100 Invalid argument, waitid of no event Invalid argument, then reaped 4
+sockets: listen unbound Invalid argument, accept4 of 0x1 Invalid argument, nonblocking Resource temporarily unavailable, connect again Socket is connected, listen connected Invalid argument
+timers: disarmed with an interval: 0 0, the old 1, then 0
+timers: clocks 0 ok 1 ok 2 ok 3 ok 4 Not supported 5 Not supported 6 Not supported 7 ok 8 Operation not permitted 9 Operation not permitted 10 Invalid argument 11 ok 12 Invalid argument
+timers: setitimer disarmed with an interval 0
+sched: setscheduler of -1 Invalid argument, of no param Invalid argument, of a param that isn't there Bad address, of no process No such process, of a policy that isn't Invalid argument
+sched: SCHED_OTHER of 5 Invalid argument, SCHED_FIFO of 50 Operation not permitted, SCHED_FIFO of 0 Invalid argument, setparam of -1 Invalid argument, of no process No such process, of 5 Invalid argument
+sched: getparam of -1 Invalid argument, of no process No such process, getscheduler of -1 Invalid argument, of no process No such process
+order: kill of 99 to no one No such process, of 0 to no one No such process, tgkill of 0 Invalid argument, of 99 to no thread No such process, of 0 to no thread No such process, tkill of -1 Invalid argument, of 99 Invalid argument
+order: rt_sigqueueinfo of 99 to no one No such process, of 0 to no one No such process, of an info that isn't there Bad address, as the kernel to itself ok
+order: rt_sigaction of SIGKILL Invalid argument, of 99 of a size that isn't Invalid argument, of SIGKILL with nothing ok, of an action that isn't there Bad address, rt_sigpending of 4 ok, to where nothing is Bad address
+sigtimedwait: of an info that isn't there Bad address, pending after 0
+resethand: handler SIG_DFL, flags 0xd0000000, SIGUSR2 in the mask 1
+pgid: setpgid of -1 Invalid argument, of no one No such process, of init No such process, to a group that isn't there Operation not permitted, setsid of a leader Operation not permitted, of a child of another session Operation not permitted, into its group Operation not permitted
+pgid: of a child that ran a program Permission denied
+done

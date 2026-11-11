@@ -37,11 +37,16 @@ theorem read_after_close {kernel next : Kernel} {group fd : Nat} (h : kernel.clo
     simp only [Kernel.read, openFileOf_releaseLocks]
     simp [Kernel.openFileOf, bind, Except.bind]
 
-/-- A child starts with the descriptors, the directory and the break of its parent, in its process group and session. -/
+/-- A child starts with the descriptors, the directory and the break of its parent, in its process group and session, as one that
+hasn't run a program, and of the policy of time sharing if its parent's said `SCHED_RESET_ON_FORK`. -/
 theorem fork_process (kernel : Kernel) (parent child : Nat) :
     (kernel.fork parent child).process child =
-      { kernel.process parent with pgid := kernel.pgidOf parent, sid := kernel.sidOf parent } := by
-  simp [Kernel.fork]
+      let process := kernel.process parent
+      let reset := process.policy &&& 0x40000000 != 0
+      { process with pgid := kernel.pgidOf parent, sid := kernel.sidOf parent, executed := false
+                     policy := if reset then 0 else process.policy, priority := if reset then 0 else process.priority } := by
+  simp only [Kernel.fork]
+  split <;> simp_all
 
 /-- What a child does to its own table leaves that of its parent alone. -/
 theorem setProcess_isolated (kernel : Kernel) {child parent : Nat} (value : Process) (h : child ≠ parent) :

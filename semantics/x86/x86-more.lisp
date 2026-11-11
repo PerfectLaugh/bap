@@ -665,10 +665,14 @@
 
 ;; C0, C2 and C3 of the status word say what the comparison is
 
-(defun x87-compare-status (x y)
+(defun x87-compare-status (x y) (x87-compare-status-by sse-forder x y))
+;; of FCOM, FICOM and FTST, which raise invalid of a quiet NaN too, where
+;; FUCOM doesn't
+(defun x87-compare-status-signaling (x y) (x87-compare-status-by sse-forders x y))
+(defun x87-compare-status-by (order x y)
   (let ((nan (logor (sse-is-nan 80 x) (sse-is-nan 80 y)))
-        (less (sse-forder 80 x y))
-        (more (sse-forder 80 y x)))
+        (less (order 80 x y))
+        (more (order 80 y x)))
     (let ((same (not (logor nan (logor less more)))))
       (set FPU_STATUS
            (logor (logand FPU_STATUS 0xb8ff:16)
@@ -676,19 +680,19 @@
                   (lshift (cast-unsigned 16 nan) 10)
                   (lshift (cast-unsigned 16 (logor less nan)) 8))))))
 
-(defun COM_FST0r (r) (x87-compare-status ST0 r))
-(defun COMP_FST0r (r) (x87-compare-status ST0 r) (x87-pop))
+(defun COM_FST0r (r) (x87-compare-status-signaling ST0 r))
+(defun COMP_FST0r (r) (x87-compare-status-signaling ST0 r) (x87-pop))
 (defun UCOM_Fr (r) (x87-compare-status ST0 r))
 (defun UCOM_FPr (r) (x87-compare-status ST0 r) (x87-pop))
 (defun UCOM_FPPr () (x87-compare-status ST0 ST1) (x87-pop) (x87-pop))
-(defun FCOMPP () (x87-compare-status ST0 ST1) (x87-pop) (x87-pop))
-(defun TST_F () (x87-compare-status ST0 (x87-from-int 16 0:16)))
-(defun FCOM32m (b s i off seg) (x87-compare-status ST0 (x87-from-float 32 (load-n 32 (ea b s i off seg)))))
-(defun FCOM64m (b s i off seg) (x87-compare-status ST0 (x87-from-float 64 (load-n 64 (ea b s i off seg)))))
+(defun FCOMPP () (x87-compare-status-signaling ST0 ST1) (x87-pop) (x87-pop))
+(defun TST_F () (x87-compare-status-signaling ST0 (x87-from-int 16 0:16)))
+(defun FCOM32m (b s i off seg) (x87-compare-status-signaling ST0 (x87-from-float 32 (load-n 32 (ea b s i off seg)))))
+(defun FCOM64m (b s i off seg) (x87-compare-status-signaling ST0 (x87-from-float 64 (load-n 64 (ea b s i off seg)))))
 (defun FCOMP32m (b s i off seg) (FCOM32m b s i off seg) (x87-pop))
 (defun FCOMP64m (b s i off seg) (FCOM64m b s i off seg) (x87-pop))
-(defun FICOM16m (b s i off seg) (x87-compare-status ST0 (x87-from-int 16 (load-n 16 (ea b s i off seg)))))
-(defun FICOM32m (b s i off seg) (x87-compare-status ST0 (x87-from-int 32 (load-n 32 (ea b s i off seg)))))
+(defun FICOM16m (b s i off seg) (x87-compare-status-signaling ST0 (x87-from-int 16 (load-n 16 (ea b s i off seg)))))
+(defun FICOM32m (b s i off seg) (x87-compare-status-signaling ST0 (x87-from-int 32 (load-n 32 (ea b s i off seg)))))
 (defun FICOMP16m (b s i off seg) (FICOM16m b s i off seg) (x87-pop))
 (defun FICOMP32m (b s i off seg) (FICOM32m b s i off seg) (x87-pop))
 
@@ -731,9 +735,10 @@
 
 ;; packed decimals, and FSAVE, which is FNSTENV, the registers, and FNINIT
 
-(defun FBLDm (b s i off seg) (x87-push (intrinsic 'fbld (load-n 80 (ea b s i off seg)) :result 80)))
+(defun FBLDm (b s i off seg) (x87-push (intrinsic 'fbld_ieee754_binary_80 (load-n 80 (ea b s i off seg)) :result 80)))
+;; to an integer by the rounding of the control word
 (defun FBSTPm (b s i off seg)
-  (store-n 80 (ea b s i off seg) (intrinsic 'fbstp ST0 :result 80))
+  (store-n 80 (ea b s i off seg) (x87-function 'fbstp ST0))
   (x87-pop))
 (defun x87-save-registers (a)
   (store-n 80 (+ a 28) ST0)

@@ -1,0 +1,7 @@
+fcmp       0
+fcmpe      1
+fcmpe #0   1
+fccmpe     1
+fcmgt      1
+fcmeq      0
+facge      1
