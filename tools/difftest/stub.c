@@ -28,8 +28,9 @@ unsigned mxcsr_clean = 0x1f80;
 #define WORD unsigned long long
 #define NGPR 32
 #define NEXTRA 2
-// the V registers, which are the Z registers at a vector length of 128 bits, P0 to P15, FFR, and padding
-#define VECBYTES (32 * 16 + 40)
+// the V registers, which are the Z registers at a vector length of 128 bits, P0 to P15, FFR, and padding, then the 16 rows of
+// ZA and ZT0 of SME at a streaming vector length of 128 bits; SVCR is the second of the extra words
+#define VECBYTES (32 * 16 + 40 + 256 + 64)
 #elif defined(__arm__)
 #define WORD unsigned int
 #define NGPR 16
@@ -224,6 +225,10 @@ __attribute__((used)) void cmain(void) {
   struct { void *sp; int flags; unsigned long size; } stack = {altstack, 0, sizeof altstack};
 #endif
   sys3(SYS_altstack, (long)&stack, 0, 0, 0);
+#if defined(__aarch64__)
+  // PR_SME_SET_VL: the streaming vector length is 128 bits, as SVE's is
+  sys3(167, 63, 16, 0, 0);
+#endif
   // SIGILL, SIGTRAP, SIGBUS, SIGFPE, SIGSEGV on the targets but MIPS, where SIGBUS is 10
   install(4); install(5); install(7); install(8); install(10); install(11);
   unsigned long long header[8] = {0xd1ff7e57, (unsigned long)slot, (unsigned long)taken, (unsigned long)window, WINDOW,
@@ -382,6 +387,7 @@ taken:
 #elif defined(__aarch64__)
 __asm__(R"ASM(
   .arch_extension sve
+  .arch_extension sme2
   .text
   .globl _start
 _start:
@@ -403,6 +409,18 @@ enter:
   str x1, [x0]
   adrp x30, st_in
   add x30, x30, :lo12:st_in
+  // SVCR first, as what it changes it zeros, then ZA and ZT0, if ZA is on
+  ldr x0, [x30, #264]
+  msr svcr, x0
+  tbz x0, #1, 1f
+  add x0, x30, #824
+  mov w12, #0
+  .irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+  ldr za[w12, \r], [x0, #\r, mul vl]
+  .endr
+  add x0, x30, #1080
+  ldr zt0, [x0]
+1:
   add x0, x30, #272
   .irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
   ldr q\r, [x0], #16
@@ -446,6 +464,18 @@ enter:
   .endr
   rdffr p0.b
   str p0, [x0]
+  // SVCR, then ZA and ZT0, which are zeros if ZA was off, as turning it on zeros them, and out of the streaming mode
+  mrs x0, svcr
+  str x0, [x30, #264]
+  smstart za
+  add x0, x30, #824
+  mov w12, #0
+  .irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+  str za[w12, \r], [x0, #\r, mul vl]
+  .endr
+  add x0, x30, #1080
+  str zt0, [x0]
+  smstop
   .endm
 fall_save:
   SAVE

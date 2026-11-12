@@ -79,7 +79,8 @@ std::string targetFeatures(const Triple &triple, bool assembling) {
     return "+thumb2,+hwdiv,+hwdiv-arm,+vfp4,+fp-armv8";
   if (triple.getArch() == Triple::aarch64)
     return "+v8.1a,+v8.2a,+v8.3a,+fullfp16,+aes,+sha2,+sha3,+sm4,+crc,+lse,+rdm,+dotprod,+fp16fml,"
-           "+flagm,+rand,+pauth,+jsconv,+complxnum,+rcpc,+rcpc-immo,+fptoint,+sb,+predres,+ccdp,+sve";
+           "+flagm,+rand,+pauth,+jsconv,+complxnum,+rcpc,+rcpc-immo,+fptoint,+sb,+predres,+ccdp,+sve,"
+           "+mte,+sve2,+sme2";
   // Release 2 adds to the base CPU of the triple: SEB, SEH, ROTR, WSBH. Release 6 is the subarchitecture
   // of the triple and removes what these add to.
   if (triple.isMIPS() && triple.getSubArch() != Triple::MipsSubArch_r6)

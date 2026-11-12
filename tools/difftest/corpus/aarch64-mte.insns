@@ -1,0 +1,858 @@
+# encodings of the MC tests of LLVM with their registers changed, for a differential test only: what they
+# expect isn't used (tools/difftest/mc_corpus.py --mattr +mte)
+
+5f 0c 82 91  # addg sp, x2, #32, #3
+e0 17 84 91  # addg x0, sp, #64, #5
+20 04 80 91  # addg x0, x1, #0, #1
+83 18 bf 91  # addg x3, x4, #1008, #6
+c5 3c 87 91  # addg x5, x6, #112, #15
+ff 03 df ba  # subps xzr, sp, sp
+1f 00 c1 ba  # subps xzr, x0, x1
+cb 7a 08 d5  # dc cgdsw, x11
+ad 7a 0b d5  # dc cgdvac, x13
+af 7d 0b d5  # dc cgdvadp, x15
+ae 7c 0b d5  # dc cgdvap, x14
+82 7a 08 d5  # dc cgsw, x2
+64 7a 0b d5  # dc cgvac, x4
+66 7d 0b d5  # dc cgvadp, x6
+65 7c 0b d5  # dc cgvap, x5
+cc 7e 08 d5  # dc cigdsw, x12
+b0 7e 0b d5  # dc cigdvac, x16
+83 7e 08 d5  # dc cigsw, x3
+67 7e 0b d5  # dc cigvac, x7
+68 74 0b d5  # dc gva, x8
+91 74 0b d5  # dc gzva, x17
+ca 76 08 d5  # dc igdsw, x10
+a9 76 08 d5  # dc igdvac, x9
+81 76 08 d5  # dc igsw, x1
+60 76 08 d5  # dc igvac, x0
+20 14 c2 9a  # gmi x0, x1, x2
+e3 17 c4 9a  # gmi x3, sp, x4
+1e 14 df 9a  # gmi x30, x0, xzr
+1f 14 de 9a  # gmi xzr, x0, x30
+3f 10 df 9a  # irg sp, x1
+3f 10 c2 9a  # irg sp, x1, x2
+e0 13 df 9a  # irg x0, sp
+20 10 df 9a  # irg x0, x1
+20 10 c2 9a  # irg x0, x1, x2
+20 00 60 d9  # ldg x0, [x1]
+e2 03 70 d9  # ldg x2, [sp, #-4096]
+83 f0 6f d9  # ldg x3, [x4, #4080]
+20 00 e0 d9  # ldgm x0, [x1]
+e1 03 e0 d9  # ldgm x1, [sp]
+5f 00 e0 d9  # ldgm xzr, [x2]
+e0 42 3b d5  # mrs x0, TCO
+c1 10 38 d5  # mrs x1, GCR_EL1
+a2 10 38 d5  # mrs x2, RGSR_EL1
+03 56 38 d5  # mrs x3, TFSR_EL1
+04 56 3c d5  # mrs x4, TFSR_EL2
+05 56 3e d5  # mrs x5, TFSR_EL3
+06 56 3d d5  # mrs x6, TFSR_EL12
+87 00 39 d5  # mrs x7, GMID_EL1
+27 56 38 d5  # mrs x7, TFSRE0_EL1
+c1 10 18 d5  # msr GCR_EL1, x1
+a2 10 18 d5  # msr RGSR_EL1, x2
+9f 40 03 d5  # msr TCO, #0
+e0 42 1b d5  # msr TCO, x0
+03 56 18 d5  # msr TFSR_EL1, x3
+06 56 1d d5  # msr TFSR_EL12, x6
+04 56 1c d5  # msr TFSR_EL2, x4
+05 56 1e d5  # msr TFSR_EL3, x5
+27 56 18 d5  # msr TFSRE0_EL1, x7
+ff 1b a0 d9  # st2g sp, [sp, #16]
+ff 1f a0 d9  # st2g sp, [sp, #16]!
+ff 17 a0 d9  # st2g sp, [sp], #16
+20 0c b0 d9  # st2g x0, [x1, #-4096]!
+20 08 a0 d9  # st2g x0, [x1]
+20 04 b0 d9  # st2g x0, [x1], #-4096
+21 08 b0 d9  # st2g x1, [x1, #-4096]
+41 fc af d9  # st2g x1, [x2, #4080]!
+41 f4 af d9  # st2g x1, [x2], #4080
+e2 1f a0 d9  # st2g x2, [sp, #16]!
+e2 17 a0 d9  # st2g x2, [sp], #16
+42 f8 af d9  # st2g x2, [x2, #4080]
+e3 1b a0 d9  # st2g x3, [sp, #16]
+ff 1b 20 d9  # stg sp, [sp, #16]
+ff 1f 20 d9  # stg sp, [sp, #16]!
+ff 17 20 d9  # stg sp, [sp], #16
+20 0c 30 d9  # stg x0, [x1, #-4096]!
+20 08 20 d9  # stg x0, [x1]
+20 04 30 d9  # stg x0, [x1], #-4096
+21 08 30 d9  # stg x1, [x1, #-4096]
+41 fc 2f d9  # stg x1, [x2, #4080]!
+41 f4 2f d9  # stg x1, [x2], #4080
+e2 1f 20 d9  # stg x2, [sp, #16]!
+e2 17 20 d9  # stg x2, [sp], #16
+42 f8 2f d9  # stg x2, [x2, #4080]
+e3 1b 20 d9  # stg x3, [sp, #16]
+20 00 a0 d9  # stgm x0, [x1]
+e1 03 a0 d9  # stgm x1, [sp]
+5f 00 a0 d9  # stgm xzr, [x2]
+e0 87 00 69  # stgp x0, x1, [sp, #16]
+e0 87 80 69  # stgp x0, x1, [sp, #16]!
+e0 87 80 68  # stgp x0, x1, [sp], #16
+40 04 20 69  # stgp x0, x1, [x2, #-1024]
+40 04 a0 69  # stgp x0, x1, [x2, #-1024]!
+40 84 1f 69  # stgp x0, x1, [x2, #1008]
+40 84 9f 69  # stgp x0, x1, [x2, #1008]!
+40 04 00 69  # stgp x0, x1, [x2]
+40 04 a0 68  # stgp x0, x1, [x2], #-1024
+40 84 9f 68  # stgp x0, x1, [x2], #1008
+40 fc 00 69  # stgp x0, xzr, [x2, #16]
+40 fc 80 69  # stgp x0, xzr, [x2, #16]!
+40 fc 80 68  # stgp x0, xzr, [x2], #16
+5f 84 00 69  # stgp xzr, x1, [x2, #16]
+5f 84 80 69  # stgp xzr, x1, [x2, #16]!
+5f 84 80 68  # stgp xzr, x1, [x2], #16
+ff 1b e0 d9  # stz2g sp, [sp, #16]
+ff 1f e0 d9  # stz2g sp, [sp, #16]!
+ff 17 e0 d9  # stz2g sp, [sp], #16
+20 0c f0 d9  # stz2g x0, [x1, #-4096]!
+20 08 e0 d9  # stz2g x0, [x1]
+20 04 f0 d9  # stz2g x0, [x1], #-4096
+21 08 f0 d9  # stz2g x1, [x1, #-4096]
+41 fc ef d9  # stz2g x1, [x2, #4080]!
+41 f4 ef d9  # stz2g x1, [x2], #4080
+e2 1f e0 d9  # stz2g x2, [sp, #16]!
+e2 17 e0 d9  # stz2g x2, [sp], #16
+42 f8 ef d9  # stz2g x2, [x2, #4080]
+e3 1b e0 d9  # stz2g x3, [sp, #16]
+ff 1b 60 d9  # stzg sp, [sp, #16]
+ff 1f 60 d9  # stzg sp, [sp, #16]!
+ff 17 60 d9  # stzg sp, [sp], #16
+20 0c 70 d9  # stzg x0, [x1, #-4096]!
+20 08 60 d9  # stzg x0, [x1]
+20 04 70 d9  # stzg x0, [x1], #-4096
+21 08 70 d9  # stzg x1, [x1, #-4096]
+41 fc 6f d9  # stzg x1, [x2, #4080]!
+41 f4 6f d9  # stzg x1, [x2], #4080
+e2 1f 60 d9  # stzg x2, [sp, #16]!
+e2 17 60 d9  # stzg x2, [sp], #16
+42 f8 6f d9  # stzg x2, [x2, #4080]
+e3 1b 60 d9  # stzg x3, [sp, #16]
+20 00 20 d9  # stzgm x0, [x1]
+e1 03 20 d9  # stzgm x1, [sp]
+5f 00 20 d9  # stzgm xzr, [x2]
+5f 0c 82 d1  # subg sp, x2, #32, #3
+e0 17 84 d1  # subg x0, sp, #64, #5
+20 04 80 d1  # subg x0, x1, #0, #1
+83 18 bf d1  # subg x3, x4, #1008, #6
+c5 3c 87 d1  # subg x5, x6, #112, #15
+e0 03 df 9a  # subp x0, sp, sp
+20 00 c2 9a  # subp x0, x1, x2
+e0 03 df ba  # subps x0, sp, sp
+20 00 c2 ba  # subps x0, x1, x2
+9f 0e 82 91  # addg sp, x20, #32, #3
+5f 0d 82 91  # addg sp, x10, #32, #3
+3f 0e 82 91  # addg sp, x17, #32, #3
+7f 0f 82 91  # addg sp, x27, #32, #3
+bf 0c 82 91  # addg sp, x5, #32, #3
+ed 17 84 91  # addg x13, sp, #64, #5
+f6 17 84 91  # addg x22, sp, #64, #5
+e8 17 84 91  # addg x8, sp, #64, #5
+f2 17 84 91  # addg x18, sp, #64, #5
+fc 17 84 91  # addg x28, sp, #64, #5
+54 06 80 91  # addg x20, x18, #0, #1
+be 07 80 91  # addg x30, x29, #0, #1
+f5 04 80 91  # addg x21, x7, #0, #1
+37 04 80 91  # addg x23, x1, #0, #1
+f8 05 80 91  # addg x24, x15, #0, #1
+74 19 bf 91  # addg x20, x11, #1008, #6
+2a 1b bf 91  # addg x10, x25, #1008, #6
+5b 1a bf 91  # addg x27, x18, #1008, #6
+81 18 bf 91  # addg x1, x4, #1008, #6
+5d 18 bf 91  # addg x29, x2, #1008, #6
+08 1b bf 91  # addg x8, x24, #1008, #6
+a8 3f 87 91  # addg x8, x29, #112, #15
+a2 3f 87 91  # addg x2, x29, #112, #15
+35 3c 87 91  # addg x21, x1, #112, #15
+ee 3d 87 91  # addg x14, x15, #112, #15
+a1 3c 87 91  # addg x1, x5, #112, #15
+57 3c 87 91  # addg x23, x2, #112, #15
+3f 02 dd ba  # subps xzr, x17, x29
+5f 00 cf ba  # subps xzr, x2, x15
+1f 03 c6 ba  # subps xzr, x24, x6
+7f 01 d0 ba  # subps xzr, x11, x16
+ff 01 c2 ba  # subps xzr, x15, x2
+df 02 dc ba  # subps xzr, x22, x28
+c0 7a 08 d5  # dc cgdsw, x0
+d0 7a 08 d5  # dc cgdsw, x16
+dc 7a 08 d5  # dc cgdsw, x28
+d7 7a 08 d5  # dc cgdsw, x23
+ca 7a 08 d5  # dc cgdsw, x10
+bb 7a 0b d5  # dc cgdvac, x27
+a3 7a 0b d5  # dc cgdvac, x3
+b9 7a 0b d5  # dc cgdvac, x25
+bd 7a 0b d5  # dc cgdvac, x29
+ba 7a 0b d5  # dc cgdvac, x26
+bc 7a 0b d5  # dc cgdvac, x28
+a2 7d 0b d5  # dc cgdvadp, x2
+ae 7d 0b d5  # dc cgdvadp, x14
+be 7d 0b d5  # dc cgdvadp, x30
+bc 7d 0b d5  # dc cgdvadp, x28
+bd 7d 0b d5  # dc cgdvadp, x29
+a8 7c 0b d5  # dc cgdvap, x8
+a3 7c 0b d5  # dc cgdvap, x3
+a0 7c 0b d5  # dc cgdvap, x0
+aa 7c 0b d5  # dc cgdvap, x10
+af 7c 0b d5  # dc cgdvap, x15
+84 7a 08 d5  # dc cgsw, x4
+90 7a 08 d5  # dc cgsw, x16
+9a 7a 08 d5  # dc cgsw, x26
+89 7a 08 d5  # dc cgsw, x9
+85 7a 08 d5  # dc cgsw, x5
+8d 7a 08 d5  # dc cgsw, x13
+66 7a 0b d5  # dc cgvac, x6
+69 7a 0b d5  # dc cgvac, x9
+74 7a 0b d5  # dc cgvac, x20
+79 7a 0b d5  # dc cgvac, x25
+78 7a 0b d5  # dc cgvac, x24
+72 7a 0b d5  # dc cgvac, x18
+75 7d 0b d5  # dc cgvadp, x21
+69 7d 0b d5  # dc cgvadp, x9
+6f 7d 0b d5  # dc cgvadp, x15
+70 7d 0b d5  # dc cgvadp, x16
+60 7d 0b d5  # dc cgvadp, x0
+6e 7d 0b d5  # dc cgvadp, x14
+6d 7c 0b d5  # dc cgvap, x13
+64 7c 0b d5  # dc cgvap, x4
+60 7c 0b d5  # dc cgvap, x0
+6c 7c 0b d5  # dc cgvap, x12
+71 7c 0b d5  # dc cgvap, x17
+66 7c 0b d5  # dc cgvap, x6
+da 7e 08 d5  # dc cigdsw, x26
+dd 7e 08 d5  # dc cigdsw, x29
+c1 7e 08 d5  # dc cigdsw, x1
+d3 7e 08 d5  # dc cigdsw, x19
+d8 7e 08 d5  # dc cigdsw, x24
+c2 7e 08 d5  # dc cigdsw, x2
+b1 7e 0b d5  # dc cigdvac, x17
+b4 7e 0b d5  # dc cigdvac, x20
+ad 7e 0b d5  # dc cigdvac, x13
+b9 7e 0b d5  # dc cigdvac, x25
+ac 7e 0b d5  # dc cigdvac, x12
+9a 7e 08 d5  # dc cigsw, x26
+90 7e 08 d5  # dc cigsw, x16
+87 7e 08 d5  # dc cigsw, x7
+94 7e 08 d5  # dc cigsw, x20
+95 7e 08 d5  # dc cigsw, x21
+82 7e 08 d5  # dc cigsw, x2
+6c 7e 0b d5  # dc cigvac, x12
+73 7e 0b d5  # dc cigvac, x19
+72 7e 0b d5  # dc cigvac, x18
+6d 7e 0b d5  # dc cigvac, x13
+79 7e 0b d5  # dc cigvac, x25
+76 7e 0b d5  # dc cigvac, x22
+67 74 0b d5  # dc gva, x7
+71 74 0b d5  # dc gva, x17
+7b 74 0b d5  # dc gva, x27
+65 74 0b d5  # dc gva, x5
+97 74 0b d5  # dc gzva, x23
+8b 74 0b d5  # dc gzva, x11
+9b 74 0b d5  # dc gzva, x27
+87 74 0b d5  # dc gzva, x7
+8c 74 0b d5  # dc gzva, x12
+c8 76 08 d5  # dc igdsw, x8
+c3 76 08 d5  # dc igdsw, x3
+cc 76 08 d5  # dc igdsw, x12
+cf 76 08 d5  # dc igdsw, x15
+a7 76 08 d5  # dc igdvac, x7
+b1 76 08 d5  # dc igdvac, x17
+bc 76 08 d5  # dc igdvac, x28
+b4 76 08 d5  # dc igdvac, x20
+b3 76 08 d5  # dc igdvac, x19
+b2 76 08 d5  # dc igdvac, x18
+9c 76 08 d5  # dc igsw, x28
+85 76 08 d5  # dc igsw, x5
+8b 76 08 d5  # dc igsw, x11
+8e 76 08 d5  # dc igsw, x14
+8d 76 08 d5  # dc igsw, x13
+9b 76 08 d5  # dc igsw, x27
+6a 76 08 d5  # dc igvac, x10
+73 76 08 d5  # dc igvac, x19
+62 76 08 d5  # dc igvac, x2
+72 76 08 d5  # dc igvac, x18
+7e 76 08 d5  # dc igvac, x30
+6b 76 08 d5  # dc igvac, x11
+52 16 c0 9a  # gmi x18, x18, x0
+ae 17 ca 9a  # gmi x14, x29, x10
+59 14 dc 9a  # gmi x25, x2, x28
+80 16 d7 9a  # gmi x0, x20, x23
+c2 15 c5 9a  # gmi x2, x14, x5
+06 15 db 9a  # gmi x6, x8, x27
+e8 17 c7 9a  # gmi x8, sp, x7
+e8 17 d9 9a  # gmi x8, sp, x25
+e8 17 db 9a  # gmi x8, sp, x27
+f0 17 c2 9a  # gmi x16, sp, x2
+fc 17 d5 9a  # gmi x28, sp, x21
+f4 17 cc 9a  # gmi x20, sp, x12
+69 14 df 9a  # gmi x9, x3, xzr
+53 15 df 9a  # gmi x19, x10, xzr
+76 16 df 9a  # gmi x22, x19, xzr
+8d 15 df 9a  # gmi x13, x12, xzr
+4b 14 df 9a  # gmi x11, x2, xzr
+bf 17 c9 9a  # gmi xzr, x29, x9
+7f 14 c7 9a  # gmi xzr, x3, x7
+3f 17 d2 9a  # gmi xzr, x25, x18
+bf 16 ca 9a  # gmi xzr, x21, x10
+bf 14 d0 9a  # gmi xzr, x5, x16
+3f 15 c5 9a  # gmi xzr, x9, x5
+9f 11 df 9a  # irg sp, x12
+7f 13 df 9a  # irg sp, x27
+7f 10 df 9a  # irg sp, x3
+1f 10 df 9a  # irg sp, x0
+bf 11 df 9a  # irg sp, x13
+5f 10 cc 9a  # irg sp, x2, x12
+7f 11 db 9a  # irg sp, x11, x27
+1f 11 cc 9a  # irg sp, x8, x12
+5f 12 d5 9a  # irg sp, x18, x21
+1f 11 c9 9a  # irg sp, x8, x9
+5f 13 c9 9a  # irg sp, x26, x9
+e2 13 df 9a  # irg x2, sp
+f1 13 df 9a  # irg x17, sp
+f7 13 df 9a  # irg x23, sp
+e9 13 df 9a  # irg x9, sp
+ef 13 df 9a  # irg x15, sp
+9b 13 df 9a  # irg x27, x28
+23 12 df 9a  # irg x3, x17
+22 12 df 9a  # irg x2, x17
+25 13 df 9a  # irg x5, x25
+64 13 df 9a  # irg x4, x27
+89 10 df 9a  # irg x9, x4
+a4 13 c8 9a  # irg x4, x29, x8
+d1 13 d9 9a  # irg x17, x30, x25
+78 11 dc 9a  # irg x24, x11, x28
+45 11 cf 9a  # irg x5, x10, x15
+e1 12 dd 9a  # irg x1, x23, x29
+28 13 c4 9a  # irg x8, x25, x4
+95 f0 6f d9  # ldg x21, [x4, #4080]
+f9 f1 6f d9  # ldg x25, [x15, #4080]
+15 f1 6f d9  # ldg x21, [x8, #4080]
+cb f3 6f d9  # ldg x11, [x30, #4080]
+cf f2 6f d9  # ldg x15, [x22, #4080]
+e8 f2 6f d9  # ldg x8, [x23, #4080]
+07 02 e0 d9  # ldgm x7, [x16]
+25 02 e0 d9  # ldgm x5, [x17]
+b0 03 e0 d9  # ldgm x16, [x29]
+dd 02 e0 d9  # ldgm x29, [x22]
+67 01 e0 d9  # ldgm x7, [x11]
+15 02 e0 d9  # ldgm x21, [x16]
+f7 03 e0 d9  # ldgm x23, [sp]
+eb 03 e0 d9  # ldgm x11, [sp]
+f5 03 e0 d9  # ldgm x21, [sp]
+e2 03 e0 d9  # ldgm x2, [sp]
+f9 03 e0 d9  # ldgm x25, [sp]
+e6 03 e0 d9  # ldgm x6, [sp]
+7f 01 e0 d9  # ldgm xzr, [x11]
+1f 03 e0 d9  # ldgm xzr, [x24]
+bf 03 e0 d9  # ldgm xzr, [x29]
+ff 00 e0 d9  # ldgm xzr, [x7]
+bf 02 e0 d9  # ldgm xzr, [x21]
+fc 42 3b d5  # mrs x28, TCO
+e5 42 3b d5  # mrs x5, TCO
+e8 42 3b d5  # mrs x8, TCO
+e6 42 3b d5  # mrs x6, TCO
+ef 42 3b d5  # mrs x15, TCO
+f6 42 3b d5  # mrs x22, TCO
+cd 10 38 d5  # mrs x13, GCR_EL1
+d2 10 38 d5  # mrs x18, GCR_EL1
+d1 10 38 d5  # mrs x17, GCR_EL1
+da 10 38 d5  # mrs x26, GCR_EL1
+d5 10 38 d5  # mrs x21, GCR_EL1
+c9 10 38 d5  # mrs x9, GCR_EL1
+a1 10 38 d5  # mrs x1, RGSR_EL1
+ba 10 38 d5  # mrs x26, RGSR_EL1
+b0 10 38 d5  # mrs x16, RGSR_EL1
+bd 10 38 d5  # mrs x29, RGSR_EL1
+ae 10 38 d5  # mrs x14, RGSR_EL1
+01 56 38 d5  # mrs x1, TFSR_EL1
+11 56 38 d5  # mrs x17, TFSR_EL1
+16 56 38 d5  # mrs x22, TFSR_EL1
+02 56 38 d5  # mrs x2, TFSR_EL1
+06 56 38 d5  # mrs x6, TFSR_EL1
+02 56 3c d5  # mrs x2, TFSR_EL2
+19 56 3c d5  # mrs x25, TFSR_EL2
+0c 56 3c d5  # mrs x12, TFSR_EL2
+10 56 3c d5  # mrs x16, TFSR_EL2
+03 56 3c d5  # mrs x3, TFSR_EL2
+14 56 3c d5  # mrs x20, TFSR_EL2
+17 56 3e d5  # mrs x23, TFSR_EL3
+00 56 3e d5  # mrs x0, TFSR_EL3
+0b 56 3e d5  # mrs x11, TFSR_EL3
+0e 56 3e d5  # mrs x14, TFSR_EL3
+16 56 3e d5  # mrs x22, TFSR_EL3
+0e 56 3d d5  # mrs x14, TFSR_EL12
+18 56 3d d5  # mrs x24, TFSR_EL12
+01 56 3d d5  # mrs x1, TFSR_EL12
+00 56 3d d5  # mrs x0, TFSR_EL12
+17 56 3d d5  # mrs x23, TFSR_EL12
+15 56 3d d5  # mrs x21, TFSR_EL12
+83 00 39 d5  # mrs x3, GMID_EL1
+80 00 39 d5  # mrs x0, GMID_EL1
+99 00 39 d5  # mrs x25, GMID_EL1
+8d 00 39 d5  # mrs x13, GMID_EL1
+81 00 39 d5  # mrs x1, GMID_EL1
+84 00 39 d5  # mrs x4, GMID_EL1
+2a 56 38 d5  # mrs x10, TFSRE0_EL1
+38 56 38 d5  # mrs x24, TFSRE0_EL1
+26 56 38 d5  # mrs x6, TFSRE0_EL1
+29 56 38 d5  # mrs x9, TFSRE0_EL1
+39 56 38 d5  # mrs x25, TFSRE0_EL1
+34 56 38 d5  # mrs x20, TFSRE0_EL1
+d9 10 18 d5  # msr GCR_EL1, x25
+cf 10 18 d5  # msr GCR_EL1, x15
+cc 10 18 d5  # msr GCR_EL1, x12
+d2 10 18 d5  # msr GCR_EL1, x18
+cb 10 18 d5  # msr GCR_EL1, x11
+a5 10 18 d5  # msr RGSR_EL1, x5
+ae 10 18 d5  # msr RGSR_EL1, x14
+b3 10 18 d5  # msr RGSR_EL1, x19
+aa 10 18 d5  # msr RGSR_EL1, x10
+a0 10 18 d5  # msr RGSR_EL1, x0
+b5 10 18 d5  # msr RGSR_EL1, x21
+f5 42 1b d5  # msr TCO, x21
+f2 42 1b d5  # msr TCO, x18
+ec 42 1b d5  # msr TCO, x12
+fb 42 1b d5  # msr TCO, x27
+ef 42 1b d5  # msr TCO, x15
+f4 42 1b d5  # msr TCO, x20
+17 56 18 d5  # msr TFSR_EL1, x23
+10 56 18 d5  # msr TFSR_EL1, x16
+1c 56 18 d5  # msr TFSR_EL1, x28
+1e 56 18 d5  # msr TFSR_EL1, x30
+1b 56 18 d5  # msr TFSR_EL1, x27
+01 56 1d d5  # msr TFSR_EL12, x1
+11 56 1d d5  # msr TFSR_EL12, x17
+00 56 1d d5  # msr TFSR_EL12, x0
+02 56 1d d5  # msr TFSR_EL12, x2
+0a 56 1d d5  # msr TFSR_EL12, x10
+13 56 1c d5  # msr TFSR_EL2, x19
+12 56 1c d5  # msr TFSR_EL2, x18
+0c 56 1c d5  # msr TFSR_EL2, x12
+1b 56 1c d5  # msr TFSR_EL2, x27
+06 56 1c d5  # msr TFSR_EL2, x6
+15 56 1e d5  # msr TFSR_EL3, x21
+1b 56 1e d5  # msr TFSR_EL3, x27
+11 56 1e d5  # msr TFSR_EL3, x17
+18 56 1e d5  # msr TFSR_EL3, x24
+0b 56 1e d5  # msr TFSR_EL3, x11
+2e 56 18 d5  # msr TFSRE0_EL1, x14
+2f 56 18 d5  # msr TFSRE0_EL1, x15
+29 56 18 d5  # msr TFSRE0_EL1, x9
+35 56 18 d5  # msr TFSRE0_EL1, x21
+2c 56 18 d5  # msr TFSRE0_EL1, x12
+3b 56 18 d5  # msr TFSRE0_EL1, x27
+a2 0e b0 d9  # st2g x2, [x21, #-4096]!
+7b 0e b0 d9  # st2g x27, [x19, #-4096]!
+d2 0f b0 d9  # st2g x18, [x30, #-4096]!
+13 0c b0 d9  # st2g x19, [x0, #-4096]!
+2e 0e b0 d9  # st2g x14, [x17, #-4096]!
+24 0f b0 d9  # st2g x4, [x25, #-4096]!
+fc 0a a0 d9  # st2g x28, [x23]
+4b 09 a0 d9  # st2g x11, [x10]
+87 08 a0 d9  # st2g x7, [x4]
+d6 0a a0 d9  # st2g x22, [x22]
+82 08 a0 d9  # st2g x2, [x4]
+6c 09 a0 d9  # st2g x12, [x11]
+9d 04 b0 d9  # st2g x29, [x4], #-4096
+41 04 b0 d9  # st2g x1, [x2], #-4096
+3c 07 b0 d9  # st2g x28, [x25], #-4096
+55 04 b0 d9  # st2g x21, [x2], #-4096
+36 06 b0 d9  # st2g x22, [x17], #-4096
+ca 06 b0 d9  # st2g x10, [x22], #-4096
+84 08 b0 d9  # st2g x4, [x4, #-4096]
+ad 09 b0 d9  # st2g x13, [x13, #-4096]
+10 0a b0 d9  # st2g x16, [x16, #-4096]
+08 09 b0 d9  # st2g x8, [x8, #-4096]
+7b fd af d9  # st2g x27, [x11, #4080]!
+92 fe af d9  # st2g x18, [x20, #4080]!
+07 fe af d9  # st2g x7, [x16, #4080]!
+2b fe af d9  # st2g x11, [x17, #4080]!
+1e fd af d9  # st2g x30, [x8, #4080]!
+42 fc af d9  # st2g x2, [x2, #4080]!
+3c f6 af d9  # st2g x28, [x17], #4080
+dd f5 af d9  # st2g x29, [x14], #4080
+1e f5 af d9  # st2g x30, [x8], #4080
+c6 f7 af d9  # st2g x6, [x30], #4080
+1a f4 af d9  # st2g x26, [x0], #4080
+c1 f5 af d9  # st2g x1, [x14], #4080
+fe 1f a0 d9  # st2g x30, [sp, #16]!
+f4 1f a0 d9  # st2g x20, [sp, #16]!
+ea 1f a0 d9  # st2g x10, [sp, #16]!
+e4 1f a0 d9  # st2g x4, [sp, #16]!
+f6 1f a0 d9  # st2g x22, [sp, #16]!
+e3 17 a0 d9  # st2g x3, [sp], #16
+f2 17 a0 d9  # st2g x18, [sp], #16
+fa 17 a0 d9  # st2g x26, [sp], #16
+ef 17 a0 d9  # st2g x15, [sp], #16
+e8 17 a0 d9  # st2g x8, [sp], #16
+31 fa af d9  # st2g x17, [x17, #4080]
+39 fb af d9  # st2g x25, [x25, #4080]
+f7 fa af d9  # st2g x23, [x23, #4080]
+ce f9 af d9  # st2g x14, [x14, #4080]
+d6 fa af d9  # st2g x22, [x22, #4080]
+eb 1b a0 d9  # st2g x11, [sp, #16]
+ea 1b a0 d9  # st2g x10, [sp, #16]
+f5 1b a0 d9  # st2g x21, [sp, #16]
+ee 1b a0 d9  # st2g x14, [sp, #16]
+f6 1b a0 d9  # st2g x22, [sp, #16]
+e0 1b a0 d9  # st2g x0, [sp, #16]
+63 0d 30 d9  # stg x3, [x11, #-4096]!
+44 0e 30 d9  # stg x4, [x18, #-4096]!
+ce 0e 30 d9  # stg x14, [x22, #-4096]!
+bc 0d 30 d9  # stg x28, [x13, #-4096]!
+00 0f 30 d9  # stg x0, [x24, #-4096]!
+22 0d 30 d9  # stg x2, [x9, #-4096]!
+42 09 20 d9  # stg x2, [x10]
+bb 09 20 d9  # stg x27, [x13]
+37 09 20 d9  # stg x23, [x9]
+b7 08 20 d9  # stg x23, [x5]
+b9 09 20 d9  # stg x25, [x13]
+db 0a 20 d9  # stg x27, [x22]
+c3 05 30 d9  # stg x3, [x14], #-4096
+50 06 30 d9  # stg x16, [x18], #-4096
+ca 07 30 d9  # stg x10, [x30], #-4096
+50 07 30 d9  # stg x16, [x26], #-4096
+be 07 30 d9  # stg x30, [x29], #-4096
+a3 04 30 d9  # stg x3, [x5], #-4096
+31 0a 30 d9  # stg x17, [x17, #-4096]
+bd 0b 30 d9  # stg x29, [x29, #-4096]
+18 0b 30 d9  # stg x24, [x24, #-4096]
+e7 08 30 d9  # stg x7, [x7, #-4096]
+ad 09 30 d9  # stg x13, [x13, #-4096]
+84 08 30 d9  # stg x4, [x4, #-4096]
+cc fc 2f d9  # stg x12, [x6, #4080]!
+62 fd 2f d9  # stg x2, [x11, #4080]!
+6e fd 2f d9  # stg x14, [x11, #4080]!
+4c fd 2f d9  # stg x12, [x10, #4080]!
+38 ff 2f d9  # stg x24, [x25, #4080]!
+b1 fc 2f d9  # stg x17, [x5, #4080]!
+0b f4 2f d9  # stg x11, [x0], #4080
+9a f5 2f d9  # stg x26, [x12], #4080
+4f f5 2f d9  # stg x15, [x10], #4080
+0f f4 2f d9  # stg x15, [x0], #4080
+3e f7 2f d9  # stg x30, [x25], #4080
+db f7 2f d9  # stg x27, [x30], #4080
+e0 1f 20 d9  # stg x0, [sp, #16]!
+e6 1f 20 d9  # stg x6, [sp, #16]!
+f2 1f 20 d9  # stg x18, [sp, #16]!
+f4 1f 20 d9  # stg x20, [sp, #16]!
+fb 1f 20 d9  # stg x27, [sp, #16]!
+f8 1f 20 d9  # stg x24, [sp, #16]!
+ed 17 20 d9  # stg x13, [sp], #16
+ee 17 20 d9  # stg x14, [sp], #16
+f0 17 20 d9  # stg x16, [sp], #16
+f3 17 20 d9  # stg x19, [sp], #16
+ea 17 20 d9  # stg x10, [sp], #16
+94 fa 2f d9  # stg x20, [x20, #4080]
+00 f8 2f d9  # stg x0, [x0, #4080]
+e7 f8 2f d9  # stg x7, [x7, #4080]
+21 f8 2f d9  # stg x1, [x1, #4080]
+7b fb 2f d9  # stg x27, [x27, #4080]
+73 fa 2f d9  # stg x19, [x19, #4080]
+f9 1b 20 d9  # stg x25, [sp, #16]
+e9 1b 20 d9  # stg x9, [sp, #16]
+e5 1b 20 d9  # stg x5, [sp, #16]
+fe 1b 20 d9  # stg x30, [sp, #16]
+fc 1b 20 d9  # stg x28, [sp, #16]
+f7 1b 20 d9  # stg x23, [sp, #16]
+90 03 a0 d9  # stgm x16, [x28]
+60 02 a0 d9  # stgm x0, [x19]
+9c 03 a0 d9  # stgm x28, [x28]
+56 03 a0 d9  # stgm x22, [x26]
+a7 03 a0 d9  # stgm x7, [x29]
+13 02 a0 d9  # stgm x19, [x16]
+ee 03 a0 d9  # stgm x14, [sp]
+f6 03 a0 d9  # stgm x22, [sp]
+f2 03 a0 d9  # stgm x18, [sp]
+fa 03 a0 d9  # stgm x26, [sp]
+f8 03 a0 d9  # stgm x24, [sp]
+fb 03 a0 d9  # stgm x27, [sp]
+ff 01 a0 d9  # stgm xzr, [x15]
+5f 02 a0 d9  # stgm xzr, [x18]
+9f 00 a0 d9  # stgm xzr, [x4]
+bf 02 a0 d9  # stgm xzr, [x21]
+7f 00 a0 d9  # stgm xzr, [x3]
+fb bf 00 69  # stgp x27, x15, [sp, #16]
+e6 83 00 69  # stgp x6, x0, [sp, #16]
+f6 df 00 69  # stgp x22, x23, [sp, #16]
+f1 93 00 69  # stgp x17, x4, [sp, #16]
+f0 f7 00 69  # stgp x16, x29, [sp, #16]
+f8 cb 00 69  # stgp x24, x18, [sp, #16]
+f0 bb 80 69  # stgp x16, x14, [sp, #16]!
+f3 d7 80 69  # stgp x19, x21, [sp, #16]!
+ee ab 80 69  # stgp x14, x10, [sp, #16]!
+f0 bf 80 69  # stgp x16, x15, [sp, #16]!
+f1 e7 80 69  # stgp x17, x25, [sp, #16]!
+e8 d7 80 69  # stgp x8, x21, [sp, #16]!
+ed e3 80 68  # stgp x13, x24, [sp], #16
+eb bb 80 68  # stgp x11, x14, [sp], #16
+e9 fb 80 68  # stgp x9, x30, [sp], #16
+fc 8f 80 68  # stgp x28, x3, [sp], #16
+fb 87 80 68  # stgp x27, x1, [sp], #16
+e8 bf 80 68  # stgp x8, x15, [sp], #16
+b9 69 20 69  # stgp x25, x26, [x13, #-1024]
+d8 2d 20 69  # stgp x24, x11, [x14, #-1024]
+39 12 20 69  # stgp x25, x4, [x17, #-1024]
+c4 38 20 69  # stgp x4, x14, [x6, #-1024]
+45 6d 20 69  # stgp x5, x27, [x10, #-1024]
+9b 16 20 69  # stgp x27, x5, [x20, #-1024]
+5e 39 a0 69  # stgp x30, x14, [x10, #-1024]!
+17 3b a0 69  # stgp x23, x14, [x24, #-1024]!
+4d 2f a0 69  # stgp x13, x11, [x26, #-1024]!
+86 5f a0 69  # stgp x6, x23, [x28, #-1024]!
+1e 37 a0 69  # stgp x30, x13, [x24, #-1024]!
+c2 0c a0 69  # stgp x2, x3, [x6, #-1024]!
+3e 95 1f 69  # stgp x30, x5, [x9, #1008]
+c3 a4 1f 69  # stgp x3, x9, [x6, #1008]
+b8 80 1f 69  # stgp x24, x0, [x5, #1008]
+f4 e0 1f 69  # stgp x20, x24, [x7, #1008]
+a2 ba 1f 69  # stgp x2, x14, [x21, #1008]
+71 9e 1f 69  # stgp x17, x7, [x19, #1008]
+2b 88 9f 69  # stgp x11, x2, [x1, #1008]!
+f7 ca 9f 69  # stgp x23, x18, [x23, #1008]!
+3a db 9f 69  # stgp x26, x22, [x25, #1008]!
+48 d9 9f 69  # stgp x8, x22, [x10, #1008]!
+6f eb 9f 69  # stgp x15, x26, [x27, #1008]!
+f9 9e 9f 69  # stgp x25, x7, [x23, #1008]!
+bb 34 00 69  # stgp x27, x13, [x5]
+49 5a 00 69  # stgp x9, x22, [x18]
+bc 34 00 69  # stgp x28, x13, [x5]
+c3 15 00 69  # stgp x3, x5, [x14]
+45 45 00 69  # stgp x5, x17, [x10]
+17 74 00 69  # stgp x23, x29, [x0]
+db 42 a0 68  # stgp x27, x16, [x22], #-1024
+b9 66 a0 68  # stgp x25, x25, [x21], #-1024
+bb 40 a0 68  # stgp x27, x16, [x5], #-1024
+f8 62 a0 68  # stgp x24, x24, [x23], #-1024
+3d 74 a0 68  # stgp x29, x29, [x1], #-1024
+c1 4a a0 68  # stgp x1, x18, [x22], #-1024
+c9 e7 9f 68  # stgp x9, x25, [x30], #1008
+47 c5 9f 68  # stgp x7, x17, [x10], #1008
+f6 a1 9f 68  # stgp x22, x8, [x15], #1008
+04 a5 9f 68  # stgp x4, x9, [x8], #1008
+b1 d6 9f 68  # stgp x17, x21, [x21], #1008
+b1 ee 9f 68  # stgp x17, x27, [x21], #1008
+fe fd 00 69  # stgp x30, xzr, [x15, #16]
+28 fe 00 69  # stgp x8, xzr, [x17, #16]
+af fd 00 69  # stgp x15, xzr, [x13, #16]
+87 fd 00 69  # stgp x7, xzr, [x12, #16]
+53 ff 00 69  # stgp x19, xzr, [x26, #16]
+d7 ff 80 69  # stgp x23, xzr, [x30, #16]!
+d1 fc 80 69  # stgp x17, xzr, [x6, #16]!
+90 fd 80 69  # stgp x16, xzr, [x12, #16]!
+54 ff 80 69  # stgp x20, xzr, [x26, #16]!
+aa fe 80 69  # stgp x10, xzr, [x21, #16]!
+8f fd 80 69  # stgp x15, xzr, [x12, #16]!
+c4 ff 80 68  # stgp x4, xzr, [x30], #16
+56 fd 80 68  # stgp x22, xzr, [x10], #16
+c2 fe 80 68  # stgp x2, xzr, [x22], #16
+f2 fc 80 68  # stgp x18, xzr, [x7], #16
+87 fe 80 68  # stgp x7, xzr, [x20], #16
+90 fe 80 68  # stgp x16, xzr, [x20], #16
+9f b9 00 69  # stgp xzr, x14, [x12, #16]
+5f e4 00 69  # stgp xzr, x25, [x2, #16]
+bf ee 00 69  # stgp xzr, x27, [x21, #16]
+3f 8f 00 69  # stgp xzr, x3, [x25, #16]
+ff a6 00 69  # stgp xzr, x9, [x23, #16]
+bf a6 00 69  # stgp xzr, x9, [x21, #16]
+bf 84 80 69  # stgp xzr, x1, [x5, #16]!
+df b0 80 69  # stgp xzr, x12, [x6, #16]!
+df a7 80 69  # stgp xzr, x9, [x30, #16]!
+9f da 80 69  # stgp xzr, x22, [x20, #16]!
+9f b0 80 69  # stgp xzr, x12, [x4, #16]!
+bf e0 80 69  # stgp xzr, x24, [x5, #16]!
+3f ad 80 68  # stgp xzr, x11, [x9], #16
+7f c4 80 68  # stgp xzr, x17, [x3], #16
+9f 84 80 68  # stgp xzr, x1, [x4], #16
+df f9 80 68  # stgp xzr, x30, [x14], #16
+3f fb 80 68  # stgp xzr, x30, [x25], #16
+ff 92 80 68  # stgp xzr, x4, [x23], #16
+05 0d f0 d9  # stz2g x5, [x8, #-4096]!
+dc 0d f0 d9  # stz2g x28, [x14, #-4096]!
+31 0c f0 d9  # stz2g x17, [x1, #-4096]!
+31 0d f0 d9  # stz2g x17, [x9, #-4096]!
+af 0c f0 d9  # stz2g x15, [x5, #-4096]!
+96 0c f0 d9  # stz2g x22, [x4, #-4096]!
+a2 0a e0 d9  # stz2g x2, [x21]
+51 0a e0 d9  # stz2g x17, [x18]
+53 09 e0 d9  # stz2g x19, [x10]
+b5 08 e0 d9  # stz2g x21, [x5]
+c2 0b e0 d9  # stz2g x2, [x30]
+b5 0b e0 d9  # stz2g x21, [x29]
+6f 07 f0 d9  # stz2g x15, [x27], #-4096
+ab 07 f0 d9  # stz2g x11, [x29], #-4096
+a5 04 f0 d9  # stz2g x5, [x5], #-4096
+fa 05 f0 d9  # stz2g x26, [x15], #-4096
+83 06 f0 d9  # stz2g x3, [x20], #-4096
+48 05 f0 d9  # stz2g x8, [x10], #-4096
+52 0a f0 d9  # stz2g x18, [x18, #-4096]
+de 0b f0 d9  # stz2g x30, [x30, #-4096]
+ad 09 f0 d9  # stz2g x13, [x13, #-4096]
+ef 09 f0 d9  # stz2g x15, [x15, #-4096]
+39 0b f0 d9  # stz2g x25, [x25, #-4096]
+94 0a f0 d9  # stz2g x20, [x20, #-4096]
+09 fc ef d9  # stz2g x9, [x0, #4080]!
+ce fd ef d9  # stz2g x14, [x14, #4080]!
+a2 fc ef d9  # stz2g x2, [x5, #4080]!
+79 fc ef d9  # stz2g x25, [x3, #4080]!
+7a fc ef d9  # stz2g x26, [x3, #4080]!
+d3 fc ef d9  # stz2g x19, [x6, #4080]!
+52 f5 ef d9  # stz2g x18, [x10], #4080
+3a f6 ef d9  # stz2g x26, [x17], #4080
+7e f7 ef d9  # stz2g x30, [x27], #4080
+64 f6 ef d9  # stz2g x4, [x19], #4080
+fc f4 ef d9  # stz2g x28, [x7], #4080
+79 f4 ef d9  # stz2g x25, [x3], #4080
+ef 1f e0 d9  # stz2g x15, [sp, #16]!
+ea 1f e0 d9  # stz2g x10, [sp, #16]!
+f5 1f e0 d9  # stz2g x21, [sp, #16]!
+ed 1f e0 d9  # stz2g x13, [sp, #16]!
+fa 1f e0 d9  # stz2g x26, [sp, #16]!
+f0 17 e0 d9  # stz2g x16, [sp], #16
+f6 17 e0 d9  # stz2g x22, [sp], #16
+e3 17 e0 d9  # stz2g x3, [sp], #16
+f7 17 e0 d9  # stz2g x23, [sp], #16
+fe 17 e0 d9  # stz2g x30, [sp], #16
+f3 17 e0 d9  # stz2g x19, [sp], #16
+de fb ef d9  # stz2g x30, [x30, #4080]
+5a fb ef d9  # stz2g x26, [x26, #4080]
+94 fa ef d9  # stz2g x20, [x20, #4080]
+31 fa ef d9  # stz2g x17, [x17, #4080]
+ce f9 ef d9  # stz2g x14, [x14, #4080]
+e6 1b e0 d9  # stz2g x6, [sp, #16]
+ed 1b e0 d9  # stz2g x13, [sp, #16]
+f8 1b e0 d9  # stz2g x24, [sp, #16]
+fc 1b e0 d9  # stz2g x28, [sp, #16]
+fa 1b e0 d9  # stz2g x26, [sp, #16]
+ee 1b e0 d9  # stz2g x14, [sp, #16]
+35 0e 70 d9  # stzg x21, [x17, #-4096]!
+bd 0c 70 d9  # stzg x29, [x5, #-4096]!
+70 0f 70 d9  # stzg x16, [x27, #-4096]!
+3e 0d 70 d9  # stzg x30, [x9, #-4096]!
+ae 0d 70 d9  # stzg x14, [x13, #-4096]!
+f1 0e 70 d9  # stzg x17, [x23, #-4096]!
+40 0a 60 d9  # stzg x0, [x18]
+cd 0b 60 d9  # stzg x13, [x30]
+d5 08 60 d9  # stzg x21, [x6]
+15 09 60 d9  # stzg x21, [x8]
+58 0a 60 d9  # stzg x24, [x18]
+a5 09 60 d9  # stzg x5, [x13]
+f0 04 70 d9  # stzg x16, [x7], #-4096
+47 07 70 d9  # stzg x7, [x26], #-4096
+3d 06 70 d9  # stzg x29, [x17], #-4096
+36 06 70 d9  # stzg x22, [x17], #-4096
+a7 05 70 d9  # stzg x7, [x13], #-4096
+63 06 70 d9  # stzg x3, [x19], #-4096
+ad 09 70 d9  # stzg x13, [x13, #-4096]
+52 0a 70 d9  # stzg x18, [x18, #-4096]
+b5 0a 70 d9  # stzg x21, [x21, #-4096]
+42 08 70 d9  # stzg x2, [x2, #-4096]
+39 0b 70 d9  # stzg x25, [x25, #-4096]
+4f fd 6f d9  # stzg x15, [x10, #4080]!
+a6 fe 6f d9  # stzg x6, [x21, #4080]!
+12 ff 6f d9  # stzg x18, [x24, #4080]!
+79 fe 6f d9  # stzg x25, [x19, #4080]!
+71 ff 6f d9  # stzg x17, [x27, #4080]!
+f2 fc 6f d9  # stzg x18, [x7, #4080]!
+d7 f5 6f d9  # stzg x23, [x14], #4080
+90 f7 6f d9  # stzg x16, [x28], #4080
+0c f4 6f d9  # stzg x12, [x0], #4080
+89 f6 6f d9  # stzg x9, [x20], #4080
+fc f4 6f d9  # stzg x28, [x7], #4080
+b8 f5 6f d9  # stzg x24, [x13], #4080
+e0 1f 60 d9  # stzg x0, [sp, #16]!
+ea 1f 60 d9  # stzg x10, [sp, #16]!
+ee 1f 60 d9  # stzg x14, [sp, #16]!
+f4 1f 60 d9  # stzg x20, [sp, #16]!
+e1 17 60 d9  # stzg x1, [sp], #16
+e9 17 60 d9  # stzg x9, [sp], #16
+e4 17 60 d9  # stzg x4, [sp], #16
+f3 17 60 d9  # stzg x19, [sp], #16
+f8 17 60 d9  # stzg x24, [sp], #16
+94 fa 6f d9  # stzg x20, [x20, #4080]
+73 fa 6f d9  # stzg x19, [x19, #4080]
+ce f9 6f d9  # stzg x14, [x14, #4080]
+84 f8 6f d9  # stzg x4, [x4, #4080]
+c6 f8 6f d9  # stzg x6, [x6, #4080]
+ef 1b 60 d9  # stzg x15, [sp, #16]
+f8 1b 60 d9  # stzg x24, [sp, #16]
+f5 1b 60 d9  # stzg x21, [sp, #16]
+e1 1b 60 d9  # stzg x1, [sp, #16]
+fe 1b 60 d9  # stzg x30, [sp, #16]
+44 01 20 d9  # stzgm x4, [x10]
+15 03 20 d9  # stzgm x21, [x24]
+0b 03 20 d9  # stzgm x11, [x24]
+47 01 20 d9  # stzgm x7, [x10]
+0b 02 20 d9  # stzgm x11, [x16]
+22 02 20 d9  # stzgm x2, [x17]
+e7 03 20 d9  # stzgm x7, [sp]
+fa 03 20 d9  # stzgm x26, [sp]
+f4 03 20 d9  # stzgm x20, [sp]
+f9 03 20 d9  # stzgm x25, [sp]
+e9 03 20 d9  # stzgm x9, [sp]
+7f 00 20 d9  # stzgm xzr, [x3]
+ff 00 20 d9  # stzgm xzr, [x7]
+3f 00 20 d9  # stzgm xzr, [x1]
+bf 00 20 d9  # stzgm xzr, [x5]
+df 02 20 d9  # stzgm xzr, [x22]
+3f 03 20 d9  # stzgm xzr, [x25]
+5f 0e 82 d1  # subg sp, x18, #32, #3
+bf 0c 82 d1  # subg sp, x5, #32, #3
+9f 0f 82 d1  # subg sp, x28, #32, #3
+ff 0e 82 d1  # subg sp, x23, #32, #3
+3f 0f 82 d1  # subg sp, x25, #32, #3
+f6 17 84 d1  # subg x22, sp, #64, #5
+f9 17 84 d1  # subg x25, sp, #64, #5
+f8 17 84 d1  # subg x24, sp, #64, #5
+f5 17 84 d1  # subg x21, sp, #64, #5
+f1 17 84 d1  # subg x17, sp, #64, #5
+e8 17 84 d1  # subg x8, sp, #64, #5
+d4 04 80 d1  # subg x20, x6, #0, #1
+db 05 80 d1  # subg x27, x14, #0, #1
+d8 06 80 d1  # subg x24, x22, #0, #1
+2c 05 80 d1  # subg x12, x9, #0, #1
+c3 06 80 d1  # subg x3, x22, #0, #1
+45 06 80 d1  # subg x5, x18, #0, #1
+91 1b bf d1  # subg x17, x28, #1008, #6
+52 19 bf d1  # subg x18, x10, #1008, #6
+7d 1b bf d1  # subg x29, x27, #1008, #6
+61 19 bf d1  # subg x1, x11, #1008, #6
+25 1b bf d1  # subg x5, x25, #1008, #6
+3e 1a bf d1  # subg x30, x17, #1008, #6
+ab 3c 87 d1  # subg x11, x5, #112, #15
+d8 3e 87 d1  # subg x24, x22, #112, #15
+c1 3e 87 d1  # subg x1, x22, #112, #15
+35 3e 87 d1  # subg x21, x17, #112, #15
+2c 3e 87 d1  # subg x12, x17, #112, #15
+6f 3c 87 d1  # subg x15, x3, #112, #15
+ee 03 df 9a  # subp x14, sp, sp
+fa 03 df 9a  # subp x26, sp, sp
+fc 03 df 9a  # subp x28, sp, sp
+fb 03 df 9a  # subp x27, sp, sp
+ef 03 df 9a  # subp x15, sp, sp
+f2 03 df 9a  # subp x18, sp, sp
+7b 03 d4 9a  # subp x27, x27, x20
+a2 01 db 9a  # subp x2, x13, x27
+2c 01 de 9a  # subp x12, x9, x30
+0f 00 c0 9a  # subp x15, x0, x0
+11 00 c0 9a  # subp x17, x0, x0
+c0 01 cb 9a  # subp x0, x14, x11
+f9 03 df ba  # subps x25, sp, sp
+f3 03 df ba  # subps x19, sp, sp
+e2 03 df ba  # subps x2, sp, sp
+ed 03 df ba  # subps x13, sp, sp
+f0 03 df ba  # subps x16, sp, sp
+f2 03 df ba  # subps x18, sp, sp
+61 02 d2 ba  # subps x1, x19, x18
+a3 03 cc ba  # subps x3, x29, x12
+9d 01 da ba  # subps x29, x12, x26
+94 01 d4 ba  # subps x20, x12, x20
+af 03 d6 ba  # subps x15, x29, x22
+5b 02 d0 ba  # subps x27, x18, x16
+9f 03 d3 ba  # subps xzr, x28, x19
+5f 02 c4 ba  # subps xzr, x18, x4
+5f 01 dc ba  # subps xzr, x10, x28
+5f 03 cc ba  # subps xzr, x26, x12
+7f 03 c9 ba  # subps xzr, x27, x9
+3f 00 d7 ba  # subps xzr, x1, x23

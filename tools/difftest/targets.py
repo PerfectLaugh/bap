@@ -858,6 +858,8 @@ def aarch64_zero_forms():
 
 
 SVE_PREDICATES = [f"P{i}" for i in range(16)] + ["FFR"]
+# where the rows of ZA are in the state, after the registers, the two extra words, the vectors, the predicates and their padding
+SME_ZA = (32 + 2) * 8 + 32 * 16 + 40
 
 
 class AArch64(Risc):
@@ -868,28 +870,33 @@ class AArch64(Risc):
     cflags = ["--target=aarch64-linux-gnu"]
     lean = "aarch64"
     mc_triple = "aarch64-linux-gnu"
-    mc_args = ["--mattr=+v8.1a,+v8.2a,+v8.3a,+fullfp16,+aes,+sha2,+sha3,+sm4,+crc,+lse,+rdm,+dotprod,+fp16fml,+flagm,+rand,+pauth,+jsconv,+complxnum,+rcpc,+fptoint,+sb"]
+    mc_args = ["--mattr=+v8.1a,+v8.2a,+v8.3a,+fullfp16,+aes,+sha2,+sha3,+sm4,+crc,+lse,+rdm,+dotprod,+fp16fml,+flagm,+rand,+pauth,+jsconv,+complxnum,+rcpc,+fptoint,+sb,+mte,+bf16"]
     corpus_name = "aarch64"
     nop = bytes.fromhex("1f2003d5")
     gpr_slots = [f"X{i}" for i in range(31)] + ["SP"]
     gprs = [(f"X{i}", 64) for i in range(31)] + [("SP", 64)]
     flags = [("NF", 31), ("ZF", 30), ("CF", 29), ("VF", 28)]
-    vectors = [(f"Q{i}", 128) for i in range(32)] + [(f"P{i}", 16) for i in range(16)] + [("FFR", 16)]
+    # and SME's: the mode and ZA of PSTATE, which SVCR is, ZA and ZT0, at a streaming vector length of 128 bits
+    vectors = [(f"Q{i}", 128) for i in range(32)] + [(f"P{i}", 16) for i in range(16)] + [("FFR", 16)] + \
+        [("PSTATE_SM", 1), ("PSTATE_ZA", 1), ("ZA", 2048), ("ZT0", 512)]
     default_pins = {"SP": "window+256"}
     base_pins = {"X5": "window+248", "X6": 8}
     semantics = ["arm/aarch64-arithmetic.lisp", "arm/aarch64-atomic.lisp", "arm/aarch64-branch.lisp", "arm/aarch64-data-movement.lisp", "arm/aarch64-float.lisp",
-        "arm/aarch64-logical.lisp", "arm/aarch64-pstate.lisp", "arm/aarch64-simd.lisp", "arm/aarch64-special.lisp", "arm/aarch64-sve.lisp"]
+        "arm/aarch64-logical.lisp", "arm/aarch64-pstate.lisp", "arm/aarch64-simd.lisp", "arm/aarch64-special.lisp", "arm/aarch64-sve.lisp",
+        "arm/aarch64-sve2.lisp", "arm/aarch64-mte.lisp", "arm/aarch64-sme.lisp"]
     mnemonics_of = staticmethod(aarch64_stems)
     excluded_prefix = ("SVC", "HVC", "SMC", "BRK", "HLT", "HINT", "SYS", "MSR", "MRS", "DCPS", "ERET", "DRPS", "CLREX", "WFE", "WFI", "PAC", "AUT", "XPAC", "RET", "BLRA", "BRA", "ERETA", "LDRAA", "LDRAB", "UDF", "GCS", "RNDR", "TSB", "CSDB", "PSB")
     pc_mask = 0
 
     def __init__(self, scratch):
         self.shape_list = aarch64_shapes()
+        self.sme_texts = set()
+        self.sme_opcodes = set()
         super().__init__(scratch)
 
     def aux_spec(self):
         return {"XZR": (0, 64), "EXCLUSIVE_MONITOR": (0, 64), "FPCR": (0, 32), "FPSR": (0, 32), "DAIF": (0, 4), "SPSel": (0, 1), "PAN": (0, 1), "UAO": (0, 1), "TPIDR_EL0": (0, 64), "TPIDRRO_EL0": (0, 64),
-            "SP_EL0": (0, 64), "SP_EL1": (0, 64), "CNTVCT_EL0": (0, 64)}
+            "SP_EL0": (0, 64), "SP_EL1": (0, 64), "CNTVCT_EL0": (0, 64), "TPIDR2_EL0": (0, 64)}
 
     def encode_extra(self, values, out):
         word = 0
@@ -902,6 +909,9 @@ class AArch64(Risc):
         base += 32 * 16
         for index, name in enumerate(SVE_PREDICATES):
             out[base + index * 2 : base + (index + 1) * 2] = values[name].to_bytes(2, "little")
+        self.set_extra_word(out, 1, values["PSTATE_SM"] | values["PSTATE_ZA"] << 1)
+        out[SME_ZA : SME_ZA + 256] = values["ZA"].to_bytes(256, "little")
+        out[SME_ZA + 256 : SME_ZA + 320] = values["ZT0"].to_bytes(64, "little")
 
     def decode_extra(self, data, result):
         word = self.extra_word(data, 0)
@@ -913,6 +923,10 @@ class AArch64(Risc):
         base += 32 * 16
         for index, name in enumerate(SVE_PREDICATES):
             result[name] = int.from_bytes(data[base + index * 2 : base + (index + 1) * 2], "little")
+        svcr = self.extra_word(data, 1)
+        result["PSTATE_SM"], result["PSTATE_ZA"] = svcr & 1, svcr >> 1 & 1
+        result["ZA"] = int.from_bytes(data[SME_ZA : SME_ZA + 256], "little")
+        result["ZT0"] = int.from_bytes(data[SME_ZA + 256 : SME_ZA + 320], "little")
 
     def shape(self, case, values, index, rng):
         """The predicates: of each size of an element, of the edges, and any. FFR is monotonic, as what writes it must be."""
@@ -930,21 +944,50 @@ class AArch64(Risc):
         written = re.match(r"wrffr\s+p(\d+)", case.text)
         if written:
             values[f"P{written.group(1)}"] = (1 << rng.randrange(17)) - 1
+        # the streaming mode and ZA: of SME's, on mostly, and of what isn't of ZA, the mode on, as what SVE2.1 shares with SME2
+        # is of it only here and of either on qemu, out of it and with ZA off of the rest. ZA and ZT0 are zeros while ZA is off.
+        values["PSTATE_SM"], values["PSTATE_ZA"] = 0, 0
+        if case.text in self.sme_texts:
+            of_za = re.search(r"\bza|\bzt0\b|smstart|smstop|svcr", case.text)
+            values["PSTATE_SM"] = int(rng.random() < 0.85) if of_za else 1
+            values["PSTATE_ZA"] = int(rng.random() < 0.85)
+        if not values["PSTATE_ZA"]:
+            values["ZA"], values["ZT0"] = 0, 0
 
     def cases(self, opcodes, assemble, layout):
-        # the operand forms of the assembler are of the others, SVE has a corpus of its own
-        self.sve_opcodes = {name for name, path in opcodes.items() if path.endswith("-sve.lisp")}
+        # the operand forms of the assembler are of the others, SVE and SVE2 have corpora of their own
+        self.sve_opcodes = {name for name, path in opcodes.items() if path.endswith(("-sve.lisp", "-sve2.lisp", "-sme.lisp"))}
+        self.sme_opcodes = {name for name, path in opcodes.items() if path.endswith("-sme.lisp")} | {"MSRpstatesvcrImm1"}
         Case = case_type()
         result = super().cases({name: path for name, path in opcodes.items() if name not in self.sve_opcodes}, assemble, layout)
-        for code, text in corpus_lines("aarch64-sve"):
-            pins = self.sve_memory(text, layout)
-            if pins is not None:
-                result.append(Case(code=code, text=text, pins=pins))
+        self.sme_texts = set()
+        for corpus in ["aarch64-sve", "aarch64-sve2", "aarch64-mte", "aarch64-sme"]:
+            for code, text in corpus_lines(corpus):
+                pins = self.sme_memory(text, layout) if corpus == "aarch64-sme" else self.sve_memory(text, layout)
+                if pins is not None:
+                    result.append(Case(code=code, text=text, pins=pins))
+                    if corpus == "aarch64-sme":
+                        self.sme_texts.add(text)
         result += [dataclasses.replace(case, always=True) for case in self.text_cases(assemble, [(line,) for line in aarch64_zero_forms()])]
         return result
 
+    def traps(self, opcode):
+        """SME's are undefined out of the streaming mode or with ZA off, which the runs of either state compare"""
+        return opcode in self.sme_opcodes
+
     def excluded(self, opcode, case):
-        return None if opcode in self.sve_opcodes else super().excluded(opcode, case)
+        # SMSTART, SMSTOP and the reads and writes of SVCR are SME's, which the state has
+        if opcode in self.sve_opcodes or case.text.startswith(("smstart", "smstop")) or "svcr" in case.text:
+            return None
+        return super().excluded(opcode, case)
+
+    def sme_memory(self, text, layout):
+        """The registers of the addressing of an instruction of SME, of which the slices and the vectors of ZA are in brackets
+        too: its memory is the last of them, of a base of X or SP."""
+        found = [m for m in re.finditer(r"\[([^\]]*)\]", text) if re.match(r"\s*(x\d+|sp)\b", m.group(1))]
+        if not found:
+            return {}
+        return self.sve_memory(text[found[-1].start():], layout)
 
     def sve_memory(self, text, layout):
         """The registers of the addressing of an SVE instruction, held to the window, or None if it can't be run here."""
@@ -966,9 +1009,12 @@ class AArch64(Risc):
             return {"Q" + register.split(".")[0][1:]: value}
 
         if base.startswith("z"):
-            # the elements of the vector are the addresses, and the immediate goes up to 248
+            # the elements of the vector are the addresses, and the immediate goes up to 248, or the scalar of SVE2's LDNT1 and STNT1 is
+            # held to a few bytes either way
             window = layout["window"]
-            pins.update(lanes(base, lambda rng: window + rng.randrange(128)))
+            pins.update(lanes(base, lambda rng: window + 64 + rng.randrange(128)))
+            if len(parts) > 1 and parts[1].startswith("x") and parts[1] != "xzr":
+                pins[parts[1].upper()] = 8
             return pins
         offset = parts[1] if len(parts) > 1 else ""
         if offset.startswith("z"):

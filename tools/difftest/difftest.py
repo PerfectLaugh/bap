@@ -131,9 +131,12 @@ def build_stub(cfg):
 
 
 def lean_prefix():
-    if shutil.which("systemd-run"):
-        return ["systemd-run", "--user", "--scope", "--quiet", "-p", "MemoryMax=12G", "-p", "MemorySwapMax=0", "timeout", "30"]
-    return []
+    """What a session of the lifter runs under: a scope of 12 GiB, if there is a manager of the user's to make one, and a timeout."""
+    scope = ["systemd-run", "--user", "--scope", "--quiet", "-p", "MemoryMax=12G", "-p", "MemorySwapMax=0"]
+    if shutil.which("systemd-run") and subprocess.run(scope + ["true"], capture_output=True).returncode == 0:
+        return scope + ["timeout", "30"]
+    # without a scope, a session is of a whole batch, which takes minutes, and only one that hangs is cut off
+    return ["timeout", "1800"]
 
 
 def lean_session(requests, scratch):
@@ -405,7 +408,8 @@ def compare_case(cfg, case, layout, states, hw, lean, stats, report):
             stats["disagreements"] += 1
             if len(known) < 3:
                 known.append({"text": case.text, "bytes": case.code.hex(), "asm": case.asm, "kind": "value",
-                    "inputs": {name: hexvalue(value, dict(cfg.all_widths)[name]) for name, value in values.items()},
+                    "inputs": {name: hexvalue(value, dict(cfg.all_widths)[name]) for name, value in values.items()
+                               if name in dict(cfg.all_widths)},
                     "window": memory.hex(), "diff": [list(d) for d in shorten(differ, memory)]})
         else:
             stats["agreements"] += 1

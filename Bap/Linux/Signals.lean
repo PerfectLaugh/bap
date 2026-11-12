@@ -538,6 +538,26 @@ private def registerValue (emu : Emu) (width : Nat) (name : String) : IO Nat := 
   | .ok (.bits value) => pure value.toNat
   | _ => pure 0
 
+/-- What Linux does of SME on AArch64 as a system call is entered and as a handler is given a signal: the streaming mode is left, as
+`fp_user_discard` and `setup_return` do with `sme_smstop`, which zeros the Z and P registers and FFR and sets FPSR to 0x0800009f, as
+ResetSVEState has it, and a handler has ZA off, which zeros ZA and ZT0, and TPIDR2_EL0 zero. What the handler is given is in the frame,
+and comes back on `sigreturn`. -/
+def leaveStreamingMode (emu : Emu) (handler : Bool) : IO Unit := do
+  let set (name : String) (width value : Nat) : IO Unit := setReg emu ⟨name, .imm width, 0, false⟩ (wordOfWidth width value)
+  if (← registerValue emu 1 "PSTATE_SM") == 1 then
+    for index in List.range 32 do
+      set s!"Q{index}" 128 0
+    for name in (List.range 16).map (s!"P{·}") ++ ["FFR"] do
+      set name 16 0
+    set "FPSR" 32 0x0800009f
+    set "PSTATE_SM" 1 0
+  if handler then
+    if (← registerValue emu 1 "PSTATE_ZA") == 1 then
+      set "ZA" 2048 0
+      set "ZT0" 512 0
+      set "PSTATE_ZA" 1 0
+    set "TPIDR2_EL0" 64 0
+
 /-- `bytes` many, in the order of the target. -/
 private def encodeNumber (emu : Emu) (bytes value : Nat) : ByteArray :=
   let little := (List.range bytes).map fun index => (value >>> (8 * index)).toUInt8
@@ -702,6 +722,7 @@ private def enterHandler (signals : Signals) (emu : Emu) (tid : Nat) (info : Sig
     set "X1" infoAddress
     set "X2" contextAddress
     set "X30" returning
+    leaveStreamingMode emu true
   | .arm =>
     set "SP" entry
     set "R0" info.signal

@@ -233,7 +233,9 @@ private def serve (stdin stdout stderr : IO.FS.Stream) : IO Unit := do
           let insn ← chosen.decode address bytes
           let decoded ← LLVM.disassemble chosen.triple bytes address
           -- An intrinsic of floating point has a value, which `Bap.Float` computes, and any other has none.
-          let specials := specialsOf 64 insn.bil
+          -- What is undefined where it runs, e.g., of SME out of its mode, is a trap, whose signal is compared, as of an instruction of
+          -- no floating point.
+          let specials := (specialsOf 64 insn.bil).filter (· != "undefined-instruction")
           let served := !specials.isEmpty && specials.all Bap.Float.serves
           let intrinsic := !served && ((reprStr insn.bil).splitOn "intrinsic:").length > 1
           stdout.putStrLn s!"D {id} {decoded.opcode} {hexOf insn.size 2} {if intrinsic then 1 else 0} {if insn.flow == .normal then 0 else 1} {insn.asm}"

@@ -66,6 +66,10 @@ def clone (emu : Emu) (options : CloneOptions) : IO ThreadId := do
     | some value => Bil.bind env (wordVar width name) (wordOf width value)
     | none => env
   let env := bindIn (bindIn current.env stackRegister options.stack) threadRegister options.threadPointer
+  -- A thread pointer of its own clears TPIDR2_EL0 of SME, as Linux's `copy_thread` has it with `CLONE_SETTLS`, of a machine that has it.
+  let tpidr2 := wordVar 64 "TPIDR2_EL0"
+  let env := if options.threadPointer.isSome && (Bil.lookup env tpidr2).toOption.isSome then Bil.bind env tpidr2 (wordOf 64 0)
+    else env
   -- On MIPS, a result that isn't an error has the flag in the register after the arguments clear, whatever that held.
   let env := bindIn env "R7" (if emu.config.syscallAbi == .mips then some 0 else none)
   let env := if emu.config.syscallAbi == .powerpc || emu.config.syscallAbi == .powerpc64 then Bil.bind env errorBit (wordOf 1 0) else env

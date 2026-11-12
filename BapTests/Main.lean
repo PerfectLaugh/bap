@@ -67,6 +67,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxPrograms,
     Bap.Tests.Emu.testLinuxLayouts,
     Bap.Tests.Emu.testThumbIt,
+    Bap.Tests.Emu.testAArch64Sme,
     Bap.Tests.Emu.testRangeEntries,
     Bap.Tests.Emu.testNativeLimit,
     Bap.Tests.Emu.testRangeLoopsAArch64,

@@ -41,6 +41,9 @@
 ;; keep the register, so that a signed and authenticated return
 ;; address is the original one, as when the authentication succeeds.
 (defun PACIASP () (empty))
+;; PACM, of FEAT_PAuth_LR, which the processor doesn't have, is the hint
+;; that it is of, which is a NOP
+(defun PACM () (empty))
 (defun PACIBSP () (empty))
 (defun AUTIASP () (empty))
 (defun AUTIBSP () (empty))
@@ -138,6 +141,8 @@
   (case reg
     0xde82 (set$ dst TPIDR_EL0)
     0xde83 (set$ dst TPIDRRO_EL0)
+    0xde85 (set$ dst TPIDR2_EL0)
+    0xda12 (set$ dst (sme-svcr))                ; SVCR
     0xda10 (set$ dst (a64-nzcv))
     0xda11 (set$ dst (lshift (cast-unsigned 64 DAIF) 6))
     0xc210 (set$ dst (cast-unsigned 64 SPSel))
@@ -171,6 +176,8 @@
   (case reg
     0xde82 (set TPIDR_EL0 src)
     0xde83 (set TPIDRRO_EL0 src)
+    0xde85 (set TPIDR2_EL0 src)
+    0xda12 (sme-set-svcr src)
     0xda10 (set-nzcv (cast-low 4 (rshift src 28)))
     0xda20 (set FPCR (cast-low 32 src))
     0xda21 (set FPSR (cast-low 32 src))
@@ -187,9 +194,14 @@
 ;; as the implementation defined ones are, which the processor doesn't have.
 (defun SYSLxt (_ _ _ _ _) (a64-undefined))
 
-;; SMSTART and SMSTOP of SME, which the processor of Unicorn doesn't
-;; have, as the programs, e.g., glibc, run them, only if it has SME
-(defun MSRpstatesvcrImm1 (_ _) (a64-undefined))
+;; SMSTART and SMSTOP of SME, of the mode (field 1), ZA (2) or both
+;; (3), see aarch64-sme.lisp
+(defun MSRpstatesvcrImm1 (field imm)
+  (case field
+    1 (sme-set-sm (cast-low 1 imm))
+    2 (sme-set-za (cast-low 1 imm))
+    3 (prog (sme-set-sm (cast-low 1 imm)) (sme-set-za (cast-low 1 imm)))
+    (a64-undefined)))
 
 ;; The selection of the stack pointer, SPSel, which Unicorn runs at
 ;; EL1, so that SP is banked to SP_EL1, when SPSel is 1, and to SP_EL0,

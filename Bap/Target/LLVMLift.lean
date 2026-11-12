@@ -260,6 +260,44 @@ private def aarch64SveRegister (name : String) : Primus.Semantics.Value :=
   else if name.startsWith "Z" then .register ("Q" ++ name.drop 1) 128 128
   else .register name 16 16
 
+/-- The numbers of the registers of a list of SVE or SME, e.g., `[0, 8]` of `Z0_Z8`, or of the predicates, of `P0_P1`. -/
+private def aarch64ListNumbers (letter : String) (name : String) : Option (List Nat) :=
+  match name.splitOn "_" with
+  | parts@(_ :: _ :: _) => parts.mapM fun part =>
+    if part.startsWith letter && !(part.drop letter.length).isEmpty && (part.drop letter.length).all Char.isDigit then
+      (part.drop letter.length).toNat? else none
+  | _ => none
+
+/-- The registers of SME, at the streaming vector length of 128 bits that `aarch64-sme.lisp` has too:
+- ZA is a variable of 16 rows of 128 bits, the first in its low bits, and a tile, e.g., `ZAS1`, is its number, as the semantics
+  find its rows by it, the rows of the number modulo the count of the tiles of its size;
+- ZT0, the table of SME2, is a variable of 512 bits;
+- PNn, a predicate as a counter, is Pn;
+- a strided list of Z registers, e.g., `Z0_Z8` or `Z0_Z4_Z8_Z12`, and a pair of predicates, e.g., `P0_P1`, are the lists of their
+  registers, as the semantics can't step from one to the next by their names, which the consecutive lists of Z registers are. -/
+private def aarch64SmeRegister (name : String) : Option Primus.Semantics.Value :=
+  let tile (prefix_ : String) (count : Nat) : Option Primus.Semantics.Value :=
+    if name.startsWith prefix_ then
+      match (name.drop prefix_.length).toNat? with
+      | some n => if n < count then some (.int (BitVec.ofNat 64 n)) else none
+      | none => none
+    else none
+  if name = "ZA" then some (.register "ZA" 2048 2048)
+  else if name = "ZT0" then some (.register "ZT0" 512 512)
+  else if let some value := tile "ZAB" 1 then some value
+  else if let some value := tile "ZAH" 2 then some value
+  else if let some value := tile "ZAS" 4 then some value
+  else if let some value := tile "ZAD" 8 then some value
+  else if let some value := tile "ZAQ" 16 then some value
+  else if name.startsWith "PN" && !(name.drop 2).isEmpty && (name.drop 2).all Char.isDigit then
+    some (.register ("P" ++ name.drop 2) 16 16)
+  else if let some numbers := aarch64ListNumbers "P" name then
+    some (.list (numbers.map fun n => .register s!"P{n}" 16 16))
+  else if let some numbers := aarch64ListNumbers "Z" name then
+    let strided := (numbers.zip numbers.tail).any fun (a, b) => (b + 32 - a) % 32 != 1
+    if strided then some (.list (numbers.map fun n => .register s!"Q{n}" 128 128)) else none
+  else none
+
 /-- The list of consecutive registers, e.g., `Q31_Q0` or `D2_D3_D4`. -/
 private def aarch64RegisterList (name : String) : Bool :=
   match name.splitOn "_" with
@@ -280,6 +318,11 @@ private def aarch64Globals : Primus.Semantics.Globals :=
   (registers ++ vectors ++ ["SP", "LR", "XZR", "NF", "ZF", "CF", "VF", "TPIDR_EL0", "TPIDRRO_EL0", "DAIF", "SPSel",
       "SP_EL0", "SP_EL1", "R31", "UAO", "PAN", "CNTVCT_EL0", "FPCR", "FPSR", "EXCLUSIVE_MONITOR"]).map
     fun name => (name, aarch64Register name)
+
+/-- The state of SME: ZA, ZT0, the mode and the enabling of ZA, of PSTATE, which SVCR is, and the register of its ABI, TPIDR2_EL0. -/
+def aarch64SmeGlobals : Primus.Semantics.Globals :=
+  [("ZA", .register "ZA" 2048 2048), ("ZT0", .register "ZT0" 512 512), ("PSTATE_SM", .register "PSTATE_SM" 1 1),
+    ("PSTATE_ZA", .register "PSTATE_ZA" 1 1), ("TPIDR2_EL0", .register "TPIDR2_EL0" 64 64)]
 
 /-- The registers of x87 and the control and status words. -/
 private def x86FloatNames : List String :=
@@ -680,8 +723,9 @@ private initialize aarch64Cache : IO.Ref (Option Primus.Semantics.Environment) �
 
 def aarch64Environment : IO Primus.Semantics.Environment := cached aarch64Cache do
   let context := semanticsContext 0 0
-  let definitions ← Primus.Semantics.loadMany (← pluginDirectories "arm") ["aarch64", "aarch64-sve"] context
-  let environment ← compiledDefinitions [] "aarch64" (aarch64Globals ++ [("FFR", aarch64SveRegister "FFR")]) definitions
+  let definitions ← Primus.Semantics.loadMany (← pluginDirectories "arm") ["aarch64", "aarch64-sve", "aarch64-sve2", "aarch64-mte", "aarch64-sme"] context
+  let predicates := ((List.range 16).map (s!"P{·}") ++ ["FFR"]).map fun name => (name, aarch64SveRegister name)
+  let environment ← compiledDefinitions [] "aarch64" (aarch64Globals ++ predicates ++ aarch64SmeGlobals) definitions
   let names := (List.range 31).flatMap (fun n => [s!"X{n}", s!"W{n}"]) ++
     (List.range 32).flatMap (fun n => [s!"B{n}", s!"H{n}", s!"S{n}", s!"D{n}", s!"Q{n}"]) ++
     ["SP", "WSP", "XZR", "WZR"]
@@ -694,8 +738,10 @@ def aarch64Environment : IO Primus.Semantics.Environment := cached aarch64Cache 
   let lists := all.filter fun entry => aarch64RegisterList entry.2 || aarch64RegisterPair entry.2
   let sve := all.filter fun entry =>
     aarch64SveList entry.2 || ((List.range 32).map (s!"Z{·}") ++ (List.range 16).map (s!"P{·}")).contains entry.2
+  let sme := all.filterMap fun entry => (aarch64SmeRegister entry.2).map (entry.1, ·)
+  let sve := sve.filter fun entry => (aarch64SmeRegister entry.2).isNone
   pure (environment.withRegisters (registers ++ lists.map (fun entry => (entry.1, aarch64Register entry.2)) ++
-    sve.map fun entry => (entry.1, aarch64SveRegister entry.2)))
+    sve.map (fun entry => (entry.1, aarch64SveRegister entry.2)) ++ sme))
 
 private initialize x86Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
