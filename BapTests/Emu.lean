@@ -2209,6 +2209,19 @@ def testBigInterpreter : IO Unit := do
     assertEqual "A program of a big interpreter runs it" (Bap.Tasks.ScheduleOutcome.finished 0, "the interpreter ran\n")
       (outcome, String.fromUTF8! (← written.get))
 
+/-- The predicates of SVE and FFR of a program of AArch64 are zero as it starts, as Linux has them, rather than unbound: `sel` of `p5`,
+which nothing wrote, takes each byte of its second source, and what `rdffr` gives has nothing active. -/
+def testSvePredicatesStartZero : IO Unit := do
+  let program ← IO.FS.readBinFile "testsuite/bin/aarch64-linux-musl-libc-files"
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  -- dup z1.b, #0x11; dup z2.b, #0x22; sel z0.b, p5, z1.b, z2.b; umov x0, v0.d[0]; ret; and at 20, rdffr p0.b; ptrue p1.b;
+  -- cntp x0, p1, p0.b; ret
+  let code := ByteArray.mk #[0x21, 0xc2, 0x38, 0x25, 0x42, 0xc4, 0x38, 0x25, 0x20, 0xd4, 0x22, 0x05, 0x00, 0x3c, 0x08, 0x4e,
+    0xc0, 0x03, 0x5f, 0xd6, 0x00, 0xf0, 0x19, 0x25, 0xe1, 0xe3, 0x18, 0x25, 0x00, 0x84, 0x20, 0x25, 0xc0, 0x03, 0x5f, 0xd6]
+  Bap.Emu.map machine.emu ⟨0x30000000, code ++ ByteArray.mk (Array.replicate (4096 - code.size) 0), ⟨true, false, true⟩⟩
+  assertEqual "SVE sel of a predicate that nothing wrote takes its second source, and FFR has nothing active"
+    (0x2222222222222222, 0) (← machine.call 0x30000000, ← machine.call 0x30000014)
+
 /-- An interpreter that is `ET_EXEC` is where its segments say, as `load_elf_interp` has it, rather than at a base of its own: one at
 0x20000000 that says so by the absolute address of what it says (`testsuite/src/exec-interp/make.py`). -/
 def testExecInterpreter : IO Unit := do

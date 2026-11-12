@@ -2560,6 +2560,10 @@ private def resetRegisters (emu : Emu) : Architecture → IO Unit
       setReg emu ⟨name, .imm 1, 0, false⟩ (bits 1 0)
     for index in List.range 32 do
       setReg emu ⟨s!"Q{index}", .imm 128, 0, false⟩ (bits 128 0)
+    -- The predicates of SVE and FFR, of a bit for each byte of a vector of 128 bits, as the lifter has them: zero, as Linux's
+    -- `sve_flush_live` leaves them, rather than nothing, which the first instruction that reads one would find unbound.
+    for name in (List.range 16).map (s!"P{·}") ++ ["FFR"] do
+      setReg emu ⟨name, .imm 16, 0, false⟩ (bits 16 0)
     for name in ["FPCR", "FPSR"] do
       setReg emu ⟨name, .imm 32, 0, false⟩ (bits 32 0)
   | .riscv64 | .riscv32 => do

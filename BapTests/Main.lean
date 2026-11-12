@@ -549,6 +549,7 @@ def main : IO Unit := do
     Bap.Tests.Emu.testHookChangesRange,
     Bap.Tests.Emu.testHugeCheckpointRegion,
     Bap.Tests.Emu.testExecInterpreter,
+    Bap.Tests.Emu.testSvePredicatesStartZero,
     Bap.Tests.Emu.testVersionedIfunc,
     Bap.Tests.Emu.testLinuxLoaderOrder,
     Bap.Tests.Emu.testBaseTaint,
