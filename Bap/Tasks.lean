@@ -16,6 +16,12 @@ def exitedStatus (code : Nat) : Nat := (code % 256) * 256
 /-- The status that `waitpid` reports for a process that a signal killed. -/
 def signaledStatus (signal : Nat) : Nat := signal % 128
 
+/-- Whether the scheduler says, of each round, the thread that runs and the one it would switch to. -/
+initialize traceSchedule : IO.Ref Bool ← IO.mkRef false
+
+/-- Whether the scheduler says what each round is of, which is slow: one line for every round. -/
+def setTraceSchedule (on : Bool) : IO Unit := traceSchedule.set on
+
 structure Entry where
   tid : Nat
   /-- The id of its process: `getpid` says this, and `gettid` says `tid`. -/

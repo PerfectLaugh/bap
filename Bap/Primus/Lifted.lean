@@ -267,6 +267,9 @@ structure Engine where
   chained : IO.Ref Nat
   /-- Whether nothing is compiled or run compiled, for now. -/
   interpretOnly : IO.Ref Bool
+  /-- Whether what makes a block go to the interpreter instead of its native plan is printed, with the pc: on from the start if
+  `BAP_LIFT_FALLBACK` is set as the engine is made, or as the ref is set. -/
+  fallbackTraced : IO.Ref Bool
   /-- What runs from each address, while one is kept. -/
   profile : IO.Ref (Option (Std.HashMap Nat Profile))
   /-- Where an access to the native memory needs no observer, which its owner keeps to what the observer does. -/
@@ -333,6 +336,7 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimi
     chainFallthrough
     chained := ← IO.mkRef 0
     interpretOnly := ← IO.mkRef false
+    fallbackTraced := ← IO.mkRef (← IO.getEnv "BAP_LIFT_FALLBACK").isSome
     profile := ← IO.mkRef none
     memoryFilter := ← IO.mkRef none
     chain := ← Jit.createChain
@@ -2384,7 +2388,14 @@ private def runBlockUnprofiled (engine : Engine) (fetch : Fetch) (lift : Lift) (
       | .ok _ => true
       | .error _ => false
     match encodeState lowering state.env, bound with
-    | .error _, _ | _, false => runInterpreted engine entry.firstNext pc fallback state observer
+    -- Why a block that has a native plan still goes to the interpreter: a state the lowering can't encode, or a register it
+    -- needs that the state hasn't got, which `fallbackTraced` says, with the pc.
+    | .error error, _ =>
+      if ← engine.fallbackTraced.get then IO.eprintln s!"lift fallback: encode {error} at {pc}"
+      runInterpreted engine entry.firstNext pc fallback state observer
+    | _, false =>
+      if ← engine.fallbackTraced.get then IO.eprintln s!"lift fallback: unbound at {pc}"
+      runInterpreted engine entry.firstNext pc fallback state observer
     | .ok slots, true => do
       -- The code sites of a range are only observed if what observes them may care about what the range has.
       let observed := observed && (← observedIn (if entry.coverage.isEmpty then [(entry.address, entry.last)] else entry.coverage))
