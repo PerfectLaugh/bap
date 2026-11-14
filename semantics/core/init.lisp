@@ -44,3 +44,7 @@
 (defun ident (x)
   "(ident X) is X"
   x)
+
+(defun nth (n l)
+  "(nth N L) is the element N of the list L, the first of which is 0"
+  (if (= n 0) (car l) (nth (- n 1) (cdr l))))

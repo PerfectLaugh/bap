@@ -130,13 +130,24 @@ def build_stub(cfg):
     return path
 
 
-def lean_prefix():
+_SCOPE = None
+
+
+def lean_prefix(seconds):
     """What a session of the lifter runs under: a scope of 12 GiB, if there is a manager of the user's to make one, and a timeout."""
+    global _SCOPE
     scope = ["systemd-run", "--user", "--scope", "--quiet", "-p", "MemoryMax=12G", "-p", "MemorySwapMax=0"]
-    if shutil.which("systemd-run") and subprocess.run(scope + ["true"], capture_output=True).returncode == 0:
-        return scope + ["timeout", "30"]
-    # without a scope, a session is of a whole batch, which takes minutes, and only one that hangs is cut off
-    return ["timeout", "1800"]
+    if _SCOPE is None:
+        _SCOPE = bool(shutil.which("systemd-run")) and subprocess.run(scope + ["true"], capture_output=True).returncode == 0
+    return (scope if _SCOPE else []) + ["timeout", str(seconds)]
+
+
+def session_seconds(requests):
+    """How long a session may take: a batch of decodes and runs takes minutes, of slow instructions, e.g., SME's, and more on a
+    machine that is busy, so that its time is of its size, times DIFFTEST_SLOWNESS of a machine that others load, and what is over it
+    is one that hangs, which is then cut down to the instruction it hangs on."""
+    scale = float(os.environ.get("DIFFTEST_SLOWNESS", "1"))
+    return int((120 + len(requests) // 4) * scale)
 
 
 def lean_session(requests, scratch):
@@ -146,7 +157,7 @@ def lean_session(requests, scratch):
         path = handle.name
     try:
         with open(path) as stdin:
-            out = subprocess.run(lean_prefix() + [LEAN], stdin=stdin, capture_output=True, cwd=ROOT)
+            out = subprocess.run(lean_prefix(session_seconds(requests)) + [LEAN], stdin=stdin, capture_output=True, cwd=ROOT)
         if out.returncode != 0:
             raise RuntimeError(f"bap-difftest: {out.returncode} {out.stderr[-2000:].decode(errors='replace')}")
         return out.stdout.decode(errors="replace").splitlines()
@@ -173,7 +184,7 @@ def lean_batches(requests, header, scratch, size=20000):
                 return
             message = str(error).replace("\n", " ")[:200]
             if " 124 " in message:
-                raise
+                raise RuntimeError(f"the lifter took longer than {session_seconds(head + body)} s on {body[0]}")
             print(f"lifter died on {body[0]}: {message}", flush=True)
             words = body[0].split(" ")
             if len(body) == 1:
@@ -442,6 +453,8 @@ def lisp_opcodes(cfg):
 
 def drive(name, options):
     cfg = targets.config(name, options.scratch)
+    cfg.corpora = options.corpora.split(",") if options.corpora else None
+    cfg.forms = options.forms
     start = time.time()
     stub = build_stub(cfg)
     layout = layout_of(cfg, stub)
@@ -601,6 +614,10 @@ def main():
     parser.add_argument("--per-opcode", type=int, default=2)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--only", default=None)
+    # of a target of corpora, only those named, e.g., `aarch64-sme,aarch64-mte`, and none of its shapes
+    parser.add_argument("--corpora", default=None)
+    # of the lines of a corpus, at most this many of each form, as its registers and numbers aside, which is fewer to decode
+    parser.add_argument("--forms", type=int, default=None)
     options = parser.parse_args()
     if not options.scratch:
         options.scratch = tempfile.mkdtemp(prefix="difftest")

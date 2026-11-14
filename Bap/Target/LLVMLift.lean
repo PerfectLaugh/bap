@@ -269,8 +269,9 @@ private def aarch64ListNumbers (letter : String) (name : String) : Option (List 
   | _ => none
 
 /-- The registers of SME, at the streaming vector length of 128 bits that `aarch64-sme.lisp` has too:
-- ZA is a variable of 16 rows of 128 bits, the first in its low bits, and a tile, e.g., `ZAS1`, is its number, as the semantics
-  find its rows by it, the rows of the number modulo the count of the tiles of its size;
+- ZA is its 16 rows, the variables `ZA0` to `ZA15` of 128 bits, which the semantics name, so that the operand ZA is nothing of its
+  own, and a tile, e.g., `ZAS1`, is its number, as the semantics find its rows by it, the rows of the number modulo the count of the
+  tiles of its size;
 - ZT0, the table of SME2, is a variable of 512 bits;
 - PNn, a predicate as a counter, is Pn;
 - a strided list of Z registers, e.g., `Z0_Z8` or `Z0_Z4_Z8_Z12`, and a pair of predicates, e.g., `P0_P1`, are the lists of their
@@ -282,7 +283,7 @@ private def aarch64SmeRegister (name : String) : Option Primus.Semantics.Value :
       | some n => if n < count then some (.int (BitVec.ofNat 64 n)) else none
       | none => none
     else none
-  if name = "ZA" then some (.register "ZA" 2048 2048)
+  if name = "ZA" then some (.int 0)
   else if name = "ZT0" then some (.register "ZT0" 512 512)
   else if let some value := tile "ZAB" 1 then some value
   else if let some value := tile "ZAH" 2 then some value
@@ -319,10 +320,14 @@ private def aarch64Globals : Primus.Semantics.Globals :=
       "SP_EL0", "SP_EL1", "R31", "UAO", "PAN", "CNTVCT_EL0", "FPCR", "FPSR", "EXCLUSIVE_MONITOR"]).map
     fun name => (name, aarch64Register name)
 
-/-- The state of SME: ZA, ZT0, the mode and the enabling of ZA, of PSTATE, which SVCR is, and the register of its ABI, TPIDR2_EL0. -/
+/-- The registers of SME, with their widths: the rows of ZA, ZT0, the mode and the enabling of ZA, of PSTATE, which SVCR is, and the
+register of its ABI, TPIDR2_EL0. -/
+def aarch64SmeRegisters : List (String × Nat) :=
+  (List.range 16).map (fun n => (s!"ZA{n}", 128)) ++
+    [("ZT0", 512), ("PSTATE_SM", 1), ("PSTATE_ZA", 1), ("TPIDR2_EL0", 64)]
+
 def aarch64SmeGlobals : Primus.Semantics.Globals :=
-  [("ZA", .register "ZA" 2048 2048), ("ZT0", .register "ZT0" 512 512), ("PSTATE_SM", .register "PSTATE_SM" 1 1),
-    ("PSTATE_ZA", .register "PSTATE_ZA" 1 1), ("TPIDR2_EL0", .register "TPIDR2_EL0" 64 64)]
+  aarch64SmeRegisters.map fun (name, width) => (name, .register name width width)
 
 /-- The registers of x87 and the control and status words. -/
 private def x86FloatNames : List String :=

@@ -1,10 +1,13 @@
 /* SME and SME2 as Linux has them for a program, which prints what it finds, as qemu does, see testsuite/data/aarch64-sme.out:
    outer products and moves of ZA, a system call in the streaming mode, which leaves it with ZA kept, and a fault in the streaming
-   mode with ZA on, whose handler has neither and TPIDR2_EL0 zero, and which all come back as it returns.
+   mode with ZA on, whose handler has neither and TPIDR2_EL0 zero, and which all come back as it returns. A call out of the
+   streaming mode leaves P1 zero, as Linux's sve_user_discard does, which qemu-user doesn't, so that the line of it in the .out is
+   Linux's, 0, where qemu prints ffff.
 
    clang --target=aarch64-linux-gnu -fuse-ld=lld -static -nostdlib -ffreestanding -fno-builtin -O1 -fno-pic -march=armv8-a \
      -Wl,-e,_start aarch64-sme.c -o ../bin/aarch64-linux-none-sme
-   qemu-aarch64 -cpu max,sve-max-vq=1 ../bin/aarch64-linux-none-sme > ../data/aarch64-sme.out */
+   qemu-aarch64 -cpu max,sve-max-vq=1 ../bin/aarch64-linux-none-sme \
+     | sed 's/^p1 after a call .*/p1 after a call 0000000000000000/' > ../data/aarch64-sme.out */
 
 typedef unsigned long u64;
 
@@ -110,6 +113,21 @@ static void products(void) {
       : "x0", "x8", "x9", "x12", "x13", "memory", "cc");
 }
 
+static u64 p1_after_call;
+
+static void discard(void) {
+  // a call out of the streaming mode, after which the predicates are zeros
+  __asm__ volatile(
+      ".arch_extension sve\n"
+      "ptrue p1.b\n"
+      "mov x8, #172\n"
+      "svc 0\n"
+      "str p1, [%[p]]\n"
+      :
+      : [p] "r"(&p1_after_call)
+      : "x0", "x8", "p1", "memory");
+}
+
 static void handler(int signal, void *info, void *context) {
   (void)signal;
   (void)info;
@@ -155,6 +173,8 @@ void cmain(void) {
   for (int i = 0; i < 12; i++) hex("z", out[2 * i] ^ out[2 * i + 1]);
   hex("p", out[14] & 0xffffffff);
   hex("svcr after a call", svcr_after_call);
+  discard();
+  hex("p1 after a call", p1_after_call & 0xffff);
   struct {
     void *handler;
     u64 flags;

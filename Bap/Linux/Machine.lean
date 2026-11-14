@@ -2568,7 +2568,7 @@ private def resetRegisters (emu : Emu) : Architecture → IO Unit
       setReg emu ⟨name, .imm 32, 0, false⟩ (bits 32 0)
     -- SME, as a program starts, out of the streaming mode and with ZA off, as `fpsimd_flush_thread` leaves it: what ZA and ZT0 hold
     -- is zeros, which is what turning ZA on makes of them.
-    for (name, width) in [("ZA", 2048), ("ZT0", 512), ("PSTATE_SM", 1), ("PSTATE_ZA", 1), ("TPIDR2_EL0", 64)] do
+    for (name, width) in Target.LLVMLift.aarch64SmeRegisters do
       setReg emu ⟨name, .imm width, 0, false⟩ (bits width 0)
   | .riscv64 | .riscv32 => do
     let wide ← wordWidth emu
@@ -3282,7 +3282,8 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   emu.betweenTurns.modify (· ++ [machine.advanceClock])
   emu.syscallStarts.modify (· ++ [fun (_ : Nat) (_ : List Nat) => machine.advanceClock])
   if architecture == .aarch64 then serveCounter machine emu
-  -- A system call leaves the streaming mode of SME, as Linux's `fp_user_discard` has it, before what serves it, e.g., `clone`, sees it.
+  -- A system call leaves the streaming mode of SME and discards the predicates of SVE, as Linux's `fp_user_discard` has it, before what
+  -- serves it, e.g., `clone`, sees it.
   if architecture == .aarch64 then emu.syscallStarts.modify (· ++ [fun (_ : Nat) (_ : List Nat) => Signals.leaveStreamingMode emu false])
   emu.betweenTurns.modify (· ++ [do let _ ← resumingCurrent (do timers.tick emu; pure true)])
   emu.betweenTurns.modify (· ++ [settleRings machine emu])

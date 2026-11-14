@@ -635,15 +635,15 @@ def testThumbIt : IO Unit := do
     (String.fromUTF8! (← written.get))
 
 /-- SME and SME2 of a program of AArch64 as qemu runs them: outer products and moves of ZA, a system call in the streaming mode,
-which leaves it and keeps ZA, and a fault in it with ZA on, whose handler has neither and TPIDR2_EL0 zero, which all come back as
-it returns. -/
+which leaves it and keeps ZA, a call out of it, which zeros the predicates, as Linux does and qemu-user doesn't, and a fault in it
+with ZA on, whose handler has neither and TPIDR2_EL0 zero, which all come back as it returns. -/
 def testAArch64Sme : IO Unit := do
   let path := "testsuite/bin/aarch64-linux-none-sme"
   let written ← IO.mkRef ByteArray.empty
   let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile path)) "/test" ["/test"]
   let outcome ← machine.run fun data => written.modify (· ++ data)
   assertEqual "AArch64 SME ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
-  assertEqual "AArch64 SME is what qemu does" (String.fromUTF8! (← IO.FS.readBinFile "testsuite/data/aarch64-sme.out"))
+  assertEqual "AArch64 SME is what qemu does, and Linux of the predicates after a call" (String.fromUTF8! (← IO.FS.readBinFile "testsuite/data/aarch64-sme.out"))
     (String.fromUTF8! (← written.get))
 
 /-- A program that runs another, a script among them, in a child that had its memory before. -/

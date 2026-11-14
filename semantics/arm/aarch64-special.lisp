@@ -194,6 +194,24 @@
 ;; as the implementation defined ones are, which the processor doesn't have.
 (defun SYSLxt (_ _ _ _ _) (a64-undefined))
 
+;; What is of EL1 or higher, or of debug state, is undefined at EL0: the
+;; calls of the hypervisor and the secure monitor, the returns from an
+;; exception and from debug state, which, of no operands, are given LR,
+;; as RET is, the changes to debug state, APAS of the realms, and the
+;; fields of PSTATE of MSR (immediate) of one bit, e.g., PM, which the
+;; processor doesn't have
+(defun APAS (_) (a64-undefined))
+(defun DCPS1 (_) (a64-undefined))
+(defun DCPS2 (_) (a64-undefined))
+(defun DCPS3 (_) (a64-undefined))
+(defun DRPS (_) (a64-undefined))
+(defun ERET (_) (a64-undefined))
+(defun ERETAA (_) (a64-undefined))
+(defun ERETAB (_) (a64-undefined))
+(defun HVC (_) (a64-undefined))
+(defun SMC (_) (a64-undefined))
+(defun MSRpstateImm1 (_ _) (a64-undefined))
+
 ;; SMSTART and SMSTOP of SME, of the mode (field 1), ZA (2) or both
 ;; (3), see aarch64-sme.lisp
 (defun MSRpstatesvcrImm1 (field imm)

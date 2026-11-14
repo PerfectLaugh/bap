@@ -2,6 +2,7 @@
 import dataclasses
 import os
 import re
+from collections import Counter
 import struct
 
 ALL = ["x86_64", "i686", "aarch64", "arm", "thumb", "riscv64", "riscv32", "mips", "mipsel", "mips64", "mipsr6", "mips64r6", "ppc", "ppc64", "ppc64le"]
@@ -858,6 +859,14 @@ def aarch64_zero_forms():
 
 
 SVE_PREDICATES = [f"P{i}" for i in range(16)] + ["FFR"]
+# what is run in the streaming mode only: what SVE2.1 shares with SME2, of it only without SVE2.1, and of either with it, which
+# qemu's processor has; and SQRSHR, UQRSHR and SQRSHRU of SME2 of two and four registers, and their N of four, which the Arm ARM has
+# CheckStreamingSVEEnabled of, and qemu 10.2's do_zz_rshr only sve_access_check
+SVE2P1_SHARED = re.compile(r"(PTRUE_C|PEXT_2?PCI|CNTP_XCI|WHILE(GE|GT|HI|HS|LE|LO|LS|LT)_(CXX|2PXX))_[BHSD]$|"
+                           r"(SQRSHRU?N?|UQRSHRN?)_VG[24]_Z[24]ZI_[BH]$|"
+                           r"(LD1|LDNT1|ST1|STNT1)[BHWD]_[24]Z(_IMM)?$|[SUF]CLAMP_ZZZ_[BHSD]$|REVD_ZPmZ$|PSEL_PPPRI_[BHSD]$|"
+                           r"[SU]DOT_ZZZI?_HtoS$|FDOT_ZZZI?_S$|BFMLSL[BT]_ZZZI?_S$|(SQCVTN|SQCVTUN|UQCVTN)_Z2Z_StoH$|"
+                           r"(SQRSHRN|SQRSHRUN|UQRSHRN)_Z2ZI_StoH$")
 # where the rows of ZA are in the state, after the registers, the two extra words, the vectors, the predicates and their padding
 SME_ZA = (32 + 2) * 8 + 32 * 16 + 40
 
@@ -878,7 +887,7 @@ class AArch64(Risc):
     flags = [("NF", 31), ("ZF", 30), ("CF", 29), ("VF", 28)]
     # and SME's: the mode and ZA of PSTATE, which SVCR is, ZA and ZT0, at a streaming vector length of 128 bits
     vectors = [(f"Q{i}", 128) for i in range(32)] + [(f"P{i}", 16) for i in range(16)] + [("FFR", 16)] + \
-        [("PSTATE_SM", 1), ("PSTATE_ZA", 1), ("ZA", 2048), ("ZT0", 512)]
+        [("PSTATE_SM", 1), ("PSTATE_ZA", 1)] + [(f"ZA{i}", 128) for i in range(16)] + [("ZT0", 512)]
     default_pins = {"SP": "window+256"}
     base_pins = {"X5": "window+248", "X6": 8}
     semantics = ["arm/aarch64-arithmetic.lisp", "arm/aarch64-atomic.lisp", "arm/aarch64-branch.lisp", "arm/aarch64-data-movement.lisp", "arm/aarch64-float.lisp",
@@ -910,7 +919,8 @@ class AArch64(Risc):
         for index, name in enumerate(SVE_PREDICATES):
             out[base + index * 2 : base + (index + 1) * 2] = values[name].to_bytes(2, "little")
         self.set_extra_word(out, 1, values["PSTATE_SM"] | values["PSTATE_ZA"] << 1)
-        out[SME_ZA : SME_ZA + 256] = values["ZA"].to_bytes(256, "little")
+        for row in range(16):
+            out[SME_ZA + row * 16 : SME_ZA + (row + 1) * 16] = values[f"ZA{row}"].to_bytes(16, "little")
         out[SME_ZA + 256 : SME_ZA + 320] = values["ZT0"].to_bytes(64, "little")
 
     def decode_extra(self, data, result):
@@ -925,7 +935,8 @@ class AArch64(Risc):
             result[name] = int.from_bytes(data[base + index * 2 : base + (index + 1) * 2], "little")
         svcr = self.extra_word(data, 1)
         result["PSTATE_SM"], result["PSTATE_ZA"] = svcr & 1, svcr >> 1 & 1
-        result["ZA"] = int.from_bytes(data[SME_ZA : SME_ZA + 256], "little")
+        for row in range(16):
+            result[f"ZA{row}"] = int.from_bytes(data[SME_ZA + row * 16 : SME_ZA + (row + 1) * 16], "little")
         result["ZT0"] = int.from_bytes(data[SME_ZA + 256 : SME_ZA + 320], "little")
 
     def shape(self, case, values, index, rng):
@@ -944,31 +955,43 @@ class AArch64(Risc):
         written = re.match(r"wrffr\s+p(\d+)", case.text)
         if written:
             values[f"P{written.group(1)}"] = (1 << rng.randrange(17)) - 1
-        # the streaming mode and ZA: of SME's, on mostly, and of what isn't of ZA, the mode on, as what SVE2.1 shares with SME2
-        # is of it only here and of either on qemu, out of it and with ZA off of the rest. ZA and ZT0 are zeros while ZA is off.
+        # the streaming mode and ZA: of SME's, on mostly, and out of it or off now and then, which is a trap of what is of them;
+        # but what SVE2.1 shares with SME2 has the mode on, as it is of it only here and of either on qemu, whose processor has
+        # SVE2.1. ZA and ZT0 are zeros while ZA is off.
         values["PSTATE_SM"], values["PSTATE_ZA"] = 0, 0
         if case.text in self.sme_texts:
-            of_za = re.search(r"\bza|\bzt0\b|smstart|smstop|svcr", case.text)
-            values["PSTATE_SM"] = int(rng.random() < 0.85) if of_za else 1
+            values["PSTATE_SM"] = 1 if SVE2P1_SHARED.match(case.opcode or "") else int(rng.random() < 0.85)
             values["PSTATE_ZA"] = int(rng.random() < 0.85)
         if not values["PSTATE_ZA"]:
-            values["ZA"], values["ZT0"] = 0, 0
+            for row in range(16):
+                values[f"ZA{row}"] = 0
+            values["ZT0"] = 0
 
     def cases(self, opcodes, assemble, layout):
         # the operand forms of the assembler are of the others, SVE and SVE2 have corpora of their own
         self.sve_opcodes = {name for name, path in opcodes.items() if path.endswith(("-sve.lisp", "-sve2.lisp", "-sme.lisp"))}
         self.sme_opcodes = {name for name, path in opcodes.items() if path.endswith("-sme.lisp")} | {"MSRpstatesvcrImm1"}
         Case = case_type()
-        result = super().cases({name: path for name, path in opcodes.items() if name not in self.sve_opcodes}, assemble, layout)
+        corpora = getattr(self, "corpora", None)
+        result = [] if corpora else \
+            super().cases({name: path for name, path in opcodes.items() if name not in self.sve_opcodes}, assemble, layout)
         self.sme_texts = set()
-        for corpus in ["aarch64-sve", "aarch64-sve2", "aarch64-mte", "aarch64-sme"]:
+        forms = getattr(self, "forms", None)
+        counts = Counter()
+        for corpus in corpora or ["aarch64-sve", "aarch64-sve2", "aarch64-mte", "aarch64-sme"]:
             for code, text in corpus_lines(corpus):
+                if forms:
+                    form = re.sub(r"\d+", "N", text)
+                    counts[form] += 1
+                    if counts[form] > forms:
+                        continue
                 pins = self.sme_memory(text, layout) if corpus == "aarch64-sme" else self.sve_memory(text, layout)
                 if pins is not None:
                     result.append(Case(code=code, text=text, pins=pins))
                     if corpus == "aarch64-sme":
                         self.sme_texts.add(text)
-        result += [dataclasses.replace(case, always=True) for case in self.text_cases(assemble, [(line,) for line in aarch64_zero_forms()])]
+        if not corpora:
+            result += [dataclasses.replace(case, always=True) for case in self.text_cases(assemble, [(line,) for line in aarch64_zero_forms()])]
         return result
 
     def traps(self, opcode):

@@ -55,7 +55,7 @@
     3 (cdr (cdr (cdr l)))
     (evex-drop (- n 4) (cdr (cdr (cdr (cdr l)))))))
 
-(defun evex-nth (n l) (car (evex-drop n l)))
+(defun evex-nth (n l) (nth n l))
 
 (defun evex-last (l)
   (if (null? (cdr l)) (car l) (evex-last (cdr l))))

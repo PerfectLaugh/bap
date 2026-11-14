@@ -16,13 +16,13 @@
 ;;
 ;; The streaming vector length is that of SVE, *sve-vl*, 128 bits, so
 ;; that a vector of the streaming mode is the Zn it is out of it, and
-;; the same semantics serve both. ZA is a variable of 16 rows of 128
-;; bits, the row N in its bits 128N to 128N + 127, and ZT0 one of 512
-;; bits. The tile T of elements of ES bits, ZA<ES>T, is the rows
+;; the same semantics serve both. ZA is 16 variables of 128 bits, its
+;; rows ZA0 to ZA15, and ZT0 one of 512 bits. The tile T of elements of
+;; ES bits, ZA<ES>T, is the rows
 ;; I * ES/8 + T of ZA, for I below 128 / ES, its rows, so that a tile
 ;; is named by its number, see aarch64SmeRegister of
 ;; Bap/Target/LLVMLift.lean. To change the vector length, change both,
-;; and the widths of ZA and ZT0 there.
+;; and the rows of ZA and the width of ZT0 there.
 ;;
 ;; PSTATE.SM and PSTATE.ZA are PSTATE_SM and PSTATE_ZA, which SVCR is.
 ;; An instruction that is of the streaming mode is undefined out of it,
@@ -78,7 +78,7 @@
 
 (defun sme-set-za (v)
   (when (/= v PSTATE_ZA)
-    (set$ ZA (cast-unsigned 2048 0))
+    (sme-zero-za)
     (set$ ZT0 (cast-unsigned 512 0))
     (set PSTATE_ZA v)))
 
@@ -89,20 +89,50 @@
 (defun sme-svcr () (logor (cast-unsigned 64 PSTATE_SM) (lshift (cast-unsigned 64 PSTATE_ZA) 1)))
 
 ;;; ZA
+;;
+;; ZA is its 16 rows, ZA0 to ZA15, so that what is of a row that the
+;; instruction names is a move of it. A row of a register is each of
+;; them under the condition that it is that row, of which one runs.
 
-(defun sme-row-mask () (cast-unsigned 2048 (lnot (cast-unsigned 128 0))))
+(defun sme-row-name (k)
+  (case k 0 'ZA0 1 'ZA1 2 'ZA2 3 'ZA3 4 'ZA4 5 'ZA5 6 'ZA6 7 'ZA7
+          8 'ZA8 9 'ZA9 10 'ZA10 11 'ZA11 12 'ZA12 13 'ZA13 14 'ZA14 'ZA15))
 
-(defun sme-row (r)
-  "the row R of ZA"
-  (cast-low 128 (rshift ZA (* (cast-unsigned 64 r) 128))))
+(defun sme-row-at/j (r lo step j)
+  (let ((k (+ lo (* j step))))
+    (if (= j 0) (unquote (sme-row-name k))
+      (if (= r k) (unquote (sme-row-name k)) (sme-row-at/j r lo step (- j 1))))))
 
-(defun sme-set-bits (off n x)
-  "sets the N bits of ZA from the bit OFF to X"
+(defun sme-row-at (r lo step n)
+  "the row R of ZA, which is one of the N rows from LO by STEP, of which
+   a register may say which"
+  (sme-row-at/j r lo step (- n 1)))
+
+(defun sme-row (r) (sme-row-at r 0 1 16))
+
+(defun sme-set-row-at/j (r x lo step j)
+  (let ((k (+ lo (* j step))))
+    (when (= r k) (set-symbol-value (sme-row-name k) x)))
+  (when (> j 0) (sme-set-row-at/j r x lo step (- j 1))))
+
+(defun sme-set-row-at (r x lo step n)
+  (let ((v (cast-unsigned 128 x)))
+    (sme-set-row-at/j r v lo step (- n 1))))
+
+(defun sme-set-row (r x) (sme-set-row-at r x 0 1 16))
+
+(defun sme-zero-za ()
+  (sme-zero-za/k 15))
+
+(defun sme-zero-za/k (k)
+  (set-symbol-value (sme-row-name k) (cast-unsigned 128 0))
+  (when (> k 0) (sme-zero-za/k (- k 1))))
+
+(defun sme-insert-bits (old off n x)
+  "OLD with its N bits from the bit OFF, which may be of a register, X"
   (let ((o (cast-unsigned 64 off)))
-    (set$ ZA (logor (logand ZA (lnot (lshift (cast-unsigned 2048 (lnot (cast-unsigned n 0))) o)))
-                    (lshift (cast-unsigned 2048 x) o)))))
-
-(defun sme-set-row (r x) (sme-set-bits (* (cast-unsigned 64 r) 128) 128 x))
+    (logor (logand old (lnot (lshift (cast-unsigned 128 (lnot (cast-unsigned n 0))) o)))
+           (lshift (cast-unsigned 128 x) o))))
 
 (defun sme-tiles (es) (/ es 8))
 (defun sme-dim (es) (/ 128 es))
@@ -115,23 +145,24 @@
   (logand (+ (cast-unsigned 64 wv) (cast-unsigned 64 imm)) (cast-unsigned 64 (- n 1))))
 
 (defun sme-vslice/i (es t s i)
-  (let ((r (cast-low es (rshift ZA (+ (* (cast-unsigned 64 (sme-tile-row es t i)) 128)
-                                      (* (cast-unsigned 64 s) es))))))
+  "the elements of the column S of the rows from I down of the tile, the
+   rows of which the tile names"
+  (let ((r (cast-low es (rshift (sme-row (sme-tile-row es t i)) (* (cast-unsigned 64 s) es)))))
     (if (= i 0) r (concat r (sme-vslice/i es t s (- i 1))))))
 
 (defun sme-slice (es t vertical s)
   "the horizontal or vertical slice S of the tile T of ES bits"
   (if vertical (sme-vslice/i es t s (- (sme-dim es) 1))
-    (sme-row (sme-tile-row es t s))))
+    (sme-row-at (sme-tile-row es t s) t (sme-tiles es) (sme-dim es))))
 
 (defun sme-set-vslice/i (es t s x i)
-  (sme-set-bits (+ (* (cast-unsigned 64 (sme-tile-row es t i)) 128) (* (cast-unsigned 64 s) es))
-                es (a64-lane x es i))
+  (let ((r (sme-tile-row es t i)))
+    (sme-set-row r (sme-insert-bits (sme-row r) (* (cast-unsigned 64 s) es) es (a64-lane x es i))))
   (when (> i 0) (sme-set-vslice/i es t s x (- i 1))))
 
 (defun sme-set-slice (es t vertical s x)
   (if vertical (sme-set-vslice/i es t s x (- (sme-dim es) 1))
-    (sme-set-row (sme-tile-row es t s) x)))
+    (sme-set-row-at (sme-tile-row es t s) x t (sme-tiles es) (sme-dim es))))
 
 (defun sme-zero-tiles/i (mask i)
   "ZERO of the tiles of 64 bits of MASK: the tile I is the rows I and I + 8"
@@ -150,16 +181,22 @@
   (logand (sme-index wv (* off k) (sme-vg-stride nreg)) (lnot (cast-unsigned 64 (- k 1)))))
 (defun sme-vg-row (base nreg r i) (+ base (* r (sme-vg-stride nreg)) i))
 
-;;; THE LISTS OF REGISTERS
+(defun sme-vg-get (base nreg k r i)
+  "the vector I of the vector R of a group of K consecutive vectors, of
+   which the base is one of the multiples of K below the stride"
+  (sme-row-at (sme-vg-row base nreg r i) (+ (* r (sme-vg-stride nreg)) i) k (/ (sme-vg-stride nreg) k)))
 
-(defun sme-nth (l k) (if (= k 0) (car l) (sme-nth (cdr l) (- k 1))))
+(defun sme-vg-set (base nreg k r i x)
+  (sme-set-row-at (sme-vg-row base nreg r i) x (+ (* r (sme-vg-stride nreg)) i) k (/ (sme-vg-stride nreg) k)))
+
+;;; THE LISTS OF REGISTERS
 
 (defun sme-z (l k)
   "the register K of a list of Z registers, consecutive or strided"
-  (if (list? l) (sme-nth l k) (a64-vt-get l k)))
+  (if (list? l) (nth k l) (a64-vt-get l k)))
 
 (defun sme-set-z (l k x)
-  (if (list? l) (set$ (sme-nth l k) (cast-unsigned 128 x)) (a64-vt-set l k x)))
+  (if (list? l) (set$ (nth k l) (cast-unsigned 128 x)) (a64-vt-set l k x)))
 
 (defun sme-zs/i (l k)
   "the registers of L from K down, concatenated, the first lowest"
@@ -222,19 +259,25 @@
         (prog (set NF all) (set CF none))
       (prog (set NF (lnot none)) (set CF (lnot all))))))
 
-(defun sme-while-count/i (op es a b i n last)
-  "the count of the first elements of the conditions of WHILE, up"
-  (let ((c (logand last (sve-while-cond op (+ a (cast-unsigned (word-width a) i)) b)))
-        (k (cast-unsigned 16 c)))
-    (if (= i (- n 1)) k
-      (+ k (sme-while-count/i op es a b (+ i 1) n c)))))
-
-(defun sme-whiledown-count/i (op es a b i n last)
-  "the count of the last elements of the conditions of WHILE, down"
-  (let ((c (logand last (sve2-whiledown-cond op (- a (cast-unsigned (word-width a) i)) b)))
-        (k (cast-unsigned 16 c)))
-    (if (= i (- n 1)) k
-      (+ k (sme-whiledown-count/i op es a b (+ i 1) n c)))))
+(defun sme-while-count (op n a b)
+  "how many of the N elements a WHILE is of are active, the first of them,
+   up, or the last, down, as the loop of the Arm ARM counts them: the
+   distance of A and B, of one more if the condition takes them equal, at
+   most N, or N of an inclusive condition whose bound is the least or the
+   greatest, which every value of A, as it wraps, is then of"
+  (let ((signed (case op 'lt true 'le true 'gt true 'ge true false))
+        (down (sme-while-down op))
+        (inclusive (case op 'ls true 'le true 'hs true 'ge true false))
+        (x (if signed (cast-signed 66 a) (cast-unsigned 66 a)))
+        (y (if signed (cast-signed 66 b) (cast-unsigned 66 b)))
+        (distance (if down (- x y) (- y x)))
+        (d (if inclusive (+ distance (cast-unsigned 66 1)) distance))
+        (top (if signed (if down (lshift (cast-unsigned 64 1) 63) (lnot (lshift (cast-unsigned 64 1) 63)))
+               (if down (cast-unsigned 64 0) (lnot (cast-unsigned 64 0)))))
+        (all (if inclusive (= b top) (cast-unsigned 1 0)))
+        (count (fp-select (s<= d (cast-unsigned 66 0)) (cast-unsigned 66 0)
+                 (fp-select (s< (cast-unsigned 66 n) d) (cast-unsigned 66 n) d))))
+    (cast-low 16 (fp-select all (cast-unsigned 66 n) count))))
 
 (defun sme-while-down (op) (case op 'ge true 'gt true 'hi true 'hs true false))
 
@@ -243,9 +286,7 @@
   (sme-check-sm)
   (let ((n (sme-pn-elements es nvl))
         (down (sme-while-down op))
-        (count (if down
-                   (sme-whiledown-count/i op es rn rm 0 n (cast-unsigned 1 1))
-                 (sme-while-count/i op es rn rm 0 n (cast-unsigned 1 1)))))
+        (count (sme-while-count op n rn rm)))
     (set$ pd (sme-pn-encode es n count down))
     (sme-pn-flags n count down)))
 
@@ -254,15 +295,13 @@
   (sme-check-sm)
   (let ((n (sme-pn-elements es 2))
         (down (sme-while-down op))
-        (count (if down
-                   (sme-whiledown-count/i op es rn rm 0 n (cast-unsigned 1 1))
-                 (sme-while-count/i op es rn rm 0 n (cast-unsigned 1 1))))
+        (count (sme-while-count op n rn rm))
         (all (cast-low 32 (sme-pn-mask (/ es 8) (cast-unsigned 16 n) false)))
         (m (if down (sme-pn-mask (/ es 8) (- (cast-unsigned 16 n) count) true)
              (sme-pn-mask (/ es 8) count false)))
         (r (logand all (cast-low 32 m))))
-    (set$ (sme-nth pl 0) (cast-low 16 r))
-    (set$ (sme-nth pl 1) (cast-high 16 r))
+    (set$ (nth 0 pl) (cast-low 16 r))
+    (set$ (nth 1 pl) (cast-high 16 r))
     (sme-pred-flags (cast-unsigned 32 all) r es)))
 
 (defun sme-pred-flags (mask x es)
@@ -621,8 +660,8 @@
     (case op
       'fmopa (fp-select both (sme-dn (sme-fma acc a b)) acc)
       'fmops (fp-select both (sme-dn (sme-fma acc (fp-neg a) b)) acc)
-      'bmopa (fp-select both (+ acc (cast-unsigned 32 (sme-popcount (lnot (logxor a b))))) acc)
-      'bmops (fp-select both (- acc (cast-unsigned 32 (sme-popcount (lnot (logxor a b))))) acc)
+      'bmopa (fp-select both (+ acc (cast-unsigned 32 (popcount (lnot (logxor a b))))) acc)
+      'bmops (fp-select both (- acc (cast-unsigned 32 (popcount (lnot (logxor a b))))) acc)
       'addha (fp-select both (+ acc b) acc)
       'addva (fp-select both (+ acc a) acc)
       'smopa (+ acc (sme-mop-int/k true true 8 zn zm pn pm i j 3))
@@ -641,11 +680,6 @@
       'fmopsl (sme-mop-wide false true acc pn pm zn zm i j)
       'bfmopa (sme-mop-wide true false acc pn pm zn zm i j)
       (sme-mop-wide true true acc pn pm zn zm i j))))
-
-(defun sme-popcount (x)
-  (if (= (word-width x) 1) (cast-unsigned 8 x)
-    (let ((h (/ (word-width x) 2)))
-      (+ (sme-popcount (cast-low h x)) (sme-popcount (cast-high h x))))))
 
 (defun sme-mop-wide (bf sub acc pn pm zn zm i j)
   "FMOPA and BFMOPA of halves to singles: of the two pairs, the inactive
@@ -706,9 +740,8 @@
     (if (= i 0) r (concat r (sme-za-vec/i op es acc n m (- i 1))))))
 
 (defun sme-za-op/r (op es base nreg zn zm mform gs idx r)
-  (let ((row (sme-vg-row base nreg r 0)))
-    (sme-set-row row (sme-za-vec/i op es (sme-row row) (sme-z zn r) (sme-mvec mform zm r gs idx)
-                                   (- (sve-lanes es) 1))))
+  (sme-vg-set base nreg 1 r 0 (sme-za-vec/i op es (sme-vg-get base nreg 1 r 0) (sme-z zn r) (sme-mvec mform zm r gs idx)
+                                            (- (sve-lanes es) 1)))
   (when (> r 0) (sme-za-op/r op es base nreg zn zm mform gs idx (- r 1))))
 
 (defun sme-za-op (op es wv off nreg zn zm mform idx)
@@ -752,9 +785,7 @@
 (defun sme-dot-vec (op acc n m) (sme-dot/e op acc n m 3))
 
 (defun sme-za-dot/r (op base nreg zn zm mform idx r)
-  (let ((row (sme-vg-row base nreg r 0))
-        (x (sme-dot-vec op (sme-row row) (sme-z zn r) (sme-mvec mform zm r 32 idx))))
-    (sme-set-row row x))
+  (sme-vg-set base nreg 1 r 0 (sme-dot-vec op (sme-vg-get base nreg 1 r 0) (sme-z zn r) (sme-mvec mform zm r 32 idx)))
   (when (> r 0) (sme-za-dot/r op base nreg zn zm mform idx (- r 1))))
 
 (defun sme-za-dot (op wv off nreg zn zm mform idx)
@@ -778,9 +809,7 @@
     (if (= e 0) x (concat x (sme-vdot/e op es acc zn m r (- e 1))))))
 
 (defun sme-za-vdot/r (op es base nreg zn m r)
-  (let ((row (sme-vg-row base nreg r 0))
-        (x (sme-vdot/e op es (sme-row row) zn m r 3)))
-    (sme-set-row row x))
+  (sme-vg-set base nreg 1 r 0 (sme-vdot/e op es (sme-vg-get base nreg 1 r 0) zn m r 3))
   (when (> r 0) (sme-za-vdot/r op es base nreg zn m (- r 1))))
 
 (defun sme-za-vdot (op es wv off nreg zn zm idx)
@@ -808,8 +837,7 @@
     (if (= e 0) r (concat r (sme-long/e op es k acc n m i (- e 1))))))
 
 (defun sme-za-long/i (op es k base nreg n m r i)
-  (let ((row (sme-vg-row base nreg r i)))
-    (sme-set-row row (sme-long/e op es k (sme-row row) n m i 3)))
+  (sme-vg-set base nreg k r i (sme-long/e op es k (sme-vg-get base nreg k r i) n m i 3))
   (when (> i 0) (sme-za-long/i op es k base nreg n m r (- i 1))))
 
 (defun sme-za-long/r (op es k base nreg zn zm mform idx r)
@@ -826,7 +854,7 @@
 ;; MOVA of the vectors of ZA
 
 (defun sme-mova-array-get/r (base nreg r)
-  (let ((v (sme-row (sme-vg-row base nreg r 0))))
+  (let ((v (sme-vg-get base nreg 1 r 0)))
     (if (= r 0) v (concat v (sme-mova-array-get/r base nreg (- r 1))))))
 
 (defun sme-mova-array-to (zd nreg wv off)
@@ -835,7 +863,7 @@
     (sme-set-zs zd nreg x)))
 
 (defun sme-mova-array-from/r (base nreg x r)
-  (sme-set-row (sme-vg-row base nreg r 0) (cast-low 128 (rshift x (* r 128))))
+  (sme-vg-set base nreg 1 r 0 (cast-low 128 (rshift x (* r 128))))
   (when (> r 0) (sme-mova-array-from/r base nreg x (- r 1))))
 
 (defun sme-mova-array-from (nreg wv off zn)
@@ -889,8 +917,8 @@
   "PEXT of a pair, whose first may be the counter itself, which is read first"
   (sme-check-sm)
   (let ((x (cast-low 32 (rshift (sme-pn-expand pn) (* k 32)))))
-    (set$ (sme-nth pl 0) (logand (sve-lsb es) (cast-low 16 x)))
-    (set$ (sme-nth pl 1) (logand (sve-lsb es) (cast-high 16 x)))))
+    (set$ (nth 0 pl) (logand (sve-lsb es) (cast-low 16 x)))
+    (set$ (nth 1 pl) (logand (sve-lsb es) (cast-high 16 x)))))
 
 (defun sme-ptrue-c (es pd)
   (sme-check-sm)
@@ -903,7 +931,7 @@
         (n (sme-pn-elements es nvl))
         (all (cast-low 64 (- (lshift (cast-unsigned 128 1) (* n (/ es 8))) (cast-unsigned 128 1))))
         (bits (logand (logand x all) (replicate (cast-unsigned (/ es 8) 1) (/ 64 (/ es 8))))))
-    (set$ rd (cast-unsigned 64 (sme-popcount bits)))))
+    (set$ rd (cast-unsigned 64 (popcount bits)))))
 
 ;;; WHAT SME2 SHARES WITH SVE2.1, AND OF SME
 
@@ -996,7 +1024,6 @@
 (defun ADD_VG4_M4Z4Z_S (_ _ wv off zn zm) (sme-za-op 'addr 32 wv off 4 zn zm 'multi 0))
 (defun ADD_VG4_M4ZZ_S (_ _ wv off zn zm) (sme-za-op 'addr 32 wv off 4 zn zm 'single 0))
 (defun ADD_VG4_M4Z_S (_ _ wv off zn) (sme-za-op 'add 32 wv off 4 zn zn 'multi 0))
-(defun APAS (_) (a64-undefined))
 (defun BF16DOTlanev4bf16 (rd _ rn rm idx) (sme-bfdot rd rn rm 2 'index idx))
 (defun BF16DOTlanev8bf16 (rd _ rn rm idx) (sme-bfdot rd rn rm 4 'index idx))
 (defun BFCVT (rd rn) (setd rd (sme-bfcvt rn)))
@@ -1055,13 +1082,6 @@
 (defun CNTP_XCI_D (rd pn imm) (sme-cntp-c 64 rd pn (* 2 (+ imm 1))))
 (defun CNTP_XCI_H (rd pn imm) (sme-cntp-c 16 rd pn (* 2 (+ imm 1))))
 (defun CNTP_XCI_S (rd pn imm) (sme-cntp-c 32 rd pn (* 2 (+ imm 1))))
-(defun DCPS1 (_) (a64-undefined))
-(defun DCPS2 (_) (a64-undefined))
-(defun DCPS3 (_) (a64-undefined))
-(defun DRPS (_) (a64-undefined))
-(defun ERET (_) (a64-undefined))
-(defun ERETAA (_) (a64-undefined))
-(defun ERETAB (_) (a64-undefined))
 (defun EXTRACT_ZPMXI_H_B (zd _ pg t wv imm) (sme-extract 8 false zd pg t wv imm))
 (defun EXTRACT_ZPMXI_H_D (zd _ pg t wv imm) (sme-extract 64 false zd pg t wv imm))
 (defun EXTRACT_ZPMXI_H_H (zd _ pg t wv imm) (sme-extract 16 false zd pg t wv imm))
@@ -1188,7 +1208,6 @@
 (defun FSUB_VG2_M2Z_S (_ _ wv off zn) (sme-za-op 'fsub 32 wv off 2 zn zn 'multi 0))
 (defun FSUB_VG4_M4Z_S (_ _ wv off zn) (sme-za-op 'fsub 32 wv off 4 zn zn 'multi 0))
 (defun FVDOT_VG2_M2ZZI_HtoS (_ _ wv off zn zm idx) (sme-za-vdot 'fdot 16 wv off 2 zn zm idx))
-(defun HVC (_) (a64-undefined))
 (defun INSERT_MXIPZ_H_B (t _ wv imm pg zn) (sme-insert 8 false t wv imm pg zn))
 (defun INSERT_MXIPZ_H_D (t _ wv imm pg zn) (sme-insert 64 false t wv imm pg zn))
 (defun INSERT_MXIPZ_H_H (t _ wv imm pg zn) (sme-insert 16 false t wv imm pg zn))
@@ -1330,7 +1349,6 @@
 (defun MOVA_VG4_MXI4Z (_ _ wv off zn) (sme-mova-array-from 4 wv off zn))
 (defun MOVT_TIX (zt imm rt) (prog (sme-check-za) (set$ zt (logor (logand zt (lnot (lshift (cast-unsigned 512 (lnot 0:64)) (* imm 64)))) (lshift (cast-unsigned 512 rt) (* imm 64))))))
 (defun MOVT_XTI (rd zt imm) (prog (sme-check-za) (set$ rd (cast-low 64 (rshift zt (* imm 64))))))
-(defun MSRpstateImm1 (_ _) (a64-undefined))
 (defun PEXT_2PCI_B (pl pn imm) (sme-pext2 8 pl pn imm))
 (defun PEXT_2PCI_D (pl pn imm) (sme-pext2 64 pl pn imm))
 (defun PEXT_2PCI_H (pl pn imm) (sme-pext2 16 pl pn imm))
@@ -1401,7 +1419,6 @@
 (defun SMAX_VG4_4ZZ_D (zdn _ zm) (sme-multi2 'smax 64 zdn 4 zm true))
 (defun SMAX_VG4_4ZZ_H (zdn _ zm) (sme-multi2 'smax 16 zdn 4 zm true))
 (defun SMAX_VG4_4ZZ_S (zdn _ zm) (sme-multi2 'smax 32 zdn 4 zm true))
-(defun SMC (_) (a64-undefined))
 (defun SMIN_VG2_2Z2Z_B (zdn _ zm) (sme-multi2 'smin 8 zdn 2 zm false))
 (defun SMIN_VG2_2Z2Z_D (zdn _ zm) (sme-multi2 'smin 64 zdn 2 zm false))
 (defun SMIN_VG2_2Z2Z_H (zdn _ zm) (sme-multi2 'smin 16 zdn 2 zm false))
