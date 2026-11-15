@@ -35,6 +35,9 @@ structure Profile where
   dispatchRange : Option (Nat × Nat) := none
   /-- What a person calls each state. -/
   names : List (Nat × String) := []
+  /-- Where the handler of each state starts, where that is known, as `Flattening` finds it of the code: a round that runs it starts
+  its handler there. -/
+  handlers : List (Nat × Nat) := []
   /-- Registers, with their widths, whose values are noted at each visit, as the thread came to the dispatcher. -/
   registers : List (String × Nat) := []
 
@@ -450,6 +453,8 @@ def recover (profile : Profile) (visits : Array Visit) (record : Option Journal.
         for entry in round do
           if (owners.getD entry.pc []).length ≥ 2 then dispatch := dispatch.add entry.pc
   let entryOf (state : Nat) (round : Array Journal.Executed) : Option Nat := Id.run do
+    if let some (_, known) := profile.handlers.find? (·.1 == state) then
+      if round.any (·.pc == known) then return some known
     let mut previousCompared := false
     for entry in round.toList.drop 1 do
       let pc := entry.pc

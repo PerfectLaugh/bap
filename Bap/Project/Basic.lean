@@ -297,9 +297,10 @@ private def sweepPlan (image : Image.Image) : Disasm.Recursive.SweepPlan :=
       | .x86 | .x86_64 => x86PaddingEnd regions
       | _ => fun _ => true }
 
-/-- The recursive scan of all the code of an image, from all its roots, and a linear sweep of what it didn't find, in
-`sweepRanges`. -/
-def scanImage (image : Image.Image) : IO (Option Disasm.Disasm) := do
+/-- The recursive scan of all the code of an image, from all its roots and the `extra` ones, e.g., the targets of the jump
+tables that `Bap.Analysis.Partition` finds, which an ARM image has as keys of `Interwork`, and a linear sweep of what it didn't
+find, in `sweepRanges`. -/
+def scanImageWith (image : Image.Image) (extra : List Nat) : IO (Option Disasm.Disasm) := do
   let regions := (codeRegions image).map Prod.snd
   match regions, ← codeDisassembler image 0 with
   | [], _ | _, none => pure none
@@ -307,9 +308,14 @@ def scanImage (image : Image.Image) : IO (Option Disasm.Disasm) := do
     let decoders ← (codeRegions image).filterMapM fun part => do
       pure ((← codeDisassembler image part.2.addr).map (part.2, ·))
     let bytes := (decoders.map (·.1.size)).sum
-    let disasm ← Disasm.Recursive.scanRegions (Disasm.Disassembler.ofRegions base decoders) bytes (entryOf image) (scanRoots image)
-      (sweepPlan image) (sweepRanges image)
+    let disasm ← Disasm.Recursive.scanRegions (Disasm.Disassembler.ofRegions base decoders) bytes (entryOf image)
+      (scanRoots image ++ extra) (sweepPlan image) (sweepRanges image)
     pure (some (if image.arch = .arm then Disasm.Interwork.unkey disasm else disasm))
+
+/-- The recursive scan of all the code of an image, from all its roots, and a linear sweep of what it didn't find, in
+`sweepRanges`. -/
+def scanImage (image : Image.Image) : IO (Option Disasm.Disasm) :=
+  scanImageWith image []
 
 def fromImage (image : Image.Image) : IO Project := do
   pure { image := some image, disasm := ← scanImage image }

@@ -22,6 +22,11 @@ import BapTests.Primus
 import BapTests.Lifted
 import BapTests.Lisp
 import BapTests.Project
+import BapTests.Partition
+import BapTests.Frame
+import BapTests.Values
+import BapTests.Checker
+import BapTests.Flattening
 import BapTests.Scheduler
 import BapTests.Symbolic
 import BapTests.SymbolicMemory
@@ -59,6 +64,11 @@ def main : IO Unit := do
     Bap.Tests.Lifted.run,
     Bap.Tests.Lisp.run,
     Bap.Tests.Project.run,
+    Bap.Tests.Partition.run,
+    Bap.Tests.Frame.run,
+    Bap.Tests.Values.run,
+    Bap.Tests.Checker.run,
+    Bap.Tests.Flattening.run,
     Bap.Tests.Scheduler.run,
     Bap.Tests.Symbolic.run,
     Bap.Tests.SymbolicMemory.run,

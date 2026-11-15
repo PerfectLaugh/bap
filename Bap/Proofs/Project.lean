@@ -1363,12 +1363,13 @@ theorem mem_scanRoots_iff (image : Bap.Image.Image) (address : Nat) :
 /-- The recursive scan of an image is sound for the decoder it goes with, and starts from all the roots of the image, and
 what its sweep added. That of an ARM image goes over keys of addresses and states, whose instructions come out with addresses,
 see `Interwork.unkeyAll_spec`, and the theorems of a scan apply to the keys. -/
-theorem scanImage_sound (image : Bap.Image.Image) :
-    Bap.Proofs.Disasm.Holds (Bap.Project.Project.scanImage image) fun result => ∀ disasm, result = some disasm →
+theorem scanImageWith_sound (image : Bap.Image.Image) (roots : List Nat) :
+    Bap.Proofs.Disasm.Holds (Bap.Project.Project.scanImageWith image roots) fun result => ∀ disasm, result = some disasm →
       disasm.entry = Bap.Project.Project.entryOf image ∧ ∃ d extra keyed,
-        Bap.Proofs.Disasm.ScanOk d ByteArray.empty (extra ++ Bap.Project.Project.scanRoots image) keyed.instructions keyed.edges ∧
+        Bap.Proofs.Disasm.ScanOk d ByteArray.empty (extra ++ (Bap.Project.Project.scanRoots image ++ roots)) keyed.instructions
+          keyed.edges ∧
         disasm = if image.arch = .arm then Bap.Disasm.Interwork.unkey keyed else keyed := by
-  unfold Bap.Project.Project.scanImage
+  unfold Bap.Project.Project.scanImageWith
   refine Bap.Proofs.Disasm.Holds.bind (Bap.Proofs.Disasm.Holds.true _) fun base _ _ => ?_
   dsimp only
   split
@@ -1384,6 +1385,16 @@ theorem scanImage_sound (image : Bap.Image.Image) :
     split
     · exact hd.1
     · exact hd.1
+
+/-- `scanImageWith_sound` of no other roots. -/
+theorem scanImage_sound (image : Bap.Image.Image) :
+    Bap.Proofs.Disasm.Holds (Bap.Project.Project.scanImage image) fun result => ∀ disasm, result = some disasm →
+      disasm.entry = Bap.Project.Project.entryOf image ∧ ∃ d extra keyed,
+        Bap.Proofs.Disasm.ScanOk d ByteArray.empty (extra ++ Bap.Project.Project.scanRoots image) keyed.instructions keyed.edges ∧
+        disasm = if image.arch = .arm then Bap.Disasm.Interwork.unkey keyed else keyed := by
+  have h := scanImageWith_sound image []
+  simp only [List.append_nil] at h
+  exact h
 
 /-! ## The decoder of an image by the fields of its ELF header -/
 

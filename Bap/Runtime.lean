@@ -80,6 +80,11 @@ import Bap.Project.Basic
 import Bap.Project.Pass
 import Bap.Project.Persist
 import Bap.Analysis.Xrefs
+import Bap.Analysis.Partition
+import Bap.Analysis.Frame
+import Bap.Analysis.Values
+import Bap.Analysis.Checker
+import Bap.Analysis.Flattening
 import Bap.Analysis.Slice
 import Bap.Analysis.Callgraph
 import Bap.Analysis.Strings
