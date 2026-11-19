@@ -206,6 +206,13 @@ struct DecoderContext {
       throw std::runtime_error("unable to create instruction printer");
     printer->setPrintImmHex(true);
   }
+
+  // A decoder of Thumb keeps the IT block it last decoded and predicates what comes after it, whoever asks. Each decode is
+  // of its own: the lifter puts the conditions of a block on its instructions itself.
+  void forget() {
+    if (context.triple.isThumb())
+      decoder.reset(context.target->createMCDisassembler(*context.subtarget, machineContext));
+  }
 };
 
 DecoderContext &decoderContext(const char *triple) {
@@ -231,6 +238,7 @@ Disassembly disassemble(const char *triple, const uint8_t *bytes, size_t size,
                         uint64_t address) {
   DecoderContext &cached = decoderContext(triple);
   TargetContext &context = cached.context;
+  cached.forget();
   auto &decoder = cached.decoder;
   auto &printer = cached.printer;
 

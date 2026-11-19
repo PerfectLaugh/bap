@@ -1444,15 +1444,16 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
     let cwd := kernel.cwdOf group
     let poller := pollerOf machine
     -- `path` from an address, in the directory that the call says.
+    -- The path is read first, as `getname` is, and the directory is looked at only for a path that isn't absolute.
     let at_ (directory address : Nat) (action : String → String → IO SyscallAction) : IO SyscallAction := do
-      match kernel.baseOf group directory (atCwd directory) with
-      | .error errno => pure (errorOf errno)
-      | .ok from_ =>
-        match ← (readString emu address).toBaseIO with
-        | .error _ => pure (errorOf Errno.efault)
-        | .ok path =>
-          -- No name is none, rather than where the call is from; within the root of the process.
-          if path.isEmpty then return errorOf Errno.enoent
+      match ← (readString emu address).toBaseIO with
+      | .error _ => pure (errorOf Errno.efault)
+      | .ok path =>
+        -- No name is none, rather than where the call is from; within the root of the process.
+        if path.isEmpty then return errorOf Errno.enoent
+        match if path.startsWith "/" then .ok cwd else kernel.baseOf group directory (atCwd directory) with
+        | .error errno => pure (errorOf errno)
+        | .ok from_ =>
           let (from_, path) := kernel.pathIn group from_ path
           action from_ path
     let here := 2 ^ 64 - 100
@@ -1504,7 +1505,11 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       match current.pipeOf group fd with
       | none => pure none
       | some number =>
-        if current.pipeWaiting number > 0 || !current.pipeHeld number (← liveGroups) true then pure none
+        -- The end that is written has nothing to read, and `read` says `EBADF` of it.
+        let writeOnly := match current.openFileOf group fd with
+          | .ok (_, file) => file.flags &&& 3 == 1
+          | .error _ => false
+        if writeOnly || current.pipeWaiting number > 0 || !current.pipeHeld number (← liveGroups) true then pure none
         else if current.nonblocking group fd then pure (some (errorOf (Errno.eagain)))
         else
           pure (some (← waitOn machine emu number))
@@ -1745,7 +1750,9 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       let (negative, distance) := signed wide (arg 1)
       applyNat machine (·.seek group (arg 0) negative distance (arg 2))
     | .llseek =>
-      let (negative, distance) := signed 64 (arg 1 * 2 ^ 32 + arg 2)
+      -- Linux ORs the halves of 64 bits: of a 64-bit target, the low one is all of the offset and the high one the offset
+      -- shifted, as musl passes them.
+      let (negative, distance) := signed 64 ((arg 1 * 2 ^ 32 ||| arg 2) % 2 ^ 64)
       match (← machine.kernel.get).seek group (arg 0) negative distance (arg 4) with
       | .error errno => pure (errorOf errno)
       | .ok (next, position) =>

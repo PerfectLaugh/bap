@@ -2722,6 +2722,36 @@ def testLinuxTaint (triple : String) : IO Unit := do
     assertEqual s!"Linux {triple} the child has what it did" [("pread /data", some 9, true)] (at_ there)
   assertEqual s!"Linux {triple} taint follows all that this does" [] (← tracker.gapsOf)
 
+/-- What a child of fork has in its registers came from where its parent's did: a byte of a file that the parent holds in a register
+when it forks, and that each of them stores, is that byte in both. -/
+def testLinuxTaintFork (triple : String) : IO Unit := do
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-taintfork"
+  let file := ByteArray.mk ((Array.range 16).map fun index => (0x40 + index).toUInt8)
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" program).addFile "/data" file
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let tracker ← machine.track
+  let main ← Bap.Emu.thread machine.emu
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual s!"Linux {triple} taint of a fork ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  let lines := (String.fromUTF8! (← written.get)).splitOn "\n"
+  assertEqual s!"Linux {triple} taint of a fork says it is done" "done" (lines.getD 1 "")
+  let first := (lines.getD 0 "").drop 1 |>.toString
+  let record := first.foldl (fun value digit => value * 16 + (if digit.isDigit then digit.toNat - 48 else digit.toNat - 87)) 0
+  let space ← Bap.Emu.spaceOf machine.emu main
+  let at_ (explanation : Bap.Analysis.DynamicTaint.Tracker.Explanation) : List (String × Option Nat) :=
+    explanation.sources.filterMap fun (node, byte, _) => match node.kind with
+      | .source label offset => some (label, offset.map (· + byte))
+      | _ => none
+  assertEqual s!"Linux {triple} the parent's register is the byte" [("pread /data", some 10)]
+    (at_ (← tracker.explainMemory (record + 1) (some space)))
+  let nodes ← tracker.nodes.get
+  match nodes.toList.find? fun node => node.space != space && node.place == .memory record with
+  | none => throw <| IO.userError s!"Linux {triple}: the store of the child has no node"
+  | some node =>
+    assertEqual s!"Linux {triple} the child's register is its parent's byte" [("pread /data", some 10)]
+      (at_ (← tracker.explainMemory record (some node.space)))
+
 private def historyKernel (triple : String) (code : Char) : IO Bap.Linux.Kernel := do
   let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-history"
   let bytes := "AB".toUTF8 ++ String.toUTF8 (String.singleton code) ++ "DEFGHIJKLMNOP".toUTF8

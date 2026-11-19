@@ -529,6 +529,16 @@ def zeroFill (data : ByteArray) : Nat :=
         if (IO.Reader.u32 data header.endian at_).toOption != some 1 then total
         else total + (field (at_ + if header.is64 then 40 else 20) - field (at_ + if header.is64 then 32 else 16))
 
+/-- The section headers of a file that is loaded and their sections, or none of a table, or names of it, that the file doesn't have
+all of: what is loaded goes by the segments, as a loader does, and a file cut short after them still runs. -/
+private def loadedSections (data : ByteArray) (header : Header) : List SectionHeader × List Section :=
+  match parseSections data header with
+  | .error _ => ([], [])
+  | .ok headers =>
+    match resolveSectionNames data header headers with
+    | .ok sections => (headers, sections)
+    | .error _ => ([], [])
+
 def decode (data : ByteArray) : Except String Image := do
   let header ← parseHeader data
   if header.fileType == 1 then
@@ -536,8 +546,7 @@ def decode (data : ByteArray) : Except String Image := do
     decodeRelocatable data header sections
   else
   let (segments, regions) ← parseSegments data header
-  let sectionHeaders ← parseSections data header
-  let sections ← resolveSectionNames data header sectionHeaders
+  let (sectionHeaders, sections) := loadedSections data header
   let symbols ← loadedSymbols data header sectionHeaders
   let memory := regions.foldl (fun memory region => MemoryMap.add region () memory) {}
   .ok {

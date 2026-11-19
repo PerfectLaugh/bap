@@ -178,22 +178,34 @@ theorem mem_blk_successors (blk : Blk) (t : Tid) :
     t ∈ blk.successors ↔ ∃ jmp ∈ blk.jmps, t ∈ jmp.successors := by
   simp [Blk.successors, List.mem_eraseDups, List.mem_flatMap]
 
+/-- Where a block of a sub may go: where its jumps say, and of one that jumps where an expression says, any block of the sub. -/
+def MayGo (sub : Sub) (blk : Blk) (b : Tid) : Prop :=
+  b ∈ blk.successors ∨ (blk.jumpsIndirectly = true ∧ b ∈ sub.blks.map Blk.tid)
+
 theorem fromSub_mem_edges (sub : Sub) (a b : Tid) :
-    (a, b) ∈ (Cfg.fromSub sub).graph.edges ↔ ∃ blk ∈ sub.blks, blk.tid = a ∧ b ∈ blk.successors := by
-  simp only [Cfg.fromSub, List.mem_flatMap, List.mem_map, Prod.mk.injEq]
+    (a, b) ∈ (Cfg.fromSub sub).graph.edges ↔ ∃ blk ∈ sub.blks, blk.tid = a ∧ MayGo sub blk b := by
+  simp only [Cfg.fromSub, List.mem_flatMap, List.mem_map, Prod.mk.injEq, MayGo]
   constructor
   · rintro ⟨blk, hblk, t, ht, rfl, rfl⟩
-    exact ⟨blk, hblk, rfl, ht⟩
+    refine ⟨blk, hblk, rfl, ?_⟩
+    rcases List.mem_append.1 ht with ht | ht
+    · exact .inl ht
+    · split at ht
+      · exact .inr ⟨‹_›, List.mem_map.1 ht⟩
+      · simp at ht
   · rintro ⟨blk, hblk, rfl, ht⟩
-    exact ⟨blk, hblk, b, ht, rfl, rfl⟩
+    refine ⟨blk, hblk, b, ?_, rfl, rfl⟩
+    rcases ht with ht | ⟨hi, ht⟩
+    · exact List.mem_append.2 (.inl ht)
+    · exact List.mem_append.2 (.inr (by simp [hi]; exact ht))
 
 theorem fromSub_successors (sub : Sub) (a b : Tid) :
-    b ∈ (Cfg.fromSub sub).successors a ↔ ∃ blk ∈ sub.blks, blk.tid = a ∧ b ∈ blk.successors := by
+    b ∈ (Cfg.fromSub sub).successors a ↔ ∃ blk ∈ sub.blks, blk.tid = a ∧ MayGo sub blk b := by
   rw [← fromSub_mem_edges]
   exact Bap.Graph.successors_mem ..
 
 theorem fromSub_predecessors (sub : Sub) (a b : Tid) :
-    a ∈ (Cfg.fromSub sub).predecessors b ↔ ∃ blk ∈ sub.blks, blk.tid = a ∧ b ∈ blk.successors := by
+    a ∈ (Cfg.fromSub sub).predecessors b ↔ ∃ blk ∈ sub.blks, blk.tid = a ∧ MayGo sub blk b := by
   rw [← fromSub_mem_edges]
   exact mem_predecessors' ..
 
@@ -678,6 +690,21 @@ theorem Blk.successors_mapExp (f : Exp → Exp) (blk : Blk) :
     (blk.mapExp f).successors = blk.successors := by
   simp only [Blk.successors, Blk.mapExp, List.flatMap_map, Jmp.successors_mapExp]
 
+/-- Rewriting expressions never changes whether a jump goes where an expression says. -/
+theorem Jmp.indirect_mapExp (f : Exp → Exp) (jmp : Jmp) : (jmp.mapExp f).indirect = jmp.indirect := by
+  obtain ⟨tid, condition, kind⟩ := jmp
+  cases kind with
+  | goto target => cases target <;> rfl
+  | _ => rfl
+
+theorem jumpsIndirectly_map (f : Exp → Exp) (jmps : List Jmp) :
+    (jmps.map (Jmp.mapExp f)).any Jmp.indirect = jmps.any Jmp.indirect := by
+  simp only [List.any_map, Function.comp_def, Jmp.indirect_mapExp]
+
+theorem Blk.jumpsIndirectly_mapExp (f : Exp → Exp) (blk : Blk) :
+    (blk.mapExp f).jumpsIndirectly = blk.jumpsIndirectly :=
+  jumpsIndirectly_map f blk.jmps
+
 theorem Blk.mapExp_definedVars (f : Exp → Exp) (blk : Blk) :
     (blk.mapExp f).definedVars = blk.definedVars := by
   simp [Blk.definedVars, Blk.mapExp, Function.comp_def]
@@ -685,7 +712,7 @@ theorem Blk.mapExp_definedVars (f : Exp → Exp) (blk : Blk) :
 /-- Rewriting expressions leaves the control-flow graph untouched. -/
 theorem fromSub_mapExp_graph (f : Exp → Exp) (sub : Sub) :
     (Cfg.fromSub (sub.mapExp f)).graph = (Cfg.fromSub sub).graph := by
-  simp only [Cfg.fromSub, Sub.mapExp, List.map_map, List.flatMap_map, Blk.successors_mapExp]
+  simp only [Cfg.fromSub, Sub.mapExp, List.map_map, List.flatMap_map, Blk.successors_mapExp, Blk.jumpsIndirectly_mapExp]
   rfl
 
 theorem fromSub_mapExp_start (f : Exp → Exp) (sub : Sub) :
@@ -2559,7 +2586,7 @@ theorem fromSub_jump_edge {sub : Sub} {t t' : Tid} {blk : Blk} {j : Jmp}
     (hb : (Cfg.fromSub sub).block t = some blk) (hj : j ∈ blk.jmps) (ht : t' ∈ j.successors) :
     t' ∈ (Cfg.fromSub sub).successors t :=
   (fromSub_successors sub t t').2
-    ⟨blk, (block_some hb).1, (block_some hb).2, (mem_blk_successors blk t').2 ⟨j, hj, ht⟩⟩
+    ⟨blk, (block_some hb).1, (block_some hb).2, .inl ((mem_blk_successors blk t').2 ⟨j, hj, ht⟩)⟩
 
 /-- A jump has at most one static target. -/
 theorem Jmp.successors_subsingleton (j : Jmp) {a b : Tid} (ha : a ∈ j.successors) (hb : b ∈ j.successors) : a = b := by
@@ -3453,15 +3480,18 @@ theorem renameDefs_shape (defs : List Def) (st : RenameState) :
 
 /-! ### SSA construction frames -/
 
-private abbrev pairs (blocks : List Blk) : List (Tid × List Tid) :=
-  blocks.map fun b => (b.tid, b.successors)
+/-- Where a block goes, as the graph of its sub has it. -/
+private abbrev shape (b : Blk) : List Tid × Bool := (b.successors, b.jumpsIndirectly)
+
+private abbrev pairs (blocks : List Blk) : List (Tid × List Tid × Bool) :=
+  blocks.map fun b => (b.tid, shape b)
 
 private abbrev tidsOf (blocks : List Blk) : List Tid := blocks.map Blk.tid
 
 /-- Replacing the only block carrying a tid by one with the same identity preserves the pair table. -/
 private theorem pairs_update (l : List Blk) (t : Tid) (found new : Blk) (hnd : (tidsOf l).Nodup)
     (hfound : found ∈ l) (ht : found.tid = t) (hnew : new.tid = found.tid)
-    (hs : new.successors = found.successors) :
+    (hs : shape new = shape found) :
     pairs (l.map fun blk => if blk.tid = t then new else blk) = pairs l := by
   induction l with
   | nil => rfl
@@ -3522,7 +3552,7 @@ private theorem eq_of_tid_eq {l : List Blk} (hnd : (tidsOf l).Nodup) {a b : Blk}
 
 /-- Any in-place edit that keeps identity and successors of the edited blocks is a frame step. -/
 private theorem frame_update (cfg : Cfg) (t : Tid) (f : Blk → Blk)
-    (ht : ∀ b, b.tid = t → (f b).tid = b.tid) (hs : ∀ b, b.tid = t → (f b).successors = b.successors) :
+    (ht : ∀ b, b.tid = t → (f b).tid = b.tid) (hs : ∀ b, b.tid = t → shape (f b) = shape b) :
     PropFrame cfg (cfg.updateBlock t f) := by
   refine ⟨rfl, rfl, updateBlock_tids cfg t f ht, fun _ => ?_⟩
   show (cfg.blocks.map _).map _ = _
@@ -3536,7 +3566,7 @@ private theorem frame_update (cfg : Cfg) (t : Tid) (f : Blk → Blk)
   · rfl
 
 private theorem frame_modify (cfg : Cfg) {t : Tid} {found : Blk} (f : Blk → Blk) (hb : cfg.block t = some found)
-    (ht : ∀ b, (f b).tid = b.tid) (hs : (f found).successors = found.successors) :
+    (ht : ∀ b, (f b).tid = b.tid) (hs : shape (f found) = shape found) :
     PropFrame cfg (cfg.updateBlock t f) := by
   obtain ⟨hfound, htid⟩ := block_some hb
   refine ⟨rfl, rfl, updateBlock_tids cfg t f (fun b _ => ht b), fun hnd => ?_⟩
@@ -3672,7 +3702,7 @@ private theorem renameBlock_frame (idom : List (Tid × Tid)) (fuel : Nat) (t : T
           have h₂ := ihc (renameBlock idom fuel c state.1 state.2)
           exact ⟨h₁.1.trans h₂.1, fun w => Nat.le_trans (h₁.2 w) (h₂.2 w)⟩
       have hedit := frame_modify cfg (renameEdit block st) hb (fun _ => rfl) (by
-        simp only [Blk.successors, List.flatMap_map, Jmp.successors_mapExp])
+        simp only [shape, Blk.successors, Blk.jumpsIndirectly, jumpsIndirectly_map, List.flatMap_map, Jmp.successors_mapExp])
       have hc := hchildren ((idom.filter fun entry => entry.2 = t).map Prod.fst)
         ((((cfg.updateBlock t (renameEdit block st)).successors t).foldl
             (fun cfg successor => updatePhiInputs t successor (renameDefs block.defs (renamePhis block.phis st).2).2 cfg)
@@ -3731,8 +3761,8 @@ theorem toSsa_tids (sub : Sub) : (toSsa sub).blks.map Blk.tid = sub.blks.map Blk
 /-- With unique tids distinct from the pseudo nodes, SSA construction preserves control flow. -/
 theorem toSsa_successors (sub : Sub)
     (hnd : (pseudoStart :: sub.blks.map Blk.tid ++ [pseudoExit]).Nodup) :
-    (toSsa sub).blks.map (fun b => (b.tid, b.successors)) =
-      sub.blks.map fun b => (b.tid, b.successors) := by
+    (toSsa sub).blks.map (fun b => (b.tid, b.successors, b.jumpsIndirectly)) =
+      sub.blks.map fun b => (b.tid, b.successors, b.jumpsIndirectly) := by
   have hblocks : (Cfg.connected sub).blocks.map Blk.tid = pseudoStart :: sub.blks.map Blk.tid ++ [pseudoExit] := by
     rw [connected_blocks]
     simp [pseudoStart, pseudoExit]
@@ -3741,10 +3771,10 @@ theorem toSsa_successors (sub : Sub)
     rw [hblocks]
     exact hnd
   have hpairs := (ssaCfg_frame sub).pairs hnd'
-  have hone : ∀ b ∈ sub.blks, ∀ x, (ssaCfg sub).block b.tid = some x → x.successors = b.successors := by
+  have hone : ∀ b ∈ sub.blks, ∀ x, (ssaCfg sub).block b.tid = some x → shape x = shape b := by
     intro b hb x hx
     obtain ⟨hxm, hxt⟩ := block_some hx
-    have hin : (x.tid, x.successors) ∈ pairs (ssaCfg sub).blocks := List.mem_map.2 ⟨x, hxm, rfl⟩
+    have hin : (x.tid, shape x) ∈ pairs (ssaCfg sub).blocks := List.mem_map.2 ⟨x, hxm, rfl⟩
     rw [hpairs] at hin
     obtain ⟨c, hc, heq⟩ := List.mem_map.1 hin
     simp only [Prod.mk.injEq] at heq
@@ -3752,11 +3782,12 @@ theorem toSsa_successors (sub : Sub)
       rw [connected_blocks]
       simp [hb]
     have : c = b := eq_of_tid_eq hnd' hc hbc (heq.1.trans hxt)
-    rw [← heq.2, this]
+    subst this
+    simp only [shape, heq.2.1, heq.2.2]
   rw [toSsa_eq]
   have key : ∀ l : List Blk, (∀ b ∈ l, b ∈ sub.blks) →
-      (l.filterMap fun blk => (ssaCfg sub).block blk.tid).map (fun b => (b.tid, b.successors)) =
-        l.map fun b => (b.tid, b.successors) := by
+      (l.filterMap fun blk => (ssaCfg sub).block blk.tid).map (fun b => (b.tid, b.successors, b.jumpsIndirectly)) =
+        l.map fun b => (b.tid, b.successors, b.jumpsIndirectly) := by
     intro l
     induction l with
     | nil => intro _; rfl
@@ -3764,8 +3795,9 @@ theorem toSsa_successors (sub : Sub)
       intro hl
       have hbm := hl b (by simp)
       obtain ⟨x, hx⟩ := block_exists (connected_tids_mem sub hbm)
+      have hshape := Prod.mk.inj (hone b hbm x hx)
       simp only [List.filterMap_cons, hx, List.map_cons, ih (fun c hc => hl c (List.mem_cons_of_mem _ hc)),
-        (block_some hx).2, hone b hbm x hx]
+        (block_some hx).2, hshape.1, hshape.2]
   exact key _ (fun _ h => h)
 
 /-! ### Scoped renaming and single assignment -/
@@ -4265,7 +4297,10 @@ private theorem SubWf.no_edge_to_start (h : SubWf sub) {a : Tid} : (a, pseudoSta
   intro he
   rcases connected_edge_cases sub he with he | ⟨_, hb⟩ | ⟨_, hb⟩
   · obtain ⟨b, hb, _, hs⟩ := (fromSub_mem_edges sub a pseudoStart).1 he
-    exact h.noStart b hb hs
+    rcases hs with hs | ⟨_, hs⟩
+    · exact h.noStart b hb hs
+    · obtain ⟨b', hb', heq⟩ := List.mem_map.1 hs
+      exact h.start_ne hb' heq
   · obtain ⟨b, hb', heq⟩ := List.mem_map.1 hb
     exact h.start_ne hb' heq
   · exact pseudoStart_ne_exit hb
@@ -6662,12 +6697,16 @@ private theorem toSsa_walk (hwf : SubWf sub) {x : Tid} {p : List Tid}
   have hedges : ∀ {a b}, (a, b) ∈ (Cfg.fromSub (toSsa sub)).graph.edges → (a, b) ∈ (connG sub).edges := by
     intro a b he
     obtain ⟨blk, hblk, hta, hs⟩ := (fromSub_mem_edges _ a b).1 he
-    have hp : (blk.tid, blk.successors) ∈ (toSsa sub).blks.map (fun b => (b.tid, b.successors)) :=
+    have hp : (blk.tid, blk.successors, blk.jumpsIndirectly) ∈
+        (toSsa sub).blks.map (fun b => (b.tid, b.successors, b.jumpsIndirectly)) :=
       List.mem_map.2 ⟨blk, hblk, rfl⟩
     rw [hpairs] at hp
     obtain ⟨o, ho, heq⟩ := List.mem_map.1 hp
     simp only [Prod.mk.injEq] at heq
-    exact connected_edges_superset sub ((fromSub_mem_edges sub a b).2 ⟨o, ho, heq.1.trans hta, heq.2 ▸ hs⟩)
+    refine connected_edges_superset sub ((fromSub_mem_edges sub a b).2 ⟨o, ho, heq.1.trans hta, ?_⟩)
+    rcases hs with hs | ⟨hi, hs⟩
+    · exact .inl (heq.2.1 ▸ hs)
+    · exact .inr ⟨heq.2.2.trans hi, by rw [toSsa_tids] at hs; exact hs⟩
   induction h with
   | nil hs =>
     have hne : sub.blks ≠ [] := by
@@ -6819,12 +6858,16 @@ private theorem renamePhis_values (phis : List Phi) (st : RenameState) {φ : Phi
 private theorem toSsa_edge (hwf : SubWf sub) {a b : Tid} (he : (a, b) ∈ (Cfg.fromSub (toSsa sub)).graph.edges) :
     (a, b) ∈ (connG sub).edges := by
   obtain ⟨blk, hblk, hta, hs⟩ := (fromSub_mem_edges _ a b).1 he
-  have hp : (blk.tid, blk.successors) ∈ (toSsa sub).blks.map (fun b => (b.tid, b.successors)) :=
+  have hp : (blk.tid, blk.successors, blk.jumpsIndirectly) ∈
+      (toSsa sub).blks.map (fun b => (b.tid, b.successors, b.jumpsIndirectly)) :=
     List.mem_map.2 ⟨blk, hblk, rfl⟩
   rw [toSsa_successors sub hwf.nodup] at hp
   obtain ⟨o, ho, heq⟩ := List.mem_map.1 hp
   simp only [Prod.mk.injEq] at heq
-  exact connected_edges_superset sub ((fromSub_mem_edges sub a b).2 ⟨o, ho, heq.1.trans hta, heq.2 ▸ hs⟩)
+  refine connected_edges_superset sub ((fromSub_mem_edges sub a b).2 ⟨o, ho, heq.1.trans hta, ?_⟩)
+  rcases hs with hs | ⟨hi, hs⟩
+  · exact .inl (heq.2.1 ▸ hs)
+  · exact .inr ⟨heq.2.2.trans hi, by rw [toSsa_tids] at hs; exact hs⟩
 
 /-- The SSA property. In the output of `toSsa`, the reaching definition of every read is available:
 a definition's read sees a phi of its block, an earlier definition of its block or a strict dominator;
@@ -6878,7 +6921,7 @@ theorem toSsa_uses_dominated (sub : Sub) (hwf : SubWf sub) (blk : Blk) (hblk : b
       obtain ⟨op, hop, ht', _⟩ := toSsa_blocks_cases hpb
       exact ⟨op, hop, ht', connected_all_reachable sub (List.mem_map.2 ⟨op, hop, ht'⟩)⟩
     have hedge : (pb.tid, blk.tid) ∈ (connG sub).edges :=
-      toSsa_edge hwf ((fromSub_mem_edges _ _ _).2 ⟨pb, hpb, rfl, hs⟩)
+      toSsa_edge hwf ((fromSub_mem_edges _ _ _).2 ⟨pb, hpb, rfl, .inl hs⟩)
     have hcanon : Canon (phiCfg sub) (Reach sub) pb.tid blk.tid :=
       ⟨hpr, (Bap.Graph.successors_mem _ _ _).2 (by
         rw [(phiCfg_spec sub).1.graph]

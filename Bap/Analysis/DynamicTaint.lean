@@ -912,6 +912,8 @@ private def follow (tracker : Tracker) (pc : Nat) : IO Unit := do
   let table ← emu.taskTable.get
   let space := table.spaceOf thread
   if let some task := table.find? thread then
+    -- A thread that runs for the first time has what its parent's last thread had, which it is the last of only after that.
+    let _ ← registersOf tracker thread
     tracker.lastOfGroup.modify (·.insert task.group thread)
   let insn ← tracker.insn.get
   tracker.insn.set (insn + 1)
@@ -1119,8 +1121,13 @@ private def callEnds (tracker : Tracker) (result : Option Nat) : IO Unit := do
   tracker.label.set none
   tracker.backing.set none
 
-/-- A new process has a copy of what its parent has, as it does of the memory. -/
+/-- A new process has a copy of what its parent has, as it does of the memory, and of its registers as they are at the fork, which runs in
+the parent: but for the result of the call, which is the child's 0. -/
 private def forked (tracker : Tracker) (parent child : Nat) : IO Unit := do
+  let (_, _, register) := Emu.syscallRegisters tracker.emu.config.syscallAbi
+  let result ← wordVar tracker.emu register
+  let registers ← registersOf tracker (← Emu.thread tracker.emu)
+  tracker.registers.modify (·.insert child (registers.erase result.name))
   let source ← Emu.spaceOf tracker.emu parent
   tracker.pages.modify fun pages =>
     pages.fold (init := pages) fun out (space, page) tags =>

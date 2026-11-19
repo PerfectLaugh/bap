@@ -191,8 +191,12 @@ mutual
         | .ok result => pure (.ok result)
 end
 
+/-- How many times a loop may test its condition before a run gives up, in the interpreter (its fuel) and in native code (`Lifted`):
+so many that only a loop that doesn't end comes to it, as a `rep` of x86 runs as long as its count. -/
+def loopLimit : Nat := 2 ^ 62
+
 def runObserved (observer : Option MemoryObserver) (program : Program) (initial : State := {})
-    (fuel : Nat := 100000) : IO (Except String (State × Effect)) :=
+    (fuel : Nat := loopLimit) : IO (Except String (State × Effect)) :=
   execProgramObserved observer fuel initial program
 
 end Bap.Bil

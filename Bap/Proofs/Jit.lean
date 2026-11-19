@@ -928,7 +928,7 @@ def Returns (program : List Op) (cfg : Cfg) (value : Word64) (machine : Machine)
     (∃ slot, Run program cfg (.jumpSlot slot :: rest, machine) ∧ value = machine.slots slot)
 
 /-- The iterations that a loop of native code has, which is the fuel that the interpreter gets (`Bil.runObserved`). -/
-def loopLimit : Nat := 100000
+def loopLimit : Nat := Bap.Bil.loopLimit
 
 /-- A run that a loop ended, out of iterations. -/
 def Exhausts (program : List Op) (cfg : Cfg) (effect : Nat) : Prop :=
@@ -2267,7 +2267,7 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
     (wf : LayoutWF first) (heff : Lowering.effectSlot first = some effect) (hlow : effect < Lowering.nextSlot first)
     (p0 : Pushed first l3 [.set (Lowering.nextSlot first) 0, .goto (Lowering.nextLabel first), .label (Lowering.nextLabel first),
         .add (Lowering.nextSlot first) (Lowering.nextSlot first) 1,
-        .set (Lowering.nextSlot first + 1) 100000,
+        .set (Lowering.nextSlot first + 1) (UInt64.ofNat Bap.Bil.loopLimit),
         .bin .ge (Lowering.nextSlot first + 2) (Lowering.nextSlot first) (Lowering.nextSlot first + 1),
         .branch (Lowering.nextSlot first + 2) (Lowering.nextLabel first + 4) (Lowering.nextLabel first + 1),
         .label (Lowering.nextLabel first + 1)] 5 3)
@@ -2300,7 +2300,7 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
   have hlabel4 : Lowering.nextLabel l4 = l + 5 := by rw [p1.label, ← he.nextLabel.symm, hlabel0]
   let goBack : List Op := if bodyDone then [] else [.goto l]
   have hgoBack : labelsOf goBack = [] := by simp only [goBack]; split <;> rfl
-  let head : List Op := [.add c c 1, .set (c + 1) 100000, .bin .ge (c + 2) c (c + 1), .branch (c + 2) (l + 4) (l + 1), .label (l + 1)]
+  let head : List Op := [.add c c 1, .set (c + 1) (UInt64.ofNat Bap.Bil.loopLimit), .bin .ge (c + 2) c (c + 1), .branch (c + 2) (l + 4) (l + 1), .label (l + 1)]
   let new : List Op := [.set c 0, .goto l, .label l] ++ head ++ newC ++
     [.branch (Operand.slot operand) (l + 2) (l + 3), .label (l + 2)] ++ newB ++ (goBack ++ [.label (l + 4)]) ++
     [.set effect 2] ++ [.jump exit, .label (l + 3)]
@@ -2383,7 +2383,7 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
     rw [hsplit]
     simp [new, List.append_assoc]
   have hafterExh := afterLabel_split _ hprogExh ctx.distinct
-  have hprogCheck : program = (pre ++ [.set c 0, .goto l, .label l, .add c c 1, .set (c + 1) 100000, .bin .ge (c + 2) c (c + 1),
+  have hprogCheck : program = (pre ++ [.set c 0, .goto l, .label l, .add c c 1, .set (c + 1) (UInt64.ofNat Bap.Bil.loopLimit), .bin .ge (c + 2) c (c + 1),
       .branch (c + 2) (l + 4) (l + 1)]) ++ .label (l + 1) :: (newC ++ [.branch (Operand.slot operand) (l + 2) (l + 3), .label (l + 2)] ++ newB ++ afterBody) := by
     rw [hsplit]
     simp [new, head, afterBody, List.append_assoc]
@@ -2429,10 +2429,10 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
     | succ fuel ih =>
       intro state result machine hcount hag hex
       obtain ⟨bit, hev, hbranch⟩ := exec_while hex
-      let m0 := runOps machine [.add c c 1, .set (c + 1) 100000, .bin .ge (c + 2) c (c + 1)]
+      let m0 := runOps machine [.add c c 1, .set (c + 1) (UInt64.ofNat Bap.Bil.loopLimit), .bin .ge (c + 2) c (c + 1)]
       have hrun0 : Run program (loop, machine) (.branch (c + 2) (l + 4) (l + 1) :: .label (l + 1) ::
           (newC ++ [.branch (Operand.slot operand) (l + 2) (l + 3), .label (l + 2)] ++ newB ++ afterBody), m0) := by
-        have hloop : loop = [.add c c 1, .set (c + 1) 100000, .bin .ge (c + 2) c (c + 1)] ++
+        have hloop : loop = [.add c c 1, .set (c + 1) (UInt64.ofNat Bap.Bil.loopLimit), .bin .ge (c + 2) c (c + 1)] ++
             (.branch (c + 2) (l + 4) (l + 1) :: .label (l + 1) ::
               (newC ++ [.branch (Operand.slot operand) (l + 2) (l + 3), .label (l + 2)] ++ newB ++ afterBody)) := by
           simp [loop, head, List.append_assoc]
@@ -2451,13 +2451,13 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
         have hsum : (machine.slots c + (1 : UInt64).toBitVec).toNat = (machine.slots c).toNat + 1 := by
           have h1 : (1 : UInt64).toBitVec.toNat = 1 := by decide
           rw [BitVec.toNat_add, h1, Nat.mod_eq_of_lt]
-          have : (machine.slots c).toNat < 100000 := hcount
+          have : (machine.slots c).toNat < 2 ^ 62 := hcount
           omega
         simp only [m0, runOps_cons, runOps_nil, Bap.Proofs.Primus.step, Machine.write_slots, denoteBin]
-        simp only [loopLimit] at hcount
+        simp only [loopLimit, Bap.Bil.loopLimit] at hcount
         have hmod : ((machine.slots c).toNat + 1) % 18446744073709551616 = (machine.slots c).toNat + 1 := Nat.mod_eq_of_lt (by omega)
-        simp [loopLimit, hmod]
-        by_cases hk : 100000 ≤ (machine.slots c).toNat + 1
+        simp [loopLimit, Bap.Bil.loopLimit, hmod]
+        by_cases hk : 2 ^ 62 ≤ (machine.slots c).toNat + 1
         · simp [flag]
           omega
         · simp [flag]
@@ -2586,7 +2586,7 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
     intro slot hslot _
     have hne : slot ≠ c := by omega
     simp [Machine.write_slots, hne]
-  rcases key fuel state result (machine.write c (0 : UInt64).toBitVec) (by simp [Machine.write_slots, loopLimit]) hag' hex with hx | hn
+  rcases key fuel state result (machine.write c (0 : UInt64).toBitVec) (by simp [Machine.write_slots, loopLimit, Bap.Bil.loopLimit]) hag' hex with hx | hn
   · exact Or.inl ⟨by simpa [Machine.write_slots] using hx.1, Exhausts.prepend hstart hx.2⟩
   · refine Or.inr ?_
     obtain ⟨st, eff⟩ := result
@@ -2661,7 +2661,7 @@ theorem lowerStmt_correct {first second : Lowering} {stmt : Bil.Stmt} {terminate
 
 /-- The operations of a lowered program, from a machine that holds the environment, end the way the interpreter ends on
 that program. It runs off its end with the machine holding the environment of the interpreter, or returns the target of
-its jump with 1 in the effect slot and likewise. The one other way to end is a loop that uses up its 100000 iterations,
+its jump with 1 in the effect slot and likewise. The one other way to end is a loop that uses up its `loopLimit` iterations,
 with 2 in the effect slot, which the runner turns into an error, and only an interpreter with more fuel than that has a result then. -/
 theorem lowerStatements_correct {first second : Lowering} {program : Bil.Program} {terminated : Bool} {effect : Nat}
     (wf : LayoutWF first) (heff : Lowering.effectSlot first = some effect) (hlow : effect < Lowering.nextSlot first)
@@ -5224,7 +5224,7 @@ theorem atCodeStop_flagOutputs (written : List Bap.Var) (final : Lowering) (pc :
 
 /-- **The limit of native loops and the fuel of the interpreter are one bound.** On the fuel that the interpreter is given (`Bil.runObserved`, or
 any less), a compiled range never gives up on a loop before the interpreter would: the end of `lowerGraph_correct` with a loop out of iterations is gone.
-A loop runs out of iterations at its 100000th test, the last that `execProgram 100000` can get to, so that the bound is exact. With more fuel, the
+A loop runs out of iterations at its `loopLimit`th test, the last that `execProgram loopLimit` can get to, so that the bound is exact. With more fuel, the
 interpreter goes on where native code reports an error: both fail, or neither, and with the same state. -/
 theorem lowerGraph_interpreterFuel {blocks : List Block} {edges : List (Nat × Nat)} {wrapFaults : Bool} {lowering : Lowering}
     (h : lowerGraph blocks edges wrapFaults = some lowering) (hedges : edges ≠ []) (stops : Nat → Bool) {fuel : Nat} (hfuel : fuel ≤ loopLimit) (budget : Nat)

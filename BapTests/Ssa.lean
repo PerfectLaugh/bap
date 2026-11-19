@@ -332,7 +332,7 @@ def run : IO Unit := do
     ⟨1, [], [], [goto 1 2, goto 2 3]⟩,
     ⟨2, [], [defn 2 x (int 1)], [goto 3 4]⟩,
     ⟨3, [], [defn 3 x (int 2)], [goto 4 4]⟩,
-    ⟨4, [], [defn 4 y (int 3)], [⟨5, none, .goto (.indirect (.var y))⟩]⟩]⟩
+    ⟨4, [], [defn 4 y (int 3)], [⟨5, none, .ret (.indirect (.var y))⟩]⟩]⟩
   let phisOf (sub : Sub) : Nat := (sub.blks.map (·.phis.length)).sum
   assertTrue "minimal SSA has a phi at the join" (phisOf (toSsa deadJoin) > 0)
   assertEqual "pruned SSA has no phi nothing reads" 0 (phisOf (toSsaPruned deadJoin))
@@ -340,9 +340,19 @@ def run : IO Unit := do
     ⟨1, [], [], [goto 1 2, goto 2 3]⟩,
     ⟨2, [], [defn 2 x (int 1)], [goto 3 4]⟩,
     ⟨3, [], [defn 3 x (int 2)], [goto 4 4]⟩,
-    ⟨4, [], [], [⟨5, none, .goto (.indirect (.var x))⟩]⟩]⟩
+    ⟨4, [], [], [⟨5, none, .ret (.indirect (.var x))⟩]⟩]⟩
   assertEqual "pruned SSA keeps a phi that is read" 1 (phisOf (toSsaPruned liveJoin))
   assertEqual "a protected output keeps its phi" 1 (phisOf (toSsaPruned deadJoin [x]))
+  -- A jump through a table: a block that only it reaches reads what was written before the jump, not what was there on entry.
+  let z : Var := ⟨"z", .imm 32, 0, false⟩
+  let switch : Sub := ⟨1, "switch", [], [
+    ⟨1, [], [defn 1 x (.bin .add (.var z) (int 1))], [⟨2, none, .goto (.indirect (.var z))⟩]⟩,
+    ⟨2, [], [defn 3 y (.var x)], [⟨4, none, .ret (.indirect (.var y))⟩]⟩]⟩
+  let ssaSwitch := toSsa switch
+  let written := (ssaSwitch.block 1).bind (·.defs.find? (·.var.base == x.base)) |>.map (·.var)
+  let read := (ssaSwitch.block 2).bind (·.defs.head?) |>.map (expString ·.rhs)
+  assertTrue "a block of a table is kept" (written.isSome && read.isSome)
+  assertEqual "a block of a table reads what was written before the jump" (written.map (expString <| .var ·)) read
   -- arguments run on entry, where every variable reads itself
   let withArgs : Sub := { deadJoin with args := [defn 7 y (.var x)] }
   assertEqual "SSA leaves arguments as they are" (withArgs.args.map (expString ·.rhs)) ((toSsa withArgs).args.map (expString ·.rhs))

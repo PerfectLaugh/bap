@@ -28,13 +28,25 @@ def Sub.block (sub : Sub) (tid : Tid) : Option Blk :=
 def Program.sub (program : Program) (tid : Tid) : Option Sub :=
   program.subs.find? fun sub => sub.tid = tid
 
+/-- Whether a jump goes where an expression says within its sub, as a jump through a table does. -/
+def Jmp.indirect (jmp : Jmp) : Bool :=
+  match jmp.kind with
+  | .goto (.indirect _) => true
+  | _ => false
+
+/-- Whether a block can go where an expression says, within its sub. -/
+def Blk.jumpsIndirectly (blk : Blk) : Bool := blk.jmps.any Jmp.indirect
+
+/-- The graph of a sub has an edge for each jump to a block, and from a block that jumps where an expression says, to every block:
+it may go to any of them, as far as anything here knows, so none of them is unreachable, and what they read is live there. -/
 def Cfg.fromSub (sub : Sub) : Cfg :=
   {
     start := sub.blks.head?.map Blk.tid |>.getD 0
     blocks := sub.blks
     graph := {
       nodes := sub.blks.map Blk.tid
-      edges := sub.blks.flatMap fun blk => blk.successors.map (blk.tid, ·)
+      edges := sub.blks.flatMap fun blk =>
+        (blk.successors ++ if blk.jumpsIndirectly then sub.blks.map Blk.tid else []).map (blk.tid, ·)
     }
   }
 

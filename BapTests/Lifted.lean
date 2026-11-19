@@ -1217,32 +1217,23 @@ def run : IO Unit := do
   assertEqual "with the input bound the range runs natively" 2 (← Primus.Lifted.stats leaveEngine).nativeRuns
   assertBits "and the later block reads the write" 1#64 (lookup leaveBound.state.env reader)
 
-  -- A native loop gives up at its 100000th test, and the interpreter, on the same fuel, no later.
+  -- A loop runs as long as its condition holds, as a `rep` of millions does, in native code and in the interpreter alike.
   let counter := reg "counter"
   let counted (limit : Nat) : Primus.Lifted.Block :=
     ⟨0x47000, 0x47004, [.move counter (int 0),
       .while (.bin .lt (.var counter) (int limit)) [.move counter (.bin .add (.var counter) (int 1))]]⟩
-  let interprets (limit : Nat) : IO Bool := do
-    match ← Bil.runObserved none (counted limit).program {} with
-    | .ok _ => pure true
-    | .error _ => pure false
   let countNative (limit : Nat) : IO (Except String Primus.Lifted.Result) := do
     let engine ← Primus.Lifted.Engine.create
     let (fetch, lift) := fixed (counted limit)
     let result ← (Primus.Lifted.runBlock engine fetch lift {} 0x47000).toBaseIO
     assertEqual "the loop is native" 1 (← Primus.Lifted.stats engine).nativeRuns
     pure (match result with | .ok result => .ok result | .error error => .error (toString error))
-  assertTrue "the interpreter finishes a loop well within its fuel" (← interprets 99996)
-  match ← countNative 99996 with
-  | .ok result => assertBits "and so does native code" (BitVec.ofNat 64 99996) (lookup result.state.env counter)
-  | .error error => throw <| IO.userError error
-  assertTrue "the interpreter runs out of fuel first" (!(← interprets 99998))
-  match ← countNative 99998 with
-  | .ok result => assertBits "99999 tests are native code's last" (BitVec.ofNat 64 99998) (lookup result.state.env counter)
-  | .error error => throw <| IO.userError error
-  assertTrue "100000 tests are out of the interpreter's fuel" (!(← interprets 99999))
-  match ← countNative 99999 with
-  | .ok _ => throw <| IO.userError "100000 tests are too many in native code"
-  | .error error => assertEqual "native code says so" "Primus loop fuel exhausted" error
+  for limit in [99999, 100000, 3000000] do
+    match ← Bil.runObserved none (counted limit).program {} with
+    | .ok (state, _) => assertBits s!"the interpreter runs {limit} iterations" (BitVec.ofNat 64 limit) (lookup state.env counter)
+    | .error error => throw <| IO.userError s!"the interpreter gave up on {limit} iterations: {error}"
+    match ← countNative limit with
+    | .ok result => assertBits s!"native code runs {limit} iterations" (BitVec.ofNat 64 limit) (lookup result.state.env counter)
+    | .error error => throw <| IO.userError s!"native code gave up on {limit} iterations: {error}"
 
 end Bap.Tests.Lifted

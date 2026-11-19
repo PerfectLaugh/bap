@@ -4240,7 +4240,7 @@ theorem decode_loaded {data : ByteArray} {image : Image} {header : Elf.Header} (
   have hne : ¬ (header.fileType == 1) = true := by simpa using ht
   rw [ite_eq_right hne] at h
   simp only [bind_ok_iff] at h
-  rcases h with ⟨⟨segments, regions⟩, h2, sh, _, sections, _, symbols, _, h⟩
+  rcases h with ⟨⟨segments, regions⟩, h2, symbols, _, h⟩
   cases h
   have ⟨entries, hs, hr, hp⟩ := parseSegments_ok h2
   refine ⟨rfl, rfl, rfl, rfl, entries, hs, ?_, hp⟩
@@ -4280,7 +4280,7 @@ theorem decode_no_program_headers {data : ByteArray} {image : Image} {header : E
   have hne : ¬ (header.fileType == 1) = true := by simpa using ht
   rw [ite_eq_right hne] at h
   simp only [bind_ok_iff] at h
-  rcases h with ⟨⟨segments, regions⟩, h2, sh, _, _, _, _, _, h⟩
+  rcases h with ⟨⟨segments, regions⟩, h2, _, _, h⟩
   rw [parseSegments_no_entries h0] at h2
   cases h2
   cases h

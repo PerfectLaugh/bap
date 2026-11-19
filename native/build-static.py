@@ -110,7 +110,7 @@ def copy_import_libraries(cxx, lean_prefix):
         shutil.copy2(found, BUILD / library)
 
 
-def build_dependencies(cmake, cxx_include):
+def build_dependencies(cmake, cxx_include, lean_prefix):
     """Fetches LLVM and Z3, and builds them into `_deps`, which takes a while the first time."""
     fetch_source(
         f"https://github.com/llvm/llvm-project/archive/refs/tags/llvmorg-{LLVM_VERSION}.tar.gz",
@@ -186,7 +186,7 @@ def main():
             raise RuntimeError("--objects needs LLVM and Z3 built first, by this script without it; missing: "
                                + ", ".join(str(path) for path in missing))
     else:
-        build_dependencies(cmake, cxx_include)
+        build_dependencies(cmake, cxx_include, lean_prefix)
 
     native_flags = ["-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror"]
     if not WINDOWS:

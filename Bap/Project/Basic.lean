@@ -111,10 +111,17 @@ private def readWord (image : Image.Image) (address size : Nat) : Option Nat :=
     let ordered := if image.endian = .little then bytes.reverse else bytes
     ordered.foldl (fun value byte => value * 256 + byte) 0
 
+/-- How many entries of `entry` bytes, of at most `count`, the region of `address` has from there: a count that a file says
+is no more than what it has, whatever it says. -/
+private def entriesIn (image : Image.Image) (address entry count : Nat) : Nat :=
+  match image.memory.entries.find? fun region => region.1.contains address with
+  | some region => min count ((region.1.maxAddr - address) / max entry 1)
+  | none => 0
+
 /-- The words of a table in memory. -/
 private def tableWords (image : Image.Image) (address size : Nat) : List Nat :=
   let width := image.addrWidth / 8
-  (List.range (size / width)).filterMap fun index => readWord image (address + index * width) width
+  (List.range (entriesIn image address width (size / width))).filterMap fun index => readWord image (address + index * width) width
 
 /-- The functions an ELF file has its loader run, in the `.preinit_array`, `.init_array` and `.fini_array` sections,
 whose kinds are 16, 14 and 15, and what its dynamic linking says: `DT_INIT`, `DT_FINI` and the same arrays, which is all
@@ -138,7 +145,7 @@ def pltEntries (image : Image.Image) : List Nat :=
   | some table, some size =>
     let width := image.addrWidth / 8
     let entry := if tag 20 == some 7 then 3 * width else 2 * width
-    (List.range (size / entry)).filterMap fun index =>
+    (List.range (entriesIn image table entry (size / entry))).filterMap fun index =>
       (readWord image (table + index * entry) width).bind fun slot => readWord image slot width
   | _, _ => []
 
@@ -163,7 +170,7 @@ def unwindFunctions (image : Image.Image) : List Nat :=
         if byte 0 == 1 && byte 1 == 0x1b && byte 2 == 0x03 && byte 3 == 0x3b then
           match readWord image (header.addr + 8) 4 with
           | some count =>
-            (List.range count).filterMap fun index =>
+            (List.range (entriesIn image (header.addr + 12) 8 count)).filterMap fun index =>
               (readWord image (header.addr + 12 + index * 8) 4).map fun value => fromBase image header.addr value 32
           | none => []
         else []
@@ -172,7 +179,7 @@ def unwindFunctions (image : Image.Image) : List Nat :=
   let indices := match Image.Elf.programHeaderOf image 0x70000001 with
     | some header =>
       if image.arch != .arm then []
-      else (List.range (header.fileSize / 8)).filterMap fun index =>
+      else (List.range (entriesIn image header.addr 8 (header.fileSize / 8))).filterMap fun index =>
         let entry := header.addr + index * 8
         (readWord image entry 4).bind fun word =>
           let start := fromBase image entry (word % 0x80000000) 31
@@ -237,7 +244,8 @@ def sweepRanges (image : Image.Image) : List (Nat × Nat) :=
     let code :=
       if image.arch != .powerpc && image.sections.any (·.name == ".symtab") then
         (image.symbols.filter fun symbol => symbol.isFunction && symbol.size != 0).filterMap fun symbol =>
-          if regions.any (·.2.contains symbol.addr) then some (symbol.addr, symbol.addr + symbol.size) else none
+          -- what a symbol says of its size goes no further than its region
+          (regions.find? (·.2.contains symbol.addr)).map fun part => (symbol.addr, min (symbol.addr + symbol.size) part.2.maxAddr)
       else
         regions.map fun part => (part.2.addr, endOfData part.2)
     (stubs.map fun part => (part.2.addr, part.2.maxAddr)) ++ code

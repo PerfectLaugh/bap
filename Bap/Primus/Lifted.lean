@@ -838,7 +838,7 @@ mutual
       let lowering := (lowering.push [.set counter 0, .goto conditionLabel, .label conditionLabel, .add counter counter 1])
       let (lowering, limit) := temporary lowering
       let (lowering, tooMuch) := temporary lowering
-      let lowering := (lowering.push [.set limit 100000, .bin .ge tooMuch counter limit,
+      let lowering := (lowering.push [.set limit (UInt64.ofNat Bil.loopLimit), .bin .ge tooMuch counter limit,
          .branch tooMuch exhaustedLabel checkLabel, .label checkLabel])
       let (lowering, condition) ← lowerExp lowering condition
       if condition.width != 1 then none

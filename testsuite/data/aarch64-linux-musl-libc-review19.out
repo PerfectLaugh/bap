@@ -1,0 +1,18 @@
+lseek -5 from the end: 6
+lseek 5 GiB and 5: 5368709125
+lseek -100 from the start: Invalid argument
+lseek 0 from where it is: 5368709125
+lseek -1 from where it is: 5368709124
+read of the written end: Bad file descriptor
+read of the written end that doesn't block: Bad file descriptor
+read of the read end that doesn't block: Resource temporarily unavailable
+openat of a bad descriptor, absolute: 0
+openat of a file, absolute: 0
+openat of a file, relative: Not a directory
+openat of a bad descriptor, relative: Bad file descriptor
+mkdirat of a file, absolute that is there: File exists
+faccessat of a bad descriptor, absolute: 0
+readlinkat of a bad descriptor, absolute: Invalid argument
+faccessat of a bad descriptor, empty: No such file or directory
+faccessat of a bad descriptor, bad address: Bad address
+fchmodat of a bad descriptor, absolute: No such file or directory

@@ -24,7 +24,7 @@ private def sample : Sub :=
     blks := [
       ⟨1, [], [defn 1 x (int 40)], [goto 1 2]⟩,
       ⟨2, [], [defn 2 y (.bin .add (.var x) (int 2))], [goto 2 3]⟩,
-      ⟨3, [], [defn 3 z (.var y), defn 4 mem store], [⟨5, none, .goto (.indirect (.var z))⟩]⟩,
+      ⟨3, [], [defn 3 z (.var y), defn 4 mem store], [⟨5, none, .ret (.indirect (.var z))⟩]⟩,
       ⟨99, [], [defn 99 (reg "unused") (int 9)], []⟩
     ]
   }
@@ -430,6 +430,15 @@ def run : IO Unit := do
   | none => throw <| IO.userError "missing propagated result block"
   let optimized := optimize sample
   assertEqual "optimization prunes unreachable blocks" [1, 2, 3] (optimized.blks.map Blk.tid)
+  -- A jump through a table: the blocks that only it reaches are kept, and so is what they read.
+  let switch : Sub := ⟨1, "switch", [], [
+    ⟨1, [], [defn 1 x (.bin .add (.var z) (int 1))], [⟨2, none, .goto (.indirect (.var z))⟩]⟩,
+    ⟨2, [], [defn 3 y (.var x)], [⟨4, none, .ret (.indirect (.var y))⟩]⟩,
+    ⟨3, [], [defn 5 y (int 3)], [⟨6, none, .ret (.indirect (.var y))⟩]⟩]⟩
+  let switched := optimize switch [y]
+  assertEqual "a jump through a table keeps the blocks it goes to" [1, 2, 3] (switched.blks.map Blk.tid)
+  assertEqual "what a block it goes to reads is kept" [x] ((switched.block 1).map (·.defs.map Def.var) |>.getD [])
+  assertEqual "and that block reads it" [expString (.var x)] ((switched.block 2).map (·.defs.map (expString ·.rhs)) |>.getD [])
   assertEqual "dead entry definition removed" 0 ((optimized.block 1).map (fun blk => blk.defs.length) |>.getD 999)
   assertEqual "dead intermediate definition removed" 0 ((optimized.block 2).map (fun blk => blk.defs.length) |>.getD 999)
   match optimized.block 3 with

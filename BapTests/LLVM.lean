@@ -615,6 +615,13 @@ private def testThumbIt : IO Unit := do
   -- the rest of the program scans past the block
   let scan ← Disasm.Recursive.scan (← Target.Thumb.disassembler 0) (bytes (ite ++ [0x70, 0x47])) 0
   assertEqual "scan treats a block as an instruction" [0, 6] (scan.instructions.map (·.address))
+  -- an IT decoded alone, as a sweep sizes it, leaves nothing for what is decoded after it
+  let _ ← LLVM.disassemble "thumbv7" (bytes [0x08, 0xbf]) 0x2000
+  let after ← LLVM.disassemble "thumbv7" (bytes [0x40, 0x18]) 0x2002
+  assertEqual "an IT decoded alone predicates nothing after it" 1 (after.assembly.splitOn "eq").length
+  let _ ← LLVM.disassemble "thumbv7" (bytes [0x08, 0xbf]) 0x2000
+  assertFlag "adds after an IT decoded alone sets zero" "ZF" 1
+    (← run [0x01, 0x30] [bit "ZF" 0, bit "CF" 0, bit "NF" 0, bit "VF" 0, r "R0" 0xffffffff])
 
 /-- The moves and the integer arithmetic of SSE, on the XMM registers in the low bits of ZMM. -/
 private def testX86Sse : IO Unit := do

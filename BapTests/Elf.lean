@@ -1187,7 +1187,26 @@ private def runElf32 : IO Unit := do
   | .error _ => IO.println "ok: undersized ELF program entries rejected when present"
   | .ok _ => throw <| IO.userError "undersized ELF program entries accepted"
 
+/-- What a file says of its tables and is cut short of. -/
+private def runUntrusted : IO Unit := do
+  -- A file cut short in its table of sections still loads by its segments, as a loader runs it, without sections.
+  let whole ← IO.FS.readBinFile "testsuite/bin/x86_64-linux-gnu-loader-stdin"
+  match Image.decode (whole.extract 0 2196) with
+  | .error error => throw <| IO.userError s!"a file cut short in its sections is refused: {error}"
+  | .ok image =>
+    assertEqual "a file cut short in its sections has none" 0 image.sections.length
+    assertEqual "and its entry is where it was" (← Image.decode whole |> IO.ofExcept).entryPoint image.entryPoint
+  -- `DT_PLTRELSZ` of nearly 64 GiB, in a file of 1592 bytes: the PLT has what its region has.
+  let stripped ← IO.FS.readBinFile "testsuite/bin/x86_64-linux-gnu-loader-stdin-stripped"
+  assertEqual "DT_PLTRELSZ is where it is looked for" 0x48 (stripped.get! 1400).toNat
+  let huge := (List.range 8).foldl (init := stripped) fun bytes index =>
+    bytes.set! (1400 + index) (UInt8.ofNat (0xffffffff0 / 256 ^ index % 256))
+  let plain := Project.Project.pltEntries (← Image.decode stripped |> IO.ofExcept)
+  let told := Project.Project.pltEntries (← Image.decode huge |> IO.ofExcept)
+  assertTrue "a PLT of a size past its region has what is there" (told.take plain.length == plain && told.length ≤ stripped.size / 24)
+
 def run : IO Unit := do
+  runUntrusted
   runOpd
   -- Two LOAD entries, each of 3 GiB of zeros, which is more than a host gives all together.
   let twoHuge := ofHex "7f454c4602010100000000000000000002003e00010000000000400000000000400000000000000000000000000000000000000040003800020040000000000001000000050000000000000000000000000040000000000000004000000000000000000000000000000000c000000000001000000000000001000000050000000000000000000000000040000200000000004000000000000000000000000000000000c0000000000010000000000000"
