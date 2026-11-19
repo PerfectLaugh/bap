@@ -30,23 +30,24 @@ open Bap.Symbolic (Expr)
 
 /-! ## Values of expressions -/
 
-/-- How many parts an expression has, as far as `limit`, but of the conditions of its choices. -/
-partial def armsSize (limit : Nat) (expr : Expr) : Nat :=
-  let rec go (left : Nat) (expr : Expr) : Nat :=
-    if left == 0 then 0 else
-    let left := left - 1
-    match expr with
-    | .app _ _ args => args.foldl go left
-    | .extract _ _ value | .select _ value => go left value
-    | .concat first second => go (go left first) second
-    | .ite _ yes no => go (go left yes) no
-    | _ => left
-  limit + 1 - go (limit + 1) expr
+/-- The ways that variables of choices can go, of each of `names` of its width, all of them, as far as there are `most`. -/
+def assignments (names : List String) (widthOf : String → Nat) (most : Nat) : Option (List (List (String × Nat))) :=
+  let count := names.foldl (fun count name => count * 2 ^ widthOf name) 1
+  if count > most then none
+  else some <| names.foldr (init := [([] : List (String × Nat))]) fun name rest =>
+    (List.range (2 ^ widthOf name)).flatMap fun value => rest.map ((name, value) :: ·)
+
+/-- The value of an expression of each way its variables go. -/
+def valueUnder (assignment : List (String × Nat)) (expr : Expr) : Nat :=
+  let σ : Proofs.Symbolic.Assignment :=
+    { var := fun name width => BitVec.ofNat width (((assignment.find? (·.1 == name)).map (·.2)).getD 0)
+      memory := fun _ _ _ => 0 }
+  Partition.valueOf σ expr
 
 /-- The constants that an expression can be, of a choice of constants as conditional moves make: by its conditions, each way. -/
 partial def choices (expr : Expr) (most : Nat := 16) : Option (List Nat) :=
   -- what is chosen, which a condition isn't of: a conditional move of what a load of the stack decided has a big condition
-  if armsSize Checker.maxQuestion expr > Checker.maxQuestion then none else
+  if Checker.sizeOf Checker.maxQuestion expr (conditions := false) > Checker.maxQuestion then none else
   let rec go : Expr → Option (List Nat)
     | .const value => some [value.toNat]
     | .ite _ yes no => do
@@ -87,17 +88,13 @@ partial def choices (expr : Expr) (most : Nat := 16) : Option (List Nat) :=
   let simple := Partition.simplify expr
   -- of the choices of rounds alone, each way they go, which keeps what the same choice makes of two registers together
   let names := Partition.varsOf simple
-  if !names.isEmpty && names.length ≤ 4 && names.all (·.startsWith "choice@") && (Partition.selectsOf simple).isEmpty then
+  if !names.isEmpty && names.all (·.startsWith "choice@") && (Partition.selectsOf simple).isEmpty then
     let widths := simple.vars
-    let assignments := names.foldr (init := [([] : List (String × Nat))]) fun name rest =>
-      let width := ((widths.find? (·.1 == name)).map (·.2)).getD 1
-      (List.range (min (2 ^ width) most)).flatMap fun value => rest.map ((name, value) :: ·)
-    let values := Partition.dedup (assignments.map fun assignment =>
-      let σ : Proofs.Symbolic.Assignment :=
-        { var := fun name width => BitVec.ofNat width (((assignment.find? (·.1 == name)).map (·.2)).getD 0)
-          memory := fun _ _ _ => 0 }
-      Partition.valueOf σ simple)
-    if values.length ≤ most && assignments.length ≤ 4096 then some values else none
+    match assignments names (fun name => ((widths.find? (·.1 == name)).map (·.2)).getD 1) 4096 with
+    | some all =>
+      let values := Partition.dedup (all.map (valueUnder · simple))
+      if values.length ≤ most then some values else none
+    | none => none
   else
   match go simple with
   | some values => if values.length ≤ most then some values else none
@@ -380,15 +377,8 @@ partial def runMachine (function : Checker.Function) (memory : Option Bap.Var) (
     -- the constants of each way the conditions go, of all of them at once
     let tuples : Option (List (List (String × Nat))) :=
       let widths := chosen.flatMap fun (_, value) => (Partition.simplify value).vars
-      let assignments := names.foldr (init := [([] : List (String × Nat))]) fun name rest =>
-        let width := ((widths.find? (·.1 == name)).map (·.2)).getD 1
-        (List.range (min (2 ^ width) 17)).flatMap fun value => rest.map ((name, value) :: ·)
-      if assignments.length > 512 then none else
-      some <| assignments.map fun assignment =>
-        let σ : Proofs.Symbolic.Assignment :=
-          { var := fun name width => BitVec.ofNat width (((assignment.find? (·.1 == name)).map (·.2)).getD 0)
-            memory := fun _ _ _ => 0 }
-        chosen.map fun (var, value) => (keyOf var, Partition.valueOf σ value)
+      (assignments names (fun name => ((widths.find? (·.1 == name)).map (·.2)).getD 1) 512).map fun all =>
+        all.map fun assignment => chosen.map fun (var, value) => (keyOf var, valueUnder assignment value)
     let keys := chosen.map (keyOf ·.1)
     let union : Option (List (List (String × Nat))) := match tuples with
       | some now =>
@@ -410,7 +400,11 @@ partial def runMachine (function : Checker.Function) (memory : Option Bap.Var) (
                                           constants := projections.foldl (init := run.constants) fun table (key, values) =>
                                             table.insert key (Partition.dedup (table.getD key [] ++ values) |>.mergeSort (· ≤ ·)) }
     | none => pure ()
-    let selector : Expr := .var s!"choice@{fresh}" 8
+    -- the selector has as many bits as its options need, so that each way it goes is one of them
+    let selectorWidth := match union with
+      | some all => Nat.log2 (all.length - 1) + 1
+      | none => 1
+    let selector : Expr := .var s!"choice@{fresh}" selectorWidth
     -- a choice of constants on a condition of what is new to the round, as a conditional move of the machine's input makes, is a
     -- choice of its own of all the constants it took
     let mut own : List (String × List Nat) := []
@@ -428,11 +422,12 @@ partial def runMachine (function : Checker.Function) (memory : Option Bap.Var) (
       else if let some (_, all) := own.find? (·.1 == key) then (var, choiceOf s!"{key}{fresh}" value.width all)
       else match union with
         | some all =>
-          if keys.contains key && all.length ≤ 256 then
+          if keys.contains key && all.length ≤ 16 then
             let options := all.map fun (tuple : List (String × Nat)) => ((tuple.find? (·.1 == key)).map (·.2)).getD 0
             let (chosen, _) := options.tail.foldl (init := (Expr.const (BitVec.ofNat value.width (options.headD 0)), 1))
               fun (others, index) option =>
-                (.ite (.app "=" 1 [selector, .const (BitVec.ofNat 8 index)]) (.const (BitVec.ofNat value.width option)) others,
+                (.ite (.app "=" 1 [selector, .const (BitVec.ofNat selectorWidth index)]) (.const (BitVec.ofNat value.width option))
+                  others,
                   index + 1)
             (var, chosen)
           else (var, .var s!"value@{key}{fresh}" value.width)
@@ -507,13 +502,7 @@ partial def runMachine (function : Checker.Function) (memory : Option Bap.Var) (
             expanded.modify (·.insert value)
             let set := setState memory state width image.endian place value
             go { step.way with state := set, visits := {} } dispatcher (some value) 0 none
-  -- of PowerPC, the summary overflow that a compare puts in the condition register with what it found is clear, as it is but after
-  -- an overflow that a program asked to be kept
-  let initial := Partition.entryState image function.entry
-  let initial := if image.arch == .powerpc then
-      { initial with env := ((⟨"SO", .imm 1, 0, false⟩ : Bap.Var), Expr.const (BitVec.ofNat 1 0)) :: initial.env }
-    else initial
-  go { state := initial, path := [], visits := {} } function.entry none 0 none
+  go { state := Partition.entryState image function.entry, path := [], visits := {} } function.entry none 0 none
   result.get
 
 /-- A flattened machine of a function. -/
@@ -550,7 +539,8 @@ def graphOf (arrivals : List Arrival) : Cff.Cfg :=
     let kind : Cff.EdgeKind := if unknown then .indirect else if targets.length > 1 then .conditional else .direct
     targets.map (fun target => ({ source, target := some target, kind, count := count target } : Cff.Edge)) ++
       (if unknown then [{ source, target := none, kind, count := 0 }] else [])
-  let initial := (arrivals.find? (·.state.isNone)).bind fun arrival => arrival.nexts.bind fun nexts =>
+  -- of the first way from the entry that came to the dispatcher, not one that returned before it
+  let initial := (arrivals.find? fun arrival => arrival.state.isNone && !arrival.ended).bind fun arrival => arrival.nexts.bind fun nexts =>
     if nexts.length == 1 then nexts.head? else none
   { entry := initial
     states := sources.mergeSort (· ≤ ·)
@@ -615,7 +605,7 @@ def machineOf (image : Image.Image) (program : Frame.Program) (function : Partit
       match checked.instructions[at_]? with
       | some insn =>
         -- not to the dispatcher, nor past a delay slot that does something, as a handler of MIPS that only sets the state does
-        let slotDoes := Frame.slotted image.arch insn &&
+        let slotDoes := Partition.mipsSlotted image.arch insn &&
           (checked.instructions[insn.next]?).any fun slot => !slot.bil.isEmpty
         match insn.flow, insn.target with
         | .jump, some target => if target == dispatcher || slotDoes then break else at_ := target

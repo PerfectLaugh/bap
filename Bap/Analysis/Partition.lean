@@ -125,7 +125,9 @@ partial def closed : Expr → Bool
   | .ite condition yes no => closed condition && closed yes && closed no
 
 /-- What the executor leaves of constants that are cast, which it folds only of its operations: each closed part folded to its
-value, an `extract` of all the bits dropped, and a sum, `or` or shift with zero, and a product with one, its other operand. -/
+value, an `extract` of all the bits dropped, an `extract` of a `concat` of the part it is of and of an `extract` of what that is
+of, as a bit of a condition register that a lifter makes of its fields, and a sum, `or` or shift with zero, and a product with
+one, its other operand. -/
 partial def simplify (expr : Expr) : Expr :=
   let zeros : Proofs.Symbolic.Assignment := { var := fun _ _ => 0, memory := fun _ _ _ => 0 }
   let fold (expr : Expr) : Expr :=
@@ -140,7 +142,15 @@ partial def simplify (expr : Expr) : Expr :=
   match expr with
   | .extract high low value =>
     let value := simplify value
-    if low == 0 && value.width == high + 1 then value else fold (.extract high low value)
+    if low == 0 && value.width == high + 1 then value
+    else match value with
+      | .concat left right =>
+        let width := right.width
+        if low ≥ width then simplify (.extract (high - width) (low - width) left)
+        else if high < width then simplify (.extract high low right)
+        else fold (.extract high low value)
+      | .extract _ low' inner => simplify (.extract (high + low') (low + low') inner)
+      | _ => fold (.extract high low value)
   | .app name width args =>
     let args := args.map simplify
     match name, args with
@@ -489,13 +499,17 @@ def rescan (image : Image.Image) (disasm : Disasm.Disasm) (roots : List Nat) : I
 
 /-! ## Functions -/
 
+/-- Whether an instruction of MIPS has a delay slot, which all but the compact ones have, a call too, which the decoder doesn't
+say of. -/
+def mipsSlotted (arch : Image.Arch) (insn : Disasm.Insn) : Bool :=
+  arch == .mips && !Target.LLVMLift.mipsCompactMnemonics.contains ((insn.asm.splitOn " ").headD "")
+
 /-- The edges of the flow of control, with those of the tables, and without the fall-through of calls of what doesn't return. -/
 def flowEdges (arch : Image.Arch) (disasm : Disasm.Disasm) (graph : Graph) (tables : List JumpTable)
     (hasDelaySlot : Disasm.Insn → Bool) (noReturn : Nat → Bool) : List (Nat × Nat) :=
   -- a call goes on after itself, or after its delay slot, which is of the size of the call: what the decoder says of a jump,
   -- and of a call of MIPS, but a compact one, which falls through to its slot
-  let slotted (insn : Disasm.Insn) : Bool :=
-    hasDelaySlot insn || (arch == .mips && !Target.LLVMLift.mipsCompactMnemonics.contains ((insn.asm.splitOn " ").headD ""))
+  let slotted (insn : Disasm.Insn) : Bool := hasDelaySlot insn || mipsSlotted arch insn
   let dead : Std.HashSet (Nat × Nat) := disasm.instructions.foldl (init := {}) fun set insn =>
     if insn.flow == .call && insn.target.any noReturn then
       set.insert (if slotted insn then (insn.next, insn.next + insn.size) else (insn.address, insn.next))

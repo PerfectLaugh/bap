@@ -97,7 +97,21 @@ private def observed : IO Unit := do
   let handler := table.targets.headD 0
   assertTrue "and has the code of its targets" (seen.disasm.instructions.any (·.address == handler))
 
+/-- The first state is of the first way from the entry to the dispatcher, not of one that returned before it; and a choice of
+more constants than are gone over isn't some of them. -/
+private def units : IO Unit := do
+  let arrivals : List Flattening.Arrival :=
+    [{ state := none, last := some 1, nexts := none, ended := true }, { state := none, last := some 2, nexts := some [7] },
+      { state := some 7, last := some 3, nexts := some [8] }, { state := some 8, last := some 4, nexts := some [7] }]
+  assertEqual "the first state is of a way that came to the dispatcher" (some 7) (Flattening.graphOf arrivals).entry
+  let selector : Symbolic.Expr := .var "choice@0" 5
+  let chain (count : Nat) : Symbolic.Expr := (List.range count).foldl (init := .const (BitVec.ofNat 32 1000))
+    fun others index => .ite (.app "=" 1 [selector, .const (BitVec.ofNat 5 index)]) (.const (BitVec.ofNat 32 index)) others
+  assertEqual "a choice of a few constants is all of them" (some 4) ((Flattening.choices (chain 3)).map (·.length))
+  assertEqual "a choice of more than are gone over isn't some of them" none (Flattening.choices (chain 20))
+
 def run : IO Unit := do
+  units
   for arch in targets do
     ofTarget arch
   -- cff.c, as it is compiled without optimization: its state on the stack, which every case's code jumps to the end of a loop after

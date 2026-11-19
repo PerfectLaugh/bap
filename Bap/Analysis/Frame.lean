@@ -379,10 +379,6 @@ def step (context : Context) (insn : Disasm.Insn) (state : State) : Run State :=
   if insn.flow != .call then return after
   callEffects context insn state after
 
-/-- Whether an instruction of MIPS has a delay slot, which all but the compact ones have. -/
-def slotted (arch : Image.Arch) (insn : Disasm.Insn) : Bool :=
-  arch == .mips && !Target.LLVMLift.mipsCompactMnemonics.contains ((insn.asm.splitOn " ").headD "")
-
 /-- The instructions of a program by their addresses, and where each goes. -/
 structure Program where
   instructions : Std.HashMap Nat Disasm.Insn
@@ -421,16 +417,16 @@ def analyze (context : Context) (program : Program) (function : Partition.Functi
     let state := states.getD address {}
     -- a call of MIPS with a delay slot calls after its slot, which may move what it is called with
     let action : Run State :=
-      if insn.flow == .call && slotted context.arch insn then plain context insn state
+      if insn.flow == .call && Partition.mipsSlotted context.arch insn then plain context insn state
       else match calls[address]? with
         | some (call, before) => do callEffects context call before (← step context insn state)
         | none => step context insn state
     let (after, seen) := action.run effects
-    if insn.flow == .call && slotted context.arch insn then calls := calls.insert insn.next (insn, state)
+    if insn.flow == .call && Partition.mipsSlotted context.arch insn then calls := calls.insert insn.next (insn, state)
     effects := seen
     if insn.flow == .ret || Partition.returnsBy context.arch insn then
       -- a return of MIPS but a compact one returns after its delay slot, which may restore the stack pointer
-      let slot := if slotted context.arch insn then instructions[insn.next]? else none
+      let slot := if Partition.mipsSlotted context.arch insn then instructions[insn.next]? else none
       match slot with
       | some slot =>
         let (returned, seen) := (step context slot after).run effects

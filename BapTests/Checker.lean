@@ -26,7 +26,8 @@ private def ofTarget (arch : String) : IO Unit := do
   let nameOf (entry : Nat) : String := ((partition.functions.find? (·.entry == entry)).map (·.name)).getD "?"
   let of (tag : Checker.Tag) : List String :=
     ((findings.filter (·.tag == tag)).map (nameOf ·.function)).mergeSort (· ≤ ·)
-  assertEqual s!"{arch}: what loads through null" ["nulls"] (of .nullDereference)
+  -- of `guarded`, a way that returns doesn't go on past its return, which of MIPS is in a delay slot, to what it guards
+  assertEqual s!"{arch}: what loads through null" ["fromGlobal", "nulls"] (of .nullDereference)
   assertEqual s!"{arch}: what reads what it may not have written" ["uninit"] (of .uninitialized)
   assertEqual s!"{arch}: what stores past an array" ["globalOverflow", "overflow"] (of .outOfBounds)
   -- the way to the load of null ends at it
@@ -46,7 +47,17 @@ private def ofTarget (arch : String) : IO Unit := do
         assertEqual s!"{arch}: the way to {callee} goes from the entry to the call" (some feasible.entry, some call)
           (way.head?, way.getLast?)
 
+/-- Of a choice of a BIL `ite`, only the one that is taken runs: a load in either isn't an access of the statement. -/
+private def choicesAreConditional : IO Unit := do
+  let mem : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let p : Bap.Var := ⟨"p", .imm 64, 0, false⟩
+  let q : Bap.Var := ⟨"q", .imm 64, 0, false⟩
+  let load (var : Bap.Var) : Bil.Exp := .load (.var mem) (.var var) .little 8
+  let chosen : Bil.Exp := .ite (.bin .eq (load q) (.int (BitVec.ofNat 64 0))) (load p) (.var p)
+  assertEqual "the accesses of an ite are of its condition" 1 (Checker.accessesOf chosen).length
+
 def run : IO Unit := do
+  choicesAreConditional
   for arch in targets do
     ofTarget arch
 

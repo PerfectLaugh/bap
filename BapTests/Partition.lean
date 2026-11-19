@@ -61,7 +61,18 @@ private def ofLibc (name : String) (imports : List String) (noReturn : List Stri
     assertEqual s!"{name}: {expected} doesn't return" (some false) (stub.map (·.returns))
     assertEqual s!"{name}: the stub of {expected} is named for it" (some s!"{expected}@plt") (stub.map (·.name))
 
+/-- What a bit of a field of a condition register is, of what is beside it that isn't known: an `extract` of a `concat` of the part
+it is of. -/
+private def folds : IO Unit := do
+  let unknown : Symbolic.Expr := .var "SO" 1
+  let field : Symbolic.Expr := .concat (.concat (.const (BitVec.ofNat 1 1)) (.const (BitVec.ofNat 1 0))) unknown
+  assertTrue "a bit of a concat beside what isn't known is a constant"
+    (match simplify (.extract 2 2 field) with | .const value => value.toNat == 1 | _ => false)
+  assertTrue "an extract of an extract is one"
+    (match simplify (.extract 0 0 (.extract 2 1 field)) with | .const value => value.toNat == 0 | _ => false)
+
 def run : IO Unit := do
+  folds
   for (arch, tables) in targets do
     ofTarget arch tables
   ofLibc "x86_64-linux-gnu-echo" ["putchar", "malloc", "strlen", "__libc_start_main"] ["__libc_start_main"]

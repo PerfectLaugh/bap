@@ -52,7 +52,19 @@ private def hoisted (arch : String) : IO Unit := do
   assertEqual s!"{arch} hoisted has the cases of the table" [(true, 8)]
     (known.tables.map fun table => (table.bounded, table.targets.length))
 
+/-- A stack pointer aligned isn't a number that has lost whose it is; a register that a way didn't write is what it held on entry
+there. -/
+private def units : IO Unit := do
+  let sp := Values.Value.set (some "RSP") 64 (-8) (-8) 0
+  assertEqual "an aligned stack pointer isn't known" Values.Value.top (Values.binary .and sp (.const 64 (2 ^ 64 - 16)))
+  assertEqual "a register masked of its low bits is below the mask" (Values.Value.set none 64 0 3 1)
+    (Values.binary .and (.set (some "RDI") 64 0 0 0) (.const 64 3))
+  let left : Values.State := { env := ({} : Std.HashMap String Values.Value).insert "RBX" (.set (some "RBX") 64 8 8 0) }
+  assertEqual "a register one way moved is of both, joined" (some (Values.Value.set (some "RBX") 64 0 8 8))
+    ((left.join {}).env["RBX"]?)
+
 def run : IO Unit := do
+  units
   for arch in targets do
     ofTarget arch
   for arch in ["x86_64", "riscv64"] do

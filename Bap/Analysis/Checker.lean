@@ -66,6 +66,8 @@ def ofValues (image : Image.Image) (partition : Partition) (frames : Frame.Frame
         if base == stackPointer && access.register.any kept.contains then some (offset, offset + access.size) else none
       | _ => none
     let mut seen : Std.HashSet (Nat × Bool) := {}
+    let writes : Std.HashMap Nat (List Values.Value) := function.accesses.foldl (init := {}) fun table access =>
+      if access.write then table.insert access.insn (access.address :: table.getD access.insn []) else table
     let deltas := (frames.frameOf function.entry).map (·.deltas) |>.getD {}
     for access in function.accesses do
       let key := (access.insn, access.write)
@@ -79,8 +81,7 @@ def ofValues (image : Image.Image) (partition : Partition) (frames : Frame.Frame
             | some before, some next => before ≤ lo && (deltas[next]?).any (lo < ·)
             | _, _ => false
           -- nor does one that writes it back, as a probe of the stack, `or qword ptr [rsp], 0`, does
-          let probes := function.accesses.any fun other =>
-            other.insn == access.insn && other.write && other.address == access.address
+          let probes := (writes.getD access.insn []).contains access.address
           if !access.write && !access.initialized && lo < 0 && !pops && !probes then
             seen := seen.insert key
             findings := findings.push { tag := .uninitialized, function := function.entry, insn := access.insn
@@ -133,14 +134,15 @@ structure Config where
   /-- How long the ways of a function go, in milliseconds: what a way writes of memory makes each step after it longer. -/
   maxMillis : Nat := 250
 
-/-- The addresses of the loads and the stores of an expression, outside what a `let` binds. -/
+/-- The addresses of the loads and the stores of an expression, outside what a `let` binds and the choices of an `ite`, which
+only one of runs. -/
 partial def accessesOf : Bil.Exp → List Bil.Exp
   | .load memory address _ _ => address :: accessesOf memory ++ accessesOf address
   | .store memory address value _ _ => address :: accessesOf memory ++ accessesOf address ++ accessesOf value
   | .bin _ left right => accessesOf left ++ accessesOf right
   | .un _ value | .cast _ _ value | .extract _ _ value => accessesOf value
   | .letIn _ value _ => accessesOf value
-  | .ite condition yes no => accessesOf condition ++ accessesOf yes ++ accessesOf no
+  | .ite condition _ _ => accessesOf condition
   | .concat left right => accessesOf left ++ accessesOf right
   | _ => []
 
@@ -168,8 +170,9 @@ partial def instrument (width : Nat) (program : Bil.Program) (next : Nat := 0) :
       | other => (other, next)
     (done ++ moves ++ [stmt], next)
 
-/-- How many parts an expression has, as far as `limit`: past it, `limit + 1`. -/
-partial def sizeOf (limit : Nat) (expr : Expr) : Nat :=
+/-- How many parts an expression has, as far as `limit`: past it, `limit + 1`; without the conditions of its choices, of
+`conditions` false. -/
+partial def sizeOf (limit : Nat) (expr : Expr) (conditions : Bool := true) : Nat :=
   -- what is left of the budget after the parts of an expression, of none left once it is spent
   let rec go (left : Nat) (expr : Expr) : Nat :=
     if left == 0 then 0 else
@@ -178,7 +181,7 @@ partial def sizeOf (limit : Nat) (expr : Expr) : Nat :=
     | .app _ _ args => args.foldl go left
     | .extract _ _ value | .select _ value => go left value
     | .concat first second => go (go left first) second
-    | .ite condition yes no => go (go (go left condition) yes) no
+    | .ite condition yes no => go (go (if conditions then go left condition else left) yes) no
     | _ => left
   let left := go (limit + 1) expr
   limit + 1 - left
@@ -207,8 +210,6 @@ def constOf (expr : Expr) : Option Nat :=
     | .const value => some value.toNat
     | _ => none
 
-def vars (expr : Expr) : List String := Partition.varsOf expr
-
 /-- Whether an expression has a choice in it, as a conditional move makes. -/
 partial def hasIte : Expr → Bool
   | .ite .. => true
@@ -218,6 +219,15 @@ partial def hasIte : Expr → Bool
   | .select _ address => hasIte address
   | _ => false
 
+/-- Whether an expression has a constant of `width` bits in the first page, as a comparison of a pointer with null has. -/
+partial def pageConstant (width : Nat) : Expr → Bool
+  | @Expr.const w value => w == width && value.toNat < 4096
+  | .app _ _ args => args.any (pageConstant width)
+  | .extract _ _ value | .select _ value => pageConstant width value
+  | .concat left right => pageConstant width left || pageConstant width right
+  | .ite condition yes no => pageConstant width condition || pageConstant width yes || pageConstant width no
+  | _ => false
+
 /-- Whether every input that meets the conditions makes an address null, below the first page: of the conditions of what the
 address is of, as far as they are small enough to ask. -/
 def nullOf (constraints : List Expr) (address : Expr) : IO Bool := do
@@ -225,13 +235,18 @@ def nullOf (constraints : List Expr) (address : Expr) : IO Bool := do
   match constOf address with
   | some value => pure (value < 4096)
   | none =>
-    let names := vars address
+    -- what a condition is of: the registers of the address, or the address itself, as a pointer loaded of memory is, each as
+    -- `simplify` has it, without the casts that a lifter makes of one and not of another
+    let names := Partition.varsOf address
+    let simple := Partition.simplify address
     let related := constraints.filter fun constraint =>
-      sizeOf maxQuestion constraint ≤ maxQuestion && (vars constraint).any names.contains
-    -- what can say that an address is null is a choice of it, or a condition of it against zero
-    let zero : Expr := .const (BitVec.ofNat address.width 0)
-    let againstZero := related.any fun constraint => Partition.hasPart zero constraint && Partition.hasPart address constraint
-    if !againstZero && !hasIte address then return false
+      sizeOf maxQuestion constraint ≤ maxQuestion &&
+        ((Partition.varsOf constraint).any names.contains || Partition.hasPart simple (Partition.simplify constraint))
+    -- what can say that an address is null is a choice of it, or a condition of it against what is in the first page
+    let againstPage := related.any fun constraint =>
+      let constraint := Partition.simplify constraint
+      pageConstant address.width constraint && Partition.hasPart simple constraint
+    if !againstPage && !hasIte address then return false
     let size := related.foldl (fun total constraint => total + sizeOf maxQuestion constraint) (sizeOf maxQuestion address)
     if size > maxQuestion then return false
     let page := Expr.const (BitVec.ofNat address.width 4096)
@@ -246,6 +261,8 @@ structure Way where
   path : List Nat
   visits : Std.HashMap Nat Nat
   pending : Option Nat := none
+  /-- Whether the way ends after the delay slot it is in, of a jump of MIPS that goes out of the function, as a return. -/
+  ending : Bool := false
   steps : Nat := 0
 
 /-- What is had of a function to go its ways. -/
@@ -267,19 +284,41 @@ def Function.of (image : Image.Image) (program : Frame.Program) (function : Part
          successors := fun address => (program.successors.getD address []).filter instructions.contains
          volatile := Frame.volatileOf image.arch convention }
 
+/-- A condition as what it is of, and whether it holds or not: `c`, `c = 1` and `c = 0` of a bit. -/
+def polarityOf : Expr → Expr × Bool
+  | .app "=" 1 [condition, @Expr.const 1 value] => (condition, value.toNat == 1)
+  | condition => (condition, true)
+
 /-- The results of running from a state, without those that a condition of constants alone rules out, and with the conditions of
-constants alone that hold left out: the executor folds only conditions that are constants as they are. -/
+constants alone that hold left out: the executor folds only conditions that are constants as they are, and `simplify` what doesn't
+depend on what it has of what isn't known. -/
 def decided (before : Symbolic.State) (results : List Symbolic.Result) : List Symbolic.Result :=
   let σ : Proofs.Symbolic.Assignment := { var := fun _ _ => 0, memory := fun _ _ _ => 0 }
   results.filterMap fun result =>
     -- the executor adds a condition after those it had
     let had := before.constraints.length
     let (old, fresh) := (result.state.constraints.take had, result.state.constraints.drop had)
-    let closed (constraint : Expr) := sizeOf maxQuestion constraint ≤ maxQuestion && Partition.closed constraint
-    if fresh.any fun constraint => closed constraint && Partition.valueOf σ constraint == 0 then none
+    -- of what it is when simplified, as a bit of a condition register that a lifter makes with what isn't known beside it
+    let simple (constraint : Expr) : Option Expr :=
+      if sizeOf maxQuestion constraint ≤ maxQuestion then
+        let simple := Partition.simplify constraint
+        if Partition.closed simple then some simple else none
+      else none
+    -- nor those of a condition that the way already has the other way, as of each instruction of ARM of the same condition
+    let contradicts (constraint : Expr) : Bool := old.any fun other =>
+      match polarityOf constraint, polarityOf other with
+      | (c, p), (c', p') => p != p' && Expr.structuralEq c c'
+    if fresh.any fun constraint => (simple constraint).any (Partition.valueOf σ · == 0) || contradicts constraint then none
     else
-      let kept := fresh.filter fun constraint => !closed constraint
+      let kept := fresh.filter fun constraint => (simple constraint).isNone && !old.any (Expr.structuralEq · constraint)
       some { result with state := { result.state with constraints := old ++ kept } }
+
+/-- The targets of a choice of targets, each with the conditions of its way. -/
+partial def armsOf : Expr → List (List Expr × Expr)
+  | .ite condition yes no =>
+    (armsOf yes).map (fun (conditions, arm) => (Expr.eqOne condition :: conditions, arm)) ++
+      (armsOf no).map fun (conditions, arm) => (Expr.eqZero condition :: conditions, arm)
+  | target => [([], target)]
 
 /-- Where a way goes after an instruction: the way, the next instruction, if it is of the function, and what the instruction
 accessed of the way. -/
@@ -296,7 +335,7 @@ def stepWay (function : Function) (way : Way) (insn : Disasm.Insn) : IO (List St
                          visits := way.visits.insert insn.address (way.visits.getD insn.address 0 + 1) }
   let within (address : Nat) : Option Nat := if function.instructions.contains address then some address else none
   -- a jump of MIPS goes after its delay slot
-  let slotted := Frame.slotted function.image.arch insn && insn.flow != .normal && insn.flow != .call
+  let slotted := Partition.mipsSlotted function.image.arch insn && insn.flow != .normal && insn.flow != .call
   -- a call, of the ways of its condition, clobbers what its convention doesn't keep with values that are new to the way, and
   -- returns to after itself with the rest as it was
   if insn.flow == .call then
@@ -321,19 +360,36 @@ def stepWay (function : Function) (way : Way) (insn : Disasm.Insn) : IO (List St
     let accesses := (List.range count).filterMap fun index =>
       Bap.Assoc.get (⟨accessName index, .imm function.width, 0, false⟩ : Bap.Var) result.state.env
     let state := compact result.state s!"{insn.address}#{way.steps}"
-    let targets : List (Option Nat × Option Nat) := match result.outcome, way.pending with
-      | .normal, some target => [(within target, none)]
-      | .normal, none => [(within insn.next, if slotted then some (insn.next + insn.size) else none)]
+    -- where the way goes, and where after a delay slot: of a jump through a register of MIPS, where the slot goes on to, its
+    -- targets, or nowhere, of a return
+    -- where a jump goes: to a constant, or else to the targets of the jump but its fall-through, which is the way of a
+    -- conditional one that isn't taken, as of a conditional return of PowerPC
+    let jumpTo (target : Expr) : List (Option Nat × Option Nat × Bool) :=
+      match constOf target with
+      | some address => if slotted then [(within insn.next, some address, false)] else [(within address, none, false)]
+      | none =>
+        if slotted then
+          match function.successors insn.next with
+          | [] => [(within insn.next, none, true)]
+          | targets => targets.map fun target => (within insn.next, some target, false)
+        else
+          let jumped := (function.successors insn.address).filter fun target =>
+            insn.flow != .conditionalJump || target != insn.next
+          match jumped with
+          | [] => [(none, none, false)]
+          | targets => targets.map fun target => (some target, none, false)
+    let targets : List (List Expr × Option Nat × Option Nat × Bool) := match result.outcome, way.pending with
+      | .normal, some target => [([], within target, none, false)]
+      | .normal, none => if way.ending then [([], none, none, false)]
+          else [([], within insn.next, if slotted then some (insn.next + insn.size) else none, false)]
       | .jump target, _ =>
-        match constOf target with
-        | some address => if slotted then [(within insn.next, some address)] else [(within address, none)]
-        | none =>
-          match function.successors insn.address with
-          | [] => [(none, none)]
-          | targets => targets.map fun target => (some target, none)
-      | _, _ => [(none, none)]
-    for (next, pending) in targets do
-      steps := steps.push { way := { base with state, pending }, next, accesses }
+        -- a jump to a choice, as ARM's `bxlt lr` to the link register or on, is a way of each, of its condition
+        (armsOf target).flatMap fun (conditions, arm) => (jumpTo arm).map fun (next, pending, ending) =>
+          (conditions, next, pending, ending)
+      | _, _ => [([], none, none, false)]
+    for (conditions, next, pending, ending) in targets do
+      let state := { state with constraints := state.constraints ++ conditions }
+      steps := steps.push { way := { base with state, pending, ending }, next, accesses }
   return steps.toList
 
 /-- Whether the memory of a state has grown past what a step of it can be had of soon: a cell of more than `maxQuestion` parts,

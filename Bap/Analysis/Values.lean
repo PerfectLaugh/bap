@@ -24,7 +24,7 @@ open Bap.Analysis.Partition (Partition)
 inductive Value where
   | top
   | set (base : Option String) (width : Nat) (lo hi : Int) (stride : Nat)
-  deriving BEq, Repr, Inhabited
+  deriving BEq, DecidableEq, Repr, Inhabited
 
 def Value.const (width value : Nat) : Value := .set none width (value % 2 ^ width) (value % 2 ^ width) 0
 
@@ -117,10 +117,16 @@ def State.write (state : State) (var : Bap.Var) (value : Value) : State :=
 
 def State.join (left right : State) : State :=
   let keys := Partition.dedup (left.env.toList.map (·.1) ++ right.env.toList.map (·.1))
+  -- a register that one hasn't written holds there what it held on entry
+  let entryOf (key : String) (other : Value) : Value := match other.width with
+    | some width => .set (some key) width 0 0 0
+    | none => .top
   let env := keys.foldl (init := ({} : Std.HashMap String Value)) fun env key =>
     let value := match left.env[key]?, right.env[key]? with
       | some a, some b => a.join b
-      | _, _ => .top
+      | some a, none => a.join (entryOf key a)
+      | none, some b => (entryOf key b).join b
+      | none, none => .top
     env.insert key value
   { env, slots := left.slots.filterMap fun slot =>
       (right.slots.find? fun other => other.base == slot.base && other.offset == slot.offset && other.size == slot.size).map
@@ -130,10 +136,14 @@ def State.join (left right : State) : State :=
 
 /-- Whether a state has all that another has, so that a join of them is the first. -/
 def State.covers (left right : State) : Bool :=
+  -- a register that one hasn't written holds there what it held on entry
+  let entryOf (key : String) (other : Value) : Value := match other.width with
+    | some width => .set (some key) width 0 0 0
+    | none => .top
   left.env.toList.all (fun (key, value) => match right.env[key]? with
     | some other => value.covers other
-    | none => false) &&
-  right.env.toList.all (fun (key, _) => left.env.contains key) &&
+    | none => value.covers (entryOf key value)) &&
+  right.env.toList.all (fun (key, other) => left.env.contains key || (entryOf key other).covers other) &&
   left.slots.all (fun slot =>
     right.slots.any fun other => other.base == slot.base && other.offset == slot.offset && other.size == slot.size &&
       slot.value.covers other.value) &&
@@ -167,8 +177,36 @@ def note (address : Value) (size : Nat) (write : Bool) (saves : Bool := false) (
 
 /-! ## Running BIL -/
 
-/-- The value of an operation of two sets. -/
+/-- The numbers of a set of few of them. -/
+def Value.elements (most : Nat := 4) : Value → Option (List Int)
+  | .set none _ lo hi stride =>
+    if lo == hi then some [lo]
+    else if stride == 0 || (hi - lo) / stride + 1 > most then none
+    else some ((List.range ((hi - lo) / stride + 1).toNat).map fun (index : Nat) => lo + (stride : Int) * (index : Int))
+  | _ => none
+
+/-- The least set of numbers of `width` bits that has all of some. -/
+def Value.ofElements (width : Nat) (values : List Nat) : Value :=
+  match (Partition.dedup values).mergeSort (· ≤ ·) with
+  | [] => .top
+  | first :: rest =>
+    let stride := rest.foldl (fun stride value => Nat.gcd stride (value - first)) 0
+    .range none width first (rest.getLast?.getD first) stride
+
+/-- The value of an operation of two sets: of few numbers each, each of what they make, which an operation of a choice without a
+branch, `(c - 1) & m`, is; else as the bounds of each go. -/
 def binary (op : Bil.BinOp) (left right : Value) : Value :=
+  match left.elements, right.elements, left, right with
+  | some lefts, some rights, .set none width .., .set none width' .. =>
+    let results := lefts.flatMap fun a => rights.filterMap fun b =>
+      match Bil.evalExp {} (.bin op (.int (BitVec.ofNat width (a % 2 ^ width).toNat)) (.int (BitVec.ofNat width' (b % 2 ^ width').toNat))) with
+      | .ok (.bits (width := w) bits) => if w == width then some bits.toNat else none
+      | _ => none
+    if results.length == lefts.length * rights.length && lefts.length * rights.length > 1 then Value.ofElements width results
+    else binaryBounds op left right
+  | _, _, _, _ => binaryBounds op left right
+where
+  binaryBounds (op : Bil.BinOp) (left right : Value) : Value :=
   match op, left, right with
   | _, .set none width a a' 0, .set none _ b b' 0 =>
     if a == a' && b == b' then
@@ -200,11 +238,13 @@ def binary (op : Bil.BinOp) (left right : Value) : Value :=
     else .top
   | .and, value, .set none width m m' 0 | .and, .set none width m m' 0, value =>
     if m != m' then .top else
-    -- of a mask of the low bits, what is below it; of a number that is already below it, the number
+    -- of a mask of the low bits, what is below it; of a number that is already below it, the number; of a mask of the high bits
+    -- of what a register held, as a stack pointer aligned, what isn't known, rather than a number that loses whose it is
     match value with
     | .set none _ lo hi stride => if 0 ≤ lo && hi ≤ m && (m + 1).toNat.isPowerOfTwo then .set none width lo hi stride
                                   else .range none width 0 m 1
-    | _ => .range none width 0 m 1
+    | .set (some _) .. => if (m + 1).toNat.isPowerOfTwo then .range none width 0 m 1 else .top
+    | .top => .range none width 0 m 1
   | .rem, _, .set none width k k' 0 => if k == k' && k > 0 then .range none width 0 (k - 1) 1 else .top
   | _, _, _ => .top
 

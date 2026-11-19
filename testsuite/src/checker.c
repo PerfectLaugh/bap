@@ -1,4 +1,5 @@
-/* Of what Bap.Analysis.Checker finds of a program without running it: a load through a pointer that one way makes null; a local
+/* Of what Bap.Analysis.Checker finds of a program without running it: a load through a pointer that one way makes null, and through
+   one loaded of memory that one way finds null; a return before what it guards, of MIPS in a delay slot; a local
    that one way leaves unwritten, and one that every way writes; a store at an index of a mask past an array of the stack, and one
    past an array of the program, and loads within them; and two ways, one of which no input takes, which each end in a call of a function of their
    own. It is never run: _start doesn't end. Built as partition.c is, see BapTests/Checker.lean. */
@@ -17,6 +18,21 @@ __attribute__((noinline)) long nulls(long x) {
     __asm__ volatile("" : "+r"(p));
   }
   return *p;
+}
+
+long *global;
+
+/* A pointer loaded of memory, which one way finds in the first page and then loads through */
+__attribute__((noinline)) long fromGlobal(void) {
+  long *p = global;
+  if ((unsigned long)p < 16) return *p;
+  return 0;
+}
+
+/* A return that the compiler lays out before what it guards, as the likely way: what is after it isn't of the way that returns */
+__attribute__((noinline)) long guarded(long *p) {
+  if (__builtin_expect(p == 0, 1)) return 0;
+  return *p + 1;
 }
 
 __attribute__((noinline)) long nonnull(long x) {
@@ -67,7 +83,8 @@ __attribute__((noinline)) long feasible(long x) {
 void _start(void) {
   long total = 0;
   for (long i = 0; i < 10; i++)
-    total += nulls(i) + nonnull(i) + uninit(i) + init(i) + overflow(i) + globalOverflow(i) + feasible(i);
+    total += nulls(i) + nonnull(i) + uninit(i) + init(i) + overflow(i) + globalOverflow(i) + feasible(i) + fromGlobal() +
+             guarded(&cell);
   sink = total;
   for (;;) {
   }
