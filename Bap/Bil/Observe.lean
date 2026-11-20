@@ -192,8 +192,9 @@ mutual
 end
 
 /-- How many times a loop may test its condition before a run gives up, in the interpreter (its fuel) and in native code (`Lifted`):
-so many that only a loop that doesn't end comes to it, as a `rep` of x86 runs as long as its count. -/
-def loopLimit : Nat := 2 ^ 62
+more than a `rep` of x86 copies of what a program has, 128 MiB of words, but few enough that one that doesn't end, which nothing
+interrupts within its instruction, ends the run in seconds rather than holding it for good. -/
+def loopLimit : Nat := 2 ^ 24
 
 def runObserved (observer : Option MemoryObserver) (program : Program) (initial : State := {})
     (fuel : Nat := loopLimit) : IO (Except String (State × Effect)) :=

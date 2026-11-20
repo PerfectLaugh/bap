@@ -85,7 +85,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
   -- A path from an address, as an absolute one, of the directory that the call says, which ends as it does.
   let pathAt (directory address : Nat) : IO (Result String) := do
     -- The path is read first, as `getname` is, and the directory is looked at only for a path that isn't absolute.
-    let given ← readString emu address
+    let some given ← (some <$> readString emu address) <|> pure none | return .error Errno.efault
     if given.isEmpty then return .error Errno.enoent
     match if given.startsWith "/" then .ok (kernel.cwdOf group) else kernel.baseOf group directory (atCwd directory) with
     | .error errno => pure (.error errno)

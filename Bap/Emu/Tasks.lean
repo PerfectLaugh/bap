@@ -79,6 +79,7 @@ def clone (emu : Emu) (options : CloneOptions) : IO ThreadId := do
   if options.vfork then
     emu.taskTable.modify (·.futexWait { thread := ← thread emu, space := vforkSpace, address := id, bitset := 2 ^ 32 - 1 })
     emu.stopped.set true
+  for hook in ← emu.cloneHooks.get do hook (← thread emu) id
   if !options.sameGroup then
     for hook in ← emu.processHooks.get do hook task.group id
   pure id

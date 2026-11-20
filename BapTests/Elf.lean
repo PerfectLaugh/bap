@@ -1201,8 +1201,12 @@ private def runUntrusted : IO Unit := do
   assertEqual "DT_PLTRELSZ is where it is looked for" 0x48 (stripped.get! 1400).toNat
   let huge := (List.range 8).foldl (init := stripped) fun bytes index =>
     bytes.set! (1400 + index) (UInt8.ofNat (0xffffffff0 / 256 ^ index % 256))
+  -- What is read of the table is what its region holds, before it is read, so that a count that isn't is an error here.
+  let hugeImage ← Image.decode huge |> IO.ofExcept
+  assertTrue "a count past its region is what the region holds"
+    (Project.Project.entriesIn hugeImage 0x380 24 (0xffffffff0 / 24) ≤ stripped.size / 24)
   let plain := Project.Project.pltEntries (← Image.decode stripped |> IO.ofExcept)
-  let told := Project.Project.pltEntries (← Image.decode huge |> IO.ofExcept)
+  let told := Project.Project.pltEntries hugeImage
   assertTrue "a PLT of a size past its region has what is there" (told.take plain.length == plain && told.length ≤ stripped.size / 24)
 
 def run : IO Unit := do

@@ -695,6 +695,10 @@ theorem Jmp.indirect_mapExp (f : Exp → Exp) (jmp : Jmp) : (jmp.mapExp f).indir
   obtain ⟨tid, condition, kind⟩ := jmp
   cases kind with
   | goto target => cases target <;> rfl
+  | call target returnTo =>
+    cases returnTo with
+    | none => rfl
+    | some label => cases label <;> rfl
   | _ => rfl
 
 theorem jumpsIndirectly_map (f : Exp → Exp) (jmps : List Jmp) :

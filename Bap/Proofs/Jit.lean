@@ -2451,13 +2451,13 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
         have hsum : (machine.slots c + (1 : UInt64).toBitVec).toNat = (machine.slots c).toNat + 1 := by
           have h1 : (1 : UInt64).toBitVec.toNat = 1 := by decide
           rw [BitVec.toNat_add, h1, Nat.mod_eq_of_lt]
-          have : (machine.slots c).toNat < 2 ^ 62 := hcount
+          have : (machine.slots c).toNat < 2 ^ 24 := hcount
           omega
         simp only [m0, runOps_cons, runOps_nil, Bap.Proofs.Primus.step, Machine.write_slots, denoteBin]
         simp only [loopLimit, Bap.Bil.loopLimit] at hcount
         have hmod : ((machine.slots c).toNat + 1) % 18446744073709551616 = (machine.slots c).toNat + 1 := Nat.mod_eq_of_lt (by omega)
         simp [loopLimit, Bap.Bil.loopLimit, hmod]
-        by_cases hk : 2 ^ 62 ≤ (machine.slots c).toNat + 1
+        by_cases hk : 2 ^ 24 ≤ (machine.slots c).toNat + 1
         · simp [flag]
           omega
         · simp [flag]

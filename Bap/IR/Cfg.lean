@@ -28,10 +28,11 @@ def Sub.block (sub : Sub) (tid : Tid) : Option Blk :=
 def Program.sub (program : Program) (tid : Tid) : Option Sub :=
   program.subs.find? fun sub => sub.tid = tid
 
-/-- Whether a jump goes where an expression says within its sub, as a jump through a table does. -/
+/-- Whether a jump goes where an expression says within its sub, as a jump through a table does, or a call comes back there. -/
 def Jmp.indirect (jmp : Jmp) : Bool :=
   match jmp.kind with
   | .goto (.indirect _) => true
+  | .call _ (some (.indirect _)) => true
   | _ => false
 
 /-- Whether a block can go where an expression says, within its sub. -/

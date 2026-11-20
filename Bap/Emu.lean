@@ -398,6 +398,8 @@ structure Emu where
   servedPrograms : IO.Ref (Std.HashMap Nat Bil.Program)
   /-- What wants to know of a new process: of the one that made it, and of it. -/
   processHooks : IO.Ref (List (Nat → Nat → IO Unit))
+  /-- What wants to know of a new task, a thread or a process, as it is made: of the thread that made it, and of it. -/
+  cloneHooks : IO.Ref (List (ThreadId → ThreadId → IO Unit))
   /-- What wants to know that the parent of `vfork` goes on, as its child runs a program or ends: of the parent, and of the child. -/
   vforkReleased : IO.Ref (List (Nat → Nat → IO Unit))
   /-- What wants to know that a thread that runs a program took the id of its process, which was its leader's, which is over: of the
@@ -571,6 +573,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     intrinsicControls := ← IO.mkRef fun _ _ => (id, id)
     servedPrograms := ← IO.mkRef {}
     processHooks := ← IO.mkRef []
+    cloneHooks := ← IO.mkRef []
     vforkReleased := ← IO.mkRef []
     leaderTaken := ← IO.mkRef []
     now := ← IO.mkRef none

@@ -113,7 +113,7 @@ private def readWord (image : Image.Image) (address size : Nat) : Option Nat :=
 
 /-- How many entries of `entry` bytes, of at most `count`, the region of `address` has from there: a count that a file says
 is no more than what it has, whatever it says. -/
-private def entriesIn (image : Image.Image) (address entry count : Nat) : Nat :=
+def entriesIn (image : Image.Image) (address entry count : Nat) : Nat :=
   match image.memory.entries.find? fun region => region.1.contains address with
   | some region => min count ((region.1.maxAddr - address) / max entry 1)
   | none => 0

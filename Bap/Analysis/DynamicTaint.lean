@@ -1121,13 +1121,16 @@ private def callEnds (tracker : Tracker) (result : Option Nat) : IO Unit := do
   tracker.label.set none
   tracker.backing.set none
 
-/-- A new process has a copy of what its parent has, as it does of the memory, and of its registers as they are at the fork, which runs in
-the parent: but for the result of the call, which is the child's 0. -/
-private def forked (tracker : Tracker) (parent child : Nat) : IO Unit := do
+/-- A new thread or process has its registers as the thread that made it had them, at the call that made it: but for the result
+of the call, which is its 0. -/
+private def cloned (tracker : Tracker) (creator child : ThreadId) : IO Unit := do
   let (_, _, register) := Emu.syscallRegisters tracker.emu.config.syscallAbi
   let result ← wordVar tracker.emu register
-  let registers ← registersOf tracker (← Emu.thread tracker.emu)
+  let registers ← registersOf tracker creator
   tracker.registers.modify (·.insert child (registers.erase result.name))
+
+/-- A new process has a copy of what its parent has, as it does of the memory. -/
+private def forked (tracker : Tracker) (parent child : Nat) : IO Unit := do
   let source ← Emu.spaceOf tracker.emu parent
   tracker.pages.modify fun pages =>
     pages.fold (init := pages) fun out (space, page) tags =>
@@ -1222,6 +1225,7 @@ def start (emu : Emu) (config : Config := {}) : IO Tracker := do
       tracker.outer.set rest
     | [] => tracker.label.set none) :: ·)
   emu.processHooks.modify ((fun parent child => forked tracker parent child) :: ·)
+  emu.cloneHooks.modify ((fun creator child => cloned tracker creator child) :: ·)
   pure tracker
 
 /-! ### Saying where a byte came from -/

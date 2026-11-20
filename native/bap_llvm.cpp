@@ -207,11 +207,29 @@ struct DecoderContext {
     printer->setPrintImmHex(true);
   }
 
-  // A decoder of Thumb keeps the IT block it last decoded and predicates what comes after it, whoever asks. Each decode is
-  // of its own: the lifter puts the conditions of a block on its instructions itself.
-  void forget() {
-    if (context.triple.isThumb())
-      decoder.reset(context.target->createMCDisassembler(*context.subtarget, machineContext));
+  // A decoder of Thumb keeps the IT block it last decoded and predicates what it decodes next. That is right of the
+  // instructions of the block, decoded in turn, but not of any other decode, which a decoder made again starts clean for.
+  uint64_t itNext = 0;
+  unsigned itLeft = 0;
+
+  void beforeDecode(uint64_t address) {
+    if (itLeft == 0 || address == itNext)
+      return;
+    decoder.reset(context.target->createMCDisassembler(*context.subtarget, machineContext));
+    itLeft = 0;
+  }
+
+  void afterDecode(uint64_t address, const MCInst &instruction, size_t size, const uint8_t *bytes) {
+    if (!context.triple.isThumb())
+      return;
+    if (context.instructions->getName(instruction.getOpcode()) == "t2IT" && size >= 2) {
+      // The mask's lowest bit that is set ends the block: as many instructions as there are bits above it.
+      unsigned mask = bytes[0] & 15;
+      itLeft = mask == 0 ? 0 : 4 - __builtin_ctz(mask);
+    } else if (itLeft > 0) {
+      itLeft -= 1;
+    }
+    itNext = address + size;
   }
 };
 
@@ -238,7 +256,7 @@ Disassembly disassemble(const char *triple, const uint8_t *bytes, size_t size,
                         uint64_t address) {
   DecoderContext &cached = decoderContext(triple);
   TargetContext &context = cached.context;
-  cached.forget();
+  cached.beforeDecode(address);
   auto &decoder = cached.decoder;
   auto &printer = cached.printer;
 
@@ -249,6 +267,7 @@ Disassembly disassemble(const char *triple, const uint8_t *bytes, size_t size,
                                         nulls());
   if (status != MCDisassembler::Success)
     throw std::runtime_error("instruction decoding failed");
+  cached.afterDecode(address, result.instruction, decodedSize, bytes);
   raw_string_ostream output(result.text);
   printer->printInst(&result.instruction, address, "", *context.subtarget, output);
   result.size = decodedSize;

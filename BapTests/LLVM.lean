@@ -617,7 +617,7 @@ private def testThumbIt : IO Unit := do
   assertEqual "scan treats a block as an instruction" [0, 6] (scan.instructions.map (·.address))
   -- an IT decoded alone, as a sweep sizes it, leaves nothing for what is decoded after it
   let _ ← LLVM.disassemble "thumbv7" (bytes [0x08, 0xbf]) 0x2000
-  let after ← LLVM.disassemble "thumbv7" (bytes [0x40, 0x18]) 0x2002
+  let after ← LLVM.disassemble "thumbv7" (bytes [0x40, 0x18]) 0x3000
   assertEqual "an IT decoded alone predicates nothing after it" 1 (after.assembly.splitOn "eq").length
   let _ ← LLVM.disassemble "thumbv7" (bytes [0x08, 0xbf]) 0x2000
   assertFlag "adds after an IT decoded alone sets zero" "ZF" 1

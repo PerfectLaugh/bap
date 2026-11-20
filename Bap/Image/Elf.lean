@@ -505,8 +505,10 @@ private def dynamicSymbols (data : ByteArray) (header : Header) : Except String 
 section headers. What can't be read of the latter, which needn't be there, is not an error. -/
 private def loadedSymbols (data : ByteArray) (header : Header) (sections : List SectionHeader) :
     Except String (List Symbol) :=
-  if sections.isEmpty then .ok ((dynamicSymbols data header).toOption.getD [])
-  else parseSymbols data header sections
+  let dynamic := (dynamicSymbols data header).toOption.getD []
+  -- A symbol table that the file is cut short of, or that is out of it, is none, as is one of no sections.
+  if sections.isEmpty then .ok dynamic
+  else .ok ((parseSymbols data header sections).toOption.getD dynamic)
 
 /-- How many bytes of zeros past what the file has its regions would take, as its headers say: of its LOAD entries, or of a relocatable
 file, the sections that it lays out. `Image.decode` keeps it to what a host can give. -/
@@ -529,15 +531,16 @@ def zeroFill (data : ByteArray) : Nat :=
         if (IO.Reader.u32 data header.endian at_).toOption != some 1 then total
         else total + (field (at_ + if header.is64 then 40 else 20) - field (at_ + if header.is64 then 32 else 16))
 
-/-- The section headers of a file that is loaded and their sections, or none of a table, or names of it, that the file doesn't have
-all of: what is loaded goes by the segments, as a loader does, and a file cut short after them still runs. -/
+/-- The section headers of a file that is loaded and their sections, or none of a table that the file doesn't have all of: what is
+loaded goes by the segments, as a loader does, and a file cut short after them still runs. Of names that it doesn't have, the
+headers still say where its symbols are, though no section is named. -/
 private def loadedSections (data : ByteArray) (header : Header) : List SectionHeader × List Section :=
   match parseSections data header with
   | .error _ => ([], [])
   | .ok headers =>
     match resolveSectionNames data header headers with
     | .ok sections => (headers, sections)
-    | .error _ => ([], [])
+    | .error _ => (headers, [])
 
 def decode (data : ByteArray) : Except String Image := do
   let header ← parseHeader data
