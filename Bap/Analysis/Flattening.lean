@@ -123,18 +123,6 @@ def sameAddress (left right : Expr) : Bool :=
   let (rightBase, rightOffset) := Symbolic.Memory.baseOffset (simpler right)
   left.width == right.width && leftOffset == rightOffset && Expr.structuralEq leftBase rightBase
 
-/-- The variable of memory that a function's code reads. -/
-def memoryVar (instructions : List Disasm.Insn) : Option Bap.Var :=
-  let rec ofExp : Bil.Exp → Option Bap.Var
-    | .var var => if var.typ matches .mem _ _ then some var else none
-    | .load memory _ _ _ => ofExp memory
-    | .store memory _ _ _ _ => ofExp memory
-    | _ => none
-  instructions.findSome? fun insn => insn.bil.findSome? fun stmt =>
-    match stmt with
-    | .move var value => if var.typ matches .mem _ _ then some var else ofExp value
-    | _ => none
-
 /-- What a register holds in a state: what it was given, or what it held where the state started. -/
 def registerValue (state : Symbolic.State) (name : String) (width : Nat) : Expr :=
   let var : Bap.Var := ⟨name, .imm width, 0, false⟩
@@ -575,7 +563,7 @@ between them. -/
 def machineOf (image : Image.Image) (program : Frame.Program) (function : Partition.Function) (config : Config := {}) :
     IO (Option Machine) := do
   let some checked := Checker.Function.of image program function | return none
-  let memory := memoryVar (checked.instructions.toList.map (·.2))
+  let memory := checked.memory
   -- of each that may be the dispatcher, and each that may be its state, the machine of the most states that are known
   let mut best : Option (Nat × Place × Run × Cff.Cfg) := none
   let deadline := (← IO.monoMsNow) + config.maxMillis

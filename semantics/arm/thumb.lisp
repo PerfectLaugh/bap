@@ -72,7 +72,7 @@
 
 (defun tADDhirr (rd rn rm cnd _)
   (when (condition-holds cnd)
-    (t2set rd (+ (t2reg rn) (t2reg rm)))))
+    (t2alu rd (+ (t2reg rn) (t2reg rm)))))
 
 (defun tMUL (rd _ rn rm cnd _)
   (when (condition-holds cnd)
@@ -230,7 +230,7 @@
 
 (defun tMOVr (rt rn pre _)
   (when (condition-holds pre)
-    (t2set rt (t2reg rn))))
+    (t2alu rt (t2reg rn))))
 
 (defun t2pc () (+ (get-program-counter) 4))
 
@@ -244,6 +244,13 @@
    selects the instruction set"
   (if (is-pc reg)
       (prog (set ISET (cast-low 1 val)) (exec-addr (logand val 0xfffffffe)))
+    (set$ reg val)))
+
+(defun t2alu (reg val)
+  "a write to PC of what isn't loaded, a move or a sum, branches
+   without the bit 0 and stays in Thumb (ALUWritePC)"
+  (if (is-pc reg)
+      (exec-addr (logand val 0xfffffffe))
     (set$ reg val)))
 
 ;; the supervisor call, as in AArch64, the condition is the one of the

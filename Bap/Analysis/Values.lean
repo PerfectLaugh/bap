@@ -167,6 +167,12 @@ structure Effects where
   /-- The instruction that is run. -/
   insn : Nat := 0
   accesses : Array Access := #[]
+  /-- The stack pointer, and whether an address of the stack was made that isn't known where of it, as of an index that a loop
+  counts: what is stored there is written, though not by an exact address. -/
+  stack : String := ""
+  lost : Bool := false
+  /-- Whether the instruction asks the system, as a system call does. -/
+  special : Bool := false
 
 abbrev Run := StateM Effects
 
@@ -223,6 +229,8 @@ where
       let (lo', hi') := if lo' == hi' && lo' ≥ 2 ^ (width - 1) then (lo' - 2 ^ width, hi' - 2 ^ width) else (lo', hi')
       .range base width (lo + lo') (hi + hi') (Nat.gcd stride stride')
   | .sub, .set base width lo hi stride, .set none _ lo' hi' stride' =>
+    -- as of a sum: `sub rax, -128` is how a compiler adds 128
+    let (lo', hi') := if base.isSome && lo' == hi' && lo' ≥ 2 ^ (width - 1) then (lo' - 2 ^ width, hi' - 2 ^ width) else (lo', hi')
     .range base width (lo - hi') (hi - lo') (Nat.gcd stride stride')
   | .sub, .set (some base) width lo hi stride, .set (some base') _ lo' hi' stride' =>
     if base == base' then .range none width (lo - hi') (hi - lo') (Nat.gcd stride stride') else .top
@@ -281,7 +289,17 @@ mutual
           (·.value) |>.getD .top)
       | _ => pure .top
     | .store .. => pure .top
-    | .bin op left right => do pure (binary op (← eval state left) (← eval state right))
+    | .bin op left right => do
+      let left ← eval state left
+      let right ← eval state right
+      let result := binary op left right
+      let ofStack (value : Value) (stack : String) : Bool := match value with
+        | .set (some base) .. => base == stack
+        | _ => false
+      if (op == .add || op == .sub) && result == .top then
+        modify fun effects =>
+          if ofStack left effects.stack || ofStack right effects.stack then { effects with lost := true } else effects
+      pure result
     | .un op value => do
       match ← eval state value with
       | .set none width lo hi 0 =>
@@ -348,6 +366,12 @@ mutual
         | .set (some register) _ 0 0 _ => if saves then some register else none
         | _ => none
       note address size true saves (register := register)
+      -- nor is what is written all by exact addresses once an address of the stack was made that isn't known where of it, or
+      -- a store is at some of a range of it
+      let ranged := match address with
+        | .set (some base) _ lo hi _ => base == stackPointer && lo != hi
+        | _ => false
+      let state := if ranged || (← get).lost then { state with escaped := true } else state
       -- an address of the stack stored is one that has left, but the stack pointer as it was, which PowerPC keeps in its frame
       let state := match stored with
         | .set (some base) _ _ _ _ => if base == stackPointer && !saves then { state with escaped := true } else state
@@ -360,6 +384,8 @@ mutual
           pure { state with slots := { base, offset := lo, size, value := stored } :: kept
                             written := if garbage then state.written else state.written.add base lo (lo + size) }
         else pure { state with slots := kept }
+      -- a store that isn't known where is of any slot, once an address of the stack has left
+      | .top => pure (if state.escaped then { state with slots := [] } else state)
       | _ => pure state
     | .var _ => pure state
     | .letIn var value body => do
@@ -367,6 +393,13 @@ mutual
       store machine (state.write var value) body
     | _ => pure { state with slots := [] }
 end
+
+/-- What a statement can write, at any depth. -/
+partial def assigned : Bil.Stmt → List Bap.Var
+  | .move var _ => [var]
+  | .while _ body => body.flatMap assigned
+  | .ifElse _ yes no => yes.flatMap assigned ++ no.flatMap assigned
+  | _ => []
 
 mutual
   partial def exec (machine : Machine) (state : State) : Bil.Program → Run State
@@ -384,15 +417,24 @@ mutual
     | .jmp target => do
       let _ ← eval state target
       pure (state, true)
-    | .special _ | .cpuExn _ => pure (state, false)
+    | .special _ | .cpuExn _ => do
+      -- what the system does of it, which `step` clobbers as of a call
+      modify fun effects => { effects with special := true }
+      pure (state, false)
     | .ifElse condition yes no => do
       match (← eval state condition).single with
       | some (none, 1) => pure (← exec machine state yes, false)
       | some (none, 0) => pure (← exec machine state no, false)
       | _ => pure ((← exec machine state yes).join (← exec machine state no), false)
     | .while _ body => do
+      -- of a loop that doesn't settle, as a `rep` whose count and addresses grow each round, what its body writes isn't
+      -- known, and no slot is: but what was written before it still is, and what it accesses is noted of that state
       let rec loop : Nat → State → Run State
-        | 0, _ => pure {}
+        | 0, state => do
+          let env := (body.flatMap assigned).foldl (init := state.env) fun env (var : Bap.Var) => env.insert var.name.str .top
+          let unknown : State := { state with slots := [], env }
+          let next ← exec machine unknown body
+          pure { unknown with written := state.written.inter next.written, escaped := state.escaped || next.escaped }
         | fuel + 1, state => do
           let next ← exec machine state body
           let joined := state.join next
@@ -417,16 +459,26 @@ def step (context : Context) (insn : Disasm.Insn) (state : State) : Run State :=
   let state := match context.deltas[insn.address]?, context.stackPointer.typ with
     | some delta, .imm width => state.write context.stackPointer (.set (some context.stackPointer.name.str) width delta delta 0)
     | _, _ => state
-  modify fun effects => { effects with insn := insn.address }
+  let stack := context.stackPointer.name.str
+  modify fun effects => { effects with insn := insn.address, stack, lost := false, special := false }
   let after ← exec context.machine state insn.bil
   let after := { after with env := after.env.filter fun name _ => !name.startsWith "_" }
-  if insn.flow != .call then return after
-  -- an address of the stack that a call is given has left
-  let given := (context.frame.convention.functionArguments ++ context.frame.convention.floatArguments).any fun var =>
-    match after.read var with
-    | .set (some base) _ _ _ _ => base == context.stackPointer.name.str
+  let effects ← get
+  let after := if effects.lost then { after with escaped := true } else after
+  if insn.flow != .call && !effects.special then return after
+  -- an address of the stack that a call is given has left: of a call of the system, whose arguments aren't those of a
+  -- function, one that any register has but the stack pointer
+  let ofStack (value : Value) : Bool := match value with
+    | .set (some base) _ _ _ _ => base == stack
     | _ => false
+  let given :=
+    if insn.flow == .call then
+      (context.frame.convention.functionArguments ++ context.frame.convention.floatArguments).any fun var =>
+        ofStack (after.read var)
+    else after.env.toList.any fun (name, value) => name != stack && ofStack value
   let after := if given then { after with escaped := true } else after
+  -- and what has an address that has left may write there
+  let after := if after.escaped then { after with slots := [] } else after
   return context.frame.volatile.foldl (init := after) fun state (name : String) =>
     state.write (⟨name, .imm context.frame.width, 0, false⟩ : Bap.Var) .top
 

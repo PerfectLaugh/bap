@@ -2997,7 +2997,7 @@ private def runServed (emu : Emu) (serve : String → List Nat → Option (Nat �
         | .error error => throw <| IO.userError error
       | .cpuExn number => throw <| IO.userError s!"CPU exception {number}"
       if let .jmp _ := stmt then pure () else go fuel rest
-  go 1048576 program
+  go Bil.loopLimit program
   if ← wroteMemory.get then
     match Bil.lookup (← emu.state.get).env emu.config.memory with
     | .ok memory => setReg emu emu.config.memory memory

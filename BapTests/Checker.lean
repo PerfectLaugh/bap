@@ -22,10 +22,13 @@ private def ofTarget (arch : String) : IO Unit := do
     let some symbol := image.symbols.find? (·.name == name) | throw (IO.userError s!"{path} has no {name}")
     let some found := partition.functionAt symbol.addr | throw (IO.userError s!"{path}: no function at {name}")
     pure found
-  let findings ← Checker.check image partition
+  -- with time to spare for each function, as the tests run beside each other
+  let findings ← Checker.check image partition { maxMillis := 4000 }
   let nameOf (entry : Nat) : String := ((partition.functions.find? (·.entry == entry)).map (·.name)).getD "?"
   let of (tag : Checker.Tag) : List String :=
     ((findings.filter (·.tag == tag)).map (nameOf ·.function)).mergeSort (· ≤ ·)
+  -- nor of `outparam`, whose local what it calls writes; of `loopinit`, whose array a loop writes; or of `reps`, whose local a
+  -- `rep` of x86_64 comes after the store of, and whose ways aren't of each round of it
   -- of `guarded`, a way that returns doesn't go on past its return, which of MIPS is in a delay slot, to what it guards
   assertEqual s!"{arch}: what loads through null" ["fromGlobal", "nulls"] (of .nullDereference)
   assertEqual s!"{arch}: what reads what it may not have written" ["uninit"] (of .uninitialized)

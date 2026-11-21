@@ -237,6 +237,9 @@ private def x86FlagBits : List String :=
     "ID", "VIP", "VIF", "AC", "VM", "RF", "MD", "NT", "IOPLH", "IOPLL", "OF", "DF", "IF", "TF", "SF", "ZF", "EFLAGS_5",
     "AF", "EFLAGS_3", "PF", "EFLAGS_1", "CF"]
 
+/-- The variables of the bits of EFLAGS, which a machine has to start with all of, as `pushf` reads them. -/
+def x86Flags : List String := x86FlagBits
+
 /-- The aliases of x86 that the views of `Value.register` cannot express: the high bytes, in a base of `width` bits,
 and EFLAGS, which is the flags. -/
 private def x86Aliases (base : String → Option String) (width : Nat) (name : String) : Option Alias :=

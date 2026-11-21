@@ -2412,7 +2412,9 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
         | .ok args => pure args
       let action ← match call, mapped || socket || watching with
       | .write, false => writeDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0)
-      | .writev, false => writeVectorDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0)
+      | .writev, false =>
+        try writeVectorDirect machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0) catch error =>
+          if ((toString error).splitOn "Emu address").length > 1 then pure (errorOf Errno.efault) else throw error
       | .pwrite, false =>
         -- Its offset, which on 32 bits is in two arguments in the order of the guest.
         let architecture := machine.architecture
@@ -2423,7 +2425,10 @@ private def serveKernelCalls (machine : Machine) : IO HookId :=
         writeDirectAt machine emu group (args.getD 0 0) (args.getD 1 0) (args.getD 2 0) offset
       | _, _ => do
         let before ← machine.kernel.get
-        let action ← kernelCall machine emu call args
+        -- An address of the program that a call can't read or write, wherever it is of what the call is given, an array of
+        -- buffers or a name, is EFAULT, as it is of Linux, rather than what ends the run.
+        let action ← try kernelCall machine emu call args catch error =>
+          if ((toString error).splitOn "Emu address").length > 1 then pure (errorOf Errno.efault) else throw error
         -- A call that is over, rather than waiting to run again, has no site nor deadline left, which another at the same place,
         -- as `ipc` of i386 has all of its calls, would take as its own.
         if !(← Bap.Emu.stopped emu) then machine.timers.finish (← thread emu)
@@ -2603,6 +2608,8 @@ private def resetRegisters (emu : Emu) : Architecture → IO Unit
   | .i686 => do
     for (name, width) in Target.LLVMLift.x8632Registers do
       setReg emu ⟨name, .imm width, 0, false⟩ (bits width 0)
+    for name in Target.LLVMLift.x86Flags do
+      setReg emu ⟨name, .imm 1, 0, false⟩ (bits 1 (if name == "EFLAGS_1" || name == "IF" then 1 else 0))
     for name in ["CS", "DS", "ES", "FS", "GS", "SS"] do
       setReg emu ⟨name, .imm 16, 0, false⟩ (bits 16 0)
     setReg emu ⟨"FPU_CONTROL", .imm 16, 0, false⟩ (bits 16 0x37f)
@@ -2612,8 +2619,9 @@ private def resetRegisters (emu : Emu) : Architecture → IO Unit
   for name in ["RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15",
       "FS_BASE", "GS_BASE"] do
     setReg emu (word name) (bits 64 0)
-  for name in ["CF", "OF", "SF", "ZF", "AF", "PF", "DF", "IF"] do
-    setReg emu ⟨name, .imm 1, 0, false⟩ (bits 1 0)
+  -- Every bit of the flags, which `pushfq` reads all of: the one that is always set, and that interrupts are let in.
+  for name in Target.LLVMLift.x86Flags do
+    setReg emu ⟨name, .imm 1, 0, false⟩ (bits 1 (if name == "EFLAGS_1" || name == "IF" then 1 else 0))
   for index in List.range 32 do
     for (name, width) in [(s!"XMM{index}", 128), (s!"YMM{index}", 256), (s!"ZMM{index}", 512)] do
       setReg emu ⟨name, .imm width, 0, false⟩ (bits width 0)

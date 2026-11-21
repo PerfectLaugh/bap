@@ -145,7 +145,7 @@ def syncMemory (machine : Machine) : Except String Machine := do
         .ok machine
     | _ => .ok machine
 
-def step (machine : Machine) (system : System) (stmt : Bil.Stmt) (fuel : Nat := 100000) :
+def step (machine : Machine) (system : System) (stmt : Bil.Stmt) (fuel : Nat := Bil.loopLimit) :
     Except String (Machine × Bil.Effect) := do
   let inst ← match currentInstance machine with
     | some inst => .ok inst
@@ -175,7 +175,7 @@ private def runAux (machine : Machine) (system : System) : Nat → Bil.Program �
     | .normal => runAux machine system fuel rest
     | other => .ok (machine, other)
 
-def run (machine : Machine) (system : System) (program : Bil.Program) (fuel : Nat := 100000) :
+def run (machine : Machine) (system : System) (program : Bil.Program) (fuel : Nat := Bil.loopLimit) :
     Except String (Machine × Bil.Effect) :=
   runAux machine system fuel program
 
@@ -191,11 +191,11 @@ def atomically (initial : Machine) (action : Machine → Except String (Machine 
   | .ok (machine, value) => ⟨machine, .ok value⟩
   | .error error => ⟨initial, .error error⟩
 
-def stepAtomic (machine : Machine) (system : System) (stmt : Bil.Stmt) (fuel : Nat := 100000) :
+def stepAtomic (machine : Machine) (system : System) (stmt : Bil.Stmt) (fuel : Nat := Bil.loopLimit) :
     Transaction Bil.Effect :=
   atomically machine fun initial => step initial system stmt fuel
 
-def runAtomic (machine : Machine) (system : System) (program : Bil.Program) (fuel : Nat := 100000) :
+def runAtomic (machine : Machine) (system : System) (program : Bil.Program) (fuel : Nat := Bil.loopLimit) :
     Transaction Bil.Effect :=
   atomically machine fun initial => run initial system program fuel
 

@@ -1216,6 +1216,20 @@ def run : IO Unit := do
   let twoHuge := ofHex "7f454c4602010100000000000000000002003e00010000000000400000000000400000000000000000000000000000000000000040003800020040000000000001000000050000000000000000000000000040000000000000004000000000000000000000000000000000c000000000001000000000000001000000050000000000000000000000000040000200000000004000000000000000000000000000000000c0000000000010000000000000"
   assertEqual "ELF segments too large together are refused" (some "the regions of the file are too large")
     (match Image.decode twoHuge with | .error message => some message | .ok _ => none)
+  -- A relocatable file of one common symbol of 8 GiB, which is laid out after its sections.
+  let common := ofHex "7f454c4602010100000000000000000001003e00010000000000000000000000000000000000000085000000000000000000000040003800000040000300020000626967002e73796d746162002e73747274616200000000000000000000000000000000000000000000000000010000001100f2ff0800000000000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000050000000200000000000000000000000000000000000000550000000000000030000000000000000200000001000000080000000000000018000000000000000d000000030000000000000000000000000000000000000040000000000000001500000000000000000000000000000001000000000000000000000000000000"
+  assertEqual "ELF common symbols too large are refused" (some "the regions of the file are too large")
+    (match Image.decode common with | .error message => some message | .ok _ => none)
+  -- A file that defines no symbol for others has, by its GNU hash table, none past the first: those that it imports, which its
+  -- relocations name, are its still.
+  for (name, count) in [("aarch64-linux-gnu-echo", 18), ("x86_64-linux-gnu-echo", 10)] do
+    match Image.decode (← IO.FS.readBinFile s!"testsuite/bin/{name}") with
+    | .error error => throw <| IO.userError s!"{name}: {error}"
+    | .ok image =>
+      let symbols ← IO.ofExcept (Image.Elf.allDynamicSymbols image)
+      assertTrue s!"{name} has the dynamic symbols that it imports: {symbols.length} of {count}"
+        (symbols.length > count / 2 && symbols.length ≤ count)
+      assertTrue s!"{name} imports free" (symbols.any fun symbol => symbol.name.startsWith "free")
   runObjects
   runRelocations
   runFieldChecks

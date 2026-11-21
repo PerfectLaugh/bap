@@ -204,7 +204,7 @@
 (defun t2SUBri12 (rd rn imm cnd _)
   (when (condition-holds cnd) (set$ rd (- rn imm))))
 (defun tADDrSP (rd _ rm cnd _)
-  (when (condition-holds cnd) (t2set rd (+ SP (t2reg rm)))))
+  (when (condition-holds cnd) (t2alu rd (+ SP (t2reg rm)))))
 (defun tADDspr (_ _ rm cnd _)
   (when (condition-holds cnd) (set SP (+ SP (t2reg rm)))))
 

@@ -371,6 +371,21 @@ private def testPcWrites : IO Unit := do
   assertReg32 "Thumb pop {r0, pc} loads r0" "R0" 0x11 popState
   assertReg32 "Thumb pop {r0, pc} moves sp" "SP" 0x1008 popState
   assertJump "Thumb pop {r0, pc} jumps" 0x1234 popEffect
+  -- a move or a sum to the pc stays in Thumb, whatever its bit 0, which only what is loaded changes the instruction set by
+  for (label, values, target) in [("mov pc, r0", [0x87, 0x46], 0x4000), ("add pc, r0", [0x87, 0x44], 0x6004)] do
+    let (state, effect) ← executeEffect (← decodeThumb values) [word32 "R0" 0x4000, bit "ISET" 1]
+    assertJump s!"Thumb {label} jumps" target effect
+    assertFlag s!"Thumb {label} stays in Thumb" "ISET" 1 state
+  let (popped, _) ← executeEffect (← decodeThumb [0x01, 0xbd]) (bit "ISET" 1 :: (← thumbStack [0x11, 0x1234]))
+  assertFlag "Thumb pop {r0, pc} of an even address goes to ARM" "ISET" 0 popped
+  -- c.jalr ra of RISC-V jumps where ra said, not to what it links; and as c.jr, without the bit 0
+  let riscv ← Target.LLVMLift.riscvEnvironment
+  let (linked, linkedTo) ← executeEffect (← Target.LLVMLift.decodeRISCVWith riscv 0x10000 0x10000 (bytes [0x82, 0x90]))
+    [word "X1" 0x4001]
+  assertJump "RISC-V c.jalr ra jumps where ra said" 0x4000 linkedTo
+  assertReg "RISC-V c.jalr ra links" "X1" 0x10002 linked
+  let (_, returned) ← executeEffect (← Target.LLVMLift.decodeRISCVWith riscv 0x10000 0x10000 (bytes [0x82, 0x80])) [word "X1" 0x4001]
+  assertJump "RISC-V c.jr ra jumps without the bit 0" 0x4000 returned
 
 /-- Targets wrap around the address space, as they do in the lifted program. -/
 private def testWrappedTargets : IO Unit := do
@@ -622,6 +637,12 @@ private def testThumbIt : IO Unit := do
   let _ ← LLVM.disassemble "thumbv7" (bytes [0x08, 0xbf]) 0x2000
   assertFlag "adds after an IT decoded alone sets zero" "ZF" 1
     (← run [0x01, 0x30] [bit "ZF" 0, bit "CF" 0, bit "NF" 0, bit "VF" 0, r "R0" 0xffffffff])
+  -- nor does an IT that doesn't decode, of a condition of all the bits, as a word of data is
+  let refused ← (do let _ ← LLVM.disassemble "thumbv7" (bytes [0xfc, 0xbf]) 0x2000; pure false) <|> pure true
+  assertTrue "an IT of a condition of all the bits doesn't decode" refused
+  for index in [0, 1] do
+    assertFlag s!"adds {index} after an IT that didn't decode sets zero" "ZF" 1
+      (← run [0x01, 0x30] [bit "ZF" 0, bit "CF" 0, bit "NF" 0, bit "VF" 0, r "R0" 0xffffffff])
 
 /-- The moves and the integer arithmetic of SSE, on the XMM registers in the low bits of ZMM. -/
 private def testX86Sse : IO Unit := do

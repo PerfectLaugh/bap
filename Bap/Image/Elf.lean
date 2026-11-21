@@ -457,23 +457,42 @@ private def tagValue (tags : List (Nat × Nat)) (tag : Nat) : Option Nat :=
 /-- The size of the table that `DT_HASH` or `DT_GNU_HASH` says the symbols of a file have. The first has it in a field. The
 second has the buckets of the highest symbol, whose chain ends at the last one, with bit 0 set. -/
 private def dynamicSymbolCount (data : ByteArray) (headers : List ProgramHeader) (tags : List (Nat × Nat)) (is64 : Bool)
-    (endian : Endian) : Except String Nat := do
+    (endian : Endian) (machine : Nat := 0) : Except String Nat := do
   let read (address : Nat) : Except String Nat :=
     match offsetOf headers data.size address 4 with
     | some offset => IO.Reader.u32 data endian offset
     | none => .error "ELF hash table is outside the file"
+  -- The highest symbol that a relocation of the tables of `tags` names: of MIPS64, the first word of its `r_info`.
+  let wordSize := if is64 then 8 else 4
+  let symbolOf (offset : Nat) : Nat :=
+    if !is64 then ((IO.Reader.u32 data endian (offset + 4)).toOption.getD 0) / 256
+    else if machine == 8 then (IO.Reader.u32 data endian (offset + 8)).toOption.getD 0
+    else (IO.Reader.u32 data endian (offset + if endian == .little then 12 else 8)).toOption.getD 0
+  let highestOf (table size entry : Nat) : Nat :=
+    match offsetOf headers data.size table 0 with
+    | some start =>
+      let count := min (size / max entry 1) ((data.size - start) / max entry 1)
+      (List.range count).foldl (fun highest index => max highest (symbolOf (start + index * entry))) 0
+    | none => 0
+  let tableOf (at_ size entry fallback : Nat) : Nat :=
+    match tagValue tags at_, tagValue tags size with
+    | some table, some bytes => highestOf table bytes ((tagValue tags entry).getD fallback)
+    | _, _ => 0
+  let relocated := max (max (tableOf 7 8 9 (3 * wordSize)) (tableOf 17 18 19 (2 * wordSize)))
+    (tableOf 23 2 0 (if tagValue tags 20 == some 7 then 3 * wordSize else 2 * wordSize))
   match tagValue tags 4, tagValue tags 0x6ffffef5 with
   | some hash, _ => read (hash + 4)
   | none, some hash =>
     let buckets ← read hash
     let first ← read (hash + 4)
     let bloom ← read (hash + 8)
-    let wordSize := if is64 then 8 else 4
     let bucketsAt := hash + 16 + bloom * wordSize
     -- No more buckets than the file has room for, and one, as a count can be anything.
     let highest ← (List.range (min buckets (data.size / 4 + 1))).foldlM (init := 0) fun highest index => do
       pure (max highest (← read (bucketsAt + index * 4)))
-    if highest < first then .ok first
+    -- Of a table that has no symbol in it, as one of a file that defines none for others has, there are those that aren't in
+    -- it still, which what it imports are: as many as its relocations name, which a loader finds by their indices.
+    if highest < first then .ok (max first (relocated + 1))
     else
       let chainAt := bucketsAt + buckets * 4
       let rec walk : Nat → Nat → Except String Nat
@@ -493,7 +512,7 @@ private def dynamicSymbols (data : ByteArray) (header : Header) : Except String 
     let entrySize := (tagValue tags 11).getD (if header.is64 then 24 else 16)
     match offsetOf headers data.size table 0, offsetOf headers data.size strings 0 with
     | some tableOffset, some stringsOffset =>
-      let count ← dynamicSymbolCount data headers tags header.is64 header.endian
+      let count ← dynamicSymbolCount data headers tags header.is64 header.endian header.machine
       let strings : SectionHeader := ⟨0, 3, 0, strings, stringsOffset, 0, 0, 0, 0, 0⟩
       let parsed ← (List.range (min count (data.size / max entrySize 1 + 1))).mapM fun index =>
         parseSymbol data header strings (tableOffset + index * entrySize)
@@ -523,7 +542,18 @@ def zeroFill (data : ByteArray) : Nat :=
       (List.range entries).foldl (init := 0) fun total index =>
         let at_ := header.sectionOffset + index * header.sectionEntrySize
         let flags := field (at_ + 8)
-        if flags &&& 2 != 0 then total + field (at_ + if header.is64 then 32 else 20) else total
+        let size := field (at_ + if header.is64 then 32 else 20)
+        if flags &&& 2 != 0 then total + size
+        else if (IO.Reader.u32 data header.endian (at_ + 4)).toOption == some 2 then
+          -- And of each common symbol of a symbol table, which is laid out after them: its size, and as far as it is aligned to.
+          let start := field (at_ + if header.is64 then 24 else 16)
+          let entry := if header.is64 then 24 else 16
+          let count := min (size / entry) ((data.size - start) / entry)
+          (List.range count).foldl (init := total) fun total symbol =>
+            let at_ := start + symbol * entry
+            if (IO.Reader.u16 data header.endian (at_ + if header.is64 then 6 else 14)).toOption != some 0xfff2 then total
+            else total + field (at_ + if header.is64 then 16 else 8) + field (at_ + if header.is64 then 8 else 4)
+        else total
     else
       let entries := min header.programCount (data.size / max header.programEntrySize 1 + 1)
       (List.range entries).foldl (init := 0) fun total index =>
@@ -599,6 +629,8 @@ private def versionName (image : Image) (headers : List ProgramHeader) (tags : L
   let some start := start | return ""
   let some first := offsetOf headers image.data.size start entrySize | return ""
   let mut entry := first
+  -- As many steps as a file of many versions has of them all together, whatever the counts of each say.
+  let mut steps := 0
   for _ in List.range (min count 4096) do
     if defined then
       -- `Elf_Verdef`: its index at 4, and its name in the first `Elf_Verdaux`, at `vd_aux` from it.
@@ -609,6 +641,8 @@ private def versionName (image : Image) (headers : List ProgramHeader) (tags : L
       -- `Elf_Verneed`, of a file, with its `Elf_Vernaux`, each of a version of it, whose index is `vna_other`.
       let mut aux := entry + u32 (entry + 8)
       for _ in List.range (min (u16 (entry + 2)) 4096) do
+        steps := steps + 1
+        if steps > 4096 then return ""
         if u16 (aux + 6) == wanted then return text (u32 (aux + 8))
         if u32 (aux + 12) == 0 then break
         aux := aux + u32 (aux + 12)
@@ -984,7 +1018,7 @@ def allDynamicSymbols (image : Image) : Except String (List DynamicSymbol) := do
   let header ← parseHeader image.data
   let headers ← programHeaders image.data
   let tags ← dynamicTags image.data headers header.is64 image.endian
-  let count ← dynamicSymbolCount image.data headers tags header.is64 header.endian
+  let count ← dynamicSymbolCount image.data headers tags header.is64 header.endian header.machine
   let symbols ← (List.range (min count (image.data.size / (if header.is64 then 24 else 16) + 1))).mapM fun index =>
     dynamicSymbol image headers tags index
   .ok (symbols.filterMap id)

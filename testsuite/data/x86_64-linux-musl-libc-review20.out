@@ -1,0 +1,13 @@
+readv of a file, no vectors: Bad address
+writev of a file, no vectors: Bad address
+preadv of a file, no vectors: Bad address
+pwritev of a file, no vectors: Bad address
+readv of a pipe, no vectors: Bad address
+writev of a pipe, no vectors: Bad address
+readv of an eventfd, no vectors: Bad address
+writev of the output, no vectors: Bad address
+read of inotify, nowhere: Bad address
+futex wait, not aligned: Invalid argument
+futex wake, not aligned: Invalid argument
+futex wake, aligned: 0
+flags after xor: 246

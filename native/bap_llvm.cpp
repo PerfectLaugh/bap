@@ -219,6 +219,13 @@ struct DecoderContext {
     itLeft = 0;
   }
 
+  void failedDecode() {
+    if (!context.triple.isThumb())
+      return;
+    decoder.reset(context.target->createMCDisassembler(*context.subtarget, machineContext));
+    itLeft = 0;
+  }
+
   void afterDecode(uint64_t address, const MCInst &instruction, size_t size, const uint8_t *bytes) {
     if (!context.triple.isThumb())
       return;
@@ -265,8 +272,11 @@ Disassembly disassemble(const char *triple, const uint8_t *bytes, size_t size,
   ArrayRef<uint8_t> input(bytes, size);
   auto status = decoder->getInstruction(result.instruction, decodedSize, input, address,
                                         nulls());
-  if (status != MCDisassembler::Success)
+  if (status != MCDisassembler::Success) {
+    // What didn't decode may have left the decoder of Thumb in a block all the same, as an IT that it refuses does.
+    cached.failedDecode();
     throw std::runtime_error("instruction decoding failed");
+  }
   cached.afterDecode(address, result.instruction, decodedSize, bytes);
   raw_string_ostream output(result.text);
   printer->printInst(&result.instruction, address, "", *context.subtarget, output);

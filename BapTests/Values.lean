@@ -59,6 +59,8 @@ private def units : IO Unit := do
   assertEqual "an aligned stack pointer isn't known" Values.Value.top (Values.binary .and sp (.const 64 (2 ^ 64 - 16)))
   assertEqual "a register masked of its low bits is below the mask" (Values.Value.set none 64 0 3 1)
     (Values.binary .and (.set (some "RDI") 64 0 0 0) (.const 64 3))
+  assertEqual "a constant of all the bits taken from an address of the stack is added, as `sub rax, -128` does"
+    (Values.Value.set (some "RSP") 64 (-72) (-72) 0) (Values.binary .sub (.set (some "RSP") 64 (-200) (-200) 0) (.const 64 (2 ^ 64 - 128)))
   let left : Values.State := { env := ({} : Std.HashMap String Values.Value).insert "RBX" (.set (some "RBX") 64 8 8 0) }
   assertEqual "a register one way moved is of both, joined" (some (Values.Value.set (some "RBX") 64 0 8 8))
     ((left.join {}).env["RBX"]?)

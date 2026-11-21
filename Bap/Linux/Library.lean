@@ -546,11 +546,12 @@ private def prepare (machine : Machine) (path : String) (space : Nat) (search : 
     if architecture matches .mips .. then
       let tag (key : Nat) : Option Nat := (tags.find? (·.1 == key)).map (·.2)
       if let (some got, some locals) := (tag 3, tag 0x7000000a) then
-        for index in [0:locals] do
+        -- No more entries than the library has room for, whatever its tags say.
+        for index in [0:min locals (span / word)] do
           let place := base + got + index * word
           writeWord place ((← readWord place) + base)
         if let (some first, some total) := (tag 0x70000013, tag 0x70000011) then
-          for index in [first:total] do
+          for index in [first:min total symbolList.size] do
             let place := base + got + (locals + index - first) * word
             let symbol := symbolList[index]?
             match symbol with
@@ -590,7 +591,7 @@ private def prepare (machine : Machine) (path : String) (space : Nat) (search : 
     let arrayOf (start size : Nat) : IO (List Nat) := do
       match tagged start, tagged size with
       | some address, some bytes =>
-        (List.range (bytes / word)).filterMapM fun index => do
+        (List.range (min (bytes / word) (span / word))).filterMapM fun index => do
           let value ← readWord (base + address + index * word)
           -- 0 and all ones mean nothing, as linkers have them.
           pure (if value == 0 || value == 2 ^ architecture.bits - 1 then none else some value)
@@ -982,7 +983,7 @@ private def importSlotsOf (machine : Machine) (library : LoadedLibrary) : IO (St
     let tags := Image.Elf.dynamicTagsOf image
     let tag (key : Nat) : Option Nat := (tags.find? (·.1 == key)).map (·.2)
     if let (some got, some locals, some first, some total) := (tag 3, tag 0x7000000a, tag 0x70000013, tag 0x70000011) then
-      for index in [first:total] do
+      for index in [first:min total symbols.size] do
         if let some symbol := symbols[index]? then
           slots := slots.alter (unversioned symbol.name) fun known => some ((known.getD []) ++ [(got + (locals + index - first) * word, 0)])
   machine.importSlots.modify (·.insert key slots)

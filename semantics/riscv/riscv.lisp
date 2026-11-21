@@ -195,7 +195,8 @@
     (exec-addr dst)))
 
 (defun C_JR (dst)
-  (exec-addr dst))
+  "jumps to DST, whose lower bit is cleared, as JALR does"
+  (exec-addr (logand dst (lnot 1))))
 
 ;; of RV32 only, where the encoding isn't that of C.ADDIW
 (defun C_JAL (off)
@@ -207,8 +208,11 @@
   (exec-addr (+ (get-program-counter) dst)))
 
 (defun C_JALR (dst)
-  (set X1 (+ (get-program-counter) 2))
-  (exec-addr dst))
+  "computes the target before it saves the return address, as DST may
+   be X1"
+  (let ((target (logand dst (lnot 1))))
+    (set X1 (+ (get-program-counter) 2))
+    (exec-addr target)))
 
 (defun conditional-jump (cmp off)
   (declare (visibility :private))

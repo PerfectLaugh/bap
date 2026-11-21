@@ -265,6 +265,18 @@ structure Way where
   ending : Bool := false
   steps : Nat := 0
 
+/-- The variable of memory that a function's code reads. -/
+def memoryVar (instructions : List Disasm.Insn) : Option Bap.Var :=
+  let rec ofExp : Bil.Exp → Option Bap.Var
+    | .var var => if var.typ matches .mem _ _ then some var else none
+    | .load memory _ _ _ => ofExp memory
+    | .store memory _ _ _ _ => ofExp memory
+    | _ => none
+  instructions.findSome? fun insn => insn.bil.findSome? fun stmt =>
+    match stmt with
+    | .move var value => if var.typ matches .mem _ _ then some var else ofExp value
+    | _ => none
+
 /-- What is had of a function to go its ways. -/
 structure Function where
   image : Image.Image
@@ -273,6 +285,9 @@ structure Function where
   successors : Nat → List Nat
   volatile : List String
   width : Nat
+  /-- The stack pointer, and the variable of memory that the code reads. -/
+  stack : String := ""
+  memory : Option Bap.Var := none
 
 def Function.of (image : Image.Image) (program : Frame.Program) (function : Partition.Function) : Option Function := do
   let convention ← ABI.convention image.arch image.addrWidth
@@ -282,7 +297,9 @@ def Function.of (image : Image.Image) (program : Frame.Program) (function : Part
     | none => table
   pure { image, entry := function.entry, instructions, width := image.addrWidth
          successors := fun address => (program.successors.getD address []).filter instructions.contains
-         volatile := Frame.volatileOf image.arch convention }
+         volatile := Frame.volatileOf image.arch convention
+         stack := convention.stackPointer.name.str
+         memory := memoryVar (instructions.toList.map (·.2)) }
 
 /-- A condition as what it is of, and whether it holds or not: `c`, `c = 1` and `c = 0` of a bit. -/
 def polarityOf : Expr → Expr × Bool
@@ -329,6 +346,41 @@ structure Step where
   /-- Of a call, whether it calls, which one of ARM that has a condition doesn't of every way. -/
   calls : Bool := false
 
+/-- Whether a value is an address of the stack as it is made, a constant from the stack pointer on entry, or a byte of one. -/
+def stackAddress (stack : String) (entry : Bool := true) : Expr → Bool
+  | .extract _ _ value => stackAddress stack entry value
+  | value =>
+    -- without what doesn't change it, as a cast of the lifter, where it is small enough to look at
+    let value := if sizeOf 256 value > 256 then value else Partition.simplify value
+    match Symbolic.Memory.baseOffset value with
+    | (.var name _, offset) => name.startsWith (stack ++ "#") && (entry || offset != 0)
+    | _ => false
+
+/-- A state after what may write any of memory that it can reach, a call or a loop: the memories are new to the way, of `fresh`,
+but for what is at a constant from the stack pointer on entry, if no address of the stack is in a register of `given` or in memory,
+which nothing but the function then has: the stack pointer as it was on entry isn't one, which PowerPC keeps in its frame. -/
+def forgetMemory (function : Function) (fresh : String) (state : Symbolic.State) (all : Bool := false) : Symbolic.State :=
+  let stack := function.stack
+  let given := function.volatile
+  -- a memory that the way hasn't written is one too
+  let state := match function.memory with
+    | some var => if (Bap.Assoc.get var state.memories).isSome then state
+                  else { state with memories := (var, Symbolic.memoryOf state var) :: state.memories }
+    | none => state
+  let left := all || stack.isEmpty ||
+    state.env.any (fun (var, value) => given.contains var.name.str && stackAddress stack false value) ||
+    state.memories.any fun (_, memory) => memory.branch.isSome || memory.cells.any fun (_, value) => stackAddress stack false value
+  { state with memories := state.memories.map fun (var, memory) =>
+      (var, { name := s!"{memory.name}@{fresh}"
+              cells := if left then [] else memory.cells.filter fun (address, _) => stackAddress stack true address }) }
+
+/-- What a statement can write, at any depth, and whether it loops. -/
+partial def assigned : Bil.Stmt → List Bap.Var × Bool
+  | .move var _ => ([var], false)
+  | .while _ body => ((body.map assigned).flatMap (·.1), true)
+  | .ifElse _ yes no => (((yes ++ no).map assigned).flatMap (·.1), ((yes ++ no).map assigned).any (·.2))
+  | _ => ([], false)
+
 /-- The ways that each way of an instruction goes on to. -/
 def stepWay (function : Function) (way : Way) (insn : Disasm.Insn) : IO (List Step) := do
   let base := { way with path := insn.address :: way.path, steps := way.steps + 1
@@ -349,9 +401,29 @@ def stepWay (function : Function) (way : Way) (insn : Disasm.Insn) : IO (List St
     return results.filterMap fun result =>
       let state := { way.state with constraints := result.state.constraints, unknowns := result.state.unknowns }
       match result.outcome with
-      | .jump _ => some { way := { base with state := { state with env }, pending := none }, next, accesses := [], calls := true }
+      | .jump _ =>
+        -- and writes what it can reach of memory
+        -- of MIPS, what its delay slot gives it isn't in a register yet
+        let state := forgetMemory function s!"{insn.address}#{way.steps}" { state with env }
+          (Partition.mipsSlotted function.image.arch insn)
+        some { way := { base with state, pending := none }, next, accesses := [], calls := true }
       | .normal => some { way := { base with state, pending := none }, next, accesses := [] }
       | _ => none
+  -- a loop of an instruction, as a `rep` of x86, isn't gone round, which is a way of each round of a count that isn't known: what
+  -- it writes is new to the way, and it goes on to after itself
+  let written := insn.bil.map assigned
+  if written.any (·.2) && insn.flow == .normal then
+    let fresh := s!"{insn.address}#{way.steps}"
+    let env := (written.flatMap (·.1)).foldl (init := way.state.env) fun env var =>
+      match var.typ with
+      | .imm width => (var, Expr.var s!"{var.name}@{fresh}" width) :: env
+      | _ => env
+    let state := forgetMemory function fresh { way.state with env }
+    return [{ way := { base with state := compact state fresh, pending := none }
+              next := match way.pending with
+                | some target => within target
+                | none => if way.ending then none else within insn.next
+              accesses := [] }]
   let (program, count) := instrument function.width insn.bil
   let some results := (Symbolic.run program way.state 4000).toOption | return []
   let results := decided way.state results

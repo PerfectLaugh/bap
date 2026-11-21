@@ -191,11 +191,6 @@ mutual
         | .ok result => pure (.ok result)
 end
 
-/-- How many times a loop may test its condition before a run gives up, in the interpreter (its fuel) and in native code (`Lifted`):
-more than a `rep` of x86 copies of what a program has, 128 MiB of words, but few enough that one that doesn't end, which nothing
-interrupts within its instruction, ends the run in seconds rather than holding it for good. -/
-def loopLimit : Nat := 2 ^ 24
-
 def runObserved (observer : Option MemoryObserver) (program : Program) (initial : State := {})
     (fuel : Nat := loopLimit) : IO (Except String (State × Effect)) :=
   execProgramObserved observer fuel initial program

@@ -2,7 +2,8 @@
    one loaded of memory that one way finds null; a return before what it guards, of MIPS in a delay slot; a local
    that one way leaves unwritten, and one that every way writes; a store at an index of a mask past an array of the stack, and one
    past an array of the program, and loads within them; and two ways, one of which no input takes, which each end in a call of a function of their
-   own. It is never run: _start doesn't end. Built as partition.c is, see BapTests/Checker.lean. */
+   own; a local written by what is called, an array written by a loop, and of x86_64 a `rep` between a store and its load, of
+   which nothing is found. It is never run: _start doesn't end. Built as partition.c is, see BapTests/Checker.lean. */
 
 volatile long sink;
 
@@ -80,11 +81,40 @@ __attribute__((noinline)) long feasible(long x) {
   return sink;
 }
 
+/* A local that what is called writes, of its address: what it had before isn't what is loaded through after */
+__attribute__((noinline)) void fill(long **out) {
+  if (sink) *out = &cell;
+}
+
+__attribute__((noinline)) long outparam(void) {
+  long *p = 0;
+  fill(&p);
+  return *p;
+}
+
+/* An array that a loop writes all of, at an index that isn't one number, and a load of it after */
+__attribute__((noinline)) long loopinit(long n) {
+  volatile long buf[64];
+  for (long i = 0; i < 64; i++) buf[i] = n + i;
+  return buf[5];
+}
+
+#ifdef __x86_64__
+/* A loop of one instruction, of a count that isn't known, between a store of a local and its load */
+__attribute__((noinline)) long reps(long x, char *to, long count) {
+  volatile long v = x;
+  __asm__ volatile("rep stosb" : "+D"(to), "+c"(count) : "a"(0) : "memory");
+  return v;
+}
+#else
+__attribute__((noinline)) long reps(long x, char *to, long count) { return x + (long)to + count; }
+#endif
+
 void _start(void) {
   long total = 0;
   for (long i = 0; i < 10; i++)
     total += nulls(i) + nonnull(i) + uninit(i) + init(i) + overflow(i) + globalOverflow(i) + feasible(i) + fromGlobal() +
-             guarded(&cell);
+             guarded(&cell) + outparam() + loopinit(i) + reps(i, (char *)table, 8);
   sink = total;
   for (;;) {
   }

@@ -800,7 +800,7 @@ private theorem exec_frame (fuel : Nat) :
 theorem run_frame {program : Bil.Program} {state : Bil.State} {result : Bil.State × Bil.Effect}
     (h : Bil.run program state = .ok result) (var : Bap.Var) (hvar : var ∉ programWrites program) :
     Bil.lookup result.1.env var = Bil.lookup state.env var :=
-  (exec_frame 100000).2 state program result h var hvar
+  (exec_frame Bil.loopLimit).2 state program result h var hvar
 
 /-- Memory frame: a store leaves every byte outside the stored range as it was. -/
 theorem store_frame {w valueWidth : Nat} {memory updated : Memory w} (hm : Proofs.Core.MemoryLaws.PagesSized memory)
