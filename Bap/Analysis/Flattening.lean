@@ -425,12 +425,16 @@ partial def runMachine (function : Checker.Function) (memory : Option Bap.Var) (
       if !choosing (keyOf var) value && !own.any (·.1 == keyOf var) then
         result.modify fun run => { run with derived := run.derived.insert (keyOf var) }
     let env := kept
-    -- what the rounds write to memory but the state is of the round that wrote it
+    -- what the rounds write to memory but the state is of the round that wrote it: the bytes of the state, and not what is
+    -- beside it, whose cells of a round before would grow with each
+    let stateSize := match place.location with
+      | .memory _ size | .relative _ _ size => size
+      | _ => 8
     let memories := match memory with
       | some var =>
         let kept := (Symbolic.memoryOf state var).cells.filter fun (address, _) =>
           match stateAddress state width place with
-          | some at_ => (List.range 8).any fun offset =>
+          | some at_ => (List.range stateSize).any fun offset =>
             sameAddress address (Partition.simplify (.app "bvadd" width [at_, .const (BitVec.ofNat width offset)]))
           | none => false
         [(var, { Symbolic.memoryOf state var with cells := kept })]
@@ -444,7 +448,12 @@ partial def runMachine (function : Checker.Function) (memory : Option Bap.Var) (
     if current.isNone && (← steps.get) ≥ config.maxBefore then
       steps.set config.maxSteps
       return
-    if way.visits.getD address 0 ≥ 2 || Checker.oversized way.state then return
+    if way.visits.getD address 0 ≥ 2 then return
+    -- a round that is cut short of what its memory has grown to is of a state all the same, which goes where isn't known
+    if Checker.oversized way.state then
+      if current.isSome then
+        result.modify fun run => { run with arrivals := run.arrivals.push ({ state := current, last := none, nexts := none } : Arrival) }
+      return
     let some insn := function.instructions[address]? | return
     steps.modify (· + 1)
     if let some state := current then

@@ -227,7 +227,39 @@ def runAuxiliaryRecords : IO Unit := do
   | .error error => throw <| IO.userError s!"COFF of auxiliary records of sections: {error}"
   | .ok (image, _) => assertEqual "COFF of auxiliary records of sections has its section" [".text"] (image.segments.map (·.name))
 
+/-- Of objects that a compiler made, `testsuite/obj/pe`: a weak external is where its default is, in the object, rather than
+with what nothing defines; symbols without a section that have a size count to what the regions take, whatever their class; and a
+function of Thumb is one that runs in Thumb state, of an object and of an executable. -/
+def runCompiled : IO Unit := do
+  let weak ← IO.FS.readBinFile "testsuite/obj/pe/x86_64-windows-weak.obj"
+  match Coff.decodeReport weak with
+  | .error error => throw <| IO.userError s!"COFF of a weak external: {error}"
+  | .ok (image, _) =>
+    let default := image.symbols.find? (·.name.startsWith ".weak.weakf.default")
+    assertTrue "COFF of a weak external has its default" default.isSome
+    assertEqual "a COFF weak external is where its default is" (default.map (·.addr))
+      ((image.symbols.find? (·.name == "weakf")).map (·.addr))
+  let symbols := fieldOf weak 8 4
+  let sized := (List.range (fieldOf weak 12 4)).foldl (init := weak) fun data index =>
+    let at_ := symbols + index * 18
+    if fieldOf weak (at_ + 12) 2 == 0 && fieldOf weak (at_ + 16) 1 == 2 && fieldOf weak (at_ + 17) 1 == 0 then
+      setField (setField data (at_ + 16) 1 3) (at_ + 8) 4 0xc0000000
+    else data
+  assertTrue "COFF of a weak external has two symbols that nothing defines" (sized != weak)
+  assertEqual "COFF symbols of any class too large together are refused" (some "the regions of the COFF file are too large")
+    (match Coff.decodeReport sized with | .error message => some message | .ok _ => none)
+  match Coff.decodeReport (← IO.FS.readBinFile "testsuite/obj/pe/thumb-windows.obj"),
+      Image.decode (← IO.FS.readBinFile "testsuite/obj/pe/thumb-windows-pe.exe") with
+  | .ok (object, _), .ok executable =>
+    for (what, image) in [("object", object), ("executable", executable)] do
+      assertEqual s!"a function of a Thumb COFF {what} runs in Thumb state" (some true)
+        ((image.symbols.find? (·.name == "other")).map (·.thumb))
+      assertEqual s!"and what isn't a function of a Thumb COFF {what} doesn't" (some false)
+        ((image.symbols.find? (·.name == "arr")).map (·.thumb))
+  | .error error, _ | _, .error error => throw <| IO.userError s!"COFF of Thumb: {error}"
+
 def run : IO Unit := do
+  runCompiled
   -- Sections and commons whose headers ask for more zeros than a host can give, all together, aren't made.
   let table := 20 + fieldOf objectFixture 16 2
   let symbols := fieldOf objectFixture 8 4

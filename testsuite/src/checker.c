@@ -3,7 +3,8 @@
    that one way leaves unwritten, and one that every way writes; a store at an index of a mask past an array of the stack, and one
    past an array of the program, and loads within them; and two ways, one of which no input takes, which each end in a call of a function of their
    own; a local written by what is called, an array written by a loop, and of x86_64 a `rep` between a store and its load, of
-   which nothing is found. It is never run: _start doesn't end. Built as partition.c is, see BapTests/Checker.lean. */
+   which nothing is found; a store past an array after an operation of floating point, which is found; and a local that what is
+   called writes when something else is, and of x86 one that a `rep` writes, of which nothing is. It is never run: _start doesn't end. Built as partition.c is, see BapTests/Checker.lean. */
 
 volatile long sink;
 
@@ -110,11 +111,60 @@ __attribute__((noinline)) long reps(long x, char *to, long count) {
 __attribute__((noinline)) long reps(long x, char *to, long count) { return x + (long)to + count; }
 #endif
 
+/* An operation of floating point, which isn't a call of the system, between a mask and the store at it */
+volatile double real;
+
+__attribute__((noinline)) long realOverflow(long i, double d) {
+  long k = i & 15;
+  real = d + d;
+  table[k] = 7;
+  return table[i & 7];
+}
+
+/* A local whose address what is called keeps, and writes through when something else is called */
+long **kept;
+
+__attribute__((noinline)) void keep(long **out) { kept = out; }
+
+__attribute__((noinline)) void poke(void) {
+  if (sink) *kept = &cell;
+}
+
+__attribute__((noinline)) long later(void) {
+  long *p = &cell;
+  keep(&p);
+  p = 0;
+  __asm__ volatile("" : : : "memory");
+  poke();
+  return *p;
+}
+
+#if defined(__x86_64__) || defined(__i386__)
+/* A loop of one instruction that writes a local, through registers that a call of i686 keeps */
+__attribute__((noinline)) long repcopy(void) {
+  long *p = 0;
+  long *source = &cell;
+  void *to = &p, *from = &source;
+  long count = sizeof p;
+  __asm__ volatile("rep movsb" : "+D"(to), "+S"(from), "+c"(count) : : "memory");
+  return *p;
+}
+#else
+__attribute__((noinline)) long repcopy(void) { return cell; }
+#endif
+
+/* A load of null on a way that no input takes, which is a question that takes long: two factors of a prime */
+__attribute__((noinline)) long hard(unsigned long long x, unsigned long long y) {
+  if (x > 1 && y > 1 && x < (1ull << 32) && y < (1ull << 32) && x * y == 0x7fffffffffffffe7ull) return *(volatile int *)0;
+  return 0;
+}
+
 void _start(void) {
   long total = 0;
   for (long i = 0; i < 10; i++)
     total += nulls(i) + nonnull(i) + uninit(i) + init(i) + overflow(i) + globalOverflow(i) + feasible(i) + fromGlobal() +
-             guarded(&cell) + outparam() + loopinit(i) + reps(i, (char *)table, 8);
+             guarded(&cell) + outparam() + loopinit(i) + reps(i, (char *)table, 8) +
+             realOverflow(i, 1.5) + later() + repcopy() + hard(i, i);
   sink = total;
   for (;;) {
   }

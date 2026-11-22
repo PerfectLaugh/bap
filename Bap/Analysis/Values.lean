@@ -417,10 +417,13 @@ mutual
     | .jmp target => do
       let _ ← eval state target
       pure (state, true)
-    | .special _ | .cpuExn _ => do
-      -- what the system does of it, which `step` clobbers as of a call
-      modify fun effects => { effects with special := true }
+    | .special name => do
+      -- what the system does of a call of it, which `step` clobbers as of a call: not what any other intrinsic does, as an
+      -- operation of floating point is one, whose results are moves after it
+      if ["syscall", "sysenter", "svc", "interrupt"].any fun call => (name.splitOn call).length > 1 then
+        modify fun effects => { effects with special := true }
       pure (state, false)
+    | .cpuExn _ => pure (state, false)
     | .ifElse condition yes no => do
       match (← eval state condition).single with
       | some (none, 1) => pure (← exec machine state yes, false)
@@ -466,8 +469,7 @@ def step (context : Context) (insn : Disasm.Insn) (state : State) : Run State :=
   let effects ← get
   let after := if effects.lost then { after with escaped := true } else after
   if insn.flow != .call && !effects.special then return after
-  -- an address of the stack that a call is given has left: of a call of the system, whose arguments aren't those of a
-  -- function, one that any register has but the stack pointer
+  -- an address of the stack that a call is given has left: of a call of the system, in the registers of its arguments
   let ofStack (value : Value) : Bool := match value with
     | .set (some base) _ _ _ _ => base == stack
     | _ => false
@@ -475,7 +477,7 @@ def step (context : Context) (insn : Disasm.Insn) (state : State) : Run State :=
     if insn.flow == .call then
       (context.frame.convention.functionArguments ++ context.frame.convention.floatArguments).any fun var =>
         ofStack (after.read var)
-    else after.env.toList.any fun (name, value) => name != stack && ofStack value
+    else context.frame.convention.syscallArguments.any fun var => ofStack (after.read var)
   let after := if given then { after with escaped := true } else after
   -- and what has an address that has left may write there
   let after := if after.escaped then { after with slots := [] } else after

@@ -90,7 +90,21 @@ def testSuperclass : IO Unit := do
   assertEqual "JNI nor has an interface" 0 (← superclass (← find 0x120))
   assertEqual "JNI nor has nothing" 0 (← superclass 0)
 
+/-- A string of JNI is of modified UTF-8: a character past U+FFFF is two code units of three bytes each, and U+0000 is two bytes,
+neither of which UTF-8 has, and a name of them was nothing. -/
+def testModifiedUtf8 : IO Unit := do
+  let pair := ByteArray.mk #[0x61, 0xED, 0xA0, 0xBD, 0xED, 0xB8, 0x80]
+  let text := Bap.Emu.Jni.ofModifiedUtf8 pair
+  assertEqual "modified UTF-8 of a pair of code units is one character" ['a', Char.ofNat 0x1F600] text.toList
+  assertEqual "and is its bytes again" pair.toList (Bap.Emu.Jni.modifiedUtf8 text).toList
+  let zero := ByteArray.mk #[0x61, 0xC0, 0x80, 0x62]
+  assertEqual "modified UTF-8 of U+0000 is a character" ['a', Char.ofNat 0, 'b'] (Bap.Emu.Jni.ofModifiedUtf8 zero).toList
+  assertEqual "and is its bytes again" zero.toList (Bap.Emu.Jni.modifiedUtf8 (Bap.Emu.Jni.ofModifiedUtf8 zero)).toList
+  assertEqual "what is of neither is U+FFFD" [Char.ofNat 0xFFFD, 'a'] (Bap.Emu.Jni.ofModifiedUtf8 (ByteArray.mk #[0xFF, 0x61])).toList
+  assertEqual "plain text is as UTF-8 has it" "héllo→".toUTF8.toList (Bap.Emu.Jni.modifiedUtf8 "héllo→").toList
+
 def run : IO Unit := do
+  testModifiedUtf8
   let fallbacks ← IO.mkRef 0
   let allocated ← IO.mkRef ([] : List Nat)
   let nextBuffer ← IO.mkRef 0x52050000
@@ -184,9 +198,12 @@ def run : IO Unit := do
       pure 0x52070000)
     (fun _ _ => pure (.value 0))
   let wide ← dispatch wideModel (call 167 [0, 0x100])
-  assertEqual "JNI GetStringUTFLength counts bytes" 7 (← dispatch wideModel (call 168 [0, wide]))
+  -- of modified UTF-8, in which a character past U+FFFF is its two code units, of three bytes each: 1, 2 and 6
+  assertEqual "JNI GetStringUTFLength counts bytes of modified UTF-8" 9 (← dispatch wideModel (call 168 [0, wide]))
   assertEqual "JNI GetStringLength counts UTF-16 units" 4 (← dispatch wideModel (call 164 [0, wide]))
-  assertEqual "JNI GetStringUTFChars is UTF-8" 0x52060000 (← dispatch wideModel (call 169 [0, wide]))
+  -- which are bytes that it puts there, with what ends them, as they aren't what a string of UTF-8 is
+  assertEqual "JNI GetStringUTFChars is modified UTF-8" 0x52070000 (← dispatch wideModel (call 169 [0, wide]))
+  assertEqual "JNI GetStringUTFChars has the bytes of its length and what ends them" (some 10) (← allocated.get).head?
   assertEqual "JNI GetStringChars is UTF-16" 0x52070000 (← dispatch wideModel (call 165 [0, wide]))
   assertEqual "JNI GetStringChars has two bytes a unit" (some 8) (← allocated.get).head?
   -- JavaVM.GetEnv: a newer version is JNI_EVERSION, an older one works.

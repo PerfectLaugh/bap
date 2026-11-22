@@ -201,8 +201,8 @@
 (defun SHUFPSrri (dst _ src ctl)
   (shufps dst src ctl))
 
-(defun SHUFPSrmi (dst _ base scale index off _ ctl)
-  (let ((src (load-bits 128 (operand-address base scale index off))))
+(defun SHUFPSrmi (dst _ base scale index off seg ctl)
+  (let ((src (load-bits 128 (ea base scale index off seg))))
     (shufps dst src ctl)))
 
 ;; the two low words are selected from DST and the two high words
@@ -231,43 +231,43 @@
 (defun PMULDQrr (dst x src)
   (pmul set$ cast-signed dst x src))
 
-(defun PMULDQrm (dst x base scale index off _)
-  (let ((src (load-bits 128 (operand-address base scale index off))))
+(defun PMULDQrm (dst x base scale index off seg)
+  (let ((src (load-bits 128 (ea base scale index off seg))))
     (pmul set$ cast-signed dst x src)))
 
 (defun PMULUDQrr (dst x src)
   (pmul set$ cast-unsigned dst x src))
 
-(defun PMULUDQrm (dst x base scale index off _)
-  (let ((src (load-bits 128 (operand-address base scale index off))))
+(defun PMULUDQrm (dst x base scale index off seg)
+  (let ((src (load-bits 128 (ea base scale index off seg))))
     (pmul set$ cast-unsigned dst x src)))
 
 (defun VPMULDQrr (dst x src)
   (pmul set-vex cast-signed dst x src))
 
-(defun VPMULDQrm (dst x base scale index off _)
-  (let ((src (load-bits 128 (operand-address base scale index off))))
+(defun VPMULDQrm (dst x base scale index off seg)
+  (let ((src (load-bits 128 (ea base scale index off seg))))
     (pmul set-vex cast-signed dst x src)))
 
 (defun VPMULUDQrr (dst x src)
   (pmul set-vex cast-unsigned dst x src))
 
-(defun VPMULUDQrm (dst x base scale index off _)
-  (let ((src (load-bits 128 (operand-address base scale index off))))
+(defun VPMULUDQrm (dst x base scale index off seg)
+  (let ((src (load-bits 128 (ea base scale index off seg))))
     (pmul set-vex cast-unsigned dst x src)))
 
 (defun VPMULDQYrr (dst x src)
   (pmuly cast-signed dst x src))
 
-(defun VPMULDQYrm (dst x base scale index off _)
-  (let ((src (load-bits 256 (operand-address base scale index off))))
+(defun VPMULDQYrm (dst x base scale index off seg)
+  (let ((src (load-bits 256 (ea base scale index off seg))))
     (pmuly cast-signed dst x src)))
 
 (defun VPMULUDQYrr (dst x src)
   (pmuly cast-unsigned dst x src))
 
-(defun VPMULUDQYrm (dst x base scale index off _)
-  (let ((src (load-bits 256 (operand-address base scale index off))))
+(defun VPMULUDQYrm (dst x base scale index off seg)
+  (let ((src (load-bits 256 (ea base scale index off seg))))
     (pmuly cast-unsigned dst x src)))
 
 (defmacro pmul (set cast dst x src)
@@ -296,8 +296,8 @@
 (defun PACKSSDWrr (dst _ src)
   (set$ dst (packsdw/128 :signed dst src)))
 
-(defun PACKSSDWrm (dst _ base scale index off _)
-  (let ((src (load-bits 128 (operand-address base scale index off))))
+(defun PACKSSDWrm (dst _ base scale index off seg)
+  (let ((src (load-bits 128 (ea base scale index off seg))))
     (set$ dst (packsdw/128 :signed dst src))))
 
 (defun VPACKSSDWrr (dst src1 src2)
@@ -306,20 +306,20 @@
 (defun VPACKSSDWYrr (dst src1 src2)
   (set-vex dst (packsdw/256 :signed src1 src2)))
 
-(defun VPACKSSDWrm (dst src1 base scale index off _)
-  (let ((src2 (load-bits 128 (operand-address base scale index off))))
+(defun VPACKSSDWrm (dst src1 base scale index off seg)
+  (let ((src2 (load-bits 128 (ea base scale index off seg))))
     (set-vex dst (packsdw/128 :signed src1 src2))))
 
-(defun VPACKSSDWYrm (dst src1 base scale index off _)
-  (let ((src2 (load-bits 256 (operand-address base scale index off))))
+(defun VPACKSSDWYrm (dst src1 base scale index off seg)
+  (let ((src2 (load-bits 256 (ea base scale index off seg))))
     (set-vex dst (packsdw/256 :signed src1 src2))))
 
 
 (defun PACKUSDWrr (dst _ src)
   (set$ dst (packsdw/128 :unsigned dst src)))
 
-(defun PACKUSDWrm (dst _ base scale index off _)
-  (let ((src (load-bits 128 (operand-address base scale index off))))
+(defun PACKUSDWrm (dst _ base scale index off seg)
+  (let ((src (load-bits 128 (ea base scale index off seg))))
     (set$ dst (packsdw/128 :unsigned dst src))))
 
 (defun VPACKUSDWrr (dst src1 src2)
@@ -328,12 +328,12 @@
 (defun VPACKUSDWYrr (dst src1 src2)
   (set-vex dst (packsdw/256 :unsigned src1 src2)))
 
-(defun VPACKUSDWrm (dst src1 base scale index off _)
-  (let ((src2 (load-bits 128 (operand-address base scale index off))))
+(defun VPACKUSDWrm (dst src1 base scale index off seg)
+  (let ((src2 (load-bits 128 (ea base scale index off seg))))
     (set-vex dst (packsdw/128 :unsigned src1 src2))))
 
-(defun VPACKUSDWYrm (dst src1 base scale index off _)
-  (let ((src2 (load-bits 256 (operand-address base scale index off))))
+(defun VPACKUSDWYrm (dst src1 base scale index off seg)
+  (let ((src2 (load-bits 256 (ea base scale index off seg))))
     (set-vex dst (packsdw/256 :unsigned src1 src2))))
 
 (defun packsdw/128 (kind src1 src2)
@@ -376,16 +376,16 @@
 (defun VPACKSSWBYrr (dst src1 src2)
   (set-vex dst (packswb/256 :signed src1 src2)))
 
-(defun PACKSSWBrm (dst _ base scale index off _)
-  (let ((src (load-bits 128 (operand-address base scale index off))))
+(defun PACKSSWBrm (dst _ base scale index off seg)
+  (let ((src (load-bits 128 (ea base scale index off seg))))
     (set$ dst (packswb/128 :signed dst src))))
 
-(defun VPACKSSWBrm (dst src1 base scale index off _)
-  (let ((src2 (load-bits 128 (operand-address base scale index off))))
+(defun VPACKSSWBrm (dst src1 base scale index off seg)
+  (let ((src2 (load-bits 128 (ea base scale index off seg))))
     (set-vex dst (packswb/128 :signed src1 src2))))
 
-(defun VPACKSSWBYrm (dst src1 base scale index off _)
-  (let ((src2 (load-bits 256 (operand-address base scale index off))))
+(defun VPACKSSWBYrm (dst src1 base scale index off seg)
+  (let ((src2 (load-bits 256 (ea base scale index off seg))))
     (set-vex dst (packswb/256 :signed src1 src2))))
 
 
@@ -398,16 +398,16 @@
 (defun VPACKUSWBYrr (dst src1 src2)
   (set-vex dst (packswb/256 :unsigned src1 src2)))
 
-(defun PACKUSWBrm (dst _ base scale index off _)
-  (let ((src (load-bits 128 (operand-address base scale index off))))
+(defun PACKUSWBrm (dst _ base scale index off seg)
+  (let ((src (load-bits 128 (ea base scale index off seg))))
     (set$ dst (packswb/128 :unsigned dst src))))
 
-(defun VPACKUSWBrm (dst src1 base scale index off _)
-  (let ((src2 (load-bits 128 (operand-address base scale index off))))
+(defun VPACKUSWBrm (dst src1 base scale index off seg)
+  (let ((src2 (load-bits 128 (ea base scale index off seg))))
     (set-vex dst (packswb/128 :unsigned src1 src2))))
 
-(defun VPACKUSWBYrm (dst src1 base scale index off _)
-  (let ((src2 (load-bits 256 (operand-address base scale index off))))
+(defun VPACKUSWBYrm (dst src1 base scale index off seg)
+  (let ((src2 (load-bits 256 (ea base scale index off seg))))
     (set-vex dst (packswb/256 :unsigned src1 src2))))
 
 (defun packswb/128 (kind src1 src2)
@@ -502,14 +502,14 @@
 (defun zero-register (reg) (set$ reg 0:512))
 
 ;; MOVNTDQ - Store packed Integers Using Non-Temporal Hint
-(defun MOVNTDQmr (base scale index off _ src)
-  (non-temporal-store-word (operand-address base scale index off) 0 src))
+(defun MOVNTDQmr (base scale index off seg src)
+  (non-temporal-store-word (ea base scale index off seg) 0 src))
 
-(defun VMOVNTDQmr (base scale index off _ src)
-  (non-temporal-store-word (operand-address base scale index off) 0 src))
+(defun VMOVNTDQmr (base scale index off seg src)
+  (non-temporal-store-word (ea base scale index off seg) 0 src))
 
-(defun VMOVNTDQYmr (base scale index off _ src)
-  (non-temporal-store-word (operand-address base scale index off) 0 src))
+(defun VMOVNTDQYmr (base scale index off seg src)
+  (non-temporal-store-word (ea base scale index off seg) 0 src))
 
 ;; to be overriden by specialized analyses
 (defun non-temporal-store-word (base off src)
@@ -531,23 +531,23 @@
 (defun VANDPDYrr (rd rn rm)
   (bitwise-rrr set-vex ident logand rd rn rm))
 
-(defun ANDPSrm (rd rn ptr scale index off _)
-  (bitwise-rrm set$ ident logand rd rn ptr scale index off))
+(defun ANDPSrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set$ ident logand rd rn ptr scale index off seg))
 
-(defun ANDPDrm (rd rn ptr scale index off _)
-  (bitwise-rrm set$ ident logand rd rn ptr scale index off))
+(defun ANDPDrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set$ ident logand rd rn ptr scale index off seg))
 
-(defun VANDPSrm (rd rn ptr scale index off _)
-  (bitwise-rrm set-vex ident logand rd rn ptr scale index off))
+(defun VANDPSrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set-vex ident logand rd rn ptr scale index off seg))
 
-(defun VANDPDrm (rd rn ptr scale index off _)
-  (bitwise-rrm set-vex ident logand rd rn ptr scale index off))
+(defun VANDPDrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set-vex ident logand rd rn ptr scale index off seg))
 
-(defun VANDPSYrm (rd rn ptr scale index off _)
-  (bitwise-rrm set-vex ident logand rd rn ptr scale index off))
+(defun VANDPSYrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set-vex ident logand rd rn ptr scale index off seg))
 
-(defun VANDPDYrm (rd rn ptr scale index off _)
-  (bitwise-rrm set-vex ident logand rd rn ptr scale index off))
+(defun VANDPDYrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set-vex ident logand rd rn ptr scale index off seg))
 
 ;; [v]orp{s,d}
 (defun ORPSrr (rd rn rm)
@@ -565,23 +565,23 @@
 (defun VORPDYrr (rd rn rm)
   (bitwise-rrr set-vex ident logor rd rn rm))
 
-(defun ORPSrm (rd rn ptr scale index off _)
-  (bitwise-rrm set$ ident logor rd rn ptr scale index off))
+(defun ORPSrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set$ ident logor rd rn ptr scale index off seg))
 
-(defun ORPDrm (rd rn ptr scale index off _)
-  (bitwise-rrm set$ ident logor rd rn ptr scale index off))
+(defun ORPDrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set$ ident logor rd rn ptr scale index off seg))
 
-(defun VORPSrm (rd rn ptr scale index off _)
-  (bitwise-rrm set-vex ident logor rd rn ptr scale index off))
+(defun VORPSrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set-vex ident logor rd rn ptr scale index off seg))
 
-(defun VORPDrm (rd rn ptr scale index off _)
-  (bitwise-rrm set-vex ident logor rd rn ptr scale index off))
+(defun VORPDrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set-vex ident logor rd rn ptr scale index off seg))
 
-(defun VORPSYrm (rd rn ptr scale index off _)
-  (bitwise-rrm set-vex ident logor rd rn ptr scale index off))
+(defun VORPSYrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set-vex ident logor rd rn ptr scale index off seg))
 
-(defun VORPDYrm (rd rn ptr scale index off _)
-  (bitwise-rrm set-vex ident logor rd rn ptr scale index off))
+(defun VORPDYrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set-vex ident logor rd rn ptr scale index off seg))
 
 ;; [v]xorp{s,d}
 (defun XORPSrr (rd rn rm)
@@ -599,23 +599,23 @@
 (defun VXORPDYrr (rd rn rm)
   (bitwise-rrr set-vex ident logxor rd rn rm))
 
-(defun XORPSrm (rd rn ptr scale index off _)
-  (bitwise-rrm set$ ident logxor rd rn ptr scale index off))
+(defun XORPSrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set$ ident logxor rd rn ptr scale index off seg))
 
-(defun XORPDrm (rd rn ptr scale index off _)
-  (bitwise-rrm set$ ident logxor rd rn ptr scale index off))
+(defun XORPDrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set$ ident logxor rd rn ptr scale index off seg))
 
-(defun VXORPSrm (rd rn ptr scale index off _)
-  (bitwise-rrm set-vex ident logxor rd rn ptr scale index off))
+(defun VXORPSrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set-vex ident logxor rd rn ptr scale index off seg))
 
-(defun VXORPDrm (rd rn ptr scale index off _)
-  (bitwise-rrm set-vex ident logxor rd rn ptr scale index off))
+(defun VXORPDrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set-vex ident logxor rd rn ptr scale index off seg))
 
-(defun VXORPSYrm (rd rn ptr scale index off _)
-  (bitwise-rrm set-vex ident logxor rd rn ptr scale index off))
+(defun VXORPSYrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set-vex ident logxor rd rn ptr scale index off seg))
 
-(defun VXORPDYrm (rd rn ptr scale index off _)
-  (bitwise-rrm set-vex ident logxor rd rn ptr scale index off))
+(defun VXORPDYrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set-vex ident logxor rd rn ptr scale index off seg))
 
 
 ;; [v]andnp{s,d}
@@ -634,27 +634,27 @@
 (defun VANDNPDYrr (rd rn rm)
   (bitwise-rrr set-vex lnot logand rd rn rm))
 
-(defun ANDNPSrm (rd rn ptr scale index off _)
-  (bitwise-rrm set$ lnot logand rd rn ptr scale index off))
+(defun ANDNPSrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set$ lnot logand rd rn ptr scale index off seg))
 
-(defun ANDNPDrm (rd rn ptr scale index off _)
-  (bitwise-rrm set$ lnot logand rd rn ptr scale index off))
+(defun ANDNPDrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set$ lnot logand rd rn ptr scale index off seg))
 
-(defun VANDNPSrm (rd rn ptr scale index off _)
-  (bitwise-rrm set-vex lnot logand rd rn ptr scale index off))
+(defun VANDNPSrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set-vex lnot logand rd rn ptr scale index off seg))
 
-(defun VANDNPDrm (rd rn ptr scale index off _)
-  (bitwise-rrm set-vex lnot logand rd rn ptr scale index off))
+(defun VANDNPDrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set-vex lnot logand rd rn ptr scale index off seg))
 
-(defun VANDNPSYrm (rd rn ptr scale index off _)
-  (bitwise-rrm set-vex lnot logand rd rn ptr scale index off))
+(defun VANDNPSYrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set-vex lnot logand rd rn ptr scale index off seg))
 
-(defun VANDNPDYrm (rd rn ptr scale index off _)
-  (bitwise-rrm set-vex lnot logand rd rn ptr scale index off))
+(defun VANDNPDYrm (rd rn ptr scale index off seg)
+  (bitwise-rrm set-vex lnot logand rd rn ptr scale index off seg))
 
 
 (defmacro bitwise-rrr (set opo opi rd rn rm)
   (set rd (opi (opo rn) rm)))
 
-(defmacro bitwise-rrm (set opo opi rd rn ptr scale index off)
-  (set rd (opi (opo rn) (load-bits (word-width (unquote rn)) (operand-address ptr scale index off)))))
+(defmacro bitwise-rrm (set opo opi rd rn ptr scale index off seg)
+  (set rd (opi (opo rn) (load-bits (word-width (unquote rn)) (ea ptr scale index off seg)))))

@@ -253,7 +253,12 @@
 (defmacro t2-post (load rt wb rn off)
   (let ((a rn)) (set$ rt (load a)) (set$ wb (+ a off))))
 
-(defun t2LDR_PRE (rt wb rn off cnd _) (when (condition-holds cnd) (t2-pre load-word32 rt wb rn off)))
+(defun t2LDR_PRE (rt wb rn off cnd _)
+  "ldr rt, [rn, #off]!, which branches of a load to the pc, after the base is written"
+  (when (condition-holds cnd)
+    (let ((a (+ rn off)) (value (load-word32 a)))
+      (set$ wb a)
+      (t2set rt value))))
 (defun t2LDRB_POST (rt wb rn off cnd _) (when (condition-holds cnd) (t2-post load-byte32 rt wb rn off)))
 (defun t2LDRH_PRE (rt wb rn off cnd _) (when (condition-holds cnd) (t2-pre load-half32 rt wb rn off)))
 (defun t2LDRH_POST (rt wb rn off cnd _) (when (condition-holds cnd) (t2-post load-half32 rt wb rn off)))

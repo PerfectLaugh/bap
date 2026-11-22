@@ -561,6 +561,9 @@ private def serveFutex (emu : Emu) (address operation value timeout target compa
   let wake (bitset : Nat) : IO SyscallAction := do
     if bitset == 0 then return ← syscallReturn emu (.error einval)
     if address % 4 != 0 then return ← syscallReturn emu (.error einval)
+    -- A word that is shared is found by its page, which has to be there.
+    if operation &&& 0x80 == 0 then
+      if let .error _ ← (readWord32 emu address).toBaseIO then return ← syscallReturn emu (.error efault)
     let (space, word) ← keyOf address
     -- Of an `int`, as `futex_wake` has it: the first that waits is woken before the count is looked at, so that 0 or less is one.
     let count := if value % 2 ^ 32 == 0 || value % 2 ^ 32 ≥ 2 ^ 31 then 1 else value % 2 ^ 32
@@ -582,8 +585,11 @@ private def serveFutex (emu : Emu) (address operation value timeout target compa
   match command with
   | 0 => wait all
   | 1 => wake all
-  | 3 => requeue
+  | 3 => if address % 4 != 0 || target % 4 != 0 then syscallReturn emu (.error einval) else requeue
   | 4 =>
+    -- A count below 0, and then a word that isn't aligned, of either, before the word is looked at.
+    if value % 2 ^ 32 ≥ 2 ^ 31 || timeout % 2 ^ 32 ≥ 2 ^ 31 || address % 4 != 0 || target % 4 != 0 then
+      return ← syscallReturn emu (.error einval)
     match ← (readWord32 emu address).toBaseIO with
     | .error _ => syscallReturn emu (.error efault)
     | .ok word => if word != compare % 2 ^ 32 then syscallReturn emu (.error eagain) else requeue

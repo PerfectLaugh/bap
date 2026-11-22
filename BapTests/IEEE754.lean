@@ -86,6 +86,16 @@ def runRaised : IO Unit := do
   assertEqual "roundsd of 1.5 is inexact" ({ inexact := true } : Bap.Float.Raised) (raised .x86 "fround_rne_ieee754_binary_64" 0x3FF8000000000000)
   assertEqual "roundsd of 1.5 with bit 3 is quiet" ({} : Bap.Float.Raised) (raised .x86 "froundq_rne_ieee754_binary_64" 0x3FF8000000000000)
   assertEqual "and gives 2" (some 0x4000000000000000) ((Bap.Float.evaluateWith .x86 "froundq_rne_ieee754_binary_64" [0x3FF8000000000000]).map (·.2))
+  -- Of two NaNs, x87 gives the one of the greater significand, whichever comes first, and of the same, the one that isn't negative.
+  let nanA := (0x7fff <<< 64) ||| 0xc000000000000001
+  let nanB := (0x7fff <<< 64) ||| 0xe000000000000005
+  let nanC := (0xffff <<< 64) ||| 0xc000000000000001
+  for name in ["fadd_rne_ieee754_binary_80", "fmul_rne_ieee754_binary_80", "fdiv_rne_ieee754_binary_80"] do
+    assertEqual s!"x87 {name} of two NaNs is the greater" (some nanB) ((Bap.Float.evaluateWith .x86 name [nanA, nanB]).map (·.2))
+    assertEqual s!"x87 {name} of two NaNs is the greater, first too" (some nanB) ((Bap.Float.evaluateWith .x86 name [nanB, nanA]).map (·.2))
+    assertEqual s!"x87 {name} of two NaNs of one significand is the positive" (some nanA) ((Bap.Float.evaluateWith .x86 name [nanC, nanA]).map (·.2))
+  assertEqual "SSE addsd of two NaNs is the first" (some 0x7ff8000000000001)
+    ((Bap.Float.evaluateWith .x86 "fadd_rne_ieee754_binary_64" [0x7ff8000000000001, 0x7ffc000000000005]).map (·.2))
   -- An unnormal and a pseudo-infinity of x87, which the 387 and after take as invalid operands: the default NaN, the indefinite.
   let one := (0x3fff <<< 64) ||| 0x8000000000000000
   for (label, operand) in [("an unnormal", (0x3fff <<< 64) ||| 0x4000000000000000), ("a pseudo-infinity", 0x7fff <<< 64)] do

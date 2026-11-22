@@ -47,3 +47,36 @@ extern "C" lean_obj_res bap_z3_check_sat(lean_obj_arg script, lean_obj_arg) {
   Z3_del_context(context);
   return lean_io_result_mk_ok(lean_box(satisfiable ? 1 : 0));
 }
+
+// As bap_z3_check_sat, within so many milliseconds: 0 of none, 1 of some, and 2 of what Z3 doesn't say in that time.
+extern "C" lean_obj_res bap_z3_check_within(lean_obj_arg script, uint32_t millis, lean_obj_arg) {
+  Z3_config config = Z3_mk_config();
+  Z3_context context = Z3_mk_context(config);
+  Z3_del_config(config);
+  if (!context)
+    return io_error("unable to create Z3 context");
+  Z3_set_error_handler(context, nullptr);
+  Z3_solver solver = Z3_mk_solver(context);
+  if (!solver) {
+    Z3_del_context(context);
+    return io_error("unable to create Z3 solver");
+  }
+  Z3_solver_inc_ref(context, solver);
+  Z3_params params = Z3_mk_params(context);
+  Z3_params_inc_ref(context, params);
+  Z3_params_set_uint(context, params, Z3_mk_string_symbol(context, "timeout"), millis);
+  Z3_solver_set_params(context, solver, params);
+  Z3_params_dec_ref(context, params);
+  Z3_solver_from_string(context, solver, lean_string_cstr(script));
+  Z3_error_code code = Z3_get_error_code(context);
+  if (code != Z3_OK) {
+    std::string message = Z3_get_error_msg(context, code);
+    Z3_solver_dec_ref(context, solver);
+    Z3_del_context(context);
+    return io_error("Z3 rejected script: " + message);
+  }
+  Z3_lbool result = Z3_solver_check(context, solver);
+  Z3_solver_dec_ref(context, solver);
+  Z3_del_context(context);
+  return lean_io_result_mk_ok(lean_box(result == Z3_L_TRUE ? 1 : result == Z3_L_FALSE ? 0 : 2));
+}

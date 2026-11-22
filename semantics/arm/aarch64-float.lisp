@@ -529,7 +529,8 @@
 
 (defun a64-frint (mode a)
   "rounds to an integral value, mode x is the rounding mode of FPCR,
-   which FRINTX and FRINTI use"
+   which FRINTX and FRINTI use; of a signaling NaN, it is invalid (IOC)"
+  (set FPSR (logor FPSR (cast-unsigned 32 (a64-is-snan a))))
   (case mode
     'x (let ((rmode (extract 23 22 FPCR)))
          (fp-select (= rmode 0) (a64-frint-as 'n a)

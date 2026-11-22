@@ -365,6 +365,13 @@ def chooseNaN (rules : NaNRules) (format : Format) (operands : List Nat) : Nat :
   -- What isn't an operand at all, of x87, gives the default, as an invalid operation does.
   let given := operands.filter (!noncanonical format ·)
   let signaling := if rules.signalingFirst then given.find? (isSignaling format) else none
+  -- Of two NaNs, x87 gives the one of the greater significand, and of the same, the one that isn't negative.
+  let nans := (given.filter (isNaN format)).map (quiet format)
+  let magnitude (bits : Nat) : Nat := bits % 2 ^ (format.width - 1)
+  let given := if format.explicit && nans.length ≥ 2 then
+      [nans.foldl (init := nans.headD 0) fun best bits =>
+        if magnitude bits > magnitude best || (magnitude bits == magnitude best && bits < best) then bits else best]
+    else given
   match signaling, given.find? (isNaN format) with
   | some bits, _ | none, some bits => quiet format bits
   | none, none => positive

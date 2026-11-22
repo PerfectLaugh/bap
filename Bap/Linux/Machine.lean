@@ -1598,12 +1598,12 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
         pure .default
     let vectors (fd address count : Nat) (action : Nat → Nat → Nat → IO SyscallAction) : IO SyscallAction := do
       let mut total := 0
+      -- All of the array first, as `import_iovec` has it: one that isn't all there is EFAULT before anything is done.
+      let entries ← match ← (read emu address (2 * wordSize * count)).toBaseIO with
+        | .ok entries => pure entries
+        | .error _ => return errorOf Errno.efault
       for index in List.range count do
-        let entry ← read emu (address + 2 * wordSize * index) (2 * wordSize)
-        let field (offset : Nat) : Nat :=
-          (List.range wordSize).foldl (fun value at__ =>
-            let byte := if big then wordSize - 1 - at__ else at__
-            value + entry[offset + byte]!.toNat * 256 ^ at__) 0
+        let field (offset : Nat) : Nat := numberAt entries (2 * wordSize * index + offset) wordSize big
         match ← action fd (field 0) (field wordSize) with
         | .returnValue value =>
           if value ≥ 2 ^ 63 then
@@ -2286,12 +2286,11 @@ private def writeVectorDirect (machine : Machine) (emu : Emu) (group fd address 
   let word := machine.architecture.bits / 8
   let big := machine.architecture.big
   let mut total := 0
+  let entries ← match ← (read emu address (2 * word * count)).toBaseIO with
+    | .ok entries => pure entries
+    | .error _ => return errorOf Errno.efault
   for index in List.range count do
-    let entry ← read emu (address + 2 * word * index) (2 * word)
-    let field (offset : Nat) : Nat :=
-      (List.range word).foldl (fun value at_ =>
-        let byte := if big then word - 1 - at_ else at_
-        value + entry[offset + byte]!.toNat * 256 ^ at_) 0
+    let field (offset : Nat) : Nat := numberAt entries (2 * word * index + offset) word big
     match ← writeDirect machine emu group fd (field 0) (field word) with
     | .returnValue value =>
       if value ≥ 2 ^ 63 then

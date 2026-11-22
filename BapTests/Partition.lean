@@ -28,7 +28,7 @@ private def ofTarget (arch : String) (tables : Nat) : IO Unit := do
     let some found := partition.functionAt symbol.addr | throw (IO.userError s!"{path}: no function at {name}")
     pure found
   -- each function has all that its symbol has of the instructions
-  for name in ["dense", "offset", "letters", "die", "fail", "target", "thunk", "tail", "_start"] do
+  for name in ["dense", "offset", "letters", "die", "fail", "target", "thunk", "tail", "chainUser", "_start"] do
     let some symbol := image.symbols.find? (·.name == name) | throw (IO.userError s!"{path} has no {name}")
     let found ← function name
     let missing := partition.disasm.instructions.filter fun insn =>
@@ -42,7 +42,8 @@ private def ofTarget (arch : String) (tables : Nat) : IO Unit := do
   -- what never returns, and what only calls that, and what does
   for name in ["die", "fail", "_start"] do
     assertTrue s!"{arch} {name} doesn't return" !(← function name).returns
-  for name in ["dense", "offset", "letters", "target", "thunk", "tail"] do
+  -- and what only calls in its tail what itself only does, with what calls that, all of it
+  for name in ["dense", "offset", "letters", "target", "thunk", "tail", "chainLeaf", "chainMid", "chainTop", "chainUser"] do
     assertTrue s!"{arch} {name} returns" (← function name).returns
   if jumpingTails.contains arch then
     let target ← function "target"

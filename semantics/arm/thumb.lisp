@@ -190,7 +190,7 @@
 (defun t2LDRi8 (rt rn imm cnd _)
   "ldr rt, [rn, #-imm]"
   (when (condition-holds cnd)
-    (set$ rt (load-word (+ rn imm)))))
+    (t2set rt (load-word (+ rn imm)))))
 
 (defun t2LDRDi8 (rt rt2 rn imm cnd _)
   "ldrd rt, rt2, [rn, #imm]; the address is computed before rt,

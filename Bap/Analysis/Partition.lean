@@ -668,11 +668,19 @@ def partition (project : Project.Project) (rounds : Nat := 8) (known : Nat → L
       { entry, name := nameOf entry, instructions, tailCalls, calls, thunkOf, importName := imports[entry]?
         returns := hasReturn || imports.contains entry || unresolvedOf instructions }
     let byEntry : Std.HashMap Nat Function := functions.foldl (init := {}) fun table function => table.insert function.entry function
+    -- What may return: by a return of its own, or by a tail call of what may, however many of them it is through, which is the
+    -- least of what holds so; a tail call of what isn't a function here may.
+    let mut may : Std.HashSet Nat := functions.foldl (init := {}) fun set function =>
+      if function.returns && !noReturn.contains function.entry then set.insert function.entry else set
+    for _ in List.range (functions.length + 1) do
+      let more := functions.foldl (init := may) fun set function =>
+        if set.contains function.entry || noReturn.contains function.entry then set
+        else if function.tailCalls.any (fun (_, target) => set.contains target || !byEntry.contains target) then set.insert function.entry
+        else set
+      if more.size == may.size then break
+      may := more
     let grown := functions.foldl (init := noReturn) fun set function =>
-      if set.contains function.entry || function.returns then set
-      else if function.tailCalls.all (fun (_, target) => set.contains target || !(byEntry[target]?.map (·.returns)).getD true) then
-        set.insert function.entry
-      else set
+      if may.contains function.entry then set else set.insert function.entry
     if grown.size == noReturn.size then break
     noReturn := grown
   let final := functions.map fun function =>

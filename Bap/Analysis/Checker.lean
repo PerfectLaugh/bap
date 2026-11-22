@@ -230,7 +230,7 @@ partial def pageConstant (width : Nat) : Expr → Bool
 
 /-- Whether every input that meets the conditions makes an address null, below the first page: of the conditions of what the
 address is of, as far as they are small enough to ask. -/
-def nullOf (constraints : List Expr) (address : Expr) : IO Bool := do
+def nullOf (constraints : List Expr) (address : Expr) (millis : Nat := 250) : IO Bool := do
   if sizeOf maxQuestion address > maxQuestion then return false
   match constOf address with
   | some value => pure (value < 4096)
@@ -251,8 +251,9 @@ def nullOf (constraints : List Expr) (address : Expr) : IO Bool := do
     if size > maxQuestion then return false
     let page := Expr.const (BitVec.ofNat address.width 4096)
     -- of conditions that no input meets, every address is null
-    if ← FFI.Z3.isUnsat related then return false
-    FFI.Z3.isUnsat (.app "bvuge" 1 [address, page] :: related)
+    -- nor is an address null of what Z3 doesn't say in time
+    if (← FFI.Z3.isSatWithin related millis) != some true then return false
+    return (← FFI.Z3.isSatWithin (.app "bvuge" 1 [address, page] :: related) millis) == some false
 
 /-- A way being gone: the state, the instructions so far, newest first, how many times each was been at, and where a delay slot
 goes after it. -/
@@ -264,6 +265,8 @@ structure Way where
   /-- Whether the way ends after the delay slot it is in, of a jump of MIPS that goes out of the function, as a return. -/
   ending : Bool := false
   steps : Nat := 0
+  /-- Whether an address of the stack has left the function, so that what it calls may write its stack. -/
+  escaped : Bool := false
 
 /-- The variable of memory that a function's code reads. -/
 def memoryVar (instructions : List Disasm.Insn) : Option Bap.Var :=
@@ -356,23 +359,28 @@ def stackAddress (stack : String) (entry : Bool := true) : Expr → Bool
     | (.var name _, offset) => name.startsWith (stack ++ "#") && (entry || offset != 0)
     | _ => false
 
-/-- A state after what may write any of memory that it can reach, a call or a loop: the memories are new to the way, of `fresh`,
-but for what is at a constant from the stack pointer on entry, if no address of the stack is in a register of `given` or in memory,
-which nothing but the function then has: the stack pointer as it was on entry isn't one, which PowerPC keeps in its frame. -/
-def forgetMemory (function : Function) (fresh : String) (state : Symbolic.State) (all : Bool := false) : Symbolic.State :=
+/-- Whether an address of the stack has left the function, to what may write through it: one that a register of `registers` holds,
+or that is in memory. The stack pointer as it was on entry isn't one, which PowerPC keeps in its frame. -/
+def leaks (function : Function) (registers : List String) (state : Symbolic.State) : Bool :=
   let stack := function.stack
-  let given := function.volatile
+  stack.isEmpty ||
+    registers.any (fun name => match state.env.find? (·.1.name.str == name) with
+      | some (_, value) => stackAddress stack false value
+      | none => false) ||
+    state.memories.any fun (_, memory) => memory.branch.isSome || memory.cells.any fun (_, value) => stackAddress stack false value
+
+/-- A state after what may write any of memory that it can reach, a call or a loop: the memories are new to the way, of `fresh`,
+but for what is at a constant from the stack pointer on entry, unless an address of the stack has `left`, which nothing but the
+function has otherwise. -/
+def forgetMemory (function : Function) (fresh : String) (state : Symbolic.State) (left : Bool) : Symbolic.State :=
   -- a memory that the way hasn't written is one too
   let state := match function.memory with
     | some var => if (Bap.Assoc.get var state.memories).isSome then state
                   else { state with memories := (var, Symbolic.memoryOf state var) :: state.memories }
     | none => state
-  let left := all || stack.isEmpty ||
-    state.env.any (fun (var, value) => given.contains var.name.str && stackAddress stack false value) ||
-    state.memories.any fun (_, memory) => memory.branch.isSome || memory.cells.any fun (_, value) => stackAddress stack false value
   { state with memories := state.memories.map fun (var, memory) =>
       (var, { name := s!"{memory.name}@{fresh}"
-              cells := if left then [] else memory.cells.filter fun (address, _) => stackAddress stack true address }) }
+              cells := if left then [] else memory.cells.filter fun (address, _) => stackAddress function.stack true address }) }
 
 /-- What a statement can write, at any depth, and whether it loops. -/
 partial def assigned : Bil.Stmt → List Bap.Var × Bool
@@ -403,10 +411,11 @@ def stepWay (function : Function) (way : Way) (insn : Disasm.Insn) : IO (List St
       match result.outcome with
       | .jump _ =>
         -- and writes what it can reach of memory
-        -- of MIPS, what its delay slot gives it isn't in a register yet
-        let state := forgetMemory function s!"{insn.address}#{way.steps}" { state with env }
-          (Partition.mipsSlotted function.image.arch insn)
-        some { way := { base with state, pending := none }, next, accesses := [], calls := true }
+        -- of what it is given as it is called: of MIPS, what its delay slot gives it isn't in a register yet; and an
+        -- address that has left once is one that any call after may write through
+        let left := way.escaped || Partition.mipsSlotted function.image.arch insn || leaks function function.volatile way.state
+        let state := forgetMemory function s!"{insn.address}#{way.steps}" { state with env } left
+        some { way := { base with state, pending := none, escaped := left }, next, accesses := [], calls := true }
       | .normal => some { way := { base with state, pending := none }, next, accesses := [] }
       | _ => none
   -- a loop of an instruction, as a `rep` of x86, isn't gone round, which is a way of each round of a count that isn't known: what
@@ -418,8 +427,10 @@ def stepWay (function : Function) (way : Way) (insn : Disasm.Insn) : IO (List St
       match var.typ with
       | .imm width => (var, Expr.var s!"{var.name}@{fresh}" width) :: env
       | _ => env
-    let state := forgetMemory function fresh { way.state with env }
-    return [{ way := { base with state := compact state fresh, pending := none }
+    -- which is through the registers that it moves along, as a `rep` does edi, which a call keeps
+    let left := way.escaped || leaks function ((written.flatMap (·.1)).map (·.name.str)) way.state
+    let state := forgetMemory function fresh { way.state with env } left
+    return [{ way := { base with state := compact state fresh, pending := none, escaped := left }
               next := match way.pending with
                 | some target => within target
                 | none => if way.ending then none else within insn.next
@@ -471,10 +482,11 @@ def oversized (state : Symbolic.State) (maxCells : Nat := 256) : Bool :=
     memory.branch.isSome || memory.cells.length > maxCells ||
       memory.cells.any fun (address, value) => sizeOf maxQuestion address + sizeOf maxQuestion value > maxQuestion
 
-/-- Whether some input takes a way, of what Z3 says of its conditions: of conditions too big to ask, `big`. -/
-def feasible (way : Way) (big : Bool) : IO Bool := do
+/-- Whether some input takes a way, of what Z3 says of its conditions: of conditions too big to ask, or that it doesn't say of
+within `millis` milliseconds, `big`. -/
+def feasible (way : Way) (big : Bool) (millis : Nat := 250) : IO Bool := do
   let size := way.state.constraints.foldl (fun total constraint => total + sizeOf (4 * maxQuestion) constraint) 0
-  if size > 4 * maxQuestion then pure big else FFI.Z3.isSat way.state.constraints
+  if size > 4 * maxQuestion then pure big else return (← FFI.Z3.isSatWithin way.state.constraints millis).getD big
 
 /-- Each way of a function from its entry, as far as `config` lets it go: `visit` is given each step, of the instruction it is
 of, and says whether to go on. Z3 isn't asked of each way, as a context of it is costly: what `visit` finds of a way, it asks
@@ -521,7 +533,7 @@ def nullDereferences (image : Image.Image) (partition : Partition) (config : Con
         let before := (← asked.get).getD insn.address 0
         asked.modify fun table => table.insert insn.address (before + 1)
         questions.modify (· + 1)
-        if (← nullOf step.way.state.constraints address) && (← feasible step.way false) then
+        if (← nullOf step.way.state.constraints address config.maxMillis) && (← feasible step.way false config.maxMillis) then
           reported.modify (·.insert insn.address)
           found.modify (·.push { tag := .nullDereference, function := function.entry, insn := insn.address
                                  path := step.way.path.reverse, detail := s!"through {(Partition.simplify address).render}" })
@@ -541,7 +553,7 @@ def feasiblePath (image : Image.Image) (partition : Partition) (function : Parti
     if (← found.get).isSome then return false
     if insn.address == target && (insn.flow != .call || step.calls) then
       -- of conditions too big to ask, a way is taken to be taken
-      if ← feasible step.way true then
+      if ← feasible step.way true config.maxMillis then
         found.set (some step.way.path.reverse)
       return false
     return true

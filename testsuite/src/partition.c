@@ -1,5 +1,5 @@
 /* Of what Bap.Analysis.Partition finds of a program without running it: jump tables of switches, of a range from 0, of one
-   that doesn't start at 0, and of bytes; a function that never returns, and one that only calls it; a thunk; and a tail call. It
+   that doesn't start at 0, and of bytes; a function that never returns, and one that only calls it; a thunk; a tail call; and tail calls of tail calls. It
    is never run: _start doesn't end. Each is built freestanding, see BapTests/Partition.lean, e.g.
 
      clang --target=x86_64-linux-gnu -O2 -ffreestanding -fno-builtin -nostdlib -static -fuse-ld=lld -fno-pic -no-pie \
@@ -75,9 +75,25 @@ __attribute__((noinline)) int tail(int x) {
   return target(x + 2);
 }
 
+/* Tail calls of what itself only calls in its tail: each returns, as the last of them does, and what calls the first goes on */
+__attribute__((noinline)) int chainLeaf(int x) {
+  sink = x;
+  return x + 1;
+}
+
+__attribute__((noinline)) int chainMid(int x) { return chainLeaf(x ^ 5); }
+
+__attribute__((noinline)) int chainTop(int x) { return chainMid(x + 3); }
+
+__attribute__((noinline)) int chainUser(int x) {
+  int result = chainTop(x);
+  sink = result;
+  return result * 3;
+}
+
 void _start(void) {
   int total = 0;
-  for (int i = 0; i < 120; i++) total += dense(i) + offset(i) + letters((unsigned char)i) + thunk(i) + tail(i);
+  for (int i = 0; i < 120; i++) total += dense(i) + offset(i) + letters((unsigned char)i) + thunk(i) + tail(i) + chainUser(i);
   if (total == 12345) fail();
   sink = total;
   for (;;) {

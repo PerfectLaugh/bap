@@ -117,7 +117,9 @@ private def parseSymbol (data : ByteArray) (header : Header) (sections : List Se
   let address := match sectionOfNumber sections sectionIndex with
     | some sec => sec.addr + value
     | none => value
-  .ok ⟨name, address, 0, sectionIndex != 0 && symbolType &&& 0x30 = 0x20, storageClass = 103, false⟩
+  -- A function of Thumb, which is all that the code of these machines is, runs in Thumb state.
+  let function := sectionIndex != 0 && symbolType &&& 0x30 = 0x20
+  .ok ⟨name, address, 0, function, storageClass = 103, function && (header.machine == 0x1c2 || header.machine == 0x1c4)⟩
 
 /-- The symbols, with their indices, after those it has, one at a time: in an array, as so many of them are, which a list would copy
 for each. -/
@@ -377,9 +379,21 @@ private def architecture (machine : Nat) : Arch × Nat :=
   | 0x5064 => (.riscv, 64)
   | _ => (.unknown, 32)
 
-/-- Whether a symbol is undefined, as its section number says. -/
+/-- The symbol that a weak external is unless something else defines it, which nothing of one object does: the one at the
+`TagIndex` of its auxiliary record, if that one has a section. -/
+private def weakDefault (data : ByteArray) (header : Header) (index : Nat) : Option Nat := do
+  let at_ := header.symbolOffset + index * 18
+  guard ((IO.Reader.get8 data (at_ + 16)).toOption == some 105 && (IO.Reader.u16 data .little (at_ + 12)).toOption == some 0)
+  guard ((IO.Reader.get8 data (at_ + 17)).toOption.any (· ≥ 1))
+  let tag ← (IO.Reader.u32 data .little (at_ + 18)).toOption
+  guard (tag < header.symbolCount)
+  let section_ ← (IO.Reader.u16 data .little (header.symbolOffset + tag * 18 + 12)).toOption
+  if section_ != 0 && section_ < 0xfffe then some tag else none
+
+/-- Whether a symbol is undefined, as its section number says: not a weak external that has its default. -/
 private def isUndefined (data : ByteArray) (header : Header) (entry : Nat × Symbol) : Bool :=
-  !entry.2.name.isEmpty && (IO.Reader.u16 data .little (header.symbolOffset + entry.1 * 18 + 12)).toOption == some 0
+  !entry.2.name.isEmpty && (IO.Reader.u16 data .little (header.symbolOffset + entry.1 * 18 + 12)).toOption == some 0 &&
+    (weakDefault data header entry.1).isNone
 
 /-- Gives the undefined symbols that `select` picks storage after the cursor, each of `size` bytes, so that nothing
 relocated against them lands on a section. The storage is reported as a region, of which they are the only contents. -/
@@ -422,8 +436,8 @@ def zeroFill (data : ByteArray) : Nat :=
       for _ in [0:limit] do
         if index ≥ limit then break
         let at_ := header.symbolOffset + index * 18
-        let external := number (IO.Reader.read data .little (at_ + 16) 1) == 2
-        if external && number (IO.Reader.u16 data .little (at_ + 12)) == 0 then
+        -- of any class, as `placeUndefined` gives storage to any that has no section and a size
+        if number (IO.Reader.u16 data .little (at_ + 12)) == 0 then
           total := total + number (IO.Reader.u32 data .little (at_ + 8))
         index := index + 1 + number (IO.Reader.read data .little (at_ + 17) 1)
       total
@@ -442,6 +456,11 @@ def decodeReport (data : ByteArray) : Except String (Image × List String) := do
   let sections := placed.map fun object => object.info
   let word := (architecture header.machine).2 / 8
   let parsedSymbols := (← parseSymbols data header sections 0 header.symbolCount #[]).toList
+  -- A weak external is where its default is.
+  let parsedSymbols := parsedSymbols.map fun (index, symbol) =>
+    match (weakDefault data header index).bind fun tag => parsedSymbols.find? (·.1 == tag) with
+    | some (_, default) => (index, { symbol with addr := default.addr, isFunction := default.isFunction, thumb := default.thumb })
+    | none => (index, symbol)
   let commonsStart := alignUp (placed.foldl (fun cursor object =>
     if isMapped object then max cursor (object.info.addr + object.segment.size) else cursor) 0) word
   let (commons, commonsEnd) := placeUndefined data header word (· != 0) id commonsStart parsedSymbols

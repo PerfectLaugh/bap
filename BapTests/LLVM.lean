@@ -378,6 +378,9 @@ private def testPcWrites : IO Unit := do
     assertFlag s!"Thumb {label} stays in Thumb" "ISET" 1 state
   let (popped, _) ← executeEffect (← decodeThumb [0x01, 0xbd]) (bit "ISET" 1 :: (← thumbStack [0x11, 0x1234]))
   assertFlag "Thumb pop {r0, pc} of an even address goes to ARM" "ISET" 0 popped
+  -- as do the loads at an offset below the base, and with the base written first: ldr pc, [sp, #-4] and ldr pc, [r1, #4]!
+  assertTrue "Thumb ldr pc, [sp, #-4] does not fall through" (!(← decodeThumb [0x5d, 0xf8, 0x04, 0xfc]).fallsThrough)
+  assertTrue "Thumb ldr pc, [r1, #4]! does not fall through" (!(← decodeThumb [0x51, 0xf8, 0x04, 0xff]).fallsThrough)
   -- c.jalr ra of RISC-V jumps where ra said, not to what it links; and as c.jr, without the bit 0
   let riscv ← Target.LLVMLift.riscvEnvironment
   let (linked, linkedTo) ← executeEffect (← Target.LLVMLift.decodeRISCVWith riscv 0x10000 0x10000 (bytes [0x82, 0x90]))
@@ -1633,6 +1636,14 @@ private def testStatusRegisters : IO Unit := do
     (← execute (← Target.LLVMLift.decodeRISCVWith riscv 0 0 (bytes [0x73, 0x10, 0x35, 0x00])) [word32 "FCSR" 0xff, word "X10" 0x41, word "X0" 0])
   assertReg32 "csrw writes VXRM" "VXRM" 1
     (← execute (← Target.LLVMLift.decodeRISCVWith riscv 0 0 (bytes [0x73, 0x10, 0xa5, 0x00])) [word32 "VXRM" 3, word "X10" 0x5, word "X0" 0])
+  -- fmin.d fa0, fa0, fa1: a signaling NaN is ignored of the result, and is invalid
+  let least ← execute (← Target.LLVMLift.decodeRISCVWith riscv 0 0 (bytes [0x53, 0x05, 0xb5, 0x2a]))
+    [word32 "FCSR" 0, word "F10" 0x7ff0000000000001, word "F11" 0x3ff0000000000000]
+  assertReg "fmin.d of a signaling NaN is the other" "F10" 0x3ff0000000000000 least
+  assertReg32 "fmin.d of a signaling NaN is invalid" "FCSR" 0x10 least
+  assertReg32 "fmin.d of a quiet NaN isn't" "FCSR" 0
+    (← execute (← Target.LLVMLift.decodeRISCVWith riscv 0 0 (bytes [0x53, 0x05, 0xb5, 0x2a]))
+      [word32 "FCSR" 0, word "F10" 0x7ff8000000000000, word "F11" 0x3ff0000000000000])
   assertReg32 "32-bit csrr reads FCSR" "X10" 0x65
     (← execute (← Target.LLVMLift.decodeRISCV32With riscv32 0 0 (bytes [0x73, 0x25, 0x30, 0x00])) [word32 "FCSR" 0x65, word32 "X10" 0])
   -- mips: rdhwr $3, $29

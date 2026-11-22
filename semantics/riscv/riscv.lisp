@@ -1171,7 +1171,12 @@
         (gt (s< (fkey y) (fkey x)))
         (r (if max
                (fsel lt y (fsel gt x (logand x y)))
-             (fsel lt x (fsel gt y (logor x y))))))
+             (fsel lt x (fsel gt y (logor x y)))))
+        (q (- (if (= n 64) 52 23) 1))
+        (signals (logor (logand (fnan x) (not (select q x)))
+                        (logand (fnan y) (not (select q y))))))
+    ;; a signaling NaN, though it is ignored, is invalid (NV)
+    (set FCSR (logor FCSR (lshift (cast-unsigned 32 signals) 4)))
     (fset n rd (fsel (logand (fnan x) (fnan y)) (fcanonical n)
                      (fsel (fnan x) y
                            (fsel (fnan y) x r))))))

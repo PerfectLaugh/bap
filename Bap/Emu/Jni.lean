@@ -165,6 +165,54 @@ def utf16Units (text : String) : List Nat :=
       let offset := char.toNat - 0x10000
       [0xD800 + offset / 0x400, 0xDC00 + offset % 0x400]
 
+/-- A string as JNI has it in bytes, modified UTF-8: U+0000 is two bytes, and a character past U+FFFF is its two UTF-16 code
+units, each of three bytes. -/
+def modifiedUtf8 (text : String) : ByteArray :=
+  (utf16Units text).foldl (init := ByteArray.empty) fun bytes unit =>
+    if unit != 0 && unit < 0x80 then bytes.push unit.toUInt8
+    else if unit < 0x800 then (bytes.push (0xC0 + unit / 64).toUInt8).push (0x80 + unit % 64).toUInt8
+    else ((bytes.push (0xE0 + unit / 4096).toUInt8).push (0x80 + unit / 64 % 64).toUInt8).push (0x80 + unit % 64).toUInt8
+
+/-- The string of bytes of modified UTF-8, and of UTF-8, whose characters of four bytes are theirs: what isn't either is U+FFFD,
+as is half of a pair of code units without the other. -/
+def ofModifiedUtf8 (bytes : ByteArray) : String := Id.run do
+  let byte (index : Nat) : Nat := if index < bytes.size then bytes[index]!.toNat else 0
+  let continues (index : Nat) : Bool := byte index / 64 == 2
+  let mut units : Array Nat := #[]
+  let mut index := 0
+  -- the code units, or a character past them as it is
+  for _ in [0:bytes.size] do
+    if index ≥ bytes.size then break
+    let first := byte index
+    if first < 0x80 then
+      units := units.push first
+      index := index + 1
+    else if first / 32 == 6 && continues (index + 1) then
+      units := units.push ((first % 32) * 64 + byte (index + 1) % 64)
+      index := index + 2
+    else if first / 16 == 14 && continues (index + 1) && continues (index + 2) then
+      units := units.push ((first % 16) * 4096 + (byte (index + 1) % 64) * 64 + byte (index + 2) % 64)
+      index := index + 3
+    else if first / 8 == 30 && continues (index + 1) && continues (index + 2) && continues (index + 3) then
+      units := units.push ((first % 8) * 262144 + (byte (index + 1) % 64) * 4096 + (byte (index + 2) % 64) * 64 + byte (index + 3) % 64)
+      index := index + 4
+    else
+      units := units.push 0xFFFD
+      index := index + 1
+  let mut text := ""
+  let mut at_ := 0
+  for _ in [0:units.size] do
+    if at_ ≥ units.size then break
+    let unit := units[at_]!
+    let next := if at_ + 1 < units.size then units[at_ + 1]! else 0
+    if 0xD800 ≤ unit && unit < 0xDC00 && 0xDC00 ≤ next && next < 0xE000 then
+      text := text.push (Char.ofNat (0x10000 + (unit - 0xD800) * 0x400 + (next - 0xDC00)))
+      at_ := at_ + 2
+    else
+      text := text.push (if (0xD800 ≤ unit && unit < 0xE000) || unit > 0x10FFFF then Char.ofNat 0xFFFD else Char.ofNat unit)
+      at_ := at_ + 1
+  return text
+
 /-- The bytes of UTF-16 code units, the least significant first unless `big`. -/
 def utf16Bytes (units : List Nat) (big : Bool := false) : ByteArray :=
   ByteArray.mk (units.flatMap fun unit =>
@@ -236,7 +284,8 @@ def readCString (emu : Emu) (address : Nat) : IO String := do
       if offset ≥ 4096 then pure bytes else
         let byte ← Bap.Emu.read emu (address + offset) 1
         if byte[0]! = 0 then pure bytes else loop (offset + 1) (bytes.push byte[0]!)
-    pure (String.fromUTF8! (← loop 0 ByteArray.empty))
+    -- of modified UTF-8, as JNI has its names and strings, which a decoder of UTF-8 alone makes nothing of
+    pure (ofModifiedUtf8 (← loop 0 ByteArray.empty))
 
 private def freshIdentity (model : Model) : IO Identity := do
   let id ← model.nextIdentity.get
@@ -495,7 +544,8 @@ private def getObjectClass (model : Model) (handle : Nat) : IO Nat := do
       else
         let declared ← match objectId with
           | .external id => pure (model.classOf id)
-          | .internal _ => pure ((← model.classNames.get).get? objectId)
+          -- of a class, which is an object too, its class is the class of classes
+          | .internal _ => pure (((← model.classNames.get).get? objectId).map fun _ => "java/lang/Class")
         match declared with
         | some name => classIdentity model name
         | none =>
@@ -511,7 +561,9 @@ private def stringAddress (model : Model) (id : Identity) : IO Nat := do
     match info.address with
     | some address => pure address
     | none =>
-      let address ← model.allocString info.contents
+      -- of modified UTF-8: what is the same in UTF-8 goes as a string does
+      let modified := modifiedUtf8 info.contents
+      let address ← if modified == info.contents.toUTF8 then model.allocString info.contents else model.allocBytes (modified.push 0)
       model.strings.modify (·.insert id { info with address := some address })
       pure address
 
@@ -629,7 +681,7 @@ private def compute (model : Model) (call : Call) : IO (Nat × String) := do
   | 168 =>
     let id ← resolve model (arg call 1)
     match (← model.strings.get).get? id with
-    | some info => pure (info.contents.utf8ByteSize, "")
+    | some info => pure ((modifiedUtf8 info.contents).size, "")
     | none => pure (← fallback (), "")
   | 165 => pure (← resolve model (arg call 1) >>= wideStringAddress model, "")
   | 169 => pure (← resolve model (arg call 1) >>= stringAddress model, "")

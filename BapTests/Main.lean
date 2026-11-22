@@ -118,6 +118,8 @@ def main : IO Unit := do
     Bap.Tests.Emu.testLinuxRaises "powerpc64-linux-musl-libc-review19",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-review20",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-review20",
+    Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-review21",
+    Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-review21",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-search",
     Bap.Tests.Emu.testLinuxRaises "aarch64-linux-musl-libc-review8",
     Bap.Tests.Emu.testLinuxRaises "x86_64-linux-musl-libc-review8root",

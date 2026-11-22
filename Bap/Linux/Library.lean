@@ -610,8 +610,9 @@ private def prepare (machine : Machine) (path : String) (space : Nat) (search : 
     let versions := versions.map fun ((name, version), address) => ((name, version), (chosen.lookup name).getD address)
     let finished : LoadedLibrary := { library with needs, finalizers, symbols, initializers, versions }
     -- What it needs is held by it already, as each was counted when it was found.
+    -- Of the entry as it is by now, which others that need it hold since it was mapped: what holds it isn't taken back.
     machine.libraries.modify fun table => table.insert space ((spaceHas space table).map fun other =>
-      if other.path == path then finished else other)
+      if other.path == path then { finished with references := other.references } else other)
     pure finished
   pure { library, names := Elf.needed data, locate, finish }
 

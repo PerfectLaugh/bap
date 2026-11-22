@@ -117,7 +117,9 @@ private def parseSymbol (data : ByteArray) (header : Header) (sections : List Se
   let address := match sectionOfNumber sections sectionIndex with
     | some sec => sec.addr + value
     | none => value
-  .ok ⟨name, address, 0, sectionIndex != 0 && symbolType &&& 0x30 = 0x20, storageClass = 103, false⟩
+  -- A function of Thumb, which is all that the code of these machines is, runs in Thumb state.
+  let function := sectionIndex != 0 && symbolType &&& 0x30 = 0x20
+  .ok ⟨name, address, 0, function, storageClass = 103, function && (header.machine == 0x1c2 || header.machine == 0x1c4)⟩
 
 /-- The symbols, after those it has, one at a time: in an array, as so many of them are, which a list would copy for each. -/
 private def parseSymbols (data : ByteArray) (header : Header) (sections : List Section) :

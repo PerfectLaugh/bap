@@ -1,0 +1,29 @@
+readv of a pipe, second vector not there: Bad address
+what the pipe still has: 6
+abcdef
+readv of a file: Bad address
+where the file is: 0
+writev of a file: Bad address
+where the file is: 0
+pwritev of a file: Bad address
+size 5: hello
+requeue, first not aligned: Invalid argument
+requeue, second not aligned: Invalid argument
+cmp requeue, first not aligned: Invalid argument
+cmp requeue, second not aligned: Invalid argument
+cmp requeue, second not aligned, other value: Invalid argument
+cmp requeue, aligned, other value: Resource temporarily unavailable
+cmp requeue, aligned: 0
+wake, not aligned, nowhere: Invalid argument
+wait, aligned, nowhere: Bad address
+wake, aligned, nowhere: Bad address
+wake, aligned, nowhere, private: 0
+rint of a signaling NaN is invalid: 0, and a NaN: 1
+rint of 1.5 is invalid: 0, inexact: 0
+of the thread: 6.000000 2 4.000000
+child: status 1057f
+grandchild: status 137f
+grandchild: status 300
+child: status 117f
+child: status a00
+no more to wait for: No child process

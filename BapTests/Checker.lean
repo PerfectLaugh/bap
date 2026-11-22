@@ -29,10 +29,13 @@ private def ofTarget (arch : String) : IO Unit := do
     ((findings.filter (·.tag == tag)).map (nameOf ·.function)).mergeSort (· ≤ ·)
   -- nor of `outparam`, whose local what it calls writes; of `loopinit`, whose array a loop writes; or of `reps`, whose local a
   -- `rep` of x86_64 comes after the store of, and whose ways aren't of each round of it
+  -- nor of `hard`, whose load of null is on a way that Z3 doesn't say in time whether an input takes
   -- of `guarded`, a way that returns doesn't go on past its return, which of MIPS is in a delay slot, to what it guards
   assertEqual s!"{arch}: what loads through null" ["fromGlobal", "nulls"] (of .nullDereference)
   assertEqual s!"{arch}: what reads what it may not have written" ["uninit"] (of .uninitialized)
-  assertEqual s!"{arch}: what stores past an array" ["globalOverflow", "overflow"] (of .outOfBounds)
+  -- of `realOverflow` too, whose operation of floating point between the mask and the store is no call of the system; and
+  -- nothing of `later`, whose local what it calls writes through an address that it gave before, or of `repcopy`, whose a `rep` does
+  assertEqual s!"{arch}: what stores past an array" ["globalOverflow", "overflow", "realOverflow"] (of .outOfBounds)
   -- the way to the load of null ends at it
   for finding in findings.filter (·.tag == .nullDereference) do
     assertEqual s!"{arch}: the way to the load of null ends at it" (some finding.insn) finding.path.getLast?

@@ -110,8 +110,25 @@ private def units : IO Unit := do
   assertEqual "a choice of a few constants is all of them" (some 4) ((Flattening.choices (chain 3)).map (·.length))
   assertEqual "a choice of more than are gone over isn't some of them" none (Flattening.choices (chain 20))
 
+/-- A flattened function without optimization, `testsuite/src/flattened0.c`: its state is four bytes on the stack beside what its
+handlers change, whose cells aren't kept with it from round to round, so that no round is cut short of what memory has grown to, and
+every state has its edges. -/
+private def unoptimized : IO Unit := do
+  let path := "testsuite/bin/x86_64-linux-none-flattened0"
+  let project ← Project.Project.load path
+  let some image := project.image | throw (IO.userError s!"{path} doesn't load")
+  let some partition ← Values.partition project | throw (IO.userError s!"{path} has no partition")
+  let machines ← Flattening.machines image partition
+  let some machine := machines.head? | throw (IO.userError s!"{path} has no machine")
+  assertEqual "flattened0: the states" [0x11, 0x22, 0x33, 0x44, 0x55, 0x66] machine.cfg.states
+  for (source, nexts) in [(0x11, [0x22]), (0x22, [0x33, 0x44]), (0x33, [0x55]), (0x44, [0x55]), (0x55, [0x22, 0x66])] do
+    assertEqual s!"flattened0: where {source} goes" (nexts.map some)
+      (((machine.cfg.edges.filter (·.source == source)).map (·.target)).mergeSort fun a b => a.getD 0 ≤ b.getD 0)
+  assertTrue "flattened0: the last state ends" (machine.cfg.exits.contains 0x66)
+
 def run : IO Unit := do
   units
+  unoptimized
   for arch in targets do
     ofTarget arch
   -- cff.c, as it is compiled without optimization: its state on the stack, which every case's code jumps to the end of a loop after

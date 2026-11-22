@@ -239,6 +239,8 @@ private def toldTracer (ptrace : Ptrace) (emu : Emu) (tid status : Nat) : IO Uni
   if ((← emu.taskTable.get).find? tid).any (·.group == tid) then
     ptrace.signals.notifyParent emu tid status
     markUnwaited ptrace emu tid
+    -- and its parent, if it waits, has what it waits for
+    wakeWaits ptrace
 
 /-- What a signal that a tracer lets the tracee have is sent with, as Linux's `ptrace_signal` has it: what it stopped for, as it was,
 if the tracer lets that signal through, and otherwise one of the tracer's own. -/
