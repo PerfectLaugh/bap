@@ -17,6 +17,19 @@ private def execute (insn : Disasm.Insn) (env : List (Bap.Var × Bap.Value) := [
   let (state, _) ← executeEffect insn env
   pure state
 
+/-- An instruction run until it doesn't go back to itself, which a repeated string instruction of x86 does after each of its rounds
+but the last. -/
+private def executeAll (insn : Disasm.Insn) (env : List (Bap.Var × Bap.Value) := []) : IO Bil.State := do
+  let mut state : Bil.State := { env := VarMap.ofList env }
+  for _ in List.range 64 do
+    match Bil.run insn.bil state with
+    | .ok (next, .jump target) =>
+      state := next
+      if target.toNat != insn.address then return state
+    | .ok (next, _) => return next
+    | .error error => throw <| IO.userError error
+  throw <| IO.userError s!"{insn.asm} doesn't end"
+
 private def testRiscvRem : IO Unit := do
   let riscv ← Target.LLVMLift.riscvEnvironment
   -- rem a0, a1, a2 truncates: the result takes the sign of the dividend.
@@ -630,6 +643,14 @@ private def testThumbIt : IO Unit := do
   let (poppedState, notPopped) ← executeEffect (← decode itPop) (bit "ZF" 0 :: stack)
   assertEqual "IT with a pop under a false condition" true (notPopped matches .normal)
   assertReg32 "IT with a pop leaves the stack" "SP" 0x1000 poppedState
+  -- itt eq; moveq r0, r1; bkpt: a BKPT in a block is taken whatever the condition, which the instruction before it isn't
+  let itBkpt := [0x04, 0xbf, 0x08, 0x46, 0x00, 0xbe]
+  let (state, effect) ← executeEffect (← decode itBkpt) (flags 0)
+  assertReg32 "itt with a bkpt: what is before it is under the condition" "R0" 0 state
+  assertEqual "itt with a bkpt: the bkpt is taken when the condition doesn't hold" true (effect matches .special "breakpoint")
+  let (state, effect) ← executeEffect (← decode itBkpt) (flags 1)
+  assertReg32 "itt with a bkpt: what is before it runs when the condition holds" "R0" 11 state
+  assertEqual "itt with a bkpt: the bkpt is taken when the condition holds" true (effect matches .special "breakpoint")
   -- the rest of the program scans past the block
   let scan ← Disasm.Recursive.scan (← Target.Thumb.disassembler 0) (bytes (ite ++ [0x70, 0x47])) 0
   assertEqual "scan treats a block as an instruction" [0, 6] (scan.instructions.map (·.address))
@@ -1386,10 +1407,12 @@ private def testX86Repeat : IO Unit := do
   let decode32 (values : List Nat) := Target.LLVMLift.decodeX8632With x8632 0 0 (bytes values)
   let source := [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]
   let mem32 : Bap.Var := thumbMemVar
+  -- An execution of a repeated instruction is one round of it, after which it is at itself again while the count isn't 0: `executeAll`
+  -- is all its rounds.
   -- rep movsb
   let movsb := [0xf3, 0xa4]
   let m64 ← bytesAt (width := 64) 0x100 source
-  let moved ← execute (← decode64 movsb)
+  let moved ← executeAll (← decode64 movsb)
     [(memVar, .memory m64), word "RSI" 0x100, word "RDI" 0x200, word "RCX" 3, bit "DF" 0]
   assertEqual "rep movsb copies" [0x11, 0x22, 0x33, 0]
     (← [0x200, 0x201, 0x202, 0x203].mapM (readByte (width := 64) moved memVar))
@@ -1397,82 +1420,99 @@ private def testX86Repeat : IO Unit := do
   assertReg "rep movsb moves the source" "RSI" 0x103 moved
   assertReg "rep movsb moves the destination" "RDI" 0x203 moved
   let m32 ← bytesAt (width := 32) 0x100 source
-  let moved ← execute (← decode32 movsb)
+  let moved ← executeAll (← decode32 movsb)
     [(mem32, .memory m32), word32 "ESI" 0x100, word32 "EDI" 0x200, word32 "ECX" 3, bit "DF" 0]
   assertEqual "32-bit rep movsb copies" [0x11, 0x22, 0x33, 0]
     (← [0x200, 0x201, 0x202, 0x203].mapM (readByte (width := 32) moved mem32))
   assertReg32 "32-bit rep movsb counts down" "ECX" 0 moved
   assertReg32 "32-bit rep movsb moves the source" "ESI" 0x103 moved
+  let (round, effect) ← executeEffect (← Target.LLVMLift.decodeX86With x86 0 0x40 (bytes ((List.replicate 0x40 0x90) ++ movsb)))
+    [(memVar, .memory m64), word "RSI" 0x100, word "RDI" 0x200, word "RCX" 3, bit "DF" 0]
+  assertEqual "a round of rep movsb copies one" [0x11, 0] (← [0x200, 0x201].mapM (readByte (width := 64) round memVar))
+  assertReg "a round of rep movsb counts one" "RCX" 2 round
+  assertReg "a round of rep movsb moves the source by one" "RSI" 0x101 round
+  assertJump "a round of rep movsb that isn't the last goes to the instruction" 0x40 effect
+  let (round, effect) ← executeEffect (← decode64 movsb)
+    [(memVar, .memory m64), word "RSI" 0x100, word "RDI" 0x200, word "RCX" 1, bit "DF" 0]
+  assertReg "the last round of rep movsb counts to 0" "RCX" 0 round
+  assertTrue "the last round of rep movsb goes on" (effect matches .normal)
+  let (round, effect) ← executeEffect (← decode64 [0xf2, 0xae])
+    [(memVar, .memory m64), word "RAX" 0x11, word "RDI" 0x100, word "RCX" 8, bit "DF" 0]
+  assertReg "a round of repne scasb that finds its byte counts it" "RCX" 7 round
+  assertTrue "a round of repne scasb that finds its byte goes on" (effect matches .normal)
+  let (_, effect) ← executeEffect (← decode64 [0xf2, 0xae])
+    [(memVar, .memory m64), word "RAX" 0x22, word "RDI" 0x100, word "RCX" 8, bit "DF" 0]
+  assertJump "a round of repne scasb that doesn't find its byte goes to the instruction" 0 effect
   -- with no count nothing moves, and without the prefix it runs once
-  let none ← execute (← decode64 movsb)
+  let none ← executeAll (← decode64 movsb)
     [(memVar, .memory m64), word "RSI" 0x100, word "RDI" 0x200, word "RCX" 0, bit "DF" 0]
   assertEqual "rep movsb without a count stores nothing" 0 (← readByte (width := 64) none memVar 0x200)
   assertReg "rep movsb without a count keeps the source" "RSI" 0x100 none
-  let once ← execute (← decode64 [0xa4])
+  let once ← executeAll (← decode64 [0xa4])
     [(memVar, .memory m64), word "RSI" 0x100, word "RDI" 0x200, word "RCX" 3, bit "DF" 0]
   assertEqual "movsb moves one byte" [0x11, 0]
     (← [0x200, 0x201].mapM (readByte (width := 64) once memVar))
   assertReg "movsb keeps the count" "RCX" 3 once
   -- the direction flag
-  let backward ← execute (← decode64 movsb)
+  let backward ← executeAll (← decode64 movsb)
     [(memVar, .memory m64), word "RSI" 0x102, word "RDI" 0x202, word "RCX" 2, bit "DF" 1]
   assertEqual "rep movsb backward" [0, 0x22, 0x33]
     (← [0x200, 0x201, 0x202].mapM (readByte (width := 64) backward memVar))
   assertReg "rep movsb backward moves down" "RDI" 0x200 backward
   -- rep stosd
   let stosd := [0xf3, 0xab]
-  let stored ← execute (← decode64 stosd)
+  let stored ← executeAll (← decode64 stosd)
     [(memVar, .memory (Memory.empty 64)), word "RAX" 0xaabbccdd, word "RDI" 0x300, word "RCX" 2, bit "DF" 0]
   assertEqual "rep stosd stores words" [0xdd, 0xcc, 0xbb, 0xaa, 0xdd, 0xcc, 0xbb, 0xaa, 0]
     (← (List.range 9).mapM fun i => readByte (width := 64) stored memVar (0x300 + i))
   assertReg "rep stosd moves by words" "RDI" 0x308 stored
   assertReg "rep stosd counts down" "RCX" 0 stored
-  let stored ← execute (← decode32 stosd)
+  let stored ← executeAll (← decode32 stosd)
     [(mem32, .memory (Memory.empty 32)), word32 "EAX" 0xaabbccdd, word32 "EDI" 0x300, word32 "ECX" 2, bit "DF" 0]
   assertEqual "32-bit rep stosd stores words" [0xdd, 0xaa, 0xdd, 0xaa, 0]
     (← [0, 3, 4, 7, 8].mapM fun i => readByte (width := 32) stored mem32 (0x300 + i))
   assertReg32 "32-bit rep stosd moves by words" "EDI" 0x308 stored
   -- rep stosq with its REX prefix
-  let stored ← execute (← decode64 [0xf3, 0x48, 0xab])
+  let stored ← executeAll (← decode64 [0xf3, 0x48, 0xab])
     [(memVar, .memory (Memory.empty 64)), word "RAX" 0x1122334455667788, word "RDI" 0x300, word "RCX" 1, bit "DF" 0]
   assertReg "rep stosq moves by double words" "RDI" 0x308 stored
   assertEqual "rep stosq stores the top byte" 0x11 (← readByte (width := 64) stored memVar 0x307)
   -- repne scasb stops at the byte it looks for
   let scasb := [0xf2, 0xae]
-  let scanned ← execute (← decode64 scasb)
+  let scanned ← executeAll (← decode64 scasb)
     [(memVar, .memory m64), word "RAX" 0x33, word "RDI" 0x100, word "RCX" 8, bit "DF" 0]
   assertReg "repne scasb stops after the match" "RDI" 0x103 scanned
   assertReg "repne scasb counts the bytes" "RCX" 5 scanned
   assertFlag "repne scasb sets ZF at the match" "ZF" 1 scanned
-  let scanned ← execute (← decode32 scasb)
+  let scanned ← executeAll (← decode32 scasb)
     [(mem32, .memory m32), word32 "EAX" 0x33, word32 "EDI" 0x100, word32 "ECX" 8, bit "DF" 0]
   assertReg32 "32-bit repne scasb stops after the match" "EDI" 0x103 scanned
   assertReg32 "32-bit repne scasb counts the bytes" "ECX" 5 scanned
   assertFlag "32-bit repne scasb sets ZF at the match" "ZF" 1 scanned
-  let missed ← execute (← decode64 scasb)
+  let missed ← executeAll (← decode64 scasb)
     [(memVar, .memory m64), word "RAX" 0xee, word "RDI" 0x100, word "RCX" 4, bit "DF" 0]
   assertReg "repne scasb runs out of the count" "RCX" 0 missed
   assertFlag "repne scasb without a match clears ZF" "ZF" 0 missed
   -- repe cmpsb stops at the first difference
   let other ← bytesAt 0x200 [0x11, 0x22, 0xff, 0x44] m64
-  let compared ← execute (← decode64 [0xf3, 0xa6])
+  let compared ← executeAll (← decode64 [0xf3, 0xa6])
     [(memVar, .memory other), word "RSI" 0x100, word "RDI" 0x200, word "RCX" 8, bit "DF" 0]
   assertReg "repe cmpsb stops after the difference" "RSI" 0x103 compared
   assertReg "repe cmpsb counts the bytes" "RCX" 5 compared
   assertFlag "repe cmpsb clears ZF at the difference" "ZF" 0 compared
   -- the last of the repeat prefixes counts, as in the architecture and LLVM
-  let last ← execute (← decode64 [0xf3, 0xf2, 0xae])
+  let last ← executeAll (← decode64 [0xf3, 0xf2, 0xae])
     [(memVar, .memory m64), word "RAX" 0x33, word "RDI" 0x100, word "RCX" 8, bit "DF" 0]
   assertReg "of REP and REPNE the last counts" "RDI" 0x103 last
   -- the prefix of the address size: the 32-bit registers and the count, which clears the upper half
-  let short ← execute (← decode64 [0x67, 0xf3, 0xa4])
+  let short ← executeAll (← decode64 [0x67, 0xf3, 0xa4])
     [(memVar, .memory m64), word "RSI" 0x100, word "RDI" 0x200, word "RCX" 0x100000002, bit "DF" 0]
   assertEqual "rep movsb with the prefix 0x67 copies by ECX" [0x11, 0x22, 0]
     (← [0x200, 0x201, 0x202].mapM (readByte (width := 64) short memVar))
   assertReg "a 32-bit count clears the upper half" "RCX" 0 short
   assertReg "a 32-bit source clears the upper half" "RSI" 0x102 short
   let m32 ← bytesAt (width := 32) 0x100 source
-  let short32 ← execute (← decode32 [0x67, 0xf3, 0xa4])
+  let short32 ← executeAll (← decode32 [0x67, 0xf3, 0xa4])
     [(mem32, .memory m32), word32 "ESI" 0x100, word32 "EDI" 0x200, word32 "ECX" 0x10002, bit "DF" 0]
   assertEqual "rep movsb with the prefix 0x67 copies by CX" [0x11, 0x22, 0]
     (← [0x200, 0x201, 0x202].mapM (readByte (width := 32) short32 mem32))
@@ -1480,10 +1520,72 @@ private def testX86Repeat : IO Unit := do
   assertEqual "the prefixes that count" [0x66, 0xf3] (Target.LLVMLift.x86Prefixes true [0x66, 0xf3, 0xa5])
   assertEqual "a REX prefix before a prefix is ignored" [0xf3] (Target.LLVMLift.x86Prefixes true [0x48, 0xf3, 0xa4])
   assertEqual "the 32-bit mode has no REX prefix" ([] : List Nat) (Target.LLVMLift.x86Prefixes false [0x48, 0xf3, 0xa4])
-  -- a repeated string instruction doesn't change the control flow
+  -- what reads the code and doesn't run it has the rounds as one loop, which leaves what they leave
+  let project ← Target.X86.disassembler 0
+  let looped (values : List Nat) : IO Disasm.Insn := do
+    match ← project.decode 0 (bytes values) with
+    | .ok insn => pure insn
+    | .error error => throw <| IO.userError error
+  let whole ← looped movsb
+  assertTrue "rep movsb of a project is a loop" (whole.bil matches [.while _ _])
+  let moved ← execute whole [(memVar, .memory m64), word "RSI" 0x100, word "RDI" 0x200, word "RCX" 3, bit "DF" 0]
+  assertEqual "rep movsb of a project copies" [0x11, 0x22, 0x33, 0]
+    (← [0x200, 0x201, 0x202, 0x203].mapM (readByte (width := 64) moved memVar))
+  assertReg "rep movsb of a project counts down" "RCX" 0 moved
+  let scanned ← execute (← looped scasb) [(memVar, .memory m64), word "RAX" 0x33, word "RDI" 0x100, word "RCX" 8, bit "DF" 0]
+  assertReg "repne scasb of a project stops after the match" "RDI" 0x103 scanned
+  assertReg "repne scasb of a project counts the bytes" "RCX" 5 scanned
+  let missed ← execute (← looped scasb) [(memVar, .memory m64), word "RAX" 0xee, word "RDI" 0x100, word "RCX" 4, bit "DF" 0]
+  assertReg "repne scasb of a project runs out of the count" "RCX" 0 missed
+  let none ← execute (← looped scasb) [(memVar, .memory m64), word "RAX" 0x11, word "RDI" 0x100, word "RCX" 0, bit "DF" 0, bit "ZF" 0]
+  assertReg "repne scasb of a project without a count doesn't move" "RDI" 0x100 none
+  assertEqual "movsb of a project is what it is" (repr (← decode64 [0xa4]).bil).pretty (repr (← looped [0xa4]).bil).pretty
+  -- a repeated string instruction doesn't change the control flow of what analyses see, as it goes nowhere but to itself
   assertEqual "rep movsb is a normal instruction" Disasm.Flow.normal (← decode64 movsb).flow
   assertEqual "rep movsb has its size" 2 (← decode64 movsb).size
   assertEqual "the size counts the prefixes" 3 (← decode64 [0x67, 0xf3, 0xa4, 0x90]).size
+
+/-- A division of x86 that has no quotient, of a zero divisor or of one that the destination can't hold, is the intrinsic that raises the
+divide error, with nothing written; any other is the quotient and the remainder. -/
+private def testX86DivideError : IO Unit := do
+  let x86 ← Target.LLVMLift.x86Environment
+  let run (code : List Nat) (a d c : Nat) := do
+    executeEffect (← Target.LLVMLift.decodeX86With x86 0 0 (bytes code)) [word "RAX" a, word "RDX" d, word "RCX" c]
+  let check (label : String) (code : List Nat) (a d c : Nat) (expected : Option (Nat × Nat)) : IO Unit := do
+    let (state, effect) ← run code a d c
+    match expected with
+    | some (quotient, remainder) =>
+      assertEqual s!"{label} is a division" true (effect matches .normal)
+      assertReg s!"{label}, the quotient" "RAX" quotient state
+      assertReg s!"{label}, the remainder" "RDX" remainder state
+    | none =>
+      assertEqual s!"{label} raises" true (effect matches .special "divide-error")
+      assertReg s!"{label} leaves the dividend" "RAX" a state
+      assertReg s!"{label} leaves its high half" "RDX" d state
+  let div64 := [0x48, 0xf7, 0xf1]
+  let idiv64 := [0x48, 0xf7, 0xf9]
+  check "div of 7 by 2" div64 7 0 2 (some (3, 1))
+  check "div by zero" div64 7 0 0 none
+  check "div of 2^64 by 1" div64 0 1 1 none
+  check "div of 2^64 + 5 by 2" div64 5 1 2 (some (0x8000000000000002, 1))
+  check "idiv by zero" idiv64 7 0 0 none
+  check "idiv of the least by -1" idiv64 (2 ^ 63) (2 ^ 64 - 1) (2 ^ 64 - 1) none
+  check "idiv of -7 by 2" idiv64 (2 ^ 64 - 7) (2 ^ 64 - 1) 2 (some (2 ^ 64 - 3, 2 ^ 64 - 1))
+  check "idiv of 2^63 by 1" idiv64 (2 ^ 63) 0 1 none
+  check "idiv of 2^63 by -1" idiv64 (2 ^ 63) 0 (2 ^ 64 - 1) (some (2 ^ 63, 0))
+  -- of 32 bits, whose results clear the upper halves, and of 16 and 8, which keep what is above them
+  check "div of 32 bits by zero" [0xf7, 0xf1] 7 0 (2 ^ 32) none
+  check "div of 32 bits" [0xf7, 0xf1] 0xfffffffe 1 2 (some (0xffffffff, 0))
+  check "idiv of 32 bits of the least by -1" [0xf7, 0xf9] 0x80000000 0xffffffff 0xffffffff none
+  check "idiv of 32 bits of -2^31 - 1 by 1" [0xf7, 0xf9] 0x7fffffff 0xffffffff 1 none
+  check "div of 16 bits that doesn't fit" [0x66, 0xf7, 0xf1] 0x1234 0x10 0x10 none
+  check "idiv of 16 bits of -2^15 by 1" [0x66, 0xf7, 0xf9] 0x8000 0xffff 1 (some (0x8000, 0))
+  check "idiv of 16 bits of 2^15 by 1" [0x66, 0xf7, 0xf9] 0x8000 0 1 none
+  check "div of 8 bits by zero" [0xf6, 0xf1] 0x1234 0 0 none
+  check "div of 8 bits that doesn't fit" [0xf6, 0xf1] 0x1234 0 0x12 none
+  check "div of 8 bits" [0xf6, 0xf1] 0x1234 0 0x13 (some (0x05f5, 0))
+  check "idiv of 8 bits of -128 by -1" [0xf6, 0xf9] 0xff80 0 0xff none
+  check "idiv of 8 bits of -128 by 1" [0xf6, 0xf9] 0xff80 0 1 (some (0x80, 0))
 
 /-- The registers of x87 and the status words, with their widths, the flags in EFLAGS. -/
 private def testX86Registers : IO Unit := do
@@ -1995,12 +2097,12 @@ private def testHardware : IO Unit := do
   assertFlag "SHRD16 by 16, PF" "PF" 1 shrd
   -- REP LODS goes on as long as the count, and does nothing with no count
   let lodsMemory := windowOf 64 0x1000 [(0, 0xaa), (1, 0xbb), (2, 0xcc)]
-  let lods ← execute (← decodeX86 [0xf3, 0xac])
+  let lods ← executeAll (← decodeX86 [0xf3, 0xac])
     (lodsMemory ++ [word "RSI" 0x1000, word "RCX" 3, word "RAX" 0x1122334455667788, bit "DF" 0])
   assertReg "REP LODSB, the last byte" "RAX" 0x11223344556677cc lods
   assertReg "REP LODSB, the count" "RCX" 0 lods
   assertReg "REP LODSB, the index" "RSI" 0x1003 lods
-  let lodsNone ← execute (← decodeX86 [0xf3, 0x66, 0xad])
+  let lodsNone ← executeAll (← decodeX86 [0xf3, 0x66, 0xad])
     (lodsMemory ++ [word "RSI" 0x1000, word "RCX" 0, word "RAX" 0x1122, bit "DF" 0])
   assertReg "REP LODSW with no count, the value" "RAX" 0x1122 lodsNone
   assertReg "REP LODSW with no count, the index" "RSI" 0x1000 lodsNone
@@ -2357,6 +2459,7 @@ def run : IO Unit := do
   testArmMultipleAgree
   testThumbMultipleAgree
   testX86Repeat
+  testX86DivideError
   testX86Registers
   testArmVfpRegisters
   testPowerPCFields

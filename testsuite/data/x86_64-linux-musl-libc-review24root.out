@@ -1,0 +1,8 @@
+chroot: ok
+getcwd gives a path and its size: starts as unreachable 1, ends where it is 1
+getcwd of the libc: No such file or directory
+chdir to the root: ok
+getcwd gives 2: /
+chdir into it: ok
+getcwd of the libc: /in
+done

@@ -1,0 +1,63 @@
+wait: the child 1, status 5, the handler ran 1
+flags: in the handler 15, after it 11
+flags: in the handler 45, after it 11
+flags: in the handler 95, after it 11
+flags: in the handler 815, after it 11
+flags: in the handler 15, after it 8c4
+flags: in the handler 45, after it 8c4
+flags: in the handler 95, after it 8c4
+flags: in the handler 815, after it 8c4
+flags: bit 1 and the interrupt flag 202, the resume flag of a fault 10000, segments 2b000000000033
+flags: a load, trap 14 error 4 at the page + 4112
+flags: a store, trap 14 error 6 at the page + 4112
+flags: a store to what is read, trap 14 error 7 at the page + 8
+flags: a signal after, trap 14 error 7 at the page + 8, the resume flag 0
+sizes: a break of 2^46 moved it: 0
+sizes: 2^46 bytes to write: Out of memory
+sizes: 2^48 bytes of nothing: Out of memory
+sizes: a shared 2^46 bytes: Out of memory
+sizes: a segment of 2^45 bytes: Out of memory
+sizes: munmap of 2^50 bytes: Invalid argument
+sizes: 2^30 bytes to write: 0
+sizes: what was written of them: 5
+sizes: munmap of them: 0
+sizes: mremap to 2^50 bytes: Invalid argument
+sizes: mremap to 2^46 bytes: Out of memory
+sizes: madvise of what ends before it starts: Invalid argument
+timers: setitimer 0 came while it ran: 1
+timers: setitimer 1 came while it ran: 1
+timers: setitimer 2 came while it ran: 1
+timers: timer_create came while it ran: 1
+timers: setitimer came between calls: 1
+timers: a thread's sleep ended while another ran: 1
+timers: a sleep beside a process that runs on took its time: 1
+bus: in the page of the end: 7
+bus: a page past it: SIGBUS, code 2, at 4099
+bus: a store two pages past it: SIGBUS, code 2, at 8195
+bus: a page past it of a private mapping: SIGBUS, code 2, at 4099
+bus: the second page of a longer file: 7
+bus: its third: SIGBUS, code 2, at 8195
+bus: the first page of an empty file: SIGBUS, code 2, at 3
+bus: and of the private mapping: SIGBUS, code 2, at 3
+bus: mprotect of it: 0
+bus: the first page, to be read: SIGBUS, code 2, at 3
+bus: the first page of a file of three: 0
+bus: the second, which was written: 0
+bus: a store to what is to be read: SIGSEGV, code 2, at 4099
+bus: mprotect of it: 0
+bus: a child that handles nothing ended of SIGBUS: 1, and the parent has 9
+bus: the second page that a child made and wrote: 3
+bus: the third: SIGBUS, code 2, at 8192
+bus: a mapping from the second page: 3
+bus: its second: SIGBUS, code 2, at 4096
+shared: a segment attached twice, and to be read: 'one' 'one'
+shared: its second page, written by the second: 'two' 'two'
+shared: attached once more: 'one' 'late' 'late'
+shared: each sees what the other wrote: 1, and a copy between them: 'copied frocopied from the first' 'copied from the first'
+shared: a child saw its own: 1, and the parent: 'child' 'child'
+shared: with the others gone: 'alone' 'alone'
+shared: a file mapped three times: 'file' 'page' 'page'
+shared: written by the one of its second page: 'part' 'part', and read: 'part'
+shared: what pwrite wrote: 'WXYZ' 'WXYZ'
+shared: code written through one mapping gives 1, and written again 2
+shared: code that stores to its own page through the other mapping: 15

@@ -1220,6 +1220,18 @@ def run : IO Unit := do
   let common := ofHex "7f454c4602010100000000000000000001003e00010000000000000000000000000000000000000085000000000000000000000040003800000040000300020000626967002e73796d746162002e73747274616200000000000000000000000000000000000000000000000000010000001100f2ff0800000000000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000050000000200000000000000000000000000000000000000550000000000000030000000000000000200000001000000080000000000000018000000000000000d000000030000000000000000000000000000000000000040000000000000001500000000000000000000000000000001000000000000000000000000000000"
   assertEqual "ELF common symbols too large are refused" (some "the regions of the file are too large")
     (match Image.decode common with | .error message => some message | .ok _ => none)
+  -- What the loader of a library calls refuses the same, of itself.
+  assertEqual "ELF segments too large together are refused by the decoder of ELF" (some "the regions of the file are too large")
+    (match Image.Elf.decode twoHuge with | .error message => some message | .ok _ => none)
+  -- LOAD entries that each say they are of all of the file, which 300 of them make 16 KiB: 5 MiB of regions of it.
+  let le (size value : Nat) : ByteArray := ByteArray.mk ((List.range size).map fun index => (value >>> (8 * index)).toUInt8).toArray
+  let whole (count : Nat) : ByteArray :=
+    let size := 64 + count * 56
+    (List.range count).foldl (init := twoHuge.extract 0 56 ++ le 2 count ++ twoHuge.extract 58 64) fun bytes index =>
+      bytes ++ le 4 1 ++ le 4 5 ++ le 8 0 ++ le 8 (0x400000 + index * 0x100000) ++ le 8 0 ++ le 8 size ++ le 8 size ++ le 8 0x1000
+  assertEqual "ELF segments that are each all of the file are refused" (some "the regions of the file are too large")
+    (match Image.Elf.decode (whole 300) with | .error message => some message | .ok _ => none)
+  assertEqual "and two of them are made" (some 2) ((Image.Elf.decode (whole 2)).toOption.map (·.segments.length))
   -- A file that defines no symbol for others has, by its GNU hash table, none past the first: those that it imports, which its
   -- relocations name, are its still.
   for (name, count) in [("aarch64-linux-gnu-echo", 18), ("x86_64-linux-gnu-echo", 10)] do

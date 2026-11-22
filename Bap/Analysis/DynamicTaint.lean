@@ -185,14 +185,14 @@ structure Plain where
   reads : Array String
   writes : Array (String × Array Tag)
 
-/-- What an instruction has done as far as it knows, until it all has. There is one, which each instruction starts on empty, as it runs for all of them and only one runs at a time. Few things
-happen in an instruction, and so what is here goes in lists. -/
+/-- What an instruction has done as far as it knows, until it all has. There is one, which each instruction starts on empty, as it runs for all of them and only one runs at a time. An
+instruction that loops, as a `rep` of many bytes, does as much as a program, and so what is here is by what it is of: the latest of each. -/
 structure Scratch where
-  variables : IO.Ref (List (Bap.Var × Option (Σ width, BitVec width) × Array Byte))
-  memory : IO.Ref (List (Nat × UInt8))
-  tags : IO.Ref (List (Nat × Tag))
+  variables : IO.Ref (Std.HashMap Bap.Var (Option (Σ width, BitVec width) × Array Byte))
+  memory : IO.Ref (Std.HashMap Nat UInt8)
+  tags : IO.Ref (Std.HashMap Nat Tag)
   newNodes : IO.Ref (Array Node)
-  newRegisters : IO.Ref (List (String × Array Tag))
+  newRegisters : IO.Ref (Std.HashMap String (Array Tag))
   newGuard : IO.Ref (Option Tag)
   incomplete : IO.Ref Bool
   operands : IO.Ref (List Input)
@@ -230,6 +230,9 @@ structure Tracker where
   sending : IO.Ref (List Send)
   /-- How many bytes of what the current call read have gone by. -/
   written : IO.Ref Nat
+  /-- The bytes of memory that are a copy of what the call that runs changed of a file, which have what those came from once it is over:
+  of what space, where and how many, and what they are kept under in the file and from what offset. -/
+  mirroring : IO.Ref (List (Nat × Nat × Nat × Nat × Nat))
   /-- Where instructions were that this couldn't follow all of, with how many times. -/
   gaps : IO.Ref (Std.HashMap Nat Nat)
   scratch : Scratch
@@ -352,15 +355,26 @@ private def bitwise (op : Bil.BinOp) (left right : Shade) (leftValue rightValue 
 
 private def isClean (shade : Shade) : Bool := shade.all Byte.isClean
 
+/-- A shade of `xor` or of a difference without the bytes that the other has too: where both have the same byte of the same node,
+unchanged, the two are equal whatever they are, and what comes of them is what comes of a constant of each. -/
+private def withoutShared (shade other : Shade) : Shade :=
+  shade.mapIdx fun index byte =>
+    match byte, byteAt other index with
+    | .same tag, .same against => if tag == against then literalByte else byte
+    | _, _ => byte
+
 private def binShade (op : Bil.BinOp) (leftExp rightExp : Bil.Exp) (left right : Shade)
     (leftBits rightBits : Option (Σ width, BitVec width)) (width : Nat) : Shade :=
   let size := bytesOf width
   match op with
   | .xor | .sub =>
-    -- `eor x, x` is a zero whatever `x` is, and `xor` otherwise goes by the byte.
+    -- `eor x, x` is a zero whatever `x` is, and `xor` otherwise goes by the byte. A lifter may write the two differently, as AArch64's
+    -- has the second shifted by 0: they are then the same bytes of the same node.
     if leftExp == rightExp then literalShade width
-    else if op == .xor then bitwise op left right (bitsValue leftBits) (bitsValue rightBits) size
-    else carrying left right size
+    else
+      let (left, right) := (withoutShared left right, withoutShared right left)
+      if op == .xor then bitwise op left right (bitsValue leftBits) (bitsValue rightBits) size
+      else carrying left right size
   | .and | .or => bitwise op left right (bitsValue leftBits) (bitsValue rightBits) size
   | .add | .mul => carrying left right size
   | .lshift | .rshift | .ashift =>
@@ -540,8 +554,8 @@ private def loadBytes (tracker : Tracker) (frame : Frame) (address size : Nat) :
   let mut bytes := raw
   let mut out := tags
   for offset in List.range size do
-    if let some byte := overlay.lookup (address + offset) then bytes := bytes.set! offset byte
-    if let some tag := written.lookup (address + offset) then out := out.setIfInBounds offset tag
+    if let some byte := overlay[address + offset]? then bytes := bytes.set! offset byte
+    if let some tag := written[address + offset]? then out := out.setIfInBounds offset tag
   pure (bytes, out)
 
 /-- A node for what has its bytes as given, if any of them needs one, and what each byte is now. A byte that stays a copy keeps the tag it had in a
@@ -618,8 +632,33 @@ private def widthOfTyp : Typ → Nat
   | .imm width => width
   | _ => 0
 
+/-- How wide an expression is, where what it is written as says that. -/
+private def writtenWidth : Bil.Exp → Option Nat
+  | @Bil.Exp.int width _ => some width
+  | .var var => match var.typ with
+    | .imm width => some width
+    | _ => none
+  | .cast _ width _ => some width
+  | .extract high low _ => some (high + 1 - low)
+  | .un _ value => writtenWidth value
+  | _ => none
+
+/-- An expression without the casts around it that are to the width that it has. -/
+private def uncast : Bil.Exp → Bil.Exp
+  | .cast kind width value => if writtenWidth value == some width then uncast value else .cast kind width value
+  | other => other
+
+/-- The two that a sum is the difference of, as `a + ~b + 1` is `a - b`, which is how the lifter of ARM writes `sub`. -/
+private def differenceOf (left right : Bil.Exp) : Option (Bil.Exp × Bil.Exp) :=
+  match left, uncast right with
+  | .bin .add minuend negated, @Bil.Exp.int _ one =>
+    match uncast negated with
+    | .un .not subtrahend => if one.toNat == 1 && writtenWidth minuend == writtenWidth subtrahend then some (minuend, subtrahend) else none
+    | _ => none
+  | _, _ => none
+
 private def lookupVariable (tracker : Tracker) (frame : Frame) (var : Bap.Var) : IO (Option (Σ width, BitVec width) × Shade) := do
-  if let some found := (← frame.scratch.variables.get).lookup var then return found
+  if let some found := (← frame.scratch.variables.get)[var]? then return found
   -- The zero register, which every target's lifter calls this: a constant, as `addiu $1, $zero, 3` makes one as `mov w8, #3` does.
   if var.name == "XZR" then
     let width := widthOfTyp var.typ
@@ -639,9 +678,13 @@ private partial def evaluate (tracker : Tracker) (frame : Frame) : Bil.Exp → I
   | .unknown _ typ => pure (none, opaqueShade (widthOfTyp typ))
   | .letIn var value body => do
     let bound ← evaluate tracker frame value
-    frame.scratch.variables.modify ((var, bound) :: ·)
+    let outer := (← frame.scratch.variables.get)[var]?
+    frame.scratch.variables.modify (·.insert var bound)
     let result ← evaluate tracker frame body
-    frame.scratch.variables.modify (·.drop 1)
+    frame.scratch.variables.modify fun variables =>
+      match outer with
+      | some outer => variables.insert var outer
+      | none => variables.erase var
     pure result
   | .ite condition yes no => do
     let (bits, shade) ← evaluate tracker frame condition
@@ -661,6 +704,10 @@ private partial def evaluate (tracker : Tracker) (frame : Frame) : Bil.Exp → I
     | .not => pure (result, shade.map changed)
     | .neg => pure (result, carrying shade shade shade.size)
   | .bin op left right => do
+    -- A difference that is written as a sum is followed as the difference, in which what is taken from itself is nothing.
+    let (op, left, right) := match (if op == .add then differenceOf left right else none) with
+      | some (minuend, subtrahend) => (.sub, minuend, subtrahend)
+      | none => (op, left, right)
     let (leftBits, leftShade) ← evaluate tracker frame left
     let (rightBits, rightShade) ← evaluate tracker frame right
     let value := match leftBits, rightBits with
@@ -685,6 +732,8 @@ private partial def evaluate (tracker : Tracker) (frame : Frame) : Bil.Exp → I
     let from_ := match bits with
       | some bits => bits.1
       | none => shade.size * 8
+    -- To the width that it has, which is most of the casts that a lifter writes, it is what it was.
+    if bits.isSome && from_ == width && shade.size == bytesOf width then return (bits, shade)
     pure (bits.bind (fun bits => constantly (.cast kind width (.int bits.2))), castShade kind width shade from_)
   | .extract high low value => do
     let (bits, shade) ← evaluate tracker frame value
@@ -742,17 +791,14 @@ private partial def evaluate (tracker : Tracker) (frame : Frame) : Bil.Exp → I
       let word := (← Emu.wordWidth tracker.emu) / 8
       let tags ← assign tracker frame (.memory at_) ordered values (!frame.jumps) (size < word)
       for offset in List.range size do
-        frame.scratch.tags.modify (((at_ + offset), tags.getD offset 0) :: ·)
+        frame.scratch.tags.modify (·.insert (at_ + offset) (tags.getD offset 0))
         if h : offset < values.size then
-          frame.scratch.memory.modify (((at_ + offset), values[offset]) :: ·)
+          frame.scratch.memory.modify (·.insert (at_ + offset) values[offset])
     pure (none, #[])
 
-private partial def perform (tracker : Tracker) (frame : Frame) : Nat → Bil.Program → IO Bool
-  | 0, _ => do
-    frame.scratch.incomplete.set true
-    pure false
-  | _ + 1, [] => pure true
-  | fuel + 1, stmt :: rest => do
+private partial def perform (tracker : Tracker) (frame : Frame) : Bil.Program → IO Bool
+  | [] => pure true
+  | stmt :: rest => do
     match stmt with
     | .move var value =>
       let (bits, shade) ← evaluate tracker frame value
@@ -762,15 +808,15 @@ private partial def perform (tracker : Tracker) (frame : Frame) : Nat → Bil.Pr
       else if isTemporary var then
         if var.name.str.startsWith "intrinsic:x" then
           frame.scratch.operands.modify (union · (allInputs shade))
-        frame.scratch.variables.modify ((var, bits, shade) :: ·)
+        frame.scratch.variables.modify (·.insert var (bits, shade))
       else
         let width := widthOfTyp var.typ
         let size := bytesOf width
         let sized := (Array.range size).map (byteAt shade)
         let tags ← assign tracker frame (.register var.name) sized (valueBytes bits size) (width > 1 && !frame.jumps) false
-        frame.scratch.newRegisters.modify ((var.name, tags) :: ·)
-        frame.scratch.variables.modify ((var, bits, tags.map ofTag) :: ·)
-      perform tracker frame fuel rest
+        frame.scratch.newRegisters.modify (·.insert var.name tags)
+        frame.scratch.variables.modify (·.insert var (bits, tags.map ofTag))
+      perform tracker frame rest
     | .jmp target =>
       let (bits, shade) ← evaluate tracker frame target
       let inputs := allInputs shade
@@ -784,8 +830,8 @@ private partial def perform (tracker : Tracker) (frame : Frame) : Nat → Bil.Pr
         frame.scratch.operands.set []
         frame.scratch.incomplete.set true
         let result : Shade := #[ofInputs (operands.map fun input => { input with edge := .data })]
-        frame.scratch.variables.modify ((⟨"intrinsic:y0", .imm 64, 0, false⟩, none, Array.replicate 16 (byteAt result 0)) :: ·)
-      perform tracker frame fuel rest
+        frame.scratch.variables.modify (·.insert ⟨"intrinsic:y0", .imm 64, 0, false⟩ (none, Array.replicate 16 (byteAt result 0)))
+      perform tracker frame rest
     | .cpuExn _ => pure false
     | .ifElse condition yes no =>
       let (bits, shade) ← evaluate tracker frame condition
@@ -793,25 +839,32 @@ private partial def perform (tracker : Tracker) (frame : Frame) : Nat → Bil.Pr
       if !inputs.isEmpty then branchNode frame inputs none (bitsBytes bits)
       match bitsValue bits with
       | some value =>
-        let go ← perform tracker frame fuel (if value != 0 then yes else no)
-        if go then perform tracker frame fuel rest else pure false
+        let go ← perform tracker frame (if value != 0 then yes else no)
+        if go then perform tracker frame rest else pure false
       | none =>
         frame.scratch.incomplete.set true
-        let _ ← perform tracker frame fuel yes
-        let _ ← perform tracker frame fuel no
-        perform tracker frame fuel rest
+        let _ ← perform tracker frame yes
+        let _ ← perform tracker frame no
+        perform tracker frame rest
     | .while condition body =>
-      let (bits, shade) ← evaluate tracker frame condition
-      let inputs := allInputs shade
-      if !inputs.isEmpty then branchNode frame inputs none (bitsBytes bits)
-      match bitsValue bits with
-      | some 0 => perform tracker frame fuel rest
-      | some _ =>
-        let go ← perform tracker frame fuel body
-        if go then perform tracker frame fuel (stmt :: rest) else pure false
-      | none =>
-        frame.scratch.incomplete.set true
-        perform tracker frame fuel rest
+      if ← iterate tracker frame condition body Bil.loopLimit then perform tracker frame rest else pure false
+
+/-- A loop of an instruction, whose condition is tested as many times as are left: as many as the machine tests it before it gives the
+loop up, which ends the run, so that what one that goes on wrote is all here. Whether what is after the loop is come to. -/
+private partial def iterate (tracker : Tracker) (frame : Frame) (condition : Bil.Exp) (body : Bil.Program) : Nat → IO Bool
+  | 0 => do
+    frame.scratch.incomplete.set true
+    pure false
+  | tests + 1 => do
+    let (bits, shade) ← evaluate tracker frame condition
+    let inputs := allInputs shade
+    if !inputs.isEmpty then branchNode frame inputs none (bitsBytes bits)
+    match bitsValue bits with
+    | some 0 => pure true
+    | some _ => if ← perform tracker frame body then iterate tracker frame condition body tests else pure false
+    | none =>
+      frame.scratch.incomplete.set true
+      pure true
 
 /-- A branch on what is marked, with what it was decided by as it ran: where a jump went, or what a condition was. -/
 private partial def branchNode (frame : Frame) (inputs : List Input) (target : Option Nat) (values : ByteArray) : IO Unit := do
@@ -905,8 +958,8 @@ private def resultUnderGuard (tracker : Tracker) (thread : ThreadId) (space pc i
     inputs := Array.replicate size [], guard := some guard }
   tracker.registers.modify (·.insert thread (current.insert register ((Array.range size).map (nodeTag id))))
 
-/-- What an instruction is about to do. It is worked out on what it can see and only then applied, so that one that faults has done nothing here, either. -/
-private def follow (tracker : Tracker) (pc : Nat) : IO Unit := do
+/-- What an instruction is about to do, or a program in its place. It is worked out on what it can see and only then applied, so that one that faults has done nothing here, either. -/
+private def followAs (tracker : Tracker) (pc : Nat) (instead : Option Bil.Program) : IO Unit := do
   let emu := tracker.emu
   let thread ← Emu.thread emu
   let table ← emu.taskTable.get
@@ -931,7 +984,10 @@ private def follow (tracker : Tracker) (pc : Nat) : IO Unit := do
     if depth < guardDepth then
       tracker.guards.modify (·.erase thread)
       if insn - at_ ≤ tracker.config.guardWindow then resultUnderGuard tracker thread space pc insn guard
-  let some (program, plain) ← programOf tracker pc | gap tracker pc
+  let found ← match instead with
+    | some program => pure (some (program, none))
+    | none => programOf tracker pc
+  let some (program, plain) := found | gap tracker pc
   if let some plain := plain then
     if ← followPlain tracker thread plain insn depth then
       if popped.isSome then tracker.calls.modify (·.insert thread calls)
@@ -944,37 +1000,42 @@ private def follow (tracker : Tracker) (pc : Nat) : IO Unit := do
     depth
     scratch := tracker.scratch }
   let scratch := tracker.scratch
-  scratch.variables.set []
-  scratch.memory.set []
-  scratch.tags.set []
+  scratch.variables.set {}
+  scratch.memory.set {}
+  scratch.tags.set {}
   scratch.newNodes.set #[]
-  scratch.newRegisters.set []
+  scratch.newRegisters.set {}
   scratch.newGuard.set none
   scratch.incomplete.set false
   scratch.operands.set []
   scratch.link.set none
   scratch.jumped.set false
   try
-    let _ ← perform tracker frame 65536 program
+    let _ ← perform tracker frame program
   catch error =>
     if error.toString == faultMessage then return
     gap tracker pc
     return
   if ← frame.scratch.incomplete.get then gap tracker pc
   for node in ← frame.scratch.newNodes.get do push tracker node
-  -- The latest of each, as an instruction may write a byte twice.
-  for (address, tag) in (← frame.scratch.tags.get).reverse do setTag tracker space address tag
-  let written := (← frame.scratch.newRegisters.get).reverse
+  for (address, tag) in ← frame.scratch.tags.get do setTag tracker space address tag
+  let written ← frame.scratch.newRegisters.get
   if !written.isEmpty then
     let _ ← registersOf tracker thread
     -- In place, as nothing else holds what the thread has.
     tracker.registers.modify (·.alter thread fun registers =>
-      some (written.foldl (fun registers (name, tags) => registers.insert name tags) (registers.getD {})))
+      some (written.fold (fun registers name tags => registers.insert name tags) (registers.getD {})))
   if let some guard := ← frame.scratch.newGuard.get then
     tracker.guards.modify (·.insert thread (guard, insn, depth))
   match ← frame.scratch.link.get, ← frame.scratch.jumped.get with
   | some site, true => tracker.calls.modify (·.insert thread (calls.push site))
   | _, _ => if popped.isSome then tracker.calls.modify (·.insert thread calls)
+
+private def follow (tracker : Tracker) (pc : Nat) : IO Unit := followAs tracker pc none
+
+/-- Follows a program that the host is about to run on the thread that runs, as the instruction at `pc` would be: on the registers and
+the memory that there are now. -/
+def followProgram (tracker : Tracker) (pc : Nat) (program : Bil.Program) : IO Unit := followAs tracker pc (some program)
 
 /-! ### Sources -/
 
@@ -1046,6 +1107,19 @@ def mapped (tracker : Tracker) (address size space offset : Nat) (label : Option
     if tag.isNode then setTag tracker current (address + index) tag
     else if let some id := source then setTag tracker current (address + index) (nodeTag id index)
 
+/-- Bytes of memory are what a file has now, as a page of a private mapping that the process hasn't written is when the file changes:
+they have what the bytes of the file came from, and nothing where those have nothing. -/
+private def mirror (tracker : Tracker) (current address size space offset : Nat) : IO Unit := do
+  for index in List.range size do
+    setTag tracker current (address + index) (← rawTag tracker space (offset + index))
+
+/-- What hears of memory that is a copy of a file's. What the call that runs changed of the file has what it came from there only when
+the call is over, as what it sent goes then. -/
+private def mirrored (tracker : Tracker) (address size space offset : Nat) (byCall : Bool) : IO Unit := do
+  let current ← Emu.spaceOf tracker.emu (← Emu.thread tracker.emu)
+  if byCall && (← tracker.calling.get).isSome then tracker.mirroring.modify ((current, address, size, space, offset) :: ·)
+  else mirror tracker current address size space offset
+
 /-- What the kernel copied from one place that keeps tags to another, as `sendfile`, `splice`, `tee` and `copy_file_range` do, has what
 it came from: a page at a time, of which a page that neither has is passed over. -/
 def copySpace (tracker : Tracker) (fromSpace fromOffset toSpace toOffset size : Nat) : IO Unit := do
@@ -1107,27 +1181,43 @@ private def callEnds (tracker : Tracker) (result : Option Nat) : IO Unit := do
           carry tracker { send with size := min send.size left }
           left := left - min send.size left
     tracker.config.called number args result
-  if let some (label, _) := ← tracker.label.get then
-    let (_, _, register) := Emu.syscallRegisters tracker.emu.config.syscallAbi
-    if result.isSome then markRegister tracker (← wordVar tracker.emu register) s!"{label} result"
-  else
-    -- What it returns says nothing, and whatever was in the register has gone.
-    let (_, _, register) := Emu.syscallRegisters tracker.emu.config.syscallAbi
-    if result.isSome then
-      let var ← wordVar tracker.emu register
-      let thread ← Emu.thread tracker.emu
-      setRegisterTags tracker thread var.name (Array.replicate (bytesOf (widthOfTyp var.typ)) (cleanTag (← tracker.emu.pc.get)))
+  for (space, address, size, kept, offset) in (← tracker.mirroring.get).reverse do mirror tracker space address size kept offset
+  tracker.mirroring.set []
+  -- The result, and on a target that says apart from it whether the call failed, the flag of that, which the kernel sets as it does
+  -- the result, whatever was in the register, as the fourth argument is on MIPS.
+  let (_, _, register) := Emu.syscallRegisters tracker.emu.config.syscallAbi
+  let set := (← wordVar tracker.emu register) :: (← Emu.errorFlagRegister tracker.emu).toList
+  if result.isSome then
+    for var in set do
+      if let some (label, _) := ← tracker.label.get then markRegister tracker var s!"{label} result"
+      else
+        -- What it returns says nothing, and whatever was in the register has gone.
+        let thread ← Emu.thread tracker.emu
+        setRegisterTags tracker thread var.name (Array.replicate (bytesOf (widthOfTyp var.typ)) (cleanTag (← tracker.emu.pc.get)))
   tracker.calling.set none
   tracker.label.set none
   tracker.backing.set none
 
 /-- A new thread or process has its registers as the thread that made it had them, at the call that made it: but for the result
-of the call, which is its 0. -/
-private def cloned (tracker : Tracker) (creator child : ThreadId) : IO Unit := do
-  let (_, _, register) := Emu.syscallRegisters tracker.emu.config.syscallAbi
+of the call, which is its 0, and those that the kernel set, which are of nothing, and those that it was given, its stack and its thread
+pointer, which come from where the argument of the call that had them did. The argument is found by what it holds, as the calls
+that make a task have theirs in an order of each target. -/
+private def cloned (tracker : Tracker) (creator child : ThreadId) (held : List (String × Option Nat)) : IO Unit := do
+  let (_, arguments, register) := Emu.syscallRegisters tracker.emu.config.syscallAbi
   let result ← wordVar tracker.emu register
   let registers ← registersOf tracker creator
-  tracker.registers.modify (·.insert child (registers.erase result.name))
+  let calling := (← tracker.calling.get).isSome
+  let env := (← tracker.emu.state.get).env
+  let mut own := registers.erase result.name
+  for (name, value) in held do
+    let holds (argument : String) : Bool :=
+      match Bil.lookup env ⟨argument, result.typ, 0, false⟩ with
+      | .ok word => (Bap.Value.asBits word).toOption.map (·.2.toNat) == value
+      | .error _ => false
+    own := match (if calling && value.isSome then arguments.find? holds else none).bind fun argument => registers.get? argument with
+      | some tags => own.insert name tags
+      | none => own.erase name
+  tracker.registers.modify (·.insert child own)
 
 /-- A new process has a copy of what its parent has, as it does of the memory. -/
 private def forked (tracker : Tracker) (parent child : Nat) : IO Unit := do
@@ -1157,15 +1247,16 @@ def start (emu : Emu) (config : Config := {}) : IO Tracker := do
     hostInputs := ← IO.mkRef []
     sending := ← IO.mkRef []
     written := ← IO.mkRef 0
+    mirroring := ← IO.mkRef []
     gaps := ← IO.mkRef {}
     restores := ← IO.mkRef []
     loadedFrom := ← IO.mkRef none
     scratch := {
-      variables := ← IO.mkRef []
-      memory := ← IO.mkRef []
-      tags := ← IO.mkRef []
+      variables := ← IO.mkRef {}
+      memory := ← IO.mkRef {}
+      tags := ← IO.mkRef {}
       newNodes := ← IO.mkRef #[]
-      newRegisters := ← IO.mkRef []
+      newRegisters := ← IO.mkRef {}
       newGuard := ← IO.mkRef none
       incomplete := ← IO.mkRef false
       operands := ← IO.mkRef []
@@ -1177,6 +1268,7 @@ def start (emu : Emu) (config : Config := {}) : IO Tracker := do
   emu.syscallEnds.modify (callEnds tracker :: ·)
   emu.memoryChanged.modify (externalWrite tracker :: ·)
   emu.memoryCopied.modify (copied tracker :: ·)
+  emu.memoryMirrored.modify (mirrored tracker :: ·)
   -- A function of the base environment computes, as the guest's own code would: it brings nothing in, so that what it writes is clean
   -- but for what it copies, which `memoryCopied` says, and what it gives back comes from what it read.
   emu.hostStarts.modify ((fun label => do
@@ -1225,7 +1317,7 @@ def start (emu : Emu) (config : Config := {}) : IO Tracker := do
       tracker.outer.set rest
     | [] => tracker.label.set none) :: ·)
   emu.processHooks.modify ((fun parent child => forked tracker parent child) :: ·)
-  emu.cloneHooks.modify ((fun creator child => cloned tracker creator child) :: ·)
+  emu.cloneHooks.modify (cloned tracker :: ·)
   pure tracker
 
 /-! ### Saying where a byte came from -/

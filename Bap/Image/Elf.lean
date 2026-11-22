@@ -92,7 +92,7 @@ private def parseProgramHeader (data : ByteArray) (header : Header) (offset : Na
       .error "ELF LOAD memory size is too large"
     else
       let fileBytes ← IO.Reader.slice data offset' fileSize
-      let bytes := fileBytes.append (Bap.zeroBytes (memorySize - fileSize))
+      let bytes := Bap.padZeros fileBytes (memorySize - fileSize)
       let readable := flags &&& 4 != 0
       let writable := flags &&& 2 != 0
       let executable := flags &&& 1 != 0
@@ -529,37 +529,38 @@ private def loadedSymbols (data : ByteArray) (header : Header) (sections : List 
   if sections.isEmpty then .ok dynamic
   else .ok ((parseSymbols data header sections).toOption.getD dynamic)
 
-/-- How many bytes of zeros past what the file has its regions would take, as its headers say: of its LOAD entries, or of a relocatable
-file, the sections that it lays out. `Image.decode` keeps it to what a host can give. -/
-def zeroFill (data : ByteArray) : Nat :=
+/-- What the regions of the file would take, as its headers say: of its LOAD entries, or of a relocatable file, of the sections that
+it lays out and its common symbols. `decode` refuses what `exceeds` is of. -/
+def regionsSize (data : ByteArray) : Extent :=
   match parseHeader data with
-  | .error _ => 0
+  | .error _ => {}
   | .ok header =>
     let field (offset : Nat) : Nat := (word data header.endian header.is64 offset).toOption.getD 0
     if header.fileType == 1 then
-      -- Of each section that is laid out, all of it, as `regionBytes` makes it.
       let entries := min (sectionCountOf data header) (data.size / max header.sectionEntrySize 1 + 1)
-      (List.range entries).foldl (init := 0) fun total index =>
+      (List.range entries).foldl (init := {}) fun total index =>
         let at_ := header.sectionOffset + index * header.sectionEntrySize
         let flags := field (at_ + 8)
+        let kind := (IO.Reader.u32 data header.endian (at_ + 4)).toOption
+        let start := field (at_ + if header.is64 then 24 else 16)
         let size := field (at_ + if header.is64 then 32 else 20)
-        if flags &&& 2 != 0 then total + size
-        else if (IO.Reader.u32 data header.endian (at_ + 4)).toOption == some 2 then
+        -- Of each section that is laid out, all of it, as `regionBytes` makes it: what the file has from where it is, and zeros.
+        if flags &&& 2 != 0 then total.add size (if kind == some 8 then 0 else data.size - start)
+        else if kind == some 2 then
           -- And of each common symbol of a symbol table, which is laid out after them: its size, and as far as it is aligned to.
-          let start := field (at_ + if header.is64 then 24 else 16)
           let entry := if header.is64 then 24 else 16
           let count := min (size / entry) ((data.size - start) / entry)
           (List.range count).foldl (init := total) fun total symbol =>
             let at_ := start + symbol * entry
             if (IO.Reader.u16 data header.endian (at_ + if header.is64 then 6 else 14)).toOption != some 0xfff2 then total
-            else total + field (at_ + if header.is64 then 16 else 8) + field (at_ + if header.is64 then 8 else 4)
+            else total.add (field (at_ + if header.is64 then 16 else 8) + field (at_ + if header.is64 then 8 else 4)) 0
         else total
     else
       let entries := min header.programCount (data.size / max header.programEntrySize 1 + 1)
-      (List.range entries).foldl (init := 0) fun total index =>
+      (List.range entries).foldl (init := {}) fun total index =>
         let at_ := header.programOffset + index * header.programEntrySize
         if (IO.Reader.u32 data header.endian at_).toOption != some 1 then total
-        else total + (field (at_ + if header.is64 then 40 else 20) - field (at_ + if header.is64 then 32 else 16))
+        else total.add (field (at_ + if header.is64 then 40 else 20)) (field (at_ + if header.is64 then 32 else 16))
 
 /-- The section headers of a file that is loaded and their sections, or none of a table that the file doesn't have all of: what is
 loaded goes by the segments, as a loader does, and a file cut short after them still runs. Of names that it doesn't have, the
@@ -572,7 +573,8 @@ private def loadedSections (data : ByteArray) (header : Header) : List SectionHe
     | .ok sections => (headers, sections)
     | .error _ => (headers, [])
 
-def decode (data : ByteArray) : Except String Image := do
+/-- An image of an ELF file, whatever its regions take. -/
+def decodeRegions (data : ByteArray) : Except String Image := do
   let header ← parseHeader data
   if header.fileType == 1 then
     let sections ← parseSections data header
@@ -593,6 +595,10 @@ def decode (data : ByteArray) : Except String Image := do
     symbols := symbols
     memory := memory
   }
+
+/-- An image of an ELF file, unless its regions would take more than a host gives a file, which no caller gets past. -/
+def decode (data : ByteArray) : Except String Image :=
+  if exceeds data (regionsSize data) then .error tooLarge else decodeRegions data
 
 
 private def dynamicString (image : Image) (headers : List ProgramHeader) (strings size offset : Nat) : String :=

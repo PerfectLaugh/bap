@@ -2024,10 +2024,35 @@ theorem decodeX86Memo_lifted (memo : IO.Ref LiftMemo) (globals : Primus.Semantic
   unfold decodeX86Memo
   lifted_decoder
 
+private theorem Holds.map {α β} {m : IO α} {f : α → β} {P : α → Prop} {Q : β → Prop} (h : Holds m P) (hf : ∀ a, P a → Q (f a)) :
+    Holds (m >>= fun a => Pure.pure (f a)) Q := by
+  intro s r s' he
+  cases hms : m s with
+  | ok a s1 =>
+    rw [bind_ok hms] at he
+    have held := h s a s1 hms
+    cases he
+    exact hf a held
+  | error e s1 =>
+    rw [bind_error hms] at he
+    cases he
+
+/-- A repeated instruction as one loop is where it was and passes control on as it did: only its BIL is another. -/
+theorem asLoop_lifted {α} (classify : α → Flow) (address : Nat) (insn : Insn) (h : Lifted classify address insn) :
+    Lifted classify address insn.asLoop := h
+
+theorem decodeX86Loop_lifted (memo : IO.Ref LiftMemo) (globals : Primus.Semantics.Environment) (base address : Nat)
+    (data : ByteArray) : Holds (decodeX86Loop memo globals base address data) (Lifted (flow) address) :=
+  Holds.map (decodeX86Memo_lifted memo globals base address data) (asLoop_lifted _ address)
+
 theorem decodeX8632Memo_lifted (memo : IO.Ref LiftMemo) (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : Holds (decodeX8632Memo memo globals base address data) (Lifted (flow) address) := by
   unfold decodeX8632Memo
   lifted_decoder
+
+theorem decodeX8632Loop_lifted (memo : IO.Ref LiftMemo) (globals : Primus.Semantics.Environment) (base address : Nat)
+    (data : ByteArray) : Holds (decodeX8632Loop memo globals base address data) (Lifted (flow) address) :=
+  Holds.map (decodeX8632Memo_lifted memo globals base address data) (asLoop_lifted _ address)
 
 theorem decodeAArch64With_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : Holds (decodeAArch64With globals base address data) (Lifted (flow) address) := by
@@ -3110,7 +3135,7 @@ theorem x86_disassembler (base : Nat) :
     Holds (X86.disassembler base) (RegisteredAs "x86-llvm-primus") := by
   unfold X86.disassembler
   refine Holds.bind fun globals => Holds.bind fun memo => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeX86Memo memo globals base) (fun _ _ => rfl) _ (decodeX86Memo_lifted memo globals base) _ _ _
+  exact registeredAs_mk _ _ (decodeX86Loop memo globals base) (fun _ _ => rfl) _ (decodeX86Loop_lifted memo globals base) _ _ _
 
 theorem x86_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (X86.decodeAt base address data) fun result =>
@@ -3236,7 +3261,7 @@ theorem x8632_disassembler (base : Nat) :
     Holds (X8632.disassembler base) (RegisteredAs "i386-llvm-primus") := by
   unfold X8632.disassembler
   refine Holds.bind fun globals => Holds.bind fun memo => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeX8632Memo memo globals base) (fun _ _ => rfl) _ (decodeX8632Memo_lifted memo globals base) _ _ _
+  exact registeredAs_mk _ _ (decodeX8632Loop memo globals base) (fun _ _ => rfl) _ (decodeX8632Loop_lifted memo globals base) _ _ _
 
 theorem x8632_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (X8632.decodeAt base address data) fun result =>

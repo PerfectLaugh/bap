@@ -188,6 +188,34 @@ private def withoutSections : IO Unit := do
   assertTrue "the slots of its PLT" (!(Project.pltEntries image).isEmpty)
   assertTrue "the unwind table has functions" (!(Project.unwindFunctions echo).isEmpty)
 
+/-- A table that a file says is in zeros past what it has, 16 MiB of them of a file of 296 bytes: `DT_INIT_ARRAY` at the start of a
+LOAD entry of no bytes of the file, of the size of all of it. What is read of it is no more than the file has room for. -/
+private def tableInZeros : IO Unit := do
+  let le (size value : Nat) : List Nat := (List.range size).map fun index => value / 256 ^ index % 256
+  let zeros := 2 ^ 24
+  let load (kind flags offset address fileSize memorySize : Nat) : List Nat :=
+    le 4 kind ++ le 4 flags ++ le 8 offset ++ le 8 address ++ le 8 address ++ le 8 fileSize ++ le 8 memorySize ++ le 8 0x1000
+  let code := 64 + 3 * 56
+  let dynamic := code + 16
+  let size := dynamic + 48
+  let file := bytesOf (
+    [0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0] ++ le 8 0 ++ le 2 2 ++ le 2 62 ++ le 4 1 ++ le 8 (0x400000 + code) ++ le 8 64 ++ le 8 0 ++
+    le 4 0 ++ le 2 64 ++ le 2 56 ++ le 2 3 ++ le 2 64 ++ le 2 0 ++ le 2 0 ++
+    load 1 5 0 0x400000 size (size + 10000) ++ load 1 6 0 0x10000000 0 zeros ++ load 2 6 dynamic (0x400000 + dynamic) 48 48 ++
+    [0xc3] ++ le 15 0 ++ le 8 25 ++ le 8 0x10000000 ++ le 8 27 ++ le 8 zeros ++ le 16 0)
+  assertEqual "the file of a table in zeros" 296 file.size
+  let image ← IO.ofExcept (Image.decode file)
+  assertTrue "a table in zeros has no more entries than its file has room for"
+    (Project.Project.entriesIn image 0x10000000 8 (zeros / 8) ≤ file.size / 8)
+  assertTrue "and its functions are as few" ((Project.initFunctions image).length ≤ file.size / 8)
+  -- The regions are of the bytes of the file and then of zeros, as many as the entries say.
+  let regionAt (address : Nat) : ByteArray := ((image.memory.entries.find? (·.1.addr == address)).map (·.1.data)).getD ByteArray.empty
+  assertEqual "a region of zeros alone has its size" zeros (regionAt 0x10000000).size
+  assertEqual "and is of zeros to its end" [0, 0, 0] ([0, zeros / 2 + 1, zeros - 1].map fun index => ((regionAt 0x10000000).get! index).toNat)
+  assertEqual "a region of more than its file has its size" (size + 10000) (regionAt 0x400000).size
+  assertEqual "with the bytes of the file first" (file.toList.map (·.toNat)) (((regionAt 0x400000).extract 0 size).toList.map (·.toNat))
+  assertEqual "and zeros after them" [0, 0, 0] ([size, size + 4096, size + 9999].map fun index => ((regionAt 0x400000).get! index).toNat)
+
 /-- What a sweep does past what doesn't decode, and what has no semantics stays an error, never a no-op. -/
 private def sweeping : IO Unit := do
   let x86 ← Target.X86.disassembler 0
@@ -471,11 +499,32 @@ def run : IO Unit := do
 
 end SliceSpec
 
+/-- Of the code of compilers: the functions of `flattened.c`, whose state a register is given, and of `cff.c`, whose state is a
+slot of the stack, are flattened, and nothing else is, of them or of the programs that aren't flattened, where registers are
+given the constants of the arguments of calls, flags are cleared and loops count. -/
+private def compiledMachines : IO Unit := do
+  let flattenedOf (name : String) : IO (List (String × Option String)) := do
+    let project ← Project.load (bin name)
+    let some partition ← Analysis.Partition.partition project | throw (IO.userError s!"{name} has no partition")
+    let byAddress : Std.HashMap Nat Disasm.Insn := partition.disasm.instructions.foldl (init := {}) fun table insn =>
+      table.insert insn.address insn
+    return partition.functions.filterMap fun function =>
+      let machine := Analysis.StateMachine.ofCode (function.instructions.mergeSort.filterMap (byAddress[·]?))
+      if Analysis.StateMachine.isFlattened machine then some (function.name, machine.stateVar.map (·.name.str)) else none
+  for (arch, state) in [("x86_64", "RAX"), ("i686", "EAX"), ("aarch64", "X8"), ("riscv64", "X10"), ("powerpc", "R3"),
+      ("powerpc64le", "R3")] do
+    assertEqual s!"{arch}: the flattened function and its state" [("steps", some state)] (← flattenedOf s!"{arch}-linux-none-flattened")
+  assertEqual "a state on the stack" [("steps", some "[RBP-4]:4")] (← flattenedOf "x86_64-linux-gnu-cff")
+  for arch in ["x86_64", "i686", "aarch64", "riscv64", "arm", "mips", "mips64el", "powerpc", "powerpc64le"] do
+    for program in ["frame", "frame2", "partition", "checker"] do
+      assertEqual s!"{arch} {program}: nothing is flattened" [] (← flattenedOf s!"{arch}-linux-none-{program}")
+
 def run : IO Unit := do
   SliceSpec.run
   targetSelection
   interworking
   withoutSections
+  tableInZeros
   sweeping
   componentsFastPath
   binaryRegressions
@@ -558,7 +607,8 @@ def run : IO Unit := do
   let binaryGraph := Analysis.Callgraph.create binaryIndex
   assertEqual "whole binary: xrefs" 30 binaryIndex.xrefs.length
   assertEqual "whole binary: functions" 10 binaryIndex.functions.length
-  assertEqual "whole binary: callgraph edges" 2 binaryGraph.graph.edges.length
+  -- __do_global_dtors_aux and main each call one, and frame_dummy jumps to register_tm_clones.
+  assertEqual "whole binary: callgraph edges" 3 binaryGraph.graph.edges.length
   assertTrue "whole binary: main is a function" (binaryIndex.functions.any (·.name == "main"))
   let stripped ← Project.load (bin "x86_64-linux-gnu-loader-stdin-stripped")
   let strippedIndex := Analysis.Xrefs.discover stripped
@@ -597,13 +647,52 @@ def run : IO Unit := do
     ((Analysis.Callgraph.stronglyConnected cyclic).any fun component => component.length = 2)
   assertEqual "callgraph reports both recursive functions" [0x1000, 0x2000]
     (Analysis.Callgraph.recursiveFunctions cyclic)
+  -- A jump to the start of another function is a call in the tail; one to its own start, or into a function, isn't.
+  let tailIndex : Analysis.Xrefs.Index := { xrefs with
+    xrefs := [⟨0x1000, 0x2000, .jump⟩, ⟨0x2000, 0x2000, .jump⟩, ⟨0x1004, 0x1008, .jump⟩, ⟨0x1008, 0x1000, .jump⟩]
+  }
+  assertEqual "callgraph has the tail call as an edge" [(0x1000, 0x2000)] (Analysis.Callgraph.create tailIndex).graph.edges
+  let tails ← Project.load (bin "x86_64-linux-none-partition")
+  let tailsIndex := Analysis.Xrefs.discover tails
+  let tailsGraph := Analysis.Callgraph.create tailsIndex
+  let addressOf := fun (name : String) => (tailsIndex.functions.find? (·.name == name)).map (·.addr)
+  let fromStart := Analysis.Callgraph.reachable tailsGraph (addressOf "_start").toList
+  for name in ["chainUser", "chainTop", "chainMid", "chainLeaf"] do
+    assertTrue s!"callgraph reaches {name} through calls in the tail" ((addressOf name).any fromStart.contains)
   let state : Var := ⟨"state", .imm 64, 0, false⟩
-  let smInstructions : List Disasm.Insn := [
+  -- Assignments of constants alone, as the arguments of calls are, are of no machine: nothing compares the variable.
+  let assignedOnly : List Disasm.Insn := [
     ⟨0x1000, 4, "set1", .normal, none, [.move state (.int (BitVec.ofNat 64 1))]⟩,
     ⟨0x1004, 4, "case1", .jump, some 0x2000, [.jmp (.int (BitVec.ofNat 64 0x2000))]⟩,
     ⟨0x1008, 4, "set2", .normal, none, [.move state (.int (BitVec.ofNat 64 2))]⟩,
     ⟨0x100c, 4, "case2", .jump, some 0x3000, [.jmp (.int (BitVec.ofNat 64 0x3000))]⟩
   ]
+  assertEqual "state machine needs a dispatcher" none ((Analysis.StateMachine.analyze assignedOnly).stateVar.map (·.name.str))
+  assertTrue "assignments without a dispatcher aren't flattened"
+    !(Analysis.StateMachine.isFlattened (Analysis.StateMachine.analyze assignedOnly))
+  -- Each block sets the state and leaves or goes on to the dispatcher, which compares the state against both constants in a loop.
+  let stateIs (value target : Nat) : Bil.Program :=
+    [.ifElse (.bin .eq (.var state) (.int (BitVec.ofNat 64 value))) [.jmp (.int (BitVec.ofNat 64 target))] []]
+  let leaves (target : Nat) : Bil.Program := [.ifElse (.var ⟨"leave", .imm 1, 0, false⟩) [.jmp (.int (BitVec.ofNat 64 target))] []]
+  let smInstructions : List Disasm.Insn := [
+    ⟨0x1000, 4, "set1", .normal, none, [.move state (.int (BitVec.ofNat 64 1))]⟩,
+    ⟨0x1004, 4, "case1", .conditionalJump, some 0x2000, leaves 0x2000⟩,
+    ⟨0x1008, 4, "set2", .normal, none, [.move state (.int (BitVec.ofNat 64 2))]⟩,
+    ⟨0x100c, 4, "case2", .conditionalJump, some 0x3000, leaves 0x3000⟩,
+    ⟨0x1010, 4, "is1", .conditionalJump, some 0x1000, stateIs 1 0x1000⟩,
+    ⟨0x1014, 4, "is2", .conditionalJump, some 0x1008, stateIs 2 0x1008⟩,
+    ⟨0x1018, 4, "again", .jump, some 0x1010, [.jmp (.int (BitVec.ofNat 64 0x1010))]⟩
+  ]
+  -- Comparisons that nothing comes back to, as those of a switch, are of no dispatcher.
+  let switched : List Disasm.Insn := [
+    ⟨0x1000, 4, "set1", .normal, none, [.move state (.int (BitVec.ofNat 64 1))]⟩,
+    ⟨0x1004, 4, "set2", .normal, none, [.move state (.int (BitVec.ofNat 64 2))]⟩,
+    ⟨0x1008, 4, "is1", .conditionalJump, some 0x2000, stateIs 1 0x2000⟩,
+    ⟨0x100c, 4, "is2", .conditionalJump, some 0x3000, stateIs 2 0x3000⟩,
+    ⟨0x1010, 4, "ret", .ret, none, []⟩
+  ]
+  assertEqual "state machine needs its dispatcher in a loop" none
+    ((Analysis.StateMachine.analyze switched).stateVar.map (·.name.str))
   let machine := Analysis.StateMachine.analyze smInstructions
   assertEqual "state machine selects state variable" (some "state") (machine.stateVar.map (·.name.str))
   assertEqual "state machine recovers case values" [1, 2] (machine.cases.map Analysis.StateMachine.Case.value)
@@ -613,7 +702,7 @@ def run : IO Unit := do
   assertEqual "state machine resolves transition" (some 0x3000) (Analysis.StateMachine.transition machine 2)
   assertTrue "state machine renders cases" (((Analysis.StateMachine.render machine).splitOn "state state").length > 1)
   let indirectMachine := Analysis.StateMachine.analyze (smInstructions ++
-    [⟨0x1010, 4, "indirect", .indirectJump, none, [.jmp (.var state)]⟩])
+    [⟨0x101c, 4, "indirect", .indirectJump, none, [.jmp (.var state)]⟩])
   assertTrue "state machine marks indirect CFG incomplete" !indirectMachine.complete
   assertTrue "state machine rejects incomplete flattening" !(Analysis.StateMachine.isFlattened indirectMachine)
   let recovery := Analysis.Deflatten.recover 0x1000 smInstructions [0x2000, 0x3000]
@@ -623,6 +712,7 @@ def run : IO Unit := do
   assertEqual "deflattening preserves state variable" (some "state") (recovery.stateVar.map (·.name.str))
   let missingRecovery := Analysis.Deflatten.recover 0x1000 smInstructions
   assertTrue "deflattening rejects undeclared external targets" !missingRecovery.complete
+  compiledMachines
   let memorySlice := Analysis.Slice.backwardProject xrefProject 0x1000 [.mem 0x3000 8]
   assertEqual "backward slice follows memory stores" [0x1004, 0x1008] memorySlice.sites
   assertEqual "backward slice preserves memory input" [Analysis.Slice.Location.memOf mem 0x3000 8] memorySlice.live

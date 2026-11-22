@@ -31,6 +31,7 @@ private def mergeDisasm (left right : Disasm.Disasm) : Disasm.Disasm := {
   instructions := mergeInstructions left.instructions right.instructions
   edges := mergeEdges left.edges right.edges
   errors := left.errors ++ right.errors
+  delayed := left.delayed ++ right.delayed
 }
 
 /-- The roots to disassemble from: the pc first, then the given ones and the symbols, each once. -/
@@ -90,6 +91,8 @@ def project (emu : Emu) (roots : List Nat := []) (symbols : List (String × Nat)
       let disassembler ← match emu.config.disassemblerAt with
         | some create => create region.address
         | none => pure emu.config.disassembler
+      -- What runs has a repeated instruction as a round of it, and what reads the code as a loop.
+      let disassembler := { disassembler with decode := fun address data => do pure ((← disassembler.decode address data).map (·.asLoop)) }
       -- A scan follows direct calls, so one scan per root would go over the callees again.
       let scanned ← Disasm.Recursive.scanRoots
         (Disasm.Disassembler.ofRegions disassembler [(⟨region.address, region.data, true, false, true⟩, disassembler)])

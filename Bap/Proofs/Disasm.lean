@@ -131,7 +131,7 @@ private theorem fast_sweep (d : Disassembler) (data : ByteArray) (entry : Nat) (
 /-- The linear sweep computes what its specification on lists does. -/
 theorem sweep_eq (d : Disassembler) (data : ByteArray) (entry : Nat) :
     Linear.sweep d data entry = (sweepAux d data entry (data.size + 1) 0 [] [] >>= fun out =>
-      pure { entry := entry, instructions := out.1, errors := out.2 }) := by
+      pure { entry := entry, instructions := out.1, errors := out.2, delayed := d.delayed out.1 }) := by
   have := fast_sweep d data entry (data.size + 1) 0 #[] #[]
   rw [show sweepAux d data entry (data.size + 1) 0 [] [] = _ from this.symm, io_bind_assoc]
   rfl
@@ -244,7 +244,7 @@ private theorem fast_scan (d : Disassembler) (data : ByteArray) (fuel : Nat) (wo
 theorem scan_eq (d : Disassembler) (data : ByteArray) (bytes entry : Nat) (roots : List Nat) :
     Recursive.scanRoots d data bytes entry roots =
       (scanAux d data (4 * bytes + roots.length + 1) roots [] [] [] [] >>= fun out =>
-        pure { entry := entry, instructions := out.1, edges := out.2.1, errors := out.2.2 }) := by
+        pure { entry := entry, instructions := out.1, edges := out.2.1, errors := out.2.2, delayed := d.delayed out.1 }) := by
   have hempty : Represents {} [] [] [] [] := by
     refine ⟨?_, ?_, rfl, rfl, rfl⟩ <;> simp
   rw [← fast_scan d data _ roots _ _ _ _ _ hempty, io_bind_assoc]
@@ -381,12 +381,18 @@ theorem sortedInstructions_strict (disasm : Bap.Disasm.Disasm)
 
 /-! ## Basic blocks -/
 
-/-- The block-leader addresses computed by `Disasm.blocks`. -/
+/-- The block-leader addresses computed by `Disasm.blocks`: the entry, the targets, where each instruction that isn't a plain one
+`resumes`, after itself or after its delay slot, and what comes after a gap. -/
 def leaders (disasm : Bap.Disasm.Disasm) : List Nat :=
   disasm.entry :: ((sortedInstructions disasm).flatMap fun insn =>
     match insn.flow with
     | .normal => insn.target.toList
-    | _ => insn.next :: insn.target.toList) ++ Bap.Disasm.gapStarts (sortedInstructions disasm)
+    | _ => disasm.resumes insn :: insn.target.toList) ++ Bap.Disasm.gapStarts (sortedInstructions disasm)
+
+/-- The leaders that `Disasm.blocks` computes, with the delayed instructions in a set, are those. -/
+theorem leaders_eq (disasm : Bap.Disasm.Disasm) : disasm.leaders (sortedInstructions disasm) = leaders disasm := by
+  simp only [Bap.Disasm.Disasm.leaders, leaders, Bap.Disasm.Disasm.resumes, Std.HashSet.contains_ofList]
+  congr 3
 
 /-- What `Disasm.blocks` builds, on lists. -/
 def build (leaders : List Nat) (current : List Insn) (blocks : List Block) : List Insn → List Block
@@ -442,6 +448,9 @@ theorem blocks_eq (disasm : Bap.Disasm.Disasm) :
       · simp [hx]
       · have : (x == a) = false := by simp; exact fun e => hx e.symm
         simp [hx, this]
+  show (fastBuild ((disasm.leaders (sortedInstructions disasm)).foldl (fun set address => set.insert address) {}) [] []
+    (sortedInstructions disasm)).reverse = _
+  rw [leaders_eq]
   exact fast_build _ (leaders disasm) (fun a => (hfold (leaders disasm) {} a).trans (by simp)) _ [] []
 
 /-- Shape of a finished block: non-empty, labelled by its head, no leader past the head. -/
@@ -562,9 +571,10 @@ theorem target_mem_leaders (disasm : Bap.Disasm.Disasm) (insn : Insn)
   · exact (sortedInstructions_perm disasm).mem_iff.2 hi
   · cases insn.flow <;> simp [ht]
 
-theorem next_mem_leaders_of_not_normal (disasm : Bap.Disasm.Disasm) (insn : Insn)
+/-- Where an instruction that isn't a plain one resumes is a leader: after it, or after its delay slot. -/
+theorem resumes_mem_leaders_of_not_normal (disasm : Bap.Disasm.Disasm) (insn : Insn)
     (hi : insn ∈ disasm.instructions) (hf : insn.flow ≠ .normal) :
-    insn.next ∈ leaders disasm := by
+    disasm.resumes insn ∈ leaders disasm := by
   refine List.mem_cons_of_mem _ (List.mem_append_left _ (List.mem_flatMap.2 ⟨insn, ?_, ?_⟩))
   · exact (sortedInstructions_perm disasm).mem_iff.2 hi
   · cases h : insn.flow <;> simp_all
@@ -579,16 +589,33 @@ theorem no_target_inside_block (disasm : Bap.Disasm.Disasm) (block : Block)
   rw [hshape] at hinner
   exact hnot inner hinner (target_mem_leaders disasm insn hi _ ht)
 
-/-- Control can only fall from one instruction to its layout successor inside a block when the
-former is not a control-flow instruction. -/
+/-- An instruction without a delay slot resumes after itself, and one with a slot after the slot, which is of its size. -/
+theorem resumes_of_not_delayed (disasm : Bap.Disasm.Disasm) (insn : Insn) (h : insn.address ∉ disasm.delayed) :
+    disasm.resumes insn = insn.next := by
+  simp [Bap.Disasm.Disasm.resumes, h]
+
+theorem resumes_of_delayed (disasm : Bap.Disasm.Disasm) (insn : Insn) (h : insn.address ∈ disasm.delayed) :
+    disasm.resumes insn = insn.next + insn.size := by
+  simp [Bap.Disasm.Disasm.resumes, h]
+
+/-- Control can only fall from an instruction to where it resumes inside a block, past its head, when the former is not a
+control-flow instruction: a block doesn't go on past a branch, or past the delay slot of one. -/
 theorem block_fallthrough_normal (disasm : Bap.Disasm.Disasm) (block : Block)
     (hb : block ∈ disasm.blocks) (inner : Insn) (hinner : inner ∈ block.instructions.tail)
-    (insn : Insn) (hi : insn ∈ disasm.instructions) (hnext : insn.next = inner.address) :
+    (insn : Insn) (hi : insn ∈ disasm.instructions) (hnext : disasm.resumes insn = inner.address) :
     insn.flow = .normal := by
   have ⟨head, tail, hshape, _, hnot⟩ := blocks_wellFormed disasm block hb
   rw [hshape] at hinner
   exact Decidable.byContradiction fun hf =>
-    hnot inner hinner (hnext ▸ next_mem_leaders_of_not_normal disasm insn hi hf)
+    hnot inner hinner (hnext ▸ resumes_mem_leaders_of_not_normal disasm insn hi hf)
+
+/-- Inside a block, past its head, an instruction that follows a control-flow instruction is the delay slot of it. -/
+theorem block_follows_delayed (disasm : Bap.Disasm.Disasm) (block : Block)
+    (hb : block ∈ disasm.blocks) (inner : Insn) (hinner : inner ∈ block.instructions.tail)
+    (insn : Insn) (hi : insn ∈ disasm.instructions) (hnext : insn.next = inner.address) (hf : insn.flow ≠ .normal) :
+    insn.address ∈ disasm.delayed :=
+  Decidable.byContradiction fun hd =>
+    hf (block_fallthrough_normal disasm block hb inner hinner insn hi ((resumes_of_not_delayed disasm insn hd).trans hnext))
 
 theorem blocks_nil_iff (disasm : Bap.Disasm.Disasm) :
     disasm.blocks = [] ↔ disasm.instructions = [] := by
@@ -2477,7 +2504,7 @@ private theorem scanRegions_unfold (d : Disassembler) (bytes entry : Nat) (roots
           fastSweepRange d ByteArray.empty (4 * bytes + roots.length + 1) plan range.2 (2 * (range.2 - range.1) + 1)
             range.1 false state.1 state.2) >>= fun out =>
         pure { entry := entry, instructions := out.2.instructions.toList, edges := out.2.edges.toList,
-               errors := first.errors.toList }) := rfl
+               errors := first.errors.toList, delayed := d.delayed out.2.instructions.toList }) := rfl
 
 /-- Soundness of the scan with a linear sweep. What holds of a scan holds of it, from its roots and the addresses the
 sweep went on from, and it has no other errors than the ones of the scan from the roots. -/

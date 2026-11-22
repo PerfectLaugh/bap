@@ -19,7 +19,7 @@ private def sweepAux (disassembler : Disassembler) (data : ByteArray) (entry : N
 
 def sweep (disassembler : Disassembler) (data : ByteArray) (entry : Nat := 0) : IO Disasm := do
   let (instructions, errors) ← sweepAux disassembler data entry (data.size + 1) 0 #[] #[]
-  pure { entry := entry, instructions := instructions.toList, errors := errors.toList }
+  pure { entry := entry, instructions := instructions.toList, errors := errors.toList, delayed := disassembler.delayed instructions.toList }
 
 /-- What a tolerant sweep found at a place of the bytes, by its offset from their start: an instruction that decoded there, or bytes that
 it went past, how many, and why nothing decoded there. -/

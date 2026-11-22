@@ -1,0 +1,7 @@
+1 / 0 is 0
+brk: signal 5 code 1, the thread 0 from the instruction, si_addr 0
+after a brk whose handler moved on: signal 5 code 1, went on 1
+a child died of the signal 5
+a child left with 1
+a child left with 2
+a child that ignored it died of the signal 5

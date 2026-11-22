@@ -442,12 +442,8 @@ theorem decode_unknown {data : ByteArray}
   simp only [dispatch, Bool.and_eq_true, decide_eq_true_eq, Bool.or_eq_true, and_assoc]
   rw [ite_eq_right helf, ite_eq_right hpe, ite_eq_right hmacho]
 
-/-- What `decode` accepts, `dispatch` does: it only refuses more. -/
-theorem dispatch_of_decode {data : ByteArray} {image : Image} (h : decode data = .ok image) : dispatch data = .ok image := by
-  unfold decode at h
-  split at h
-  · cases h
-  · exact h
+/-- What `decode` accepts, `dispatch` does: they are the same. -/
+theorem dispatch_of_decode {data : ByteArray} {image : Image} (h : decode data = .ok image) : dispatch data = .ok image := h
 
 /-- Anything `decode` accepts carries one of the recognized magic numbers. -/
 theorem decode_ok_has_magic {data : ByteArray} {image : Image} (h : decode data = .ok image) :
@@ -693,7 +689,7 @@ theorem link_regions_disjoint (input : Input) : (link input).regions.Pairwise Be
 theorem regionBytes_size (memory : ByteArray) (fileSize : Nat) (region : Region) :
     (regionBytes memory fileSize region).size = region.size := by
   unfold regionBytes
-  simp only [Bap.zeroBytes]
+  simp only [Bap.zeroBytes, Bap.padZeros]
   split
   · show (Array.replicate region.size 0).size = _
     simp
@@ -4226,6 +4222,24 @@ def SegmentsAgree (image : Image) : Prop :=
     image.memory.entries = (pairs.map Prod.snd).reverse.map (fun region => (region, ())) ∧
     ∀ pair ∈ pairs, pair.1.addr = pair.2.addr ∧ pair.1.size = pair.2.size
 
+/-- What `Elf.decode` accepts is what `Elf.decodeRegions` makes of a file whose regions take no more of it than `fileLimit` and no
+more zeros than `zeroLimit`. -/
+theorem decode_bounded {data : ByteArray} {image : Image} (h : Elf.decode data = .ok image) :
+    (Elf.regionsSize data).file ≤ fileLimit data ∧ (Elf.regionsSize data).zeros ≤ zeroLimit ∧
+      Elf.decodeRegions data = .ok image := by
+  unfold Elf.decode at h
+  split at h
+  · cases h
+  · next hx =>
+    simp only [exceeds, Bool.or_eq_true, decide_eq_true_eq, not_or, Nat.not_lt] at hx
+    exact ⟨hx.1, hx.2, h⟩
+
+/-- No file whose regions would take more than that is decoded, by any caller. -/
+theorem decode_refuses_large {data : ByteArray} (h : exceeds data (Elf.regionsSize data) = true) :
+    Elf.decode data = .error tooLarge := by
+  unfold Elf.decode
+  rw [ite_eq_left h]
+
 /-- An executable or shared object: its segments are its LOAD entries, with the bytes of the file. -/
 theorem decode_loaded {data : ByteArray} {image : Image} {header : Elf.Header} (h : Elf.decode data = .ok image)
     (hh : parseHeader data = .ok header) (ht : header.fileType ≠ 1) :
@@ -4234,7 +4248,8 @@ theorem decode_loaded {data : ByteArray} {image : Image} {header : Elf.Header} (
       ∃ entries : List (Segment × MemRegion), image.segments = entries.map Prod.fst ∧
         image.memory.entries = (entries.map Prod.snd).reverse.map (fun region => (region, ())) ∧
         ∀ entry ∈ entries, LoadPair data entry := by
-  simp only [Elf.decode, bind_ok_iff, hh] at h
+  replace h := (decode_bounded h).2.2
+  simp only [Elf.decodeRegions, bind_ok_iff, hh] at h
   rcases h with ⟨_, he, h⟩
   cases he
   have hne : ¬ (header.fileType == 1) = true := by simpa using ht
@@ -4257,7 +4272,8 @@ theorem decode_relocatable {data : ByteArray} {image : Image} {header : Elf.Head
         image.segments = output.regions.map ElfLinker.toSegment ∧
         image.memory.entries = ((output.regions.map (ElfLinker.toMemRegion output.memory prepared.data.size)).reverse.map
           fun region => (region, ())) := by
-  simp only [Elf.decode, bind_ok_iff, hh] at h
+  replace h := (decode_bounded h).2.2
+  simp only [Elf.decodeRegions, bind_ok_iff, hh] at h
   rcases h with ⟨_, he, h⟩
   cases he
   have hy : (header.fileType == 1) = true := by simpa using ht
@@ -4274,7 +4290,8 @@ theorem decode_no_program_headers {data : ByteArray} {image : Image} {header : E
     (h : Elf.decode data = .ok image) (hh : parseHeader data = .ok header) (ht : header.fileType ≠ 1)
     (h0 : header.programCount = 0) :
     image.segments = [] ∧ image.memory.entries = [] ∧ Elf.programHeaders data = .ok [] := by
-  simp only [Elf.decode, bind_ok_iff, hh] at h
+  replace h := (decode_bounded h).2.2
+  simp only [Elf.decodeRegions, bind_ok_iff, hh] at h
   rcases h with ⟨_, he, h⟩
   cases he
   have hne : ¬ (header.fileType == 1) = true := by simpa using ht
@@ -4290,7 +4307,8 @@ theorem decode_no_program_headers {data : ByteArray} {image : Image} {header : E
 
 theorem decode_header {data : ByteArray} {image : Image} (h : Elf.decode data = .ok image) :
     ∃ header, parseHeader data = .ok header := by
-  simp only [Elf.decode, bind_ok_iff] at h
+  replace h := (decode_bounded h).2.2
+  simp only [Elf.decodeRegions, bind_ok_iff] at h
   rcases h with ⟨header, h1, _⟩
   exact ⟨header, h1⟩
 
@@ -5388,8 +5406,8 @@ def GoodEntry (data : ByteArray) (entry : Segment × MemRegion × FileMapping) :
 /-- The parse state's parallel lists stay parallel and describe the same segments. -/
 def StateInvariant (data : ByteArray) (state : ParseState) : Prop :=
   ∃ entries : List (Segment × MemRegion × FileMapping),
-    ParseState.segments state = entries.map Prod.fst ∧ ParseState.regions state = entries.map (·.2.1) ∧
-    ParseState.mappings state = entries.map (·.2.2) ∧ ∀ entry ∈ entries, GoodEntry data entry
+    (ParseState.segments state).toList = entries.map Prod.fst ∧ (ParseState.regions state).toList = entries.map (·.2.1) ∧
+    (ParseState.mappings state).toList = entries.map (·.2.2) ∧ ∀ entry ∈ entries, GoodEntry data entry
 
 /-- Each load command advances at least 8 bytes and stays inside the command region. -/
 theorem parseCommands_ok {data : ByteArray} {header : Header} :
@@ -5460,6 +5478,24 @@ theorem parseCommands_ok {data : ByteArray} {header : Header} :
       omega
     | succ m => exact h2 (by omega)
 
+/-- What `Macho.decode` accepts is what `Macho.decodeRegions` makes of a file whose regions take no more of it than `fileLimit` and no
+more zeros than `zeroLimit`. -/
+theorem decode_bounded {data : ByteArray} {image : Image} (h : Macho.decode data = .ok image) :
+    (Macho.regionsSize data).file ≤ fileLimit data ∧ (Macho.regionsSize data).zeros ≤ zeroLimit ∧
+      Macho.decodeRegions data = .ok image := by
+  unfold Macho.decode at h
+  split at h
+  · cases h
+  · next hx =>
+    simp only [exceeds, Bool.or_eq_true, decide_eq_true_eq, not_or, Nat.not_lt] at hx
+    exact ⟨hx.1, hx.2, h⟩
+
+/-- No file whose regions would take more than that is decoded, by any caller. -/
+theorem decode_refuses_large {data : ByteArray} (h : exceeds data (Macho.regionsSize data) = true) :
+    Macho.decode data = .error tooLarge := by
+  unfold Macho.decode
+  rw [ite_eq_left h]
+
 /-- Everything `Macho.decode` promises: the file's bytes, a consistent segment map and a mapped entry point. -/
 theorem decode_ok {data : ByteArray} {image : Image} (h : Macho.decode data = .ok image) :
     image.data = data ∧ image.addrWidth = 64 ∧
@@ -5467,13 +5503,14 @@ theorem decode_ok {data : ByteArray} {image : Image} (h : Macho.decode data = .o
       ∃ entries : List (Segment × MemRegion × FileMapping), image.segments = entries.map Prod.fst ∧
         image.memory.entries = (entries.map (·.2.1)).reverse.map (fun region => (region, ())) ∧
         (∀ entry ∈ entries, GoodEntry data entry) ∧
-        ParseState.mappings state = entries.map (·.2.2) ∧
+        (ParseState.mappings state).toList = entries.map (·.2.2) ∧
         (ParseState.entryOffset state = none → image.entryPoint = (ParseState.threadEntry state).getD 0) ∧
         (∀ entry, ParseState.entryOffset state = some entry →
-          ∃ mapping ∈ ParseState.mappings state, FileMapping.offset mapping ≤ entry ∧
+          ∃ mapping ∈ (ParseState.mappings state).toList, FileMapping.offset mapping ≤ entry ∧
             entry < FileMapping.offset mapping + FileMapping.size mapping ∧
             image.entryPoint = FileMapping.address mapping + entry - FileMapping.offset mapping) := by
-  simp only [Macho.decode, bind_ok_iff] at h
+  replace h := (decode_bounded h).2.2
+  simp only [Macho.decodeRegions, bind_ok_iff] at h
   rcases h with ⟨header, h1, ⟨final, state⟩, h2, h⟩
   have ⟨_, _, entries, hseg, hreg, hmap, hgood⟩ := parseCommands_ok h2
     ⟨[], rfl, rfl, rfl, by simp⟩
@@ -5481,7 +5518,7 @@ theorem decode_ok {data : ByteArray} {image : Image} (h : Macho.decode data = .o
   · rw [ite_eq_left hf] at h; cases h
   rw [ite_eq_right hf] at h
   have hmem : (List.foldl (fun memory region => MemoryMap.add region () memory) ({} : MemoryMap Unit)
-      (ParseState.regions state)).entries =
+      (ParseState.regions state).toList).entries =
       (entries.map (·.2.1)).reverse.map (fun region => (region, ())) := by
     rw [Map.foldl_add_entries, hreg]
     exact List.append_nil _
@@ -5500,7 +5537,7 @@ theorem decode_ok {data : ByteArray} {image : Image} (h : Macho.decode data = .o
       simp only [ok_bind, bind_ok_iff] at h
       rcases h with ⟨symbols, _, h⟩
       cases h
-      have hm : mapping ∈ ParseState.mappings state := List.mem_of_find?_eq_some hfind
+      have hm : mapping ∈ (ParseState.mappings state).toList := List.mem_of_find?_eq_some hfind
       have hp := List.find?_some hfind
       simp only [Bool.and_eq_true, decide_eq_true_eq] at hp
       exact ⟨rfl, rfl, header, state, h1, rfl, entries, hseg, hmem, hgood, hmap,
@@ -5712,6 +5749,24 @@ theorem parseSymbols_ok {data : ByteArray} {header : Header} {sections : List Se
     have ⟨added, he, hl⟩ := parseSymbols_ok (fuel := fuel) (by omega) h
     exact ⟨symbol :: added, by simpa [Array.toList_push] using he, by simp; omega⟩
 
+/-- What `Pe.decode` accepts is what `Pe.decodeRegions` makes of a file whose regions take no more of it than `fileLimit` and no
+more zeros than `zeroLimit`. -/
+theorem decode_bounded {data : ByteArray} {image : Image} (h : Pe.decode data = .ok image) :
+    (Pe.regionsSize data).file ≤ fileLimit data ∧ (Pe.regionsSize data).zeros ≤ zeroLimit ∧
+      Pe.decodeRegions data = .ok image := by
+  unfold Pe.decode at h
+  split at h
+  · cases h
+  · next hx =>
+    simp only [exceeds, Bool.or_eq_true, decide_eq_true_eq, not_or, Nat.not_lt] at hx
+    exact ⟨hx.1, hx.2, h⟩
+
+/-- No file whose regions would take more than that is decoded, by any caller. -/
+theorem decode_refuses_large {data : ByteArray} (h : exceeds data (Pe.regionsSize data) = true) :
+    Pe.decode data = .error tooLarge := by
+  unfold Pe.decode
+  rw [ite_eq_left h]
+
 /-- Everything `Pe.decode` promises about an accepted file. -/
 theorem decode_ok {data : ByteArray} {image : Image} (h : Pe.decode data = .ok image) :
     ∃ header, parseHeader data = .ok header ∧ image.data = data ∧ image.addrWidth = Header.width header ∧
@@ -5720,7 +5775,8 @@ theorem decode_ok {data : ByteArray} {image : Image} (h : Pe.decode data = .ok i
       ∃ entries : List (Section × Segment × MemRegion), image.segments = entries.map (·.2.1) ∧
         image.memory.entries = (entries.map (·.2.2)).reverse.map (fun region => (region, ())) ∧
         ∀ entry ∈ entries, entry.2.1.addr = entry.2.2.addr ∧ entry.2.1.size = entry.2.2.size := by
-  simp only [Pe.decode, bind_ok_iff] at h
+  replace h := (decode_bounded h).2.2
+  simp only [Pe.decodeRegions, bind_ok_iff] at h
   rcases h with ⟨header, h1, ⟨sections, segments, regions⟩, h2, symbols, _, h⟩
   cases h
   have ⟨hs, hg, entries, _, hseg, hreg, hp⟩ := parseSections_ok h2
@@ -6304,9 +6360,10 @@ theorem decodeReport_ok {data : ByteArray} {image : Image} {errors : List String
         image.memory.entries = (pairs.map Prod.snd).reverse.map (fun region => (region, ())) ∧
         ∀ pair ∈ pairs, pair.1.addr = pair.2.addr ∧ pair.1.size = pair.2.size := by
   unfold Coff.decodeReport at h
-  by_cases hz : Coff.zeroFill data > 2 ^ 32
+  by_cases hz : exceeds data (Coff.regionsSize data) = true
   · simp [hz] at h; cases h
-  simp only [hz, ite_false, bind_ok_iff] at h
+  rw [Bool.not_eq_true] at hz
+  simp only [hz, Bool.false_eq_true, ite_false, bind_ok_iff] at h
   rcases h with ⟨header, h1, parsed, h2, parsedSymbols, _, h⟩
   have hgood : ∀ object ∈ parsed, GoodObject object := by
     intro object hm

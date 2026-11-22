@@ -737,6 +737,14 @@ def testOptimizedRange : IO Unit := do
   Bap.Emu.setReg emu ⟨"X11", .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 count))
   let _ ← Bap.Emu.runUntil emu 12 (fuel := 3 * count + 100)
   assertBits "A loop comes to the same when compiled again" (BitVec.ofNat 64 (3 * count)) (.ok (← Bap.Emu.reg emu a0))
+  -- What is compiled again is compiled beside the run, which may be over before it is, as when the tests run beside each other:
+  -- the loop run once more after that is done is of it.
+  Primus.Lifted.finishBackgroundCompiles
+  Bap.Emu.setReg emu a0 (.bits (BitVec.ofNat 64 0))
+  Bap.Emu.setReg emu ⟨"X11", .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 count))
+  Bap.Emu.setPc emu 0
+  let _ ← Bap.Emu.runUntil emu 12 (fuel := 3 * count + 100)
+  assertBits "and the same of what was compiled again" (BitVec.ofNat 64 (3 * count)) (.ok (← Bap.Emu.reg emu a0))
   let stats ← Primus.Lifted.stats emu.engine
   assertTrue s!"A loop that runs a lot is compiled again ({stats.optimized})" (stats.optimized ≥ 1)
 
@@ -850,6 +858,27 @@ def testLinuxRaises (name : String) : IO Unit := do
   assertEqual s!"Linux {name} ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
   assertEqual s!"Linux {name} is what qemu does" (String.fromUTF8! (← IO.FS.readBinFile s!"testsuite/data/{name}.out"))
     (String.fromUTF8! (← written.get))
+
+/-- A program of `testLinuxRaises` says the same when it is run a piece of `step` instructions at a time, each from a checkpoint of
+the one before, which is the same checkpoint when it is made again: of `libc-review23`, with timers that are armed, a thread that
+sleeps, mappings past the end of their file and mappings that have the pages of another, whichever of them a piece ends in. -/
+def testLinuxRaisesCheckpoints (name : String) (step : Nat) : IO Unit := do
+  let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile s!"testsuite/bin/{name}")
+  let written ← IO.mkRef ByteArray.empty
+  let rec go : Nat → Bap.Linux.Machine → IO Bap.Tasks.ScheduleOutcome
+    | 0, _ => throw <| IO.userError "more pieces than a run should have"
+    | fuel + 1, machine => do
+      let outcome ← machine.run (fuel := step) fun data => written.modify (· ++ data)
+      if outcome == .outOfFuel then
+        let data ← machine.checkpoint
+        let next ← Bap.Linux.Machine.ofCheckpoint data
+        assertTrue s!"Linux {name} saves again as it was" (data == (← next.checkpoint))
+        go fuel next
+      else pure outcome
+  let outcome ← go 2000 (← Bap.Linux.start kernel "/test" ["/test"])
+  assertEqual s!"Linux {name} ends as it should, from pieces" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  assertEqual s!"Linux {name} says what it should, from pieces"
+    (String.fromUTF8! (← IO.FS.readBinFile s!"testsuite/data/{name}.out")) (String.fromUTF8! (← written.get))
 
 /-- `libc-ptrace` says the same when a checkpoint is made where it has said `marker`, and the machine of it goes on: after `attach 0`,
 the tracer waits and the tracee stops, with the tracer's memory in its states, as it has no native memory yet, which a wait writes to;
@@ -2393,6 +2422,20 @@ def testVersionedIfunc : IO Unit := do
   let some address := ← machine.findSymbol "g" (some library) | throw <| IO.userError "libifveruse has no g"
   assertEqual "A reference of a version to an IFUNC is of what it picks" 42 ((← machine.call address) % 2 ^ 32)
 
+/-- What a library that is needed is bound to of an IFUNC of the one that needs it, `late` of `libifneed` in `libifdep`, is what its
+resolver picks, as `ld.so` has it, which it picks once its own library is relocated: by a call and by its address. -/
+def testIfuncOfNeeder : IO Unit := do
+  let binary (name : String) : IO ByteArray := IO.FS.readBinFile s!"testsuite/bin/{name}"
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" (← binary "x86_64-linux-musl-libc-files"))
+    |>.addFile "/lib/libifdep.so" (← binary "x86_64-linux-gnu-libifdep")
+    |>.addFile "/lib/libifneed.so" (← binary "x86_64-linux-gnu-libifneed")
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let library ← machine.loadLibrary "libifneed.so"
+  let some call := ← machine.findSymbol "through_needed" (some library) | throw <| IO.userError "libifneed has no through_needed"
+  assertEqual "An IFUNC of what needs a library is to that library what it picks" 77 ((← machine.call call) % 2 ^ 32)
+  let some same := ← machine.findSymbol "same_address" (some library) | throw <| IO.userError "libifneed has no same_address"
+  assertEqual "An IFUNC of what needs a library, and of the same address there" 1 ((← machine.call same) % 2 ^ 32)
+
 /-- What a library needs is loaded as `ld.so` loads it (`testsuite/src/loader.sh`): breadth first, as symbols are looked for in that
 order; what is loaded of the name that is needed is it; what is of another machine is passed over; `DT_RPATH` is looked in before what
 is asked and `DT_RUNPATH` after; a symbol of `SHN_ABS` is its value; text of i386 that isn't position-independent is relocated; and
@@ -2764,6 +2807,119 @@ private def sourcesAt (explanation : Bap.Analysis.DynamicTaint.Tracker.Explanati
   explanation.sources.filterMap fun (node, byte, _) => match node.kind with
     | .source label offset => some (label, offset.map (· + byte))
     | _ => none
+
+/-- Where the bytes of the record of `testsuite/src/libc-taintreview.c` came from: what an instruction of more rounds than 65535 wrote
+over has gone, what is taken from itself comes from nothing, however a lifter writes that, a private mapping of a file has what the file
+has when a shared one or a call changed it, and a thread has its stack and its thread pointer from the arguments that gave them. -/
+def testLinuxTaintReview (triple : String) : IO Unit := do
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-taintreview"
+  let file := ByteArray.mk ((Array.range 256).map fun index => index.toUInt8)
+  let kernel := (Bap.Linux.Kernel.empty.addFile "/test" program).addFile "/data" file
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start kernel "/test" ["/test"]
+  let tracker ← machine.track
+  let main ← Bap.Emu.thread machine.emu
+  let outcome ← machine.run fun data => written.modify (· ++ data)
+  assertEqual s!"Linux {triple} what is followed with care ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+  let lines := (String.fromUTF8! (← written.get)).splitOn "\n"
+  assertEqual s!"Linux {triple} what is followed with care says it is done" "done" (lines.getD 1 "")
+  let record := hexOfLine (lines.getD 0 "")
+  let space ← Bap.Emu.spaceOf machine.emu main
+  -- What a byte of the record came from as its value or through an address, and not by a branch that was taken near it.
+  let at_ (index : Nat) : IO (List (String × Option Nat)) := do
+    let explanation ← tracker.explainMemory (record + index) (some space)
+    pure (explanation.sources.filterMap fun (node, byte, edge) => match node.kind with
+      | .source label offset => if edge == .data || edge == .address then some (label, offset.map (· + byte)) else none
+      | _ => none)
+  if triple == "mips" then
+    assertEqual s!"Linux {triple} the flag of a result isn't the argument that its register had" ([] : List (String × Option Nat))
+      ((← at_ 40).filter (·.1.startsWith "pread"))
+    return
+  if triple == "x86_64" then
+    assertEqual s!"Linux {triple} a byte that a long rep stosb filled comes from nothing" [] (← at_ 0)
+    assertEqual s!"Linux {triple} a byte of a file that a rep stosb of more than 65535 rounds wrote over has gone" [] (← at_ 1)
+  for (index, said) in [(8, "a register taken from itself by eor"), (9, "a register taken from itself by sub"),
+      (10, "the low half of a register taken from itself by eor"), (11, "the low half of a register taken from itself by sub")] do
+    assertEqual s!"Linux {triple} {said} comes from nothing" [] (← at_ index)
+  assertEqual s!"Linux {triple} the register that was taken from itself is of the file" [("pread /data", some 96)] (← at_ 12)
+  if triple == "arm" then return
+  assertEqual s!"Linux {triple} what pread reads of a file that a shared mapping wrote is what was written" [("pread /data", some 80)] (← at_ 16)
+  assertEqual s!"Linux {triple} a private mapping has what a shared one of its file wrote" [("pread /data", some 80)] (← at_ 17)
+  assertEqual s!"Linux {triple} a private mapping has what pwrite wrote to its file" [("pread /data", some 85)] (← at_ 18)
+  -- A byte of the file, and those below it where it was moved by a sum, as AArch64 moves its stack pointer, and nothing else.
+  let isByte (first index : Nat) (sources : List (String × Option Nat)) : Bool :=
+    sources.contains ("pread /g", some (first + index)) &&
+      sources.all fun (label, offset) => label == "pread /g" && first ≤ offset.getD 0 && offset.getD 0 ≤ first + index
+  for index in List.range 8 do
+    assertTrue s!"Linux {triple} byte {index} of the stack pointer of a thread is of the argument of clone that gave it"
+      (isByte 32 index (← at_ (24 + index)))
+  if triple == "aarch64" then
+    for index in List.range 8 do
+      assertTrue s!"Linux {triple} byte {index} of the thread pointer of a thread is of the argument of clone that gave it"
+        (isByte 40 index (← at_ (32 + index)))
+  else
+    let through := (← at_ 32).filter (·.1 == "pread /g")
+    assertEqual s!"Linux {triple} a load through the thread pointer of a thread is through the argument of clone that gave it"
+      ((List.range 8).map fun index => some (40 + index)) (through.map (·.2) |>.mergeSort (fun left right => left.getD 0 ≤ right.getD 0))
+
+/-- A loop of an instruction is followed however many rounds it goes, in one run of the instruction or in several that each go some
+of them and jump back to it, as a `rep` may be lifted either way: a copy of more bytes than 65535 has what each came from, and what it
+wrote over has gone. The programs are written here, and followed as an instruction of a machine that hasn't started. -/
+def testTaintLoops : IO Unit := do
+  let program ← IO.FS.readBinFile "testsuite/bin/x86_64-linux-musl-libc-taintreview"
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let tracker ← machine.track
+  let emu := machine.emu
+  let count := 66000
+  let some (base, _, _) := (← Bap.Emu.regions emu).find? fun (_, size, protection) => protection.writable && size ≥ 2 * count + 8192
+    | throw <| IO.userError "no region to copy in"
+  let (from_, to) := (base + 4096, base + 4096 + count)
+  let word (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
+  let (rsi, rdi, rcx) := (word "RSI", word "RDI", word "RCX")
+  let memory := emu.config.memory
+  let literal (value : Nat) : Bap.Bil.Exp := .int (BitVec.ofNat 64 value)
+  let set (var : Bap.Var) (value : Nat) : IO Unit := Bap.Emu.setReg emu var (.bits (BitVec.ofNat 64 value))
+  let round : Bap.Bil.Program := [
+    .move memory (.store (.var memory) (.var rdi) (.load (.var memory) (.var rsi) .little 1) .little 1),
+    .move rsi (.bin .add (.var rsi) (literal 1)),
+    .move rdi (.bin .add (.var rdi) (literal 1)),
+    .move rcx (.bin .sub (.var rcx) (literal 1))]
+  let labels (address : Nat) : IO (List (String × Option Nat)) := do
+    pure (sourcesAt (← tracker.explainMemory address))
+  let pc ← emu.pc.get
+  -- In one run of the instruction.
+  tracker.markMemory (from_ + count - 50) 4 "copied" (some 0)
+  tracker.markMemory (to + count - 99) 4 "written over" (some 0)
+  set rsi from_
+  set rdi to
+  set rcx count
+  let started ← IO.monoMsNow
+  tracker.followProgram pc [.while (.bin .neq (.var rcx) (literal 0)) round]
+  let took := (← IO.monoMsNow) - started
+  assertEqual "A byte that a loop of more than 65535 rounds copied is what it was" [("copied", some 1)] (← labels (to + count - 49))
+  assertEqual "A byte that a loop of more than 65535 rounds wrote over has gone" [] (← labels (to + count - 98))
+  assertEqual "A loop of an instruction is followed all of" [] (← tracker.gapsOf)
+  assertTrue s!"A loop of 66000 rounds is followed in the time of its rounds, not of their square: {took} ms" (took < 5000)
+  -- In runs of 4096 rounds, each of which jumps back to the instruction while there is more.
+  let rounds : Bap.Var := ⟨"#rounds", .imm 64, 0, true⟩
+  let some_ : Bap.Bil.Program := [
+    .move rounds (literal 0),
+    .while (.bin .and (.bin .neq (.var rcx) (literal 0)) (.bin .lt (.var rounds) (literal 4096)))
+      (round ++ [.move rounds (.bin .add (.var rounds) (literal 1))]),
+    .ifElse (.bin .neq (.var rcx) (literal 0)) [.jmp (literal pc)] []]
+  tracker.markMemory (from_ + count - 30) 4 "copied again" (some 0)
+  tracker.markMemory (to + count - 80) 4 "written over again" (some 0)
+  let mut left := count
+  while left > 0 do
+    set rsi (from_ + (count - left))
+    set rdi (to + (count - left))
+    set rcx left
+    tracker.followProgram pc some_
+    left := left - min left 4096
+  assertEqual "A byte that a loop of runs that jump back copied is what it was" [("copied again", some 2)] (← labels (to + count - 28))
+  assertEqual "A byte that a loop of runs that jump back wrote over has gone" [] (← labels (to + count - 79))
+  assertEqual "What the first loop copied is copied again" [("copied", some 1)] (← labels (to + count - 49))
+  assertEqual "A loop of runs that jump back is followed all of" [] (← tracker.gapsOf)
 
 /-- What a run did and what went where, with a dispatcher that comes to a deferred routine by a byte of a file: how it first got there, who called whom in which
 thread, a byte through a pipe from a child and through a file, why it went there, and where it would have gone otherwise. -/
@@ -5070,6 +5226,14 @@ def testSeccompState : IO Unit := do
   assertEqual "seccomp: the first result of the actions" 0x80000000
     (Bap.Linux.Seccomp.combine [0x7fff0000, 0x00050001, 0x80000000, 0x00030000])
   assertTrue "seccomp: a load past seccomp_data isn't a filter" (!Bap.Linux.Seccomp.valid #[⟨0x20, 0, 0, 64⟩, ⟨0x06, 0, 0, 0⟩])
+  -- Scratch is loaded only after it is stored, on each way there, as `check_load_and_stores` has it.
+  assertTrue "seccomp: a load of scratch that nothing stored isn't a filter" (!Bap.Linux.Seccomp.valid #[⟨0x60, 0, 0, 3⟩, ⟨0x06, 0, 0, 0⟩])
+  assertTrue "seccomp: nor of another word than was stored"
+    (!Bap.Linux.Seccomp.valid #[⟨0x00, 0, 0, 7⟩, ⟨0x02, 0, 0, 2⟩, ⟨0x61, 0, 0, 3⟩, ⟨0x06, 0, 0, 0⟩])
+  assertTrue "seccomp: nor of one that a way there didn't store"
+    (!Bap.Linux.Seccomp.valid #[⟨0x20, 0, 0, 0⟩, ⟨0x15, 1, 0, 39⟩, ⟨0x02, 0, 0, 3⟩, ⟨0x60, 0, 0, 3⟩, ⟨0x16, 0, 0, 0⟩])
+  assertTrue "seccomp: one that each way stored is"
+    (Bap.Linux.Seccomp.valid #[⟨0x20, 0, 0, 0⟩, ⟨0x03, 0, 0, 3⟩, ⟨0x15, 0, 1, 39⟩, ⟨0x02, 0, 0, 3⟩, ⟨0x60, 0, 0, 3⟩, ⟨0x16, 0, 0, 0⟩])
 
 /-- Files and directories put in a kernel, before a run and as a machine runs, through links and over what is there. -/
 def testKernelFiles : IO Unit := do

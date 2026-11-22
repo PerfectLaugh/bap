@@ -98,6 +98,25 @@ def run : IO Unit := do
   assertTrue "Mach-O fixture has a segment" found
   assertEqual "Mach-O segments too large are refused" (some "the regions of the file are too large")
     (match Image.decode huge with | .error message => some message | .ok _ => none)
+  assertEqual "Mach-O segments too large are refused by the decoder of Mach-O" (some "the regions of the file are too large")
+    (match Macho.decode huge with | .error message => some message | .ok _ => none)
+  -- Segments that each say they are of all of the file, which 300 of them make 21 KiB: 6 MiB of regions of it.
+  let le (size value : Nat) : ByteArray := ByteArray.mk ((List.range size).map fun index => (value >>> (8 * index)).toUInt8).toArray
+  let segments (count : Nat) (sizeOf : Nat → Nat) (protection : Nat) : ByteArray :=
+    let size := 32 + count * 72
+    let header := le 4 0xfeedfacf ++ le 4 0x01000007 ++ le 4 3 ++ le 4 2 ++ le 4 count ++ le 4 (count * 72) ++ le 4 0 ++ le 4 0
+    (List.range count).foldl (init := header) fun bytes index =>
+      bytes ++ le 4 0x19 ++ le 4 72 ++ le 8 0 ++ le 8 0 ++ le 8 (0x100000000 + index * 0x100000) ++ le 8 (sizeOf size) ++ le 8 0 ++
+        le 8 (sizeOf size) ++ le 4 protection ++ le 4 protection ++ le 4 0 ++ le 4 0
+  assertEqual "Mach-O segments that are each all of the file are refused" (some "the regions of the file are too large")
+    (match Macho.decode (segments 300 id 5) with | .error message => some message | .ok _ => none)
+  assertEqual "and two of them are made" (some 2) ((Macho.decode (segments 2 id 5)).toOption.map (·.segments.length))
+  -- As many segment commands as 3 MiB have room for, each of nothing, are read one after another, rather than each after a copy
+  -- of those before it.
+  let empty := segments 40000 (fun _ => 0) 0
+  let before ← IO.monoMsNow
+  assertEqual "Mach-O segments of nothing are all there" (some 40000) ((Macho.decode empty).toOption.map (·.segments.length))
+  assertTrue "and take no time" ((← IO.monoMsNow) - before < 4000)
   match Macho.decode (ByteArray.mk #[1, 2, 3, 4]) with
   | .error _ => IO.println "ok: malformed Mach-O rejected"
   | .ok _ => throw <| IO.userError "malformed Mach-O accepted"

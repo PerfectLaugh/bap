@@ -1,0 +1,61 @@
+div of 7 by 2: rax 3 rdx 1
+div by zero: signal 8 code 1, the thread 0 from the instruction, si_addr 0
+  rax 7 rdx 0 rcx 0
+div of 2^64 by 1: signal 8 code 1, the thread 0 from the instruction, si_addr 0
+  rax 0 rdx 1 rcx 1
+div of 2^64 + 5 by 2: rax 8000000000000002 rdx 1
+div of 3 * 2^64 by 2: signal 8 code 1, the thread 0 from the instruction, si_addr 0
+  rax 0 rdx 3 rcx 2
+idiv by zero: signal 8 code 1, the thread 0 from the instruction, si_addr 0
+  rax 7 rdx 0 rcx 0
+idiv of the least by -1: signal 8 code 1, the thread 0 from the instruction, si_addr 0
+  rax 8000000000000000 rdx ffffffffffffffff rcx ffffffffffffffff
+idiv of -7 by 2: rax fffffffffffffffd rdx ffffffffffffffff
+idiv of 2^63 by 1: signal 8 code 1, the thread 0 from the instruction, si_addr 0
+  rax 8000000000000000 rdx 0 rcx 1
+idiv of 2^63 by -1: rax 8000000000000000 rdx 0
+idiv of 2^63 + 1 by -1: signal 8 code 1, the thread 0 from the instruction, si_addr 0
+  rax 8000000000000001 rdx 0 rcx ffffffffffffffff
+div of 32 bits by zero: signal 8 code 1, the thread 0 from the instruction, si_addr 0
+  rax 7 rdx 0 rcx 100000000
+div of 32 bits that fits: rax ffffffff rdx 0
+div of 32 bits that doesn't: signal 8 code 1, the thread 0 from the instruction, si_addr 0
+  rax 0 rdx 2 rcx 2
+idiv of 32 bits of the least by -1: signal 8 code 1, the thread 0 from the instruction, si_addr 0
+  rax 80000000 rdx ffffffff rcx ffffffff
+idiv of 32 bits of -2^31 - 1 by 1: signal 8 code 1, the thread 0 from the instruction, si_addr 0
+  rax 7fffffff rdx ffffffff rcx 1
+div of 16 bits that doesn't fit: signal 8 code 1, the thread 0 from the instruction, si_addr 0
+  rax 1234 rdx 10 rcx 10
+idiv of 16 bits of 2^15 by 1: signal 8 code 1, the thread 0 from the instruction, si_addr 0
+  rax 8000 rdx 0 rcx 1
+idiv of 16 bits of -2^15 by 1: rax 8000 rdx 0
+div of 8 bits by zero: signal 8 code 1, the thread 0 from the instruction, si_addr 0
+  rax 1234 rdx 0 rcx 0
+div of 8 bits that doesn't fit: signal 8 code 1, the thread 0 from the instruction, si_addr 0
+  rax 1234 rdx 0 rcx 12
+div of 8 bits that fits: rax 5f5 rdx 0
+idiv of 8 bits of -128 by -1: signal 8 code 1, the thread 0 from the instruction, si_addr 0
+  rax ff80 rdx 0 rcx ff
+idiv of 8 bits of -129 by 1: signal 8 code 1, the thread 0 from the instruction, si_addr 0
+  rax ff7f rdx 0 rcx 1
+idiv of 8 bits of -128 by 1: rax 80 rdx 0
+1 % 0: signal 8 code 1
+int3: signal 5 code 128, the thread 1 from the instruction, si_addr 0
+  rax 1 rdx 2 rcx 3
+hlt: signal 11 code 128, the thread 0 from the instruction, si_addr 0
+  rax 1 rdx 2 rcx 3
+after an int3 whose handler returned: signal 5, went on 1
+a child died of the signal 5
+a child died of the signal 8
+a child died of the signal 11
+a child that ignored it died of the signal 5
+rep movsb into a page that isn't there: signal 11 code 2, the thread 0 from the instruction
+  90 left, the destination 0 into its page, the fault 0; what was written e537d6086ad48cff
+rep stosq into a page that isn't there: signal 11 code 2; 98 left, the destination -4 into its page; what was written 73e615993ad8bb3e
+rep movsb backward from a page that isn't there: signal 11 code 2; 50 left
+rep movsb that a handler let go on: signal 11, 2000 left when it was raised, the source 1000 on; 0 left, and it copied 1
+repe cmpsb stops with 1765 left
+repne scasb stops with 4086 left
+rep stosb of nothing: 0 on, the first byte 1
+rep stosb of 17 MiB: 0 left, 17825792 on, the first 41, the last 41

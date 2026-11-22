@@ -3,11 +3,12 @@ import Bap.Linux.Calls
 
 /-! # Time that goes on
 
-The clock of a machine is the kernel's, in nanoseconds: it goes on by a microsecond each time that it is read, and, when nothing can
-run, to what happens next: a deadline of a call that waits with a timeout, or a timer. That is all that makes it go on, so that a run
-is the same each time, however it is cut into turns, stopped, checkpointed or stepped back, and a sleep of a second takes a second of
-the machine's time and none of the host's. A loop that waits for a timer without reading the clock or waiting for anything doesn't
-see it come.
+The clock of a machine is the kernel's, in nanoseconds: it goes on by the instructions that run and by a microsecond each time that it
+is read, and, when nothing can run, to what happens next: a deadline of a call that waits with a timeout, or a timer. That is all that
+makes it go on, so that a run is the same each time, however it is stopped, checkpointed or stepped back, and a sleep of a second
+takes a second of the machine's time and none of the host's. What is due happens when a thread stops and at the end of each turn of
+one that runs on (`Emu.turnEnds`), so that a loop that waits for a timer without a call sees it come, within a turn of when it was
+due, and a thread that sleeps wakes while others run.
 
 A sleep waits with its result, 0, which a signal makes `EINTR`, as Linux has it. A call that waits for something to be ready runs
 again when it is woken, with the deadline that it had: see `Timers.waitUntil`. A futex gives `ETIMEDOUT` at its deadline.
@@ -103,8 +104,10 @@ private def itimerSignal (timers : Timers) (which : Nat) : Nat :=
 `timer_create` whose signal is still pending has that signal say that it expired again, rather than send another. Whether any was
 due. -/
 private def fire (timers : Timers) (emu : Emu) : IO Bool := do
-  let now ← timers.now
   let state ← timers.state.get
+  -- Most machines have no timer, and are asked at the end of every turn.
+  if state.timers.isEmpty then return false
+  let now ← timers.now
   let due := state.timers.toList.filter fun (_, timer) => timer.expiry.any (· ≤ now)
   if due.isEmpty then return false
   let table ← emu.taskTable.get

@@ -974,7 +974,11 @@ private def unboundedResult (operation : String) (source target : Format) (mode 
   | "fsqrt", [x] => some (unpack wide (sqrt wide mode x))
   | "fmad", [x, y, z] => some (unpack wide (fma wide mode x y z))
   | "fmadh", [x, y, z] => some (unpack wide (fmaHalved wide mode x y z))
-  | "fconvert", [_] => inputs.head?.map fun x => unpack (widened target) (convert source (widened target) mode x)
+  | "fconvert", [_] =>
+    -- With the exponents of whichever has more, so that what is below every number of the target, as most of 80 bits are of 32, is
+    -- still a number and not a zero.
+    let wide := widened { target with exponentBits := max source.exponentBits target.exponentBits }
+    inputs.head?.map fun x => unpack wide (convert source wide mode x)
   | _, _ => none
 
 /-- Whether a number is past the largest finite one of a format, or below its smallest normal one, by its highest bit. -/
@@ -1128,7 +1132,8 @@ def raisedBy (rules : NaNRules) (name : String) (inputs : List Nat) (result : Na
     let signaling := inputs.any fun input =>
       if rules.legacyMips then isNaN source input && !isSignaling source input else isSignaling source input
     let anyNaN := inputs.any (isNaN source)
-    let denormal := inputs.any (isDenormal source)
+    -- A store of a register of x87 to memory, the conversion of 80 bits to fewer, says nothing of a denormal in the register.
+    let denormal := inputs.any (isDenormal source) && !(operation == "fconvert" && source.explicit)
     let resultNaN := isNaN target result
     -- Of what is raised, these leave no denormal to say.
     let infinityTimesZero := operation == "fmad" && rules.infinityZeroInvalid && (match inputs with

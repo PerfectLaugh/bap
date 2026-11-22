@@ -114,6 +114,45 @@ private def ssaRegressions : IO Unit := do
     (((exact.block 2).map (fun blk => blk.defs.map (·.var.index)) |>.getD []))
   assertEqual "not the other arm" [] (definedVars exact 3)
 
+/-- `x := 0; call 77, back at M; M: y := x + 1; ret y`: what the callee leaves in `x` isn't known. -/
+private def acrossCall : Sub :=
+  ⟨1, "across-call", [], [
+    ⟨1, [], [defn 1 x (int 0)], [⟨2, none, .call (.direct 77) (some (.direct 2))⟩]⟩,
+    ⟨2, [], [defn 3 y (.bin .add (.var x) (int 1))], [⟨4, none, .ret (.indirect (.var y))⟩]⟩]⟩
+
+/-- `x := 0; interrupt 0x80, back at M; M: if x == 0 goto A else B`: the result of a system call is in `x`. -/
+private def acrossInterrupt : Sub :=
+  ⟨1, "across-interrupt", [], [
+    ⟨1, [], [defn 1 x (int 0)], [⟨2, none, .interrupt 0x80 2⟩]⟩,
+    ⟨2, [], [], [⟨3, some (.bin .eq (.var x) (int 0)), .goto (.direct 3)⟩, goto 4 4]⟩,
+    ⟨3, [], [], []⟩, ⟨4, [], [], []⟩]⟩
+
+/-- `x := 2; call x + 1, back at M`: the call itself reads what the block left, before it leaves. -/
+private def callOfConstant : Sub :=
+  ⟨1, "call-of-constant", [], [
+    ⟨1, [], [defn 1 x (int 2)], [⟨2, none, .call (.indirect (.bin .add (.var x) (int 1))) (some (.direct 2))⟩]⟩,
+    ⟨2, [], [], [⟨3, none, .ret (.indirect (.var x))⟩]⟩]⟩
+
+/-- No constant is carried over a call or an interrupt to where it comes back. -/
+private def callRegressions : IO Unit := do
+  let rhsOf (sub : Sub) (tid : Tid) : List String := ((sub.block tid).map (·.defs.map (expString ·.rhs))).getD []
+  assertEqual "a constant isn't carried over a call" [expString (.bin .add (.var x) (int 1))] (rhsOf (optimize acrossCall [x, y]) 2)
+  assertEqual "nor by the propagation alone" [expString (.bin .add (.var x) (int 1))]
+    (((propagateConstants (Cfg.fromSub acrossCall)).block 2).map (·.defs.map (expString ·.rhs)) |>.getD [])
+  let conditions (sub : Sub) (tid : Tid) : List (Option String) := ((sub.block tid).map (·.jmps.map (·.condition.map expString))).getD []
+  assertEqual "a condition on the result of an interrupt isn't folded"
+    [some (expString (.bin .eq (.var x) (int 0))), none] (conditions (optimize acrossInterrupt [x]) 2)
+  let targets := ((optimize callOfConstant [x]).block 1).map (·.jmps.map fun jmp =>
+    match jmp.kind with
+    | .call (.indirect target) _ => expString target
+    | _ => "")
+  assertEqual "the target of a call is folded with what its block left" (some [expString (int 3)]) targets
+  assertEqual "and what is read after it comes back isn't" (some [some (expString (.var x))])
+    (((optimize callOfConstant [x]).block 2).map (·.jmps.map fun jmp =>
+      match jmp.kind with
+      | .ret (.indirect value) => some (expString value)
+      | _ => none))
+
 private def protectedRegressions : IO Unit := do
   assertEqual "protected write survives" ["x"] (definedVars (optimize deadOutputs [x]) 1)
   assertEqual "unprotected dead writes removed" [] (definedVars (optimize deadOutputs) 1)
@@ -142,6 +181,7 @@ private def protectedRegressions : IO Unit := do
 
 private def regressions : IO Unit := do
   protectedRegressions
+  callRegressions
   ssaRegressions
   match (propagateConstants (Cfg.fromSub stableLoop)).block 2 with
   | some block =>

@@ -27,7 +27,7 @@ private def ofTarget (arch : String) (path : String := s!"testsuite/bin/{arch}-l
   let some image := project.image | throw (IO.userError s!"{path} doesn't load")
   let some partition ← Values.partition project | throw (IO.userError s!"{path} has no partition")
   let some symbol := image.symbols.find? (·.name == "steps") | throw (IO.userError s!"{path} has no steps")
-  let machines ← Flattening.machines image partition
+  let machines ← Flattening.machines image partition { maxMillis := 4000 }
   assertEqual s!"{arch}: steps is the one flattened machine" [symbol.addr] (machines.map (·.function))
   let some machine := machines.head? | throw (IO.userError s!"{path} has no machine")
   if let some state := state then assertEqual s!"{arch}: where the state is" state machine.state
@@ -70,7 +70,7 @@ private def ran (arch : String) : IO Unit := do
   let project ← Project.Project.load path
   let some image := project.image | throw (IO.userError s!"{path} doesn't load")
   let some partition ← Values.partition project | throw (IO.userError s!"{path} has no partition")
-  let some machine := (← Flattening.machines image partition).head? | throw (IO.userError s!"{path} has no machine")
+  let some machine := (← Flattening.machines image partition { maxMillis := 4000 }).head? | throw (IO.userError s!"{path} has no machine")
   let kernel := Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile path)
   let running ← Bap.Linux.start kernel "/test" ["/test"]
   let journal ← running.journal
@@ -81,6 +81,10 @@ private def ran (arch : String) : IO Unit := do
   assertEqual s!"{arch}: what ran is what was found" ([] : List String) (Flattening.agrees machine dispatcher)
   -- and all the ways that were found, but that of 4b19 to e55, which 27 takes once, were taken
   assertEqual s!"{arch}: the run took each way" machine.cfg.edges.length dispatcher.graph.length
+  -- and a state that a handler only copies, of what an instruction chose rounds before it, was chosen, as the ways found say
+  for (source, _, chooses) in expected do
+    let edges := dispatcher.cfg.edges.filter (·.source == source)
+    assertTrue s!"{arch}: how the run of {source} chose" (edges.all (·.kind == if chooses then .conditional else .direct))
 
 /-- A jump that a partition doesn't resolve without what value sets know, with the targets that a run would have seen. -/
 private def observed : IO Unit := do
@@ -118,7 +122,7 @@ private def unoptimized : IO Unit := do
   let project ← Project.Project.load path
   let some image := project.image | throw (IO.userError s!"{path} doesn't load")
   let some partition ← Values.partition project | throw (IO.userError s!"{path} has no partition")
-  let machines ← Flattening.machines image partition
+  let machines ← Flattening.machines image partition { maxMillis := 4000 }
   let some machine := machines.head? | throw (IO.userError s!"{path} has no machine")
   assertEqual "flattened0: the states" [0x11, 0x22, 0x33, 0x44, 0x55, 0x66] machine.cfg.states
   for (source, nexts) in [(0x11, [0x22]), (0x22, [0x33, 0x44]), (0x33, [0x55]), (0x44, [0x55]), (0x55, [0x22, 0x66])] do

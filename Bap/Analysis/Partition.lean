@@ -495,7 +495,8 @@ def rescan (image : Image.Image) (disasm : Disasm.Disasm) (roots : List Nat) : I
   let bytes := (decoders.map (·.1.size)).sum
   let found ← Disasm.Recursive.scanRoots fresh ByteArray.empty bytes disasm.entry roots
   let added := found.instructions.filter fun insn => !known.contains insn.address
-  return { disasm with instructions := disasm.instructions ++ added, edges := disasm.edges ++ found.edges }
+  return { disasm with instructions := disasm.instructions ++ added, edges := disasm.edges ++ found.edges
+                       delayed := disasm.delayed ++ found.delayed }
 
 /-! ## Functions -/
 

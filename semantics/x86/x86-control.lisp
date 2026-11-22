@@ -111,20 +111,30 @@
 (defun continues ()
   (if (x86-prefix 0xf2) (not ZF) ZF))
 
+;; A repeated instruction is one round of it: nothing with a count of
+;; zero, else the body and the count, and then a jump to the instruction
+;; itself while there is more to do. So what interrupts it, as a fault,
+;; finds the registers and the memory of the rounds that completed, as of
+;; the processor, and it goes on from there when it runs again. The count
+;; of zero leaves first, so that nothing of the round is conditional but
+;; the two jumps. What reads the code has the rounds as one loop, see
+;; Disasm.Insn.asLoop.
 (defmacro repeat (body)
   (if (repeated)
-      (while (non-zero (count-register))
-        body
-        (set-count-register (- (count-register) 1)))
+      (prog
+       (when (is-zero (count-register)) (exec-addr (get-next-program-counter)))
+       body
+       (set-count-register (- (count-register) 1))
+       (when (non-zero (count-register)) (exec-addr (get-program-counter))))
     body))
 
 (defmacro repeat-while (body)
   (if (repeated)
-      (let ((go true))
-        (while (logand go (non-zero (count-register)))
-          body
-          (set-count-register (- (count-register) 1))
-          (set go (continues))))
+      (prog
+       (when (is-zero (count-register)) (exec-addr (get-next-program-counter)))
+       body
+       (set-count-register (- (count-register) 1))
+       (when (logand (non-zero (count-register)) (continues)) (exec-addr (get-program-counter))))
     body))
 
 ;; the address of a register of the size of the address

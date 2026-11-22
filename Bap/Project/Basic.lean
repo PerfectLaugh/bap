@@ -112,10 +112,14 @@ private def readWord (image : Image.Image) (address size : Nat) : Option Nat :=
     ordered.foldl (fun value byte => value * 256 + byte) 0
 
 /-- How many entries of `entry` bytes, of at most `count`, the region of `address` has from there: a count that a file says
-is no more than what it has, whatever it says. -/
+is no more than what it has, whatever it says. Nor is it more than the file of the image has room for, as a table is of the
+bytes of its file and a region may be of zeros past them, 4 GiB of which have no entry; an image of no file has what its
+regions have. -/
 def entriesIn (image : Image.Image) (address entry count : Nat) : Nat :=
   match image.memory.entries.find? fun region => region.1.contains address with
-  | some region => min count ((region.1.maxAddr - address) / max entry 1)
+  | some region =>
+    let inRegion := min count ((region.1.maxAddr - address) / max entry 1)
+    if image.data.isEmpty then inRegion else min inRegion (image.data.size / max entry 1)
   | none => 0
 
 /-- The words of a table in memory. -/

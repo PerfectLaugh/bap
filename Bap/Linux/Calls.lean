@@ -336,6 +336,19 @@ def Architecture.calls : Architecture → List (Nat × Call)
 def Architecture.call (architecture : Architecture) (number : Nat) : Option Call :=
   architecture.calls.lookup number
 
+/-- `AUDIT_ARCH_*` of an architecture, which `struct seccomp_data` and `struct ptrace_syscall_info` have. -/
+def Architecture.auditArch : Architecture → Nat
+  | .x86_64 => 0xC000003E
+  | .i686 => 0x40000003
+  | .aarch64 => 0xC00000B7
+  | .arm => 0x40000028
+  | .riscv64 => 0xC00000F3
+  | .riscv32 => 0x400000F3
+  | .mips 32 big _ => if big then 0x00000008 else 0x40000008
+  | .mips _ big _ => if big then 0x80000008 else 0xC0000008
+  | .powerpc 32 big => if big then 0x00000014 else 0x40000014
+  | .powerpc _ big => if big then 0x80000015 else 0xC0000015
+
 /-- Where MIPS has the flags of `open` that are elsewhere than on x86-64, the ones that a machine looks at: `O_APPEND`, `O_NONBLOCK`,
 `O_CREAT`, `O_EXCL`, `O_NOCTTY` and `O_DSYNC`. -/
 def mipsOpenBits : List (Nat × Nat) :=

@@ -14,7 +14,9 @@ registers of floating point and the flags are, is kept here and comes back all t
 The offsets are those of the `ucontext_t` of musl, which are those of the kernel, as the compiler says them for each target, and what a
 program sees of all this agrees with qemu on `testsuite/src/libc-signals.c`. A signal that stops a process, as `SIGSTOP`, is ignored, as
 no process is ever stopped here. There are no timers, so nothing raises `SIGALRM`. Of the exceptions, a fault of memory raises `SIGSEGV`
-and an instruction that is undefined where a program runs raises `SIGILL` (`illNumber`); nothing raises `SIGFPE`. -/
+and an instruction that is undefined where a program runs raises `SIGILL` (`illNumber`); an instruction that traps raises `SIGTRAP`
+(`trapNumber`), and a division of integers that has no quotient, where the architecture traps of it, `SIGFPE` (`fpeNumber`), which no
+operation of floating point raises, as their exceptions are masked. -/
 
 namespace Bap.Linux
 
@@ -77,6 +79,10 @@ structure ThreadSignals where
   /-- Where a `waitid` that blocked has its `siginfo_t`, in which what it waits for leaves a status. -/
   waitingChild : Option Nat := none
   last : Option LastCall := none
+  /-- What the last exception that the thread took a signal of was, as the context of a handler says it of any signal after: of x86,
+  the number of the trap, its error code and, of a page fault, where it was (`trap_nr`, `error_code` and `cr2` of Linux's
+  `thread_struct`); of AArch64, only where, its `fault_address`. -/
+  trap : Nat × Nat × Nat := (0, 0, 0)
 
 structure SignalTable where
   /-- By process and signal, where it isn't the default. -/
@@ -102,6 +108,12 @@ private structure Layout where
   cpsr : Option Nat := none
   /-- Where a pointer to the registers goes, and what it points to. -/
   pointer : Option (Nat × Nat) := none
+  /-- Where the flags are, of a slot: `EFLAGS` of x86 and `pstate` of AArch64. -/
+  flags : Option Nat := none
+  /-- Of x86, where the number of the trap, its error code and the address of the page fault are; of AArch64, the last of them. -/
+  trap : Option Nat × Option Nat × Option Nat := (none, none, none)
+  /-- What is in a context whatever the thread does, as the segments of x86 are: where, of how many bytes, and what. -/
+  fixed : List (Nat × Nat × Nat) := []
 
 private def isMipsArchitecture : Architecture → Bool
   | .mips .. => true
@@ -116,12 +128,20 @@ private def named (prefix_ : String) (first count : Nat) : List String :=
 private def layoutOf : Architecture → Layout
   | .x86_64 =>
     { word := 8, slot := 8, pc := 40 + 16 * 8, mask := 296, stack := 16, stackFlags := 24, stackSize := 32, size := 936,
+      flags := some (40 + 17 * 8), trap := (some (40 + 20 * 8), some (40 + 19 * 8), some (40 + 22 * 8)),
+      -- `cs`, `gs`, `fs` and `ss`, each of 16 bits.
+      fixed := [(40 + 18 * 8, 8, 0x002b000000000033)],
       registers := numbered 40 8 ["R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15", "RDI", "RSI", "RBP", "RBX", "RDX", "RAX", "RCX", "RSP"] }
   | .i686 =>
     { word := 4, slot := 4, pc := 20 + 14 * 4, mask := 108, stack := 8, stackFlags := 12, stackSize := 16, size := 348,
-      registers := numbered (20 + 4 * 4) 4 ["EDI", "ESI", "EBP", "ESP", "EBX", "EDX", "ECX", "EAX"] }
+      flags := some (20 + 16 * 4), trap := (some (20 + 12 * 4), some (20 + 13 * 4), some 104),
+      -- `es`, `ds`, `cs` and `ss`, as a kernel of 64 bits has them of a program of 32.
+      fixed := [(20 + 2 * 4, 4, 0x2b), (20 + 3 * 4, 4, 0x2b), (20 + 15 * 4, 4, 0x23), (20 + 18 * 4, 4, 0x2b)],
+      -- The stack pointer is there twice, of which the second is `sp_at_signal`, which nothing goes back to.
+      registers := numbered (20 + 4 * 4) 4 ["EDI", "ESI", "EBP", "ESP", "EBX", "EDX", "ECX", "EAX"] ++ [("ESP", 20 + 17 * 4)] }
   | .aarch64 =>
     { word := 8, slot := 8, pc := 440, mask := 40, stack := 16, stackFlags := 24, stackSize := 32, size := 4560,
+      flags := some 448, trap := (none, none, some 176),
       registers := numbered 184 8 (named "X" 0 31) ++ [("SP", 432)] }
   | .riscv64 =>
     { word := 8, slot := 8, pc := 176, mask := 40, stack := 16, stackFlags := 24, stackSize := 32, size := 960,
@@ -163,6 +183,11 @@ private structure SignalNumbers where
   segv : Nat
   /-- `SIGILL`, which is 4 on every architecture that Linux has. -/
   ill : Nat := 4
+  /-- `SIGTRAP` and `SIGFPE`, which are 5 and 8 on every architecture that Linux has. -/
+  trap : Nat := 5
+  fpe : Nat := 8
+  /-- `SIGBUS`, which MIPS numbers apart. -/
+  bus : Nat := 7
   chld : Nat
   /-- What does nothing by default, of which those that stop are here too, as nothing is stopped. -/
   ignored : List Nat
@@ -186,7 +211,7 @@ private structure SignalNumbers where
 
 private def numbersOf (architecture : Architecture) : SignalNumbers :=
   if isMipsArchitecture architecture then
-    { kill := 9, stop := 23, segv := 11, chld := 18, ignored := [18, 20, 21, 23, 24, 25, 26, 27], saInfo := 8, saNoCldWait := 0x10000, howBlock := 1, howUnblock := 2,
+    { kill := 9, stop := 23, segv := 11, bus := 10, chld := 18, ignored := [18, 20, 21, 23, 24, 25, 26, 27], saInfo := 8, saNoCldWait := 0x10000, howBlock := 1, howUnblock := 2,
       howSet := 3, eintr := 4, eagain := 11, einval := 22, esrch := 3, efault := 14, eperm := 1, count := 128, stops := [23, 24, 26, 27],
       cont := 25 }
   else
@@ -221,6 +246,14 @@ private def givenAlternate (base size flags : Nat) : Option (Nat × Nat × Nat) 
   else none
 
 private def bitOf (signal : Nat) : Nat := 1 <<< (signal - 1)
+
+/-- The flags of a target that a context has, by where each is in its status word, and the bits of that word that are set whatever
+the flags are: of x86, bit 1 and the interrupt flag, and of ARM, the user mode. -/
+private def statusBits : Architecture → List (String × Nat) × Nat
+  | .x86_64 | .i686 => ([("CF", 0), ("PF", 2), ("AF", 4), ("ZF", 6), ("SF", 7), ("DF", 10), ("OF", 11)], 0x202)
+  | .aarch64 => ([("NF", 31), ("ZF", 30), ("CF", 29), ("VF", 28)], 0)
+  | .arm => ([("NF", 31), ("ZF", 30), ("CF", 29), ("VF", 28)], 0x10)
+  | _ => ([], 0)
 
 /-- The system calls of signals of a target. -/
 private structure SignalCalls where
@@ -382,7 +415,8 @@ private def putThread (out : ByteArray) (entry : Nat × ThreadSignals) : ByteArr
   let out := putOption putNat out thread.suspended
   let out := putOption (fun out wait => putNat (putNat out wait.1) wait.2) out thread.waiting
   let out := putOption putNat out thread.waitingChild
-  putOption putLast out thread.last
+  let out := putOption putLast out thread.last
+  putNat (putNat (putNat out thread.trap.1) thread.trap.2.1) thread.trap.2.2
 
 private def getThread : Decoder (Nat × ThreadSignals) := fun data at_ => do
   let (tid, at_) ← getNat data at_
@@ -399,7 +433,11 @@ private def getThread : Decoder (Nat × ThreadSignals) := fun data at_ => do
     .ok ((set, address), at_)) data at_
   let (waitingChild, at_) ← getOption getNat data at_
   let (last, at_) ← getOption getLast data at_
-  .ok ((tid, { mask, pending, frames, alternate := (alternateStack, alternateSize, alternateFlags), suspended, waiting, waitingChild, last }), at_)
+  let (trapNumber, at_) ← getNat data at_
+  let (trapError, at_) ← getNat data at_
+  let (trapAddress, at_) ← getNat data at_
+  .ok ((tid, { mask, pending, frames, alternate := (alternateStack, alternateSize, alternateFlags), suspended, waiting, waitingChild, last
+               trap := (trapNumber, trapError, trapAddress) }), at_)
 
 private def putAction (out : ByteArray) (entry : (Nat × Nat) × SignalAction) : ByteArray :=
   let ((group, signal), action) := entry
@@ -489,6 +527,11 @@ private def numbers (signals : Signals) : SignalNumbers := numbersOf signals.arc
 
 /-- `SIGILL` of the architecture. -/
 def illNumber (signals : Signals) : Nat := signals.numbers.ill
+
+/-- `SIGTRAP`, `SIGFPE` and `SIGSEGV` of the architecture. -/
+def trapNumber (signals : Signals) : Nat := signals.numbers.trap
+def fpeNumber (signals : Signals) : Nat := signals.numbers.fpe
+def segvNumber (signals : Signals) : Nat := signals.numbers.segv
 
 private def threadOf (signals : Signals) (tid : Nat) : IO ThreadSignals := do
   pure ((← signals.table.get).threads.getD tid {})
@@ -632,9 +675,10 @@ private def stackRegister (architecture : Architecture) : String :=
   | .mips .. => "R29"
   | .powerpc .. => "R1"
 
-/-- Runs a handler, on the frame that it needs. `resume` is where the thread goes when it returns. -/
+/-- Runs a handler, on the frame that it needs. `resume` is where the thread goes when it returns, and `pageError` what x86 says of the
+page fault that the signal is of, if it is of one. -/
 private def enterHandler (signals : Signals) (emu : Emu) (tid : Nat) (info : SignalInfo) (action : SignalAction) (resume : Nat)
-    (skip : Option Nat) : IO Nat := do
+    (skip : Option Nat) (pageError : Nat := 4) : IO Nat := do
   let architecture := signals.architecture
   let layout := layoutOf architecture
   let width := architecture.bits
@@ -678,8 +722,29 @@ private def enterHandler (signals : Signals) (emu : Emu) (tid : Nat) (info : Sig
   write emu (contextAddress + layout.mask) (encodeMask signals emu oldMask (maskBytes architecture))
   if let some (at_, target) := layout.pointer then
     write emu (contextAddress + at_) (encodeNumber emu word (contextAddress + target))
+  let (flagNames, always) := statusBits architecture
+  let mut status := always
+  for (name, bit) in flagNames do
+    if (← registerValue emu 1 name) != 0 then status := status ||| (1 <<< bit)
+  -- An exception leaves what the thread last took a signal of, which the context of any signal after has too. Of x86, an instruction
+  -- that faults has the resume flag, as it would run again without its breakpoints.
+  let numbers := signals.numbers
+  let trap := match info.detail, architecture with
+    | .fault address, .x86_64 | .fault address, .i686 =>
+      if info.signal == numbers.segv || info.signal == numbers.bus then
+        (14, pageError, address)
+      else (6, 0, thread.trap.2.2)
+    | .fault address, .aarch64 => (0, 0, address)
+    | _, _ => thread.trap
+  if (architecture matches .x86_64 | .i686) && info.detail matches .fault _ then status := status ||| 0x10000
+  if let some at_ := layout.flags then write emu (contextAddress + at_) (slot status)
+  if let some at_ := layout.trap.1 then write emu (contextAddress + at_) (slot trap.1)
+  if let some at_ := layout.trap.2.1 then write emu (contextAddress + at_) (slot trap.2.1)
+  if let some at_ := layout.trap.2.2 then write emu (contextAddress + at_) (slot trap.2.2)
+  for (at_, bytes, value) in layout.fixed do
+    write emu (contextAddress + at_) (encodeNumber emu bytes value)
   if let some at_ := layout.cpsr then
-    write emu (contextAddress + at_) (encodeNumber emu 4 (if (← registerValue emu 1 "ISET") == 1 then 0x20 else 0))
+    write emu (contextAddress + at_) (encodeNumber emu 4 (status ||| if (← registerValue emu 1 "ISET") == 1 then 0x20 else 0))
   -- What goes back on `sigreturn`.
   let memoryVar := emu.config.memory
   let env := ((← emu.state.get).env.filter fun binding => binding.1 != memoryVar).toList
@@ -689,6 +754,7 @@ private def enterHandler (signals : Signals) (emu : Emu) (tid : Nat) (info : Sig
   modifyThread signals tid fun thread =>
     { thread with
       frames := frame :: withoutStale
+      trap
       -- What the handler runs with is the mask that the thread has now, which of `sigsuspend` is the one it was given, and what the
       -- action adds, as Linux's `signal_delivered` has it: the mask from before is what the frame keeps, for `sigreturn`.
       mask := blockable signals (thread.mask ||| addedMask)
@@ -874,6 +940,14 @@ private def interrupt (signals : Signals) (emu : Emu) (tid : Nat) (restart : Boo
         modifyThread signals tid fun state => { state with waiting := none }
   (← signals.interrupted.get) emu tid restart spaces traced
   wakeThread emu tid
+
+/-- A thread that waits in a system call leaves it for a stop of its tracer that no signal makes, as `PTRACE_INTERRUPT`, and makes it
+again when it goes on, as a tracee does of a signal. -/
+def leaveCall (signals : Signals) (emu : Emu) (tid : Nat) : IO Unit := interrupt signals emu tid true (traced := true)
+
+/-- Whether a system call is one that waits for a signal, `pause` or `rt_sigsuspend`. -/
+def waitsForSignal (architecture : Architecture) (number : Nat) : Bool :=
+  number == (callsOf architecture).suspend || (callsOf architecture).pause == some number
 
 /-- SIGCONT takes away the stop signals that are pending for a process, and a stop signal SIGCONT, as `prepare_signal` has it of what is
 sent. -/
@@ -1147,32 +1221,46 @@ def afterCall (signals : Signals) (emu : Emu) : IO Unit := do
   deliver signals emu true
   endSuspend signals emu
 
-/-- A guest faulted, and it may have a handler for that. Whether it does. -/
-def faulted (signals : Signals) (emu : Emu) (fault : MemoryFault) : IO Bool := do
+/-- A guest faulted, and it may have a handler for that. Whether it does. `bus` says that what it accessed is mapped of a file that has no
+page there, which is `SIGBUS` with `BUS_ADRERR`, as Linux has it, rather than `SIGSEGV`; with nothing to handle that, the process
+ends of it here. -/
+def faulted (signals : Signals) (emu : Emu) (fault : MemoryFault) (bus : Bool := false) : IO Bool := do
   let task ← currentTask emu
   let numbers := signals.numbers
   let tid ← thread emu
   let state ← threadOf signals tid
-  let code := if (lookupRegion (← emu.regions.get) fault.address).isSome then 2 else 1
-  let info : SignalInfo := ⟨numbers.segv, code, .fault fault.address⟩
+  let region := lookupRegion (← emu.regions.get) fault.address
+  let code := if region.isSome then 2 else 1
+  -- The error code of the page fault, as x86 has it: of a program, with what was done, and whether the page was there, which is so
+  -- of one that something may be done of, as if all that may be were.
+  let present := region.any fun region => region.protection.readable || region.protection.executable
+  let pageError := 4 ||| (if present then 1 else 0) ||| match fault.operation with
+    | .write => 2
+    | .fetch => 16
+    | .read => 0
+  let (signal, name) := if bus then (numbers.bus, "SIGBUS") else (numbers.segv, "SIGSEGV")
+  let info : SignalInfo := ⟨signal, if bus then 2 else code, .fault fault.address⟩
   let fail (why : String) : IO Bool := do
     signals.failures.modify (·.push (.unhandled tid fault.pc fault.address why))
-    pure false
+    if bus then
+      kill emu task.group signal
+      pure true
+    else pure false
   -- A tracee stops for it, before anything is made of it.
   if ← (← signals.intercept.get) emu tid info then return true
-  if bitOf numbers.segv &&& state.mask != 0 then return ← fail "SIGSEGV is blocked"
-  match ← dispositionOf signals task.group numbers.segv with
+  if bitOf signal &&& state.mask != 0 then return ← fail s!"{name} is blocked"
+  match ← dispositionOf signals task.group signal with
   | .handle action =>
     let resume ← emu.pc.get
     let skip ← emu.skipCode.get
-    match ← (enterHandler signals emu tid info action resume skip).toBaseIO with
+    match ← (enterHandler signals emu tid info action resume skip (pageError := pageError)).toBaseIO with
     | .ok handler =>
       emu.pc.set handler
       emu.pendingRef.set none
       emu.skipCode.set none
       pure true
     | .error error =>
-      signals.failures.modify (·.push (.handlerEntry tid numbers.segv (toString error)))
+      signals.failures.modify (·.push (.handlerEntry tid signal (toString error)))
       pure false
   | .ignore =>
     if ← signals.skipIgnoredFaults.get then
@@ -1184,10 +1272,10 @@ def faulted (signals : Signals) (emu : Emu) (fault : MemoryFault) : IO Bool := d
         emu.skipCode.set none
         emu.stopped.set false
         pure true
-      | none => fail "SIGSEGV is ignored, and what faulted can't be decoded to go past it"
-    else fail "SIGSEGV is ignored"
-  -- SIGSEGV doesn't stop by default.
-  | .terminate | .stop => fail "nothing handles SIGSEGV"
+      | none => fail s!"{name} is ignored, and what faulted can't be decoded to go past it"
+    else fail s!"{name} is ignored"
+  -- Neither stops by default.
+  | .terminate | .stop => fail s!"nothing handles {name}"
 
 /-- The thread that runs takes what it has now, as if what it was running had been a system call that goes on at `resume`: an exception
 that an instruction raised, as `SIGILL`, has its handler see `resume` as where it was, which is the instruction, and go back there. If
@@ -1317,6 +1405,14 @@ def leaveHandler (signals : Signals) (emu : Emu) : IO SyscallAction := do
     try
       for (name, offset) in layout.registers do
         setReg emu ⟨name, .imm width, 0, false⟩ (wordOfWidth width (← slotValue offset))
+      -- The flags are what the context says of them, which the handler may have changed.
+      let status ← match layout.flags, layout.cpsr with
+        | some at_, _ => (some ·) <$> slotValue at_
+        | none, some at_ => (some ·) <$> readNumber emu (frame.context + at_) 4
+        | none, none => pure none
+      if let some status := status then
+        for (name, bit) in (statusBits architecture).1 do
+          setReg emu ⟨name, .imm 1, 0, false⟩ (wordOfWidth 1 ((status >>> bit) &&& 1))
       if let some at_ := layout.cpsr then
         let cpsr ← readNumber emu (frame.context + at_) 4
         setReg emu ⟨"ISET", .imm 1, 0, false⟩ (wordOfWidth 1 ((cpsr >>> 5) &&& 1))

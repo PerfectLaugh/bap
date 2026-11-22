@@ -117,6 +117,31 @@ structure Image where
   symbols : List Symbol := []
   memory : MemoryMap Unit := {}
 
+/-- At most this many bytes of zeros past what a file has, of all its regions together: a header can say anything. -/
+def zeroLimit : Nat := 2 ^ 32
+
+/-- At most this many bytes of a file in all its regions together: each region is made of its own bytes, whatever of the file it is
+of, and every header may say that it is of all of the file. Twice what the file has, and a megabyte, is more than regions that
+share some of it take. -/
+def fileLimit (data : ByteArray) : Nat := 2 * data.size + 2 ^ 20
+
+/-- What the regions of a file take, all together: bytes of the file, each as often as a region has it, and zeros past them. -/
+structure Extent where
+  file : Nat := 0
+  zeros : Nat := 0
+  deriving DecidableEq, Repr
+
+/-- With a region of `size` bytes, the first `fileSize` of them of the file. -/
+def Extent.add (extent : Extent) (size fileSize : Nat) : Extent :=
+  ⟨extent.file + min size fileSize, extent.zeros + (size - fileSize)⟩
+
+/-- Whether regions take more than a host gives a file: more of it than `fileLimit`, or more zeros than `zeroLimit`. -/
+def exceeds (data : ByteArray) (extent : Extent) : Bool :=
+  extent.file > fileLimit data || extent.zeros > zeroLimit
+
+/-- What a decoder says of a file whose regions `exceeds` is of. -/
+def tooLarge : String := "the regions of the file are too large"
+
 structure Summary where
   arch : Arch
   addrWidth : Nat

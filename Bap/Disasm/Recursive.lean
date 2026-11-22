@@ -139,7 +139,8 @@ one of them and adds at most three addresses, some possibly out of range, so a d
 no more than `4 * bytes + roots.length + 1` addresses. -/
 def scanRoots (disassembler : Disassembler) (data : ByteArray) (bytes entry : Nat) (roots : List Nat) : IO Disasm := do
   let state ← scanAux disassembler data (4 * bytes + roots.length + 1) roots {}
-  pure { entry := entry, instructions := state.instructions.toList, edges := state.edges.toList, errors := state.errors.toList }
+  pure { entry := entry, instructions := state.instructions.toList, edges := state.edges.toList, errors := state.errors.toList
+         delayed := disassembler.delayed state.instructions.toList }
 
 /-- The scan of the code in `data` from one root. -/
 def scan (disassembler : Disassembler) (data : ByteArray) (entry : Nat) : IO Disasm :=
@@ -209,6 +210,7 @@ def scanRegions (disassembler : Disassembler) (bytes entry : Nat) (roots : List 
   let errors := state.errors
   let (_, state) ← ranges.foldlM (init := (({} : Walk), state)) fun (walk, state) range =>
     sweepRange disassembler data fuel plan range.2 (2 * (range.2 - range.1) + 1) range.1 false walk state
-  pure { entry := entry, instructions := state.instructions.toList, edges := state.edges.toList, errors := errors.toList }
+  pure { entry := entry, instructions := state.instructions.toList, edges := state.edges.toList, errors := errors.toList
+         delayed := disassembler.delayed state.instructions.toList }
 
 end Bap.Disasm.Recursive

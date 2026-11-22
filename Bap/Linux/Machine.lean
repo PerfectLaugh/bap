@@ -102,6 +102,9 @@ structure Machine where
   rings : IO.Ref Ring.State
   /-- How many calls that may let go of something there were since what nothing holds was let go of: see `Kernel.collect`. -/
   releases : IO.Ref Nat
+  /-- How many instructions had run (`Emu.retired`) at the last fault of mappings that are together, how many times in a row there
+  was one with as many, and where the last of them that was a store was: see `siblingFault`. -/
+  siblingFaults : IO.Ref (Nat × Nat × Option Nat)
   /-- What `Machine.malloc` has given out, by address space. -/
   heaps : IO.Ref (Std.HashMap Nat GuestHeap)
   /-- What `Machine.loadLibrary` has loaded, by address space. -/
@@ -305,7 +308,9 @@ private def refreshUntouched (emu : Emu) (before after : Kernel) (mapping : File
       for (first, size) in chunksOf 0 length 4096 do
         let old := was.extract first (first + size)
         let page := now.extract first (first + size)
-        if page != old && memory.extract first (first + size) == old then poke emu (at_ + first) page
+        if page != old && memory.extract first (first + size) == old then
+          poke emu (at_ + first) page (known := true)
+          for mirrored in ← emu.memoryMirrored.get do mirrored (at_ + first) size (Kernel.fileSpace + mapping.inode) (offset + first) true
 
 /-- What a process wrote to its shared mappings goes to their files, which is how any other mapping or a `read` sees it. A running
 process is the only one that can have written since it came to run, and whatever else it has mapped of a file is as the file was, so
@@ -358,7 +363,9 @@ private def flushShared (machine : Machine) (emu : Emu) : IO Unit := do
             let old := before.extract (at_ - offset) (at_ - offset + size)
             let page := flushed.inodeBytes inode at_ size
             let address := mapping.start + (at_ - mapping.offset)
-            if page != old && (← peek emu address size) == old then poke emu address page
+            if page != old && (← peek emu address size) == old then
+              poke emu address page (known := true)
+              for mirrored in ← emu.memoryMirrored.get do mirrored address size (Kernel.fileSpace + inode) at_ false
 
 /-- What the files of a process's shared mappings hold, for when it comes to run. -/
 private def refreshShared (machine : Machine) (emu : Emu) : IO Unit := do
@@ -526,6 +533,200 @@ private def serveRemoval (machine : Machine) (group address upper advice : Nat) 
     machine.kernel.set (kernel.setProcess group { process with guards := process.guards.flatMap (·.without address upper) })
     pure (.returnValue 0)
 
+/-- Where a mapping of a file is past the last page that the file has any of, if it is anywhere. -/
+private def pastEnd (kernel : Kernel) (mapping : FileMapping) : Option (Nat × Nat) :=
+  match kernel.inodes.get? mapping.inode with
+  | some { content := .file data, .. } =>
+    let within := min mapping.size (pageUp (data.size - mapping.offset))
+    if within < mapping.size then some (mapping.start + within, mapping.start + mapping.size) else none
+  | _ => none
+
+/-- Ranges in order, with those that touch or overlap as one. -/
+private def mergeRanges (ranges : List (Nat × Nat)) : List (Nat × Nat) :=
+  let sorted := (ranges.toArray.qsort fun first second => first.1 < second.1).toList
+  (sorted.foldl (init := []) fun merged (lower, upper) =>
+    match merged with
+    | (start, stop) :: rest => if lower ≤ stop then (start, max stop upper) :: rest else (lower, upper) :: merged
+    | [] => [(lower, upper)]).reverse
+
+/-- Ranges without what is in any of `others`. -/
+private def rangesWithout (ranges others : List (Nat × Nat)) : List (Nat × Nat) :=
+  others.foldl (init := ranges) fun ranges (lower, upper) => ranges.flatMap fun (start, stop) =>
+    if stop ≤ lower || upper ≤ start then [(start, stop)]
+    else (if start < lower then [(start, lower)] else []) ++ (if upper < stop then [(upper, stop)] else [])
+
+/-- Where the shared mappings of a process have pages of a file that another shared mapping of it has too, as a segment attached
+twice or a file mapped twice does: what is written through one is what the other reads, at once. -/
+private def siblingRanges (process : Process) : List (Nat × Nat) :=
+  let shared := process.mappings.filter (·.shared)
+  if shared.length < 2 then [] else
+    mergeRanges <| shared.flatMap fun mapping => shared.filterMap fun other =>
+      let lower := max mapping.offset other.offset
+      let upper := min (mapping.offset + mapping.size) (other.offset + other.size)
+      if other.inode == mapping.inode && other.start != mapping.start && lower < upper then
+        some (mapping.start + (lower - mapping.offset), mapping.start + (upper - mapping.offset))
+      else none
+
+private def Guard.isPastEnd (guard : Guard) : Bool := guard.bits &&& Guard.pastEnd != 0
+private def Guard.isSibling (guard : Guard) : Bool := guard.bits &&& Guard.sibling != 0
+private def Guard.protection (guard : Guard) (writable : Bool := true) : Primus.Protection :=
+  ⟨guard.bits &&& 1 != 0, writable && guard.bits &&& 2 != 0, guard.bits &&& 4 != 0⟩
+
+/-- The pages of a file that a guard of `Guard.sibling` is of: the file, and from where to where of it. -/
+private def Guard.pagesOf (process : Process) (guard : Guard) : Option (Nat × Nat × Nat) :=
+  (process.mappings.find? fun mapping => mapping.shared && mapping.start ≤ guard.start && guard.start < mapping.start + mapping.size).map
+    fun mapping => (mapping.inode, mapping.offset + (guard.start - mapping.start), mapping.offset + (guard.start - mapping.start) + guard.size)
+
+/-- The guards of `Guard.sibling` of the process that runs. -/
+private def siblingsOf (machine : Machine) (emu : Emu) : IO (List Guard) := do
+  let some group ← runningGroup emu | return []
+  let guards := ((← machine.kernel.get).process group).guards
+  pure (if guards.isEmpty then [] else guards.filter (·.isSibling))
+
+/-- Every mapping that has the pages of another has the protection that it was given, as a system call goes by, or that without
+writing, as the program runs from when all of them hold the same: see `settleMappings`. -/
+private def protectSiblings (machine : Machine) (emu : Emu) (writable : Bool) : IO Unit := do
+  for guard in ← siblingsOf machine emu do
+    try protect emu guard.start guard.size (guard.protection writable) catch _ => pure ()
+
+/-- The mappings of the process that runs are as their files are now, in two ways, each of which is a guard that says what the
+protection of the pages was given as, while they have another.
+
+A page that is wholly past the end of its file can't be read, written or run, an access of which is `SIGBUS`, as Linux has it of a
+mapping longer than its file or of a file that was cut short, and what was written there is gone; a page that the file has again has
+the protection that it had, and what the file has: `Guard.pastEnd`.
+
+Two shared mappings of the same pages of a file are the same memory on Linux, and here each has bytes of its own, which a system call
+makes the same (`flushShared`). Between calls they are kept the same by their protection (`Guard.sibling`): none can be written while
+all hold the same; the first that is written, which faults, then can be, and the others can't be accessed at all; and an access of
+one of those, which faults, copies to them what was written and starts again (`siblingFault`). A system call finds them with what
+they were given, and leaves them as at the start. -/
+private def settleMappings (machine : Machine) (emu : Emu) : IO Unit := do
+  let some group ← runningGroup emu | return
+  let kernel ← machine.kernel.get
+  let process := kernel.process group
+  if process.mappings.isEmpty then return
+  let ends := process.mappings.filterMap (pastEnd kernel)
+  let siblings := rangesWithout (siblingRanges process) ends
+  let (heldEnds, rest) := process.guards.partition (·.isPastEnd)
+  let (heldSiblings, guards) := rest.partition (·.isSibling)
+  if ends.isEmpty && siblings.isEmpty && heldEnds.isEmpty && heldSiblings.isEmpty then return
+  let rangeOf (guard : Guard) : Nat × Nat := (guard.start, guard.start + guard.size)
+  let outside (held : List Guard) (wanted : List (Nat × Nat)) : List Guard :=
+    wanted.foldl (init := held) fun pieces (lower, upper) => pieces.flatMap (·.without lower upper)
+  let inside (held : List Guard) (wanted : List (Nat × Nat)) : List Guard :=
+    held.flatMap fun guard => wanted.filterMap fun (lower, upper) =>
+      let first := max guard.start lower
+      let stop := min (guard.start + guard.size) upper
+      if first < stop then some { guard with start := first, size := stop - first } else none
+  let freed := outside heldEnds ends ++ outside heldSiblings siblings
+  let freshEnds := rangesWithout ends (heldEnds.map rangeOf)
+  let freshSiblings := rangesWithout siblings (heldSiblings.map rangeOf)
+  if freed.isEmpty && freshEnds.isEmpty && freshSiblings.isEmpty then return
+  let piecesOf (ranges : List (Nat × Nat)) (bit : Nat) : IO (List Guard) := do
+    let regions ← emu.regions.get
+    pure (ranges.flatMap fun (lower, upper) => (protectionsOf regions lower upper).map fun piece => { piece with bits := piece.bits ||| bit })
+  try
+    -- What is a guard no longer, and what stays one of mappings that are together, have what they were given, which is what a
+    -- new guard keeps of what it takes the place of.
+    for guard in freed ++ inside heldSiblings siblings do protect emu guard.start guard.size guard.protection
+    let newEnds ← piecesOf freshEnds Guard.pastEnd
+    for piece in newEnds do
+      clearMapped emu piece.start piece.size
+      protect emu piece.start piece.size ⟨false, false, false⟩
+    let newSiblings ← piecesOf freshSiblings Guard.sibling
+    machine.kernel.set (kernel.setProcess group { process with
+      guards := guards ++ inside heldEnds ends ++ newEnds ++ inside heldSiblings siblings ++ newSiblings })
+  catch _ => pure ()
+
+/-- What `settleMappings` keeps with another protection in `lower`..`upper` has the one that it was given, and isn't kept, for a call
+that goes by what the pages were given, as `mremap` does: `settleMappings` keeps anew what is there after it. -/
+private def releaseMappings (machine : Machine) (emu : Emu) (group lower upper : Nat) : IO Unit := do
+  let kernel ← machine.kernel.get
+  let process := kernel.process group
+  let (kept, guards) := process.guards.partition fun guard => guard.isPastEnd || guard.isSibling
+  if !kept.any fun guard => guard.start < upper && lower < guard.start + guard.size then return
+  for guard in kept do
+    let first := max guard.start lower
+    let stop := min (guard.start + guard.size) upper
+    if first < stop then
+      try protect emu first (stop - first) guard.protection catch _ => pure ()
+  machine.kernel.set (kernel.setProcess group { process with guards := guards ++ kept.flatMap (·.without lower upper) })
+
+/-- Whether an address of the process that runs is of a mapping where its file has no page, as `settleMappings` keeps it. -/
+private def isPastEnd (machine : Machine) (emu : Emu) (address : Nat) : IO Bool := do
+  let some group ← runningGroup emu | return false
+  pure (((← machine.kernel.get).process group).guards.any fun guard =>
+    guard.isPastEnd && guard.start ≤ address && address < guard.start + guard.size)
+
+/-- A fault of the process that runs, if it is one of mappings that have the pages of another and are kept the same by their
+protection, as `settleMappings` has it, rather than one of the program's: whether it was, and then the instruction runs again.
+
+- A store to one of them while all hold the same: it can be written from now, and those that have pages of it can't be accessed.
+- An access while one can be written: what that one has goes to those that have its pages, and all hold the same again.
+- An instruction that comes here a third time without having run, as one that copies from one to another, or that is itself in
+  one and stores to another, is run by itself with all of them as they were given, and what it stored goes to the others. -/
+private def siblingFault (machine : Machine) (emu : Emu) (fault : MemoryFault) : IO Bool := do
+  let some group ← runningGroup emu | return false
+  let process := (← machine.kernel.get).process group
+  if process.guards.isEmpty then return false
+  let guards := process.guards.filter (·.isSibling)
+  let some guard := guards.find? fun guard => guard.start ≤ fault.address && fault.address < guard.start + guard.size | return false
+  let needed := match fault.operation with
+    | .read => 1
+    | .write => 2
+    | .fetch => 4
+  -- What it was never given is the program's fault.
+  if guard.bits &&& needed == 0 then return false
+  let together (other : Guard) : Bool := other.start != guard.start && match guard.pagesOf process, other.pagesOf process with
+    | some (inode, lower, upper), some (inode', lower', upper') => inode == inode' && lower < upper' && lower' < upper
+    | _, _ => false
+  -- What `owner` has goes to each of the others where they have its pages.
+  let copyFrom (owner : Guard) : IO Unit := do
+    let some (inode, lower, upper) := owner.pagesOf process | return
+    for other in guards do
+      let some (inode', lower', upper') := other.pagesOf process | continue
+      if other.start == owner.start || inode != inode' then continue
+      let first := max lower lower'
+      let stop := min upper upper'
+      if first < stop then
+        for (at_, length) in chunksOf first (stop - first) do
+          let bytes ← peek emu (owner.start + (at_ - lower)) length
+          if bytes != (← peek emu (other.start + (at_ - lower')) length) then
+            poke emu (other.start + (at_ - lower')) bytes (known := true)
+  let regions ← emu.regions.get
+  let owners := guards.filter fun other => (lookupRegion regions other.start).any (·.protection.writable)
+  let retired ← emu.retired.get
+  let (last, times, stored) ← machine.siblingFaults.get
+  let times := if last == retired then times + 1 else 1
+  let stored := if fault.operation == .write then some fault.address else if last == retired then stored else none
+  machine.siblingFaults.set (retired, times, stored)
+  if times ≥ 3 then
+    for owner in owners do copyFrom owner
+    protectSiblings machine emu true
+    emu.lastFault.set none
+    let stepped ← (step emu).toBaseIO
+    protectSiblings machine emu false
+    match stepped with
+    | .ok _ =>
+      -- What it stored is in the one that it faulted of storing to.
+      let written := stored.bind fun address => guards.find? fun other => other.start ≤ address && address < other.start + other.size
+      copyFrom (written.getD guard)
+      return true
+    -- What it does with them as they were given is the program's fault.
+    | .error _ => return false
+  if !owners.isEmpty then
+    for owner in owners do copyFrom owner
+    protectSiblings machine emu false
+    return true
+  if fault.operation != .write then
+    -- None can be written, and this one can't be accessed, as of a machine that was kept so: they hold the same.
+    protectSiblings machine emu false
+    return true
+  protect emu guard.start guard.size guard.protection
+  for other in guards.filter together do protect emu other.start other.size ⟨false, false, false⟩
+  pure true
+
 /-- `madvise`, for what has a file behind it: `MADV_DONTNEED` leaves what the file has, and zeros elsewhere. A shared mapping has been
 written back by now, so that for it nothing changes. The segments of a program and of a library aren't known as files here and get zeros. -/
 private def serveAdvice (machine : Machine) (group address size advice : Nat) : IO SyscallAction := do
@@ -538,6 +739,16 @@ private def serveAdvice (machine : Machine) (group address size advice : Nat) : 
   if !coversRange (← emu.regions.get) address (address + pages) then return errorOf Errno.enomem
   zapPages machine group address pages
   pure (.returnValue 0)
+
+/-- Where the memory of a process ends, as `access_ok` has it: `TASK_SIZE_MAX` of x86-64, 48 bits of the other 64-bit targets, and all
+of 32 bits. -/
+private def userLimit (architecture : Architecture) : Nat :=
+  if architecture.bits == 32 then 2 ^ 32 else if architecture matches .x86_64 then 0x7ffffffff000 else 2 ^ 48
+
+/-- Whether `size` bytes that would be a process's own to write are more than the machine could ever give, as Linux's
+`__vm_enough_memory` has it where it guesses, which is how it starts: more than all the memory and the swap that there is. What is
+only read, or of a file that takes the writes, or asked for with `MAP_NORESERVE`, isn't counted, and is given whatever its size. -/
+private def overcommitted (size : Nat) : Bool := size / 4096 > Abi.memory / 4096
 
 /-- Whether `growth` more bytes of memory would be more than a process may have, as `may_expand_vm` has `RLIMIT_AS`: all that is mapped
 in its space, and that. -/
@@ -560,6 +771,9 @@ private def serveRemap (machine : Machine) (group old oldSize newSize flags targ
   if old % 4096 != 0 || newPages == 0 || flags ≥ 8 || (fixed && !mayMove) || (keep && (!mayMove || oldPages != newPages)) then
     return errorOf Errno.einval
   if fixed && (target % 4096 != 0 || (target < old + oldPages && old < target + newPages)) then
+    return errorOf Errno.einval
+  -- More than a process can have, as `mremap` has `TASK_SIZE`.
+  if newSize > userLimit machine.architecture || (fixed && target > userLimit machine.architecture - newPages) then
     return errorOf Errno.einval
   -- What it adds, of all of it where the old stays as it is.
   if ← addressSpaceFull machine group (if keep || oldPages == 0 then newPages else newPages - oldPages) then
@@ -654,6 +868,8 @@ private def serveBreak (machine : Machine) (group wanted : Nat) : IO SyscallActi
   else
     let mappedTo := pageUp process.breakEnd
     let needed := pageUp wanted
+    -- Past where the memory of a process ends, or by more than the machine has, it stays where it is.
+    if needed > userLimit machine.architecture || overcommitted (needed - mappedTo) then return .returnValue process.breakEnd
     if ← addressSpaceFull machine group (needed - mappedTo) then return .returnValue process.breakEnd
     try
       if needed > mappedTo then
@@ -668,11 +884,6 @@ private def base (machine : Machine) (group directory : Nat) : IO (Result String
   pure ((← machine.kernel.get).baseOf group directory (atCwd directory))
 
 private def stackTop (architecture : Architecture) : Nat := if architecture.bits == 32 then 0x7fff0000 else 0x7ffffffff000
-
-/-- Where the memory of a process ends, as `access_ok` has it: `TASK_SIZE_MAX` of x86-64, 48 bits of the other 64-bit targets, and all
-of 32 bits. -/
-private def userLimit (architecture : Architecture) : Nat :=
-  if architecture.bits == 32 then 2 ^ 32 else if architecture matches .x86_64 then 0x7ffffffff000 else 2 ^ 48
 
 /-- `MAX_RW_COUNT`, which is as much as one read or write asks for: what asks for more asks for that. -/
 private def maxCount : Nat := 0x7ffff000
@@ -690,7 +901,7 @@ private def ioReady (kernel : Kernel) (group : Nat) (call : Call) (fd : Nat) : B
     let seekable := match kernel.inodes.get? file.inode with
       | some { content := .file _, .. } | some { content := .device _, .. } | some { content := .directory, .. } => true
       | _ => false
-    (if reading then file.flags &&& 3 != 1 else file.flags &&& 3 != 0) && (!positioned || seekable)
+    (if reading then Kernel.reads file.flags else Kernel.writes file.flags) && (!positioned || seekable)
   | .error _ => false
 
 /-- The arguments of a call, as `vfs_read` and `vfs_write` have them: a buffer that isn't all in the memory of a process, without its
@@ -1579,6 +1790,14 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       if arg 3 &&& 3 == 0 then return errorOf Errno.einval
       -- More than `RLIMIT_AS` lets it have, but for what `MAP_FIXED` takes the place of.
       let pages := pageUp (arg 1)
+      -- More than a process can have, as `do_mmap` has `TASK_SIZE`, and at an address, what would end past it.
+      if pages > userLimit architecture || (arg 3 &&& 0x100010 != 0 && arg 0 > userLimit architecture - pages) then
+        return errorOf Errno.enomem
+      -- What is the process's own to write, or shared without a file, is counted, unless it says not to: `MAP_NORESERVE`, which
+      -- MIPS and PowerPC number apart.
+      let reserved := arg 3 &&& (if mips then 0x400 else if architecture matches .powerpc .. then 0x40 else 0x4000) == 0
+      let counted := if mapsShared (arg 3) then arg 3 &&& architecture.mapAnonymous != 0 else arg 2 &&& 2 != 0
+      if reserved && counted && overcommitted pages then return errorOf Errno.enomem
       let regions ← emu.regions.get
       let replaced := if arg 3 &&& 0x10 == 0 then 0 else
         regions.foldl (init := 0) fun total region =>
@@ -1915,11 +2134,13 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
           machine.kernel.set (kernel.advance id first count all)
           returning emu (arg 1) bytes bytes.size
     | .getcwd =>
-      -- A directory that was removed has no path.
+      -- A directory that was removed has no path, and one that isn't under the root of the process is said to be so, as `d_path`
+      -- has it.
       match kernel.pathOf (kernel.process group).cwd with
       | none => pure (errorOf Errno.enoent)
       | some path =>
-        let text := Path.toBytes (kernel.shownPath group path ++ "\x00")
+        let (shown, within) := kernel.shownWithin group path
+        let text := Path.toBytes ((if within then "" else "(unreachable)") ++ shown ++ "\x00")
         if text.size > arg 1 then pure (errorOf Errno.erange)
         else returning emu (arg 0) text text.size
     | .chdir => at_ here (arg 0) fun _ path => apply machine (·.chdir group path)
@@ -2015,6 +2236,8 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
     | .mmap2 => mapMemory (arg 5 * 4096)
     | .munmap =>
       if arg 0 % 4096 != 0 || arg 1 == 0 then pure (errorOf Errno.einval)
+      -- Past where the memory of a process ends, as `__vm_munmap` has `TASK_SIZE`.
+      else if arg 0 > userLimit architecture || arg 1 > userLimit architecture - arg 0 then pure (errorOf Errno.einval)
       else
         machine.kernel.modify (·.dropMappings group (arg 0) (arg 0 + pageUp (arg 1)))
         pure .default
@@ -2022,15 +2245,29 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
       let upper := arg 0 + pageUp (arg 1)
       if arg 2 &&& 2 != 0 && (kernel.process group).mappings.any (fun mapping => mapping.shared && !mapping.mayWrite && mapping.overlaps (arg 0) upper) then
         pure (errorOf Errno.eacces)
-      else pure .default
+      else do
+        -- What `settleMappings` keeps with another protection has the one that this gives it, which it then keeps anew.
+        let process := kernel.process group
+        let (kept, guards) := process.guards.partition fun guard => guard.isPastEnd || guard.isSibling
+        if !kept.isEmpty then
+          machine.kernel.set (kernel.setProcess group { process with guards := guards ++ kept.flatMap (·.without (arg 0) upper) })
+        pure .default
     | .madvise =>
       -- The advice that there is, of a range that is mapped.
       let advice := arg 2
       if arg 0 % 4096 != 0 || !(advice ≤ 4 || (8 ≤ advice && advice ≤ 25) || (100 ≤ advice && advice ≤ 103)) then
         pure (errorOf Errno.einval)
+      -- What ends past the last address there is, where it would be before where it starts.
+      else if arg 0 + pageUp (arg 1) > 2 ^ architecture.bits then pure (errorOf Errno.einval)
       else if !coversRange (← emu.regions.get) (arg 0) (arg 0 + pageUp (arg 1)) then
-        -- What is mapped of it is advised all the same, as `madvise_walk_vmas` has it, and what isn't is `ENOMEM` after.
-        if advice == 4 then zapPages machine group (arg 0) (pageUp (arg 1))
+        -- What is mapped of it is advised all the same, as `madvise_walk_vmas` has it, and what isn't is `ENOMEM` after: each piece
+        -- that is mapped, as the range may be of more than there is.
+        if advice == 4 then
+          let upper := arg 0 + pageUp (arg 1)
+          for region in ← emu.regions.get do
+            let first := max (arg 0) region.address
+            let stop := min upper (region.address + region.data.size)
+            if first < stop then zapPages machine group first (stop - first)
         pure (errorOf Errno.enomem)
       else if advice == 9 || advice == 102 || advice == 103 then serveRemoval machine group (arg 0) (arg 0 + pageUp (arg 1)) advice
       -- `MADV_DONTFORK`, `MADV_DOFORK`, `MADV_WIPEONFORK` and `MADV_KEEPONFORK`, which a child of `fork` goes by. Only what is private
@@ -2072,7 +2309,9 @@ private partial def kernelCall (machine : Machine) (emu : Emu) (call : Call) (ar
         pure (.returnValue 0)
       else if command ∈ [8, 32, 128] && process.barriers &&& (2 * command) == 0 then pure (errorOf Errno.eperm)
       else pure (.returnValue 0)
-    | .mremap => serveRemap machine group (arg 0) (arg 1) (arg 2) (arg 3) (arg 4)
+    | .mremap =>
+      releaseMappings machine emu group (arg 0) (arg 0 + pageUp (arg 1))
+      serveRemap machine group (arg 0) (arg 1) (arg 2) (arg 3) (arg 4)
     | .brk => serveBreak machine group (arg 0)
     | .gettimeofday => clock (arg 0) 1000
     | .time =>
@@ -2559,6 +2798,70 @@ private def serveIllegalInstructions (machine : Machine) (emu : Emu) : IO Unit :
     machine.signals.deliverAt current resume
     pure .proceed
   pure ()
+
+/-- What a trap of an instruction raises: the signal, its `si_code` and the rest of its `siginfo_t`, and where the thread is then. -/
+private structure Trap where
+  signal : Nat
+  code : Nat
+  detail : SignalDetail
+  resume : Nat
+
+/-- What the semantics of an architecture call the instructions that trap where a program runs, other than the undefined ones, and what
+Linux raises for each at an address, which is where the thread is then unless said. `SI_KERNEL`, 0x80, is of `force_sig`, which gives no
+address.
+- x86, `int3`, `exc_int3`: `SIGTRAP` of `SI_KERNEL`, after the instruction, as it is a trap; `hlt`, which is privileged,
+  `exc_general_protection`: `SIGSEGV` of `SI_KERNEL`; a division without a quotient, `exc_divide_error`: `SIGFPE` of `FPE_INTDIV` at it;
+- AArch64, `brk`, `do_el0_brk64`; RISC-V, `ebreak`, `do_trap_break`; PowerPC, the traps, `program_check_exception`: `SIGTRAP` of
+  `TRAP_BRKPT` at the instruction;
+- ARM, `bkpt`, `hw_breakpoint_pending`, which doesn't know it: `SIGTRAP` of `TRAP_HWBKPT` at the instruction, as `hook_ifault_code` of
+  the debug exception says (qemu says `TRAP_BRKPT`);
+- MIPS, `break`, `do_bp`, and the traps, `do_tr`, by the code that the instruction has, of which those of a division, which compilers
+  put after one, are `SIGFPE`: `do_trap_or_bp`. -/
+private def trapsOf (machine : Machine) : List (String × (Emu → Nat → IO Trap)) :=
+  let signals := machine.signals
+  let breakpoint (code : Nat) : Emu → Nat → IO Trap := fun _ pc => pure ⟨signals.trapNumber, code, .fault pc, pc⟩
+  match machine.architecture with
+  | .x86_64 | .i686 =>
+    [("breakpoint", fun _ pc => pure ⟨signals.trapNumber, 0x80, .sent 0 0 0, pc + 1⟩),
+     ("hlt", fun _ pc => pure ⟨signals.segvNumber, 0x80, .sent 0 0 0, pc⟩),
+     ("divide-error", fun _ pc => pure ⟨signals.fpeNumber, 1, .fault pc, pc⟩)]
+  | .arm => [("breakpoint", breakpoint 4)]
+  | .mips _ big _ =>
+    -- The code of a `break` is of 20 bits, whose halves the kernel swaps if the high one is set, as assemblers put a code in either;
+    -- that of a trap is of 10.
+    let raise (isBreak : Bool) : Emu → Nat → IO Trap := fun emu pc => do
+      let bytes ← read emu pc 4
+      let bytes := if big then bytes.toList else bytes.toList.reverse
+      let word := bytes.foldl (fun value byte => value * 256 + byte.toNat) 0
+      let code := if isBreak then
+          let code := (word >>> 6) % 2 ^ 20
+          if code ≥ 2 ^ 10 then (code % 2 ^ 10) * 2 ^ 10 + code / 2 ^ 10 else code
+        else (word >>> 6) % 2 ^ 10
+      if code == 6 || code == 7 then pure ⟨signals.fpeNumber, if code == 7 then 1 else 2, .fault pc, pc⟩
+      else if isBreak && code != 12 && code != 514 then pure ⟨signals.trapNumber, 1, .fault 0, pc⟩
+      else pure ⟨signals.trapNumber, 0x80, .sent 0 0 0, pc⟩
+    [("breakpoint", raise true), ("trap", raise false)]
+  | .powerpc .. => [("trap", breakpoint 1)]
+  | .aarch64 | .riscv64 | .riscv32 => [("breakpoint", breakpoint 1)]
+
+/-- An instruction that traps where a program runs raises its signal, forced as that of an undefined one is. A handler sees where Linux
+has the thread, the branch for a trap in a delay slot, and goes on from there when it returns: at a breakpoint of x86 that is after it,
+and elsewhere the instruction, which traps again unless the handler moved the thread. -/
+private def serveTraps (machine : Machine) (emu : Emu) : IO Unit := do
+  for (name, trapOf) in trapsOf machine do
+    let _ ← onIntrinsic emu name fun current pc => do
+      let tid ← thread current
+      let group := (← currentTask current).group
+      let pending ← current.pendingRef.get
+      let trap ← trapOf current pc
+      -- The exception program counter of MIPS is the branch, and what it says faulted is that too.
+      let (detail, resume) := match pending, trap.detail with
+        | some pending, .fault address => (.fault (if address == pc then pending.branch else address), pending.branch)
+        | some pending, detail => (detail, pending.branch)
+        | none, detail => (detail, trap.resume)
+      machine.signals.force current tid group ⟨trap.signal, trap.code, detail⟩
+      machine.signals.deliverAt current resume
+      pure .proceed
 
 /-- Registers hold zeros at the start, as the kernel leaves them, but for the state of the floating point units. -/
 private def resetRegisters (emu : Emu) : Architecture → IO Unit
@@ -3155,13 +3458,14 @@ private def libraryModelId : String := "bap.libraries"
 /-- What a checkpoint has of the trace of instructions and accesses, all of it, as the machine of it is to go on with it. -/
 private def traceModelId : String := "bap.trace"
 
-/-- The models that every machine has, with the versions of what they keep: of ptrace, 2 has the stops that tracees have yet to make
+/-- The models that every machine has, with the versions of what they keep: of the signals, 3 has the last
+exception of each thread; of ptrace, 2 has the stops that tracees have yet to make
 and those that stopped for their end, 3 the exits that tracers that aren't parents have yet to hear of, 4 the steps that tracees have yet to make, 5 the system call that
 each tracee last started, 6 what a tracer said a call that a tracee is stopped at the start of is to be, and 7 the processes that are
 over that no one waits for; of the timers, 3 has the fraction of what is left of a wait that goes back as a `timespec` or a `timeval`,
 and 4 the semaphore that a call of `semop` waits for. -/
 private def builtinModels : List (String × Nat) :=
-  [(Signals.modelId, 2), (Ptrace.modelId, 8), (Seccomp.modelId, 1), (Timers.modelId, 4), (Ring.modelId, 2), (heapModelId, 1), (libraryModelId, 2),
+  [(Signals.modelId, 3), (Ptrace.modelId, 9), (Seccomp.modelId, 1), (Timers.modelId, 4), (Ring.modelId, 2), (heapModelId, 1), (libraryModelId, 2),
     (traceModelId, 6)]
 
 private def builtinVersion (id : String) : Nat := (builtinModels.lookup id).getD 1
@@ -3227,7 +3531,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   let ptrace ← Ptrace.make architecture signals
   let kernelRef ← IO.mkRef kernel
   let timers ← Timers.make architecture kernelRef signals
-  let machine : Machine := { architecture, emu, kernel := kernelRef, models := ← IO.mkRef [], target, handled := handler.isSome, signals, ptrace, timers, notifier := ← Notify.make, hostMounts := ← IO.mkRef [], rings := ← IO.mkRef {}, releases := ← IO.mkRef 0, heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {}, clockCounted := ← IO.mkRef (← emu.retired.get) }
+  let machine : Machine := { architecture, emu, kernel := kernelRef, models := ← IO.mkRef [], target, handled := handler.isSome, signals, ptrace, timers, notifier := ← Notify.make, hostMounts := ← IO.mkRef [], rings := ← IO.mkRef {}, releases := ← IO.mkRef 0, siblingFaults := ← IO.mkRef (0, 0, none), heaps := ← IO.mkRef {}, libraries := ← IO.mkRef {}, history := ← IO.mkRef none, restored := ← IO.mkRef [], listing := ← IO.mkRef none, hostHooks := ← IO.mkRef {}, importSlots := ← IO.mkRef {}, clockCounted := ← IO.mkRef (← emu.retired.get) }
   if let some watch := watch then
     let _ ← onSyscall emu fun _ number args => do
       watch number args
@@ -3237,6 +3541,8 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   -- What a process wrote to shared memory is in the file before anything can look at the file.
   let _ ← onSyscall emu fun emu _ _ => do
     flushShared machine emu
+    -- What the call reads and writes of the program is as the program was given it.
+    protectSiblings machine emu true
     -- What the call walks is within the root of its process.
     if let some group ← runningGroup emu then
       let kernel ← machine.kernel.get
@@ -3246,7 +3552,15 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   emu.leavingSpace.set (some (flushShared machine emu))
   -- What was found of the instances of `inotify` is of the kernel that was.
   machine.restored.modify ((fun _ => Notify.forget machine.notifier) :: ·)
-  emu.enteredSpace.set (some (refreshShared machine emu))
+  -- The mappings of what comes to run hold what their files do, and are as long.
+  emu.enteredSpace.set (some do
+    refreshShared machine emu
+    settleMappings machine emu
+    protectSiblings machine emu false)
+  -- A call may have made a file longer or shorter, or mapped one, and is over.
+  emu.syscallEnds.modify (· ++ [fun (_ : Option Nat) => do
+    settleMappings machine emu
+    protectSiblings machine emu false])
   emu.futexKey.set (some fun address => do
     let some group ← runningGroup emu | return none
     let mappings := ((← machine.kernel.get).process group).mappings
@@ -3275,13 +3589,15 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   machine.models.modify (· ++ [{ id := Seccomp.modelId, version := builtinVersion Seccomp.modelId, state := seccomp.modelState emu }])
   -- Time goes on as instructions run, and to what happens next when nothing can.
   emu.now.set (some do pure (← kernelRef.get).clock)
-  -- The thread that is current, which a timer or a deadline woke there, takes what came for it, as a switch to it would have it.
+  -- The thread that is current, which a timer or a deadline woke there, takes what came for it, as a switch to it would have it; and
+  -- one that runs takes what a timer sent it where it is, as an interrupt has it, rather than at the end of its next system call.
   let resumingCurrent (action : IO Bool) : IO Bool := do
     let waited ← Bap.Emu.stopped emu
     let changed ← action
     if waited && !(← Bap.Emu.stopped emu) then
       signals.switchedIn emu
       timers.resumed emu
+    else if !waited then signals.deliverPending emu
     pure changed
   emu.idle.set (some (resumingCurrent (timers.idle emu)))
   -- A signal that comes has what waits to read one look again, and what it woke from a call that runs again hear of it.
@@ -3290,7 +3606,9 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   signals.members.set fun pgid => do
     let present := ((← emu.taskTable.get).present.map (·.group)).eraseDups
     pure (Identity.members (← kernelRef.get) present pgid)
-  signals.interrupted.set fun emu tid restart spaces traced => timers.interrupted emu tid restart spaces traced
+  signals.interrupted.set fun emu tid restart spaces traced => do
+    timers.interrupted emu tid restart spaces traced
+    if traced then ptrace.restarted emu tid
   signals.taken.set timers.taken
   -- The clock goes on first, so that the timers and the deadlines go by what ran.
   emu.betweenTurns.modify (· ++ [machine.advanceClock])
@@ -3300,6 +3618,11 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   -- serves it, e.g., `clone`, sees it.
   if architecture == .aarch64 then emu.syscallStarts.modify (· ++ [fun (_ : Nat) (_ : List Nat) => Signals.leaveStreamingMode emu false])
   emu.betweenTurns.modify (· ++ [do let _ ← resumingCurrent (do timers.tick emu; pure true)])
+  -- A thread that goes on running turn after turn has time go on with it: at the end of each turn the timers that are due send
+  -- their signals, of which it takes its own there, and what waited until a time that has come is one to run next.
+  emu.turnEnds.modify (· ++ [do
+    machine.advanceClock
+    let _ ← resumingCurrent (do timers.tick emu; pure true)])
   emu.betweenTurns.modify (· ++ [settleRings machine emu])
   let timeState : ModelState := { save := timers.save, load := timers.load }
   machine.models.modify (· ++ [{ id := Timers.modelId, version := builtinVersion Timers.modelId, state := timeState }])
@@ -3316,6 +3639,12 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
       { state with submitted := state.submitted.filterMap fun (tid, at_, count) =>
           if tid == leader then none else some (if tid == former then leader else tid, at_, count) }])
   signals.serve emu
+  -- A fault where a file that is mapped has no page is of the bus.
+  emu.faultHandler.set (some fun fault => do
+    if ← siblingFault machine emu fault then return true
+    -- What an instruction that was run by itself did is what faulted.
+    let fault := (← failure emu).getD fault
+    signals.faulted emu fault (← isPastEnd machine emu fault.address))
   -- A thread that a switch has run again has what was left of a sleep that a signal ended.
   let arrived ← emu.switchedIn.get
   emu.switchedIn.set (some do
@@ -3399,6 +3728,7 @@ private def machineOf (architecture : Architecture) (emu : Emu) (kernel : Kernel
   let _ ← serveRest machine
   if architecture == .x86_64 || architecture == .i686 then serveCpu emu machine.kernel architecture.bits
   serveIllegalInstructions machine emu
+  serveTraps machine emu
   -- What was advised for a child of `fork`: what it leaves out isn't mapped there, and what it wipes is zeros, but a child that has its
   -- parent's memory, of `vfork`, has it as it is. This comes once the child is a process of the kernel.
   emu.processHooks.modify ((fun _ child => do

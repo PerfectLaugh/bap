@@ -324,7 +324,10 @@ def without (advice : ForkAdvice) (lower upper : Nat) : List ForkAdvice :=
 end ForkAdvice
 
 /-- What `MADV_GUARD_INSTALL` put a guard on, of the memory of a process: an access of it is `SIGSEGV` until `MADV_GUARD_REMOVE` gives it
-back the protection that it had, `bits` as `mprotect` has them. A child of `fork` has it too, and `munmap` and `execve` end it. -/
+back the protection that it had, `bits` as `mprotect` has them. A child of `fork` has it too, and `munmap` and `execve` end it. With
+`Guard.pastEnd` in its bits, it is instead where a mapping of a file is past the last page that the file has, an access of which is
+`SIGBUS`, until the file has a page there again; and with `Guard.sibling`, where a shared mapping has pages that another of the
+process has too, which are kept the same by what may be done of each, as `Bap.Linux.Machine` says. -/
 structure Guard where
   start : Nat
   size : Nat
@@ -332,6 +335,12 @@ structure Guard where
   deriving DecidableEq, Repr
 
 namespace Guard
+
+/-- The bit of `bits`, which is none of `mprotect`, of what is kept from being accessed as its file has no page there. -/
+def pastEnd : Nat := 8
+
+/-- The bit of `bits` of a shared mapping that has the pages of another. -/
+def sibling : Nat := 16
 
 /-- What is left of a guard without `lower`..`upper`. -/
 def without (guard : Guard) (lower upper : Nat) : List Guard :=
@@ -912,6 +921,8 @@ def resolveVia (kernel : Kernel) (base path : String) (follow : Bool := true) (l
           match left.or (kernel.mounts.find? fun mount => mount.source == here && mount.source.startsWith hiddenRoot) with
           | some mount => walk ((Path.parts "/" mount.target).reverse.drop 1) rest none fuel links
           | none => walk (done.drop 1) rest via fuel links
+      -- After the target of a link that says that it is a directory, which the walk has found to be one by now.
+      | "/" :: rest => walk done rest via fuel links
       | part :: rest =>
         if !searchable done then .error Errno.eacces else
         -- Nothing is in a directory that was removed.
@@ -942,8 +953,11 @@ def resolveVia (kernel : Kernel) (base path : String) (follow : Bool := true) (l
                   | _, _, _ => .error Errno.enotdir
                 | none =>
                   -- From where the link is, or of an absolute one, from the root of the process.
-                  if target.startsWith "/" then walk root (Path.walkParts target ++ rest) none fuel (links - 1)
-                  else walk done (Path.walkParts target ++ rest) via fuel (links - 1)
+                  -- What its target says is a directory, by a slash or a `.` at its end, is one: a `/`, which is no name, has
+                  -- what comes before it be more than the last of the walk.
+                  let onward := Path.walkParts target ++ (if Path.ending target matches .slash | .dot then ["/"] else []) ++ rest
+                  if target.startsWith "/" then walk root onward none fuel (links - 1)
+                  else walk done onward via fuel (links - 1)
             | .directory => walk (part :: done) rest via fuel links
             | _ => if rest.isEmpty then .ok (path, some number, via) else .error Errno.enotdir
   match walk (if path.startsWith "/" then [] else (Path.parts "/" base).reverse) (Path.walkParts path) none (links * 256 + 4096) links with
@@ -1194,6 +1208,16 @@ private def has (flags flag : Nat) : Bool := flags &&& flag != 0
 
 private def writable (flags : Nat) : Bool := flags &&& 3 != 0
 
+/-- Whether what was opened with these flags is read through, and whether it is written through: neither of the access mode 3, which
+asks to read and to write of what it opens and then does neither, as Linux has it. -/
+def reads (flags : Nat) : Bool := flags &&& 3 == 0 || flags &&& 3 == 2
+
+def writes (flags : Nat) : Bool := flags &&& 3 == 1 || flags &&& 3 == 2
+
+/-- Whether a path of the tree is in `/proc`, where no call makes a name, which is `ENOENT` as its lookup has it of what isn't there, nor
+removes or moves one, `EPERM`. -/
+def ofProc (normal : String) : Bool := normal.startsWith "/proc/"
+
 private def parentIsDirectory (kernel : Kernel) (path : String) : Bool :=
   match kernel.paths.get? (Path.parent path) with
   | some number =>
@@ -1317,7 +1341,7 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
       .ok (kernel, number)
     | none =>
       if !has flags oCreat then .error Errno.enoent
-      if !parentIsDirectory kernel normal then .error Errno.enoent
+      if !parentIsDirectory kernel normal || ofProc normal then .error Errno.enoent
       if kernel.readOnlyVia via normal then .error erofs
       if !kernel.mayChangeIn credentials normal then .error Errno.eacces
       let process := kernel.process group
@@ -1329,13 +1353,15 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
   let want := (if accessMode == 0 || accessMode == 2 then 4 else 0) |||
     (if accessMode == 1 || accessMode == 2 || has flags oTrunc then 2 else 0)
   let checked := found.isSome && !(inode.content matches .symlink _ | .generated _) &&
-    !(inode.content matches .directory && (writable flags || has flags oCreat))
+    !(inode.content matches .directory && (writable flags || has flags oCreat || has flags oTrunc))
   if checked && !permits inode credentials false want then .error Errno.eacces
   let kernel ← match inode.content with
+    -- A directory isn't opened to write, nor to make or to empty it, as `may_open` and `do_open` have it.
     | .directory =>
-      if writable flags || has flags oCreat then .error Errno.eisdir
+      if writable flags || has flags oCreat || has flags oTrunc then .error Errno.eisdir
       .ok kernel
-    | .symlink _ => .error Errno.eloop
+    -- A link that `O_NOFOLLOW` has it not follow: of `O_DIRECTORY`, it isn't one.
+    | .symlink _ => if has flags oDirectory then .error Errno.enotdir else .error Errno.eloop
     -- `Machine` opens these, with what they see, which this doesn't know.
     | .generated _ => .error Errno.eacces
     | .file data =>
@@ -1376,7 +1402,7 @@ def randomBytes (start count : Nat) : ByteArray := Id.run do
 /-- `read`, at the offset of the file, which moves. Of a pipe, what is first in it, which goes. -/
 def read (kernel : Kernel) (group fd count : Nat) : Result (Kernel × ByteArray) := do
   let (id, file) ← openFileOf kernel group fd
-  if file.flags &&& 3 == 1 then .error Errno.ebadf
+  if !reads file.flags then .error Errno.ebadf
   let inode ← inodeOf kernel file.inode
   if let .pipe buffer head consumed capacity := inode.content then
     let bytes := buffer.extract head (head + count)
@@ -1414,7 +1440,7 @@ def givesAll (kernel : Kernel) (group fd : Nat) : Bool :=
 def readFrom (kernel : Kernel) (group fd count offset : Nat) : Result ByteArray := do
   if negativeOffset (offset + count) then .error Errno.einval
   let (_, file) ← openFileOf kernel group fd
-  if file.flags &&& 3 == 1 then .error Errno.ebadf
+  if !reads file.flags then .error Errno.ebadf
   let inode ← inodeOf kernel file.inode
   match inode.content with
   | .file data => .ok (readAt data offset count)
@@ -1445,7 +1471,7 @@ def growthLimited (kernel : Kernel) (group size : Nat) (current : Nat) : Result 
 /-- `write`, at the offset of the file, or at its end if it was opened to append, and to a pipe, as much as it has room for. -/
 def write (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Result (Kernel × Nat) := do
   let (id, file) ← openFileOf kernel group fd
-  if !writable file.flags then .error Errno.ebadf
+  if !writes file.flags then .error Errno.ebadf
   let inode ← inodeOf kernel file.inode
   match inode.content with
   | .console _ => .ok ({ kernel with output := kernel.output ++ bytes }, bytes.size)
@@ -1477,7 +1503,7 @@ def writeError (kernel : Kernel) (group fd count : Nat) : Option Nat :=
   match kernel.openFileOf group fd with
   | .error errno => some errno
   | .ok (_, file) =>
-    if !writable file.flags then some Errno.ebadf
+    if !writes file.flags then some Errno.ebadf
     else
       match kernel.inodes.get? file.inode with
       | none => some Errno.eio
@@ -1544,7 +1570,7 @@ def writeAtError (kernel : Kernel) (group fd count offset : Nat) : Option Nat :=
   match kernel.openFileOf group fd with
   | .error errno => some errno
   | .ok (_, file) =>
-    if !writable file.flags then some Errno.ebadf
+    if !writes file.flags then some Errno.ebadf
     else
       match kernel.inodes.get? file.inode with
       | some inode@{ content := .file data, .. } =>
@@ -1575,7 +1601,7 @@ def writeTo (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Nat
     Result (Kernel × Nat) := do
   if negativeOffset offset then .error Errno.einval
   let (_, file) ← openFileOf kernel group fd
-  if !writable file.flags then .error Errno.ebadf
+  if !writes file.flags then .error Errno.ebadf
   let inode ← inodeOf kernel file.inode
   match inode.content with
   | .file data =>
@@ -2000,7 +2026,7 @@ def mkdir (kernel : Kernel) (group : Nat) (base path : String) (mode : Nat) : Re
   let process := kernel.process group
   searchError kernel process.credentials normal
   if found.isSome then .error Errno.eexist
-  if !parentIsDirectory kernel normal then .error Errno.enoent
+  if !parentIsDirectory kernel normal || ofProc normal then .error Errno.enoent
   if kernel.readOnlyVia via normal then .error erofs
   if !kernel.mayChangeIn process.credentials normal then .error Errno.eacces
   -- Of its mode, only what Linux's `vfs_mkdir` keeps, the permissions and the sticky bit: setgid comes of a parent that has it.
@@ -2028,10 +2054,12 @@ def remove (kernel : Kernel) (group : Nat) (base path : String) (directory : Boo
     | .directory, true =>
       -- Of the root, as of what is mounted, `EBUSY`, as Linux's `do_rmdir` has it of `LAST_ROOT`.
       if normal == "/" || normal == kernel.walkRoot then .error ebusy
+      if ofProc normal then .error Errno.eperm
       if !(children kernel normal).isEmpty then .error Errno.enotempty
     | .directory, false => .error Errno.eisdir
     | _, true => .error Errno.enotdir
     | _, false => if Path.ending path == .slash then .error Errno.enotdir
+    if ofProc normal then .error Errno.eperm
     if kernel.readOnlyVia via normal then .error erofs
     .ok { kernel.unbindPath normal with
       inodes := kernel.inodes.insert number { inode with details := { inode.details with name := normal ++ " (deleted)" } } }
@@ -2072,9 +2100,10 @@ def rename (kernel : Kernel) (group : Nat) (base source target : String) : Resul
   if kernel.mountIdOf fromVia from_ != kernel.mountIdOf toVia to_ then .error Errno.exdev
   if (Path.ending source == .slash || Path.ending target == .slash) && !((← inodeOf kernel number).content matches .directory) then
     .error Errno.enotdir
-  if !parentIsDirectory kernel to_ then .error Errno.enoent
+  if !parentIsDirectory kernel to_ || ofProc to_ && existing.isNone then .error Errno.enoent
   -- Two names of the same file stay as they are.
   if from_ == to_ || existing == some number then return kernel
+  if ofProc from_ || ofProc to_ then .error Errno.eperm
   kernel.mayRename credentials from_ number to_ existing
   if kernel.mountedAt from_ || kernel.mountedAt to_ then .error ebusy
   if (to_ ++ "/").startsWith (from_ ++ "/") then .error Errno.einval
@@ -2112,7 +2141,7 @@ def linkInode (kernel : Kernel) (group : Nat) (number : Nat) (base target : Stri
   searchError kernel credentials normal
   if existing.isSome then .error Errno.eexist
   if Path.ending target == .slash then .error Errno.enoent
-  if !parentIsDirectory kernel normal then .error Errno.enoent
+  if !parentIsDirectory kernel normal || ofProc normal then .error Errno.enoent
   if kernel.readOnlyVia via normal then .error erofs
   if !kernel.mayChangeIn credentials normal then .error Errno.eacces
   -- Of another mount than where it is, as `do_linkat` has it: of a path, the mount that it was found through.
@@ -2178,7 +2207,7 @@ def symlink (kernel : Kernel) (group : Nat) (base target path : String) : Result
   let (normal, found, via) ← kernel.resolveVia base path (follow := false) (exact := true)
   if found.isSome then .error Errno.eexist
   if Path.ending path == .slash then .error Errno.enoent
-  if !parentIsDirectory kernel normal then .error Errno.enoent
+  if !parentIsDirectory kernel normal || ofProc normal then .error Errno.enoent
   if kernel.readOnlyVia via normal then .error erofs
   let credentials := (kernel.process group).credentials
   searchError kernel credentials normal
@@ -2211,8 +2240,9 @@ def pathIn (kernel : Kernel) (group : Nat) (base path : String) : String × Stri
   -- A walk doesn't go above the root of the process: see `walkRoot`.
   else (base, path)
 
-/-- A path of the tree as a process sees it: within a mount of its own, from where that is mounted, and from its root. -/
-def shownPath (kernel : Kernel) (group : Nat) (path : String) : String :=
+/-- A path of the tree as a process sees it: within a mount of its own, from where that is mounted, and from its root; and whether it is
+within its root, which what it left behind at `chroot` isn't. -/
+def shownWithin (kernel : Kernel) (group : Nat) (path : String) : String × Bool :=
   let within (path prefix_ : String) : Bool := path == prefix_ || path.startsWith (prefix_ ++ "/")
   let mounted (path : String) : String := kernel.mounts.length.fold (init := path) fun _ _ path =>
     match kernel.mounts.find? fun mount => mount.source.startsWith hiddenRoot && within path mount.source with
@@ -2220,7 +2250,12 @@ def shownPath (kernel : Kernel) (group : Nat) (path : String) : String :=
     | none => path
   let path := mounted path
   let root := mounted (kernel.baseIn (kernel.process group).root)
-  if root == "/" || !within path root then path else Path.ofParts (Path.parts "/" (path.drop root.length).toString)
+  if root == "/" then (path, true)
+  else if !within path root then (path, false)
+  else (Path.ofParts (Path.parts "/" (path.drop root.length).toString), true)
+
+/-- `shownWithin`, without whether it is within the root. -/
+def shownPath (kernel : Kernel) (group : Nat) (path : String) : String := (kernel.shownWithin group path).1
 
 /-- `mount` of a file system of `fstype` at `target`, or with `MS_BIND`, of what `source` is, or with `MS_REMOUNT`, `MS_MOVE` and those
 of how mounts are shared, of a mount that is there. A file system of its own is an empty directory: `proc`, `sysfs` and `devtmpfs`
@@ -2381,7 +2416,7 @@ def truncateInode (kernel : Kernel) (number size : Nat) : Result Kernel := do
 def truncateDescriptor (kernel : Kernel) (group fd size : Nat) : Result Kernel := do
   if negativeOffset size then .error Errno.einval
   let (_, file) ← openFileOf kernel group fd
-  if !writable file.flags then .error Errno.einval
+  if !writes file.flags then .error Errno.einval
   if let .file data := (← inodeOf kernel file.inode).content then kernel.growthLimited group size data.size
   kernel.truncateInode file.inode size
 
@@ -2393,7 +2428,7 @@ def allocate (kernel : Kernel) (group fd mode offset size : Nat) : Result Kernel
   if negativeOffset offset || size == 0 || negativeOffset size then .error Errno.einval
   -- A hole has to keep the size.
   if mode > 3 || mode == 2 then .error Errno.eopnotsupp
-  if !writable file.flags then .error Errno.ebadf
+  if !writes file.flags then .error Errno.ebadf
   let inode ← inodeOf kernel file.inode
   match inode.content with
   | .file data =>
@@ -2597,7 +2632,7 @@ def anonymousInode (kernel : Kernel) (data : ByteArray) : Kernel × Nat :=
 /-- The inode of a descriptor and how it was opened: whether it can be read, and whether written. -/
 def mappingSource (kernel : Kernel) (group fd : Nat) : Result (Nat × Bool × Bool) := do
   let (_, file) ← openFileOf kernel group fd
-  .ok (file.inode, file.flags &&& 3 != 1, file.flags &&& 3 == 2)
+  .ok (file.inode, reads file.flags, file.flags &&& 3 == 2)
 
 /-- A process without what it had mapped in `lower`..`upper`, and what it advised of it for a child. -/
 def dropMappings (kernel : Kernel) (group lower upper : Nat) : Kernel :=
@@ -2784,11 +2819,13 @@ def statfs (wide big mips : Bool) : ByteArray :=
     word tmpfs ++ word 4096 ++ get 8 blocks ++ get 8 blocks ++ get 8 blocks ++ get 8 blocks ++ get 8 blocks ++ bytesOf 8 0 ++
       word 255 ++ word 4096 ++ word 0 ++ bytesOf (if wide then 32 else 16) 0
 
+/-- How much memory the machine has, in bytes: 2 GiB, and no swap. -/
+def memory : Nat := 0x7fffffff
+
 /-- `struct sysinfo`: 2 GiB of memory, all free, in units of a byte. -/
 def sysinfo (wide big : Bool) (uptime processes : Nat) : ByteArray :=
   let get := field big
   let word := if wide then get 8 else get 4
-  let memory := 0x7fffffff
   word uptime ++ word 0 ++ word 0 ++ word 0 ++ word memory ++ word memory ++ word 0 ++ word 0 ++ word 0 ++ word 0 ++
     get 2 processes ++ bytesOf (if wide then 6 else 2) 0 ++ word 0 ++ word 0 ++ get 4 1 ++
     bytesOf (if wide then 4 else 8) 0

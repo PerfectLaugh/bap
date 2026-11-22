@@ -178,6 +178,8 @@ def after (notifier : Notifier) (kernelRef : IO.Ref Kernel) (group : Nat) (call 
       (after.openFileOf group fd).toOption.map fun (_, file) => (file.inode, inOpen)
     | .read, some count | .readv, some count | .pread, some count | .preadv, some count | .preadv2, some count =>
       if count == 0 then none else (after.openFileOf group (arg 0)).toOption.map fun (_, file) => (file.inode, inAccess)
+    -- A directory that is read is accessed, whatever of it was left to read, as `iterate_dir` has it.
+    | .getdents, some _ => (after.openFileOf group (arg 0)).toOption.map fun (_, file) => (file.inode, inAccess)
     | .close, some _ =>
       (before.openFileOf group (arg 0)).toOption.bind fun (id, file) =>
         let open_ := (after.heldFiles live).contains id
@@ -195,9 +197,11 @@ def after (notifier : Notifier) (kernelRef : IO.Ref Kernel) (group : Nat) (call 
     entriesAfter := entriesAfter.insert directory (← entriesOf notifier after directory).2
     entriesBefore := entriesBefore.insert directory (if pathsChanged then before.children ((before.pathOfInode directory).getD "") else entriesAfter.getD directory [])
   let mut kernel := after
-  -- What happens to an inode is said to each directory that has it, with its name, and then to the inode.
+  -- What happens to an inode is said to each directory that has it, with its name, and then to the inode: of a directory, with
+  -- `IN_ISDIR`, but that it was deleted or moved itself, which Linux says without.
   let say (kernel : Kernel) (inode mask : Nat) (entries : Std.HashMap Nat (List (String × Nat))) (toParents : Bool) : Kernel :=
-    let mask := if isDirectory (after.inodes.get? inode) || isDirectory (before.inodes.get? inode) then mask ||| inIsdir else mask
+    let mask := if mask &&& (inDeleteSelf ||| inMoveSelf) == 0 &&
+        (isDirectory (after.inodes.get? inode) || isDirectory (before.inodes.get? inode)) then mask ||| inIsdir else mask
     let kernel := if !toParents then kernel else
       directories.foldl (init := kernel) fun kernel directory =>
         ((entries.getD directory []).filter (·.2 == inode)).foldl (init := kernel) fun kernel (name, _) =>

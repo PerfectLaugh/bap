@@ -106,6 +106,18 @@ def run : IO Unit := do
   let huge := [0, 1].foldl (init := setField padded (headers + 6) 2 2) fun data index => setField data (table + index * 40 + 8) 4 0xffffffff
   assertEqual "PE sections too large are refused" (some "the regions of the file are too large")
     (match Image.decode huge with | .error message => some message | .ok _ => none)
+  assertEqual "PE sections too large are refused by the decoder of PE" (some "the regions of the file are too large")
+    (match Pe.decode huge with | .error message => some message | .ok _ => none)
+  -- Sections that each say they are of all of the file, which 200 of them make 9 KiB: 2 MiB of regions of it.
+  let whole (count : Nat) : ByteArray :=
+    let size := table + count * 40 + 64
+    let padded := setField (fixture ++ ByteArray.mk (Array.replicate (size - fixture.size) 0)) (headers + 12) 8 0
+    (List.range count).foldl (init := setField padded (headers + 6) 2 count) fun data index =>
+      let at_ := table + index * 40
+      setField (setField (setField (setField data (at_ + 8) 4 size) (at_ + 12) 4 ((index + 1) * 0x10000)) (at_ + 16) 4 size) (at_ + 20) 4 0
+  assertEqual "PE sections that are each all of the file are refused" (some "the regions of the file are too large")
+    (match Pe.decode (whole 200) with | .error message => some message | .ok _ => none)
+  assertEqual "and two of them are made" (some 2) ((Pe.decode (whole 2)).toOption.map (·.segments.length))
   match Pe.decode (ByteArray.mk #[1, 2, 3, 4]) with
   | .error _ => IO.println "ok: malformed PE rejected"
   | .ok _ => throw <| IO.userError "malformed PE accepted"

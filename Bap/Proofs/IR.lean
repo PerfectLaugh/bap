@@ -1402,7 +1402,7 @@ private theorem propagateBlock_eq (blk : Blk) (env : ConstEnv) :
             { phi with values := phi.values.map fun input => (input.1, Bil.simplifyExp input.2) }
           defs := (propFold blk env).1
           jmps := blk.jmps.map (Jmp.mapExp (propJump (propFold blk env).2)) },
-        (propFold blk env).2) := rfl
+        if blk.calls then [] else (propFold blk env).2) := rfl
 
 private theorem propagateBlock_tid (blk : Blk) (env : ConstEnv) : (propagateBlock blk env).1.tid = blk.tid := rfl
 
@@ -1857,17 +1857,26 @@ theorem propagateBlock_sim {blk : Blk} {c : ConstEnv} {env : Env} (hc : ConstHol
   have hdefs : (propagateBlock blk c).1.defs = tail := by
     rw [propagateBlock_eq]
     simpa using hfold
-  refine ⟨r', by rw [hdefs]; exact hexec, hr, hsub, hout, propJump (propFold blk c).2, ?_, ?_⟩
+  have hexit : ConstHold r.1 (propagateBlock blk c).2 := by
+    rw [propagateBlock_eq]
+    show ConstHold r.1 (if blk.calls then [] else (propFold blk c).2)
+    split
+    · intro k c hm
+      simp at hm
+    · exact hout
+  refine ⟨r', by rw [hdefs]; exact hexec, hr, hsub, hexit, propJump (propFold blk c).2, ?_, ?_⟩
   · rw [propagateBlock_eq]
   · exact fun e v he => eval_replaced hout he
 
-/-- A run through blocks along CFG edges. A phi on entry may change only the phi's variable. -/
+/-- A run through blocks along CFG edges. A phi on entry may change only the phi's variable. After a block that `calls`, the
+environment that the next block is entered with is any at all: what a callee or the system leaves in the variables is not modelled,
+so nothing is assumed of it. -/
 inductive PropRun (cfg : Cfg) : Tid → Env → Prop where
   | start (env : Env) : PropRun cfg cfg.start env
   | step {t t' : Tid} {env env' : Env} {blk blk' : Blk} {r : Env × List (Var × Value)} :
     PropRun cfg t env → cfg.block t = some blk → execDefs env blk.defs = .ok r →
     t' ∈ cfg.successors t → cfg.block t' = some blk' →
-    (∀ x, (∀ phi ∈ blk'.phis, phi.var ≠ x) → Bil.lookup env' x = Bil.lookup r.1 x) →
+    (blk.calls = false → ∀ x, (∀ phi ∈ blk'.phis, phi.var ≠ x) → Bil.lookup env' x = Bil.lookup r.1 x) →
     PropRun cfg t' env'
 
 private theorem mem_join {first : ConstEnv} {rest : List ConstEnv} {e : Var × Constant}
@@ -1949,7 +1958,6 @@ theorem fixpoint_constants_hold {cfg : Cfg} {reads : List (Tid × List Var)} {ex
       intro phi hphi heq
       apply of_decide_eq_true hnot
       exact List.mem_map.2 ⟨phi, hphi, heq⟩
-    rw [hagree k hnot']
     have hc := ih hp
     obtain ⟨hmem, htid⟩ := block_some hp
     obtain ⟨known, hget, hsub⟩ := isSolved_spec hsolved hmem
@@ -1958,7 +1966,15 @@ theorem fixpoint_constants_hold {cfg : Cfg} {reads : List (Tid × List Var)} {ex
     have hpred : t ∈ cfg.predecessors t' := by
       have := (Bap.Graph.successors_mem cfg.graph t t').1 hsucc
       exact (mem_predecessors' _ _ _).2 this
-    exact hout k c (List.mem_filter.1 (hsub _ (entryEnv_mem hentry hpred hget))).1
+    have hexit := (List.mem_filter.1 (hsub _ (entryEnv_mem hentry hpred hget))).1
+    -- Of a block that calls, nothing is known at its exit, so nothing is said of what it comes back with.
+    cases hcalls : p.calls with
+    | true =>
+      rw [propagateBlock_eq] at hexit
+      simp [hcalls] at hexit
+    | false =>
+      rw [hagree hcalls k hnot']
+      exact hout k c hexit
 
 private abbrev solution (cfg : Cfg) : ExitEnvs :=
   propagateAux cfg.prune (constReads cfg.prune)
@@ -1973,7 +1989,8 @@ private theorem propagateConstants_eq (cfg : Cfg) :
       { cfg.prune with blocks := cfg.prune.blocks.map fun blk => (propagateBlock blk (constAt cfg blk.tid)).1 } := rfl
 
 /-- The rewrite only uses constants that hold: on any run reaching a reachable block, the rewritten
-block is a correct replacement for the original. This covers loops, where a constant is used only if
+block is a correct replacement for the original. The runs are of `PropRun`: whatever a call or an
+interrupt comes back with, as no constant is kept past a block that calls. This covers loops, where a constant is used only if
 every path into the block agrees on it. -/
 theorem propagateConstants_correct (cfg : Cfg) {t : Tid} {env : Env} (hrun : PropRun cfg.prune t env)
     {blk : Blk} (hb : cfg.prune.block t = some blk) {r : Env × List (Var × Value)}
@@ -2565,8 +2582,24 @@ theorem selectJmp_agree {env env' : Env} {jmps : List Jmp} {o : Option Jmp}
 previous block (`pseudoStart` for the entry): the block's phis run, then its definitions, and either
 the run ends or the jump the conditions select takes it to its target. The path is every block visited.
 The run may end after any block, so runs also cover prefixes of non-terminating executions. A jump with
-no static target leaves the subroutine and so ends the run. A call continues at its return block with
-the environment unchanged: callees are not modelled, here or in the liveness analysis. -/
+no static target leaves the subroutine and so ends the run.
+
+A call or an interrupt continues at its return block with the environment unchanged: `Run` is of a subroutine
+whose callees and system calls leave every variable as it was, which none that writes a register does, and
+every theorem of `Run` is of that. What relies on it and what doesn't:
+
+- Constant propagation doesn't. It keeps no constant past a block that calls (`Blk.calls`), and its rewrite is
+  correct of `PropRun`, where the environment after such a block is any at all (`fixpoint_constants_hold`,
+  `propagateConstants_correct`). A run of `Run` is one of those.
+- Dead-code elimination does. To the liveness analysis a call or an interrupt reads what its own expressions
+  read and nothing else, and writes nothing: what a callee or the system reads of the variables is live only
+  if the caller says so in `protectedVars`, and a definition that only they would read is removed.
+- SSA construction does. A call or an interrupt defines no version, so a read after it is of the version
+  from before it.
+
+So `optimize_preserves_runs`, `optimize_reflects_runs` and those of `toSsa` and `toSsaPruned` say nothing of a
+run in which a callee changes a variable: there the folding of `optimize` is still right, by the first point,
+and its removal of definitions is right only of what `protectedVars` covers. -/
 
 inductive Run (cfg : Cfg) : Tid → Tid → Env → List Tid → List (Var × Value) → Env → Blk → Prop where
   | last {pred t env env₁ r blk} : cfg.block t = some blk → execPhis pred env blk.phis env = .ok env₁ →
@@ -2870,7 +2903,7 @@ private theorem propagateConstants_run (cfg : Cfg) {pred t : Tid} {env final : E
     obtain ⟨r', hr', heq, hsub, _, g₁, hg₁, hgv₁⟩ := propagateBlock_sim (hconst hrun₁ hb) hr
     have hnext : ∀ b' env₂, cfg.prune.block t' = some b' → execPhis t r.1 b'.phis r.1 = .ok env₂ →
         PropRun cfg.prune t' env₂ := fun b' env₂ hb' hp₂ =>
-      .step hrun₁ hb hr hsucc hb' (fun _ hx => lookup_execPhis_other hp₂ hx)
+      .step hrun₁ hb hr hsucc hb' (fun _ _ hx => lookup_execPhis_other hp₂ hx)
     obtain ⟨tr', f', hrun', hsub', hft, hg⟩ := ih hnext
     refine ⟨r'.2 ++ tr', f', ?_, hsub.append hsub', hft, hg⟩
     refine .next (j := j.mapExp g₁) (propagateConstants_block cfg hb) ?_ hr' ?_ ?_ hsucc ?_
@@ -2930,7 +2963,9 @@ along the same path, ending in the same block, whose stores include the original
 selects the rewrite of the same jump at the end. It refines rather than equals: a removed definition can
 no longer fail. At the end of the run every protected variable has the same value in both runs, as does
 every assigned version of an unversioned protected variable; other variables not read by a later jump or
-definition are not preserved, so the caller lists the subroutine's outputs in `ps`. -/
+definition are not preserved, so the caller lists the subroutine's outputs in `ps`. The runs are of `Run`,
+in which a call or an interrupt comes back with every variable as it was: see there for what of `optimize`
+holds without that. -/
 theorem optimize_preserves_runs (sub : Sub) (ps : List Var) {pred : Tid} {env final : Env} {path : List Tid}
     {tr : List (Var × Value)} {f : Blk} (h : Run (Cfg.fromSub sub) pred (Cfg.fromSub sub).start env path tr final f) :
     ∃ tr' final' f', Run (Cfg.fromSub (optimize sub ps)) pred (Cfg.fromSub sub).start env path tr' final' f' ∧
@@ -7049,7 +7084,9 @@ private theorem Run.last_reachable {cfg : Cfg} {p t : Tid} {E F : Env} {path : L
 form from the same environment along the same path, ending in the block with the same tid, with the
 same stored values, and selecting the rewrite of the same jump. At the end of the run each variable the
 subroutine mentions, and each unversioned one, is readable under a version of itself, the name reads of
-it see at that block, with its original value. Unbound variables stay unbound in both runs. -/
+it see at that block, with its original value. Unbound variables stay unbound in both runs. The runs are
+of `Run`, in which a call or an interrupt comes back with every variable as it was: a call defines no
+version, so nothing is said of a run in which a callee changes a variable. -/
 theorem toSsa_preserves_runs (sub : Sub) (hwf : SubWf sub) {env final : Env} {path : List Tid}
     {tr : List (Var × Value)} {f : Blk}
     (h : Run (Cfg.fromSub sub) pseudoStart (Cfg.fromSub sub).start env path tr final f) :

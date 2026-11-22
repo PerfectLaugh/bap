@@ -388,8 +388,11 @@ private def evalExpFast (env : Env) (exp : Exp) : Except String Value := evalSco
 end Fast
 
 /-- How many times a loop may test its condition before a run gives up, in the interpreter (its fuel) and in native code (`Lifted`):
-more than a `rep` of x86 copies of what a program has, 128 MiB of words, but few enough that one that doesn't end, which nothing
-interrupts within its instruction, ends the run in seconds rather than holding it for good. -/
+far more than the loop of any instruction goes round, as a `rep` of x86 is lifted as one round of it and not as a loop, but few enough
+that one that doesn't end, which nothing interrupts within its instruction, ends the run in seconds rather than holding it for good.
+The two don't give up at the same round: the fuel here is structural, so that what is before a loop and the depth of its body are
+spent of it too, and the interpreter gives up a few rounds before native code, which counts the tests alone, would. That native code
+gives up only where the interpreter has is what is proved (`Bap.Proofs.Jit`), not the converse. -/
 def loopLimit : Nat := 2 ^ 24
 
 def run (program : Program) (initial : State := {}) (fuel : Nat := loopLimit) :

@@ -42,9 +42,31 @@ def modelId : String := "bap.seccomp"
 
 /-! ### Classic BPF -/
 
+/-- Whether each word of scratch that a filter loads was stored before, whichever way it came there, as Linux's
+`check_load_and_stores` has it, of a filter whose jumps go forward and inside: going over it once, with the words that are stored on
+every way to each instruction, which after a jump are those of the ways that jump there. -/
+def stored (program : Array Insn) : Bool := Id.run do
+  let all := 2 ^ 16 - 1
+  let mut masks : Array Nat := Array.replicate program.size all
+  let mut known := 0
+  for pc in [0:program.size] do
+    let some insn := program[pc]? | return true
+    known := known &&& masks[pc]!
+    match insn.code with
+    | 0x02 | 0x03 => known := known ||| (1 <<< insn.k)
+    | 0x60 | 0x61 => if known &&& (1 <<< insn.k) == 0 then return false
+    | 0x05 =>
+      masks := masks.modify (pc + 1 + insn.k) (· &&& known)
+      known := all
+    | 0x15 | 0x1d | 0x25 | 0x2d | 0x35 | 0x3d | 0x45 | 0x4d =>
+      masks := (masks.modify (pc + 1 + insn.jt) (· &&& known)).modify (pc + 1 + insn.jf) (· &&& known)
+      known := all
+    | _ => pure ()
+  return true
+
 /-- Whether a filter is one that seccomp takes: of 1 to 4096 instructions, each of those that it allows, with its loads in
-`struct seccomp_data` and aligned, its scratch in the 16 words, its jumps forward and inside, no division by a constant 0 nor a shift by
-32 or more, and a return at its end. -/
+`struct seccomp_data` and aligned, its scratch in the 16 words and stored before it is loaded, its jumps forward and inside, no
+division by a constant 0 nor a shift by 32 or more, and a return at its end. -/
 def valid (program : Array Insn) : Bool :=
   let size := program.size
   let fits (pc offset : Nat) : Bool := pc + 1 + offset < size
@@ -60,7 +82,7 @@ def valid (program : Array Insn) : Bool :=
     | 0x15 | 0x1d | 0x25 | 0x2d | 0x35 | 0x3d | 0x45 | 0x4d => fits pc insn.jt && fits pc insn.jf
     | _ => false
   0 < size && size ≤ 4096 && (program.back?.any fun insn => insn.code == 0x06 || insn.code == 0x16) &&
-    program.zipIdx.all fun (insn, pc) => ok insn pc
+    (program.zipIdx.all fun (insn, pc) => ok insn pc) && stored program
 
 /-- What a filter returns of the words of `struct seccomp_data`, by their offsets. It is `valid`, so that each jump goes forward, and it
 ends within as many steps as it has instructions; a division by 0 that `X` has returns 0, as Linux has it. -/
@@ -118,19 +140,6 @@ def combine (results : List Nat) : Nat :=
 
 /-! ### The machine's side -/
 
-/-- `AUDIT_ARCH_*` of an architecture, which `struct seccomp_data` has. -/
-def auditArch : Architecture → Nat
-  | .x86_64 => 0xC000003E
-  | .i686 => 0x40000003
-  | .aarch64 => 0xC00000B7
-  | .arm => 0x40000028
-  | .riscv64 => 0xC00000F3
-  | .riscv32 => 0x400000F3
-  | .mips 32 big _ => if big then 0x00000008 else 0x40000008
-  | .mips _ big _ => if big then 0x80000008 else 0xC0000008
-  | .powerpc 32 big => if big then 0x00000014 else 0x40000014
-  | .powerpc _ big => if big then 0x80000015 else 0xC0000015
-
 /-- `exit` and `__NR_seccomp_sigreturn`, which strict mode lets through with `read` and `write`: `sigreturn` of x86-32, as its
 `asm/seccomp.h` has it, and `rt_sigreturn` of the others, of `asm-generic`. -/
 private def strictCalls : Architecture → List Nat
@@ -155,7 +164,7 @@ private def numberOf (big : Bool) (bytes : ByteArray) : Nat :=
 six arguments. -/
 def callData (architecture : Architecture) (number ip : Nat) (args : List Nat) : ByteArray :=
   let big := architecture.big
-  let out := numberBytes big 4 number ++ numberBytes big 4 (auditArch architecture) ++ numberBytes big 8 ip
+  let out := numberBytes big 4 number ++ numberBytes big 4 (architecture.auditArch) ++ numberBytes big 8 ip
   (List.range 6).foldl (fun out index => out ++ numberBytes big 8 (args.getD index 0)) out
 
 /-- The 32 bits of `struct seccomp_data` at an offset, as a load of a filter reads them. -/
@@ -317,7 +326,7 @@ def screen (seccomp : Seccomp) (emu : Emu) (tid number : Nat) (args : List Nat) 
     | 0x00050000 => return some (← syscallReturn emu (if value == 0 then .ok 0 else .error (min value 4095)))
     | 0x00030000 =>
       let group := ((← emu.taskTable.get).find? tid).map (·.group) |>.getD tid
-      seccomp.signals.force emu tid group ⟨seccomp.sigsys, 1, .seccomp (← emu.nextPc.get) number (auditArch architecture) value⟩
+      seccomp.signals.force emu tid group ⟨seccomp.sigsys, 1, .seccomp (← emu.nextPc.get) number (architecture.auditArch) value⟩
       return some (← Ptrace.unmade emu)
     | 0x7ff00000 =>
       -- Once its tracer let it go on, the call goes through.

@@ -1764,6 +1764,11 @@ def decodeX86Memo (memo : IO.Ref LiftMemo) (globals : Primus.Semantics.Environme
     bil := bil
   }
 
+/-- `decodeX86Memo` for what reads the code and doesn't run it: a repeated instruction is one loop (`Disasm.Insn.asLoop`). -/
+def decodeX86Loop (memo : IO.Ref LiftMemo) (globals : Primus.Semantics.Environment) (base address : Nat)
+    (data : ByteArray) : IO Disasm.Insn := do
+  pure (← decodeX86Memo memo globals base address data).asLoop
+
 def decodeX86With (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : IO Disasm.Insn := do
   let bytes := instructionBytes data (address - base)
@@ -1830,6 +1835,11 @@ def decodeX8632Memo (memo : IO.Ref LiftMemo) (globals : Primus.Semantics.Environ
     target := x86MCTarget 32 globals (address + decoded.size) opcode machineOperands
     bil := bil
   }
+
+/-- `decodeX8632Memo` for what reads the code and doesn't run it, as `decodeX86Loop`. -/
+def decodeX8632Loop (memo : IO.Ref LiftMemo) (globals : Primus.Semantics.Environment) (base address : Nat)
+    (data : ByteArray) : IO Disasm.Insn := do
+  pure (← decodeX8632Memo memo globals base address data).asLoop
 
 def decodeX8632 (base address : Nat) (data : ByteArray) : IO Disasm.Insn := do
   decodeX8632With (← x8632Environment) base address data
@@ -2006,7 +2016,8 @@ def thumbItFlow : Disasm.Flow → Disasm.Flow
   | _ => .conditionalJump
 
 /-- An IT instruction lifted with the instructions it predicates, each under its condition, as they mean nothing without
-it and a jump into a block is not allowed. Each instruction reads the flags as they are when it runs. -/
+it and a jump into a block is not allowed. Each instruction reads the flags as they are when it runs. A BKPT in a block is
+unconditional, as the architecture has it. -/
 private def decodeThumbIt (globals : Primus.Semantics.Environment) (base address : Nat) (data : ByteArray)
     (it : LLVM.Decoded) (firstcond mask : Nat) : IO Disasm.Insn := do
   let conditions := thumbItConditions firstcond mask
@@ -2018,9 +2029,10 @@ private def decodeThumbIt (globals : Primus.Semantics.Environment) (base address
     let decoded ← LLVM.disassemble "thumbv7" (instructionBytes data (cursor - base)) cursor
     let predicated := { decoded with operands := thumbPredicated condition (decoded.size == 2) decoded.operands }
     let body ← liftThumb globals cursor predicated
-    bil := bil ++ (match armCondition condition with
-      | some holds => [Bil.Stmt.ifElse holds body []]
-      | none => body)
+    -- BKPT is the one instruction that a block doesn't predicate: it is taken whatever its condition.
+    bil := bil ++ (match armCondition condition, decoded.opcode == "tBKPT" with
+      | some holds, false => [Bil.Stmt.ifElse holds body []]
+      | _, _ => body)
     asm := asm ++ "; " ++ normalizeAssembly decoded.assembly
     last := some (decoded, cursor)
     cursor := cursor + decoded.size

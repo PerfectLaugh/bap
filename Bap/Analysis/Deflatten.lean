@@ -22,6 +22,9 @@ private def assignmentAddresses (instructions : List Disasm.Insn) (var : Bap.Var
   instructions.filterMap fun insn =>
     if cases.any (fun current => assigns insn var current.value) then some insn.address else none
 
+/-- The flow of a flattened function without its dispatcher: an instruction that sets the state goes where its case goes. The
+instructions are read as `StateMachine.analyze` reads them, so those of a compiler are given as `StateMachine.normalize` has
+them. -/
 def recover (entry : Nat) (instructions : List Disasm.Insn) (external : List Nat := [])
     (stateVar : Option Bap.Var := none) : Recovery :=
   let machine := match stateVar with

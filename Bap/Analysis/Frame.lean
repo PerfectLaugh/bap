@@ -14,7 +14,18 @@ from what a register held on entry, which a store sets and a load reads. A store
 not to change the stack, as ROSE also has it: what a function writes through its arguments isn't its own frame. A call does what its
 callee was found to do to the stack pointer, or what leaves it as it was, and clobbers what its convention doesn't keep; whether a
 function returns a value is whether a caller reads what it left in its result register before it writes it, as ROSE's
-`ReturnValueUsed` has it. -/
+`ReturnValueUsed` has it, or the caller of one that calls it in its tail does.
+
+An argument is read where what it held on entry is computed with, stored to what isn't the function's own stack, loaded through,
+returned, or passed on to a callee: a store of a register as it is to the stack saves or spills it, which reads nothing, and a
+copy of it is read where the copy is. A callee that was found to take `n` arguments is passed the first `n` registers of the
+convention, of which those that still hold what one held on entry are read by the call, in its tail too; and what it reads of
+its own arguments on the stack that the caller didn't write there is the caller's arguments. Of a callee that isn't known, a call
+through a pointer or of an import, the registers passed are those that hold what they held on entry, from the first for as long
+as they do: that is the most it can be passing on, and the count of such a function is the most that it takes (`Frame.open`). A
+callee of a cycle, which has no count yet, passes nothing on. A function that returns with its result register as it was on entry
+returns its argument if that register is one, as the first is of most conventions, and a caller uses what it returns; if none
+does, the register is only left alone. -/
 
 namespace Bap.Analysis.Frame
 
@@ -56,11 +67,18 @@ structure Effects where
   stackReads : Std.HashSet Nat := {}
   /-- The functions whose results it read. -/
   usedResults : Std.HashSet Nat := {}
+  /-- Whether registers were taken to be passed to a callee that isn't known. -/
+  «open» : Bool := false
 
 /-- What is had of a function that a call of it does. -/
 structure Summary where
   /-- How far a return leaves the stack pointer from where it was on entry. -/
   returnDelta : Option Int := none
+  /-- How many of the registers of the arguments of its convention it takes, of integers and of floating point, where that is
+  known: not of one that passes them on to what isn't known. -/
+  registerArguments : Option (Nat × Nat) := none
+  /-- The offsets of its arguments in memory, from the stack pointer on entry. -/
+  stackArguments : List Nat := []
 
 /-- The convention of a function, and its registers. -/
 structure Context where
@@ -168,9 +186,10 @@ abbrev Run := StateM Effects
 def noteInput (name : String) : Run Unit :=
   modify fun effects => { effects with inputs := effects.inputs.insert name }
 
-/-- Whether an expression is a register as it is, which a copy or a store of it moves rather than reads. -/
+/-- Whether an expression is a register as it is, or what is loaded as it is, which a copy or a store of it moves rather than
+reads. -/
 def plainVar : Bil.Exp → Bool
-  | .var _ | .cast _ _ (.var _) | .extract _ _ (.var _) => true
+  | .var _ | .cast _ _ (.var _) | .extract _ _ (.var _) | .load .. => true
   | _ => false
 
 mutual
@@ -192,8 +211,14 @@ mutual
           let from_ := signed width offset
           if from_ ≥ (context.convention.stackArgumentsStart : Int) then
             modify fun effects => { effects with stackReads := effects.stackReads.insert from_.toNat }
-        pure ((state.slots.find? fun slot => slot.base == base && slot.offset == offset && slot.size == size).map
-          (·.value) |>.getD .top)
+        let value := (state.slots.find? fun slot => slot.base == base && slot.offset == offset && slot.size == size).map
+          (·.value) |>.getD .top
+        -- what a register held on entry, spilled and loaded again, is read where what is loaded is
+        match value with
+        | .entry name _ 0 => if !quiet then noteInput name
+        | .result callee _ => modify fun effects => { effects with usedResults := effects.usedResults.insert callee }
+        | _ => pure ()
+        pure value
       | _ => pure .top
     | .store .. => pure .top
     | .bin op left right => do
@@ -247,8 +272,11 @@ mutual
     | .store memory address value _ size => do
       let state ← store context state memory
       let address ← eval context state false address
-      -- what a register held on entry, stored as it is, is saved rather than read
-      let value ← eval context state (plainVar value) value
+      -- what a register held on entry, stored as it is to the stack, is saved or spilled rather than read
+      let ownStack := match address with
+        | .entry base _ _ => base == context.convention.stackPointer.name.str
+        | _ => false
+      let value ← eval context state (ownStack && plainVar value) value
       match address with
       | .entry base _ offset =>
         let kept := state.slots.filter fun slot =>
@@ -326,6 +354,10 @@ structure Frame where
   clobbered : List String := []
   /-- Of the functions it calls, those whose results it reads. -/
   usedResults : List Nat := []
+  /-- Whether its inputs are the most it takes rather than what it takes: it passes registers on to a callee that isn't known. -/
+  «open» : Bool := false
+  /-- Whether a return of it leaves the result register as it was on entry. -/
+  passesResult : Bool := false
   deriving Inhabited
 
 /-- What a stack pointer is, where it is a constant from where it was on entry. -/
@@ -342,18 +374,50 @@ def plain (context : Context) (insn : Disasm.Insn) (state : State) : Run State :
   -- what is of the instruction alone, its temporaries, goes with it
   return { after with env := after.env.filter fun name _ => !name.startsWith "_" }
 
-/-- What a call does after it, of the state before it and after what it does itself, and after its delay slot if it has one. -/
-def callEffects (context : Context) (insn : Disasm.Insn) (state after : State) : Run State := do
+/-- What a callee is passed of what the function itself was entered with, in the state that the callee is entered in: `callee`
+is where it is, if that is known. -/
+def passes (context : Context) (callee : Option Nat) (after : State) : Run Unit := do
   -- what was copied to an argument is read by the call
   for var in context.convention.functionArguments ++ context.convention.floatArguments do
     match after.read var with
     | .entry name _ 0 => if name != var.name.str then noteInput name
     | _ => pure ()
+  let own (var : Bap.Var) : Bool := match after.read var with
+    | .entry name _ 0 => name == var.name.str
+    | _ => false
+  match callee, callee.bind context.summaries.get? with
+  | some _, none => pure ()
+  | _, some { registerArguments := some (integers, floats), .. } =>
+    for var in context.convention.functionArguments.take integers ++ context.convention.floatArguments.take floats do
+      if own var then noteInput var.name.str
+  | _, _ =>
+    let passed := context.convention.functionArguments.takeWhile own
+    for var in passed do noteInput var.name.str
+    if !passed.isEmpty then modify fun effects => { effects with «open» := true }
+  -- an argument of the callee on the stack that wasn't written is one of the function's own, and one saved there as it was is passed
+  let sp := context.convention.stackPointer
+  match callee.bind context.summaries.get?, after.read sp with
+  | some summary, .entry base width offset =>
+    if base == sp.name.str then
+      for argument in summary.stackArguments do
+        let at_ := (offset + argument) % 2 ^ width
+        match after.slots.find? fun slot => slot.base == base && slot.offset ≤ at_ && at_ < slot.offset + slot.size with
+        | some { value := .entry name _ 0, .. } => noteInput name
+        | some _ => pure ()
+        | none =>
+          let from_ := signed width at_
+          if from_ ≥ (context.convention.stackArgumentsStart : Int) then
+            modify fun effects => { effects with stackReads := effects.stackReads.insert from_.toNat }
+  | _, _ => pure ()
+
+/-- What a call does after it, of the state before it and after what it does itself, and after its delay slot if it has one. -/
+def callEffects (context : Context) (insn : Disasm.Insn) (state after : State) : Run State := do
   let sp := context.convention.stackPointer
   let pushed := match deltaOf context state, deltaOf context after with
     | some before, some later => later - before
     | _, _ => 0
   let callee := context.callees[insn.address]? <|> insn.target
+  passes context callee after
   let calleeReturn : Int := ((callee.bind context.summaries.get?).bind (·.returnDelta)).getD (-pushed)
   let moved := match after.read sp with
     | .entry name width offset =>
@@ -408,6 +472,7 @@ def analyze (context : Context) (program : Program) (function : Partition.Functi
   let mut visits : Std.HashMap Nat Nat := {}
   let mut returns : List State := []
   let mut calls : Std.HashMap Nat (Disasm.Insn × State) := {}
+  let tailCalls : Std.HashMap Nat Nat := function.tailCalls.foldl (init := {}) fun table (jump, target) => table.insert jump target
   let mut fuel := 64 * instructions.size + 64
   while next < work.size && fuel > 0 do
     fuel := fuel - 1
@@ -433,6 +498,20 @@ def analyze (context : Context) (program : Program) (function : Partition.Functi
         effects := seen
         returns := returned :: returns
       | none => returns := after :: returns
+    else
+      -- a jump out of the function, to the entry of another or to where isn't known, is a call in its tail, which of MIPS is
+      -- after its delay slot
+      let tail : Option (Option Nat) := match tailCalls[address]? with
+        | some target => some (some target)
+        | none => if insn.flow == .indirectJump && (successors address).isEmpty then some none else none
+      if let some callee := tail then
+        let slot := if Partition.mipsSlotted context.arch insn then instructions[insn.next]? <|> program.instructions[insn.next]? else none
+        let entered : Run Unit := do
+          let state ← match slot with
+            | some slot => plain context slot after
+            | none => pure after
+          passes context callee state
+        effects := (entered.run effects).2
     for target in successors address do
       let count := visits.getD target 0
       match states[target]? with
@@ -459,13 +538,22 @@ def analyze (context : Context) (program : Program) (function : Partition.Functi
     | .entry other _ 0 => other == name
     | .const _ _ => context.arch == .powerpc && context.width == 64 && name == "R2"
     | _ => false
+  -- what a return leaves in the result register: another register as it was on entry, which is read, or the result register
+  let result := context.convention.result
+  let returned := returns.filterMap fun state => match state.read result with
+    | .entry name _ 0 => some name
+    | _ => none
+  effects := returned.foldl (init := effects) fun effects name =>
+    if name == result.name.str then effects else { effects with inputs := effects.inputs.insert name }
   let preserved := context.calleeSaved.filter keeps
   let clobbered := context.calleeSaved.filter fun name => !returns.isEmpty && !keeps name
   { entry := function.entry, deltas, returnDelta
     inputs := effects.inputs.toList.mergeSort (· ≤ ·)
     stackArguments := effects.stackReads.toList.mergeSort (· ≤ ·)
     preserved, clobbered
-    usedResults := effects.usedResults.toList }
+    usedResults := effects.usedResults.toList
+    «open» := effects.open
+    passesResult := returned.contains result.name.str }
 
 /-! ## A program -/
 
@@ -506,6 +594,10 @@ def calleesFirst (partition : Partition) : List Partition.Function :=
     fun state function => visit (partition.functions.length + 1) state function.entry
   order.reverse
 
+/-- How many of `registers` a function of `inputs` takes: as far as the last of them that it reads. -/
+def lastIndex (inputs : List String) (registers : List Bap.Var) : Nat :=
+  (registers.zipIdx.filter fun (var, _) => inputs.contains var.name).foldl (fun most (_, index) => max most (index + 1)) 0
+
 /-- The frames and the signatures of the functions of a partition of an image. -/
 def frames (image : Image.Image) (partition : Partition) : Option Frames := do
   let convention ← ABI.convention image.arch image.addrWidth
@@ -515,18 +607,31 @@ def frames (image : Image.Image) (partition : Partition) : Option Frames := do
                           callees := partition.functions.foldl (init := {}) fun table function =>
                             function.calls.foldl (init := table) fun table (call, callee) => table.insert call callee }
   let program := Program.of partition
-  let (frames, _) := (calleesFirst partition).foldl (init := (([] : List Frame), base)) fun (frames, context) function =>
+  let ordered := calleesFirst partition
+  let (frames, _) := ordered.foldl (init := (([] : List Frame), base)) fun (frames, context) function =>
     let frame := analyze context program function
-    (frame :: frames, { context with summaries := context.summaries.insert function.entry { returnDelta := frame.returnDelta } })
+    -- of the stub of an import, what it takes is what the import does, which isn't known
+    let registerArguments := if frame.open || function.importName.isSome then none
+      else some (lastIndex frame.inputs convention.functionArguments, lastIndex frame.inputs convention.floatArguments)
+    let summary : Summary := { returnDelta := frame.returnDelta, registerArguments, stackArguments := frame.stackArguments }
+    (frame :: frames, { context with summaries := context.summaries.insert function.entry summary })
   let frames := frames.reverse
-  let used : Std.HashSet Nat := frames.foldl (init := {}) fun set frame =>
+  -- what a caller reads of a function is of what that calls in its tail too
+  let read : Std.HashSet Nat := frames.foldl (init := {}) fun set frame =>
     frame.usedResults.foldl (init := set) fun set callee => set.insert callee
-  let lastIndex (names : List String) (registers : List Bap.Var) : Nat :=
-    (registers.zipIdx.filter fun (var, _) => names.contains var.name).foldl (fun most (_, index) => max most (index + 1)) 0
-  let signatures := (frames.zip (calleesFirst partition)).map fun (frame, function) =>
+  let rec spread : Nat → Std.HashSet Nat → Std.HashSet Nat
+    | 0, used => used
+    | fuel + 1, used =>
+      let more := ordered.foldl (init := used) fun set function =>
+        if set.contains function.entry then function.tailCalls.foldl (init := set) fun set (_, target) => set.insert target else set
+      if more.size == used.size then used else spread fuel more
+  let used := spread ordered.length read
+  let signatures := (frames.zip ordered).map fun (frame, function) =>
+    -- a result register left as it was is an argument returned, if a caller reads it
+    let inputs := if frame.passesResult && used.contains frame.entry then convention.result.name.str :: frame.inputs else frame.inputs
     { entry := frame.entry, name := function.name
-      registerArguments := lastIndex frame.inputs convention.functionArguments
-      floatArguments := lastIndex frame.inputs convention.floatArguments
+      registerArguments := lastIndex inputs convention.functionArguments
+      floatArguments := lastIndex inputs convention.floatArguments
       stackArguments := frame.stackArguments
       returnsValue := used.contains frame.entry
       conforms := frame.clobbered.isEmpty }

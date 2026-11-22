@@ -1,0 +1,60 @@
+start: status 857f, 0 after the call, number 3, result -38
+  info of 80: op 1 arch c000003e, pc same, sp same, number 3
+end: status 857f, 0 after the call, number 3, result -9
+  info of 33: op 2 arch c000003e, pc same, sp same, result -9
+registers set: 0
+start again: status 857f, 0 after the call, number 3, result -38
+  info of 80: op 1 arch c000003e, pc same, sp same, number 3
+step: status 57f, 0 after the call, result -9, code 1
+step: status 57f, 1 after the call, result -9, code 2
+on with a signal that there isn't: I/O error
+ends with 700
+seize: 0
+interrupt: 0
+stopped with 80057f in the call 0, which gives -512, after its instruction
+detach with a signal: 0
+ends with 3300
+seize: 0
+interrupt: 0
+stopped with 80057f in the call 35, which gives -516, after its instruction
+ends with 9
+seize: 0
+stopped with a7f in the call 0, which gives -512, after its instruction
+ends with 3300
+the leader stops with 3057f, of a thread of its own: 1
+the thread stops with 137f
+the thread ends with 0
+the leader ends with 900
+attach: 0
+stopped with 137f by signal 19 of code 128
+a filter that loads scratch that nothing stored: Invalid argument
+that one way didn't store: Invalid argument
+that is another word than was stored: Invalid argument
+that each way stored: 0
+a directory opened with O_TRUNC: Is a directory
+a file opened with the access mode 3: 0
+read of it: Bad file descriptor
+write of it: Bad file descriptor
+fstat of it: 0
+a link to file/: Not a directory
+a link to dir/: 0
+what is under a link to dir/: 0
+a link opened with O_NOFOLLOW and O_DIRECTORY: Not a directory
+and with O_NOFOLLOW: Symbolic link loop
+mkdir in /proc/self: No such file or directory
+a file made in /proc/self: No such file or directory
+symlink in /proc/self: No such file or directory
+unlink of /proc/self/maps: Operation not permitted
+rmdir of /proc/self/fd: Operation not permitted
+unlink of what isn't in /proc/self: No such file or directory
+a watch: 1
+after nothing:
+getdents: 1
+after a read of the directory: 40000020 40000001
+getdents at its end: 0
+after a read at its end: 40000001
+after its close: 40000010
+after a read of a directory in it: 40000020 of inside 40000001 of inside 40000010 of inside
+after that one is removed: 40000200 of inside
+after it is moved: 800
+after it is removed: 400 8000

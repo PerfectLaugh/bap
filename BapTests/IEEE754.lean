@@ -103,5 +103,27 @@ def runRaised : IO Unit := do
     let result := ((Bap.Float.evaluateWith .x86 "fadd_rne_ieee754_binary_80" given).map (·.2)).getD 0
     assertEqual s!"x87 fadd of {label} is invalid" true (Bap.Float.raisedBy .x86 "fadd_rne_ieee754_binary_80" given result).invalid
     assertEqual s!"and gives the indefinite, of {label}" 0xFFFFC000000000000000 result
+  -- A store of a register of x87 to memory, FST and FSTP of 32 and 64 bits, as the status word has it of what is raised: of what is
+  -- below every number of where it goes, underflow with inexact, however far below, and of a denormal in the register, no denormal.
+  let status (raised : Bap.Float.Raised) : Nat :=
+    (if raised.invalid then 1 else 0) + (if raised.denormal then 2 else 0) + (if raised.divideByZero then 4 else 0) +
+      (if raised.overflow then 8 else 0) + (if raised.underflow then 0x10 else 0) + (if raised.inexact then 0x20 else 0)
+  for (label, width, exponent, significand, expected) in [
+      ("2^-6942 to 32 bits", 32, 0x24e1, 0xdff94831dc6b0910, 0x30), ("the least normal to 64 bits", 64, 1, 0x8000000000000000, 0x30),
+      ("a denormal to 64 bits", 64, 0, 0x5a6ee4ff48ff7591, 0x30), ("a denormal to 32 bits", 32, 0, 7, 0x30),
+      ("2^-1000 to 32 bits", 32, 0x3fff - 1000, 0x8000000000000001, 0x30), ("1 to 32 bits", 32, 0x3fff, 0x8000000000000000, 0),
+      ("2^-140 to 32 bits, which has it", 32, 0x3fff - 140, 0x8000000000000000, 0),
+      ("a third to 64 bits", 64, 0x3ffd, 0xaaaaaaaaaaaaaaab, 0x20)] do
+    let name := s!"fconvert_rne_ieee754_binary_80_ieee754_binary_{width}"
+    let given := [(exponent <<< 64) ||| significand]
+    let result := ((Bap.Float.evaluateWith .x86 name given).map (·.2)).getD 0
+    assertEqual s!"x87 store of {label} raises" expected (status (Bap.Float.raisedBy .x86 name given result))
+    -- Of what is known to be inexact already, the rest is the same.
+    if expected &&& 0x20 != 0 then
+      assertEqual s!"x87 store of {label} raises but for inexact, which is known" (expected &&& 0x1f)
+        (status (Bap.Float.raisedBy .x86 name given result (known := true)) &&& 0x1f)
+  -- The other way, a load of a denormal of 64 bits, says so.
+  assertEqual "x87 load of a denormal of 64 bits is of a denormal" 2
+    (status (Bap.Float.raisedBy .x86 "fconvert_rne_ieee754_binary_64_ieee754_binary_80" [1] (0x3bcd <<< 64 ||| 0x8000000000000000)))
 
 end Bap.Tests.IEEE754

@@ -44,15 +44,33 @@ private def scanUtf16 (minimum : Nat) (little : Bool) (next : Nat) (chars : List
     | some char => scanUtf16 minimum little (next + 2) (chars ++ [char]) results rest
     | none => scanUtf16 minimum little (next + 2) [] (finish minimum 2 next chars results) rest
 
+/-- Whether `new` is the better reading of bytes that `old` reads too: the longer, or of the same length the one at an even
+address, where a string of 16-bit units is put. -/
+private def better (new old : StringRecord) : Bool :=
+  new.text.length > old.text.length || (new.text.length == old.text.length && new.address % 2 == 0 && old.address % 2 != 0)
+
+/-- Of readings by address, those that share no byte with a better one before or after: the same bytes read as of the other byte
+order, or from the other byte of a unit, are a shorter string of the same text or the same one a byte apart. -/
+private def disjoint : List StringRecord → List StringRecord → List StringRecord
+  | kept, [] => kept.reverse
+  | [], record :: rest => disjoint [record] rest
+  | last :: kept, record :: rest =>
+    if record.address < last.address + 2 * last.text.length then
+      disjoint ((if better record last then record else last) :: kept) rest
+    else disjoint (record :: last :: kept) rest
+
+/-- The strings of an image: of ASCII, and of UTF-16 of either byte order, which may start at any byte of a region. -/
 def strings (image : Bap.Image.Image) (minimum : Nat := 4) : List StringRecord :=
   image.memory.entries.flatMap fun entry =>
     let region := entry.1
-    let ascii := (scanAscii minimum region.addr [] [] region.data.toList).map fun result =>
+    let bytes := region.data.toList
+    let ascii := (scanAscii minimum region.addr [] [] bytes).map fun result =>
       ⟨result.1, result.2, .ascii⟩
-    let little := (scanUtf16 minimum true region.addr [] [] (pairs region.data.toList)).map fun result =>
-      ⟨result.1, result.2, .utf16le⟩
-    let big := (scanUtf16 minimum false region.addr [] [] (pairs region.data.toList)).map fun result =>
-      ⟨result.1, result.2, .utf16be⟩
-    ascii ++ little ++ big
+    let wide := [(true, 0), (false, 0), (true, 1), (false, 1)].flatMap fun (little, skip) =>
+      if skip ≤ bytes.length then
+        (scanUtf16 minimum little (region.addr + skip) [] [] (pairs (bytes.drop skip))).map fun result =>
+          (⟨result.1, result.2, if little then .utf16le else .utf16be⟩ : StringRecord)
+      else []
+    ascii ++ disjoint [] (wide.mergeSort fun a b => a.address ≤ b.address)
 
 end Bap.Analysis.Strings

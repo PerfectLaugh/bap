@@ -79,7 +79,13 @@ def clone (emu : Emu) (options : CloneOptions) : IO ThreadId := do
   if options.vfork then
     emu.taskTable.modify (·.futexWait { thread := ← thread emu, space := vforkSpace, address := id, bitset := 2 ^ 32 - 1 })
     emu.stopped.set true
-  for hook in ← emu.cloneHooks.get do hook (← thread emu) id
+  -- What it has that its maker doesn't, for what follows where the registers of each came from.
+  let given := (if options.stack.isSome then [(stackRegister, options.stack)] else []) ++
+    (if options.threadPointer.isSome then [(threadRegister, options.threadPointer)] else []) ++
+    (if options.threadPointer.isSome && (Bil.lookup current.env tpidr2).toOption.isSome then [(tpidr2.name.str, none)] else []) ++
+    (if emu.config.syscallAbi == .mips then [("R7", none)] else []) ++
+    (if emu.config.syscallAbi == .powerpc || emu.config.syscallAbi == .powerpc64 then [(errorBit.name.str, none)] else [])
+  for hook in ← emu.cloneHooks.get do hook (← thread emu) id given
   if !options.sameGroup then
     for hook in ← emu.processHooks.get do hook task.group id
   pure id
@@ -290,6 +296,12 @@ private def isPowerPC (emu : Emu) : Bool := emu.config.syscallAbi == .powerpc ||
 
 /-- Whether a target says that a call failed apart from its result: an error is then the number itself. -/
 private def flagsErrors (emu : Emu) : Bool := isMips emu || isPowerPC emu
+
+/-- The register that a result has its flag in, of a target that has one: on MIPS, the one after the arguments, and on PowerPC, SO of CR0. -/
+def errorFlagRegister (emu : Emu) : IO (Option Bap.Var) := do
+  if isPowerPC emu then pure (some errorBit)
+  else if isMips emu then pure (some (wordVar (← wordWidth emu) "R7"))
+  else pure none
 
 /-- The flag of a result: on MIPS, in the register after the arguments, and on PowerPC, in SO of CR0. -/
 private def setErrorFlag (emu : Emu) (id : ThreadId) (width : Nat) : Option Nat → IO Unit
@@ -653,8 +665,10 @@ def placeMapping (emu : Emu) (address : Nat) (fixed : Bool) (data : ByteArray) (
 /-- `placeMapping` of zeros, which takes nothing of the host until it is written. -/
 def placeZeros (emu : Emu) (address : Nat) (fixed : Bool) (size bits : Nat) : IO Nat := do
   let start ← if fixed then pure address else freeAddress emu size
+  -- What the host can't give leaves what was there.
+  let data ← reserveZeros size
   if fixed then unmap emu start size
-  mapZeros emu start size (protectionOf bits)
+  map emu ⟨start, data, protectionOf bits⟩ (zeros := true)
   pure start
 
 /-- `mmap` of anonymous memory, which is what the stacks of threads are. -/

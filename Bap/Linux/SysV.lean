@@ -118,7 +118,10 @@ partial def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) 
       if size > segment.size then fail Errno.einval else succeed id
     | .ok none =>
       if size == 0 || size ≥ 2 ^ 48 then return ← fail Errno.einval
-      let (kernel, inode) := kernel.anonymousInode (Bap.zeroBytes ((size + 4095) / 4096 * 4096))
+      -- More than the machine has, unless it isn't to be counted (`SHM_NORESERVE`), as `shmem_acct_size` has it.
+      if flags &&& 0o10000 == 0 && size / 4096 > Abi.memory / 4096 then return ← fail Errno.enomem
+      let some zeros := Jit.fillChecked ((size + 4095) / 4096 * 4096) [] | return ← fail Errno.enomem
+      let (kernel, inode) := kernel.anonymousInode zeros
       let id := ipc.made.1
       save { ipc with segments := ipc.segments ++ [{ id, perm := permOf key flags, inode, size, cpid := group, ctime := seconds }]
                       made := (id + 1, ipc.made.2) } kernel

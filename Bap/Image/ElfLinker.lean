@@ -1968,7 +1968,7 @@ def regionBytes (memory : ByteArray) (fileSize : Nat) (region : Region) : ByteAr
   | some off =>
     let limit := if region.isSection then min fileSize memory.size else memory.size
     let available := min region.size (limit - off)
-    (memory.extract off (off + available)).append (Bap.zeroBytes (region.size - available))
+    Bap.padZeros (memory.extract off (off + available)) (region.size - available)
 
 def toMemRegion (memory : ByteArray) (fileSize : Nat) (region : Region) : MemRegion :=
   ⟨region.addr, regionBytes memory fileSize region, region.r, region.w, region.x⟩

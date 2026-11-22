@@ -62,6 +62,20 @@ def run : IO Unit := do
     (beRecords.any fun record => record.address = 0x3000 && record.text = "XY" && record.encoding = .utf16be)
   assertTrue "string scanner enforces minimum length"
     !((Analysis.Strings.strings (Raw.load utf16be 0x3000 .little) 4).any fun record => record.text = "XY")
+  -- A string of UTF-16 is found at an odd address too, and once: not again as of the other byte order a byte on, or without
+  -- its first character.
+  let wide := fun (bytes : ByteArray) => (Analysis.Strings.strings (Raw.load bytes 0x2000 .little) 4).filter (·.encoding != .ascii)
+  assertEqual "string scanner finds UTF-16LE at an odd address" [⟨0x2001, "hello", Analysis.Strings.Encoding.utf16le⟩]
+    (wide (ByteArray.mk #[1, 0x68, 0, 0x65, 0, 0x6c, 0, 0x6c, 0, 0x6f, 0, 0, 0]))
+  assertEqual "string scanner finds UTF-16BE at an odd address" [⟨0x2001, "hello", Analysis.Strings.Encoding.utf16be⟩]
+    (wide (ByteArray.mk #[1, 0, 0x68, 0, 0x65, 0, 0x6c, 0, 0x6c, 0, 0x6f, 1, 1]))
+  assertEqual "string scanner reads UTF-16LE after a zero once" [⟨0x2002, "hello", Analysis.Strings.Encoding.utf16le⟩]
+    (wide (ByteArray.mk #[0, 0, 0x68, 0, 0x65, 0, 0x6c, 0, 0x6c, 0, 0x6f, 0, 0, 0]))
+  assertEqual "string scanner reads UTF-16BE before a zero once" [⟨0x2000, "hello", Analysis.Strings.Encoding.utf16be⟩]
+    (wide (ByteArray.mk #[0, 0x68, 0, 0x65, 0, 0x6c, 0, 0x6c, 0, 0x6f, 0, 0]))
+  assertEqual "string scanner finds the strings of UTF-16 of both byte orders beside each other"
+    [⟨0x2000, "abcd", Analysis.Strings.Encoding.utf16le⟩, ⟨0x200b, "wxyz", Analysis.Strings.Encoding.utf16be⟩]
+    (wide (ByteArray.mk #[0x61, 0, 0x62, 0, 0x63, 0, 0x64, 0, 1, 1, 1, 0, 0x77, 0, 0x78, 0, 0x79, 0, 0x7a, 1]))
   let signature ← match Analysis.Signatures.create "prologue"
     (ByteArray.mk #[0x55, 0x48, 0x89]) (ByteArray.mk #[0xff, 0xff, 0x00]) with
     | .ok signature => pure signature

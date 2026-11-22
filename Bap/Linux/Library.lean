@@ -335,6 +335,11 @@ private structure Loading where
   mapped : List LoadedLibrary := []
   /-- What to run, in order: those of what a library needs before its own. -/
   initializers : List Nat := []
+  /-- The resolvers of the indirect functions of what is mapped and isn't relocated yet, which is where their symbols are until it
+  is: a library that needs one of what needs it is relocated first. -/
+  resolvers : List Nat := []
+  /-- What was bound to one of those, by where: it is given what the resolver picks once its library is relocated and it can run. -/
+  deferred : List (Nat × Nat) := []
 
 /-- Maps a library, writable and executable until it has been relocated, so that its indirect resolvers can run. -/
 private def mapLibrary (machine : Machine) (path : String) (data : ByteArray) (program : Elf.Program) : IO (Nat × Nat × Nat) := do
@@ -426,7 +431,9 @@ private def prepare (machine : Machine) (path : String) (space : Nat) (search : 
     { path, name, base, start, span, symbols, needs := [], tls, tlsSymbols, digest := targetDigest architecture data, versions }
   -- It is known of before what it needs is loaded, as they may need each other.
   machine.libraries.modify fun table => table.insert space (spaceHas space table ++ [library])
-  loading.modify fun state => { state with mapped := library :: state.mapped }
+  let resolvers := dynamic.filterMap fun symbol =>
+    if symbol.typ == 10 && symbol.sectionIndex != 0 && symbol.binding != 0 && !symbol.name.isEmpty then some (at_ symbol) else none
+  loading.modify fun state => { state with mapped := library :: state.mapped, resolvers := resolvers ++ state.resolvers }
   let locate (needed : String) : IO (Option String) := findLibrary machine needed origin rpath runpath search
   -- Relocated with all there is to find.
   let finish (needs : List String) : IO LoadedLibrary := do
@@ -459,6 +466,8 @@ private def prepare (machine : Machine) (path : String) (space : Nat) (search : 
       pure ((if big then bytes.toList else bytes.toList.reverse).foldl (fun value byte => value * 256 + byte.toNat) 0)
     let writeWord (address value : Nat) : IO Unit := Bap.Emu.write emu address (numberBytes big word (value % 2 ^ architecture.bits))
     let relocations ← IO.ofExcept (Image.Elf.allDynamicRelocations image)
+    -- The indirect functions of the others that aren't relocated yet.
+    let pending := (← loading.get).resolvers.filter (!resolvers.contains ·)
     let mut missing : List String := []
     let mut indirect : List (Nat × Nat) := []
     for relocation in relocations do
@@ -536,6 +545,10 @@ private def prepare (machine : Machine) (path : String) (space : Nat) (search : 
             -- is to be had first or is found before it, which goes before its own as any other definition does.
             if symbol.typ == 10 && symbol.sectionIndex != 0 && address == base + symbol.value then
               indirect := (place, address) :: indirect
+            -- The indirect function of a library that needs this one, and so isn't relocated yet: what its resolver picks, which
+            -- runs once it is, as it does for the library's own.
+            else if pending.contains address then
+              loading.modify fun state => { state with deferred := (place, address) :: state.deferred }
             else
               match kind with
               | .slot => writeWord place (address + (if relocation.explicitAddend then relocation.addend else 0))
@@ -585,6 +598,11 @@ private def prepare (machine : Machine) (path : String) (space : Nat) (search : 
     -- What chooses an implementation runs now, with all that it could call relocated, as far as they can be.
     for (place, resolver) in indirect.reverse do
       writeWord place (← callResolver resolver)
+    -- And what the libraries that it needs bound to its indirect functions, whatever they made of their memory since.
+    let (mine, others) := (← loading.get).deferred.partition fun entry => resolvers.contains entry.2
+    for (place, resolver) in mine.reverse do
+      Bap.Emu.poke emu place (numberBytes big word ((← callResolver resolver) % 2 ^ architecture.bits))
+    loading.modify fun state => { state with deferred := others, resolvers := state.resolvers.filter (!resolvers.contains ·) }
     protectLibrary machine image base program
     -- Its initializers, and what undoes them.
     let tagged (key : Nat) : Option Nat := (tags.find? (·.1 == key)).map (·.2)
@@ -655,7 +673,8 @@ private def loadTree (machine : Machine) (root : String) (space : Nat) (search :
         else queue := queue.push found
     needsOf := needsOf.insert path needs
   for (path, count) in held.toList do hold path count
-  -- What it needs before it, of what this maps, as `_dl_sort_maps` has them for their initializers.
+  -- What it needs before it, of what this maps, depth first, and of what one needs that don't need each other, in the order that it
+  -- names them, as musl and bionic have their initializers: glibc's `_dl_sort_maps` has those the other way round.
   let mut order : Array String := #[]
   let mut stack : List (String × Bool) := [(root, false)]
   let mut seen : Std.HashSet String := {}

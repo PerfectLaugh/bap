@@ -53,12 +53,36 @@ private def assertMemory (label : String) (address expected : Nat) (state : Bil.
   | .ok _ => throw <| IO.userError "memory is not mapped"
   | .error error => throw <| IO.userError error
 
+/-- How many times a block goes on past a branch otherwise than by its delay slot, or past the slot. -/
+private def broken (delayed : Std.HashSet Nat) : List Disasm.Insn → Nat
+  | first :: second :: rest =>
+    (if first.flow != .normal && !delayed.contains first.address then 1 else 0) +
+      (if first.flow != .normal && delayed.contains first.address && !rest.isEmpty then 1 else 0) + broken delayed (second :: rest)
+  | _ => 0
+
+private def delaySlots : IO Unit := do
+  -- The delay slot of a branch ends the block of the branch, and what is after it starts one; without a slot, the branch ends it.
+  let slotted : Disasm.Disasm := { entry := 0, delayed := [4, 16], instructions := [⟨0, 4, "a", .normal, none, []⟩,
+    ⟨4, 4, "beqz", .conditionalJump, some 24, []⟩, ⟨8, 4, "slot", .normal, none, []⟩, ⟨12, 4, "b", .normal, none, []⟩,
+    ⟨16, 4, "jr", .ret, none, []⟩, ⟨20, 4, "slot", .normal, none, []⟩, ⟨24, 4, "c", .normal, none, []⟩,
+    ⟨28, 4, "bc", .jump, some 12, []⟩, ⟨32, 4, "d", .normal, none, []⟩] }
+  assertEqual "Disasm blocks end after a delay slot" [[0, 4, 8], [12, 16, 20], [24, 28], [32]]
+    (slotted.blocks.map fun block => block.instructions.map (·.address))
+  let mips ← Project.Project.load "testsuite/bin/mips-linux-musl-libc-exec"
+  let mipsDisasm := mips.disasm.getD { entry := 0 }
+  let delayed : Std.HashSet Nat := Std.HashSet.ofList mipsDisasm.delayed
+  assertEqual "MIPS has instructions with delay slots" 897 delayed.size
+  assertEqual "MIPS blocks end after the delay slots of their branches" 0
+    ((mipsDisasm.blocks.map fun block => broken delayed block.instructions).sum)
+  assertEqual "MIPS blocks" 1395 mipsDisasm.blocks.length
+
 def run : IO Unit := do
   -- Instructions with a gap between them, as where one didn't decode, are of blocks of their own.
   let gapped : Disasm.Disasm := { entry := 0, instructions := [⟨0, 4, "a", .normal, none, []⟩, ⟨8, 4, "b", .normal, none, []⟩,
     ⟨12, 4, "c", .normal, none, []⟩] }
   assertEqual "Disasm blocks don't go over a gap" [[0], [8, 12]]
     (gapped.blocks.map fun block => block.instructions.map (·.address))
+  delaySlots
   let decode := decodeWith (← Target.X86.disassembler 0)
   let sub ← decode [0x48, 0x83, 0xec, 0x08]
   assertEqual "x86 stack subtraction assembly" "sub rsp, 0x8" sub.asm

@@ -183,6 +183,42 @@ partial def storedRegister (program : Bil.Program) : Option String :=
     | .move _ value => inStore value
     | _ => none
 
+/-- The register that a program copies to `register` as it is, of one that does nothing else to it, as a `mov` of two registers,
+which of AArch64 is an `orr` with zero of the register shifted by nothing. -/
+partial def copiedRegister (program : Bil.Program) (register : String) : Option String :=
+  let zero (exp : Bil.Exp) : Bool := match Bil.evalExp {} exp with
+    | .ok (.bits bits) => bits.toNat == 0
+    | _ => false
+  let rec ofValue : Bil.Exp → Option String
+    | .var var => some var.name
+    | .cast _ _ value | .extract _ _ value => ofValue value
+    | .bin .or left right | .bin .add left right | .bin .xor left right =>
+      if zero left then ofValue right else if zero right then ofValue left else none
+    | .bin .lshift value amount | .bin .rshift value amount | .bin .sub value amount => if zero amount then ofValue value else none
+    | _ => none
+  (program.reverse.findSome? fun statement => match statement with
+    | .move var value => if var.name == register then some (ofValue value) else none
+    | _ => none).join.filter (· != register)
+
+/-- What chose the value that `source` holds, before an instruction of a round: the condition of the last that wrote it on one, as a
+`csel` or a `cmov` does, through the copies of one register to another, in the rounds of the thread before it too, as far as
+`back` of them, as a compiler leaves the choice of a state where its inputs are and the copy in the handler. None if the last
+that wrote it did so without a condition, or nothing that ran wrote it. -/
+def chosenBy (programOf : Nat → Option Bil.Program) (rounds : Array (Array Journal.Executed)) (index pc : Nat) (source : String)
+    (back : Nat := 64) : Option (List String) := Id.run do
+  let mut source := source
+  for step in List.range (min back index + 1) do
+    let entries := (rounds[index - step]?.getD #[]).toList.reverse
+    let before := if step == 0 then (entries.dropWhile (·.pc != pc)).drop 1 else entries
+    for entry in before do
+      if let some program := programOf entry.pc then
+        if let some (conditional, condition) := assignmentIn program (some source) then
+          if conditional then return some condition
+          match copiedRegister program source with
+          | some other => source := other
+          | none => return none
+  pure none
+
 /-- The instruction of a round that last wrote a state in a register, from the end of the round, by the code of what it ran. -/
 private def lastWriter (round : Array Journal.Executed) (register : String) (programOf : Nat → Option Bil.Program) : Option Nat := Id.run do
   for entry in round.reverse do
@@ -514,18 +550,12 @@ def recover (profile : Profile) (visits : Array Visit) (record : Option Journal.
         match (programOf pc).bind (assignmentIn · register) with
         | some (true, condition) => { pc, conditional := true, condition : Assignment }
         | _ =>
-          -- A store of what a register holds: what chose that, earlier in the round, as a `csel` before a `str` does.
-          let chosen : Option (List String) := match register, (programOf pc).bind storedRegister, round with
-            | none, some source, some round => Id.run do
-              let entries := round.toList
-              let before := (entries.reverse.dropWhile (·.pc != pc)).drop 1
-              for entry in before do
-                if let some program := programOf entry.pc then
-                  if let some (conditional, condition) := assignmentIn program (some source) then
-                    return if conditional then some condition else none
-              pure none
-            | _, _, _ => none
-          match chosen with
+          -- A store of what a register holds, or a copy of one to the state: what chose that, earlier, as a `csel` before a `str` does,
+          -- or a `cmov` that a compiler moved to where its inputs change, rounds before the handler copies what it chose.
+          let source := match register with
+            | none => (programOf pc).bind storedRegister
+            | some name => (programOf pc).bind (copiedRegister · name)
+          match source.bind (chosenBy programOf (rounds.getD #[]) k pc ·) with
           | some condition => { pc, conditional := true, condition }
           | none => { pc, conditional := false, condition := [] }
       let handler := round.bind (entryOf visit.state)

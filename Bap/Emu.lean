@@ -398,8 +398,10 @@ structure Emu where
   servedPrograms : IO.Ref (Std.HashMap Nat Bil.Program)
   /-- What wants to know of a new process: of the one that made it, and of it. -/
   processHooks : IO.Ref (List (Nat → Nat → IO Unit))
-  /-- What wants to know of a new task, a thread or a process, as it is made: of the thread that made it, and of it. -/
-  cloneHooks : IO.Ref (List (ThreadId → ThreadId → IO Unit))
+  /-- What wants to know of a new task, a thread or a process, as it is made: of the thread that made it, of it, and of the registers
+  that it doesn't have as its maker has them, other than the result of the call. One that it was given, as its stack and its thread
+  pointer are, is with what it was given, and one that the kernel set of its own with none. -/
+  cloneHooks : IO.Ref (List (ThreadId → ThreadId → List (String × Option Nat) → IO Unit))
   /-- What wants to know that the parent of `vfork` goes on, as its child runs a program or ends: of the parent, and of the child. -/
   vforkReleased : IO.Ref (List (Nat → Nat → IO Unit))
   /-- What wants to know that a thread that runs a program took the id of its process, which was its leader's, which is over: of the
@@ -432,6 +434,9 @@ structure Emu where
   syscallEnds : IO.Ref (List (Option Nat → IO Unit))
   /-- What runs between turns of `runProcesses`, where nothing is in the middle of anything: as a wait is given what it waits for. -/
   betweenTurns : IO.Ref (List (IO Unit))
+  /-- What runs as the turn of a thread that still runs ends, before the next thread is chosen, where it is between two instructions:
+  as time that went on in the turn has what was due happen, which `betweenTurns` only sees once a thread stops. -/
+  turnEnds : IO.Ref (List (IO Unit))
   /-- What hears of bytes of a guest that no instruction of it changed: where and how many, and whether they became zeros because of nothing. -/
   memoryChanged : IO.Ref (List (Nat → Nat → Bool → IO Unit))
   /-- The patches that were applied, the last first, and the loads of their bytes by the instruction that made them and the patch. -/
@@ -439,6 +444,10 @@ structure Emu where
   patchReads : IO.Ref (Std.HashMap (Nat × Nat) Nat)
   /-- What hears that the host moved bytes of a guest from one place to another, from, to and how many. -/
   memoryCopied : IO.Ref (List (Nat → Nat → Nat → IO Unit))
+  /-- What hears that bytes of a guest are now a copy of what is kept somewhere else, as a page of a private mapping has what its file
+  has: where and how many, what they are kept under there and from what offset, and whether it is the call being served that changed
+  them there, of which what they came from is known only once it is over. -/
+  memoryMirrored : IO.Ref (List (Nat → Nat → Nat → Nat → Bool → IO Unit))
   /-- What hears that the host is serving a call of the guest that isn't a system call, such as one of JNI, by name, and then that it has
   left what it returns in a register, by name of that, if it returns something. -/
   hostStarts : IO.Ref (List (String → IO Unit))
@@ -590,10 +599,12 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     syscallStarts := ← IO.mkRef []
     syscallEnds := ← IO.mkRef []
     betweenTurns := ← IO.mkRef []
+    turnEnds := ← IO.mkRef []
     memoryChanged := ← IO.mkRef []
     patched := ← IO.mkRef []
     patchReads := ← IO.mkRef {}
     memoryCopied := ← IO.mkRef []
+    memoryMirrored := ← IO.mkRef []
     hostStarts := ← IO.mkRef []
     hostEnds := ← IO.mkRef []
     hostReads := ← IO.mkRef []
@@ -2157,9 +2168,19 @@ def map (emu : Emu) (region : Region) (zeros : Bool := false) : IO Unit := do
   for changed in ← emu.memoryChanged.get do changed region.address region.data.size (!written)
   replaceRegions emu (region :: (← emu.regions.get)) [] [region]
 
+/-- `size` zeros for a mapping, which take nothing of the host until they are written. The host has to have as many addresses to give,
+though, and what it hasn't is an error rather than the end of the process, as a program may ask for any size. -/
+def reserveZeros (size : Nat) : IO ByteArray :=
+  -- What is small is there, and isn't asked for twice.
+  if size < 2 ^ 24 then pure (Jit.zeros size)
+  else
+    match Jit.fillChecked size [] with
+    | some data => pure data
+    | none => throw <| IO.userError s!"the host has no room for a mapping of {size} bytes"
+
 /-- A mapping of zeros, which takes nothing of the host until it is written, and isn't looked through: what a program maps of memory is. -/
-def mapZeros (emu : Emu) (address size : Nat) (protection : Primus.Protection) : IO Unit :=
-  map emu ⟨address, Jit.zeros size, protection⟩ (zeros := true)
+def mapZeros (emu : Emu) (address size : Nat) (protection : Primus.Protection) : IO Unit := do
+  map emu ⟨address, ← reserveZeros size, protection⟩ (zeros := true)
 
 /-- Puts bytes over a region that is mapped already, of the same size, with its protection. -/
 def overlay (emu : Emu) (region : Region) : IO Unit := do
@@ -3235,6 +3256,8 @@ def measure (emu : Emu) (steps : Nat) : IO Measurement := do
          peakResidentKiB := ← peakResidentKiB }
 
 private def switchNextThread (emu : Emu) : IO Bool := do
+  -- What the end of the turn makes happen may wake a thread, which is then one to choose, or send the one that runs somewhere else.
+  for hook in ← emu.turnEnds.get do hook
   saveCurrentThread emu
   let current ← thread emu
   -- As `scheduleLoop` has it: a thread blocked where it waits, or over, isn't one to run, whatever its stopped flag
@@ -3696,10 +3719,10 @@ def arm32 (code : ByteArray) (base entry : Nat) (thumb : Bool := false) (adjust 
 
 /-- An emulator of i686, as `riscv64`. -/
 def x86_32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
-  let disassembler ← Target.X8632.disassembler base
+  let disassembler ← Target.X8632.emulatorDisassembler base
   let config : Config := {
     disassembler
-    disassemblerAt := some (fun base => Target.X8632.disassembler base)
+    disassemblerAt := some (fun base => Target.X8632.emulatorDisassembler base)
     memory := ⟨"mem", .mem 32 8, 0, false⟩
     endian := .little
     syscallAbi := .x86_32
@@ -3709,10 +3732,10 @@ def x86_32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := 
 
 /-- An emulator of x86-64, as `riscv64`. -/
 def x86_64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
-  let disassembler ← Target.X86.disassembler base
+  let disassembler ← Target.X86.emulatorDisassembler base
   let config : Config := {
     disassembler
-    disassemblerAt := some (fun base => Target.X86.disassembler base)
+    disassemblerAt := some (fun base => Target.X86.emulatorDisassembler base)
     memory := ⟨"mem", .mem 64 8, 0, false⟩
     endian := .little
     syscallAbi := .x86_64

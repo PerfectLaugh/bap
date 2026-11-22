@@ -33,8 +33,17 @@ private def replacements (env : ConstEnv) : List (Bap.Var × Bil.Exp) :=
 private def joinEnv (left right : ConstEnv) : ConstEnv :=
   left.filter fun entry => Assoc.get entry.1 right = some entry.2
 
+/-- Whether a block has a jump that leaves for what comes back: a call, to its return, or an interrupt. What it comes back with is
+whatever the callee or the system left in the variables, which nothing here says. -/
+def Blk.calls (blk : Blk) : Bool :=
+  blk.jmps.any fun jmp =>
+    match jmp.kind with
+    | .call _ _ | .interrupt _ _ => true
+    | _ => false
+
 /-- Rewrites a block under the constants known at its entry and returns those known at its exit.
-A phi assigns its variable on entry, so an incoming constant for it no longer holds. -/
+A phi assigns its variable on entry, so an incoming constant for it no longer holds. Of a block that `calls`, none is known at its
+exit, to any block after it: its own jumps are still rewritten with what its definitions leave, which they read before they leave. -/
 private def propagateBlock (blk : Blk) (env : ConstEnv) : Blk × ConstEnv :=
   let phiVars := blk.phis.map Phi.var
   let env : ConstEnv := env.filter fun entry => entry.1 ∉ phiVars
@@ -47,7 +56,7 @@ private def propagateBlock (blk : Blk) (env : ConstEnv) : Blk × ConstEnv :=
       | none => Assoc.remove defn.var state.2
     (state.1 ++ [{ defn with rhs := rhs }], env)
   let jmps := blk.jmps.map (Jmp.mapExp fun exp => Bil.simplifyExp (Bil.substitute (replacements env) exp))
-  ({ blk with phis := phis, defs := defs, jmps := jmps }, env)
+  ({ blk with phis := phis, defs := defs, jmps := jmps }, if blk.calls then [] else env)
 
 /-- `Bil.substitute` of `replacements`: only what is read of the constants is made into expressions. -/
 private def substConst (env : ConstEnv) : Bil.Exp → Bil.Exp
@@ -119,6 +128,7 @@ private def constStep (env : ConstEnv) (var : Bap.Var) (rhs : Bil.Exp) : ConstEn
 
 /-- What `propagateBlock` says of its constants, without rewriting the block. -/
 private def propagateExit (blk : Blk) (env : ConstEnv) : ConstEnv :=
+  if blk.calls then [] else
   let phiVars := blk.phis.map Phi.var
   let env : ConstEnv := if phiVars.isEmpty then env else env.filter fun entry => entry.1 ∉ phiVars
   blk.defs.foldl (init := env) fun env defn => constStep env defn.var (Bil.simplifyExp (substConst env defn.rhs))
@@ -150,7 +160,9 @@ private theorem propagateExit_eq (blk : Blk) (env : ConstEnv) : (propagateBlock 
       congr 1
       simp only [constStep, removeConst_eq, substConst_eq]
   simp only [propagateBlock, propagateExit, hf]
-  exact key _ _ _
+  split
+  · rfl
+  · exact key _ _ _
 
 /-- `propagateBlock`, with its definitions in order at the end instead of each added at the end. -/
 private def propagateBlockFast (blk : Blk) (env : ConstEnv) : Blk × ConstEnv :=
@@ -162,7 +174,7 @@ private def propagateBlockFast (blk : Blk) (env : ConstEnv) : Blk × ConstEnv :=
     let rhs := Bil.simplifyExp (substConst state.2 defn.rhs)
     ({ defn with rhs := rhs } :: state.1, constStep state.2 defn.var rhs)
   let jmps := blk.jmps.map (Jmp.mapExp fun exp => Bil.simplifyExp (substConst env exp))
-  ({ blk with phis := phis, defs := defs.reverse, jmps := jmps }, env)
+  ({ blk with phis := phis, defs := defs.reverse, jmps := jmps }, if blk.calls then [] else env)
 
 @[csimp] private theorem propagateBlock_eq_fast : @propagateBlock = @propagateBlockFast := by
   funext blk env
@@ -2340,7 +2352,13 @@ def Cfg.protectedNames (cfg : Cfg) (protectedVars : List Bap.Var) : List Bap.Var
     protectedVars ++ (cfg.blocks.flatMap Blk.definedVars).filter fun var => protectedVars.contains var.base
 
 /-- Folds and removes dead code. `[]` means nothing is read on return: callers must pass their
-outputs, and an unversioned output also covers its SSA versions (see `Cfg.protectedNames`). -/
+outputs, and an unversioned output also covers its SSA versions (see `Cfg.protectedNames`).
+
+Of a call or an interrupt in the subroutine: the folding assumes nothing of what it comes back with, as no constant is kept
+past a block that calls (`Blk.calls`, `Bap.Proofs.IR.propagateConstants_correct`). The removal of dead code takes it to read
+only what its own expressions read: a definition that only the callee or the system would read, as of an argument register,
+is removed unless its variable is in `protectedVars`. The theorems of the whole of it (`Bap.Proofs.IR.optimize_preserves_runs`)
+are of runs in which a call comes back with every variable as it was. -/
 def optimize (sub : Sub) (protectedVars : List Bap.Var := []) : Sub :=
   let cfg := propagateConstants (Cfg.fromSub sub)
   (eliminateDeadCode cfg (cfg.protectedNames protectedVars)).intoSub sub

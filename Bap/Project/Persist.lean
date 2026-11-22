@@ -154,7 +154,8 @@ private def putDisasm (tables : Tables) (out : ByteArray) (disasm : Disasm.Disas
   let out := putList putText out tables.texts.items.toList
   let out := putInsns tables (putNat out disasm.instructions.length) disasm.instructions 0
   let out := putList putEdge out disasm.edges
-  putList putText out disasm.errors
+  let out := putList putText out disasm.errors
+  putList putNat out disasm.delayed
 
 private def getDisasm (data : ByteArray) (pos : Nat) : Option (Disasm.Disasm × Nat) := do
   let (entry, pos) ← getNat data pos
@@ -164,7 +165,8 @@ private def getDisasm (data : ByteArray) (pos : Nat) : Option (Disasm.Disasm × 
   let (instructions, pos) ← getList (getInsn vars programs texts data) data pos
   let (edges, pos) ← getList (getEdge data) data pos
   let (errors, pos) ← getList (getText data) data pos
-  some (⟨entry, instructions, edges, errors⟩, pos)
+  let (delayed, pos) ← getList (getNat data) data pos
+  some (⟨entry, instructions, edges, errors, delayed⟩, pos)
 
 /-- The code is no deeper than what the reader goes. -/
 private def disasmFits (tables : Tables) (disasm : Disasm.Disasm) : Bool :=
@@ -178,7 +180,7 @@ private def getBinding (data : ByteArray) (pos : Nat) : Option ((String × Strin
   let (value, pos) ← getText data pos
   some ((name, value), pos)
 
-private def magic : ByteArray := "BAPPROJECT2\n".toUTF8
+private def magic : ByteArray := "BAPPROJECT3\n".toUTF8
 
 private def putProject (project : Project) (tables : Tables) (knowledge : String) : ByteArray :=
   let out := magic

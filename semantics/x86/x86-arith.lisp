@@ -521,47 +521,84 @@
   (let ((d (cast (word-width x) y)))
     (- x (* (div x d) d))))
 
+;; the divide error, #DE, which Linux makes SIGFPE of: a quotient that the
+;; destination can't hold, which that of a zero divisor is, is raised
+;; before anything is written
+(defun divide-error () (intrinsic 'divide-error :aborts))
+
+;; an unsigned quotient fits if the high half of the dividend is below
+;; the divisor, and a signed one if it is the sign extension of its low
+;; half
+(defmacro unsigned-overflows (x y n) (>= (cast-high n x) y))
+(defmacro signed-overflows (x y n)
+  (let ((q (quotient s/ cast-signed x y)))
+    (logor (is-zero y) (/= q (cast-signed (word-width x) (cast-low n q))))))
+
 (defun div8 (y)
   (let ((x AX))
-    (set AL (cast-low 8 (quotient / cast-unsigned x y)))
-    (set AH (cast-low 8 (remainder / cast-unsigned x y)))))
+    (if (unsigned-overflows x y 8)
+        (divide-error)
+      (prog
+       (set AL (cast-low 8 (quotient / cast-unsigned x y)))
+       (set AH (cast-low 8 (remainder / cast-unsigned x y)))))))
 
 (defun div16 (y)
   (let ((x (concat DX AX)))
-    (set AX (cast-low 16 (quotient / cast-unsigned x y)))
-    (set DX (cast-low 16 (remainder / cast-unsigned x y)))))
+    (if (unsigned-overflows x y 16)
+        (divide-error)
+      (prog
+       (set AX (cast-low 16 (quotient / cast-unsigned x y)))
+       (set DX (cast-low 16 (remainder / cast-unsigned x y)))))))
 
 (defun div32 (y)
   (let ((x (concat EDX EAX)))
-    (set-eax (cast-low 32 (quotient / cast-unsigned x y)))
-    (set-edx (cast-low 32 (remainder / cast-unsigned x y)))))
+    (if (unsigned-overflows x y 32)
+        (divide-error)
+      (prog
+       (set-eax (cast-low 32 (quotient / cast-unsigned x y)))
+       (set-edx (cast-low 32 (remainder / cast-unsigned x y)))))))
 
 (defun div64 (y)
   (declare (context (bits 64)))
   (let ((x (concat RDX RAX)))
-    (set RAX (cast-low 64 (quotient / cast-unsigned x y)))
-    (set RDX (cast-low 64 (remainder / cast-unsigned x y)))))
+    (if (unsigned-overflows x y 64)
+        (divide-error)
+      (prog
+       (set RAX (cast-low 64 (quotient / cast-unsigned x y)))
+       (set RDX (cast-low 64 (remainder / cast-unsigned x y)))))))
 
 (defun idiv8 (y)
   (let ((x AX))
-    (set AL (cast-low 8 (quotient s/ cast-signed x y)))
-    (set AH (cast-low 8 (remainder s/ cast-signed x y)))))
+    (if (signed-overflows x y 8)
+        (divide-error)
+      (prog
+       (set AL (cast-low 8 (quotient s/ cast-signed x y)))
+       (set AH (cast-low 8 (remainder s/ cast-signed x y)))))))
 
 (defun idiv16 (y)
   (let ((x (concat DX AX)))
-    (set AX (cast-low 16 (quotient s/ cast-signed x y)))
-    (set DX (cast-low 16 (remainder s/ cast-signed x y)))))
+    (if (signed-overflows x y 16)
+        (divide-error)
+      (prog
+       (set AX (cast-low 16 (quotient s/ cast-signed x y)))
+       (set DX (cast-low 16 (remainder s/ cast-signed x y)))))))
 
 (defun idiv32 (y)
   (let ((x (concat EDX EAX)))
-    (set-eax (cast-low 32 (quotient s/ cast-signed x y)))
-    (set-edx (cast-low 32 (remainder s/ cast-signed x y)))))
+    (if (signed-overflows x y 32)
+        (divide-error)
+      (prog
+       (set-eax (cast-low 32 (quotient s/ cast-signed x y)))
+       (set-edx (cast-low 32 (remainder s/ cast-signed x y)))))))
 
 (defun idiv64 (y)
   (declare (context (bits 64)))
   (let ((x (concat RDX RAX)))
-    (set RAX (cast-low 64 (quotient s/ cast-signed x y)))
-    (set RDX (cast-low 64 (remainder s/ cast-signed x y)))))
+    (if (signed-overflows x y 64)
+        (divide-error)
+      (prog
+       (set RAX (cast-low 64 (quotient s/ cast-signed x y)))
+       (set RDX (cast-low 64 (remainder s/ cast-signed x y)))))))
 
 ;; MUL
 (defun MUL8r (y) (mul8 y))

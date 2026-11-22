@@ -1162,11 +1162,12 @@ private theorem getEdge_put (data : ByteArray) (value : Nat × Nat) : Reads (get
 private theorem getDisasm_put (tables : Tables) (data : ByteArray) {value : Bap.Disasm.Disasm} (hfit : disasmFits tables value = true) :
     Reads (getDisasm data) (putDisasm tables) data value := by
   intro out h
-  obtain ⟨entry, instructions, edges, errors⟩ := value
+  obtain ⟨entry, instructions, edges, errors, delayed⟩ := value
   simp only [disasmFits, Bool.and_eq_true, Array.all_eq_true, List.all_eq_true, decide_eq_true_eq] at hfit
   obtain ⟨hitems, hinsns⟩ := hfit
   simp only [putDisasm] at h ⊢
-  obtain ⟨h6, r6⟩ := getList_putList (fun item _ out h => getText_putText h) h
+  obtain ⟨h7, r7⟩ := getList_putList (fun item _ out h => getNat_putNat h) h
+  obtain ⟨h6, r6⟩ := getList_putList (fun item _ out h => getText_putText h) h7
   obtain ⟨h5, r5⟩ := getList_putList (fun item _ => getEdge_put data item) h6
   obtain ⟨h4', r4⟩ := getItems_putInsns tables data hinsns _ _ #[] h5
   obtain ⟨h4, r4n⟩ := getNat_putNat h4'
@@ -1183,7 +1184,7 @@ private theorem getDisasm_put (tables : Tables) (data : ByteArray) {value : Bap.
   obtain ⟨hp, hr⟩ := getNat_putNat h1
   refine ⟨hp, ?_⟩
   simp only [Array.toArray_toList] at r1 r2 r3
-  simp only [getDisasm, hr, r1, r2, r3, r4l, r5, r6, bind, Option.bind]
+  simp only [getDisasm, hr, r1, r2, r3, r4l, r5, r6, r7, bind, Option.bind]
 
 private theorem getBinding_put (data : ByteArray) (value : String × String) : Reads (getBinding data) putBinding data value := by
   intro out h

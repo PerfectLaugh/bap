@@ -89,7 +89,7 @@ block alone): it ends as the blocks do one at a time in the interpreter, with th
 nothing of the graph: `lowerGraphChecked` checks at compile time what it does not follow through every statement, and a lowering
 that failed the check would stay out of native code. The one thing `lowerGraph_correct` leaves out is the interpreter running out of its
 fuel: what lowers has a result otherwise, on a state that `encodeState` takes with its memory bound (`graph_progress`). The limit on native loops
-is that same bound: on the fuel the interpreter runs with, a loop out of iterations means that the interpreter ran out too (`lowerGraph_interpreterFuel`). `Bap.Emu.Core` lists what stays trusted around all of this, and `Bap.Proofs` all of it for the project. -/
+is that same bound, one way only: on the fuel the interpreter runs with, a loop out of iterations means that the interpreter ran out too (`lowerGraph_interpreterFuel`). The other way doesn't hold: the fuel of the interpreter is structural, spent by the statements before a loop and by its body as well as by its rounds, so that of a loop within a few rounds of `Bil.loopLimit` the interpreter gives up where native code, which counts the tests of the condition alone, completes. No instruction comes near the limit, as a repeated one of x86 is a round of it each time it runs. `Bap.Emu.Core` lists what stays trusted around all of this, and `Bap.Proofs` all of it for the project. -/
 
 namespace Bap.Jit
 

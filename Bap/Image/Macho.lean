@@ -21,12 +21,14 @@ private structure SymbolTable where
   stringsOffset : Nat
   stringsSize : Nat
 
+/-- What the load commands read so far say, each in the order of its commands: in arrays, which a command adds to in place, as a
+file has as many commands as it has room for. -/
 private structure ParseState where
-  segments : List Segment := []
-  regions : List MemRegion := []
-  sections : List Section := []
-  mappings : List FileMapping := []
-  symbolTables : List SymbolTable := []
+  segments : Array Segment := #[]
+  regions : Array MemRegion := #[]
+  sections : Array Section := #[]
+  mappings : Array FileMapping := #[]
+  symbolTables : Array SymbolTable := #[]
   entryOffset : Option Nat := none
   /-- Where `LC_UNIXTHREAD` has its thread start, an address, which is where the program starts if it has no `LC_MAIN`. -/
   threadEntry : Option Nat := none
@@ -94,7 +96,7 @@ private def parseSegment (data : ByteArray) (endian : Endian) (offset commandSiz
       let fileBytes ← IO.Reader.slice data fileOffset fileSize
       -- __PAGEZERO reserves 4 GiB that nothing can access and no file holds: it maps nothing.
       let mapped := if protection = 0 && fileSize = 0 then 0 else memorySize
-      let bytes := fileBytes.append (Bap.zeroBytes (mapped - fileSize))
+      let bytes := Bap.padZeros fileBytes (mapped - fileSize)
       let sections ← (List.range sectionCount).mapM fun index =>
         parseSection data endian (offset + 72 + index * 80)
       let readable := protection &&& 1 != 0
@@ -119,9 +121,9 @@ private def parseCommands (data : ByteArray) (header : Header) (offset : Nat) :
         | 0x19 => do
           let (segment, region, mapping, sections) ← parseSegment data header.endian offset commandSize
           .ok { state with
-            segments := state.segments ++ [segment]
-            regions := state.regions ++ [region]
-            mappings := state.mappings ++ [mapping]
+            segments := state.segments.push segment
+            regions := state.regions.push region
+            mappings := state.mappings.push mapping
             sections := state.sections ++ sections }
         | 0x80000028 => do
           if commandSize < 24 then
@@ -146,7 +148,7 @@ private def parseCommands (data : ByteArray) (header : Header) (offset : Nat) :
             if tableOffset + count * 16 > data.size || stringsOffset + stringsSize > data.size then
               .error "Mach-O symbol table exceeds input"
             else
-              .ok { state with symbolTables := state.symbolTables ++ [⟨tableOffset, count, stringsOffset, stringsSize⟩] }
+              .ok { state with symbolTables := state.symbolTables.push ⟨tableOffset, count, stringsOffset, stringsSize⟩ }
         | _ => .ok state
       parseCommands data header (offset + commandSize) remaining state
 
@@ -169,9 +171,10 @@ private def parseSymbol (data : ByteArray) (endian : Endian) (stringsOffset stri
 
 private def parseSymbols (data : ByteArray) (header : Header) (state : ParseState) :
     Except String (List Symbol) :=
-  state.symbolTables.foldlM (init := []) fun symbols table => do
+  let sections := state.sections.toList
+  Array.toList <$> state.symbolTables.foldlM (init := #[]) fun symbols table => do
     let parsed ← (List.range table.count).mapM fun index =>
-      parseSymbol data header.endian table.stringsOffset table.stringsSize state.sections
+      parseSymbol data header.endian table.stringsOffset table.stringsSize sections
         (table.offset + index * 16)
     .ok (symbols ++ parsed.filterMap id)
 
@@ -181,24 +184,26 @@ private def architecture (cpuType : Nat) : Arch :=
   | 0x0100000c => .aarch64
   | _ => .unknown
 
-/-- How many bytes of zeros past what the file has its segments would take, as its load commands say. -/
-def zeroFill (data : ByteArray) : Nat :=
+/-- What the segments of the file would take, as its load commands say, of each that maps anything. `decode` refuses what `exceeds`
+is of. -/
+def regionsSize (data : ByteArray) : Extent :=
   match parseHeader data with
-  | .error _ => 0
+  | .error _ => {}
   | .ok header =>
     let number (read : Except String Nat) : Nat := read.toOption.getD 0
-    let (_, total) := (List.range (min header.commandCount (header.commandBytes / 8 + 1))).foldl (init := (32, 0))
+    let (_, total) := (List.range (min header.commandCount (header.commandBytes / 8 + 1))).foldl (init := (32, ({} : Extent)))
       fun (offset, total) _ =>
         let size := number (IO.Reader.u32 data header.endian (offset + 4))
         let total := if number (IO.Reader.u32 data header.endian offset) != 0x19 then total else
           let memorySize := number (IO.Reader.u64 data header.endian (offset + 32))
           let fileSize := number (IO.Reader.u64 data header.endian (offset + 48))
           let protection := number (IO.Reader.u32 data header.endian (offset + 60))
-          if protection == 0 && fileSize == 0 then total else total + (memorySize - fileSize)
+          if protection == 0 && fileSize == 0 then total else total.add memorySize fileSize
         (offset + max size 8, total)
     total
 
-def decode (data : ByteArray) : Except String Image := do
+/-- An image of a Mach-O file, whatever its segments take. -/
+def decodeRegions (data : ByteArray) : Except String Image := do
   let header ← parseHeader data
   let (finalOffset, state) ← parseCommands data header 32 header.commandCount {}
   if finalOffset != 32 + header.commandBytes then
@@ -207,23 +212,27 @@ def decode (data : ByteArray) : Except String Image := do
     let entryPoint ← match state.entryOffset with
       | none => .ok (state.threadEntry.getD 0)
       | some entryOffset =>
-        match state.mappings.find? fun mapping =>
+        match state.mappings.toList.find? fun mapping =>
           mapping.offset ≤ entryOffset && entryOffset < mapping.offset + mapping.size with
         | some mapping => .ok (mapping.address + entryOffset - mapping.offset)
         | none => .error "Mach-O entry point is outside mapped segments"
     let symbols ← parseSymbols data header state
-    let memory := state.regions.foldl (fun memory region => MemoryMap.add region () memory) {}
+    let memory := state.regions.toList.foldl (fun memory region => MemoryMap.add region () memory) {}
     .ok {
       arch := architecture header.cpuType
       addrWidth := 64
       endian := header.endian
       entryPoint := entryPoint
       data := data
-      sections := state.sections
-      segments := state.segments
+      sections := state.sections.toList
+      segments := state.segments.toList
       symbols := symbols
       memory := memory
     }
+
+/-- An image of a Mach-O file, unless its segments would take more than a host gives a file, which no caller gets past. -/
+def decode (data : ByteArray) : Except String Image :=
+  if exceeds data (regionsSize data) then .error tooLarge else decodeRegions data
 
 def load (path : String) : IO Image := do
   let data ← IO.FS.readBinFile path

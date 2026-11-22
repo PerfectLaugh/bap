@@ -91,6 +91,10 @@ structure PtraceTable where
   /-- Processes that are over whose parent doesn't wait for them, as it ignores `SIGCHLD` or has `SA_NOCLDWAIT`: no wait reports them,
   and they go once they don't run. -/
   reaping : List Nat := []
+  /-- Of each thread that makes its system call again when it goes on, as one that stopped at its start, that waits in it, or that left
+  it for a stop: where the instruction that makes the call is. While it is there it is in the call, which a tracer sees as Linux has
+  it: from after the instruction. -/
+  sites : Std.HashMap Nat Nat := {}
 
 /-- The ptrace and the stops of a machine. -/
 structure Ptrace where
@@ -113,6 +117,8 @@ structure Ptrace where
   /-- What decides of a call of a thread, by its number and its arguments, after its tracer saw it start and before anything serves
   it: what `Bap.Linux.Seccomp` makes of it, if anything. -/
   screen : IO.Ref (Emu → Nat → Nat → List Nat → IO (Option SyscallAction))
+  /-- Where the instruction of the system call that is served is. -/
+  site : IO.Ref Nat
 
 namespace Ptrace
 
@@ -267,6 +273,12 @@ def jobStopped (ptrace : Ptrace) (emu : Emu) (group : Nat) : IO Bool := do
   let stops := (← ptrace.table.get).stops
   pure ((← emu.taskTable.get).tasks.any fun task => task.group == group && (stops.get? task.tid).any (!·.traced))
 
+/-- A thread left the system call that it waited in, for a stop of its tracer, and makes it again from where it is when it goes on. -/
+def restarted (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Unit := do
+  let pc := ((← threads emu).find? (·.id == tid)).map (·.pc)
+  let pc ← if (← thread emu) == tid then emu.pc.get else pure (pc.getD 0)
+  ptrace.table.modify fun table => { table with sites := table.sites.insert tid pc }
+
 /-- The process tracing a thread, if it is traced. -/
 def tracerOf (ptrace : Ptrace) (tid : Nat) : IO (Option Nat) := do
   pure (((← ptrace.table.get).tracees.get? tid).map (·.tracer))
@@ -383,12 +395,14 @@ def processExited (ptrace : Ptrace) (emu : Emu) (group status : Nat) : IO Unit :
   let table ← ptrace.table.get
   let tasks ← emu.taskTable.get
   let gone := (tasks.tasks.filter (·.group == group)).map (·.tid)
-  -- Its tracers that live on, other than its parent, which hears of it as a parent does.
+  -- Its tracers that live on, other than its parent, which hears of it as a parent does, but of its threads that aren't its leader.
   let parent := ((tasks.find? group).map (·.parent)).getD 0
   let alive (process : Nat) : Bool := (tasks.find? process).any (·.status.isNone)
   if !table.tracees.contains group then markUnwaited ptrace emu group
   let told := gone.filterMap fun tid => match table.tracees.get? tid with
-    | some tracee => if tracee.tracer != group && tracee.tracer != parent && alive tracee.tracer then some (tracee.tracer, tid, status) else none
+    | some tracee =>
+      if tracee.tracer != group && (tracee.tracer != parent || tid != group) && alive tracee.tracer then some (tracee.tracer, tid, status)
+      else none
     | none => none
   unless told.isEmpty do
     ptrace.table.modify fun table => { table with untold := table.untold ++ told }
@@ -419,10 +433,24 @@ def processExited (ptrace : Ptrace) (emu : Emu) (group status : Nat) : IO Unit :
       calls := table.calls.filter fun tid _ => !gone.contains tid
       entries := table.entries.filter fun tid _ => !gone.contains tid
       skipping := table.skipping.filter fun tid _ => !gone.contains tid
+      sites := table.sites.filter fun tid _ => !gone.contains tid
       untold := table.untold.filter (·.1 != group) }
   for (tracer, tid, status) in table.untold do
     if tracer == group then toldTracer ptrace emu tid status
   reapUnwaited ptrace emu
+  wakeWaits ptrace
+
+/-- A traced thread ended while others of its process go on: it is traced no longer, and its tracer hears of it, by `SIGCHLD` and a
+wait, as Linux's `exit_notify` has it of a tracee. -/
+private def threadExited (ptrace : Ptrace) (emu : Emu) (tid tracer status : Nat) : IO Unit := do
+  disarmStep ptrace emu tid
+  ptrace.table.modify fun table =>
+    { table with
+      tracees := table.tracees.erase tid, stops := table.stops.erase tid, injected := table.injected.erase tid
+      pending := table.pending.erase tid, exiting := table.exiting.erase tid, calls := table.calls.erase tid
+      entries := table.entries.erase tid, skipping := table.skipping.erase tid, sites := table.sites.erase tid
+      untold := table.untold ++ [(tracer, tid, status)] }
+  ptrace.signals.send emu none tracer ⟨ptrace.numbers.chld, 1, .child tid 0 (status / 256 % 256)⟩
   wakeWaits ptrace
 
 /-! ### Waiting -/
@@ -478,6 +506,10 @@ private def find (ptrace : Ptrace) (emu : Emu) (group : Nat) (target : Option Na
   if exited then
     let ofStatus (pid status : Nat) : Report :=
       if status % 128 != 0 then { pid, status, code := 2, value := status % 128 } else { pid, status, code := 1, value := status / 256 % 256 }
+    -- A traced thread that ended, before the leader of its process, which Linux reports once its threads are waited for.
+    if let some (_, tid, status) := untold.find? fun (_, tid, _) => (tasks.find? tid).any (·.group != tid) then
+      unless keep do ptrace.table.modify fun table => { table with untold := table.untold.erase (group, tid, status) }
+      return some (some (ofStatus tid status))
     -- Of a process group, the first of its children that ended.
     let target := match target with
       | some wantedTarget => if wantedTarget ≥ 2 ^ 32 then
@@ -595,19 +627,61 @@ private def pcOf (emu : Emu) (tid : Nat) : IO Nat := do
   if (← thread emu) == tid then emu.pc.get
   else pure (((← threads emu).find? (·.id == tid)).map (·.pc) |>.getD 0)
 
+/-- How long the instruction that makes a system call is, where a thread is. -/
+private def callLength (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Nat := do
+  match ptrace.architecture with
+  | .x86_64 | .i686 => pure 2
+  | .arm => pure (if (← threadValue emu tid "ISET" 1) != 0 then 2 else 4)
+  | _ => pure 4
+
+/-- Where the instruction of the system call that a thread is in is, of one that is there to make it again: see `PtraceTable.sites`. -/
+private def siteOf (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO (Option Nat) := do
+  match (← ptrace.table.get).sites.get? tid with
+  | some site => pure (if (← pcOf emu tid) == site then some site else none)
+  | none => pure none
+
+/-- Where a tracer sees a thread: where it is, or, of one that is in a system call that it makes again when it goes on, after the
+instruction of the call, as Linux has it of a call from its start to its end. -/
+private def seenPc (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Nat := do
+  let pc ← pcOf emu tid
+  if (← siteOf ptrace emu tid).isSome then pure (pc + (← callLength ptrace emu tid)) else pure pc
+
+/-- What a tracer sees a system call give that its thread left before it was over, for a stop, and makes again when it goes on, as
+Linux has it until then: `ERESTART_RESTARTBLOCK` of a sleep and of `poll`, `ERESTARTNOHAND` of what waits for a signal or with a mask
+of its own, and `ERESTARTSYS` of the others, below 0 but where a flag says that it is an error. None of a thread that isn't in a call,
+or that is stopped at the start of one, which hasn't been made. -/
+private def leftCall (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO (Option Nat) := do
+  let some stop := (← ptrace.table.get).stops.get? tid | return none
+  if (← siteOf ptrace emu tid).isNone then return none
+  if stop.signal == ptrace.numbers.trap && stop.info.isNone && [0, exitEvent, seccompEvent].contains (stop.status >>> 16 % 256) then
+    return none
+  let width ← wordWidth emu
+  let (register, _, _) := syscallRegisters emu.config.syscallAbi
+  let number ← threadValue emu tid register width
+  let code := match ptrace.architecture.call number with
+    | some .nanosleep | some .clockNanosleep | some .clockNanosleep64 | some .poll => 516
+    | some .select | some .pselect6 | some .pselect664 | some .ppoll | some .ppoll64 => 514
+    | _ => if Signals.waitsForSignal ptrace.architecture number then 514 else 512
+  pure (some (if ptrace.architecture matches .mips .. | .powerpc .. then code else 2 ^ width - code))
+
 /-- The registers of a thread, by slot. -/
 private def readSlots (ptrace : Ptrace) (emu : Emu) (tid : Nat) (slots : List Slot) : IO (List Nat) := do
   let width ← wordWidth emu
+  let (numberRegister, _, resultRegister) := syscallRegisters emu.config.syscallAbi
+  -- Of a call that it left to make again, the registers are as they were at its start: a tracer sees what Linux has there.
+  let left ← leftCall ptrace emu tid
   slots.mapM fun slot => match slot with
-    | .register name => threadValue emu tid name width
+    | .register name => if name == resultRegister && left.isSome then pure (left.getD 0) else threadValue emu tid name width
     | .result name => do
       match ((← ptrace.table.get).entries.get? tid).map (·.2) with
       | some result => pure result
-      | none => threadValue emu tid name width
+      | none => if left.isSome then pure (left.getD 0) else threadValue emu tid name width
     | .callNumber => do
       match ((← ptrace.table.get).entries.get? tid).map (·.1) with
       | some number => pure number
-      | none => pure ((((← ptrace.table.get).calls.get? tid).map (·.1)).getD (2 ^ width - 1))
+      | none =>
+        if left.isSome then threadValue emu tid numberRegister width
+        else pure ((((← ptrace.table.get).calls.get? tid).map (·.1)).getD (2 ^ width - 1))
     | .callArgument => do
       match ((← ptrace.table.get).calls.get? tid).map (·.2) with
       | some argument => pure argument
@@ -617,7 +691,7 @@ private def readSlots (ptrace : Ptrace) (emu : Emu) (tid : Nat) (slots : List Sl
       for (name, bit) in fields do
         if (← threadValue emu tid name 1) != 0 then word := word ||| (1 <<< bit)
       pure word
-    | .pc => pcOf emu tid
+    | .pc => seenPc ptrace emu tid
     | .constant value => pure value
     | .flags => do
       let mut word := if ptrace.architecture matches .x86_64 | .i686 then 0x202 else if ptrace.architecture matches .arm then 0x10 else 0
@@ -627,25 +701,47 @@ private def readSlots (ptrace : Ptrace) (emu : Emu) (tid : Nat) (slots : List Sl
         if (← threadValue emu tid "ISET" 1) != 0 then word := word ||| 0x20
       pure word
 
-/-- Sets the registers of a thread from what its slots have, but those that are what they are. -/
+/-- Sets the registers of a thread from what its slots have, but those that are what they are. Of a thread in a system call that it
+makes again when it goes on, where it is to go is after the instruction that it goes on from, as `seenPc` has it; and of a call that
+it left for a stop, as `leftCall` has it, a result other than what says that it is made again is what the call gives, which isn't made
+again then, and the number is that of the call that is, as Linux has it of `orig_rax`. -/
 private def writeSlots (ptrace : Ptrace) (emu : Emu) (tid : Nat) (slots : List Slot) (values : List Nat) : IO Unit := do
   let width ← wordWidth emu
+  let (numberRegister, _, resultRegister) := syscallRegisters emu.config.syscallAbi
+  let set (name : String) (value : Nat) : IO Unit := setThreadReg emu tid ⟨name, .imm width, 0, false⟩ (.bits (BitVec.ofNat width value))
+  let mut left ← leftCall ptrace emu tid
   for (slot, value) in slots.zip values do
+    -- The result of a call that it left: the call is over with it, unless it is as it was.
+    let result (name : String) : IO Bool := do
+      set name value
+      setThreadPc emu tid (← seenPc ptrace emu tid)
+      ptrace.table.modify fun table => { table with sites := table.sites.erase tid }
+      pure true
+    let mut over := false
     match slot with
-    | .register name => setThreadReg emu tid ⟨name, .imm width, 0, false⟩ (.bits (BitVec.ofNat width value))
+    | .register name =>
+      if name == resultRegister && left.isSome then
+        if left != some value then over ← result name
+      else set name value
     -- At the start of a call, what it is to be and what it gives if it isn't one, until it goes on: see `leaveEntry`.
     | .result name =>
       match (← ptrace.table.get).entries.get? tid with
       | some (number, _) => ptrace.table.modify fun table => { table with entries := table.entries.insert tid (number, value) }
-      | none => setThreadReg emu tid ⟨name, .imm width, 0, false⟩ (.bits (BitVec.ofNat width value))
+      | none =>
+        if left.isSome then
+          if left != some value then over ← result name
+        else set name value
     | .callNumber =>
       match (← ptrace.table.get).entries.get? tid with
       | some (_, result) => ptrace.table.modify fun table => { table with entries := table.entries.insert tid (value, result) }
-      | none => pure ()
+      | none => if left.isSome then set numberRegister value
     | .pc =>
-      if (← thread emu) == tid then setPc emu value
-      else emu.threadsRef.modify fun contexts => contexts.map fun context =>
-        if context.id == tid then { context with pc := value, pending := none, skip := none } else context
+      let actual ← if (← siteOf ptrace emu tid).isSome then do
+          let actual := value - (← callLength ptrace emu tid)
+          ptrace.table.modify fun table => { table with sites := table.sites.insert tid actual }
+          pure actual
+        else pure value
+      if actual != (← pcOf emu tid) then setThreadPc emu tid actual
     | .flags =>
       for (name, bit) in flagBits ptrace.architecture do
         setThreadReg emu tid ⟨name, .imm 1, 0, false⟩ (.bits (BitVec.ofNat 1 ((value >>> bit) &&& 1)))
@@ -653,6 +749,7 @@ private def writeSlots (ptrace : Ptrace) (emu : Emu) (tid : Nat) (slots : List S
       for (name, bit) in fields do
         setThreadReg emu tid ⟨name, .imm 1, 0, false⟩ (.bits (BitVec.ofNat 1 ((value >>> bit) &&& 1)))
     | _ => pure ()
+    if over then left := none
 
 /-- A thread goes on from the start of a system call, as its tracer left `orig_rax` and `rax`: the call that it says is made, or if it
 says none, as -1 and any other below 0 are, none is, and the call gives what `rax` says. -/
@@ -794,6 +891,10 @@ private def settleWaits (ptrace : Ptrace) (emu : Emu) : IO Unit := do
           { table with futexes := table.futexes.filter fun waiter => !(waiter.thread == tid && waiter.space == waitSpace) }
         setSyscallResult emu tid result
         resumeThread emu tid
+        -- The thread that runs was switched to while it waited: it takes what came for it now, as SIGCHLD of what it waited for,
+        -- before it goes on, as a switch to it that found it running would have it.
+        if tid == (← thread emu) then
+          if let some arrived := ← emu.switchedIn.get then arrived
 
 /-- A wait of the thread that runs: what it finds now, or, unless it may not wait, it waits, and a signal may interrupt it. -/
 private def serveRequest (ptrace : Ptrace) (emu : Emu) (request : WaitRequest) (noHang : Bool) : IO SyscallAction := do
@@ -846,7 +947,8 @@ private def serveWaitid (ptrace : Ptrace) (emu : Emu) (kind id info options : Na
 
 /-! ### ptrace -/
 
-/-- The hook of a thread that `stepping` says steps, which stops it once it ran one instruction. -/
+/-- The hook of a thread that `stepping` says steps, which stops it once it ran one instruction: with `TRAP_TRACE`, or, of a system call
+of x86, with `TRAP_BRKPT`, as its `user_single_step_report` has it at the end of a call. -/
 private def hookStep (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Unit := do
   let width ← wordWidth emu
   let hook ← onCode emu (0, 2 ^ width - 1) fun current address => do
@@ -854,13 +956,16 @@ private def hookStep (ptrace : Ptrace) (emu : Emu) (tid : Nat) : IO Unit := do
     let table ← ptrace.table.get
     match table.stepping.get? tid with
     | some start =>
-      -- The first is where it goes on from, and the next is after it ran that.
+      -- The first is where it goes on from, and the next is after it ran that: `2 ^ width`, or one more once that was a system call,
+      -- which is made again from where it is if it waited.
       if address == start then
         ptrace.table.modify fun table => { table with stepping := table.stepping.insert tid (2 ^ width) }
+      else if table.sites.get? tid == some address then pure ()
       else
         ptrace.table.modify fun table => { table with stepping := table.stepping.erase tid }
         disarmStep ptrace current tid
-        stopThread ptrace current tid { status := stoppedStatus ptrace.numbers.trap, traced := true, signal := ptrace.numbers.trap, code := 2 }
+        let code := if start == 2 ^ width + 1 && ptrace.architecture matches .x86_64 | .i686 then 1 else 2
+        stopThread ptrace current tid { status := stoppedStatus ptrace.numbers.trap, traced := true, signal := ptrace.numbers.trap, code }
     | none => pure ()
   ptrace.stepHooks.modify (·.insert tid hook)
 
@@ -885,9 +990,12 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
   -- A tracee of this process, and whether it is stopped for its tracer.
   let mine : Option Tracee := (table.tracees.get? pid).filter (·.tracer == group)
   let stoppedHere := (table.stops.get? pid).any (·.traced)
+  -- A signal that a tracee is to go on with is one that there is, as `valid_signal` has it.
+  let signals := if ptrace.architecture matches .mips .. then 128 else 64
   let goOn (syscalls : Bool) (step : Bool) : IO SyscallAction := do
     let some tracee := mine | return ← fail esrch
     if !stoppedHere then return ← fail esrch
+    if data > signals then return ← fail eio
     let stop := table.stops.get? pid
     -- A step that a stop of something else came before is over: it steps again only if it is told to now.
     disarmStep ptrace emu pid
@@ -940,7 +1048,8 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
       if target == group || table.tracees.contains pid then return ← fail eperm
       ptrace.table.modify fun table =>
         { table with tracees := table.tracees.insert pid { tracer := group, seized := request != 16, options := if request != 16 then data else 0 } }
-      if request == 16 then ptrace.signals.send emu (some pid) target ⟨numbers.stop, 0, .sent group 0 0⟩
+      -- As `SEND_SIG_PRIV` has it: of the kernel.
+      if request == 16 then ptrace.signals.send emu (some pid) target ⟨numbers.stop, 0x80, .sent 0 0 0⟩
       ok
     | _ => fail esrch
   | 0x4207 =>
@@ -948,17 +1057,21 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
     let some tracee := mine | return ← fail esrch
     if !tracee.seized then return ← fail eio
     unless table.stops.contains pid do
+      -- A call that it waits in is left, to be made again when it goes on.
+      ptrace.signals.leaveCall emu pid
       stopThread ptrace emu pid { status := stoppedStatus numbers.trap 128, traced := true, signal := numbers.trap }
     ok
   | 0x4208 => if mine.isSome then ok else fail esrch
   | 17 =>
-    -- PTRACE_DETACH, with a signal to go on with.
+    -- PTRACE_DETACH, with a signal to go on with, but from a stop of an event, as `goOn` has it.
     if mine.isNone then return ← fail esrch
+    if data > signals then return ← fail eio
     ptrace.table.modify fun table =>
       { table with tracees := table.tracees.erase pid, pending := table.pending.erase pid, calls := table.calls.erase pid }
     disarmStep ptrace emu pid
     leaveEntry ptrace emu pid
-    if data != 0 then ptrace.signals.send emu (some pid) (← groupOf emu pid) (letThrough (table.stops.get? pid) data group)
+    if data != 0 && !(table.stops.get? pid).any (·.status >>> 16 % 256 != 0) then
+      ptrace.signals.send emu (some pid) (← groupOf emu pid) (letThrough (table.stops.get? pid) data group)
     release ptrace emu pid
     ok
   | 7 => goOn false false
@@ -1071,8 +1184,8 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
     let put (bytes : ByteArray) (offset size value : Nat) : ByteArray := (numberBytes big size value).copySlice 0 bytes offset size
     let bytes := ByteArray.mk (Array.replicate 128 0)
     -- A stop at a call or of an event, which no signal was sent for, is one that Linux's `ptrace_notify` makes: SIGTRAP, of the code
-    -- that the stop's status has, `SIGTRAP | 0x80` or `SIGTRAP | event << 8`, and of the tracee.
-    let notified := stop.info.isNone && !stop.fault && stop.signal % 128 == ptrace.numbers.trap
+    -- that the stop's status has, `SIGTRAP | 0x80` or `SIGTRAP | event << 8`, and of the tracee. A step has a code of its own.
+    let notified := stop.info.isNone && !stop.fault && stop.signal % 128 == ptrace.numbers.trap && stop.code == 0
     let bytes := put bytes 0 4 (if notified then ptrace.numbers.trap else stop.signal)
     let bytes := put bytes (if mips then 4 else 8) 4 (if notified then (stop.status >>> 8) % 0x10000 else stop.code)
     let detail := if notified then pid else stop.detail
@@ -1091,17 +1204,17 @@ def servePtrace (ptrace : Ptrace) (emu : Emu) (request pid address data : Nat) :
     let (callNumber, arguments, result) := syscallRegisters emu.config.syscallAbi
     let value (name : String) : IO Nat := threadValue emu pid name width
     let number := (table.calls.get? pid).map (·.1) |>.getD 0
-    let (_, stackRegister) := threadRegisters emu.config.syscallAbi
+    let (stackRegister, _) := threadRegisters emu.config.syscallAbi
     let header (op : Nat) : IO ByteArray := do
-      pure (numberBytes big 1 op ++ ByteArray.mk #[0, 0, 0] ++ numberBytes big 4 0 ++ numberBytes big 8 (← pcOf emu pid) ++
-        numberBytes big 8 (← value stackRegister))
+      pure (numberBytes big 1 op ++ ByteArray.mk #[0, 0, 0] ++ numberBytes big 4 ptrace.architecture.auditArch ++
+        numberBytes big 8 (← seenPc ptrace emu pid) ++ numberBytes big 8 (← value stackRegister))
     let entry : IO ByteArray := do
       let values ← (arguments.take 6).mapM value
       pure (numberBytes big 8 number ++ (values ++ List.replicate (6 - values.length) 0).foldl (fun out v => out ++ numberBytes big 8 v) .empty)
     let _ := callNumber
     let bytes ← if code == trap ||| (seccompEvent <<< 8) then do
         pure ((← header 3) ++ (← entry) ++ numberBytes big 4 (table.messages.getD pid 0))
-      else if stop.signal == trap && (code == trap || code == trap ||| 0x80) && !stop.fault && stop.info.isNone then
+      else if stop.signal == trap && (code == trap || code == trap ||| 0x80) && !stop.fault && stop.info.isNone && stop.code == 0 then
         if tracee.inSyscall then do pure ((← header 1) ++ (← entry))
         else do
           let returned ← value result
@@ -1148,6 +1261,11 @@ def serve (ptrace : Ptrace) (emu : Emu) : IO Unit := do
   let _ ← onSyscall emu fun current number args => do
     let arg (index : Nat) : Nat := args.getD index 0
     let tid ← thread current
+    ptrace.site.set (← current.pc.get)
+    -- A step over a call is one that the call was made in.
+    if let some stepped := (← ptrace.table.get).stepping.get? tid then
+      if stepped == 2 ^ (← wordWidth current) then
+        ptrace.table.modify fun table => { table with stepping := table.stepping.insert tid (stepped + 1) }
     -- Where a wait that a signal interrupts starts again from, which the signals would have noted had they served it.
     -- A call that its tracer said not to make, at its start: it gives what the tracer said, and is over.
     if let some result := (← ptrace.table.get).skipping.get? tid then
@@ -1204,6 +1322,17 @@ def serve (ptrace : Ptrace) (emu : Emu) : IO Unit := do
     else pure .default
   emu.syscallEnds.modify ((fun result => do
     let tid ← thread emu
+    -- A call that is made again from where it is, as one that stopped at its start or that waits, is one that its thread is in.
+    let site ← ptrace.site.get
+    if (← emu.redirect.get) == some site then
+      unless (← ptrace.table.get).sites.get? tid == some site do
+        ptrace.table.modify fun table => { table with sites := table.sites.insert tid site }
+    else if (← ptrace.table.get).sites.contains tid then
+      ptrace.table.modify fun table => { table with sites := table.sites.erase tid }
+    -- A traced thread that ended, which isn't the last of its process: its tracer hears of it, by `SIGCHLD` and a wait.
+    if let some tracee := (← ptrace.table.get).tracees.get? tid then
+      if let some { status := some status, group, .. } := (← emu.taskTable.get).find? tid then
+        if group != tid then threadExited ptrace emu tid tracee.tracer status
     if let some (event, first) := (← ptrace.cloning.get).get? tid then
       ptrace.cloning.modify (·.erase tid)
       -- What the call gave is the child if it made one: on MIPS an error is a small number too, and isn't a new thread.
@@ -1309,7 +1438,7 @@ def save (ptrace : Ptrace) : IO ByteArray := do
   let out := putSorted (fun out (tid, call) => putPair (putNat out tid) call) out table.calls.toList
   let out := putSorted (fun out (tid, entry) => putPair (putNat out tid) entry) out table.entries.toList
   let out := putSorted putPair out table.skipping.toList
-  pure (putList putNat out table.reaping)
+  pure (putSorted putPair (putList putNat out table.reaping) table.sites.toList)
 
 open Wire in
 def load (ptrace : Ptrace) (emu : Emu) (data : ByteArray) : IO Unit := do
@@ -1340,11 +1469,12 @@ def load (ptrace : Ptrace) (emu : Emu) (data : ByteArray) : IO Unit := do
       .ok ((tid, entry), at_)) data at_
     let (skipping, at_) ← getList getPair data at_
     let (reaping, at_) ← getList getNat data at_
+    let (sites, at_) ← getList getPair data at_
     expectEnd data at_
     .ok { waiting := Std.HashMap.ofList waiting, tracees := Std.HashMap.ofList tracees, stops := Std.HashMap.ofList stops, continued, injected := Std.HashMap.ofList injected
           messages := Std.HashMap.ofList messages, untold, pending := Std.HashMap.ofList pending, exiting
           stepping := Std.HashMap.ofList stepping, calls := Std.HashMap.ofList calls
-          entries := Std.HashMap.ofList entries, skipping := Std.HashMap.ofList skipping, reaping }
+          entries := Std.HashMap.ofList entries, skipping := Std.HashMap.ofList skipping, reaping, sites := Std.HashMap.ofList sites }
   let table ← IO.ofExcept decoded
   -- The steps that were armed are those of the table, each with its hook, which isn't in the bytes.
   for (_, hook) in (← ptrace.stepHooks.get).toList do removeHook emu hook
@@ -1358,7 +1488,7 @@ def load (ptrace : Ptrace) (emu : Emu) (data : ByteArray) : IO Unit := do
 def make (architecture : Architecture) (signals : Signals) : IO Ptrace := do
   let ptrace : Ptrace := {
     architecture, signals, table := ← IO.mkRef {}, stepHooks := ← IO.mkRef {}, settle := ← IO.mkRef (fun _ => pure ())
-    changed := ← IO.mkRef true, resultOf := ← IO.mkRef id, cloning := ← IO.mkRef {}, screen := ← IO.mkRef fun _ _ _ _ => pure none }
+    changed := ← IO.mkRef true, resultOf := ← IO.mkRef id, cloning := ← IO.mkRef {}, screen := ← IO.mkRef fun _ _ _ _ => pure none, site := ← IO.mkRef 0 }
   ptrace.settle.set (settleWaits ptrace)
   pure ptrace
 
@@ -1374,7 +1504,7 @@ private def leaderTaken (ptrace : Ptrace) (emu : Emu) (former leader : Nat) : IO
       stops := moveThread table.stops former leader, injected := moveThread table.injected former leader
       messages := moveThread table.messages former leader, pending := moveThread table.pending former leader
       calls := moveThread table.calls former leader, entries := moveThread table.entries former leader
-      skipping := moveThread table.skipping former leader
+      skipping := moveThread table.skipping former leader, sites := moveThread table.sites former leader
       exiting := (table.exiting.filter (· != leader)).map fun tid => if tid == former then leader else tid }
   ptrace.cloning.modify (moveThread · former leader)
   if let some from_ := stepping then

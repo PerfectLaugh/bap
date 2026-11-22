@@ -7,17 +7,25 @@ structure Callgraph where
   graph : Graph.Graph Nat := {}
   functions : List Image.Symbol := []
 
+/-- The edge of a reference: a call, or a jump to the start of a function other than the one it is in, which is a call in its tail. `starts` says
+whether an address is the start of a function. -/
+def edge (index : Xrefs.Index) (starts : Nat → Bool) (xref : Xrefs.Xref) : Option (Nat × Nat) :=
+  match xref.kind with
+  | .call => (Xrefs.functionOf index xref.source).map fun caller => (caller.addr, xref.target)
+  | .jump =>
+    if starts xref.target then
+      (Xrefs.functionOf index xref.source).bind fun caller => if caller.addr = xref.target then none else some (caller.addr, xref.target)
+    else none
+  | _ => none
+
+/-- The functions and what each calls, a call in the tail, which is a jump to another function, as any other. -/
 def create (index : Xrefs.Index) : Callgraph := {
   graph := {
     nodes := (index.functions.map Image.Symbol.addr ++
       index.xrefs.filterMap fun xref => match xref.kind with
         | .call => some xref.target
         | _ => none).eraseDups
-    edges := (index.xrefs.filterMap fun xref =>
-      if xref.kind = .call then
-        (Xrefs.functionOf index xref.source).map fun caller => (caller.addr, xref.target)
-      else
-        none) |>.eraseDups
+    edges := (index.xrefs.filterMap (edge index fun address => index.functions.any (·.addr == address))).eraseDups
   }
   functions := index.functions
 }
@@ -371,25 +379,26 @@ private theorem components_checked {graph : Graph.Graph Nat} {labels : Std.HashM
     simp only [Option.getD_some]
     exact components_checked h
 
-/-- `create`, without comparing every pair of what it lists. -/
-private def createFast (index : Xrefs.Index) : Callgraph := {
-  graph := {
-    nodes := Graph.Fast.dedup (index.functions.map Image.Symbol.addr ++
-      index.xrefs.filterMap fun xref => match xref.kind with
-        | .call => some xref.target
-        | _ => none)
-    edges := Graph.Fast.dedup (index.xrefs.filterMap fun xref =>
-      if xref.kind = .call then
-        (Xrefs.functionOf index xref.source).map fun caller => (caller.addr, xref.target)
-      else
-        none)
-  }
-  functions := index.functions
-}
+/-- `create`, without comparing every pair of what it lists, the starts of the functions in a set. -/
+private def createFast (index : Xrefs.Index) : Callgraph :=
+  let starts : Std.HashSet Nat := Std.HashSet.ofList (index.functions.map Image.Symbol.addr)
+  { graph := {
+      nodes := Graph.Fast.dedup (index.functions.map Image.Symbol.addr ++
+        index.xrefs.filterMap fun xref => match xref.kind with
+          | .call => some xref.target
+          | _ => none)
+      edges := Graph.Fast.dedup (index.xrefs.filterMap (edge index starts.contains))
+    }
+    functions := index.functions }
 
 @[csimp] private theorem create_eq_fast : @create = @createFast := by
   funext index
-  simp only [create, createFast, Graph.Fast.dedup_eq]
+  have hstarts : (fun address => index.functions.any (·.addr == address)) =
+      (Std.HashSet.ofList (index.functions.map Image.Symbol.addr)).contains := by
+    funext address
+    rw [Std.HashSet.contains_ofList, Bool.eq_iff_iff]
+    simp only [List.any_eq_true, beq_iff_eq, List.contains_eq_mem, List.mem_map, decide_eq_true_eq]
+  simp only [create, createFast, Graph.Fast.dedup_eq, hstarts]
 
 def recursiveFunctions (callgraph : Callgraph) : List Nat :=
   let components := stronglyConnected callgraph

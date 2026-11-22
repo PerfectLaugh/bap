@@ -1,0 +1,11 @@
+tiny to float: 30
+least normal to float: 30
+least normal to double: 30
+2^-1000 and a bit to float: 30
+2^-140 to float: 0
+denormal to double: 30
+denormal to float: 30
+one to float: 0
+a third to double: 20
+a denormal from double: 2
+one from double: 0

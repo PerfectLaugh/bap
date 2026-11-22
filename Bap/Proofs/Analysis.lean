@@ -528,21 +528,49 @@ theorem callgraph_mem_nodes_iff (index : Bap.Analysis.Xrefs.Index) (node : Nat) 
   · rintro ⟨xref, hx, hk, ht⟩
     exact ⟨xref, hx, by simp [hk, ht]⟩
 
-/-- An edge exists exactly for a call reference, from the function that owns the call site. -/
+/-- An edge exists exactly for a call reference, or for a jump to the start of another function, which is a call in the tail,
+from the function that owns the site. -/
 theorem callgraph_mem_edges_iff (index : Bap.Analysis.Xrefs.Index) (caller callee : Nat) :
     (caller, callee) ∈ (create index).graph.edges ↔
-      ∃ xref ∈ index.xrefs, xref.kind = .call ∧ xref.target = callee ∧
+      ∃ xref ∈ index.xrefs, xref.target = callee ∧
+        (xref.kind = .call ∨ (xref.kind = .jump ∧ (∃ symbol ∈ index.functions, symbol.addr = callee) ∧ caller ≠ callee)) ∧
         ∃ owner, Bap.Analysis.Xrefs.functionOf index xref.source = some owner ∧ owner.addr = caller := by
   simp only [create, List.mem_eraseDups, List.mem_filterMap]
   constructor
   · rintro ⟨xref, hx, h⟩
-    by_cases hk : xref.kind = .call
-    · simp [hk] at h
+    cases hk : xref.kind with
+    | call =>
+      simp only [edge, hk, Option.map_eq_some_iff, Prod.mk.injEq] at h
       obtain ⟨owner, ho, h1, h2⟩ := h
-      exact ⟨xref, hx, hk, h2, owner, ho, h1⟩
-    · simp [hk] at h
-  · rintro ⟨xref, hx, hk, ht, owner, ho, ha⟩
-    exact ⟨xref, hx, by simp [hk, ho, ha, ht]⟩
+      exact ⟨xref, hx, h2, .inl hk, owner, ho, h1⟩
+    | jump =>
+      simp only [edge, hk] at h
+      split at h
+      · rename_i hstart
+        simp only [Option.bind_eq_some_iff] at h
+        obtain ⟨owner, ho, h⟩ := h
+        split at h
+        · simp at h
+        · rename_i hne
+          simp only [Option.some.injEq, Prod.mk.injEq] at h
+          obtain ⟨h1, h2⟩ := h
+          simp only [List.any_eq_true, beq_iff_eq] at hstart
+          refine ⟨xref, hx, h2, .inr ⟨hk, ?_, ?_⟩, owner, ho, h1⟩
+          · obtain ⟨symbol, hs, he⟩ := hstart
+            exact ⟨symbol, hs, he.trans h2⟩
+          · rw [← h1, ← h2]
+            exact hne
+      · simp at h
+    | load => simp [edge, hk] at h
+    | store => simp [edge, hk] at h
+  · rintro ⟨xref, hx, rfl, hkind, owner, ho, rfl⟩
+    refine ⟨xref, hx, ?_⟩
+    rcases hkind with hk | ⟨hk, ⟨symbol, hs, he⟩, hne⟩
+    · simp [edge, hk, ho]
+    · have hstart : (index.functions.any fun x => x.addr == xref.target) = true := by
+        simp only [List.any_eq_true, beq_iff_eq]
+        exact ⟨symbol, hs, he⟩
+      simp only [edge, hk, hstart, ↓reduceIte, ho, Option.bind_some, hne]
 
 theorem callgraph_nodes_nodup (index : Bap.Analysis.Xrefs.Index) :
     (create index).graph.nodes.Nodup := callgraph_eraseDups_nodup _
@@ -555,10 +583,12 @@ theorem callgraph_edge_endpoints {index : Bap.Analysis.Xrefs.Index} {caller call
     (h : (caller, callee) ∈ (create index).graph.edges) :
     caller ∈ (create index).graph.nodes ∧ callee ∈ (create index).graph.nodes ∧
       ∃ symbol ∈ index.functions, symbol.addr = caller := by
-  obtain ⟨xref, hx, hk, ht, owner, ho, ha⟩ := (callgraph_mem_edges_iff index caller callee).mp h
+  obtain ⟨xref, hx, ht, hkind, owner, ho, ha⟩ := (callgraph_mem_edges_iff index caller callee).mp h
   have hown := (Bap.Proofs.Analysis.xrefs_functionOf_sound ho).1
-  refine ⟨(callgraph_mem_nodes_iff index caller).mpr (.inl ⟨owner, hown, ha⟩),
-    (callgraph_mem_nodes_iff index callee).mpr (.inr ⟨xref, hx, hk, ht⟩), owner, hown, ha⟩
+  refine ⟨(callgraph_mem_nodes_iff index caller).mpr (.inl ⟨owner, hown, ha⟩), ?_, owner, hown, ha⟩
+  rcases hkind with hk | ⟨_, hstart, _⟩
+  · exact (callgraph_mem_nodes_iff index callee).mpr (.inr ⟨xref, hx, hk, ht⟩)
+  · exact (callgraph_mem_nodes_iff index callee).mpr (.inl hstart)
 
 /-- Reachability along edges from a set of roots that are graph nodes. -/
 inductive callgraph_Path (graph : Bap.Graph.Graph Nat) (roots : List Nat) : Nat → Prop where
@@ -731,7 +761,7 @@ end Callgraph
 
 section Strings
 open Bap.Analysis.Strings
-open_private Bap.Analysis.Strings in Bap.Analysis.Strings : printable finish scanAscii pairs decodePair scanUtf16
+open_private Bap.Analysis.Strings in Bap.Analysis.Strings : printable finish scanAscii pairs decodePair scanUtf16 disjoint
 
 /-- An ASCII result: long enough, and exactly the printable run at its address in `bytes`. -/
 def strings_AsciiLocated (minimum base : Nat) (bytes : List UInt8) (result : Nat × String) : Prop :=
@@ -923,12 +953,12 @@ theorem strings_scanUtf16_sound (minimum : Nat) (little : Bool) (base : Nat) (un
   have := strings_scanUtf16_located minimum little base [] [] units [] (by simp) (by simp)
   simpa using this
 
-/-- A UTF-16 result in raw bytes: each code unit sits at an even offset from the region start. -/
+/-- A UTF-16 result in raw bytes: its code units, one after the other, at its address, which is at any byte of the region. -/
 def strings_Utf16Located (minimum : Nat) (little : Bool) (base : Nat) (bytes : List UInt8)
     (result : Nat × String) : Prop :=
   minimum ≤ result.2.length ∧ ∃ (before : List UInt8) (run : List (UInt8 × UInt8)) (after : List UInt8),
     bytes = before ++ run.flatMap (fun unit => [unit.1, unit.2]) ++ after ∧
-    2 ∣ before.length ∧ result.1 = base + before.length ∧
+    result.1 = base + before.length ∧
     (∀ unit ∈ run, (strings_codeUnit little unit).2 = 0 ∧
       0x20 ≤ (strings_codeUnit little unit).1.toNat ∧ (strings_codeUnit little unit).1.toNat ≤ 0x7e) ∧
     result.2.toList = run.map fun unit => Char.ofNat (strings_codeUnit little unit).1.toNat
@@ -946,15 +976,58 @@ theorem strings_scanUtf16_bytes_sound (minimum : Nat) (little : Bool) (base : Na
     strings_scanUtf16_sound minimum little base (pairs bytes) r hr
   obtain ⟨tail, htail, _⟩ := strings_pairs_flatten bytes
   refine ⟨hmin, before.flatMap (fun unit => [unit.1, unit.2]), run,
-    after.flatMap (fun unit => [unit.1, unit.2]) ++ tail, ?_, ?_, ?_, ?_, htext⟩
+    after.flatMap (fun unit => [unit.1, unit.2]) ++ tail, ?_, ?_, ?_, htext⟩
   · conv => lhs; rw [htail, hunits]
     simp [List.flatMap_append]
-  · rw [strings_flatten_length]
-    exact ⟨_, rfl⟩
   · rw [strings_flatten_length, haddr]
   · intro unit hu
     obtain ⟨h0, hp⟩ := hall unit hu
     simpa [printable] using And.intro h0 hp
+
+/-- What is found of the bytes after the first `skip` of a region is found of the region. -/
+theorem strings_Utf16Located_drop {minimum : Nat} {little : Bool} {base skip : Nat} {bytes : List UInt8} {result : Nat × String}
+    (hskip : skip ≤ bytes.length) (h : strings_Utf16Located minimum little (base + skip) (bytes.drop skip) result) :
+    strings_Utf16Located minimum little base bytes result := by
+  obtain ⟨hmin, before, run, after, hbytes, haddr, hall, htext⟩ := h
+  refine ⟨hmin, bytes.take skip ++ before, run, after, ?_, ?_, hall, htext⟩
+  · conv => lhs; rw [← List.take_append_drop skip bytes, hbytes]
+    simp [List.append_assoc]
+  · rw [haddr, List.length_append, List.length_take, Nat.min_eq_left hskip]
+    omega
+
+/-- Of readings that share bytes one is kept: what is kept was read. -/
+theorem strings_disjoint_mem (kept rest : List StringRecord) (record : StringRecord) (h : record ∈ disjoint kept rest) :
+    record ∈ kept ∨ record ∈ rest := by
+  induction rest generalizing kept with
+  | nil =>
+    cases kept with
+    | nil => simp [disjoint] at h
+    | cons last kept =>
+      simp only [disjoint, List.mem_reverse] at h
+      exact .inl h
+  | cons head tail ih =>
+    cases kept with
+    | nil =>
+      simp only [disjoint] at h
+      rcases ih _ h with h | h
+      · simp only [List.mem_singleton] at h
+        exact .inr (h ▸ List.mem_cons_self)
+      · exact .inr (List.mem_cons_of_mem _ h)
+    | cons last kept =>
+      simp only [disjoint] at h
+      split at h
+      · rcases ih _ h with h | h
+        · rcases List.mem_cons.mp h with h | h
+          · split at h
+            · exact .inr (h ▸ List.mem_cons_self)
+            · exact .inl (h ▸ List.mem_cons_self)
+          · exact .inl (List.mem_cons_of_mem _ h)
+        · exact .inr (List.mem_cons_of_mem _ h)
+      · rcases ih _ h with h | h
+        · rcases List.mem_cons.mp h with h | h
+          · exact .inr (h ▸ List.mem_cons_self)
+          · exact .inl h
+        · exact .inr (List.mem_cons_of_mem _ h)
 
 /-- Soundness of whole-image string extraction: every record is long enough, printable, and made
 of exactly the bytes of one memory region at the record's address, in the record's encoding. -/
@@ -970,10 +1043,31 @@ theorem strings_strings_sound (image : Bap.Image.Image) (minimum : Nat) (record 
   simp only [strings, List.mem_flatMap, List.mem_append, List.mem_map] at h
   obtain ⟨entry, he, h⟩ := h
   refine ⟨entry, he, ?_⟩
-  rcases h with (⟨result, hr, rfl⟩ | ⟨result, hr, rfl⟩) | ⟨result, hr, rfl⟩
+  rcases h with ⟨result, hr, rfl⟩ | h
   · exact .inl ⟨rfl, strings_scanAscii_sound _ _ _ _ hr⟩
-  · exact .inr (.inl ⟨rfl, strings_scanUtf16_bytes_sound _ _ _ _ _ hr⟩)
-  · exact .inr (.inr ⟨rfl, strings_scanUtf16_bytes_sound _ _ _ _ _ hr⟩)
+  · have hm := strings_disjoint_mem _ _ _ h
+    simp only [List.not_mem_nil, false_or, List.mem_mergeSort, List.mem_flatMap, List.mem_cons, Prod.exists] at hm
+    obtain ⟨little, skip, hwhich, hm⟩ := hm
+    split at hm
+    · rename_i hskip
+      simp only [List.mem_map] at hm
+      obtain ⟨result, hr, rfl⟩ := hm
+      have hlocated := strings_Utf16Located_drop hskip (strings_scanUtf16_bytes_sound _ _ _ _ _ hr)
+      rcases hwhich with h | h | h | h | h
+      · simp only [Prod.mk.injEq] at h
+        obtain ⟨rfl, rfl⟩ := h
+        exact .inr (.inl ⟨rfl, hlocated⟩)
+      · simp only [Prod.mk.injEq] at h
+        obtain ⟨rfl, rfl⟩ := h
+        exact .inr (.inr ⟨by simp, hlocated⟩)
+      · simp only [Prod.mk.injEq] at h
+        obtain ⟨rfl, rfl⟩ := h
+        exact .inr (.inl ⟨rfl, hlocated⟩)
+      · simp only [Prod.mk.injEq] at h
+        obtain ⟨rfl, rfl⟩ := h
+        exact .inr (.inr ⟨by simp, hlocated⟩)
+      · cases h
+    · cases hm
 
 /-- Every extracted character is printable ASCII. -/
 theorem strings_char_printable {image : Bap.Image.Image} {minimum : Nat} {record : StringRecord}
@@ -986,8 +1080,8 @@ theorem strings_char_printable {image : Bap.Image.Image} {minimum : Nat} {record
     simp only [Char.ofNat, hvalid, dite_true]
     rfl
   obtain ⟨_, _, h⟩ := strings_strings_sound image minimum record h
-  rcases h with ⟨_, _, _, run, _, _, _, hall, htext⟩ | ⟨_, _, _, run, _, _, _, _, hall, htext⟩ |
-      ⟨_, _, _, run, _, _, _, _, hall, htext⟩
+  rcases h with ⟨_, _, _, run, _, _, _, hall, htext⟩ | ⟨_, _, _, run, _, _, _, hall, htext⟩ |
+      ⟨_, _, _, run, _, _, _, hall, htext⟩
   · simp only at htext
     rw [htext] at hc
     obtain ⟨byte, hb, rfl⟩ := List.mem_map.mp hc
@@ -9511,7 +9605,8 @@ theorem statemachine_mem_simplerCandidates {instructions : List Bap.Disasm.Insn}
     triple ∈ simplerCandidates instructions ↔
       ∃ index current next, instructions[index]? = some current ∧
         instructions[index + 1]? = some next ∧ directTarget next = some triple.2.2 ∧
-        (triple.1, triple.2.1) ∈ assignments current := by
+        (triple.1, triple.2.1) ∈ assignments current ∧
+        isCase (dispatchers instructions) current triple.1 triple.2.1 = true := by
   simp only [simplerCandidates, List.mem_flatMap, List.mem_range]
   constructor
   · rintro ⟨index, hi, hm⟩
@@ -9519,49 +9614,53 @@ theorem statemachine_mem_simplerCandidates {instructions : List Bap.Disasm.Insn}
     · rename_i current next h1 h2
       split at hm
       · rename_i target ht
-        simp only [List.mem_map] at hm
-        rcases hm with ⟨a, ha, rfl⟩
-        exact ⟨index, current, next, h1, h2, ht, ha⟩
+        simp only [List.mem_map, List.mem_filter] at hm
+        rcases hm with ⟨a, ⟨ha, hcase⟩, rfl⟩
+        exact ⟨index, current, next, h1, h2, ht, ha, hcase⟩
       · simp at hm
     · simp at hm
-  · rintro ⟨index, current, next, h1, h2, ht, ha⟩
+  · rintro ⟨index, current, next, h1, h2, ht, ha, hcase⟩
     refine ⟨index, ?_, ?_⟩
     · have := (List.getElem?_eq_some_iff.mp h2).1
       omega
-    · simp only [h1, h2, ht, List.mem_map]
-      exact ⟨_, ha, rfl⟩
+    · simp only [h1, h2, ht, List.mem_map, List.mem_filter]
+      exact ⟨_, ⟨ha, hcase⟩, rfl⟩
 
 theorem statemachine_analyzeWithState_stateVar (instructions : List Bap.Disasm.Insn) (var : Bap.Var) :
     (analyzeWithState instructions var).stateVar = some var := rfl
 
 /-- Every recovered case is backed by an assignment of the state variable immediately followed by
-an instruction whose direct target is the case target. -/
+an instruction whose direct target is the case target, and the assignment is one of the state of a dispatcher: of a constant
+that the variable is compared against, where a comparison of it comes after. -/
 theorem statemachine_analyzeWithState_evidence {instructions : List Bap.Disasm.Insn} {var : Bap.Var}
     {c : Case} (h : c ∈ (analyzeWithState instructions var).cases) :
     ∃ index current next, instructions[index]? = some current ∧
       instructions[index + 1]? = some next ∧ directTarget next = some c.target ∧
-      (var, c.value) ∈ assignments current := by
+      (var, c.value) ∈ assignments current ∧ isCase (dispatchers instructions) current var c.value = true := by
   simp only [analyzeWithState, List.mem_filterMap] at h
   rcases h with ⟨triple, ht, he⟩
   split at he
   · rename_i hv
     simp only [Option.some.injEq] at he
     subst he
-    rcases statemachine_mem_simplerCandidates.mp ht with ⟨index, current, next, h1, h2, h3, h4⟩
-    refine ⟨index, current, next, h1, h2, h3, ?_⟩
-    rw [← hv]
-    exact h4
+    rcases statemachine_mem_simplerCandidates.mp ht with ⟨index, current, next, h1, h2, h3, h4, h5⟩
+    refine ⟨index, current, next, h1, h2, h3, ?_, ?_⟩
+    · rw [← hv]
+      exact h4
+    · rw [← hv]
+      exact h5
   · simp at he
 
 /-- Conversely, every such adjacent pair produces a case. -/
 theorem statemachine_analyzeWithState_complete {instructions : List Bap.Disasm.Insn} {var : Bap.Var}
     {index value target : Nat} {current next : Bap.Disasm.Insn}
     (h1 : instructions[index]? = some current) (h2 : instructions[index + 1]? = some next)
-    (h3 : directTarget next = some target) (h4 : (var, value) ∈ assignments current) :
+    (h3 : directTarget next = some target) (h4 : (var, value) ∈ assignments current)
+    (h5 : isCase (dispatchers instructions) current var value = true) :
     (⟨value, target⟩ : Case) ∈ (analyzeWithState instructions var).cases := by
   simp only [analyzeWithState, List.mem_filterMap]
   refine ⟨(var, value, target), statemachine_mem_simplerCandidates.mpr
-    ⟨index, current, next, h1, h2, h3, h4⟩, by simp⟩
+    ⟨index, current, next, h1, h2, h3, h4, h5⟩, by simp⟩
 
 theorem statemachine_mem_assignments {insn : Bap.Disasm.Insn} {var : Bap.Var} {value : Nat}
     (h : (var, value) ∈ assignments insn) :
@@ -9750,16 +9849,17 @@ theorem statemachine_isFlattened_iff (result : Result) :
     isFlattened result = true ↔ result.complete = true ∧ 2 ≤ result.cases.length := by
   simp [isFlattened]
 
-/-- Whichever way the variable was picked, completeness rules out indirect jumps. -/
+/-- Whichever way the variable was picked, completeness is of the cases of two states or more, and rules out indirect jumps. -/
 theorem statemachine_analyzeWithState_complete_iff (instructions : List Bap.Disasm.Insn) (var : Bap.Var) :
     (analyzeWithState instructions var).complete = true ↔
-      2 ≤ (analyzeWithState instructions var).cases.length ∧
+      2 ≤ ((analyzeWithState instructions var).cases.map Case.value).eraseDups.length ∧
         ∀ insn ∈ instructions, insn.flow ≠ .indirectJump := by
   simp [analyzeWithState]
 
 theorem statemachine_analyze_complete_no_indirect {instructions : List Bap.Disasm.Insn}
     (h : (analyze instructions).complete = true) :
-    2 ≤ (analyze instructions).cases.length ∧ ∀ insn ∈ instructions, insn.flow ≠ .indirectJump := by
+    2 ≤ ((analyze instructions).cases.map Case.value).eraseDups.length ∧
+      ∀ insn ∈ instructions, insn.flow ≠ .indirectJump := by
   simp only [analyze] at h ⊢
   split at h
   · simp at h
@@ -10023,11 +10123,11 @@ theorem deflatten_recover_indirect_no_successor {entry : Nat} {instructions : Li
   · exact ⟨c, hc, ht⟩
   · exact absurd (hindirect insn hi hs) hf
 
-/-- `complete` recovery implies the machine had at least two cases and no indirect jump. -/
+/-- `complete` recovery implies the machine had cases of at least two states and no indirect jump. -/
 theorem deflatten_recover_complete_two_cases {entry : Nat} {instructions : List Bap.Disasm.Insn}
     {external : List Nat} {stateVar : Option Bap.Var}
     (h : (recover entry instructions external stateVar).complete = true) :
-    2 ≤ (recover entry instructions external stateVar).cases.length ∧
+    2 ≤ ((recover entry instructions external stateVar).cases.map Bap.Analysis.StateMachine.Case.value).eraseDups.length ∧
       ∀ insn ∈ instructions, insn.flow ≠ .indirectJump := by
   cases hm : (deflatten_machine instructions stateVar).stateVar with
   | none =>

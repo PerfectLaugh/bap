@@ -1,0 +1,27 @@
+not traced
+a directory opened with O_TRUNC: Is a directory
+a file opened with the access mode 3: 0
+write of it: Bad file descriptor
+fstat of it: 0
+a link to file/: Not a directory
+a link to dir/: 0
+what is under a link to dir/: 0
+a link opened with O_NOFOLLOW and O_DIRECTORY: Not a directory
+and with O_NOFOLLOW: Symbolic link loop
+mkdir in /proc/self: No such file or directory
+a file made in /proc/self: No such file or directory
+symlink in /proc/self: No such file or directory
+unlink of /proc/self/maps: Operation not permitted
+rmdir of /proc/self/fd: Operation not permitted
+unlink of what isn't in /proc/self: No such file or directory
+a watch: 1
+after nothing:
+getdents: 1
+after a read of the directory: 40000020 40000001
+getdents at its end: 0
+after a read at its end: 40000001
+after its close: 40000010
+after a read of a directory in it: 40000020 of inside 40000001 of inside 40000010 of inside
+after that one is removed: 40000200 of inside
+after it is moved: 800
+after it is removed: 400 8000

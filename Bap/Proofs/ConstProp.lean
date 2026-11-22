@@ -13,7 +13,10 @@ The steps, each of which needs the one before:
 4. `propagateAux_finishes`: its fuel is always enough, for any table of what to keep, as each change loses a constant.
 5. `restricted_eq`: the restricted solution is the unrestricted one, cut down to what is kept. Each is a solution of the
    other's equations, and the worklist finds the greatest.
-6. `propagateConstants_unrestricted`: what is cut is never read, so the rewrite is the same. -/
+6. `propagateConstants_unrestricted`: what is cut is never read, so the rewrite is the same.
+
+Both keep nothing at the end of a block that calls (`Blk.calls`, `exitOf`): that is of `propagateBlock` itself, and not of what
+`constReads` cuts. -/
 
 
 open Lean Elab Command in
@@ -737,9 +740,16 @@ private theorem stepC_mono {a b : ConstEnv} (hle : ConstLe a b) (hb : ConstTyped
     rw [ite_eq_right hv] at hg
     exact hle v c hg
 
-/-- The constants at the end of a block, given those at its entry, whatever `propagateBlock` is written as. -/
-private def exitOf (blk : Blk) (e : ConstEnv) : ConstEnv :=
+/-- The constants after the definitions of a block, given those at its entry. -/
+private def foldOf (blk : Blk) (e : ConstEnv) : ConstEnv :=
   blk.defs.foldl stepC (e.filter fun x => decide (x.1 ∉ blk.phis.map Phi.var))
+
+/-- The constants at the end of a block, given those at its entry, whatever `propagateBlock` is written as: none of a block that
+calls, which comes back with what isn't known. -/
+private def exitOf (blk : Blk) (e : ConstEnv) : ConstEnv :=
+  if blk.calls then [] else foldOf blk e
+
+private theorem constLe_nil (b : ConstEnv) : ConstLe [] b := fun _ _ h => by simp [Assoc.get] at h
 
 private theorem exit_eq (blk : Blk) (e : ConstEnv) : (propagateBlock blk e).2 = exitOf blk e := by
   rw [propagateExit_eq]
@@ -751,7 +761,7 @@ private theorem exit_eq (blk : Blk) (e : ConstEnv) : (propagateBlock blk e).2 = 
       rw [hnil]
       exact (List.filter_eq_self.2 (by simp)).symm
     · rfl
-  simp only [propagateExit, hf, exitOf, substConst_eq]
+  simp only [propagateExit, hf, exitOf, foldOf, substConst_eq]
 
 private theorem foldC_mono (defs : List Def) {a b : ConstEnv} (hle : ConstLe a b) (hb : ConstWF b) :
     ConstLe (defs.foldl stepC a) (defs.foldl stepC b) := by
@@ -771,15 +781,22 @@ private theorem ConstLe.filter_keys {a b : ConstEnv} (h : ConstLe a b) (p : Var 
     rw [ite_eq_right hp] at hg
     cases hg
 
-private theorem exitOf_mono (blk : Blk) {a b : ConstEnv} (hle : ConstLe a b) (hb : ConstWF b) : ConstLe (exitOf blk a) (exitOf blk b) :=
-  foldC_mono _ (hle.filter_keys fun k => decide (k ∉ blk.phis.map Phi.var)) (hb.filter _)
+private theorem exitOf_mono (blk : Blk) {a b : ConstEnv} (hle : ConstLe a b) (hb : ConstWF b) : ConstLe (exitOf blk a) (exitOf blk b) := by
+  unfold exitOf
+  split
+  · exact constLe_nil _
+  · exact foldC_mono _ (hle.filter_keys fun k => decide (k ∉ blk.phis.map Phi.var)) (hb.filter _)
 
 private theorem foldC_wf (defs : List Def) {a : ConstEnv} (h : ConstWF a) : ConstWF (defs.foldl stepC a) := by
   induction defs generalizing a with
   | nil => exact h
   | cons d ds ih => exact ih (constStep_wf h _ _)
 
-private theorem exitOf_wf (blk : Blk) {a : ConstEnv} (h : ConstWF a) : ConstWF (exitOf blk a) := foldC_wf _ (h.filter _)
+private theorem exitOf_wf (blk : Blk) {a : ConstEnv} (h : ConstWF a) : ConstWF (exitOf blk a) := by
+  unfold exitOf
+  split
+  · exact ConstWF.nil
+  · exact foldC_wf _ (h.filter _)
 
 /-- Which variables have constants, as a set: every table of the analysis is of these. -/
 def KeysIn (U : List Var) (e : ConstEnv) : Prop := ∀ v c, Assoc.get v e = some c → v ∈ U
@@ -803,6 +820,13 @@ private theorem KeysIn.filter_keys {U : List Var} {a : ConstEnv} (h : KeysIn U a
   split at hg
   · exact h v c hg
   · cases hg
+
+private theorem exitOf_keys {U : List Var} (blk : Blk) (hU : ∀ d ∈ blk.defs, d.var ∈ U) {a : ConstEnv} (h : KeysIn U a) :
+    KeysIn U (exitOf blk a) := by
+  unfold exitOf
+  split
+  · exact fun _ _ h => by simp [Assoc.get] at h
+  · exact foldC_keys _ hU (KeysIn.filter_keys h fun k => decide (k ∉ blk.phis.map Phi.var))
 
 /-- What the analysis says of a block's end. -/
 private def transfer (reads : List (Tid × List Var)) (blk : Blk) (e : ConstEnv) : ConstEnv :=
@@ -828,9 +852,8 @@ private theorem transfer_wf (reads : List (Tid × List Var)) (blk : Blk) {a : Co
 
 private theorem transfer_keys {U : List Var} (reads : List (Tid × List Var)) (blk : Blk) (hU : ∀ d ∈ blk.defs, d.var ∈ U) {a : ConstEnv}
     (h : KeysIn U a) : KeysIn U (transfer reads blk a) := by
-  simp only [transfer, keep_eq, exitOf]
-  exact KeysIn.filter_keys (foldC_keys _ hU (KeysIn.filter_keys h fun k => decide (k ∉ blk.phis.map Phi.var)))
-    fun k => decide (k ∈ (Assoc.get blk.tid reads).getD [])
+  simp only [transfer, keep_eq]
+  exact KeysIn.filter_keys (exitOf_keys blk hU h) fun k => decide (k ∈ (Assoc.get blk.tid reads).getD [])
 
 /-! ### What the blocks before say of a block's entry -/
 
@@ -1774,7 +1797,7 @@ private theorem block_local (blk : Blk) (out : List Var) {a b : ConstEnv} (h : �
     rw [e, e, get_filter_key (fun k => decide (k ∉ blk.phis.map Phi.var)) a v,
       get_filter_key (fun k => decide (k ∉ blk.phis.map Phi.var)) b v, h v hv]
   obtain ⟨h₁, h₂⟩ := defs_local (fun v => (∃ j ∈ blk.jmps, v ∈ j.freeVars) ∨ v ∈ out) blk.defs [] hentry
-  have hexit : ∀ x, exitOf blk x = (propFold blk x).2 := fun x => by
+  have hexit : ∀ x, exitOf blk x = if blk.calls then [] else (propFold blk x).2 := fun x => by
     rw [← exit_eq, propagateBlock_eq]
   constructor
   · rw [propagateBlock_eq, propagateBlock_eq]
@@ -1785,7 +1808,9 @@ private theorem block_local (blk : Blk) (out : List Var) {a b : ConstEnv} (h : �
     simp only [hj, show (propFold blk a).1 = (propFold blk b).1 from h₁]
   · intro v hv
     rw [hexit, hexit]
-    exact h₂ v (Or.inr hv)
+    split
+    · rfl
+    · exact h₂ v (Or.inr hv)
 
 /-! ### Keeping only what can be read -/
 
@@ -1877,7 +1902,7 @@ private theorem transfer_all (cfg : Cfg) {blk : Blk} (hm : blk ∈ cfg.blocks) {
     | none => rfl
     | some c =>
       have hk : KeysIn (varsOf cfg) (exitOf blk e) :=
-        foldC_keys _ (defs_in_vars cfg blk hm) (KeysIn.filter_keys he fun k => decide (k ∉ blk.phis.map Phi.var))
+        exitOf_keys blk (defs_in_vars cfg blk hm) he
       exact absurd (hk v c hg) hv
 
 private theorem entry_same_one {cfg : Cfg} {A B : ExitEnvs} (hA : AllWF A) (hB : AllWF B) (t : Tid) (v : Var)
