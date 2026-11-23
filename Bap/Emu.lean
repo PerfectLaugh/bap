@@ -61,7 +61,7 @@ structure Config where
   /-- How many steps after a write to code nothing is compiled, for code that writes itself all the time. -/
   jitCooldown : Nat := 0
   /-- Where an address that the guest gives is in memory, which on AArch64 ignores its top byte, as a kernel does of what a program
-  gives it once the program asks with `PR_SET_TAGGED_ADDR_CTRL`. -/
+  gives it once the program asks with `PR_SET_TAGGED_ADDR_CTRL`: see `taggedAddresses` and `userAddress`. -/
   untag : Nat → Nat := id
 
 /-- What `removeHook` takes to take a hook off. -/
@@ -394,6 +394,9 @@ structure Emu where
   intrinsicRaises : IO.Ref (Bil.Env → String → List Nat → Nat → List (Bap.Var × Bap.Value))
   /-- What the controls of the machine make of the operands and of the result of an intrinsic. -/
   intrinsicControls : IO.Ref (Bil.Env → String → (List Nat → List Nat) × (Nat → Nat))
+  /-- What a system call of the compatibility entry of x86-64, `int $0x80`, is by the numbers of the machine, from its number of i386;
+  none of one that the machine doesn't serve by that entry. -/
+  compatCall : IO.Ref (Nat → Option Nat)
   /-- The programs of the instructions that have such an intrinsic, each by the number that its `served:` special says. -/
   servedPrograms : IO.Ref (Std.HashMap Nat Bil.Program)
   /-- What wants to know of a new process: of the one that made it, and of it. -/
@@ -464,6 +467,9 @@ structure Emu where
   faultHandler : IO.Ref (Option (MemoryFault → IO Bool))
   /-- What hears that a process is over, with its status. -/
   processExited : IO.Ref (Option (Nat → Nat → IO Unit))
+  /-- What hears that a task is about to end, of its exit, of a signal or of a program that its process runs, while it is still in
+  the table as it was, with its memory: as what it holds for others, which the kernel lets go of for it, is still to be found. -/
+  taskExiting : IO.Ref (List (ThreadId → IO Unit))
   /-- Whether a hook runs in the middle of an instruction: of a system call, an intrinsic or an access. -/
   serving : IO.Ref Bool
   /-- Whether a fault has been recorded since the last rollback, which says why that one came. -/
@@ -580,6 +586,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     intrinsicName := ← IO.mkRef fun _ name => name
     intrinsicRaises := ← IO.mkRef fun _ _ _ _ => []
     intrinsicControls := ← IO.mkRef fun _ _ => (id, id)
+    compatCall := ← IO.mkRef fun _ => none
     servedPrograms := ← IO.mkRef {}
     processHooks := ← IO.mkRef []
     cloneHooks := ← IO.mkRef []
@@ -613,6 +620,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     futexKey := ← IO.mkRef none
     faultHandler := ← IO.mkRef none
     processExited := ← IO.mkRef none
+    taskExiting := ← IO.mkRef []
     faultFresh := ← IO.mkRef false
     stepNative := ← IO.mkRef none
     memorySwitched := ← IO.mkRef false
@@ -1888,9 +1896,30 @@ def invalidateCode (emu : Emu) (first last : Nat) : IO Unit := do
   for (_, worker) in ← emu.parallelWorkers.get do
     Primus.Lifted.invalidateCode worker first last
 
+/-- Whether the thread that runs has asked that the kernel take addresses with a tag from it, as `PR_SET_TAGGED_ADDR_CTRL` of Linux on
+AArch64 says with `PR_TAGGED_ADDR_ENABLE`, which is `TIF_TAGGED_ADDR` of the thread there: a bit of each thread, that what a thread
+makes has from it, and that a program starts without. -/
+def taggedAddresses : Bap.Var := ⟨"TAGGED_ADDR_CTRL", .imm 1, 0, false⟩
+
+/-- Whether the thread that runs has asked for addresses with a tag to be taken: `taggedAddresses`, which a thread that never had it
+set hasn't. -/
+def takesTaggedAddresses (emu : Emu) : IO Bool := do
+  match Bil.lookup (← emu.state.get).env taggedAddresses with
+  | .ok (.bits value) => pure (value.toNat % 2 == 1)
+  | _ => pure false
+
+/-- Where an address that a program gives to what isn't its own instructions, as to a system call, is in memory: as it is, unless it
+has a tag (`Config.untag` changes it) and the thread has asked for tags to be taken (`taggedAddresses`), when it is without the tag.
+An address with a tag of a thread that hasn't asked is as it is, where nothing is mapped, so that a call given it fails as Linux's
+`access_ok` has it fail, with `EFAULT`. The instructions of a program ignore the top byte whatever it asked: they don't come here. -/
+def userAddress (emu : Emu) (address : Nat) : IO Nat := do
+  let plain := emu.config.untag address
+  if plain == address then return address
+  pure (if ← takesTaggedAddresses emu then plain else address)
+
 /-- Bytes of memory as a program may read them: what isn't mapped or readable is an error. -/
 def read (emu : Emu) (address size : Nat) : IO ByteArray := do
-  let address := emu.config.untag address
+  let address ← userAddress emu address
   -- An absurd size fails right here, instead of allocating before it fails. What fails says where, and how much before it could be
   -- read, for a read across a hole, which `peek` reads as zeros.
   let regions ← regionsTouching emu address size
@@ -1963,7 +1992,7 @@ private def writableCode (regions : List Region) (address upper : Nat) : IO (Lis
 /-- Writes bytes as a program may, in writable regions, which it may go across, and drops what was compiled of code there. Nothing
 is written unless all of it can be. What hears of changes hears of it. -/
 def write (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
-  let address := emu.config.untag address
+  let address ← userAddress emu address
   if data.size > 0 then
     let code ← writableCode (← regionsTouching emu address data.size) address (address + data.size)
     let state ← emu.state.get
@@ -2198,6 +2227,8 @@ def overlay (emu : Emu) (region : Region) : IO Unit := do
   for changed in ← emu.memoryChanged.get do changed region.address region.data.size false
   setRegions emu (region :: mapped.filter fun current => current.address != region.address)
 
+/-- A piece of a region, with its bytes, which of a large region are looked for only where the host has pages of it (`Jit.slice`): a
+piece of a mapping that was never written takes no longer the larger the mapping is. -/
 private def regionPiece (region : Region) (first last : Nat) (protection : Primus.Protection) : List Region :=
   if first < last then
     [⟨first, Jit.slice region.data (first - region.address) (last - region.address), protection⟩]
@@ -2221,13 +2252,24 @@ def protectRegions (regions : List Region) (address size : Nat) (protection : Pr
     some (regions.flatMap (splitRegion address (address + size) protection))
   else none
 
+/-- That the host has the addresses for the pieces of the regions that `lower`..`upper` splits, which are theirs again while the pieces
+are made: of a region that a program reserved most of the addresses there are for, it may not, which is an error rather than the
+end of the process. -/
+private def checkSplit (touched : List Region) (lower upper : Nat) : IO Unit := do
+  for region in touched do
+    let finish := region.address + region.data.size
+    if region.data.size ≥ 2 ^ 32 && (region.address < lower || upper < finish) then
+      if (Jit.fillChecked region.data.size []).isNone then
+        throw <| IO.userError s!"the host has no room to split a mapping of {region.data.size} bytes"
+
 /-- Changes what may be done with mapped memory, as `mprotect`, splitting regions where it has to. -/
 def protect (emu : Emu) (address size : Nat) (protection : Primus.Protection) : IO Unit := do
   if size = 0 then pure ()
   else
+    let touched ← regionsTouching emu address size
+    checkSplit touched address (address + size)
     match protectRegions (← emu.regions.get) address size protection with
     | some regions =>
-      let touched ← regionsTouching emu address size
       replaceRegions emu regions touched (touched.flatMap (splitRegion address (address + size) protection))
       -- A compiled range would keep running code that lost its execute permission: what was executable of the range, and nothing
       -- else, as a page made writable again and again for a stub or the GOT had nothing compiled to lose.
@@ -2263,6 +2305,7 @@ def unmap (emu : Emu) (address size : Nat) : IO Unit := do
       else regionPiece region region.address (min address finish) region.protection ++
         regionPiece region (max upper region.address) finish region.protection
     let touched ← regionsTouching emu address size
+    checkSplit touched address upper
     replaceRegions emu ((← emu.regions.get).flatMap pieces) touched (touched.flatMap pieces)
     if let some top := ← emu.mappingTop.get then
       if upper > top then emu.mappingTop.set none
@@ -2462,15 +2505,23 @@ def setThreadReg (emu : Emu) (id : ThreadId) (var : Bap.Var) (value : Bap.Value)
       if context.id == id then { context with state := { env := Bil.bind context.state.env var value } }
       else context
 
-private def dispatchSyscall (emu : Emu) : IO (Option Nat) := serialize emu <| do
+private def dispatchSyscall (emu : Emu) (compat : Bool := false) : IO (Option Nat) := serialize emu <| do
   let hooks ← emu.syscallHooks.get
   if hooks.isEmpty then
     pure none
   else
     let width ← wordWidth emu
-    let (numberRegister, argumentRegisters, resultRegister) := syscallRegisters emu.config.syscallAbi
+    -- By `int $0x80` of x86-64, the registers are those of i386, of 32 bits each, as `do_int80_emulation` takes them, and the number
+    -- is of its table.
+    let (numberRegister, argumentRegisters, resultRegister) :=
+      if compat then ("RAX", ["RBX", "RCX", "RDX", "RSI", "RDI", "RBP"], "RAX") else syscallRegisters emu.config.syscallAbi
     let number ← readWord emu numberRegister
     let args ← argumentRegisters.mapM (readWord emu)
+    let (number, args) ← if compat then
+        match (← emu.compatCall.get) (number % 2 ^ 32) with
+        | some native => pure (native, args.map (· % 2 ^ 32))
+        | none => throw <| IO.userError s!"the system call {number % 2 ^ 32} of i386, by int $0x80 of a process of 64 bits, isn't modelled"
+      else pure (number, args)
     -- On o32, what is past the four registers of arguments is on the stack of the caller, at 16, as many as `fadvise64` has.
     let args ← if emu.config.syscallAbi == .mips && width == 32 then do
         let stack ← readWord emu "R29"
@@ -2591,13 +2642,20 @@ private def fetch (emu : Emu) (address : Nat) : IO ByteArray := do
     recordFault emu .fetch address
     throw error
 
-/-- Whether a program calls an intrinsic of floating point, or `virtual-counter`, whose hook sets what the rest of the instruction reads,
-to this depth of branches: those run as served programs, which go on after an intrinsic. -/
+/-- The intrinsics with a value that aren't of floating point and that an intrinsic server serves all the same: the rounds of AES-NI
+and the inverse of GFNI. Those of BF16, whose names say `bfloat`, are of floating point too. -/
+private def servedByName : List String :=
+  ["aesenc", "aesenclast", "aesdec", "aesdeclast", "aesimc", "aeskeygenassist", "gf2p8affineinvqb"]
+
+/-- Whether a program calls an intrinsic of floating point, one of those of PowerPC that the server of a machine has, which are named
+`powerpc-`, or `virtual-counter`, whose hook sets what the rest of the instruction reads, to this depth of branches: those run as
+served programs, which go on after an intrinsic. -/
 private def namesFloat : Nat → List Bil.Stmt → Bool
   | 0, _ => false
   | fuel + 1, program => program.any fun stmt =>
     match stmt with
-    | .special name => (name.splitOn "ieee754").length > 1 || name == "virtual-counter"
+    | .special name => (name.splitOn "ieee754").length > 1 || (name.splitOn "_bfloat_").length > 1 || name == "virtual-counter" ||
+        servedByName.contains name || name.startsWith "powerpc-"
     | .ifElse _ yes no => namesFloat fuel yes || namesFloat fuel no
     | .while _ body => namesFloat fuel body
     | _ => false
@@ -2628,7 +2686,18 @@ private def lift (emu : Emu) (thumb : Bool) (address : Nat) (code : ByteArray) :
   let disassembler ← disassemblerFor emu thumb address
   let decoded ← disassembler.decode address code
   match decoded with
-  | .error error => throw <| IO.userError s!"Emu instruction at {address}: {error}"
+  | .error error =>
+    -- Of fewer bytes than an instruction may have, which is all that `fetchSpan` found to execute from there: an instruction that
+    -- goes on past them, as the same bytes with more after them say, faults at the first byte that can't be fetched, as the
+    -- instruction at that byte would, rather than being one that doesn't decode.
+    let window := decodeWindow emu.config
+    if code.size < window then
+      let padded := code ++ ByteArray.mk (Array.replicate (window - code.size) 0)
+      if let .ok insn ← disassembler.decode address padded then
+        if insn.size > code.size then
+          recordFault emu .fetch (address + code.size)
+          throw <| IO.userError s!"non-executable Emu instruction address {address + code.size}"
+    throw <| IO.userError s!"Emu instruction at {address}: {error}"
   | .ok insn =>
     -- An instruction that an intrinsic server serves runs as its program, which `dispatchSpecial` is sent to.
     let served : Bool ← match ← emu.intrinsicServer.get with
@@ -2962,6 +3031,9 @@ private def delayFor (emu : Emu) (address : Nat) : IO DelayKind := do
       else if release6 && mipsCompact word then pure .forbidden
       else pure .none
 
+/-- The variable that `intrinsicRaises` changes to say that what an intrinsic raised is an exception that isn't masked. -/
+def floatTrap : String := "intrinsic:trap"
+
 /-- Runs a program in the state of the emulator, where lifted code can't go past an intrinsic. A loop has to end in `fuel`
 turns. What it writes to memory is in the state, and native memory follows it after. -/
 private def runServed (emu : Emu) (serve : String → List Nat → Option (Nat × Nat)) (program : Bil.Program) : IO Unit := do
@@ -2971,10 +3043,19 @@ private def runServed (emu : Emu) (serve : String → List Nat → Option (Nat �
     | .error error => throw <| IO.userError error
   let wroteMemory ← IO.mkRef false
   let operands ← IO.mkRef ([] : List Nat)
+  -- What a hook of an intrinsic sent the thread elsewhere of, as a signal does, or stopped it of: the rest of the instruction
+  -- isn't run, as it isn't of one that is no served program, which ends at its intrinsic.
+  let abandoned ← IO.mkRef false
+  let start ← emu.pc.get
+  let hooked (name : String) : IO Bool := do
+    let handled ← dispatchIntrinsic emu name
+    if handled && ((← emu.pc.get) != start || (← emu.stopped.get) || (← emu.redirect.get).isSome) then abandoned.set true
+    pure handled
   let rec go : Nat → Bil.Program → IO Unit
     | 0, _ => throw <| IO.userError "a served program ran out of fuel"
     | _ + 1, [] => pure ()
     | fuel + 1, stmt :: rest => do
+      if ← abandoned.get then return
       match stmt with
       | .move var value =>
         let value ← evaluate value
@@ -2994,12 +3075,19 @@ private def runServed (emu : Emu) (serve : String → List Nat → Option (Nat �
           let bits := finished bits
           operands.set []
           let raises ← emu.intrinsicRaises.get
+          let updates := raises (← emu.state.get).env named inputs bits
           emu.state.modify fun state =>
             let env := Bil.bind state.env ⟨"intrinsic:y0", .imm width, 0, false⟩ (.bits (BitVec.ofNat width bits))
-            { env := (raises env named inputs bits).foldl (fun env update => Bil.bind env update.1 update.2) env }
+            { env := updates.foldl (fun env update => Bil.bind env update.1 update.2) env }
+          -- What it raises may be an exception that isn't masked, which `intrinsicRaises` says by a variable of this name among
+          -- what it changes: the hooks of `float-exception` raise it, and the rest of the instruction isn't run.
+          if updates.any fun update => update.1.name.str == floatTrap then
+            if !(← dispatchIntrinsic emu "float-exception") then
+              throw <| IO.userError s!"nothing serves the exception of floating point that {name} raises"
+            abandoned.set true
         | none =>
           operands.set []
-          if !(← dispatchIntrinsic emu name) then
+          if !(← hooked name) then
             throw <| IO.userError s!"nothing serves the intrinsic {name}"
       | .ifElse condition yes no =>
         match Value.asBits (← evaluate condition) with
@@ -3033,6 +3121,10 @@ private def dispatchSpecial (emu : Emu) (name : String) : IO Bool := do
     pure true
   else if name == "syscall" || name == "svc" || (name == "interrupt" && emu.config.syscallAbi == .x86_32) then
     match ← dispatchSyscall emu with
+    | some _ => pure true
+    | none => dispatchIntrinsic emu name
+  else if name == "syscall-compat" && emu.config.syscallAbi == .x86_64 then
+    match ← dispatchSyscall emu true with
     | some _ => pure true
     | none => dispatchIntrinsic emu name
   else
@@ -3639,6 +3731,46 @@ def withUndefined (endian : Endian) (undefined : Nat → Bool) (disassembler : D
           { address := address, size := 4, asm := ".inst 0x" ++ hex, flow := .normal, bil := [.special "undefined-instruction"] }
         pure (.ok insn) }
 
+/-- A decoder of ARM, or of Thumb if `thumb`, that has what it can't decode but that `Target.LLVMLift.armUndefined` says the architecture
+has UNDEFINED where a program runs as an instruction that raises the exception of undefined instructions, as `withUndefined` has a
+word of the other architectures: of 4 bytes of ARM, and of Thumb of the 2 bytes of its first halfword, which is all that is asked. -/
+def withUndefinedArm (thumb : Bool) (disassembler : Disasm.Disassembler) (base : Nat) : Disasm.Disassembler :=
+  { disassembler with
+    decode := fun address data => do
+      match ← disassembler.decode address data with
+      | .ok insn => pure (.ok insn)
+      | .error error =>
+        let offset := address - base
+        let size := if thumb then 2 else 4
+        if address < base || data.size < offset + size then return .error error
+        let word := (List.range size).foldl (fun word index => word + data[offset + index]!.toNat * 256 ^ index) 0
+        if !Target.LLVMLift.armUndefined thumb word then return .error error
+        let hex := String.mk (Nat.toDigits 16 word)
+        let insn : Disasm.Insn :=
+          { address := address, size := size, asm := (if thumb then ".inst.n 0x" else ".inst 0x") ++ hex, flow := .normal,
+            bil := [.special "undefined-instruction"] }
+        pure (.ok insn) }
+
+/-- A decoder that has a word of 4 bytes that it can't decode, but that `defined` has an instruction of at its address, as that
+instruction: one that the architecture has and that the decoder of LLVM doesn't. What the decoder is of what it decodes, and what is
+proved of it, is as it was. -/
+def withDefined (endian : Endian) (defined : Nat → Nat → Option (IO Disasm.Insn)) (disassembler : Disasm.Disassembler) (base : Nat) :
+    Disasm.Disassembler :=
+  { disassembler with
+    decode := fun address data => do
+      match ← disassembler.decode address data with
+      | .ok insn => pure (.ok insn)
+      | .error error =>
+        let offset := address - base
+        if address < base || data.size < offset + 4 then return .error error
+        let bytes := (List.range 4).map fun index => data[offset + index]!.toNat
+        let word := (match endian with | .big => bytes | .little => bytes.reverse).foldl (fun word byte => word * 256 + byte) 0
+        match defined address word with
+        | none => pure (.error error)
+        | some lift =>
+          try pure (.ok (← lift))
+          catch failure => pure (.error (toString failure)) }
+
 /-- What is at `address` compiled now, rather than as it runs (`Config.compileAtLoad`). -/
 def compileAhead (emu : Emu) (address : Nat) : IO Unit := do
   let thumb := isThumb (← emu.state.get)
@@ -3656,8 +3788,8 @@ private def loaded (emu : Emu) (entry : Nat) : IO Emu := do
 /-- The decoders at each base for RISC-V 64, which all share their semantics. -/
 def riscv64Decoders : IO (Nat → IO Disasm.Disassembler) := do
   let environment ← Target.LLVMLift.riscvEnvironment
-  pure fun base => pure
-    { name := "riscv64-llvm-primus", decode := decodeAt (Target.LLVMLift.decodeRISCVWith environment) base }
+  pure fun base => pure <| withUndefined .little (Target.LLVMLift.riscvUndefined 64)
+    { name := "riscv64-llvm-primus", decode := decodeAt (Target.LLVMLift.decodeRISCVWith environment) base } base
 
 /-- An emulator of RISC-V 64 with `code` at `base`, that starts at `entry`. `adjust` changes its configuration. -/
 def riscv64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
@@ -3675,8 +3807,8 @@ def riscv64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config :=
 /-- An emulator of RISC-V 32, as `riscv64`. -/
 def riscv32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config := id) : IO Emu := do
   let environment ← Target.LLVMLift.riscv32Environment
-  let decoders (base : Nat) : IO Disasm.Disassembler := pure
-    { name := "riscv32-llvm-primus", decode := decodeAt (Target.LLVMLift.decodeRISCV32With environment) base }
+  let decoders (base : Nat) : IO Disasm.Disassembler := pure <| withUndefined .little (Target.LLVMLift.riscvUndefined 32)
+    { name := "riscv32-llvm-primus", decode := decodeAt (Target.LLVMLift.decodeRISCV32With environment) base } base
   let disassembler ← decoders base
   let config : Config := {
     disassembler
@@ -3689,8 +3821,10 @@ def riscv32 (code : ByteArray) (base entry : Nat) (adjust : Config → Config :=
 
 /-- An emulator of a variant of PowerPC, as `riscv64`. -/
 def powerpc (code : ByteArray) (base entry : Nat) (variant : Target.LLVMLift.PowerPCVariant) (adjust : Config → Config := id) : IO Emu := do
+  let environment ← Target.LLVMLift.powerpcEnvironmentOf variant
   let decoders (base : Nat) : IO Disasm.Disassembler := do
-    pure (withUndefined variant.endian Target.LLVMLift.powerpcUndefined (← Target.PowerPC.disassembler base variant) base)
+    pure (withUndefined variant.endian Target.LLVMLift.powerpcUndefined
+      (withDefined variant.endian (Target.LLVMLift.powerpcDefined variant environment) (← Target.PowerPC.disassembler base variant) base) base)
   let disassembler ← decoders base
   let config : Config := {
     disassembler
@@ -3704,11 +3838,12 @@ def powerpc (code : ByteArray) (base entry : Nat) (variant : Target.LLVMLift.Pow
 
 /-- ARM and Thumb, of which it starts in Thumb if `thumb`. -/
 def arm32 (code : ByteArray) (base entry : Nat) (thumb : Bool := false) (adjust : Config → Config := id) : IO Emu := do
-  let disassembler ← Target.ARM32.disassembler base
+  let arm (base : Nat) : IO Disasm.Disassembler := do pure (withUndefinedArm false (← Target.ARM32.disassembler base) base)
+  let disassembler ← arm base
   let config : Config := {
     disassembler
-    disassemblerAt := some (fun base => Target.ARM32.disassembler base)
-    thumbAt := some (fun base => Target.Thumb.disassembler base)
+    disassemblerAt := some arm
+    thumbAt := some (fun base => do pure (withUndefinedArm true (← Target.Thumb.disassembler base) base))
     memory := ⟨"mem", .mem 32 8, 0, false⟩
     endian := .little
     syscallAbi := .arm
@@ -3759,11 +3894,12 @@ def aarch64 (code : ByteArray) (base entry : Nat) (adjust : Config → Config :=
 
 private def mipsOf (variant : Target.LLVMLift.MipsVariant) (code : ByteArray) (base entry : Nat) (adjust : Config → Config) : IO Emu := do
   let environment ← Target.LLVMLift.mipsEnvironmentOf variant
-  let decoders (base : Nat) : IO Disasm.Disassembler := pure <| withUndefined variant.endian (Target.LLVMLift.mipsUndefined variant) {
-    name := if variant.bits == 64 then "mips64-llvm-primus" else "mips-llvm-primus"
-    decode := decodeAt (Target.LLVMLift.decodeMIPSOf variant environment) base
-    hasDelaySlot := Target.LLVMLift.mipsHasDelaySlotOf variant
-    annulsSlot := Target.LLVMLift.mipsAnnulsSlot } base
+  let decoders (base : Nat) : IO Disasm.Disassembler := pure <| withUndefined variant.endian (Target.LLVMLift.mipsUndefined variant)
+    (withDefined variant.endian (Target.LLVMLift.mipsDefined variant environment) {
+      name := if variant.bits == 64 then "mips64-llvm-primus" else "mips-llvm-primus"
+      decode := decodeAt (Target.LLVMLift.decodeMIPSOf variant environment) base
+      hasDelaySlot := Target.LLVMLift.mipsHasDelaySlotOf variant
+      annulsSlot := Target.LLVMLift.mipsAnnulsSlot } base) base
   let disassembler ← decoders base
   let config : Config := {
     disassembler

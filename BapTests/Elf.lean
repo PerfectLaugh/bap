@@ -1209,8 +1209,81 @@ private def runUntrusted : IO Unit := do
   let told := Project.Project.pltEntries hugeImage
   assertTrue "a PLT of a size past its region has what is there" (told.take plain.length == plain && told.length ≤ stripped.size / 24)
 
+/-- The halves of MIPS that wait for their `R_MIPS_LO16` are had by their symbols: each `R_MIPS_HI16` is resolved with the next
+`R_MIPS_LO16` of its symbol, whatever is between them, and those that none follows at the end, with nothing for the low half. A
+`R_MIPS_LO16` costs what it resolves, not all that is pending: 100000 `R_MIPS_HI16` of one symbol before 100000 `R_MIPS_LO16` of
+another are 10^10 steps of going through them all for each, a minute of them, and are done at once. Only the time says so: it
+is given 20 s. -/
+def runPendingHalves : IO Unit := do
+  let text (words : Nat) : ElfLinker.Section := ⟨".text", 1, ElfLinker.shfAlloc + ElfLinker.shfExecinstr, 0, 4 * words, 16⟩
+  let word (value : Nat) : List UInt8 := (List.range 4).map fun index => UInt8.ofNat (value >>> (8 * index))
+  let symbols : Array ElfLinker.Sym := #[⟨"", 0, false, 0, 0, 0, 0, 0⟩, ⟨"a", 1, false, 0x17ffc, 0, 1, 1, 0⟩, ⟨"b", 1, false, 0x2fff0, 0, 1, 1, 0⟩]
+  let lui := 0x3c020000
+  let addiu := 0x24420000
+  -- `lui %hi(a + 0x10008)`, `lui %hi(b + 0x20)`, `addiu %lo(b + 0x20)`, `addiu %lo(a + 0x10008)`, and a `lui %hi(b)` that nothing follows
+  let paired : ElfLinker.Input :=
+    { machine := ElfLinker.emMips, width := 32, little := true, base := 0x400000
+      data := ByteArray.mk ((word (lui + 1) ++ word lui ++ word (addiu + 0x20) ++ word (addiu + 8) ++ word lui).toArray)
+      sections := #[⟨"", 0, 0, 0, 0, 0⟩, text 5], symbols
+      relocations := [⟨1, 0, 5, 1, 0, false⟩, ⟨1, 4, 5, 2, 0, false⟩, ⟨1, 8, 6, 2, 0, false⟩, ⟨1, 12, 6, 1, 0, false⟩, ⟨1, 16, 5, 2, 0, false⟩] }
+  let output := ElfLinker.link paired
+  let base := (output.sectionAddrs[1]?).join.getD 0
+  let a := base + 0x17ffc + 0x10008
+  let b := base + 0x2fff0 + 0x20
+  assertEqual "MIPS: each R_MIPS_HI16 is of the next R_MIPS_LO16 of its symbol, and of nothing if none follows"
+    [lui + (a + 0x8000) / 0x10000 % 0x10000, lui + (b + 0x8000) / 0x10000 % 0x10000, addiu + b % 0x10000, addiu + a % 0x10000,
+      lui + (base + 0x2fff0 + 0x8000) / 0x10000 % 0x10000]
+    ((List.range 5).map fun index => ElfLinker.readNat output.memory true (4 * index) 4)
+  assertEqual "MIPS: and nothing is said of them" ([] : List String) output.warnings
+  let count := 100000
+  let many : ElfLinker.Input :=
+    { paired with
+      data := (List.range count).foldl (fun bytes _ => bytes ++ ByteArray.mk (word addiu).toArray)
+        ((List.range count).foldl (fun bytes _ => bytes ++ ByteArray.mk (word lui).toArray) ByteArray.empty)
+      sections := #[⟨"", 0, 0, 0, 0, 0⟩, text (2 * count)]
+      relocations := (List.range count).map (fun index => ⟨1, 4 * index, 5, 1, 0, false⟩) ++
+        (List.range count).map fun index => ⟨1, 4 * (count + index), 6, 2, 0, false⟩ }
+  let started ← IO.monoMsNow
+  let output := ElfLinker.link many
+  let base := (output.sectionAddrs[1]?).join.getD 0
+  assertEqual "MIPS: many R_MIPS_HI16 of a symbol before as many R_MIPS_LO16 of another are all done"
+    [lui + (base + 0x17ffc + 0x8000) / 0x10000 % 0x10000, lui + (base + 0x17ffc + 0x8000) / 0x10000 % 0x10000,
+      addiu + (base + 0x2fff0) % 0x10000, addiu + (base + 0x2fff0) % 0x10000]
+    ([0, count - 1, count, 2 * count - 1].map fun index => ElfLinker.readNat output.memory true (4 * index) 4)
+  let elapsed := (← IO.monoMsNow) - started
+  assertTrue s!"MIPS: in the time of what they are, not of their product: {elapsed} ms" (elapsed < 20000)
+
+/-- The names of the symbols of a file take no more than `namesLimit`, each as often as a symbol has it, and each ends in its
+string table: of 64 symbols that each name a string of 64 KiB, 4 MiB of names of a file of 67 KiB, the file has none, as of a
+symbol table that it doesn't have; 8 are read; and a name that goes on past its table isn't one. -/
+def runNames : IO Unit := do
+  let length := 2 ^ 16
+  let file (count : Nat) (tableSize : Nat := length + 2) (kind : Nat := 2) : ByteArray :=
+    let le (size value : Nat) : ByteArray := appendNat ByteArray.empty value size
+    let symbolsAt := 64 + 3 * 64
+    let stringsAt := symbolsAt + 24 * count
+    let header := ByteArray.mk #[0x7f, 0x45, 0x4c, 0x46, 2, 1, 1] ++ le 9 0 ++ le 2 kind ++ le 2 62 ++ le 4 1 ++ le 8 0x1000 ++ le 8 0 ++
+      le 8 64 ++ le 4 0 ++ le 2 64 ++ le 2 56 ++ le 2 0 ++ le 2 64 ++ le 2 3 ++ le 2 2
+    let sectionHeader (kind offset size link align entry : Nat) : ByteArray :=
+      le 4 0 ++ le 4 kind ++ le 8 0 ++ le 8 0 ++ le 8 offset ++ le 8 size ++ le 4 link ++ le 4 0 ++ le 8 align ++ le 8 entry
+    let symbol := le 4 1 ++ le 1 0x12 ++ le 1 0 ++ le 2 1 ++ le 8 0x1000 ++ le 8 0
+    let symbols := (List.range count).foldl (fun bytes _ => bytes ++ symbol)
+      (header ++ sectionHeader 0 0 0 0 0 0 ++ sectionHeader 2 symbolsAt (24 * count) 2 8 24 ++ sectionHeader 3 stringsAt tableSize 0 1 0)
+    symbols ++ ByteArray.mk #[0] ++ ByteArray.mk (Array.replicate length 0x41) ++ ByteArray.mk #[0]
+  let names (data : ByteArray) : Option (List Nat) := (Elf.decode data).toOption.map (·.symbols.map (·.name.length))
+  assertEqual "ELF symbols whose names are 8 times a string of 64 KiB are read" (some (List.replicate 8 length)) (names (file 8))
+  assertEqual "ELF symbols whose names take more than the file is given are none" (some []) (names (file 64))
+  assertEqual "an ELF symbol name that doesn't end in its string table is none" (some []) (names (file 8 100))
+  -- of a relocatable file, which the linker has the symbols of
+  assertEqual "ELF symbols of a relocatable file whose names are 8 times a string of 64 KiB are read" (some (List.replicate 8 length))
+    (names (file 8 (kind := 1)))
+  assertEqual "ELF symbols of a relocatable file whose names take more than the file is given are none" (some [])
+    (names (file 64 (kind := 1)))
+
 def run : IO Unit := do
   runUntrusted
+  runNames
+  runPendingHalves
   runOpd
   -- Two LOAD entries, each of 3 GiB of zeros, which is more than a host gives all together.
   let twoHuge := ofHex "7f454c4602010100000000000000000002003e00010000000000400000000000400000000000000000000000000000000000000040003800020040000000000001000000050000000000000000000000000040000000000000004000000000000000000000000000000000c000000000001000000000000001000000050000000000000000000000000040000200000000004000000000000000000000000000000000c0000000000010000000000000"

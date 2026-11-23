@@ -2,6 +2,7 @@ import Lean
 import Bap.Image.Loader
 import Bap.Image.Coff
 import Bap.Proofs.Core
+import Bap.Proofs.IO
 
 namespace Bap.Proofs.Image
 
@@ -2614,7 +2615,7 @@ theorem mips_hi16_pending {env : Env} {site : Site} {state : LinkState}
     (ht : site.rel.typ = 5 ∨ (site.rel.typ = 9 ∧ site.sym.bind = stbLocal)) (he : site.rel.isExplicit = false)
     (hb : inSection site 0 4 state.memory.size = true) :
     (mips env site).run state = .ok (some []) { state with mipsPending :=
-      (site, readNat state.memory env.little (site.off + 0) 4 &&& 0xffff) :: state.mipsPending } := by
+      (state.mipsPending.push (site, readNat state.memory env.little (site.off + 0) 4 &&& 0xffff)) } := by
   rcases ht with ht | ⟨ht, hl⟩
   · link_run [mips, ht, he, hb, modify, modifyGet, MonadStateOf.modifyGet, EStateM.modifyGet]
     try rfl
@@ -3127,22 +3128,17 @@ theorem frame_mipsFlush {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) (lo :
   unfold mipsFlush
   refine Frame.get_bind fun state hp => ?_
   dsimp only
-  generalize hpart : state.mipsPending.partition (fun entry => entry.1.rel.symbol == symbol) = parts
-  obtain ⟨matched, rest⟩ := parts
-  have hboth : (∀ entry ∈ matched, entry ∈ state.mipsPending) ∧ ∀ entry ∈ rest, entry ∈ state.mipsPending := by
-    rw [List.partition_eq_filter_filter] at hpart
-    simp only [Prod.mk.injEq] at hpart
-    rw [← hpart.1, ← hpart.2]
-    exact ⟨fun _ h => (List.mem_filter.mp h).1, fun _ h => (List.mem_filter.mp h).1⟩
-  have hloop : Frame P (SiteIn P) (forIn matched.reverse PUnit.unit
+  have hloop : Frame P (SiteIn P) (forIn (state.mipsPending.ofSymbol symbol).reverse PUnit.unit
       fun entry _ => do
         mipsApplyHi env entry.1 ((entry.2 : Int) * 65536 + lo)
         pure (ForInStep.yield PUnit.unit)) := by
     apply Frame.forIn
     intro entry hentry c
-    exact Frame.bind (frame_mipsApplyHi hg (hp entry (hboth.1 entry (List.mem_reverse.mp hentry))) _) fun _ => Frame.pure _
-  have hset : ∀ entry ∈ ({ state with mipsPending := rest } : LinkState).mipsPending, SiteIn P entry.1 :=
-    fun entry hentry => hp entry (hboth.2 entry hentry)
+    exact Frame.bind (frame_mipsApplyHi hg (hp entry (Pending.mem_ofSymbol.mp (List.mem_reverse.mp hentry)).1) _) fun _ =>
+      Frame.pure _
+  have hset : ∀ entry ∈ ({ state with mipsPending := state.mipsPending.without symbol } : LinkState).mipsPending,
+      SiteIn P entry.1 :=
+    fun entry hentry => hp entry (Pending.mem_without.mp hentry).1
   exact (Frame.bind hloop fun _ => Frame.pure _) _ hset
 
 theorem frame_mipsCompound {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) (site : Site) : Frame P S (mipsCompound env site) := by
@@ -3151,9 +3147,9 @@ theorem frame_mipsCompound {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) (s
   frame_auto
 
 theorem frame_pending {site : Site} (hs : SiteIn P site) (stored : Nat) :
-    Frame P (SiteIn P) (modify fun state : LinkState => { state with mipsPending := (site, stored) :: state.mipsPending } : LinkM PUnit) :=
+    Frame P (SiteIn P) (modify fun state : LinkState => { state with mipsPending := state.mipsPending.push (site, stored) } : LinkM PUnit) :=
   Frame.modify (fun _ hp entry hentry => by
-    rcases List.mem_cons.mp hentry with rfl | hentry
+    rcases Pending.mem_push.mp hentry with rfl | hentry
     · exact hs
     · exact hp _ hentry) (fun _ => rfl)
 
@@ -3412,7 +3408,8 @@ theorem link_keeps_bytes (input : Input) {o : Nat} (ho : o < input.data.size)
     (hout : ∀ rel ∈ input.relocations, ∀ sec, input.sections[rel.target]? = some sec → ¬ (sec.off ≤ o ∧ o < sec.off + sec.size)) :
     (link input).memory.get! o = input.data.get! o := by
   obtain ⟨tables, rfl, hg, _, _, _, _, _, hmem, _⟩ := link_relocate input
-  obtain ⟨_, _, hkeep⟩ := relocate_frame tables { memory := tables.input.data } (by simp)
+  obtain ⟨_, _, hkeep⟩ := relocate_frame tables { memory := tables.input.data }
+    (fun entry he => absurd he (Pending.not_mem_empty entry))
   rw [hmem]
   apply hkeep o ho
   rintro (h | ⟨rel, hrel, sec, hsec, h1, h2⟩)
@@ -3422,7 +3419,8 @@ theorem link_keeps_bytes (input : Input) {o : Nat} (ho : o < input.data.size)
 /-- A link only adds to the bytes of the input. -/
 theorem link_memory_size (input : Input) : input.data.size ≤ (link input).memory.size := by
   obtain ⟨tables, rfl, _, _, _, _, _, _, hmem, _⟩ := link_relocate input
-  obtain ⟨_, hs, _⟩ := relocate_frame tables { memory := tables.input.data } (by simp)
+  obtain ⟨_, hs, _⟩ := relocate_frame tables { memory := tables.input.data }
+    (fun entry he => absurd he (Pending.not_mem_empty entry))
   rw [hmem]
   exact hs
 
@@ -3693,7 +3691,7 @@ theorem inSection_mono {site : Site} {at' n small large : Nat} (h : inSection si
 it isn't a hypothesis of `mips_lo16_resolves`. -/
 theorem mipsFlush_ok (env : Env) (lo : Int) (symbol : Nat) {state : LinkState} (h : PendingOk state) :
     ∃ after, mipsFlush env lo symbol state = .ok () after ∧ state.memory.size ≤ after.memory.size ∧
-      after.mipsPending = state.mipsPending.filter fun entry => !(entry.1.rel.symbol == symbol) := by
+      after.mipsPending = state.mipsPending.without symbol := by
   have key : ∀ (list : List (Site × Nat)) (st : LinkState), (∀ entry ∈ list, inSection entry.1 0 4 st.memory.size = true) →
       ∃ after, (forIn list PUnit.unit fun entry _ => do
           mipsApplyHi env entry.1 ((entry.2 : Int) * 65536 + lo)
@@ -3711,19 +3709,13 @@ theorem mipsFlush_ok (env : Env) (lo : Int) (symbol : Nat) {state : LinkState} (
       have hs : (do mipsApplyHi env entry.1 ((entry.2 : Int) * 65536 + lo); pure (ForInStep.yield PUnit.unit) : LinkM _) st =
           .ok (ForInStep.yield PUnit.unit) mid := bind_ok hm
       exact (bind_ok hs).trans ha
-  have hrest : state.mipsPending.partition (fun entry => entry.1.rel.symbol == symbol) =
-      (state.mipsPending.filter fun entry => entry.1.rel.symbol == symbol,
-        state.mipsPending.filter fun entry => !(entry.1.rel.symbol == symbol)) := by
-    rw [List.partition_eq_filter_filter]
-    rfl
-  obtain ⟨after, ha, h1, h2⟩ := key (state.mipsPending.filter fun entry => entry.1.rel.symbol == symbol).reverse
-    { state with mipsPending := state.mipsPending.filter fun entry => !(entry.1.rel.symbol == symbol) } (fun e he =>
-      h e (List.mem_filter.mp (List.mem_reverse.mp he)).1)
+  obtain ⟨after, ha, h1, h2⟩ := key (state.mipsPending.ofSymbol symbol).reverse
+    { state with mipsPending := state.mipsPending.without symbol } (fun e he =>
+      h e (Pending.mem_ofSymbol.mp (List.mem_reverse.mp he)).1)
   refine ⟨after, ?_, h1, h2⟩
   unfold mipsFlush
   have step : ∀ f : LinkState → LinkM Unit, ((get : LinkM LinkState) >>= f) state = f state state := fun _ => rfl
   rw [step]
-  simp only [hrest]
   exact Eq.trans rfl ((bind_ok ha).trans rfl)
 
 /-- **`R_MIPS_LO16`**: its place is in bounds and the pending sites are, so what `mips_lo16` assumed holds. It first resolves
@@ -3731,7 +3723,7 @@ the pending halves of its symbol, then stores `S + A`, and for `_gp_disp` the `G
 theorem mips_lo16_resolves {env : Env} {site : Site} {state : LinkState} (ht : site.rel.typ = 6)
     (hb : inSection site 0 4 state.memory.size = true) (hp : PendingOk state) :
     ∃ after, mipsFlush env (mipsA16 env site state) site.rel.symbol state = .ok () after ∧
-      after.mipsPending = (state.mipsPending.filter fun entry => !(entry.1.rel.symbol == site.rel.symbol)) ∧
+      after.mipsPending = state.mipsPending.without site.rel.symbol ∧
       (mips env site).run state = .ok (some [stAt env site 0 4 (setLo16 (readNat state.memory env.little (site.off + 0) 4)
         ((if site.sym.name == "_gp_disp" then mipsGp env - site.p + 4 else site.s) + mipsA16 env site state))]) after := by
   obtain ⟨after, hf, _, hpend⟩ := mipsFlush_ok env (mipsA16 env site state) site.rel.symbol hp
@@ -3740,9 +3732,9 @@ theorem mips_lo16_resolves {env : Env} {site : Site} {state : LinkState} (ht : s
 /-- What is deferred stays good: the place of `R_MIPS_HI16` was read before it was deferred. -/
 theorem PendingOk.push {state : LinkState} (h : PendingOk state) {site : Site} (stored : Nat)
     (hb : inSection site 0 4 state.memory.size = true) :
-    PendingOk { state with mipsPending := (site, stored) :: state.mipsPending } := by
+    PendingOk { state with mipsPending := state.mipsPending.push (site, stored) } := by
   intro entry he
-  rcases List.mem_cons.mp he with rfl | he
+  rcases Pending.mem_push.mp he with rfl | he
   · exact hb
   · exact h entry he
 
@@ -3934,7 +3926,7 @@ end LinkerLaws
 namespace ElfParser
 
 open_private Bap.Image.Elf Bap.Image.Elf word parseHeader parseProgramHeader parseSections parseSegments
-  offsetOf tagValue sleb128 sleb128.loop codeAddress parseSymbol relativeType irelativeType symbolRelocationKind
+  offsetOf tagValue sleb128 sleb128.loop codeAddress stringsEnd parseSymbol relativeType irelativeType symbolRelocationKind
   isMips64el decodeRelocatable linkInput rawRelocations sectionRelocations relocatesMemory
   AndroidGroup AndroidGroup.is64 AndroidGroup.rela AndroidGroup.byOffset AndroidGroup.offsetDelta AndroidState AndroidState.mk AndroidState.cursor AndroidState.offset
   AndroidState.addend AndroidState.result
@@ -4608,6 +4600,7 @@ theorem parseSymbol_layout {data : ByteArray} {header : Elf.Header} {strings : E
       word data header.endian header.is64 (offset + if header.is64 then 8 else 4) = .ok value ∧
       symbol.addr = codeAddress header.machine (info &&& 0xf) value ∧
       symbol.isFunction = decide (info &&& 0xf = 2) ∧
+      IO.Reader.cstringIn data (strings.offset + nameOffset) (stringsEnd data strings) = .ok symbol.name ∧
       IO.Reader.cstring data (strings.offset + nameOffset) = .ok symbol.name := by
   simp only [parseSymbol, bind_ok_iff] at h
   rcases h with ⟨nameOffset, h1, info, h2, size, h3, value, h4, h⟩
@@ -4617,7 +4610,7 @@ theorem parseSymbol_layout {data : ByteArray} {header : Elf.Header} {strings : E
   simp only [bind_ok_iff] at h
   rcases h with ⟨name, h5, h⟩
   cases h
-  exact ⟨nameOffset, info, value, h1, h0, h2, h3, h4, rfl, rfl, h5⟩
+  exact ⟨nameOffset, info, value, h1, h0, h2, h3, h4, rfl, rfl, h5, Bap.Proofs.IO.cstring_of_cstringIn h5⟩
 
 /-- A symbol keeps the Thumb state of an ARM function: bit 0 of its value, which its address doesn't have. -/
 theorem parseSymbol_thumb {data : ByteArray} {header : Elf.Header} {strings : Elf.SectionHeader} {offset : Nat}
@@ -5731,18 +5724,18 @@ theorem parseSections_ok {data : ByteArray} {header : Header} {sections : List S
 
 /-- Auxiliary records are skipped: symbols only accumulate, by at most the declared number. -/
 theorem parseSymbols_ok {data : ByteArray} {header : Header} {sections : List Section} :
-    ∀ {fuel index remaining : Nat} {symbols result : Array Symbol}, remaining ≤ fuel →
-      parseSymbols data header sections index remaining symbols = .ok result →
+    ∀ {fuel used index remaining : Nat} {symbols result : Array Symbol}, remaining ≤ fuel →
+      parseSymbols data header sections used index remaining symbols = .ok result →
       ∃ added, result.toList = symbols.toList ++ added ∧ added.length ≤ remaining
-  | _, index, 0, symbols, result, _, h => by
+  | _, _, index, 0, symbols, result, _, h => by
     rw [parseSymbols] at h
     cases h
     exact ⟨[], by simp, by simp⟩
-  | 0, _, _ + 1, _, _, hf, _ => by omega
-  | fuel + 1, index, n + 1, symbols, result, hf, h => by
+  | 0, _, _, _ + 1, _, _, hf, _ => by omega
+  | fuel + 1, used, index, n + 1, symbols, result, hf, h => by
     rw [parseSymbols] at h
     simp only [bind_ok_iff] at h
-    rcases h with ⟨symbol, _, aux, _, h⟩
+    rcases h with ⟨symbol, _, used', _, aux, _, h⟩
     by_cases ha : aux > n
     · rw [ite_eq_left ha] at h; cases h
     rw [ite_eq_right ha] at h
@@ -5911,18 +5904,18 @@ theorem parseSection_uninitialized_reads_zero {data : ByteArray} {header : Heade
   exact hl.readByte_zero (by rw [hz hf]; omega) hi
 
 theorem symbols_ok {data : ByteArray} {header : Header} {sections : List Section} :
-    ∀ {fuel index remaining : Nat} {symbols result : Array (Nat × Symbol)}, remaining ≤ fuel →
-      parseSymbols data header sections index remaining symbols = .ok result →
+    ∀ {fuel used index remaining : Nat} {symbols result : Array (Nat × Symbol)}, remaining ≤ fuel →
+      parseSymbols data header sections used index remaining symbols = .ok result →
       ∃ added, result.toList = symbols.toList ++ added ∧ added.length ≤ remaining ∧ ∀ entry ∈ added, index ≤ entry.1
-  | _, index, 0, symbols, result, _, h => by
+  | _, _, index, 0, symbols, result, _, h => by
     rw [parseSymbols] at h
     cases h
     exact ⟨[], by simp, by simp, by simp⟩
-  | 0, _, _ + 1, _, _, hf, _ => by omega
-  | fuel + 1, index, n + 1, symbols, result, hf, h => by
+  | 0, _, _, _ + 1, _, _, hf, _ => by omega
+  | fuel + 1, used, index, n + 1, symbols, result, hf, h => by
     rw [parseSymbols] at h
     simp only [bind_ok_iff] at h
-    rcases h with ⟨symbol, _, aux, _, h⟩
+    rcases h with ⟨symbol, _, used', _, aux, _, h⟩
     by_cases ha : aux > n
     · rw [ite_eq_left ha] at h; cases h
     rw [ite_eq_right ha] at h
@@ -6060,8 +6053,8 @@ theorem relocationKind_numbers :
 
 /-- A successful relocation writes what `relocationValue` computes over the bytes at the place. -/
 theorem applyRelocation_ok {data : ByteArray} {header : Header} {sections : List Section}
-    {symbols : List (Nat × Symbol)} {object : ObjectSection} {region out : MemRegion} {index : Nat}
-    (h : applyRelocation data header sections symbols object region index = .ok out) :
+    {find : Nat → Option (Nat × Symbol)} {object : ObjectSection} {region out : MemRegion} {index : Nat}
+    (h : applyRelocation data header sections find object region index = .ok out) :
     out.addr = region.addr ∧ out.size = region.size ∧
       ∃ rva number kind, ∃ symbol : Symbol, ∃ sectionNumber sectionAddr addend,
         IO.Reader.u16 data .little (ObjectSection.relocationOffset object + index * 10 + 8) = .ok number ∧
@@ -6103,21 +6096,22 @@ set_option maxRecDepth 100000 in
 theorem rel32_call_next_instruction :
     let object := ObjectSection.mk ⟨".text", 0, 0, 5, 0, 0⟩ ⟨".text", 0, 5, true, false, true⟩
       ⟨0, ByteArray.mk #[0xe8, 0, 0, 0, 0], true, false, true⟩ 0 1
-    (applyRelocation rel32Input (Header.mk 0x8664 1 0 10 1 0) [] [(0, ⟨"f", 5, 0, true, false, false⟩)] object
+    (applyRelocation rel32Input (Header.mk 0x8664 1 0 10 1 0) []
+      (fun index => [(0, (⟨"f", 5, 0, true, false, false⟩ : Symbol))].find? fun entry => entry.1 = index) object
       (ObjectSection.region object) 0).toOption.map (fun region => (region.data.get! 1).toNat) = some 0 := by
   rfl
 
 /-- Relocating a section keeps its metadata, the region's address and size, and adds at most an error a relocation. -/
 theorem applyRelocations_frame {data : ByteArray} {header : Header} {sections : List Section}
-    {symbols : List (Nat × Symbol)} (object : ObjectSection) :
-    let (out, errors) := applyRelocations data header sections symbols object
+    {find : Nat → Option (Nat × Symbol)} (object : ObjectSection) :
+    let (out, errors) := applyRelocations data header sections find object
     ObjectSection.segment out = ObjectSection.segment object ∧ ObjectSection.info out = ObjectSection.info object ∧
       (ObjectSection.region out).addr = (ObjectSection.region object).addr ∧
       (ObjectSection.region out).size = (ObjectSection.region object).size ∧
       errors.length ≤ ObjectSection.relocationCount object := by
   have fold : ∀ (indices : List Nat) (region : MemRegion) (errors : List String),
       let result := indices.foldl (init := (region, errors)) fun x index =>
-        match applyRelocation data header sections symbols object x.1 index with
+        match applyRelocation data header sections find object x.1 index with
         | .ok next => (next, x.2)
         | .error error => (x.1, error :: x.2)
       result.1.addr = region.addr ∧ result.1.size = region.size ∧ result.2.length ≤ errors.length + indices.length := by
@@ -6127,7 +6121,7 @@ theorem applyRelocations_frame {data : ByteArray} {header : Header} {sections : 
     | cons index rest ih =>
       intro region errors
       simp only [List.foldl_cons]
-      cases hr : applyRelocation data header sections symbols object region index with
+      cases hr : applyRelocation data header sections find object region index with
       | ok next =>
         have ⟨a1, s1, _⟩ := applyRelocation_ok hr
         have ⟨a2, s2, l2⟩ := ih next errors
@@ -6360,7 +6354,7 @@ theorem decodeReport_ok {data : ByteArray} {image : Image} {errors : List String
         image.memory.entries = (pairs.map Prod.snd).reverse.map (fun region => (region, ())) ∧
         ∀ pair ∈ pairs, pair.1.addr = pair.2.addr ∧ pair.1.size = pair.2.size := by
   unfold Coff.decodeReport at h
-  by_cases hz : exceeds data (Coff.regionsSize data) = true
+  by_cases hz : (exceeds data (Coff.regionsSize data) || Coff.sectionNamesExceed data) = true
   · simp [hz] at h; cases h
   rw [Bool.not_eq_true] at hz
   simp only [hz, Bool.false_eq_true, ite_false, bind_ok_iff] at h
@@ -6380,7 +6374,8 @@ theorem decodeReport_ok {data : ByteArray} {image : Image} {errors : List String
     simp only [List.length_range] at hl
     rw [placeObjects_length, hl]
   cases h
-  generalize (placeUndefined data header ((architecture (Header.machine header)).snd / 8) (fun x => x == 0) _ _ _).fst = symbols
+  generalize Coff.symbolFinder (Coff.symbolTable
+    (placeUndefined data header ((architecture (Header.machine header)).snd / 8) (fun x => x == 0) _ _ _).fst) = find
   generalize hplacedList : placeObjects 0 parsed = placed at hplaced hlength ⊢
   have hzero : ∀ a b c d, ∀ pair ∈ zeroRegion "%common" a b true ++ zeroRegion "EXTERNAL" c d false,
       pair.1.addr = pair.2.addr ∧ pair.1.size = pair.2.size := by
@@ -6403,8 +6398,8 @@ theorem decodeReport_ok {data : ByteArray} {image : Image} {errors : List String
     split
     · rename_i _
       have hf := applyRelocations_frame (data := data) (header := header)
-        (sections := List.map (fun object => ObjectSection.info object) placed) (symbols := symbols) source
-      rcases hrel : applyRelocations data header (List.map (fun object => ObjectSection.info object) placed) symbols source
+        (sections := List.map (fun object => ObjectSection.info object) placed) (find := find) source
+      rcases hrel : applyRelocations data header (List.map (fun object => ObjectSection.info object) placed) find source
         with ⟨out, errors'⟩
       rw [hrel] at hf
       have ⟨f1, _, f3, f4, _⟩ := hf

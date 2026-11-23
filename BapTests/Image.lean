@@ -8,6 +8,19 @@ open Bap.Image
 private def bytes : ByteArray := ByteArray.mk #[0x7f, 0x45, 0x4c, 0x46]
 private def small : ByteArray := ByteArray.mk #[1, 2, 3, 4]
 
+/-- A run of text costs its length, not its square: a megabyte without a byte that isn't printable is one string of all of it, of
+ASCII and of UTF-16, which adding each character at the end of a list didn't get to the end of. -/
+def longStrings : IO Unit := do
+  let size := 2 ^ 20
+  let ascii := Analysis.Strings.strings (Raw.load (ByteArray.mk (Array.replicate size 0x41)) 0x1000 .little)
+  assertEqual "string scanner reads a megabyte of text as one string" [(0x1000, size, Analysis.Strings.Encoding.ascii)]
+    (ascii.map fun record => (record.address, record.text.length, record.encoding))
+  let units : ByteArray := (List.range (size / 2)).foldl (init := ByteArray.emptyWithCapacity size) fun bytes _ =>
+    (bytes.push 0x41).push 0
+  let wide := Analysis.Strings.strings (Raw.load units 0x2000 .little)
+  assertEqual "string scanner reads a megabyte of UTF-16 as one string" [(0x2000, size / 2, Analysis.Strings.Encoding.utf16le)]
+    (wide.map fun record => (record.address, record.text.length, record.encoding))
+
 def run : IO Unit := do
   match IO.Reader.read small .little 0 2 with
   | .ok value => assertEqual "little-endian integer reader" 0x0201 value
@@ -76,6 +89,7 @@ def run : IO Unit := do
   assertEqual "string scanner finds the strings of UTF-16 of both byte orders beside each other"
     [⟨0x2000, "abcd", Analysis.Strings.Encoding.utf16le⟩, ⟨0x200b, "wxyz", Analysis.Strings.Encoding.utf16be⟩]
     (wide (ByteArray.mk #[0x61, 0, 0x62, 0, 0x63, 0, 0x64, 0, 1, 1, 1, 0, 0x77, 0, 0x78, 0, 0x79, 0, 0x7a, 1]))
+  longStrings
   let signature ← match Analysis.Signatures.create "prologue"
     (ByteArray.mk #[0x55, 0x48, 0x89]) (ByteArray.mk #[0xff, 0xff, 0x00]) with
     | .ok signature => pure signature

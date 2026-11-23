@@ -891,6 +891,9 @@
 (defun PLDrs (_ _ _) (empty))
 (defun PLIi12 (_ _) (empty))
 (defun PLIrs (_ _ _) (empty))
+;; the preload for a write, of the multiprocessing extensions
+(defun PLDWi12 (_ _) (empty))
+(defun PLDWrs (_ _ _) (empty))
 (defun CLREX () (set EXCLUSIVE_MONITOR 0))
 ;; the hint to a debugger, which has no architectural effect
 (defun DBG (_ _ _) (empty))
@@ -900,6 +903,28 @@
 (defun BKPT (imm) (intrinsic 'breakpoint imm :aborts))
 (defun UDF (_) (intrinsic 'undefined-instruction :aborts))
 (defun TRAP () (intrinsic 'undefined-instruction :aborts))
+
+;; What is UNDEFINED in the user mode, or UNPREDICTABLE there with that
+;; as what the processors do: the call of the secure monitor, and the
+;; return from an exception and the store of its return state, which are
+;; of the modes that have an SPSR.
+(defun SMC (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun RFEDA (_) (intrinsic 'undefined-instruction :aborts))
+(defun RFEDA_UPD (_) (intrinsic 'undefined-instruction :aborts))
+(defun RFEDB (_) (intrinsic 'undefined-instruction :aborts))
+(defun RFEDB_UPD (_) (intrinsic 'undefined-instruction :aborts))
+(defun RFEIA (_) (intrinsic 'undefined-instruction :aborts))
+(defun RFEIA_UPD (_) (intrinsic 'undefined-instruction :aborts))
+(defun RFEIB (_) (intrinsic 'undefined-instruction :aborts))
+(defun RFEIB_UPD (_) (intrinsic 'undefined-instruction :aborts))
+(defun SRSDA (_) (intrinsic 'undefined-instruction :aborts))
+(defun SRSDA_UPD (_) (intrinsic 'undefined-instruction :aborts))
+(defun SRSDB (_) (intrinsic 'undefined-instruction :aborts))
+(defun SRSDB_UPD (_) (intrinsic 'undefined-instruction :aborts))
+(defun SRSIA (_) (intrinsic 'undefined-instruction :aborts))
+(defun SRSIA_UPD (_) (intrinsic 'undefined-instruction :aborts))
+(defun SRSIB (_) (intrinsic 'undefined-instruction :aborts))
+(defun SRSIB_UPD (_) (intrinsic 'undefined-instruction :aborts))
 
 ;; The data is little-endian in this model, so SETEND LE has no effect.
 ;; The state of SETEND BE can't be represented, and it doesn't lift.

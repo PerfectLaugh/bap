@@ -441,13 +441,10 @@
 (defun STTRHi (rt rn off) (st-h rt (+ rn off)))
 (defun STTRBi (rt rn off) (st-b rt (+ rn off)))
 
-;; The loads that authenticate their base: the authentication isn't
-;; modeled, see aarch64-special.lisp, so it succeeds and the base is the
-;; address. The offset is of 10 bits, scaled by 8.
+;; The loads that authenticate their base are UNDEFINED, as the processor
+;; doesn't have the pointer authentication, see aarch64-special.lisp.
 
-(defun LDRAAindexed (rt rn off) (ld-x rt (+ rn (lshift off 3))))
-(defun LDRABindexed (rt rn off) (ld-x rt (+ rn (lshift off 3))))
-(defun LDRAAwriteback (wb rt rn off)
-  (let ((a (+ rn (lshift off 3)))) (ld-x rt a) (set$ wb a)))
-(defun LDRABwriteback (wb rt rn off)
-  (let ((a (+ rn (lshift off 3)))) (ld-x rt a) (set$ wb a)))
+(defun LDRAAindexed (_ _ _) (a64-no-pauth))
+(defun LDRABindexed (_ _ _) (a64-no-pauth))
+(defun LDRAAwriteback (_ _ _ _) (a64-no-pauth))
+(defun LDRABwriteback (_ _ _ _) (a64-no-pauth))

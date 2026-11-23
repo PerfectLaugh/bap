@@ -157,12 +157,15 @@
     (exec-addr (+ (logand (t2pc) (lnot 3)) off))))
 
 (defun tBLXr (pre _ rm)
-  "blx rm; A7-216"
+  "blx rm; A7-216. Of the pc it is UNPREDICTABLE, which is taken as
+   UNDEFINED, one of what the architecture lets it be"
   (when (condition-holds pre)
-    (let ((dst rm))
-      (thumb-link 2)
-      (set ISET (cast-low 1 dst))
-      (exec-addr (logand dst (lnot 1))))))
+    (if (is-pc rm)
+        (intrinsic 'undefined-instruction :aborts)
+      (let ((dst rm))
+        (thumb-link 2)
+        (set ISET (cast-low 1 dst))
+        (exec-addr (logand dst (lnot 1)))))))
 
 (defun tBX (rm pre _)
   "bx rm; A7-250"

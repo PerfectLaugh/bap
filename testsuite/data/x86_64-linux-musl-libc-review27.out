@@ -1,0 +1,248 @@
+by int80
+seg 00000033002b0000
+seg 00000000
+mm 0000000000000000
+fscale 1 2^31 7fff:8000000000000000 sw=0228
+fscale 1 1e10 7fff:8000000000000000 sw=0228
+fscale 1 -1e10 0000:0000000000000000 sw=0030
+fscale 1 inf 7fff:8000000000000000 sw=0000
+fscale 1 -inf 0000:0000000000000000 sw=0000
+fscale 0 inf ffff:c000000000000000 sw=0001
+fscale inf -inf ffff:c000000000000000 sw=0001
+fscale inf inf ffff:8000000000000000 sw=0000
+fscale 1 nan 7fff:c000000000000000 sw=0000
+fscale snan 1 7fff:c000000000000001 sw=0001
+fscale tiny 32500 7eb6:8000000000000000 sw=0002
+fscale 1 3.7 4002:8000000000000000 sw=0000
+fscale 1 -3.7 3ffc:8000000000000000 sw=0000
+fscale 1.5 -16390 0000:00c0000000000000 sw=0030
+fscale 1.5 -16390 up 0000:00c0000000000001 sw=0230
+fscale -0 5 8000:0000000000000000 sw=0000
+fscale tiny tiny 0000:0000000000000001 sw=0002
+fscale 1 tiny 3fff:8000000000000000 sw=0002
+fscale 3 20000 7fff:8000000000000000 sw=0228
+fscale 3 20000 rtz 7ffe:ffffffffffffffff sw=0028
+fadd qnan snan 7fff:c000000000000000 sw=0001
+fadd snan qnan 7fff:c000000000000000 sw=0001
+fmul snan2 qnan 7fff:c000000000000000 sw=0001
+fdiv snan snan2 7fff:c000000000000002 sw=0001
+fadd qnan qnan2 ffff:c000000000000005 sw=0000
+fsin pi bfbf:8000000000000000 sw=0220
+fcos pi bfff:8000000000000000 sw=0220
+fsin 2^31 bffe:f8a7c89f4cc3b0ff sw=0020
+fsin 2^63- 3ffe:e0ab9300da6d2684 sw=0020
+fcos 2^63 403e:8000000000000000 sw=0400
+fsin 2^63 403e:8000000000000000 sw=0400
+fptan 2^70 4045:8000000000000000 sw=0400
+ second ffff:c000000000000000 sw=0000
+fsincos -2^64 c03f:8000000000000000 sw=0400
+ second ffff:c000000000000000 sw=0000
+fsin inf ffff:c000000000000000 sw=0001
+consts cw=037f
+ c 4000:c90fdaa22168c235 sw=0000
+ c 4000:d49a784bcd1b8afe sw=0000
+ c 3fff:b8aa3b295c17f0bc sw=0000
+ c 3ffd:9a209a84fbcff799 sw=0000
+ c 3ffe:b17217f7d1cf79ac sw=0000
+consts cw=077f
+ c 4000:c90fdaa22168c234 sw=0000
+ c 4000:d49a784bcd1b8afe sw=0000
+ c 3fff:b8aa3b295c17f0bb sw=0000
+ c 3ffd:9a209a84fbcff798 sw=0000
+ c 3ffe:b17217f7d1cf79ab sw=0000
+consts cw=0b7f
+ c 4000:c90fdaa22168c235 sw=0000
+ c 4000:d49a784bcd1b8aff sw=0000
+ c 3fff:b8aa3b295c17f0bc sw=0000
+ c 3ffd:9a209a84fbcff799 sw=0000
+ c 3ffe:b17217f7d1cf79ac sw=0000
+consts cw=0f7f
+ c 4000:c90fdaa22168c234 sw=0000
+ c 4000:d49a784bcd1b8afe sw=0000
+ c 3fff:b8aa3b295c17f0bb sw=0000
+ c 3ffd:9a209a84fbcff798 sw=0000
+ c 3ffe:b17217f7d1cf79ab sw=0000
+pc53 1*(2-2^-63) 4000:8000000000000000 sw=0220
+pc53 0+tiny 0000:0000000000000000 sw=0032
+pc24 1+2^-30 3fff:8000000000000000 sw=0020
+pc53 1/3 4000:c000000000000000 sw=0000
+1/3 4000:c000000000000000 sw=0000
+2/3 3fff:c000000000000000 sw=0000
+fistpl 1.5 00000002 sw=0220
+fistpl -1.5 fffffffe sw=0220
+fistpl 2.5 00000002 sw=0020
+fistpq 0000000000000002 sw=0220
+fstps 40000000 sw=0220
+fstpl 4000000000000000 sw=0220
+fstpl dn 3ff0000000000000 sw=0020
+fbstp 00000000000000000010 sw=0020
+fprem fstpt sw=7800
+overflow ffff:c000000000000000 sw=0241
+underflow fstp ffff:c000000000000000 sw=0041
+underflow faddp ffff:c000000000000000 sw=0041
+underflow fadd st3 ffff:c000000000000000 sw=0041
+underflow fsqrt ffff:c000000000000000 sw=0041
+underflow fxch ffff:c000000000000000 sw=0041
+underflow fcomi 3fff:8000000000000000 sw=0041
+underflow fistpl 80000000 sw=0841
+underflow fld st0 ffff:c000000000000000 sw=0041
+ftz exact tiny 0000000000000000 9fb0
+ftz roundup 0000000000000000 9fb0
+ftz inexact 0000000000000000 9fb0
+roundup 0010000000000000 1fb0
+eip mov 00000000abcdef01
+eip lea 1
+loopl 0003 0000000000000000
+loopnel 0002 0000000000000001
+fs:8 00002222
+fs ds 00002222
+fs es 00003333
+cs fs 00004444
+xlat 00001123
+fs xlat 000011a1
+addr32 xlat 0000113f
+set gs 0000000000000000
+get gs 0000000000000000 1
+gs:16 00003333
+get fs 0000000000000000 1
+set gs bad ffffffffffffffff
+get gs fault fffffffffffffff2
+popf -257 0000000000244ed7
+popf 0 0000000000000202
+popfw 0000000000000ed7
+leavew rsp+0042 rbp 1
+enterw rsp+002e rbp 777777777777 1 pushed 1234111111110007
+enterw 3 rsp+0030 rbp+003e frame 11 levels 11111111 st6 11111111
+bsr32 0 1234567890abcdef
+bsf32 0 1234567890abcdef
+bsr32 16 0000000000000004
+bsr32 m0 1234567890abcdef
+mmx sw 0000 tags 1556 st0 ffff1122334455667788 st1 00000000000000000000 ftw ff
+mmx reads 1122334455667788 8000000000000000 sw 0000
+mmx paddq st3 ffff000000000000000a st7 3fff8000000000000000 emms tags ffff
+fnstenv ffff0000000000000000000000000000ffffffffffff0000ffff037f
+fxsave tail 00a5a5a5a5 head 000000000000037f mxcsr 00001f80
+aesenc 0c24467e5f96af05d15dc2507a44d8c3
+aesenclast 459d2fe75e39686c648e4bbfb50e5dc3
+aesdec 1fef54cf089ca7a0cf9fd48662a2467d
+aesdeclast c97d548bd63e443f593f4622a1c068f2
+aesimc a1a4a3a6a5a0a7a2a9acabaeada8afaa
+aeskeygenassist 9179e48e79e49591495c241d5c240649
+vaesenc 0c24467e5f96af05d15dc2507a44d8c3
+ph2ps denormal 33800000 csr 1f80
+ph2ps denormal daz 33800000 csr 1fc0
+ph2ps snan 7fc02000 csr 1f81
+ps2ph tiny 0001 csr 1f80
+ps2ph tiny ftz 0001 csr 9f80
+ps2ph denormal in 0000 csr 1fb2
+ps2ph denormal in daz 0000 csr 1fc0
+ps2ph half tiny ftz 0001 csr 9fb0
+movaps load: sig=11 code=128 addr=0
+movaps store: sig=11 code=128 addr=0
+movdqa load: sig=11 code=128 addr=0
+movapd store: sig=11 code=128 addr=0
+movntps: sig=11 code=128 addr=0
+movntdq: sig=11 code=128 addr=0
+movntdqa: sig=11 code=128 addr=0
+vmovaps y: sig=11 code=128 addr=0
+vmovdqa y ok: ran
+vmovaps x: sig=11 code=128 addr=0
+movups: ran
+movaps ok: ran
+int5: sig=11 code=128 addr=0 ip+0
+int1: sig=11 code=128 addr=0 ip+0
+int3: sig=5 code=128 addr=0 ip+1
+int3b: sig=5 code=128 addr=0 ip+1
+int4: sig=11 code=128 addr=0 ip+2
+icebp: sig=5 code=1 addr=ip ip+1
+int255: sig=11 code=128 addr=0 ip+0
+cli: sig=11 code=128 addr=0 ip+0
+sti: sig=11 code=128 addr=0 ip+0
+inb: sig=11 code=128 addr=0 ip+0
+outb: sig=11 code=128 addr=0 ip+0
+inw: sig=11 code=128 addr=0 ip+0
+outl: sig=11 code=128 addr=0 ip+0
+insb: sig=11 code=128 addr=0 ip+0
+outsl: sig=11 code=128 addr=0 ip+0
+rdmsr: sig=11 code=128 addr=0 ip+0
+wrmsr: sig=11 code=128 addr=0 ip+0
+movcr: sig=11 code=128 addr=0 ip+0
+movtocr: sig=11 code=128 addr=0 ip+0
+movdr: sig=11 code=128 addr=0 ip+0
+movfromdr: sig=11 code=128 addr=0 ip+0
+iretq: sig=11 code=128 addr=0 ip+0
+sysretq: sig=11 code=128 addr=0 ip+0
+sysret: sig=11 code=128 addr=0 ip+0
+lgdt: sig=11 code=128 addr=0 ip+0
+lidt: sig=11 code=128 addr=0 ip+0
+ltr: sig=11 code=128 addr=0 ip+0
+lldt: sig=11 code=128 addr=0 ip+0
+invlpg: sig=11 code=128 addr=0 ip+0
+swapgs: sig=11 code=128 addr=0 ip+0
+clts: sig=11 code=128 addr=0 ip+0
+rdpmc: sig=11 code=128 addr=0 ip+0
+vmcall: sig=4 code=2 addr=ip ip+0
+vmmcall: sig=4 code=2 addr=ip ip+0
+sysenter: sig=4 code=2 addr=ip ip+0
+hlt: sig=11 code=128 addr=0 ip+0
+wbinvd: sig=11 code=128 addr=0 ip+0
+invd: sig=11 code=128 addr=0 ip+0
+lmsw: sig=11 code=128 addr=0 ip+0
+sysexit: sig=4 code=2 addr=ip ip+0
+badds: sig=11 code=128 addr=0 ip+5
+nullds: ran
+userds: ran
+badss: sig=11 code=128 addr=0 ip+2
+ldtds: sig=11 code=128 addr=0 ip+5
+movcs: sig=4 code=2 addr=ip ip+0
+ud2: sig=4 code=2 addr=ip ip+0
+clac: sig=4 code=2 addr=ip ip+0
+xsetbv: sig=11 code=128 addr=0 ip+2
+vmxoff: sig=4 code=2 addr=ip ip+0
+int80 getpid: pid
+int80 write: 9 rcx kept r8 1122334455667788 r11 6666
+int80 1000: -38
+syscall rcx after r11 flags
+xgetbv 3 0
+xgetbv1: sig=11 code=128 addr=0 ip+5
+smsw 80050033
+smsw m 33
+smsw q 80050033
+smsw w ffffffffffff0033
+lsl 2b ffffffff zf=1
+lsl 33 ffffffff zf=1
+lsl 0 11111111deadbeef zf=0
+lsl 1234 11111111deadbeef zf=0
+lsl 10 11111111deadbeef zf=0
+d1 /6: 6
+f6 /1: 80 zf=0
+f7 /1: 80 zf=1
+c1 /6: 50
+hint nops
+lar %%ecx,%%eax 002b 0000000000cff300 zf=1
+lar %%ecx,%%eax 0033 0000000000affb00 zf=1
+lar %%ecx,%%eax 0023 0000000000cffb00 zf=1
+lar %%ecx,%%eax 007b 000000000040f500 zf=1
+lar %%ecx,%%eax 0000 11111111deadbeef zf=0
+lar %%ecx,%%eax 0010 11111111deadbeef zf=0
+lar %%ecx,%%eax 002f 11111111deadbeef zf=0
+lar %%rcx,%%rax 0033 0000000000affb00 zf=1
+lar %%cx,%%ax 002b 11111111deadf300 zf=1
+verr %%cx 002b 11111111deadbeef zf=1
+verr %%cx 0033 11111111deadbeef zf=1
+verr %%cx 007b 11111111deadbeef zf=1
+verr %%cx 0000 11111111deadbeef zf=0
+verr %%cx 0010 11111111deadbeef zf=0
+verw %%cx 002b 11111111deadbeef zf=1
+verw %%cx 0033 11111111deadbeef zf=0
+verw %%cx 007b 11111111deadbeef zf=0
+verw %%cx 1234 11111111deadbeef zf=0
+sldt 0000
+str 0040
+second sig=11 code=1 off=4160
+straddle sig=11 code=1 off=4096
+second sig=11 code=2 off=4160
+straddle sig=11 code=2 off=4096
+hot 1200
+second sig=11 code=2 off=4160
+straddle sig=11 code=2 off=4096

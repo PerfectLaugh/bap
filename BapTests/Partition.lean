@@ -1,5 +1,6 @@
 import BapTests.Support
 import Bap.Analysis.Partition
+import Bap.Image.Raw
 
 /-! What `Bap.Analysis.Partition` finds of `testsuite/src/partition.c` of each target, as its symbols say it should: each function
 with all the instructions in its symbol, which those of a `switch` only are of the targets of its table; no indirect jump left
@@ -72,8 +73,68 @@ private def folds : IO Unit := do
   assertTrue "an extract of an extract is one"
     (match simplify (.extract 0 0 (.extract 2 1 field)) with | .const value => value.toNat == 0 | _ => false)
 
+/-- A call of a condition goes on when the condition doesn't hold, whatever it calls: `cmp r0, #0; bleq abort; mov r0, #1; bx lr`
+keeps the edge from the call to what follows it, which `bl abort` doesn't have. -/
+private def conditionalCalls : IO Unit := do
+  let r (name : String) (width : Nat := 32) : Bap.Var := ⟨name, .imm width, 0, false⟩
+  let c (value : Nat) : Bil.Exp := .int (BitVec.ofNat 32 value)
+  let call : Bil.Program := [.move (r "LR") (c 8), .jmp (c 0x100)]
+  let instructions (asm : String) (code : Bil.Program) : List Disasm.Insn :=
+    [{ address := 0, size := 4, asm := "cmp r0, #0", bil := [.move (r "ZF" 1) (.bin .eq (.var (r "R0")) (c 0))] },
+      { address := 4, size := 4, asm, flow := .call, target := some 0x100, bil := code },
+      { address := 8, size := 4, asm := "mov r0, #1", bil := [.move (r "R0") (c 1)] },
+      { address := 12, size := 4, asm := "bx lr", flow := .indirectJump, bil := [.jmp (.var (r "LR"))] }]
+  let edgesOf (instructions : List Disasm.Insn) : List (Nat × Nat) :=
+    let disasm : Disasm.Disasm := { entry := 0, instructions, edges := [(0, 4), (4, 8), (8, 12)] }
+    flowEdges .arm disasm (Graph.ofEdges instructions disasm.edges) [] (fun _ => false) (· == 0x100)
+  assertEqual "a call of a condition of what doesn't return goes on" [(0, 4), (4, 8), (8, 12)]
+    (edgesOf (instructions "bleq abort" [.ifElse (.var (r "ZF" 1)) call []]))
+  assertEqual "a call of what doesn't return doesn't" [(0, 4), (8, 12)] (edgesOf (instructions "bl abort" call))
+  -- as MIPS's `bgezal` links first, and jumps of its condition
+  assertEqual "a call that links and then jumps of a condition goes on" [(0, 4), (4, 8), (8, 12)]
+    (edgesOf (instructions "bgezal" [.move (r "LR") (c 8), .ifElse (.var (r "ZF" 1)) [.jmp (c 0x100)] []]))
+
+/-- What leads to an indirect jump is walked within a budget, whatever it shares: 24 instructions that each make a register of
+three of itself, `rax := rax + rax * rax`, make a target of 3^24 parts, of which nothing is walked whole. The targets that
+`pathTargets` gives are of no more parts than a few instructions make of what `bounded` leaves, and the jump has no table. -/
+private def sharedPaths : IO Unit := do
+  let rax : Bap.Var := ⟨"RAX", .imm 64, 0, false⟩
+  let mem : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let count := 24
+  let ofBody (asm : String) (body : Bil.Program) : IO Unit := do
+    let instructions : List Disasm.Insn :=
+      ((List.range count).map fun index => { address := 0x1000 + 3 * index, size := 3, asm, bil := body }) ++
+        [{ address := 0x1000 + 3 * count, size := 2, asm := "jmp rax", flow := .indirectJump, bil := [.jmp (.var rax)] }]
+    let edges := (List.range count).map fun index => (0x1000 + 3 * index, 0x1000 + 3 * (index + 1))
+    let graph := Graph.ofEdges instructions edges
+    let path := pathTo graph (0x1000 + 3 * count)
+    assertEqual s!"{asm}: the path to the jump has what leads to it" (count + 1) path.length
+    let targets := pathTargets path
+    assertTrue s!"{asm}: the target of a jump after instructions that share is of few parts"
+      (!targets.isEmpty && targets.all fun (_, target) => walkable target (64 * maxWalk))
+    let image := Image.Raw.load (ByteArray.mk (Array.replicate 256 0x90)) 0x1000 .little
+    assertEqual s!"{asm}: and the jump has no table" none
+      ((resolveJump image graph (0x1000 + 3 * count) (0x1000, 0x1100)).map (·.targets))
+  let tripled : Bil.Exp := .bin .add (.var rax) (.bin .mul (.var rax) (.var rax))
+  ofBody "imul rax, rax" [.move rax tripled]
+  -- and stored where it says, which a read there compares the addresses of
+  ofBody "mov [rax], rax" [.move rax tripled, .move mem (.store (.var mem) (.var rax) (.var rax) .little 8),
+    .move rax (.bin .add (.var rax) (.load (.var mem) (.var rax) .little 8))]
+  -- a target of more than `maxWalk` parts has no table
+  let big : Symbolic.Expr := (List.range 13).foldl (init := .var "RAX#0" 64) fun expr _ => .app "bvadd" 64 [expr, expr]
+  assertTrue "an expression of 2^14 parts is past the budget" (!walkable big && sizeOf maxWalk big == maxWalk + 1)
+  assertEqual "and has no table" none ((tableTargets image0 big []).map (·.2.2))
+where
+  image0 : Image.Image := Image.Raw.load (ByteArray.mk (Array.replicate 256 0x90)) 0x1000 .little
+
+/-- The tests of what the review 30 found, which need no program. -/
+def review30 : IO Unit := do
+  conditionalCalls
+  sharedPaths
+
 def run : IO Unit := do
   folds
+  review30
   for (arch, tables) in targets do
     ofTarget arch tables
   ofLibc "x86_64-linux-gnu-echo" ["putchar", "malloc", "strlen", "__libc_start_main"] ["__libc_start_main"]

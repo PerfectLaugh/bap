@@ -194,7 +194,7 @@ def plainVar : Bil.Exp → Bool
 
 mutual
   /-- The value of an expression. `quiet` reads registers without taking them for inputs, which a store of one to save it does. -/
-  partial def eval (context : Context) (state : State) (quiet : Bool) : Bil.Exp → Run Value
+  def eval (context : Context) (state : State) (quiet : Bool) : Bil.Exp → Run Value
     | .int (width := width) value => pure (.const width value.toNat)
     | .var var => do
       let value := state.read var
@@ -268,7 +268,7 @@ mutual
     | .unknown _ _ => pure .top
 
   /-- The stores of a value of memory, in order, on the slots. -/
-  partial def store (context : Context) (state : State) : Bil.Exp → Run State
+  def store (context : Context) (state : State) : Bil.Exp → Run State
     | .store memory address value _ size => do
       let state ← store context state memory
       let address ← eval context state false address
@@ -297,7 +297,21 @@ inductive Ending where
   deriving Inhabited
 
 mutual
-  partial def exec (context : Context) (state : State) : Bil.Program → Run (State × Ending)
+  /-- What a statement can write, at any depth. -/
+  def stmtAssigned : Bil.Stmt → List Bap.Var
+    | .move var _ => [var]
+    | .while _ body => assigned body
+    | .ifElse _ yes no => assigned yes ++ assigned no
+    | _ => []
+
+  /-- What a program can write, at any depth. -/
+  def assigned : Bil.Program → List Bap.Var
+    | [] => []
+    | stmt :: rest => stmtAssigned stmt ++ assigned rest
+end
+
+mutual
+  def exec (context : Context) (state : State) : Bil.Program → Run (State × Ending)
     | [] => pure (state, .on)
     | stmt :: rest => do
       let (state, ending) ← execStmt context state stmt
@@ -305,7 +319,7 @@ mutual
       | .on => exec context state rest
       | jump => pure (state, jump)
 
-  partial def execStmt (context : Context) (state : State) : Bil.Stmt → Run (State × Ending)
+  def execStmt (context : Context) (state : State) : Bil.Stmt → Run (State × Ending)
     | .move var value => do
       match var.typ with
       | .mem _ _ => pure (← store context state value, .on)
@@ -327,8 +341,12 @@ mutual
         | .jump a, .jump b => pure (yesState.join noState, .jump (a.join b))
         | .on, .on => pure (yesState.join noState, .on)
     | .while _ body => do
+      -- of a loop that doesn't settle in the rounds it is given, what its body writes isn't known, and no slot is, rather
+      -- than what the rounds so far left, which a round more may change
       let rec loop : Nat → State → Run State
-        | 0, state => pure state
+        | 0, state =>
+          pure { env := (assigned body).foldl (init := state.env) fun env (var : Bap.Var) => env.insert var.name.str .top
+                 slots := [] }
         | fuel + 1, state => do
           let (next, _) ← exec context state body
           let joined := state.join next

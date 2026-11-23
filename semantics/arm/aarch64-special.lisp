@@ -29,17 +29,20 @@
 (defun UDF (exn)
   (intrinsic 'undefined-instruction :aborts))
 
-;; the breakpoint and the halting debug exceptions
+;; the breakpoint, and the halt, which is UNDEFINED while halting isn't
+;; allowed, as it isn't to a program of Linux
 (defun BRK (imm) (intrinsic 'breakpoint imm :aborts))
-(defun HLT (imm) (intrinsic 'halt imm))
+(defun HLT (_) (intrinsic 'undefined-instruction :aborts))
 
 ;; the supervisor call
 (defun SVC (imm) (intrinsic 'svc imm))
 
-;; The pointer authentication is not modeled, the instructions that
-;; sign, authenticate or strip the authentication code of LR or X17
-;; keep the register, so that a signed and authenticated return
-;; address is the original one, as when the authentication succeeds.
+;; The processor doesn't have the pointer authentication, as what a
+;; program is told of it says (AT_HWCAP has neither PACA nor PACG, and
+;; ID_AA64ISAR1_EL1 has no APA, API, GPA or GPI). The instructions that
+;; sign, authenticate or strip the code of LR or X17 are in the space of
+;; the hints, and are NOPs there, so that a return address that is signed
+;; and authenticated is the original one.
 (defun PACIASP () (empty))
 ;; PACM, of FEAT_PAuth_LR, which the processor doesn't have, is the hint
 ;; that it is of, which is a NOP
@@ -57,36 +60,30 @@
 (defun AUTIB1716 () (empty))
 (defun XPACLRI () (empty))
 
-;; The same goes for the forms of the other registers and for the data
-;; keys. A code is a function of a key, which the kernel chooses and the
-;; model doesn't have, so no pointer gets one: the instructions that sign
-;; keep the register, the ones that authenticate succeed and keep it, and
-;; XPACI and XPACD have nothing to strip. A pointer that was signed outside
-;; of the model keeps its code.
-(defun PACIA (_ _ _) (empty))
-(defun PACIB (_ _ _) (empty))
-(defun PACDA (_ _ _) (empty))
-(defun PACDB (_ _ _) (empty))
-(defun AUTIA (_ _ _) (empty))
-(defun AUTIB (_ _ _) (empty))
-(defun AUTDA (_ _ _) (empty))
-(defun AUTDB (_ _ _) (empty))
-(defun PACIZA (_ _) (empty))
-(defun PACIZB (_ _) (empty))
-(defun PACDZA (_ _) (empty))
-(defun PACDZB (_ _) (empty))
-(defun AUTIZA (_ _) (empty))
-(defun AUTIZB (_ _) (empty))
-(defun AUTDZA (_ _) (empty))
-(defun AUTDZB (_ _) (empty))
-(defun XPACI (_ _) (empty))
-(defun XPACD (_ _) (empty))
-
-;; PACGA has no register to keep: the upper half of its result is the
-;; code of its operands with the generic key, which is not modeled, so
-;; it is an intrinsic of them, and the lower half is zero.
-(defun PACGA (rd rn rm)
-  (set$ rd (concat (intrinsic 'pacga rn rm :result 32) (cast-unsigned 32 0))))
+;; The forms of the other registers and of the data keys, and PACGA,
+;; aren't hints: without the pointer authentication they are UNDEFINED,
+;; as are the branches, the returns and the loads that authenticate, see
+;; aarch64-branch.lisp and aarch64-data-movement.lisp.
+(defun a64-no-pauth () (intrinsic 'undefined-instruction :aborts))
+(defun PACIA (_ _ _) (a64-no-pauth))
+(defun PACIB (_ _ _) (a64-no-pauth))
+(defun PACDA (_ _ _) (a64-no-pauth))
+(defun PACDB (_ _ _) (a64-no-pauth))
+(defun AUTIA (_ _ _) (a64-no-pauth))
+(defun AUTIB (_ _ _) (a64-no-pauth))
+(defun AUTDA (_ _ _) (a64-no-pauth))
+(defun AUTDB (_ _ _) (a64-no-pauth))
+(defun PACIZA (_ _) (a64-no-pauth))
+(defun PACIZB (_ _) (a64-no-pauth))
+(defun PACDZA (_ _) (a64-no-pauth))
+(defun PACDZB (_ _) (a64-no-pauth))
+(defun AUTIZA (_ _) (a64-no-pauth))
+(defun AUTIZB (_ _) (a64-no-pauth))
+(defun AUTDZA (_ _) (a64-no-pauth))
+(defun AUTDZB (_ _) (a64-no-pauth))
+(defun XPACI (_ _) (a64-no-pauth))
+(defun XPACD (_ _) (a64-no-pauth))
+(defun PACGA (_ _ _) (a64-no-pauth))
 
 ;; CHKFEAT clears the bits of X16 of the features that are enabled. The
 ;; only one is the guarded control stack, which is not modeled, so it is
@@ -134,9 +131,18 @@
 ;; The system registers by their encodings, op0:op1:CRn:CRm:op2, that
 ;; the programs read, the ones, that the processor of Unicorn has, with
 ;; its values, e.g., of its identification, as Linux emulates their reads
-;; at EL0, the counter, see [a64-counter], and the fields of PSTATE, see
-;; [a64-set-spsel], and SP_EL0, while SPSel selects SP_EL1, as it is
-;; undefined, while SP is SP_EL0.
+;; at EL0, and the counter, see [a64-counter]. What is of EL1 is
+;; undefined at EL0, where a program runs: the fields of PSTATE SPSel,
+;; PAN and UAO, and SP_EL0; and so is DAIF, which EL0 has only with
+;; SCTLR_EL1.UMA, that Linux doesn't set. Each is SIGILL of Linux.
+;;
+;; FPCR has the bits that the processor has: AHP, DN, FZ, RMode and FZ16.
+;; The rest is RES0, which reads as zero: the traps of the exceptions,
+;; which it doesn't have, the Len and Stride of the short vectors of
+;; AArch32, and the bits of FEAT_AFP and FEAT_EBF16. FPSR has the flags
+;; of AArch32, QC, IDC and the five cumulative exceptions.
+(defun a64-fpcr-bits () 0x07c80000:32)
+(defun a64-fpsr-bits () 0xf800009f:32)
 (defun MRS (dst reg)
   (case reg
     0xde82 (set$ dst TPIDR_EL0)
@@ -144,11 +150,11 @@
     0xde85 (set$ dst TPIDR2_EL0)
     0xda12 (set$ dst (sme-svcr))                ; SVCR
     0xda10 (set$ dst (a64-nzcv))
-    0xda11 (set$ dst (lshift (cast-unsigned 64 DAIF) 6))
-    0xc210 (set$ dst (cast-unsigned 64 SPSel))
-    0xc213 (set$ dst (lshift (cast-unsigned 64 PAN) 22))
-    0xc214 (set$ dst (lshift (cast-unsigned 64 UAO) 23))
-    0xc208 (if SPSel (set$ dst SP_EL0) (a64-undefined))
+    0xda11 (a64-undefined)                      ; DAIF
+    0xc210 (a64-undefined)                      ; SPSel
+    0xc213 (a64-undefined)                      ; PAN
+    0xc214 (a64-undefined)                      ; UAO
+    0xc208 (a64-undefined)                      ; SP_EL0
     0xda20 (set$ dst (cast-unsigned 64 FPCR))
     0xda21 (set$ dst (cast-unsigned 64 FPSR))
     0xd807 (set$ dst 4)                         ; DCZID_EL0, the blocks of 64 bytes
@@ -163,7 +169,7 @@
     0xc021 (set$ dst 1)                         ; ID_AA64PFR1_EL1
     0xc028 (set$ dst 0x10305506)                ; ID_AA64DFR0_EL1
     0xc030 (set$ dst 0x1021111110212120)        ; ID_AA64ISAR0_EL1
-    0xc031 (set$ dst 0x11101211012)             ; ID_AA64ISAR1_EL1
+    0xc031 (set$ dst 0x11100211002)             ; ID_AA64ISAR1_EL1
     0xc038 (set$ dst 0x1124)                    ; ID_AA64MMFR0_EL1
     0xc039 (set$ dst 0x211120)                  ; ID_AA64MMFR1_EL1
     0xc03a (set$ dst 0x11)                      ; ID_AA64MMFR2_EL1
@@ -179,13 +185,13 @@
     0xde85 (set TPIDR2_EL0 src)
     0xda12 (sme-set-svcr src)
     0xda10 (set-nzcv (cast-low 4 (rshift src 28)))
-    0xda20 (set FPCR (cast-low 32 src))
-    0xda21 (set FPSR (cast-low 32 src))
-    0xda11 (set DAIF (extract 9 6 src))
-    0xc210 (a64-set-spsel (extract 0 0 src))
-    0xc213 (set PAN (extract 22 22 src))
-    0xc214 (set UAO (extract 23 23 src))
-    0xc208 (if SPSel (set SP_EL0 src) (a64-undefined))
+    0xda20 (set FPCR (logand (cast-low 32 src) (a64-fpcr-bits)))
+    0xda21 (set FPSR (logand (cast-low 32 src) (a64-fpsr-bits)))
+    0xda11 (a64-undefined)                      ; DAIF
+    0xc210 (a64-undefined)                      ; SPSel
+    0xc213 (a64-undefined)                      ; PAN
+    0xc214 (a64-undefined)                      ; UAO
+    0xc208 (a64-undefined)                      ; SP_EL0
     0x1987 (empty)                              ; SB
     (a64-undefined)))
 
@@ -221,27 +227,17 @@
     3 (prog (sme-set-sm (cast-low 1 imm)) (sme-set-za (cast-low 1 imm)))
     (a64-undefined)))
 
-;; The selection of the stack pointer, SPSel, which Unicorn runs at
-;; EL1, so that SP is banked to SP_EL1, when SPSel is 1, and to SP_EL0,
-;; when it is 0: the change saves SP to the bank of the old one and
-;; loads the bank of the new one.
-(defun a64-set-spsel (sel)
-  (when (/= sel SPSel)
-    (if SPSel
-        (prog (set SP_EL1 R31) (set R31 SP_EL0))
-      (prog (set SP_EL0 R31) (set R31 SP_EL1)))
-    (set SPSel sel)))
-
-;; The fields of PSTATE, that MSR sets to an immediate, which Unicorn
-;; runs at EL1: DAIFSet and DAIFClr set and clear the masks of DAIF,
-;; and SPSel, UAO, and PAN are set to the bit of the immediate.
-(defun MSRpstateImm4 (field imm)
+;; The fields of PSTATE that MSR sets to an immediate of four bits:
+;; DAIFSet and DAIFClr, which EL0 has only with SCTLR_EL1.UMA, that Linux
+;; doesn't set, and SPSel, UAO and PAN, which are of EL1. Each is
+;; undefined where a program runs, and SIGILL of Linux, by its field.
+(defun MSRpstateImm4 (field _)
   (case field
-    0x1e (set DAIF (logor DAIF (cast-low 4 imm)))
-    0x1f (set DAIF (logand DAIF (lnot (cast-low 4 imm))))
-    0x05 (a64-set-spsel (extract 0 0 imm))
-    0x03 (set UAO (extract 0 0 imm))
-    0x04 (set PAN (extract 0 0 imm))
+    0x1e (a64-undefined)                        ; DAIFSet
+    0x1f (a64-undefined)                        ; DAIFClr
+    0x05 (a64-undefined)                        ; SPSel
+    0x03 (a64-undefined)                        ; UAO
+    0x04 (a64-undefined)                        ; PAN
     (a64-undefined)))
 
 ;; The cache maintenance, by op1:CRn:CRm:op2, that EL0 may run, as

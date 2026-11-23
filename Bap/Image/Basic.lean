@@ -142,6 +142,34 @@ def exceeds (data : ByteArray) (extent : Extent) : Bool :=
 /-- What a decoder says of a file whose regions `exceeds` is of. -/
 def tooLarge : String := "the regions of the file are too large"
 
+/-- At most this many bytes of names, of all the symbols or the sections of a file together, each as often as one of them has it:
+every entry of a table may name a string as long as its string table, so that a file would cost the product of the two. What
+`fileLimit` gives is more than names that share some of a table take. -/
+def namesLimit (data : ByteArray) : Nat := fileLimit data
+
+/-- What a decoder says of a file whose names take more than `namesLimit`. -/
+def namesTooLarge : String := "the names of the file are too large"
+
+/-- What the names read so far take with `bytes` more, which is an error past `namesLimit`. -/
+def countNames (data : ByteArray) (used bytes : Nat) : Except String Nat :=
+  if used + bytes > namesLimit data then .error namesTooLarge else .ok (used + bytes)
+
+/-- What the names read so far take with another. -/
+def countName (data : ByteArray) (used : Nat) (name : String) : Except String Nat :=
+  countNames data used (name.utf8ByteSize + 1)
+
+/-- What a name takes: its bytes and its zero. -/
+def nameCost (name : String) : Nat := name.utf8ByteSize + 1
+
+/-- `mapM` of what reads a name each, after names of `used` bytes: an error once they take more than `namesLimit`, with what they
+take. What each took is `cost` of what was read of it. -/
+def mapNamedM {α β : Type} (data : ByteArray) (cost : β → Nat) (read : α → Except String β) (items : List α)
+    (used : Nat := 0) : Except String (List β × Nat) := do
+  let (found, used) ← items.foldlM (init := ((#[] : Array β), used)) fun (found, used) item => do
+    let value ← read item
+    pure (found.push value, ← countNames data used (cost value))
+  pure (found.toList, used)
+
 structure Summary where
   arch : Arch
   addrWidth : Nat

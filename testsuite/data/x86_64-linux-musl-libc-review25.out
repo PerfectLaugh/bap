@@ -1,0 +1,140 @@
+close(open("td/n", O_CREAT, 0644)): the mtime of td changes
+close(open("td/n", O_CREAT | O_RDWR, 0644)): the mtime of td stays
+rename("td/n", "td/m"): the mtime of td changes
+link("td/m", "td/h"): the mtime of td changes
+unlink("td/h"): the ctime of td/m changes
+link("td/m", "td/h"): the mtime of td changes
+unlink("td/h"): the mtime of td changes
+mkdir("td/s", 0755): the mtime of td changes
+rmdir("td/s"): the ctime of td changes
+symlink("x", "td/l"): the mtime of td changes
+rename("td/m", "out"): the mtime of . changes
+rename("out", "td/m"): the mtime of td changes
+rename("td/m", "td/m2"): the ctime of td/k changes
+unlink("nope"): the mtime of td stays
+list("td"): the atime of td changes
+list("td"): the atime of td stays
+write(f, "", 0): the mtime of t stays
+write(f, "a", 1): the mtime of t changes
+a read to where nothing is: 1 submitted, 1 gives -14
+nothing, after it: 1 submitted, 2 gives 0
+a timeout of a time that isn't there: 1 submitted, 3 gives -14
+a read of 2^32 vectors: 1 submitted, 4 gives -22
+a read: 1 submitted, 5 gives 4
+  of 2345
+io_uring_enter with a flag that there isn't: Invalid argument
+io_uring_setup with a flag that there isn't: Invalid argument
+io_setup: 0
+io_submit of 2000 vectors: Invalid argument
+dup2 to -1: Bad file descriptor
+close of -1: Bad file descriptor
+dup3 to -5: Bad file descriptor
+F_GETFD of -5: Bad file descriptor
+F_GETFD of 1 and 2^32: 0
+poll of an array that isn't all there: Bad address
+  which leaves 7777 and 7777
+poll of more than may be open: Invalid argument
+poll of what is there: 0
+  which leaves 0 and 0
+F_SETLKW for what waits for a lock of ours: Resource deadlock would occur
+  and the other has what it waited for: 0
+unlinkat with a flag that there isn't: Invalid argument
+  which leaves it: 0
+linkat with a flag that there isn't: Invalid argument
+fstatat with a flag that there isn't: Invalid argument
+statx with both ways of how fresh: Invalid argument
+statx with a flag that there isn't: Invalid argument
+statx with a mask of what is reserved: Invalid argument
+statx: 0
+pipe2 with a flag that there isn't: Invalid argument
+splice with a flag that there isn't: Invalid argument
+getrandom with a flag that there isn't: Invalid argument
+timerfd_settime with a flag that there isn't: Invalid argument
+tcflush of a queue that there isn't: Invalid argument
+tcflush: 0
+two bytes with a descriptor: 2
+  are read: 2, with a descriptor
+  before the two after them: 2
+two bytes more with a descriptor: 2
+  are read with the two before them: 4, with a descriptor
+  before the two after them: 2
+nothing with a descriptor: 0
+  is nothing, before a byte: 1
+MSG_WAITALL of 10 bytes with 3 there and a time: 3
+  and then: Resource temporarily unavailable
+bind: 0
+  of mode 140755
+connect: 0
+a datagram from another to what is connected: Operation not permitted
+a datagram to a peer that is gone: Connection refused
+  and another: Socket not connected
+a datagram from another to what was connected: 1
+  which comes: 1
+listen with a backlog of 1: 0
+  connect: 0
+  connect: 0
+  connect: Resource temporarily unavailable
+  and once one is accepted: 0
+bind to a name of two bytes: 0
+  which is of 8 bytes, the first of them 0
+SO_PASSCRED: 0
+  of a byte: 1, of type 2 and length 12, from us, user 0, group 0
+what is shut both ways is ready of 2015, and its other end of 2015
+a pipe that nothing reads is ready of c
+pipe2 with O_DIRECT: 0
+  of a packet of 3, 2 are read: 2
+  and then: 4
+sendfile from a pipe: Invalid argument
+sendfile from a socket: Invalid argument
+splice from a pipe to itself: Invalid argument
+  which still has: 5
+  and the socket: 8
+readv with a length below 0: Invalid argument
+  which leaves it at: 0
+an epoll in another: 0
+  and that one in it: Symbolic link loop
+an exclusive entry: 0
+  changed: Invalid argument
+an exclusive entry of an epoll: Invalid argument
+a link and an unlink say 100 of c 200 of b
+a file of /proc as a directory: Not a directory
+/proc is of 9fa0
+readlinkat of no path: 6
+  which is target
+  and of a directory: No such file or directory
+faccessat2 of no path: 0
+fdinfo of what execve closes says so
+a seek to the last byte there can be: 1
+  and a read there: Invalid argument
+  and of nothing: 0
+security.* without CAP_SYS_ADMIN: Operation not permitted
+  and user.*: 0
+mkfifo: 0
+  of mode 10644
+  and again: File exists
+mknod of a file: 0
+  of mode 100600 and 0 bytes
+mknod of a directory: Operation not permitted
+mknodat of a FIFO: 0
+a FIFO that nothing reads, to write without waiting: No such device or address
+  to read: 1
+  and then to write: 1
+  what is written: 2
+  is read: 2
+a FIFO that a child writes gives there
+  which ends with 0
+a FIFO that a child reads takes: 4
+  which ends with 0
+close_range of a range that ends before it starts: Invalid argument
+close_range with a flag that there isn't: Invalid argument
+close_range with CLOSE_RANGE_CLOEXEC: 0
+  which leaves 100 with: 0
+  and 102 with: 1
+close_range: 0
+  which leaves 100: 0
+  and 101: Bad file descriptor
+renameat2 with RENAME_WHITEOUT: 0
+  which leaves: 0
+  of mode 20000 and device 0
+  and what moved: 0
+and all of it is taken away: 0

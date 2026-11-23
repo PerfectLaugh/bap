@@ -181,20 +181,21 @@ private def fieldOf (data : ByteArray) (offset size : Nat) (big : Bool := false)
 
 /-- An object of AMD64 whose `.text` has more relocations than its 16 bits can say: `IMAGE_SCN_LNK_NRELOC_OVFL`, with the count in the
 first relocation, which is no relocation. Each is an `ADDR32` of a symbol at 0x10 to a slot that holds its index. -/
-private def overflowObject (count : Nat) : ByteArray :=
+private def overflowObject (count : Nat) (symbols : Nat := 1) (slots : Nat := count) : ByteArray :=
   let le (size value : Nat) : ByteArray := ByteArray.mk ((List.range size).map fun index => (value >>> (8 * index)).toUInt8).toArray
   let rawOffset := 60
-  let rawSize := 4 * count
+  let rawSize := 4 * slots
   let relocationOffset := rawOffset + rawSize
   let symbolOffset := relocationOffset + 10 * (count + 1)
-  let header := le 2 0x8664 ++ le 2 1 ++ le 4 0 ++ le 4 symbolOffset ++ le 4 1 ++ le 2 0 ++ le 2 0
+  let header := le 2 0x8664 ++ le 2 1 ++ le 4 0 ++ le 4 symbolOffset ++ le 4 symbols ++ le 2 0 ++ le 2 0
   let sectionHeader := ".text".toUTF8 ++ le 3 0 ++ le 4 0 ++ le 4 0 ++ le 4 rawSize ++ le 4 rawOffset ++ le 4 relocationOffset ++
     le 4 0 ++ le 2 0xffff ++ le 2 0 ++ le 4 (0x60000020 ||| 0x01000000)
-  let raw := (List.range count).foldl (fun out index => out ++ le 4 index) ByteArray.empty
-  let relocations := (List.range count).foldl (fun out index => out ++ le 4 (4 * index) ++ le 4 0 ++ le 2 2)
+  let raw := (List.range slots).foldl (fun out index => out ++ le 4 index) ByteArray.empty
+  -- each of the last of the symbols, which are all the same, to the slots in turn
+  let relocations := (List.range count).foldl (fun out index => out ++ le 4 (4 * (index % slots)) ++ le 4 (symbols - 1) ++ le 2 2)
     (le 4 (count + 1) ++ le 4 0 ++ le 2 0)
   let symbol := "sym".toUTF8 ++ le 5 0 ++ le 4 0x10 ++ le 2 1 ++ le 2 0 ++ ByteArray.mk #[2, 0]
-  header ++ sectionHeader ++ raw ++ relocations ++ symbol ++ le 4 4
+  (List.range symbols).foldl (fun out _ => out ++ symbol) (header ++ sectionHeader ++ raw ++ relocations) ++ le 4 4
 
 /-- All of the relocations of a section that has more than 65535, and not the first, which says how many. -/
 def runRelocationOverflow : IO Unit := do
@@ -206,6 +207,26 @@ def runRelocationOverflow : IO Unit := do
     let word (address : Nat) : Nat :=
       (List.range 4).foldl (fun value index => value + ((image.memory.readByte (address + index)).getD 0).toNat * 256 ^ index) 0
     assertEqual "COFF of more relocations than 16 bits: the first and the last" (0x10, 0x10 + count - 1) (word 0, word (4 * (count - 1)))
+  -- The symbol of a relocation is had of a table of them all, not of a search of them for each: 2000000 relocations of the last of
+  -- 60000 symbols are 12 * 10^10 steps of that, three minutes of them, and take seconds. Only the time says so: it is given 60 s.
+  -- They are all of one slot, which has the symbol's address added as often.
+  let (count, symbols) := (2000000, 60000)
+  let started ← IO.monoMsNow
+  match Coff.decodeReport (overflowObject count symbols 1) with
+  | .error error => throw <| IO.userError error
+  | .ok (image, errors) =>
+    assertEqual "COFF of many relocations of many symbols applies them all" ([] : List String) errors
+    let word (address : Nat) : Nat :=
+      (List.range 4).foldl (fun value index => value + ((image.memory.readByte (address + index)).getD 0).toNat * 256 ^ index) 0
+    assertEqual "COFF of many relocations of many symbols: all of them" (0x10 * count % 2 ^ 32) (word 0)
+    let elapsed := (← IO.monoMsNow) - started
+    assertTrue s!"COFF of many relocations of many symbols is done in the time of what it has, not of their product: {elapsed} ms"
+      (elapsed < 60000)
+  -- and it is the first of the symbols of an index, as a search has it
+  let named (name : String) : Symbol := ⟨name, 0, 0, false, false, false⟩
+  let find := Coff.symbolFinder (Coff.symbolTable [(3, named "a"), (5, named "b"), (3, named "c")])
+  assertEqual "COFF symbols are found by their indices, the first of each" [some "a", some "b", none]
+    ([3, 5, 4].map fun index => (find index).map (·.2.name))
 
 /-- An object of AMD64 with the symbols of its sections, as MSVC makes them, each with an auxiliary record of its definition: a
 checksum where a symbol has its value, and no section where a symbol has its section, as it isn't of an associative COMDAT. -/
@@ -258,7 +279,30 @@ def runCompiled : IO Unit := do
         ((image.symbols.find? (·.name == "arr")).map (·.thumb))
   | .error error, _ | _, .error error => throw <| IO.userError s!"COFF of Thumb: {error}"
 
+/-- The names of the symbols of an object take no more than `namesLimit`, each as often as a symbol has it, and so do those of its
+sections that are in the string table: 64 of either that each name a string of 64 KiB are refused, and 8 are read. -/
+def runNames : IO Unit := do
+  let length := 2 ^ 16
+  let file (sections symbols : Nat) (tableSize : Nat := length + 5) : ByteArray :=
+    let le (size value : Nat) : ByteArray := appendNat ByteArray.empty value size
+    let header := le 2 0x8664 ++ le 2 sections ++ le 4 0 ++ le 4 (20 + 40 * sections) ++ le 4 symbols ++ le 2 0 ++ le 2 0
+    let sectionHeader := "/4".toUTF8 ++ le 6 0 ++ le 28 0 ++ le 4 0x60000020
+    let symbol := le 4 0 ++ le 4 4 ++ le 4 0 ++ le 2 1 ++ le 2 0x20 ++ le 1 2 ++ le 1 0
+    let headers := (List.range sections).foldl (fun bytes _ => bytes ++ sectionHeader) header
+    (List.range symbols).foldl (fun bytes _ => bytes ++ symbol) headers ++ le 4 tableSize ++
+      ByteArray.mk (Array.replicate length 0x41) ++ ByteArray.mk #[0]
+  let refused (data : ByteArray) : Option String := match Coff.decodeReport data with
+    | .error message => some message
+    | .ok _ => none
+  assertEqual "COFF symbols and sections whose names are 8 times a string of 64 KiB are read"
+    (some (List.replicate 8 length, List.replicate 8 length))
+    ((Coff.decode (file 8 8)).toOption.map fun image => (image.sections.map (·.name.length), image.symbols.map (·.name.length)))
+  assertEqual "COFF symbols whose names take more than the file is given are refused" (some namesTooLarge) (refused (file 1 64))
+  assertEqual "COFF sections whose names take more than the file is given are refused" (some namesTooLarge) (refused (file 64 1))
+  assertEqual "a COFF name that doesn't end in the string table is refused" (some "unterminated string") (refused (file 1 1 100))
+
 def run : IO Unit := do
+  runNames
   runCompiled
   -- Sections and commons whose headers ask for more zeros than a host can give, all together, aren't made.
   let table := 20 + fieldOf objectFixture 16 2

@@ -98,7 +98,7 @@ structure Invariant (env : Env) (R : LinkState → Prop) : Prop where
   /-- Deferring a site whose place was just read. -/
   defer : ∀ state site, env.machine = 8 → (site.rel.typ = 5 ∨ site.rel.typ = 9) → SiteOk env site → R state →
     inSection site 0 4 state.memory.size = true →
-    R { state with mipsPending := (site, readNat state.memory env.little (site.off + 0) 4 &&& 0xffff) :: state.mipsPending }
+    R { state with mipsPending := state.mipsPending.push (site, readNat state.memory env.little (site.off + 0) 4 &&& 0xffff) }
   /-- A deferred half is resolved. -/
   applyHi : ∀ site, env.machine = 8 → (site.rel.typ = 5 ∨ site.rel.typ = 9) → SiteOk env site → site.rel.isExplicit = true →
     Preserves R (mipsApplyHi env site site.a)
@@ -155,7 +155,7 @@ theorem Invariant.deferred (I : Invariant env R) (site : Site) (hm : env.machine
     (hsite : SiteOk env site) :
     Preserves R (do
       let x ← ld env site 0 4
-      modify fun state : LinkState => { state with mipsPending := (site, x &&& 0xffff) :: state.mipsPending }
+      modify fun state : LinkState => { state with mipsPending := state.mipsPending.push (site, x &&& 0xffff) }
       done [] : Outcome) := by
   intro state hs
   by_cases hb : inSection site 0 4 state.memory.size = true
@@ -422,7 +422,7 @@ theorem flush_pendingOk (env : Env) (lo : Int) (symbol : Nat) : Preserves Pendin
   intro entry he
   change entry ∈ after.mipsPending at he
   rw [hpend] at he
-  exact inSection_mono (hs entry (List.mem_filter.mp he).1) hsize
+  exact inSection_mono (hs entry (Pending.mem_without.mp he).1) hsize
 
 theorem got_pendingOk (env : Env) (value : Int) : Preserves PendingOk (gotEntry env value) := by
   intro state hs
@@ -455,24 +455,24 @@ theorem relocate_pendingOk (tables : Tables) (state : LinkState) (hs : PendingOk
 
 /-- The states of the second pass, from one with nothing pending. -/
 theorem applied_pendingOk {tables : Tables} {apply : Site → Outcome} (hh : handler tables.env = some apply) (done : List Rel)
-    (start : LinkState) (hs : start.mipsPending = []) :
+    (start : LinkState) (hs : start.mipsPending = ∅) :
     PendingOk (done.foldl (fun state rel => stateOf (applyOne tables apply rel state))
       (tables.input.relocations.foldl (fun state rel => stateOf (prescanOne tables rel state)) start)) := by
   have I := pendingOk_invariant tables.env
-  have h0 : PendingOk start := fun entry he => by simp [hs] at he
+  have h0 : PendingOk start := fun entry he => absurd (hs ▸ he) (Pending.not_mem_empty entry)
   exact preserves_foldl (I.applyOne tables rfl hh) done _
     (preserves_foldl (preserves_prescanOne I.warnings I.references (fun _ _ _ h => h) tables I.got) _ start h0)
 
 /-- **`R_MIPS_LO16` in a whole link**: whichever one of the relocations of a file it is, what is pending of its symbol is resolved
 and it does what its ABI says, with its place in bounds as the only condition. -/
 theorem link_mips_lo16 {tables : Tables} {apply : Site → Outcome} (hh : handler tables.env = some apply) (before : List Rel)
-    {start : LinkState} (hs : start.mipsPending = []) {site : Site}
+    {start : LinkState} (hs : start.mipsPending = ∅) {site : Site}
     (ht : site.rel.typ = 6) :
     let state := before.foldl (fun state rel => stateOf (applyOne tables apply rel state))
       (tables.input.relocations.foldl (fun state rel => stateOf (prescanOne tables rel state)) start)
     inSection site 0 4 state.memory.size = true →
     ∃ flushed, mipsFlush tables.env (mipsA16 tables.env site state) site.rel.symbol state = .ok () flushed ∧
-      flushed.mipsPending = (state.mipsPending.filter fun entry => !(entry.1.rel.symbol == site.rel.symbol)) ∧
+      flushed.mipsPending = state.mipsPending.without site.rel.symbol ∧
       (mips tables.env site).run state = .ok (some [stAt tables.env site 0 4 (setLo16 (readNat state.memory tables.env.little (site.off + 0) 4)
         ((if site.sym.name == "_gp_disp" then mipsGp tables.env - site.p + 4 else site.s) + mipsA16 tables.env site state))]) flushed :=
   fun hb => mips_lo16_resolves ht hb (applied_pendingOk hh before start hs)

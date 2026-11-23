@@ -207,13 +207,90 @@ structure Env where
   /-- What a MIPS object's local `GPREL` addends are relative to. -/
   gp0 : Int := 0
 
+/-- The HI16 and local GOT16 sites that await their LO16, with their stored halves: by their symbols, the latest of each first, as a
+LO16 resolves those of its symbol and no others, so that it costs what it resolves and not all that is pending, which a file may
+have as many of as it has relocations. -/
+structure Pending where
+  bySymbol : Std.HashMap Nat (List (Site × Nat)) := {}
+
+namespace Pending
+
+/-- What is pending of a symbol, the latest first. -/
+def ofSymbol (pending : Pending) (symbol : Nat) : List (Site × Nat) :=
+  (pending.bySymbol.getD symbol []).filter fun entry => entry.1.rel.symbol == symbol
+
+/-- What is pending, but of a symbol. -/
+def without (pending : Pending) (symbol : Nat) : Pending := ⟨pending.bySymbol.erase symbol⟩
+
+/-- With one more, the latest of its symbol. -/
+def push (pending : Pending) (entry : Site × Nat) : Pending :=
+  ⟨pending.bySymbol.insert entry.1.rel.symbol (entry :: pending.bySymbol.getD entry.1.rel.symbol [])⟩
+
+/-- The symbols that something may be pending of. -/
+def symbols (pending : Pending) : List Nat := pending.bySymbol.keys
+
+instance : EmptyCollection Pending := ⟨{}⟩
+
+/-- A site is pending if it is of what is pending of its symbol. -/
+protected def Mem (pending : Pending) (entry : Site × Nat) : Prop := entry ∈ pending.ofSymbol entry.1.rel.symbol
+
+instance : Membership (Site × Nat) Pending := ⟨Pending.Mem⟩
+
+theorem mem_iff {pending : Pending} {entry : Site × Nat} :
+    entry ∈ pending ↔ entry ∈ pending.bySymbol.getD entry.1.rel.symbol [] := by
+  show entry ∈ pending.ofSymbol entry.1.rel.symbol ↔ _
+  simp [ofSymbol]
+
+-- What is pending is known of by the theorems below, not by what it is made of, which is a table.
+attribute [irreducible] Pending.Mem
+
+theorem not_mem_empty (entry : Site × Nat) : ¬ entry ∈ (∅ : Pending) := by
+  rw [mem_iff]
+  show ¬ entry ∈ (∅ : Std.HashMap Nat (List (Site × Nat))).getD entry.1.rel.symbol []
+  simp
+
+theorem mem_ofSymbol {pending : Pending} {symbol : Nat} {entry : Site × Nat} :
+    entry ∈ pending.ofSymbol symbol ↔ entry ∈ pending ∧ entry.1.rel.symbol = symbol := by
+  rw [mem_iff]
+  simp only [ofSymbol, List.mem_filter, beq_iff_eq]
+  constructor
+  · rintro ⟨h, rfl⟩
+    exact ⟨h, rfl⟩
+  · rintro ⟨h, rfl⟩
+    exact ⟨h, rfl⟩
+
+theorem mem_without {pending : Pending} {symbol : Nat} {entry : Site × Nat} :
+    entry ∈ pending.without symbol ↔ entry ∈ pending ∧ entry.1.rel.symbol ≠ symbol := by
+  rw [mem_iff, mem_iff]
+  simp only [without, Std.HashMap.getD_erase]
+  by_cases h : symbol = entry.1.rel.symbol
+  · simp [h]
+  · have h' : (symbol == entry.1.rel.symbol) = false := by simpa using h
+    simp [h', Ne.symm h]
+
+theorem mem_push {pending : Pending} {added entry : Site × Nat} :
+    entry ∈ pending.push added ↔ entry = added ∨ entry ∈ pending := by
+  rw [mem_iff, mem_iff]
+  simp only [push, Std.HashMap.getD_insert]
+  by_cases h : added.1.rel.symbol = entry.1.rel.symbol
+  · simp [h]
+  · have h' : (added.1.rel.symbol == entry.1.rel.symbol) = false := by simpa using h
+    simp only [h', Bool.false_eq_true, ite_false]
+    constructor
+    · exact .inr
+    · rintro (rfl | h2)
+      · exact absurd rfl h
+      · exact h2
+
+end Pending
+
 structure LinkState where
   memory : ByteArray
   /-- The address of the GOT entry of a value. -/
   got : Std.HashMap Nat Nat := {}
   gotCount : Nat := 0
-  /-- The HI16 and local GOT16 sites awaiting their LO16, the latest first, with their stored halves. -/
-  mipsPending : List (Site × Nat) := []
+  /-- The HI16 and local GOT16 sites awaiting their LO16, with their stored halves. -/
+  mipsPending : Pending := ∅
   /-- The pc-relative values of the AUIPC instructions, by their addresses. -/
   riscvHi : Std.HashMap Int Int := {}
   references : List (Nat × String) := []
@@ -612,10 +689,10 @@ def mipsApplyHi (env : Env) (site : Site) (ahl : Int) : LinkM Unit := do
     let entry ← gotEntry env (page - page % 65536)
     commit site [stAt env site 0 4 (setLo16 insn (entry - gp))]
 
+/-- Resolves what is pending of a symbol, the earliest first, with the low half `lo` of its addend, and it is pending no more. -/
 def mipsFlush (env : Env) (lo : Int) (symbol : Nat) : LinkM Unit := do
-  let state ← get
-  let (matched, rest) := state.mipsPending.partition fun entry => entry.1.rel.symbol == symbol
-  set { state with mipsPending := rest }
+  let matched := (← get).mipsPending.ofSymbol symbol
+  modify fun state => { state with mipsPending := state.mipsPending.without symbol }
   for entry in matched.reverse do
     mipsApplyHi env entry.1 (((entry.2 : Int) * 65536) + lo)
 
@@ -707,7 +784,7 @@ def mips (env : Env) (site : Site) : Outcome := do
       mipsApplyHi env site site.a
     else
       let stored := (← ld env site 0 4) &&& 0xffff
-      modify fun state => { state with mipsPending := (site, stored) :: state.mipsPending }
+      modify fun state => { state with mipsPending := state.mipsPending.push (site, stored) }
     done []
   let gotOffset (value : LinkM Int) : LinkM Int := do pure ((← value) - gp)
   match rel.typ with
@@ -766,10 +843,8 @@ def mips (env : Env) (site : Site) : Outcome := do
   | typ => if typ < 256 then pure none else mipsCompound env site
 
 def mipsFinish (env : Env) : LinkM Unit := do
-  let symbols := (← get).mipsPending.map (·.1.rel.symbol)
-  let unique := symbols.foldl (init := []) fun result symbol =>
-    if result.contains symbol then result else symbol :: result
-  for symbol in unique.mergeSort do
+  let symbols := (← get).mipsPending.symbols
+  for symbol in symbols.mergeSort do
     mipsFlush env 0 symbol
 
 def bit (value : Int) (n : Nat) : Nat := field value n 1

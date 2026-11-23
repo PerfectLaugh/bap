@@ -97,6 +97,20 @@
 (defun VMRS (rt cnd _) (vfp cnd (set$ rt FPSCR)))
 (defun VMSR (rt cnd _) (vfp cnd (set FPSCR rt)))
 
+;; The other system registers of the floating point are of PL1: an
+;; access from the user mode is UNDEFINED, and Linux doesn't emulate one.
+(defun VMRS_FPSID (_ cnd _) (vfp cnd (intrinsic 'undefined-instruction :aborts)))
+(defun VMRS_MVFR0 (_ cnd _) (vfp cnd (intrinsic 'undefined-instruction :aborts)))
+(defun VMRS_MVFR1 (_ cnd _) (vfp cnd (intrinsic 'undefined-instruction :aborts)))
+(defun VMRS_MVFR2 (_ cnd _) (vfp cnd (intrinsic 'undefined-instruction :aborts)))
+(defun VMRS_FPEXC (_ cnd _) (vfp cnd (intrinsic 'undefined-instruction :aborts)))
+(defun VMRS_FPINST (_ cnd _) (vfp cnd (intrinsic 'undefined-instruction :aborts)))
+(defun VMRS_FPINST2 (_ cnd _) (vfp cnd (intrinsic 'undefined-instruction :aborts)))
+(defun VMSR_FPSID (_ cnd _) (vfp cnd (intrinsic 'undefined-instruction :aborts)))
+(defun VMSR_FPEXC (_ cnd _) (vfp cnd (intrinsic 'undefined-instruction :aborts)))
+(defun VMSR_FPINST (_ cnd _) (vfp cnd (intrinsic 'undefined-instruction :aborts)))
+(defun VMSR_FPINST2 (_ cnd _) (vfp cnd (intrinsic 'undefined-instruction :aborts)))
+
 ;; CONVERSIONS
 
 (defun VCVTDS (dd sm cnd _) (vfp cnd (set$ dd (fconvert :rne 64 sm))))
@@ -1410,6 +1424,8 @@
       'fmul (neon-fmul x y)
       'fmax (neon-fres (fp-max (neon-fz x) (neon-fz y) 23))
       'fmin (neon-fres (fp-min (neon-fz x) (neon-fz y) 23))
+      'fmaxnm (neon-fres (fp-maxnm (neon-fz x) (neon-fz y) 23))
+      'fminnm (neon-fres (fp-minnm (neon-fz x) (neon-fz y) 23))
       'fceq (neon-fcmp 'eq x y)
       'fcge (neon-fcmp 'ge x y)
       'fcgt (neon-fcmp 'gt x y)
@@ -2545,6 +2561,11 @@
 (defun VADDfq (rd rn rm cnd _) (neon cnd 2 rd (neon-map2 'fadd (neon-get rn 2) (neon-get rm 2) 32 0)))
 (defun VSUBfq (rd rn rm cnd _) (neon cnd 2 rd (neon-map2 'fsub (neon-get rn 2) (neon-get rm 2) 32 0)))
 (defun VMULfq (rd rn rm cnd _) (neon cnd 2 rd (neon-map2 'fmul (neon-get rn 2) (neon-get rm 2) 32 0)))
+;; ARMv8: FPMaxNum and FPMinNum of the lanes, without a condition
+(defun NEON_VMAXNMNDf (rd rn rm) (neon-set rd 1 (neon-map2 'fmaxnm (neon-get rn 1) (neon-get rm 1) 32 0)))
+(defun NEON_VMINNMNDf (rd rn rm) (neon-set rd 1 (neon-map2 'fminnm (neon-get rn 1) (neon-get rm 1) 32 0)))
+(defun NEON_VMAXNMNQf (rd rn rm) (neon-set rd 2 (neon-map2 'fmaxnm (neon-get rn 2) (neon-get rm 2) 32 0)))
+(defun NEON_VMINNMNQf (rd rn rm) (neon-set rd 2 (neon-map2 'fminnm (neon-get rn 2) (neon-get rm 2) 32 0)))
 (defun VMAXfq (rd rn rm cnd _) (neon cnd 2 rd (neon-map2 'fmax (neon-get rn 2) (neon-get rm 2) 32 0)))
 (defun VMINfq (rd rn rm cnd _) (neon cnd 2 rd (neon-map2 'fmin (neon-get rn 2) (neon-get rm 2) 32 0)))
 (defun VCEQfq (rd rn rm cnd _) (neon cnd 2 rd (neon-map2 'fceq (neon-get rn 2) (neon-get rm 2) 32 0)))

@@ -1,0 +1,17 @@
+time by csrrs: goes on 1
+time by csrrc: goes on 1
+time by immediates: goes on 1
+time written: signal 4 code 1 at a test 1
+time set: signal 4 code 1 at a test 1
+cycle: signal 4 code 1 at a test 1
+instret: signal 4 code 1 at a test 1
+timeh: the same twice 1
+rounding mode 5: signal 4 code 1 at a test 1
+rounding mode 6: signal 4 code 1 at a test 1
+rounding mode 5 fused: signal 4 code 1 at a test 1
+sret: signal 4 code 1 at a test 1
+mret: signal 4 code 1 at a test 1
+uret: signal 4 code 1 at a test 1
+wfi: signal 4 code 1 at a test 1
+sfence.vma: signal 4 code 1 at a test 1
+all bits: signal 4 code 1 at a test 1

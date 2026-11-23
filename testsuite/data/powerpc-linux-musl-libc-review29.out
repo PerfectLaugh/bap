@@ -1,0 +1,17 @@
+block: 32
+dcbz: 1
+time base: goes on 1 1
+time base upper: read
+time base written: signal 4 code 1 at a test 1
+vrsave: ffffffff
+version: read 1
+sprg3: 0
+xer: 7f 20000000
+float writes: 0 0 0 0 0 0
+dscr: signal 4 code 1 at a test 1
+mfmsr: signal 4 code 5 at a test 1
+mtmsr: signal 4 code 5 at a test 1
+rfid: signal 4 code 1 at a test 1
+tlbie: signal 4 code 5 at a test 1
+privileged register: signal 4 code 5 at a test 1
+no register: signal 4 code 1 at a test 1

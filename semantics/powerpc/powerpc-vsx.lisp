@@ -161,14 +161,19 @@
     23 0xc001c000000000000000000000000000:128
     24 0xffff0000000000000000000000000000:128
     25 0xffff8000000000000000000000000000:128
-    (intrinsic 'lxvkq-reserved uim :result 128)))
-(defun LXVKQ (xt uim) (set$ xt (quad-constant uim)))
+    0:128))
+;; of a value that is reserved, which has no constant, the form is
+;; invalid, an illegal instruction
+(defun LXVKQ (xt uim)
+  (if (is-zero (quad-constant uim))
+      (intrinsic 'undefined-instruction :aborts)
+    (set$ xt (quad-constant uim))))
 
-;; the masks for permutations, whose tables are of the intrinsics
-(defun XXGENPCVBM (xt vb imm) (set$ xt (intrinsic 'xxgenpcvbm vb imm :result 128)))
-(defun XXGENPCVHM (xt vb imm) (set$ xt (intrinsic 'xxgenpcvhm vb imm :result 128)))
-(defun XXGENPCVWM (xt vb imm) (set$ xt (intrinsic 'xxgenpcvwm vb imm :result 128)))
-(defun XXGENPCVDM (xt vb imm) (set$ xt (intrinsic 'xxgenpcvdm vb imm :result 128)))
+;; the masks for permutations, which a machine serves (Bap.PowerPC)
+(defun XXGENPCVBM (xt vb imm) (set$ xt (intrinsic 'powerpc-xxgenpcv vb imm 8 :result 128)))
+(defun XXGENPCVHM (xt vb imm) (set$ xt (intrinsic 'powerpc-xxgenpcv vb imm 16 :result 128)))
+(defun XXGENPCVWM (xt vb imm) (set$ xt (intrinsic 'powerpc-xxgenpcv vb imm 32 :result 128)))
+(defun XXGENPCVDM (xt vb imm) (set$ xt (intrinsic 'powerpc-xxgenpcv vb imm 64 :result 128)))
 
 ;;; MOVES BETWEEN THE GENERAL AND THE VSX REGISTERS
 
@@ -723,8 +728,11 @@
 (defun XVCVHPSP (xt xb) (set$ xt (lanes32-1 word-of-hp xb)))
 (defun XVCVSPHP (xt xb) (set$ xt (lanes32-1 word-to-hp xb)))
 
-(defun bf16-to-sp (x) (intrinsic 'bfloat16-to-single x :result 32))
-(defun sp-to-bf16 (x) (intrinsic 'single-to-bfloat16 x :result 32))
+;; a bfloat16 is the high half of a single; a single is rounded to one
+;; as FPSCR says, where its bits end, and its NaN is quiet
+(defun bf16-to-sp (x) (concat (cast-low 16 x) 0:16))
+(defun sp-to-bf16 (x)
+  (cast-unsigned 32 (cast-high 16 (pick (fp-nan x) (fp-quiet x) (round-bits x 16 (current-rounding))))))
 (defun XVCVBF16SPN (xt xb) (set$ xt (lanes32-1 bf16-to-sp xb)))
 (defun XVCVSPBF16 (xt xb) (set$ xt (lanes32-1 sp-to-bf16 xb)))
 
@@ -779,11 +787,10 @@
 
 ;;; QUAD PRECISION
 ;;
-;; The values are in the whole of a vector register. The arithmetic is of
-;; binary128 and its intrinsics, what has no theory, i.e., the rounding to
-;; odd of the forms with the O suffix, and the fused operations and the
-;; conversions, is an intrinsic with the name of the instruction, whose
-;; results are what the instruction writes.
+;; The values are in the whole of a vector register. The arithmetic, the
+;; fused operations and the conversions are of binary128 and its
+;; intrinsics, those of the forms with the O suffix rounded to odd. The
+;; rounding to the double extended precision, XSRQPXP, is by the bits.
 
 (defun qp-nan-first (r a b)
   (pick (fp-nan a) (fp-quiet a)
@@ -795,37 +802,136 @@
 (defun XSMULQP (vt va vb) (set$ vt (qp-nan-first (*. :rne va vb) va vb)))
 (defun XSDIVQP (vt va vb) (set$ vt (qp-nan-first (/. :rne va vb) va vb)))
 (defun XSSQRTQP (vt vb) (set$ vt (qp-nan-first (fsqrt :rne vb) vb vb)))
-(defun XSADDQPO (vt va vb) (set$ vt (intrinsic 'xsaddqpo va vb :result 128)))
-(defun XSSUBQPO (vt va vb) (set$ vt (intrinsic 'xssubqpo va vb :result 128)))
-(defun XSMULQPO (vt va vb) (set$ vt (intrinsic 'xsmulqpo va vb :result 128)))
-(defun XSDIVQPO (vt va vb) (set$ vt (intrinsic 'xsdivqpo va vb :result 128)))
-(defun XSSQRTQPO (vt vb) (set$ vt (intrinsic 'xssqrtqpo vb :result 128)))
+;; the forms with the O suffix round to odd: toward zero, with the last
+;; bit of the significand set of what isn't exact
+(defun XSADDQPO (vt va vb) (set$ vt (qp-nan-first (+. :rod va vb) va vb)))
+(defun XSSUBQPO (vt va vb) (set$ vt (qp-nan-first (-. :rod va vb) va vb)))
+(defun XSMULQPO (vt va vb) (set$ vt (qp-nan-first (*. :rod va vb) va vb)))
+(defun XSDIVQPO (vt va vb) (set$ vt (qp-nan-first (/. :rod va vb) va vb)))
+(defun XSSQRTQPO (vt vb) (set$ vt (qp-nan-first (fsqrt :rod vb) vb vb)))
 
-(defun XSMADDQP (vt _ va vb) (set$ vt (intrinsic 'xsmaddqp va vb vt :result 128)))
-(defun XSMSUBQP (vt _ va vb) (set$ vt (intrinsic 'xsmsubqp va vb vt :result 128)))
-(defun XSNMADDQP (vt _ va vb) (set$ vt (intrinsic 'xsnmaddqp va vb vt :result 128)))
-(defun XSNMSUBQP (vt _ va vb) (set$ vt (intrinsic 'xsnmsubqp va vb vt :result 128)))
-(defun XSMADDQPO (vt _ va vb) (set$ vt (intrinsic 'xsmaddqpo va vb vt :result 128)))
-(defun XSMSUBQPO (vt _ va vb) (set$ vt (intrinsic 'xsmsubqpo va vb vt :result 128)))
-(defun XSNMADDQPO (vt _ va vb) (set$ vt (intrinsic 'xsnmaddqpo va vb vt :result 128)))
-(defun XSNMSUBQPO (vt _ va vb) (set$ vt (intrinsic 'xsnmsubqpo va vb vt :result 128)))
+;; the fused operations, VA * VB + VT rounded once; of the NaNs, that of
+;; VA comes first, then that of VT, then that of VB
+(defun qp-fused (mode a c b)
+  (intrinsic (symbol-concat 'fmad mode 'ieee754_binary '128 :sep '_) a c b :result 128))
+(defun qp-nan3 (r a b c)
+  (pick (fp-nan a) (fp-quiet a)
+        (pick (fp-nan b) (fp-quiet b)
+              (pick (fp-nan c) (fp-quiet c)
+                    (pick (fp-nan r) 0x7fff8000000000000000000000000000:128 r)))))
+(defun qp-madd (mode va vb vt) (qp-nan3 (qp-fused mode va vb vt) va vt vb))
+(defun qp-msub (mode va vb vt) (qp-nan3 (qp-fused mode va vb (fp-neg vt)) va vt vb))
+(defun qp-negate (x) (pick (fp-nan x) x (fp-neg x)))
+(defun XSMADDQP (vt _ va vb) (set$ vt (qp-madd 'rne va vb vt)))
+(defun XSMSUBQP (vt _ va vb) (set$ vt (qp-msub 'rne va vb vt)))
+(defun XSNMADDQP (vt _ va vb) (set$ vt (qp-negate (qp-madd 'rne va vb vt))))
+(defun XSNMSUBQP (vt _ va vb) (set$ vt (qp-negate (qp-msub 'rne va vb vt))))
+(defun XSMADDQPO (vt _ va vb) (set$ vt (qp-madd 'rod va vb vt)))
+(defun XSMSUBQPO (vt _ va vb) (set$ vt (qp-msub 'rod va vb vt)))
+(defun XSNMADDQPO (vt _ va vb) (set$ vt (qp-negate (qp-madd 'rod va vb vt))))
+(defun XSNMSUBQPO (vt _ va vb) (set$ vt (qp-negate (qp-msub 'rod va vb vt))))
 
-(defun XSCVDPQP (vt xb) (set$ vt (intrinsic 'xscvdpqp xb :result 128)))
-(defun XSCVSDQP (vt xb) (set$ vt (intrinsic 'xscvsdqp xb :result 128)))
-(defun XSCVUDQP (vt xb) (set$ vt (intrinsic 'xscvudqp xb :result 128)))
-(defun XSCVSQQP (vt vb) (set$ vt (intrinsic 'xscvsqqp vb :result 128)))
-(defun XSCVUQQP (vt vb) (set$ vt (intrinsic 'xscvuqqp vb :result 128)))
-(defun XSCVQPDP (xt vb) (set-scalar xt (intrinsic 'xscvqpdp vb :result 64)))
-(defun XSCVQPDPO (xt vb) (set-scalar xt (intrinsic 'xscvqpdpo vb :result 64)))
-(defun XSCVQPSDZ (vt vb) (set$ vt (intrinsic 'xscvqpsdz vb :result 128)))
-(defun XSCVQPUDZ (vt vb) (set$ vt (intrinsic 'xscvqpudz vb :result 128)))
-(defun XSCVQPSWZ (vt vb) (set$ vt (intrinsic 'xscvqpswz vb :result 128)))
-(defun XSCVQPUWZ (vt vb) (set$ vt (intrinsic 'xscvqpuwz vb :result 128)))
-(defun XSCVQPSQZ (vt vb) (set$ vt (intrinsic 'xscvqpsqz vb :result 128)))
-(defun XSCVQPUQZ (vt vb) (set$ vt (intrinsic 'xscvqpuqz vb :result 128)))
-(defun XSRQPI (vt r vb rmc) (set$ vt (intrinsic 'xsrqpi r vb rmc :result 128)))
-(defun XSRQPIX (vt r vb rmc) (set$ vt (intrinsic 'xsrqpix r vb rmc :result 128)))
-(defun XSRQPXP (vt r vb rmc) (set$ vt (intrinsic 'xsrqpxp r vb rmc :result 128)))
+;; The conversions. A NaN keeps its sign and the high bits of its
+;; fraction, and is quiet. A double and an integer of a doubleword are
+;; exactly a quad, and one of a quadword is rounded.
+(defun dp-to-qp (x)
+  (pick (fp-nan x)
+        (concat (msb x) 0x7fff:15 1:1 (extract 50 0 x) (cast-unsigned 60 0:1))
+        (fconvert :rne 128 x)))
+(defun qp-to-dp-nan (x) (concat (msb x) 0x7ff:11 1:1 (extract 110 60 x)))
+(defun XSCVDPQP (vt xb) (set$ vt (dp-to-qp xb)))
+(defun XSCVSDQP (vt xb) (set$ vt (cast-sfloat :rne 128 xb)))
+(defun XSCVUDQP (vt xb) (set$ vt (cast-float :rne 128 xb)))
+(defun XSCVSQQP (vt vb) (set$ vt (cast-sfloat :rne 128 vb)))
+(defun XSCVUQQP (vt vb) (set$ vt (cast-float :rne 128 vb)))
+(defun XSCVQPDP (xt vb)
+  (set-scalar xt (pick (fp-nan vb) (qp-to-dp-nan vb) (fconvert :rne 64 vb))))
+(defun XSCVQPDPO (xt vb)
+  (set-scalar xt (pick (fp-nan vb) (qp-to-dp-nan vb) (fconvert :rod 64 vb))))
+
+;; To the integers, toward zero: what is out of the range saturates, and
+;; a NaN is the most negative of the signed ones and zero of the others.
+;; The magnitude is the integral part of the significand, which fits the
+;; quadword while the exponent is below that of 2^128.
+(defun qp-exponent (x) (cast-unsigned 128 (extract 126 112 x)))
+(defun qp-integral (x)
+  (let ((e (qp-exponent x))
+        (sig (logor (cast-unsigned 128 (extract 111 0 x)) (lshift (u128 1) 112))))
+    (pick (< e (u128 16383)) (u128 0)
+          (pick (<= e (u128 16495))
+                (rshift sig (- (u128 16495) e))
+                (lshift sig (- e (u128 16495)))))))
+(defun qp-to-signed (x n)
+  (let ((e (qp-exponent x))
+        (mag (qp-integral x))
+        (lowest (lshift (u128 1) (- n 1)))
+        (big (logor (>= e (u128 (+ 16383 n)))
+                    (logand (msb x) (> mag lowest))
+                    (logand (not (msb x)) (>= mag lowest)))))
+    (pick (fp-nan x) lowest
+          (pick big
+                (pick (msb x) lowest (- lowest (u128 1)))
+                (pick (msb x) (neg mag) mag)))))
+(defun qp-to-unsigned (x n)
+  (let ((e (qp-exponent x))
+        (highest (if (= n 128) (lnot (u128 0)) (low-ones (u128 0) n))))
+    (pick (logor (fp-nan x) (msb x)) (u128 0)
+          (pick (>= e (u128 (+ 16383 n))) highest (qp-integral x)))))
+(defun XSCVQPSDZ (vt vb) (set$ vt (concat (cast-low 64 (qp-to-signed vb 64)) (u64 0))))
+(defun XSCVQPUDZ (vt vb) (set$ vt (concat (cast-low 64 (qp-to-unsigned vb 64)) (u64 0))))
+(defun XSCVQPSWZ (vt vb)
+  (set$ vt (concat (cast-signed 64 (cast-low 32 (qp-to-signed vb 32))) (u64 0))))
+(defun XSCVQPUWZ (vt vb)
+  (set$ vt (concat (cast-unsigned 64 (cast-low 32 (qp-to-unsigned vb 32))) (u64 0))))
+(defun XSCVQPSQZ (vt vb) (set$ vt (qp-to-signed vb 128)))
+(defun XSCVQPUQZ (vt vb) (set$ vt (qp-to-unsigned vb 128)))
+
+;; The rounding to an integral value, by R and RMC: to the nearest, with
+;; ties away from zero (0, 0) or to even (1, 0), toward zero (1, 1), up
+;; (1, 2), down (1, 3), or as FPSCR says (0, 3). The others are reserved,
+;; and are as FPSCR says here too. XSRQPIX differs by the inexact
+;; exception, which isn't modeled.
+(defun qp-round (r vb rmc)
+  (let ((x (if (= r 0)
+               (if (= rmc 0) (fround :rna vb) (fround :rne vb))
+             (case rmc
+               0 (fround :rnx vb)
+               1 (fround :rtz vb)
+               2 (fround :rtp vb)
+               (fround :rtn vb)))))
+    (pick (fp-nan vb) (fp-quiet vb) x)))
+(defun XSRQPI (vt r vb rmc) (set$ vt (qp-round r vb rmc)))
+(defun XSRQPIX (vt r vb rmc) (set$ vt (qp-round r vb rmc)))
+;; XSRQPXP rounds to the double extended precision, of a significand of
+;; 64 bits, whose least is the 49th of the fraction of a quad, of its
+;; denormals too; a NaN keeps as much of its fraction
+(defun current-rounding () (cast-low 8 (logand FPSCR 3:64)))
+(defun round-bits (x k m)
+  "the number X, by its bits, rounded to what has zeros for its K low
+   bits, by the mode M: 0 to the nearest even, 1 toward zero, 2 up, 3
+   down, 4 to the nearest away from zero. A carry goes to the exponent,
+   and from the greatest finite number to the infinity"
+  (let ((mag (fp-magnitude x))
+        (low (logand mag (low-ones x k)))
+        (base (- mag low))
+        (unit (lshift (one-like x) k))
+        (half (rshift unit 1))
+        (odd (non-zero (logand base unit)))
+        (inexact (non-zero low))
+        (up (logor (logand (= m 0:8) (logor (> low half) (logand (= low half) odd)))
+                   (logand (= m 4:8) (>= low half))
+                   (logand (= m 2:8) (not (msb x)) inexact)
+                   (logand (= m 3:8) (msb x) inexact))))
+    (logor (logand x (most-negative x))
+           (+ base (pick up unit (cast-unsigned (word-width x) 0:1))))))
+(defun qp-mode (r rmc)
+  (if (= r 0)
+      (if (= rmc 0) 4:8 (current-rounding))
+    (case rmc 0 0:8 1 1:8 2 2:8 3:8)))
+(defun XSRQPXP (vt r vb rmc)
+  (set$ vt (pick (fp-nan vb)
+                 (logand (fp-quiet vb) (lnot (low-ones vb 49)))
+                 (round-bits vb 49 (qp-mode r rmc)))))
 
 ;;; THE MATRIX-MULTIPLY ASSIST OF THE ISA 3.1
 ;;
@@ -833,7 +939,8 @@
 ;; UACC0 to UACC7, each made of four VSX registers by the target's aliases.
 ;; The moves in and out of the accumulator have thus no effect on the
 ;; values, that real hardware has only for the renaming. The products are
-;; the intrinsics with the names of the instructions, which take the
+;; the intrinsics with the names of the instructions after powerpc-, which
+;; a machine serves (Bap.PowerPC): they take the rounding mode, and the
 ;; accumulator in the forms that accumulate.
 
 (defun XXMTACC (_ _) (empty))
@@ -841,75 +948,75 @@
 (defun XXSETACCZ (at) (set$ at (cast-unsigned 512 0:1)))
 
 (defmacro ger (name at xa xb)
-  (set$ at (intrinsic name xa xb :result 512)))
+  (set$ at (intrinsic name (current-rounding) xa xb :result 512)))
 (defmacro ger-acc (name at xa xb)
-  (set$ at (intrinsic name at xa xb :result 512)))
+  (set$ at (intrinsic name (current-rounding) at xa xb :result 512)))
 (defmacro pm-ger (name at xa xb xm ym)
-  (set$ at (intrinsic name xa xb xm ym :result 512)))
+  (set$ at (intrinsic name (current-rounding) xa xb xm ym :result 512)))
 (defmacro pm-ger-acc (name at xa xb xm ym)
-  (set$ at (intrinsic name at xa xb xm ym :result 512)))
+  (set$ at (intrinsic name (current-rounding) at xa xb xm ym :result 512)))
 (defmacro pm-ger3 (name at xa xb xm ym pm)
-  (set$ at (intrinsic name xa xb xm ym pm :result 512)))
+  (set$ at (intrinsic name (current-rounding) xa xb xm ym pm :result 512)))
 (defmacro pm-ger3-acc (name at xa xb xm ym pm)
-  (set$ at (intrinsic name at xa xb xm ym pm :result 512)))
+  (set$ at (intrinsic name (current-rounding) at xa xb xm ym pm :result 512)))
 
-(defun XVF32GER (at xa xb) (ger 'xvf32ger at xa xb))
-(defun XVF64GER (at xa xb) (ger 'xvf64ger at xa xb))
-(defun XVF16GER2 (at xa xb) (ger 'xvf16ger2 at xa xb))
-(defun XVBF16GER2 (at xa xb) (ger 'xvbf16ger2 at xa xb))
-(defun XVI4GER8 (at xa xb) (ger 'xvi4ger8 at xa xb))
-(defun XVI8GER4 (at xa xb) (ger 'xvi8ger4 at xa xb))
-(defun XVI16GER2 (at xa xb) (ger 'xvi16ger2 at xa xb))
-(defun XVI16GER2S (at xa xb) (ger 'xvi16ger2s at xa xb))
-(defun XVF32GERPP (at _ xa xb) (ger-acc 'xvf32gerpp at xa xb))
-(defun XVF32GERPN (at _ xa xb) (ger-acc 'xvf32gerpn at xa xb))
-(defun XVF32GERNP (at _ xa xb) (ger-acc 'xvf32gernp at xa xb))
-(defun XVF32GERNN (at _ xa xb) (ger-acc 'xvf32gernn at xa xb))
-(defun XVF64GERPP (at _ xa xb) (ger-acc 'xvf64gerpp at xa xb))
-(defun XVF64GERPN (at _ xa xb) (ger-acc 'xvf64gerpn at xa xb))
-(defun XVF64GERNP (at _ xa xb) (ger-acc 'xvf64gernp at xa xb))
-(defun XVF64GERNN (at _ xa xb) (ger-acc 'xvf64gernn at xa xb))
-(defun XVF16GER2PP (at _ xa xb) (ger-acc 'xvf16ger2pp at xa xb))
-(defun XVF16GER2PN (at _ xa xb) (ger-acc 'xvf16ger2pn at xa xb))
-(defun XVF16GER2NP (at _ xa xb) (ger-acc 'xvf16ger2np at xa xb))
-(defun XVF16GER2NN (at _ xa xb) (ger-acc 'xvf16ger2nn at xa xb))
-(defun XVBF16GER2PP (at _ xa xb) (ger-acc 'xvbf16ger2pp at xa xb))
-(defun XVBF16GER2PN (at _ xa xb) (ger-acc 'xvbf16ger2pn at xa xb))
-(defun XVBF16GER2NP (at _ xa xb) (ger-acc 'xvbf16ger2np at xa xb))
-(defun XVBF16GER2NN (at _ xa xb) (ger-acc 'xvbf16ger2nn at xa xb))
-(defun XVI4GER8PP (at _ xa xb) (ger-acc 'xvi4ger8pp at xa xb))
-(defun XVI8GER4PP (at _ xa xb) (ger-acc 'xvi8ger4pp at xa xb))
-(defun XVI8GER4SPP (at _ xa xb) (ger-acc 'xvi8ger4spp at xa xb))
-(defun XVI16GER2PP (at _ xa xb) (ger-acc 'xvi16ger2pp at xa xb))
-(defun XVI16GER2SPP (at _ xa xb) (ger-acc 'xvi16ger2spp at xa xb))
+(defun XVF32GER (at xa xb) (ger 'powerpc-xvf32ger at xa xb))
+(defun XVF64GER (at xa xb) (ger 'powerpc-xvf64ger at xa xb))
+(defun XVF16GER2 (at xa xb) (ger 'powerpc-xvf16ger2 at xa xb))
+(defun XVBF16GER2 (at xa xb) (ger 'powerpc-xvbf16ger2 at xa xb))
+(defun XVI4GER8 (at xa xb) (ger 'powerpc-xvi4ger8 at xa xb))
+(defun XVI8GER4 (at xa xb) (ger 'powerpc-xvi8ger4 at xa xb))
+(defun XVI16GER2 (at xa xb) (ger 'powerpc-xvi16ger2 at xa xb))
+(defun XVI16GER2S (at xa xb) (ger 'powerpc-xvi16ger2s at xa xb))
+(defun XVF32GERPP (at _ xa xb) (ger-acc 'powerpc-xvf32gerpp at xa xb))
+(defun XVF32GERPN (at _ xa xb) (ger-acc 'powerpc-xvf32gerpn at xa xb))
+(defun XVF32GERNP (at _ xa xb) (ger-acc 'powerpc-xvf32gernp at xa xb))
+(defun XVF32GERNN (at _ xa xb) (ger-acc 'powerpc-xvf32gernn at xa xb))
+(defun XVF64GERPP (at _ xa xb) (ger-acc 'powerpc-xvf64gerpp at xa xb))
+(defun XVF64GERPN (at _ xa xb) (ger-acc 'powerpc-xvf64gerpn at xa xb))
+(defun XVF64GERNP (at _ xa xb) (ger-acc 'powerpc-xvf64gernp at xa xb))
+(defun XVF64GERNN (at _ xa xb) (ger-acc 'powerpc-xvf64gernn at xa xb))
+(defun XVF16GER2PP (at _ xa xb) (ger-acc 'powerpc-xvf16ger2pp at xa xb))
+(defun XVF16GER2PN (at _ xa xb) (ger-acc 'powerpc-xvf16ger2pn at xa xb))
+(defun XVF16GER2NP (at _ xa xb) (ger-acc 'powerpc-xvf16ger2np at xa xb))
+(defun XVF16GER2NN (at _ xa xb) (ger-acc 'powerpc-xvf16ger2nn at xa xb))
+(defun XVBF16GER2PP (at _ xa xb) (ger-acc 'powerpc-xvbf16ger2pp at xa xb))
+(defun XVBF16GER2PN (at _ xa xb) (ger-acc 'powerpc-xvbf16ger2pn at xa xb))
+(defun XVBF16GER2NP (at _ xa xb) (ger-acc 'powerpc-xvbf16ger2np at xa xb))
+(defun XVBF16GER2NN (at _ xa xb) (ger-acc 'powerpc-xvbf16ger2nn at xa xb))
+(defun XVI4GER8PP (at _ xa xb) (ger-acc 'powerpc-xvi4ger8pp at xa xb))
+(defun XVI8GER4PP (at _ xa xb) (ger-acc 'powerpc-xvi8ger4pp at xa xb))
+(defun XVI8GER4SPP (at _ xa xb) (ger-acc 'powerpc-xvi8ger4spp at xa xb))
+(defun XVI16GER2PP (at _ xa xb) (ger-acc 'powerpc-xvi16ger2pp at xa xb))
+(defun XVI16GER2SPP (at _ xa xb) (ger-acc 'powerpc-xvi16ger2spp at xa xb))
 
 ;; the prefixed forms have the masks as well
-(defun PMXVF32GER (at xa xb xm ym) (pm-ger 'pmxvf32ger at xa xb xm ym))
-(defun PMXVF32GERPP (at _ xa xb xm ym) (pm-ger-acc 'pmxvf32gerpp at xa xb xm ym))
-(defun PMXVF32GERPN (at _ xa xb xm ym) (pm-ger-acc 'pmxvf32gerpn at xa xb xm ym))
-(defun PMXVF32GERNP (at _ xa xb xm ym) (pm-ger-acc 'pmxvf32gernp at xa xb xm ym))
-(defun PMXVF32GERNN (at _ xa xb xm ym) (pm-ger-acc 'pmxvf32gernn at xa xb xm ym))
-(defun PMXVF64GER (at xa xb xm ym) (pm-ger 'pmxvf64ger at xa xb xm ym))
-(defun PMXVF64GERPP (at _ xa xb xm ym) (pm-ger-acc 'pmxvf64gerpp at xa xb xm ym))
-(defun PMXVF64GERPN (at _ xa xb xm ym) (pm-ger-acc 'pmxvf64gerpn at xa xb xm ym))
-(defun PMXVF64GERNP (at _ xa xb xm ym) (pm-ger-acc 'pmxvf64gernp at xa xb xm ym))
-(defun PMXVF64GERNN (at _ xa xb xm ym) (pm-ger-acc 'pmxvf64gernn at xa xb xm ym))
-(defun PMXVF16GER2 (at xa xb xm ym pm) (pm-ger3 'pmxvf16ger2 at xa xb xm ym pm))
-(defun PMXVF16GER2PP (at _ xa xb xm ym pm) (pm-ger3-acc 'pmxvf16ger2pp at xa xb xm ym pm))
-(defun PMXVF16GER2PN (at _ xa xb xm ym pm) (pm-ger3-acc 'pmxvf16ger2pn at xa xb xm ym pm))
-(defun PMXVF16GER2NP (at _ xa xb xm ym pm) (pm-ger3-acc 'pmxvf16ger2np at xa xb xm ym pm))
-(defun PMXVF16GER2NN (at _ xa xb xm ym pm) (pm-ger3-acc 'pmxvf16ger2nn at xa xb xm ym pm))
-(defun PMXVBF16GER2 (at xa xb xm ym pm) (pm-ger3 'pmxvbf16ger2 at xa xb xm ym pm))
-(defun PMXVBF16GER2PP (at _ xa xb xm ym pm) (pm-ger3-acc 'pmxvbf16ger2pp at xa xb xm ym pm))
-(defun PMXVBF16GER2PN (at _ xa xb xm ym pm) (pm-ger3-acc 'pmxvbf16ger2pn at xa xb xm ym pm))
-(defun PMXVBF16GER2NP (at _ xa xb xm ym pm) (pm-ger3-acc 'pmxvbf16ger2np at xa xb xm ym pm))
-(defun PMXVBF16GER2NN (at _ xa xb xm ym pm) (pm-ger3-acc 'pmxvbf16ger2nn at xa xb xm ym pm))
-(defun PMXVI4GER8 (at xa xb xm ym pm) (pm-ger3 'pmxvi4ger8 at xa xb xm ym pm))
-(defun PMXVI4GER8PP (at _ xa xb xm ym pm) (pm-ger3-acc 'pmxvi4ger8pp at xa xb xm ym pm))
-(defun PMXVI8GER4 (at xa xb xm ym pm) (pm-ger3 'pmxvi8ger4 at xa xb xm ym pm))
-(defun PMXVI8GER4PP (at _ xa xb xm ym pm) (pm-ger3-acc 'pmxvi8ger4pp at xa xb xm ym pm))
-(defun PMXVI8GER4SPP (at _ xa xb xm ym pm) (pm-ger3-acc 'pmxvi8ger4spp at xa xb xm ym pm))
-(defun PMXVI16GER2 (at xa xb xm ym pm) (pm-ger3 'pmxvi16ger2 at xa xb xm ym pm))
-(defun PMXVI16GER2PP (at _ xa xb xm ym pm) (pm-ger3-acc 'pmxvi16ger2pp at xa xb xm ym pm))
-(defun PMXVI16GER2S (at xa xb xm ym pm) (pm-ger3 'pmxvi16ger2s at xa xb xm ym pm))
-(defun PMXVI16GER2SPP (at _ xa xb xm ym pm) (pm-ger3-acc 'pmxvi16ger2spp at xa xb xm ym pm))
+(defun PMXVF32GER (at xa xb xm ym) (pm-ger 'powerpc-pmxvf32ger at xa xb xm ym))
+(defun PMXVF32GERPP (at _ xa xb xm ym) (pm-ger-acc 'powerpc-pmxvf32gerpp at xa xb xm ym))
+(defun PMXVF32GERPN (at _ xa xb xm ym) (pm-ger-acc 'powerpc-pmxvf32gerpn at xa xb xm ym))
+(defun PMXVF32GERNP (at _ xa xb xm ym) (pm-ger-acc 'powerpc-pmxvf32gernp at xa xb xm ym))
+(defun PMXVF32GERNN (at _ xa xb xm ym) (pm-ger-acc 'powerpc-pmxvf32gernn at xa xb xm ym))
+(defun PMXVF64GER (at xa xb xm ym) (pm-ger 'powerpc-pmxvf64ger at xa xb xm ym))
+(defun PMXVF64GERPP (at _ xa xb xm ym) (pm-ger-acc 'powerpc-pmxvf64gerpp at xa xb xm ym))
+(defun PMXVF64GERPN (at _ xa xb xm ym) (pm-ger-acc 'powerpc-pmxvf64gerpn at xa xb xm ym))
+(defun PMXVF64GERNP (at _ xa xb xm ym) (pm-ger-acc 'powerpc-pmxvf64gernp at xa xb xm ym))
+(defun PMXVF64GERNN (at _ xa xb xm ym) (pm-ger-acc 'powerpc-pmxvf64gernn at xa xb xm ym))
+(defun PMXVF16GER2 (at xa xb xm ym pm) (pm-ger3 'powerpc-pmxvf16ger2 at xa xb xm ym pm))
+(defun PMXVF16GER2PP (at _ xa xb xm ym pm) (pm-ger3-acc 'powerpc-pmxvf16ger2pp at xa xb xm ym pm))
+(defun PMXVF16GER2PN (at _ xa xb xm ym pm) (pm-ger3-acc 'powerpc-pmxvf16ger2pn at xa xb xm ym pm))
+(defun PMXVF16GER2NP (at _ xa xb xm ym pm) (pm-ger3-acc 'powerpc-pmxvf16ger2np at xa xb xm ym pm))
+(defun PMXVF16GER2NN (at _ xa xb xm ym pm) (pm-ger3-acc 'powerpc-pmxvf16ger2nn at xa xb xm ym pm))
+(defun PMXVBF16GER2 (at xa xb xm ym pm) (pm-ger3 'powerpc-pmxvbf16ger2 at xa xb xm ym pm))
+(defun PMXVBF16GER2PP (at _ xa xb xm ym pm) (pm-ger3-acc 'powerpc-pmxvbf16ger2pp at xa xb xm ym pm))
+(defun PMXVBF16GER2PN (at _ xa xb xm ym pm) (pm-ger3-acc 'powerpc-pmxvbf16ger2pn at xa xb xm ym pm))
+(defun PMXVBF16GER2NP (at _ xa xb xm ym pm) (pm-ger3-acc 'powerpc-pmxvbf16ger2np at xa xb xm ym pm))
+(defun PMXVBF16GER2NN (at _ xa xb xm ym pm) (pm-ger3-acc 'powerpc-pmxvbf16ger2nn at xa xb xm ym pm))
+(defun PMXVI4GER8 (at xa xb xm ym pm) (pm-ger3 'powerpc-pmxvi4ger8 at xa xb xm ym pm))
+(defun PMXVI4GER8PP (at _ xa xb xm ym pm) (pm-ger3-acc 'powerpc-pmxvi4ger8pp at xa xb xm ym pm))
+(defun PMXVI8GER4 (at xa xb xm ym pm) (pm-ger3 'powerpc-pmxvi8ger4 at xa xb xm ym pm))
+(defun PMXVI8GER4PP (at _ xa xb xm ym pm) (pm-ger3-acc 'powerpc-pmxvi8ger4pp at xa xb xm ym pm))
+(defun PMXVI8GER4SPP (at _ xa xb xm ym pm) (pm-ger3-acc 'powerpc-pmxvi8ger4spp at xa xb xm ym pm))
+(defun PMXVI16GER2 (at xa xb xm ym pm) (pm-ger3 'powerpc-pmxvi16ger2 at xa xb xm ym pm))
+(defun PMXVI16GER2PP (at _ xa xb xm ym pm) (pm-ger3-acc 'powerpc-pmxvi16ger2pp at xa xb xm ym pm))
+(defun PMXVI16GER2S (at xa xb xm ym pm) (pm-ger3 'powerpc-pmxvi16ger2s at xa xb xm ym pm))
+(defun PMXVI16GER2SPP (at _ xa xb xm ym pm) (pm-ger3-acc 'powerpc-pmxvi16ger2spp at xa xb xm ym pm))

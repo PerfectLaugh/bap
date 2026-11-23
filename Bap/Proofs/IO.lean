@@ -563,6 +563,63 @@ theorem cstring_unterminated {data : ByteArray} {offset : Nat}
         exact ih _ _ (by omega)
   exact aux _ 0 [] (Nat.le_refl _)
 
+/-! ## cstringIn -/
+
+private theorem zeroFrom_some {data : ByteArray} {limit : Nat} :
+    ∀ {fuel index finish}, zeroFrom data limit fuel index = some finish →
+      index ≤ finish ∧ finish < limit ∧ byteAt data finish = 0 ∧ ∀ k, index ≤ k → k < finish → byteAt data k ≠ 0
+  | 0, _, _, h => by cases h
+  | fuel + 1, index, finish, h => by
+    rw [zeroFrom] at h
+    by_cases hl : index < limit
+    · rw [if_pos hl] at h
+      by_cases hz : data.get! index = 0
+      · rw [if_pos hz] at h
+        cases h
+        exact ⟨Nat.le_refl _, hl, by simp [byteAt, hz], fun k h1 h2 => absurd h1 (by omega)⟩
+      · rw [if_neg hz] at h
+        obtain ⟨h1, h2, h3, h4⟩ := zeroFrom_some h
+        refine ⟨by omega, h2, h3, fun k hk1 hk2 => ?_⟩
+        by_cases he : k = index
+        · subst he
+          intro hzero
+          exact hz (UInt8.toNat_inj.mp (by simpa [byteAt] using hzero))
+        · exact h4 k (by omega) hk2
+    · rw [if_neg hl] at h
+      cases h
+
+private theorem latin1_eq_range (data : ByteArray) : ∀ n offset,
+    ((List.range n).map fun index => Char.ofNat (data.get! (offset + index)).toNat) = latin1 data offset n
+  | 0, _ => rfl
+  | n + 1, offset => by
+    rw [List.range_succ_eq_map, List.map_cons, List.map_map, latin1, ← latin1_eq_range data n (offset + 1)]
+    simp only [Nat.add_zero, byteAt, List.cons.injEq, true_and]
+    apply List.map_congr_left
+    intro index _
+    simp only [Function.comp, Nat.succ_eq_add_one]
+    rw [show offset + (index + 1) = offset + 1 + index by omega]
+
+/-- What `cstringIn` reads is the bytes from `offset` to the first NUL, which is before `stop`. -/
+theorem cstringIn_ok {data : ByteArray} {offset stop : Nat} {s : String} (h : cstringIn data offset stop = .ok s) :
+    ∃ n, TerminatedAt data offset n ∧ offset + n < stop ∧ s = String.ofList (latin1 data offset n) := by
+  unfold cstringIn at h
+  cases he : cstringEnd data offset stop with
+  | none => rw [he] at h; cases h
+  | some finish =>
+    rw [he] at h
+    cases h
+    obtain ⟨h1, h2, h3, h4⟩ := zeroFrom_some he
+    refine ⟨finish - offset, ⟨by omega, ?_, fun k hk => h4 (offset + k) (by omega) (by omega)⟩, by omega, ?_⟩
+    · rw [show offset + (finish - offset) = finish by omega]
+      exact h3
+    · rw [latin1_eq_range]
+
+/-- A string that `cstringIn` reads in its table is what `cstring` reads there. -/
+theorem cstring_of_cstringIn {data : ByteArray} {offset stop : Nat} {s : String} (h : cstringIn data offset stop = .ok s) :
+    cstring data offset = .ok s := by
+  obtain ⟨n, ht, _, rfl⟩ := cstringIn_ok h
+  exact cstring_ok_iff.mpr ⟨n, ht, rfl⟩
+
 /-- The terminator position is unique, so `cstring` is deterministic in the first NUL. -/
 theorem terminatedAt_unique {data : ByteArray} {offset m n : Nat}
     (hm : TerminatedAt data offset m) (hn : TerminatedAt data offset n) : m = n := by

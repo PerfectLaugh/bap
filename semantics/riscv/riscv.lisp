@@ -269,13 +269,12 @@
 (defun NOP ()
   (empty))
 
-;; the hints, which have no effect: C.NOP with an immediate, the
-;; prefetches of Zicbop, and WFI, as no interrupt is modeled
+;; the hints, which have no effect: C.NOP with an immediate, and the
+;; prefetches of Zicbop
 (defun C_NOP_HINT (_) (empty))
 (defun PREFETCH_R (_ _) (empty))
 (defun PREFETCH_W (_ _) (empty))
 (defun PREFETCH_I (_ _) (empty))
-(defun WFI () (empty))
 
 
 ;;; The register forms of the operations, and the word operations of
@@ -446,6 +445,18 @@
 (defun C_UNIMP () (intrinsic 'undefined-instruction :aborts))
 ;; `csrrw x0, cycle, x0`, a write to a register that can only be read
 (defun UNIMP () (intrinsic 'undefined-instruction :aborts))
+
+;; the instructions of the supervisor and of the machine: the returns
+;; from traps, the flush of the translations, and the wait for an
+;; interrupt, which a hart with a supervisor has illegal in the user
+;; mode unless it ends within a bound (the privileged architecture,
+;; 3.3.3), as of time it doesn't here. Each is illegal in the user mode,
+;; where Linux sends SIGILL for it
+(defun SRET () (intrinsic 'undefined-instruction :aborts))
+(defun MRET () (intrinsic 'undefined-instruction :aborts))
+(defun DRET () (intrinsic 'undefined-instruction :aborts))
+(defun WFI () (intrinsic 'undefined-instruction :aborts))
+(defun SFENCE_VMA (_ _) (intrinsic 'undefined-instruction :aborts))
 
 
 ;;; ATOMICS, the A extension, whose orderings are of no concern here, as
@@ -1509,25 +1520,33 @@
 ;;; i.e., the ones of the floating point: fflags (1), frm (2), and fcsr
 ;;; (3), which are the fields of FCSR, whose writes are kept, though
 ;;; the operations don't accrue the exceptions,
-;;; the vector rounding mode vxrm (0xa), and the counters, which are read
-;;; with the intrinsics riscv_csr_<name>.
+;;; the vector rounding mode vxrm (0xa), and the time, which is read
+;;; with the intrinsics riscv_csr_time and riscv_csr_timeh.
 
 (defun fcsr (csr)
   (declare (visibility :private))
   (logand (<= 1 csr) (<= csr 3)))
 
-;; the counters, that the programs read, which the emulators provide,
-;; e.g., from the clock, which they don't write
+;; the counters. Linux lets a program read the time, time (0xC01) and,
+;; of RV32, its upper half, timeh (0xC81), which a machine serves as the
+;; intrinsics riscv_csr_time and riscv_csr_timeh: its hook writes the
+;; register. The cycles and the instructions retired, cycle and instret,
+;; aren't enabled in scounteren for a program that has no event of perf
+;; mapped: pmu_sbi_starting_cpu of drivers/perf/riscv_pmu_sbi.c writes
+;; 0x2 to it, the bit of the time alone, unless the sysctl
+;; kernel.perf_user_access is 2, the legacy value, with which it writes
+;; 0x7. This is of its default, 1, with which a program reads them only
+;; through an event that it maps; so reading them is illegal, as writing
+;; any of them is.
 (defun counter (csr)
   (declare (visibility :private))
-  (logand (<= 0xC00 csr) (<= csr 0xC02)))
+  (logor (= csr 0xC01) (logand (= csr 0xC81) (= (word-width) 32))))
 
 (defun read-counter (csr)
   (declare (visibility :private))
-  (case csr
-    0xC00 (intrinsic 'riscv_csr_cycle :result (word-width))
-    0xC01 (intrinsic 'riscv_csr_time :result (word-width))
-    (intrinsic 'riscv_csr_instret :result (word-width))))
+  (if (= csr 0xC01)
+      (intrinsic 'riscv_csr_time :result (word-width))
+    (intrinsic 'riscv_csr_timeh :result (word-width))))
 
 ;; the field of FCSR, that the CSR accesses, by its position and mask
 (defun fcsr-shift (csr)
@@ -1542,9 +1561,9 @@
   "reads the CSR to RD, and writes to it, if WRITE, its old bits, that
    KEEP masks, with the bits of X, i.e., CSRRW keeps none, CSRRS all,
    and CSRRC the ones, that X doesn't clear: the fields of FCSR and
-   VXRM are written, the counters are read, and the other CSRs, e.g., of the
-   extensions, that are not modeled, and the writes of the counters,
-   are illegal, as in the user mode of Linux"
+   VXRM are written, the time is read, and the other CSRs, e.g., of the
+   extensions, that are not modeled, the other counters, and the writes
+   of the counters, are illegal, as in the user mode of Linux"
   (declare (visibility :private))
   (if (fcsr csr)
       (let ((shift (fcsr-shift csr))
@@ -1566,8 +1585,9 @@
         (intrinsic 'undefined-instruction :aborts)))))
 
 (defun CSRRW (rd csr rs1) (csr-access rd csr 0 rs1 true))
-(defun CSRRS (rd csr rs1) (csr-access rd csr -1 rs1 (/= (symbol rs1) 'X0)))
-(defun CSRRC (rd csr rs1) (csr-access rd csr (lnot rs1) 0 (/= (symbol rs1) 'X0)))
+;; CSRRS and CSRRC of x0, whose name here is XZR, don't write
+(defun CSRRS (rd csr rs1) (csr-access rd csr -1 rs1 (/= (symbol rs1) 'XZR)))
+(defun CSRRC (rd csr rs1) (csr-access rd csr (lnot rs1) 0 (/= (symbol rs1) 'XZR)))
 (defun CSRRWI (rd csr imm) (csr-access rd csr 0 imm true))
 (defun CSRRSI (rd csr imm) (csr-access rd csr -1 imm (/= imm 0)))
 (defun CSRRCI (rd csr imm) (csr-access rd csr (lnot imm) 0 (/= imm 0)))

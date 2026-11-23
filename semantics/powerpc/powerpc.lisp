@@ -525,35 +525,98 @@
 
 ;;; SPECIAL PURPOSE REGISTERS
 ;;
-;; The other special purpose registers are moved by the intrinsics.
+;; What a program of Linux has of them, by their numbers:
+;;   1, 8, 9: XER, LR and CTR;
+;;   13: AMR, of a 64-bit processor, the authority mask of the storage
+;;     keys, which a program reads and writes;
+;;   136: CTRL, of a 64-bit processor, to read: its bit RUN, which is set
+;;     while a program runs;
+;;   896: PPR, of a 64-bit processor, the priority of the program, which
+;;     it reads, and sets to low, medium low or medium, 2 to 4: another
+;;     is ignored. Linux starts a program at medium low (INIT_PPR);
+;;   3 and 17: DSCR, of a 64-bit processor, which Linux gives a program
+;;     by either number: the privileged one is emulated
+;;     (emulate_instruction of arch/powerpc/kernel/traps.c), and the
+;;     facility of the other is turned on as it is first used;
+;;   256: VRSAVE, of 32 bits;
+;;   259: SPRG3, to read, where Linux keeps the number of the processor
+;;     and of its node for getcpu, both zero;
+;;   268 and 269: the time base and its upper half, to read, which a
+;;     machine serves as the intrinsic time-base: its hook writes the
+;;     register;
+;;   287: PVR, to read, which is privileged and which Linux emulates for
+;;     a program, of the processor that has the instructions here, a
+;;     POWER10;
+;;   815: TAR.
+;; Any other is one that a program has no access to. That of a number
+;; with the bit 0x10, a privileged one, is the privileged instruction
+;; type of the program interrupt, SIGILL with ILL_PRVOPC, and that of
+;; another, which the processor doesn't have or whose facility Linux
+;; doesn't give, as of the transactional memory (128 to 131), the
+;; event-based branches (800 to 806) and the performance monitor (768 to
+;; 787), is SIGILL with ILL_ILLOPC.
 
 (defun flag (x n) (lshift (zext x) n))
 
+;; XER has the bytes that the string instructions move, of its 7 low
+;; bits, and OV32 and CA32 where the processor has them, a 64-bit one
+;; of the ISA 3.0
 (defun xer ()
-  (logor (flag SO 31) (flag OV 30) (flag CA 29) (flag OV32 19) (flag CA32 18)))
+  (logor (flag SO 31) (flag OV 30) (flag CA 29)
+         (if (= (word-width) 64) (logor (flag OV32 19) (flag CA32 18)) (flag 0:1 0))
+         (logand XER_COUNT 0x7f)))
 
 (defun set-xer (x)
   (set SO (extract 31 31 x))
   (set OV (extract 30 30 x))
   (set CA (extract 29 29 x))
-  (set OV32 (extract 19 19 x))
-  (set CA32 (extract 18 18 x)))
+  (when (= (word-width) 64)
+    (set OV32 (extract 19 19 x))
+    (set CA32 (extract 18 18 x)))
+  (set XER_COUNT (logand x 0x7f)))
+
+(defun no-special-register (spr)
+  (if (non-zero (logand spr 0x10))
+      (intrinsic 'privileged-instruction :aborts)
+    (intrinsic 'undefined-instruction :aborts)))
+
+(defun processor-version () 0x00800200)
+
+(defun set-priority (x)
+  (let ((p (logand (rshift x 50) 7)))
+    (when (logand (>= p 2) (<= p 4))
+      (set PPR (lshift p 50)))))
 
 (defun MFSPR (rt spr)
   (case spr
     1 (set$ rt (xer))
+    3 (if (= (word-width) 64) (set$ rt DSCR) (no-special-register spr))
     8 (set$ rt LR)
     9 (set$ rt CTR)
+    13 (if (= (word-width) 64) (set$ rt AMR) (no-special-register spr))
+    17 (if (= (word-width) 64) (set$ rt DSCR) (no-special-register spr))
+    136 (if (= (word-width) 64) (set$ rt 1) (no-special-register spr))
+    896 (if (= (word-width) 64) (set$ rt PPR) (no-special-register spr))
+    256 (set$ rt VRSAVE)
+    259 (set$ rt 0)
+    268 (set$ rt (intrinsic 'time-base :result (word-width)))
+    269 (set$ rt (intrinsic 'time-base :result (word-width)))
+    287 (set$ rt (processor-version))
     815 (set$ rt TAR)
-    (set$ rt (intrinsic 'move-from-special-register spr :result (word-width)))))
+    (no-special-register spr)))
 
 (defun MTSPR (spr rs)
   (case spr
     1 (set-xer rs)
+    3 (if (= (word-width) 64) (set DSCR rs) (no-special-register spr))
     8 (set LR rs)
     9 (set CTR rs)
+    13 (if (= (word-width) 64) (set AMR rs) (no-special-register spr))
+    17 (if (= (word-width) 64) (set DSCR rs) (no-special-register spr))
+    896 (if (= (word-width) 64) (set-priority rs) (no-special-register spr))
+    256 (set VRSAVE (zext (low32 rs)))
     815 (set TAR rs)
-    (intrinsic 'move-to-special-register spr rs)))
+    (no-special-register spr)))
 
 (defun MFLR (rt) (set$ rt LR))
 (defun MFCTR (rt) (set$ rt CTR))
@@ -867,44 +930,51 @@
 (defun fp-div (a b) (nan-result (/. :rne a b) a b a))
 (defun fp-sqrt (b) (nan-result (fsqrt :rne b) b b b))
 
-(defun FMR (rt rb) (set$ rt rb))
-(defun FNEGS (rt rb) (set$ rt (fp-neg rb)))
-(defun FNEGD (rt rb) (set$ rt (fp-neg rb)))
-(defun FABSS (rt rb) (set$ rt (fp-abs rb)))
-(defun FABSD (rt rb) (set$ rt (fp-abs rb)))
-(defun FNABSS (rt rb) (set$ rt (fp-nabs rb)))
-(defun FNABSD (rt rb) (set$ rt (fp-nabs rb)))
+;; What writes a floating point register zeros the other doubleword of
+;; its VSX register, as the ISA 3.1 has it and the processors before it
+;; did, which left it undefined.
+(defun set-fpr (rt x)
+  (set$ rt x)
+  (set-symbol-value (symbol-concat (symbol rt) 'L) (cast-unsigned 64 0:1)))
 
-(defun FADD (rt ra rb) (set$ rt (fp-add ra rb)))
-(defun FSUB (rt ra rb) (set$ rt (fp-sub ra rb)))
-(defun FMUL (rt ra rc) (set$ rt (fp-mul ra rc)))
-(defun FDIV (rt ra rb) (set$ rt (fp-div ra rb)))
-(defun FSQRT (rt rb) (set$ rt (fp-sqrt rb)))
-(defun FADDS (rt ra rb) (set$ rt (fp-single (fp-add ra rb))))
-(defun FSUBS (rt ra rb) (set$ rt (fp-single (fp-sub ra rb))))
-(defun FMULS (rt ra rc) (set$ rt (fp-single (fp-mul ra rc))))
-(defun FDIVS (rt ra rb) (set$ rt (fp-single (fp-div ra rb))))
-(defun FSQRTS (rt rb) (set$ rt (fp-single (fp-sqrt rb))))
+(defun FMR (rt rb) (set-fpr rt rb))
+(defun FNEGS (rt rb) (set-fpr rt (fp-neg rb)))
+(defun FNEGD (rt rb) (set-fpr rt (fp-neg rb)))
+(defun FABSS (rt rb) (set-fpr rt (fp-abs rb)))
+(defun FABSD (rt rb) (set-fpr rt (fp-abs rb)))
+(defun FNABSS (rt rb) (set-fpr rt (fp-nabs rb)))
+(defun FNABSD (rt rb) (set-fpr rt (fp-nabs rb)))
 
-(defun FMADD (rt ra rc rb) (set$ rt (fmad64 ra rc rb)))
-(defun FMSUB (rt ra rc rb) (set$ rt (fmsub64 ra rc rb)))
-(defun FNMADD (rt ra rc rb) (set$ rt (fp-negate (fmad64 ra rc rb))))
-(defun FNMSUB (rt ra rc rb) (set$ rt (fp-negate (fmsub64 ra rc rb))))
-(defun FMADDS (rt ra rc rb) (set$ rt (fp-single (fmad64 ra rc rb))))
-(defun FMSUBS (rt ra rc rb) (set$ rt (fp-single (fmsub64 ra rc rb))))
-(defun FNMADDS (rt ra rc rb) (set$ rt (fp-negate (fp-single (fmad64 ra rc rb)))))
-(defun FNMSUBS (rt ra rc rb) (set$ rt (fp-negate (fp-single (fmsub64 ra rc rb)))))
+(defun FADD (rt ra rb) (set-fpr rt (fp-add ra rb)))
+(defun FSUB (rt ra rb) (set-fpr rt (fp-sub ra rb)))
+(defun FMUL (rt ra rc) (set-fpr rt (fp-mul ra rc)))
+(defun FDIV (rt ra rb) (set-fpr rt (fp-div ra rb)))
+(defun FSQRT (rt rb) (set-fpr rt (fp-sqrt rb)))
+(defun FADDS (rt ra rb) (set-fpr rt (fp-single (fp-add ra rb))))
+(defun FSUBS (rt ra rb) (set-fpr rt (fp-single (fp-sub ra rb))))
+(defun FMULS (rt ra rc) (set-fpr rt (fp-single (fp-mul ra rc))))
+(defun FDIVS (rt ra rb) (set-fpr rt (fp-single (fp-div ra rb))))
+(defun FSQRTS (rt rb) (set-fpr rt (fp-single (fp-sqrt rb))))
+
+(defun FMADD (rt ra rc rb) (set-fpr rt (fmad64 ra rc rb)))
+(defun FMSUB (rt ra rc rb) (set-fpr rt (fmsub64 ra rc rb)))
+(defun FNMADD (rt ra rc rb) (set-fpr rt (fp-negate (fmad64 ra rc rb))))
+(defun FNMSUB (rt ra rc rb) (set-fpr rt (fp-negate (fmsub64 ra rc rb))))
+(defun FMADDS (rt ra rc rb) (set-fpr rt (fp-single (fmad64 ra rc rb))))
+(defun FMSUBS (rt ra rc rb) (set-fpr rt (fp-single (fmsub64 ra rc rb))))
+(defun FNMADDS (rt ra rc rb) (set-fpr rt (fp-negate (fp-single (fmad64 ra rc rb)))))
+(defun FNMSUBS (rt ra rc rb) (set-fpr rt (fp-negate (fp-single (fmsub64 ra rc rb)))))
 
 ;; the estimates are exact, rounded, as in QEMU, the ISA allows any
 ;; value within its precision
-(defun FRES (rt rb) (set$ rt (fp-single (fp-div 0x3ff0000000000000:64 rb))))
-(defun FRSQRTE (rt rb) (set$ rt (fp-div 0x3ff0000000000000:64 (fp-sqrt rb))))
+(defun FRES (rt rb) (set-fpr rt (fp-single (fp-div 0x3ff0000000000000:64 rb))))
+(defun FRSQRTE (rt rb) (set-fpr rt (fp-div 0x3ff0000000000000:64 (fp-sqrt rb))))
 
-(defun FRSP (rt rb) (set$ rt (fp-single rb)))
+(defun FRSP (rt rb) (set-fpr rt (fp-single rb)))
 
 ;; FRA >= 0, -0 included, and not a NaN
 (defun FSELS (rt ra rc rb)
-  (set$ rt (pick (logand (not (is-nan ra)) (logor (not (msb ra)) (is-fzero ra))) rc rb)))
+  (set-fpr rt (pick (logand (not (is-nan ra)) (logor (not (msb ra)) (is-fzero ra))) rc rb)))
 (defun FSELD (rt ra rc rb) (FSELS rt ra rc rb))
 
 ;; the comparisons set the field of CR and FPCC, FL, FG, FE and FU. Of
@@ -981,10 +1051,10 @@
 (defun raises-unsigned-word (x r) (fp-to-int-raises x r 0x0000000000000000:64 0x41EFFFFFFFE00000:64))
 (defun raises-unsigned-dword (x r) (fp-to-int-raises x r 0x0000000000000000:64 0x43EFFFFFFFFFFFFF:64))
 
-(defun FCTIWZ (rt rb) (raises-signed-word rb (fp-trunc rb)) (set$ rt (fp-to-word (fp-trunc rb))))
-(defun FCTIW (rt rb) (raises-signed-word rb (fround :rne rb)) (set$ rt (fp-to-word (fround :rne rb))))
+(defun FCTIWZ (rt rb) (raises-signed-word rb (fp-trunc rb)) (set-fpr rt (fp-to-word (fp-trunc rb))))
+(defun FCTIW (rt rb) (raises-signed-word rb (fround :rne rb)) (set-fpr rt (fp-to-word (fround :rne rb))))
 
-(defun FCFID (rt rb) (set$ rt (cast-sfloat :rne 64 rb)))
+(defun FCFID (rt rb) (set-fpr rt (cast-sfloat :rne 64 rb)))
 
 ;; LOADS AND STORES
 ;;
@@ -1013,8 +1083,8 @@
         (small (concat (msb x) (cast-low 31 (pick (>= expn (u64 874)) tiny 0:32)))))
     (pick (> expn (u64 896)) big small)))
 
-(defun load-single (rt addr) (set$ rt (single-to-double (load-size 32 addr))))
-(defun load-double (rt addr) (set$ rt (load-size 64 addr)))
+(defun load-single (rt addr) (set-fpr rt (single-to-double (load-size 32 addr))))
+(defun load-double (rt addr) (set-fpr rt (load-size 64 addr)))
 (defun store-single (rs addr) (store-word addr (double-to-single rs)))
 (defun store-double (rs addr) (store-word addr (cast-low 64 rs)))
 
@@ -1026,8 +1096,8 @@
 (defun LFDU (rt ra d _) (let ((a (ea ra d))) (load-double rt a) (set$ ra a)))
 (defun LFSUX (rt ra _ rb) (let ((a (+ ra rb))) (load-single rt a) (set$ ra a)))
 (defun LFDUX (rt ra _ rb) (let ((a (+ ra rb))) (load-double rt a) (set$ ra a)))
-(defun LFIWAX (rt ra rb) (set$ rt (cast-signed 64 (load-size 32 (+ ra rb)))))
-(defun LFIWZX (rt ra rb) (set$ rt (cast-unsigned 64 (load-size 32 (+ ra rb)))))
+(defun LFIWAX (rt ra rb) (set-fpr rt (cast-signed 64 (load-size 32 (+ ra rb)))))
+(defun LFIWZX (rt ra rb) (set-fpr rt (cast-unsigned 64 (load-size 32 (+ ra rb)))))
 
 (defun STFS (rs d ra) (store-single rs (ea ra d)))
 (defun STFD (rs d ra) (store-double rs (ea ra d)))
@@ -1859,26 +1929,49 @@
     (set$ rt (zext (pick (< x y) (u64 0) (- x y))))))
 (defun SUBFUS_rec (rt ra rb l) (SUBFUS rt ra rb l) (record rt))
 
-;; the random number generator and the hashes of the return addresses
-;; depend on what isn't in the state; a failed HASHCHK traps
+;; the random number generator is of a machine, which serves the
+;; intrinsic darn. The hash of a return address, of the registers RA and RB
+;; and of the key of the process, which isn't in the state, is of a
+;; machine too, powerpc-hash: Linux has the hashes on for a program (the
+;; aspect NPHIE of DEXCR), and sends SIGILL with ILL_ILLOPN for a HASHCHK
+;; that fails, which is the intrinsic hash-check. The privileged forms are
+;; of the supervisor's key.
 (defun DARN (rt l) (set$ rt (intrinsic 'darn l :result (word-width))))
-(defun HASHST (rb d ra) (intrinsic 'hashst ra rb d))
-(defun HASHSTP (rb d ra) (intrinsic 'hashstp ra rb d))
-(defun HASHCHK (rb d ra) (intrinsic 'hashchk ra rb d))
-(defun HASHCHKP (rb d ra) (intrinsic 'hashchkp ra rb d))
+(defun return-hash (ra rb) (intrinsic 'powerpc-hash ra rb :result 64))
+(defun HASHST (rb d ra)
+  (if (= (word-width) 64)
+      (store-word (+ ra d) (return-hash ra rb))
+    (intrinsic 'undefined-instruction :aborts)))
+(defun HASHSTP (_ _ _) (intrinsic 'privileged-instruction :aborts))
+(defun HASHCHK (rb d ra)
+  (if (= (word-width) 64)
+      (when (/= (load-size 64 (+ ra d)) (return-hash ra rb))
+        (intrinsic 'hash-check :aborts))
+    (intrinsic 'undefined-instruction :aborts)))
+(defun HASHCHKP (_ _ _) (intrinsic 'privileged-instruction :aborts))
 
-;; the time base, the data stream control register, the system call and
-;; the event-based branches, none of which are in the state, the target
-;; of RFEBB is in EBBRR
-(defun MFTB (rt spr) (set$ rt (intrinsic 'move-from-time-base spr :result (word-width))))
+;; the time base and the data stream control register are of MFSPR. The
+;; vectored system call, whose facility Linux gives only where it says
+;; PPC_FEATURE2_SCV in AT_HWCAP2, which the machine doesn't, and the
+;; return from an event-based branch, whose facility a program has only
+;; with an event of perf, are of facilities that aren't available:
+;; SIGILL with ILL_ILLOPC
+;; MFTB of the time base or of its upper half is MFSPR of it, and of
+;; anything else isn't an instruction
+(defun MFTB (rt spr)
+  (case spr
+    268 (MFSPR rt spr)
+    269 (MFSPR rt spr)
+    (intrinsic 'undefined-instruction :aborts)))
 (defun MFUDSCR (rt) (MFSPR rt 3))
 (defun MTUDSCR (rs) (MTSPR 3 rs))
-(defun SCV (lev) (intrinsic 'syscall-vectored lev))
-(defun RFEBB (s) (exec-addr (intrinsic 'rfebb s :result (word-width))))
+(defun SCV (_) (intrinsic 'undefined-instruction :aborts))
+(defun RFEBB (_) (intrinsic 'undefined-instruction :aborts))
 
-;; the branch history rolling buffer isn't in the state
-(defun CLRBHRB () (intrinsic 'clrbhrb))
-(defun MFBHRBE (rt imm) (set$ rt (intrinsic 'mfbhrbe imm :result (word-width))))
+;; the branch history rolling buffer, which a program has only while an
+;; event of perf gives it: the facility isn't available otherwise
+(defun CLRBHRB () (intrinsic 'undefined-instruction :aborts))
+(defun MFBHRBE (_ _) (intrinsic 'undefined-instruction :aborts))
 
 ;; the cache hints, the barrier of the ISA 3.1 and the waiting for an
 ;; event change nothing in the state of a program
@@ -1889,29 +1982,42 @@
 (defun WAIT (_) (empty))
 (defun WAITP10 (_ _) (empty))
 
-;; the size of the block that DCBZ clears is of the implementation, it
-;; is the store of zeros that the intrinsic stands for
-(defun DCBZ (ra rb) (intrinsic 'data-cache-block-zero (+ ra rb)))
-(defun DCBZL (ra rb) (intrinsic 'data-cache-block-zero (+ ra rb)))
+;; DCBZ and DCBZL store zeros over the block of the data cache that has
+;; the address, whose size a machine says in AT_DCACHEBSIZE: 128 bytes
+;; of a 64-bit processor and 32 of a 32-bit one
+(defun cache-block () (if (= (word-width) 64) 128 32))
+(defun zero-doublewords (a n)
+  (when (> n 0)
+    (store-word a 0:64)
+    (zero-doublewords (+ a 8) (- n 1))))
+(defun zero-block (addr)
+  (let ((a (logand addr (lnot (zext (- (cache-block) 1))))))
+    (zero-doublewords a (/ (cache-block) 8))))
+(defun DCBZ (ra rb) (zero-block (+ ra rb)))
+(defun DCBZL (ra rb) (zero-block (+ ra rb)))
 
-;; the copy-paste facility, whose buffer isn't in the state; PASTE sets
-;; CR0 by the result of the transaction
-(defun CP_ABORT () (intrinsic 'cp-abort))
-(defun CP_COPY (ra rb) (intrinsic 'copy (+ ra rb)))
-(defun CP_PASTE_rec (ra rb l)
-  (set CR0 (intrinsic 'paste (+ ra rb) l :result 4)))
+;; the copy-paste facility. A program that has no window of an
+;; accelerator, which Linux gives by a device that isn't here, has nowhere
+;; to paste: COPY of its memory puts a block in a buffer that nothing can
+;; receive, and PASTE to its memory is a data storage interrupt of the
+;; wrong type of memory (DSISR_BAD_COPYPASTE), for which Linux sends SIGBUS
+;; with BUS_OBJERR at the address, the intrinsic paste-wrong-memory
+(defun CP_ABORT () (empty))
+(defun CP_COPY (_ _) (empty))
+(defun CP_PASTE_rec (_ _ _) (intrinsic 'paste-wrong-memory :aborts))
 
-;; the transactional memory facility, a transaction and its failure are
-;; of the intrinsics, which give CR0 as the instructions do
-(defun TBEGIN (r) (set CR0 (intrinsic 'tbegin r :result 4)))
-(defun TEND (a) (set CR0 (intrinsic 'tend a :result 4)))
-(defun TSR (l) (set CR0 (intrinsic 'tsr l :result 4)))
-(defun TABORT (ra) (set CR0 (intrinsic 'tabort ra :result 4)))
-(defun TABORTWC (to ra rb) (set CR0 (intrinsic 'tabortwc to ra rb :result 4)))
-(defun TABORTWCI (to ra si) (set CR0 (intrinsic 'tabortwci to ra si :result 4)))
-(defun TABORTDC (to ra rb) (set CR0 (intrinsic 'tabortdc to ra rb :result 4)))
-(defun TABORTDCI (to ra si) (set CR0 (intrinsic 'tabortdci to ra si :result 4)))
-(defun TCHECK (bf) (set$ bf (intrinsic 'tcheck :result 4)))
+;; the transactional memory facility, which a processor of the ISA 3.1
+;; doesn't have: Linux sends SIGILL with ILL_ILLOPC for an instruction of
+;; a facility that isn't there (facility_unavailable_exception)
+(defun TBEGIN (_) (intrinsic 'undefined-instruction :aborts))
+(defun TEND (_) (intrinsic 'undefined-instruction :aborts))
+(defun TSR (_) (intrinsic 'undefined-instruction :aborts))
+(defun TABORT (_) (intrinsic 'undefined-instruction :aborts))
+(defun TABORTWC (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun TABORTWCI (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun TABORTDC (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun TABORTDCI (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun TCHECK (_) (intrinsic 'undefined-instruction :aborts))
 
 ;;; THE OTHER LOADS AND STORES
 
@@ -2009,10 +2115,57 @@
 
 ;; the atomic operations of the ISA 3.0, whose function code selects the
 ;; operation, on the memory and on the registers after RT, are intrinsics
-(defun LWAT (rt rti ra fc) (set$ rt (intrinsic 'lwat rti ra fc :result (word-width rt))))
-(defun LDAT (rt rti ra fc) (set$ rt (intrinsic 'ldat rti ra fc :result (word-width rt))))
-(defun STWAT (rs ra fc) (intrinsic 'stwat rs ra fc))
-(defun STDAT (rs ra fc) (intrinsic 'stdat rs ra fc))
+(defun amo-operand (rt k) (unquote (gpr-name (mod (+ (gpr-index rt) k) 32))))
+(defun amo-lowest (size) (lshift (cast-unsigned size 1:1) (- size 1)))
+(defun amo-put (rt a m new)
+  (store-word a new)
+  (set$ rt (zext m)))
+(defun amo-step (rt a m ok new size)
+  (if ok
+      (amo-put rt a m new)
+    (set$ rt (zext (amo-lowest size)))))
+(defun amo-load (rt a fc size)
+  (let ((m (load-size size a))
+        (x (cast-low size (amo-operand rt 1)))
+        (one (cast-unsigned size 1:1))
+        (bytes (/ size 8)))
+    (case fc
+      0 (amo-put rt a m (+ m x))
+      1 (amo-put rt a m (logxor m x))
+      2 (amo-put rt a m (logor m x))
+      3 (amo-put rt a m (logand m x))
+      4 (amo-put rt a m (pick (> m x) m x))
+      5 (amo-put rt a m (pick (s> m x) m x))
+      6 (amo-put rt a m (pick (< m x) m x))
+      7 (amo-put rt a m (pick (s< m x) m x))
+      8 (let ((y (cast-low size (amo-operand rt 2))))
+          (when (/= m x) (store-word a y))
+          (set$ rt (zext m)))
+      16 (amo-step rt a m (/= m (load-size size (+ a bytes))) (+ m one) size)
+      24 (amo-step rt a m (= m (load-size size (+ a bytes))) (+ m one) size)
+      28 (amo-step rt a m (/= m (load-size size (- a bytes))) (- m one) size)
+      (intrinsic 'undefined-instruction :aborts))))
+(defun amo-store (rs a fc size)
+  (let ((m (load-size size a))
+        (x (cast-low size rs))
+        (bytes (/ size 8)))
+    (case fc
+      0 (store-word a (+ m x))
+      1 (store-word a (logxor m x))
+      2 (store-word a (logor m x))
+      3 (store-word a (logand m x))
+      4 (store-word a (pick (> m x) m x))
+      5 (store-word a (pick (s> m x) m x))
+      6 (store-word a (pick (< m x) m x))
+      7 (store-word a (pick (s< m x) m x))
+      24 (when (= m (load-size size (+ a bytes)))
+           (store-word a x)
+           (store-word (+ a bytes) x))
+      (intrinsic 'undefined-instruction :aborts))))
+(defun LWAT (rt _ ra fc) (amo-load rt ra fc 32))
+(defun LDAT (rt _ ra fc) (amo-load rt ra fc 64))
+(defun STWAT (rs ra fc) (amo-store rs ra fc 32))
+(defun STDAT (rs ra fc) (amo-store rs ra fc 64))
 
 ;; the prefixed forms: the displacements have 34 bits, and with a PC
 ;; relative one, which the disassembler gives without a base register,
@@ -2091,21 +2244,21 @@
 (defun FSELS_rec (rt ra rc rb) (FSELS rt ra rc rb) (record-fp))
 
 ;; the same estimates as FRES and FRSQRTE, see there
-(defun FRE (rt rb) (set$ rt (fp-div 0x3ff0000000000000:64 rb)))
+(defun FRE (rt rb) (set-fpr rt (fp-div 0x3ff0000000000000:64 rb)))
 (defun FRE_rec (rt rb) (FRE rt rb) (record-fp))
-(defun FRSQRTES (rt rb) (set$ rt (fp-single (fp-div 0x3ff0000000000000:64 (fp-sqrt rb)))))
+(defun FRSQRTES (rt rb) (set-fpr rt (fp-single (fp-div 0x3ff0000000000000:64 (fp-sqrt rb)))))
 (defun FRSQRTES_rec (rt rb) (FRSQRTES rt rb) (record-fp))
 
-(defun FCPSGNS (rt ra rb) (set$ rt (concat (msb ra) (cast-low 63 rb))))
+(defun FCPSGNS (rt ra rb) (set-fpr rt (concat (msb ra) (cast-low 63 rb))))
 (defun FCPSGNS_rec (rt ra rb) (FCPSGNS rt ra rb) (record-fp))
 
 ;; the rounding to an integral value, ties of FRIN go away from zero,
 ;; which is what the mode rna says, a NaN is the result, quiet
 (defun round-with-nan (r x) (pick (is-nan x) (quiet64 x) r))
-(defun FRINS (rt rb) (set$ rt (round-with-nan (fround :rna rb) rb)))
-(defun FRIZS (rt rb) (set$ rt (round-with-nan (fround :rtz rb) rb)))
-(defun FRIPS (rt rb) (set$ rt (round-with-nan (fround :rtp rb) rb)))
-(defun FRIMS (rt rb) (set$ rt (round-with-nan (fround :rtn rb) rb)))
+(defun FRINS (rt rb) (set-fpr rt (round-with-nan (fround :rna rb) rb)))
+(defun FRIZS (rt rb) (set-fpr rt (round-with-nan (fround :rtz rb) rb)))
+(defun FRIPS (rt rb) (set-fpr rt (round-with-nan (fround :rtp rb) rb)))
+(defun FRIMS (rt rb) (set-fpr rt (round-with-nan (fround :rtn rb) rb)))
 (defun FRINS_rec (rt rb) (FRINS rt rb) (record-fp))
 (defun FRIZS_rec (rt rb) (FRIZS rt rb) (record-fp))
 (defun FRIPS_rec (rt rb) (FRIPS rt rb) (record-fp))
@@ -2181,12 +2334,12 @@
 (defun to-ud (x) (fp-to-unsigned x 64 (u64 0)))
 (defun to-uw (x) (fp-to-unsigned x 32 (u64 0)))
 
-(defun FCTID (rt rb) (raises-signed-dword rb (fround :rne rb)) (set$ rt (to-sd (fround :rne rb))))
-(defun FCTIDZ (rt rb) (raises-signed-dword rb (fp-trunc rb)) (set$ rt (to-sd rb)))
-(defun FCTIDU (rt rb) (raises-unsigned-dword rb (fround :rne rb)) (set$ rt (to-ud (fround :rne rb))))
-(defun FCTIDUZ (rt rb) (raises-unsigned-dword rb (fp-trunc rb)) (set$ rt (to-ud rb)))
-(defun FCTIWU (rt rb) (raises-unsigned-word rb (fround :rne rb)) (set$ rt (to-uw (fround :rne rb))))
-(defun FCTIWUZ (rt rb) (raises-unsigned-word rb (fp-trunc rb)) (set$ rt (to-uw rb)))
+(defun FCTID (rt rb) (raises-signed-dword rb (fround :rne rb)) (set-fpr rt (to-sd (fround :rne rb))))
+(defun FCTIDZ (rt rb) (raises-signed-dword rb (fp-trunc rb)) (set-fpr rt (to-sd rb)))
+(defun FCTIDU (rt rb) (raises-unsigned-dword rb (fround :rne rb)) (set-fpr rt (to-ud (fround :rne rb))))
+(defun FCTIDUZ (rt rb) (raises-unsigned-dword rb (fp-trunc rb)) (set-fpr rt (to-ud rb)))
+(defun FCTIWU (rt rb) (raises-unsigned-word rb (fround :rne rb)) (set-fpr rt (to-uw (fround :rne rb))))
+(defun FCTIWUZ (rt rb) (raises-unsigned-word rb (fp-trunc rb)) (set-fpr rt (to-uw rb)))
 (defun FCTID_rec (rt rb) (FCTID rt rb) (record-fp))
 (defun FCTIDZ_rec (rt rb) (FCTIDZ rt rb) (record-fp))
 (defun FCTIDU_rec (rt rb) (FCTIDU rt rb) (record-fp))
@@ -2196,9 +2349,9 @@
 (defun FCTIWU_rec (rt rb) (FCTIWU rt rb) (record-fp))
 (defun FCTIWUZ_rec (rt rb) (FCTIWUZ rt rb) (record-fp))
 
-(defun FCFIDS (rt rb) (set$ rt (fconvert :rne 64 (cast-sfloat :rne 32 rb))))
-(defun FCFIDU (rt rb) (set$ rt (cast-float :rne 64 rb)))
-(defun FCFIDUS (rt rb) (set$ rt (fconvert :rne 64 (cast-float :rne 32 rb))))
+(defun FCFIDS (rt rb) (set-fpr rt (fconvert :rne 64 (cast-sfloat :rne 32 rb))))
+(defun FCFIDU (rt rb) (set-fpr rt (cast-float :rne 64 rb)))
+(defun FCFIDUS (rt rb) (set-fpr rt (fconvert :rne 64 (cast-float :rne 32 rb))))
 (defun FCFID_rec (rt rb) (FCFID rt rb) (record-fp))
 (defun FCFIDS_rec (rt rb) (FCFIDS rt rb) (record-fp))
 (defun FCFIDU_rec (rt rb) (FCFIDU rt rb) (record-fp))
@@ -2266,20 +2419,20 @@
     (set FE (select 13 x))
     (set FU (select 12 x))))
 
-(defun MFFS (rt) (set$ rt (fpscr)))
+(defun MFFS (rt) (set-fpr rt (fpscr)))
 (defun MFFS_rec (rt) (MFFS rt) (record-fp))
 
 ;; what these give and set is in the masks of the ISA 3.0: DRN, the
 ;; enables, NI, RN and the status bits, FR, FI and FPRF
-(defun MFFSL (rt) (set$ rt (logand (fpscr) 0x000000070007f0ff:64)))
+(defun MFFSL (rt) (set-fpr rt (logand (fpscr) 0x000000070007f0ff:64)))
 (defun MFFSCE (rt)
   (let ((x (fpscr)))
-    (set$ rt x)
+    (set-fpr rt x)
     (set-fpscr (logand x (lnot 0xf8:64)))))
 
 (defun set-control (rt x)
   (let ((old (fpscr)))
-    (set$ rt (logand old 0x00000007000000ff:64))
+    (set-fpr rt (logand old 0x00000007000000ff:64))
     (set-fpscr x)))
 (defun with-rn (old rn) (logor (logand old (lnot 3:64)) (logand rn 3:64)))
 (defun with-drn (old drn)
@@ -2319,3 +2472,162 @@
         (sh (* 4 (- 7 (field-index bfa)))))
     (set$ bf (cast-low 4 (rshift old sh)))
     (set-fpscr (logand old (lnot (logand 0x000000009ff80700:64 (lshift (u64 15) sh)))))))
+
+;;; WHAT A PROGRAM CAN'T RUN
+;;
+;; The instructions that are of the supervisor or of the hypervisor of a
+;; server processor: the machine state register and the returns from
+;; interrupts, the segments and the translations, the loads and stores
+;; that bypass the cache, the messages to other threads and the power
+;; saving. In the problem state, where a program of Linux runs, each is
+;; the privileged instruction type of the program interrupt, for which
+;; program_check_exception sends SIGILL with ILL_PRVOPC at the
+;; instruction: a machine has that of the intrinsic. Those that only a
+;; 64-bit processor has, or only a 32-bit one, are illegal instructions
+;; of the other, SIGILL with ILL_ILLOPC.
+(defun privileged () (intrinsic 'privileged-instruction :aborts))
+(defun privileged-of (bits)
+  (if (= (word-width) bits)
+      (intrinsic 'privileged-instruction :aborts)
+    (intrinsic 'undefined-instruction :aborts)))
+
+(defun MFMSR (_) (privileged))
+(defun MTMSR (_ _) (privileged))
+(defun TLBIA () (privileged))
+(defun TLBIE (_ _) (privileged))
+(defun TLBSYNC () (privileged))
+
+;; of a 64-bit processor: the returns of its interrupts, the segment
+;; lookaside buffer, and what the hypervisor and the threads of a core
+;; have
+(defun RFID () (privileged-of 64))
+(defun HRFID () (privileged-of 64))
+(defun MTMSRD (_ _) (privileged-of 64))
+(defun SLBFEE_rec (_ _) (privileged-of 64))
+(defun SLBIA () (privileged-of 64))
+(defun SLBIE (_) (privileged-of 64))
+(defun SLBIEG (_ _) (privileged-of 64))
+(defun SLBMFEE (_ _) (privileged-of 64))
+(defun SLBMFEV (_ _) (privileged-of 64))
+(defun SLBMTE (_ _) (privileged-of 64))
+(defun SLBSYNC () (privileged-of 64))
+(defun TLBIEL (_) (privileged-of 64))
+(defun TLBIEP9 (_ _ _ _ _) (privileged-of 64))
+(defun LBZCIX (_ _ _) (privileged-of 64))
+(defun LDCIX (_ _ _) (privileged-of 64))
+(defun LHZCIX (_ _ _) (privileged-of 64))
+(defun LWZCIX (_ _ _) (privileged-of 64))
+(defun STBCIX (_ _ _) (privileged-of 64))
+(defun STDCIX (_ _ _) (privileged-of 64))
+(defun STHCIX (_ _ _) (privileged-of 64))
+(defun STWCIX (_ _ _) (privileged-of 64))
+(defun MSGSNDP (_) (privileged-of 64))
+(defun MSGSYNC () (privileged-of 64))
+(defun STOP () (privileged-of 64))
+(defun NAP () (privileged-of 64))
+
+;; of a 32-bit processor: its return and the segment registers
+(defun RFI () (privileged-of 32))
+(defun MFSR (_ _) (privileged-of 32))
+(defun MFSRIN (_ _) (privileged-of 32))
+(defun MTSR (_ _) (privileged-of 32))
+(defun MTSRIN (_ _) (privileged-of 32))
+
+;; Those of the embedded processors, Book E and the 4xx: the external
+;; process ID, the device control and performance monitor registers, the
+;; cache locking, the software translations and their returns from
+;; interrupts. A server processor, which the one here is, has none of
+;; them: they are illegal instructions, SIGILL with ILL_ILLOPC.
+(defun DCBFEP (_ _) (intrinsic 'undefined-instruction :aborts))
+(defun DCBSTEP (_ _) (intrinsic 'undefined-instruction :aborts))
+(defun DCBTEP (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DCBTSTEP (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DCBZEP (_ _) (intrinsic 'undefined-instruction :aborts))
+(defun DCBZLEP (_ _) (intrinsic 'undefined-instruction :aborts))
+(defun ICBIEP (_ _) (intrinsic 'undefined-instruction :aborts))
+(defun LBEPX (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun LFDEPX (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun LHEPX (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun LWEPX (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun STBEPX (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun STFDEPX (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun STHEPX (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun STWEPX (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DCCCI (_ _) (intrinsic 'undefined-instruction :aborts))
+(defun ICCCI (_ _) (intrinsic 'undefined-instruction :aborts))
+(defun ICBLC (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun ICBLQ (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun ICBTLS (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun MFDCR (_ _) (intrinsic 'undefined-instruction :aborts))
+(defun MTDCR (_ _) (intrinsic 'undefined-instruction :aborts))
+(defun MFPMR (_ _) (intrinsic 'undefined-instruction :aborts))
+(defun MTPMR (_ _) (intrinsic 'undefined-instruction :aborts))
+(defun RFCI () (intrinsic 'undefined-instruction :aborts))
+(defun RFDI () (intrinsic 'undefined-instruction :aborts))
+(defun RFMCI () (intrinsic 'undefined-instruction :aborts))
+(defun TLBIVAX (_ _) (intrinsic 'undefined-instruction :aborts))
+(defun TLBLD (_) (intrinsic 'undefined-instruction :aborts))
+(defun TLBLI (_) (intrinsic 'undefined-instruction :aborts))
+(defun TLBRE () (intrinsic 'undefined-instruction :aborts))
+(defun TLBRE2 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun TLBSX (_ _) (intrinsic 'undefined-instruction :aborts))
+(defun TLBSX2 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun TLBSX2D (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun TLBWE () (intrinsic 'undefined-instruction :aborts))
+(defun TLBWE2 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun TLBIEP (_ _ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun WRTEE (_) (intrinsic 'undefined-instruction :aborts))
+(defun WRTEEI (_) (intrinsic 'undefined-instruction :aborts))
+(defun MTLPL (_ _) (intrinsic 'undefined-instruction :aborts))
+
+;; The transactional memory of the supervisor, which the processor here
+;; doesn't have, as none of the ISA 3.1 does, and the attention of the
+;; support processor, of the primary opcode 0, are illegal too.
+(defun TRECHKPT () (intrinsic 'undefined-instruction :aborts))
+(defun TRECLAIM (_) (intrinsic 'undefined-instruction :aborts))
+(defun ATTN () (intrinsic 'undefined-instruction :aborts))
+
+;; What LLVM has of an architecture after the ISA 3.1, the dense math
+;; registers and the I/O forms of the synchronizations, no processor has.
+(defun DMMR (_ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMSETDMRZ (_) (intrinsic 'undefined-instruction :aborts))
+(defun DMSHA2HASH (_ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMSHA3HASH (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXOR (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXVBF16GERX2 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXVBF16GERX2NN (_ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXVBF16GERX2NP (_ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXVBF16GERX2PN (_ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXVBF16GERX2PP (_ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXVF16GERX2 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXVF16GERX2NN (_ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXVF16GERX2NP (_ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXVF16GERX2PN (_ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXVF16GERX2PP (_ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXVI8GERX4 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXVI8GERX4PP (_ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXVI8GERX4SPP (_ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXXEXTFDMR256 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXXEXTFDMR512 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXXEXTFDMR512_HI (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXXINSTDMR256 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXXINSTDMR512 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXXINSTDMR512_HI (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMXXSHAPAD (_ _ _ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun PTESYNCIO (_) (intrinsic 'undefined-instruction :aborts))
+(defun TLBSYNCIO (_) (intrinsic 'undefined-instruction :aborts))
+(defun TLBIEIO (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun PMDMXVBF16GERX2 (_ _ _ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun PMDMXVBF16GERX2NN (_ _ _ _ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun PMDMXVBF16GERX2NP (_ _ _ _ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun PMDMXVBF16GERX2PN (_ _ _ _ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun PMDMXVBF16GERX2PP (_ _ _ _ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun PMDMXVF16GERX2 (_ _ _ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun PMDMXVF16GERX2NN (_ _ _ _ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun PMDMXVF16GERX2NP (_ _ _ _ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun PMDMXVF16GERX2PN (_ _ _ _ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun PMDMXVF16GERX2PP (_ _ _ _ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun PMDMXVI8GERX4 (_ _ _ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun PMDMXVI8GERX4PP (_ _ _ _ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun PMDMXVI8GERX4SPP (_ _ _ _ _ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun XXSSUMUDMCEXT (_ _ _ _ _) (intrinsic 'undefined-instruction :aborts))

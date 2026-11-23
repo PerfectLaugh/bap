@@ -488,7 +488,9 @@ private def testProcesses : IO Unit := do
     "addi a7, zero, 222", "addi a0, zero, 0", "lui a1, 4", "addi a2, zero, 3", "addi a3, zero, 0x22", "addi a4, zero, -1",
     "addi a5, zero, 0", "ecall",
     "addi s1, a0, 0", "lui t0, 4", "add a1, s1, t0",
-    "lui a0, 0x1210", "addi a0, a0, 0x100", "addi a2, zero, 0", "addi a3, zero, 0", "lui a4, 1", "addi a7, zero, 220", "ecall",
+    -- CLONE_VM, CLONE_SIGHAND, CLONE_THREAD, CLONE_CHILD_CLEARTID and CLONE_CHILD_SETTID: a thread shares its handlers, as Linux
+    -- has it, `EINVAL` otherwise.
+    "lui a0, 0x1211", "addi a0, a0, -0x700", "addi a2, zero, 0", "addi a3, zero, 0", "lui a4, 1", "addi a7, zero, 220", "ecall",
     "bne a0, zero, 32",
     "addi sp, sp, -8", "sd a2, 0(sp)", "addi t0, zero, 77", "lui t1, 1", "sw t0, 8(t1)", "addi a7, zero, 93", "ecall",
     "addi s2, a0, 0",
@@ -858,6 +860,76 @@ def testLinuxRaises (name : String) : IO Unit := do
   assertEqual s!"Linux {name} ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
   assertEqual s!"Linux {name} is what qemu does" (String.fromUTF8! (← IO.FS.readBinFile s!"testsuite/data/{name}.out"))
     (String.fromUTF8! (← written.get))
+
+/-- A process that is over and that nothing waited for keeps its status and nothing else: of the 40 children of `libc-review26b zombies`,
+none has memory or registers left once the program says that it made them, where each had all of its address space until it was
+waited for, and each new process took longer than the one before. -/
+def testZombiesKeepNothing (triple : String) : IO Unit := do
+  let name := s!"{triple}-libc-review26b"
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{name}"
+  let written ← IO.mkRef ""
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test", "zombies"]
+  let mut reached := false
+  for _ in List.range 100000 do
+    let outcome ← machine.run (fuel := 20000) fun data => written.modify (· ++ String.fromUTF8! data)
+    if ((← written.get).splitOn "made").length > 1 then
+      reached := true
+      break
+    if outcome != .outOfFuel then break
+  assertTrue s!"Linux {name} makes its children" reached
+  let zombies := (← machine.emu.taskTable.get).tasks.filter (·.status.isSome)
+  assertEqual s!"Linux {name} has them as zombies" 40 zombies.length
+  assertTrue s!"Linux {name} keeps no memory of what is over: {(← machine.emu.processMemory.get).size} spaces"
+    ((← machine.emu.processMemory.get).size ≤ 2)
+  assertTrue s!"Linux {name} keeps no registers of what is over: {(← Bap.Emu.threads machine.emu).length} threads"
+    ((← Bap.Emu.threads machine.emu).length ≤ 2)
+
+/-- A file of ELF of 64 bits with the 8 bytes at `offset` of each of its program headers of `kind` set to `value`. -/
+private def withHeaderField (data : ByteArray) (kind offset value : Nat) : ByteArray := Id.run do
+  let field (at_ size : Nat) : Nat := (List.range size).foldl (fun out index => out + (data.get! (at_ + index)).toNat * 256 ^ index) 0
+  let (table, entry, count) := (field 32 8, field 54 2, field 56 2)
+  let mut out := data
+  for index in List.range count do
+    if field (table + index * entry) 4 == kind then
+      for byte in List.range 8 do
+        out := out.set! (table + index * entry + offset + byte) ((value >>> (8 * byte)).toUInt8)
+  pure out
+
+/-- What a hostile file of ELF says of its sizes is not what the host is asked for. A program whose segment is larger in the file than in
+memory, or ends past the address space, or has more zeros than the machine has memory, isn't run, as `load_elf_binary` has it, where
+the host was asked for as many bytes of zeros as the file said, 2^47 of them; and the libraries that a file needs are read no further
+than the file has of its dynamic section, where a list as long as `p_filesz` said, 2^40 bytes of entries, was made first. A segment
+of zeros that the machine has room for costs the host nothing until it is written. -/
+def testHostileElf : IO Unit := do
+  let program ← IO.FS.readBinFile "testsuite/bin/x86_64-linux-musl-libc-review26b"
+  let start (data : ByteArray) : IO Bap.Linux.Machine :=
+    Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" data) "/test" ["/test"]
+  -- `p_memsz`, at 40 of a program header, and `p_filesz`, at 32.
+  expectThrow "Linux ELF a segment that ends past the address space isn't loaded" (start (withHeaderField program 1 40 (2 ^ 47)))
+  expectThrow "Linux ELF a segment of more zeros than the machine has isn't loaded" (start (withHeaderField program 1 40 (2 ^ 36)))
+  expectThrow "Linux ELF a segment that is larger in the file than in memory isn't loaded" (start (withHeaderField program 1 32 (2 ^ 40)))
+  let roomy ← start (withHeaderField program 1 40 (2 ^ 30))
+  assertTrue "Linux ELF a segment of 2^30 bytes of zeros is mapped"
+    ((← Bap.Emu.regions roomy.emu).any fun (_, size, _) => size ≥ 2 ^ 29)
+  let dynamic ← IO.FS.readBinFile "testsuite/bin/x86_64-linux-gnu-echo"
+  let needed := Bap.Linux.Elf.needed dynamic
+  assertTrue s!"Linux ELF the libraries that a program needs: {needed}" (!needed.isEmpty)
+  assertEqual "Linux ELF a dynamic section that says it is 2^40 bytes is read as far as the file has it" needed
+    (Bap.Linux.Elf.needed (withHeaderField dynamic 2 32 (2 ^ 40)))
+
+/-- What a program wrote before an error of the machine ends its run has gone to the output by then: `libc-review27d` writes a line
+and runs a byte that is no instruction, which is an error rather than a signal. -/
+def testLinuxOutputBeforeError : IO Unit := do
+  let name := "x86_64-linux-musl-libc-review27d"
+  let program ← IO.FS.readBinFile s!"testsuite/bin/{name}"
+  let written ← IO.mkRef ByteArray.empty
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let failed ← try
+      let _ ← machine.run fun data => written.modify (· ++ data)
+      pure false
+    catch _ => pure true
+  assertTrue s!"Linux {name} ends in an error of the machine" failed
+  assertEqual s!"Linux {name} has said what it wrote before the error" "said before the end\n" (String.fromUTF8! (← written.get))
 
 /-- A program of `testLinuxRaises` says the same when it is run a piece of `step` instructions at a time, each from a checkpoint of
 the one before, which is the same checkpoint when it is made again: of `libc-review23`, with timers that are armed, a thread that
@@ -2125,6 +2197,31 @@ def testUndefinedWords : IO Unit := do
     | .ok insn =>
       assertTrue s!"AArch64 {word} is undefined at EL0: {repr insn.bil}" (insn.size == 4 && insn.bil matches [.special "undefined-instruction"])
     | .error error => throw <| IO.userError s!"AArch64 {word} doesn't decode: {error}"
+  -- ARM: `hlt` of A32 and of T32, which LLVM doesn't decode of ARMv7, is UNDEFINED; `bkpt` and `nop` of T32 aren't of these.
+  assertEqual "ARM UNDEFINED words that LLVM doesn't decode" [true, true, false, false, false]
+    [Bap.Target.LLVMLift.armUndefined false 0xe1000071, Bap.Target.LLVMLift.armUndefined true 0xba81,
+     Bap.Target.LLVMLift.armUndefined false 0xf1000071, Bap.Target.LLVMLift.armUndefined true 0xbe01,
+     Bap.Target.LLVMLift.armUndefined true 0xbf00]
+  -- What LLVM decodes of ARM and Thumb with a warning is an instruction only where the architecture defines what it does: the pc
+  -- as the register that A32 shifts by an immediate (`and r10, r4, pc, lsr #2`, `movs r10, pc, lsl #1`), and the stack pointer
+  -- as that or as an operand of T32, which ARMv8 defines (`add r10, r4, sp, lsl #1`, `sub.w r10, r8, sp`, `orr r10, sp, #1`,
+  -- `ldr.w r10, [r9, sp]`, `sxth.w r10, sp`). What is UNPREDICTABLE stays what doesn't decode: the pc shifted by a register
+  -- (`and r10, r4, pc, lsl r2`), a field that should be zero and isn't (`movs` with a first operand, `cmp` with a destination),
+  -- and the pc as an operand of T32 (`sub.w r10, r8, pc`, `sxth.w r10, pc`).
+  let decodes (triple : String) (bytes : List Nat) (address : Nat := 0x1000) : IO Bool := do
+    pure ((← (LLVM.disassemble triple (ByteArray.mk (bytes.map UInt8.ofNat).toArray) address).toBaseIO) matches .ok _)
+  let arm (word : Nat) : IO Bool := decodes "armv7" ((List.range 4).map fun index => word >>> (8 * index) % 256)
+  let thumb (first second : Nat) : IO Bool := decodes "thumbv7" [first % 256, first / 256, second % 256, second / 256]
+  assertEqual "ARM instructions that LLVM warns of and the architecture defines" [true, true, true]
+    [← arm 0xe004a12f, ← arm 0xe1b0a08f, ← arm 0xe084a08d]
+  assertEqual "ARM instructions that are UNPREDICTABLE" [false, false, false] [← arm 0xe004a21f, ← arm 0xe1b1a08f, ← arm 0xe150a08f]
+  assertEqual "Thumb instructions that LLVM warns of and ARMv8 defines" [true, true, true, true]
+    [← thumb 0xeba8 0x0a0d, ← thumb 0xf04d 0x0a01, ← thumb 0xf859 0xa00d, ← thumb 0xfa0f 0xfa8d]
+  assertEqual "Thumb instructions that are UNPREDICTABLE" [false, false] [← thumb 0xeba8 0x0a0f, ← thumb 0xfa0f 0xfa8f]
+  -- In an IT block too, where the decoder is asked of each instruction in turn: `ite eq; subeq.w r10, r8, sp; nopne`.
+  assertEqual "Thumb instructions of an IT block that ARMv8 defines" [true, true, true]
+    [← decodes "thumbv7" [0x0c, 0xbf] 0x2000, ← decodes "thumbv7" [0xa8, 0xeb, 0x0d, 0x0a] 0x2002,
+     ← decodes "thumbv7" [0x00, 0xbf] 0x2006]
   -- SPECIAL 0x0e and 0x28 and the primary opcode 0x3b, which release 6 has as PCREL; and `addu`.
   let release2 : Bap.Target.LLVMLift.MipsVariant := { bits := 32, release6 := false }
   assertEqual "MIPS reserved words" [true, true, true, false]
@@ -2765,9 +2862,54 @@ def testLinuxTaint (triple : String) : IO Unit := do
     assertEqual s!"Linux {triple} the child has what it did" [("pread /data", some 9, true)] (at_ there)
   assertEqual s!"Linux {triple} taint follows all that this does" [] (← tracker.gapsOf)
 
+/-- What the taint of a machine does of a mapping goes by the pages that have a tag, not by every byte of it: of a file of a
+terabyte mapped, of 4 GiB moved and of pages mirrored, the bytes that came from somewhere have that where they are now, the
+others have nothing, and each is done at once, where a step for each byte didn't come to an end. -/
+def testTaintOfMappings : IO Unit := do
+  let program ← IO.FS.readBinFile "testsuite/bin/x86_64-linux-musl-libc-taintfork"
+  let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" program) "/test" ["/test"]
+  let tracker ← machine.track
+  let space ← Bap.Emu.spaceOf machine.emu (← Bap.Emu.thread machine.emu)
+  let some (base, _, _) := (← Bap.Emu.regions machine.emu).find? (·.2.1 ≥ 4096)
+    | throw <| IO.userError "the machine has no memory"
+  let labelsAt (address : Nat) : IO (List (String × Option Nat)) := do
+    pure (sourcesOfExplanation (← tracker.explainMemory address (some space)))
+  -- Eight bytes of memory are a source, and go to a file a long way into it, as a write of them would.
+  tracker.markMemory (base + 16) 8 "marked" (some 0)
+  let file := Bap.Linux.Kernel.fileSpace + 12345
+  let far := 2 ^ 39 + 5000
+  tracker.copySpace space (base + 16) file far 8
+  -- The file is mapped, a terabyte of it, where nothing is.
+  let mapping := 2 ^ 45
+  tracker.mapped mapping (2 ^ 40) file 0 none
+  assertEqual "taint: a byte of a big mapping has what the file has there" [("marked", some 3)] (← labelsAt (mapping + far + 3))
+  assertEqual "taint: and the bytes beside it have nothing" ([], []) (← labelsAt (mapping + far - 1), ← labelsAt (mapping + far + 8))
+  -- The mapping moves, 4 GiB of it.
+  let moved := 2 ^ 46
+  for copied in ← machine.emu.memoryCopied.get do copied (mapping + 2 ^ 39) (moved + 2 ^ 39) (2 ^ 32)
+  assertEqual "taint: a byte of a big mapping that moved has what it had" [("marked", some 5)]
+    (← labelsAt (moved + far + 5))
+  assertEqual "taint: and the bytes beside it have nothing" ([], []) (← labelsAt (moved + far - 1), ← labelsAt (moved + far + 8))
+  -- What moves over what had something has what moved: nothing, of what had nothing.
+  for copied in ← machine.emu.memoryCopied.get do copied (mapping + far + 4096) (moved + far + 2) 3
+  assertEqual "taint: bytes that nothing was of, moved over others, are of nothing" [[("marked", some 1)], [], [], [], [("marked", some 5)]]
+    (← (List.range 5).mapM fun index => labelsAt (moved + far + 1 + index))
+  -- A mapping of the file is what the file has now: its pages, and those that had something and have nothing now.
+  for mirrored in ← machine.emu.memoryMirrored.get do mirrored (moved + far - far % 4096) (2 ^ 24) file (far - far % 4096) false
+  assertEqual "taint: bytes that mirror a file have what it has" [[("marked", some 2)], [("marked", some 3)], [("marked", some 4)]]
+    (← (List.range 3).mapM fun index => labelsAt (moved + far + 2 + index))
+  for mirrored in ← machine.emu.memoryMirrored.get do mirrored (moved + far - far % 4096) (2 ^ 24) (file + 1) 0 false
+  assertEqual "taint: and nothing where it has nothing" [[], []] (← (List.range 2).mapM fun index => labelsAt (moved + far + 2 + index))
+where
+  sourcesOfExplanation (explanation : Bap.Analysis.DynamicTaint.Tracker.Explanation) : List (String × Option Nat) :=
+    explanation.sources.filterMap fun (node, byte, _) => match node.kind with
+      | .source label offset => some (label, offset.map (· + byte))
+      | _ => none
+
 /-- What a child of fork has in its registers came from where its parent's did: a byte of a file that the parent holds in a register
 when it forks, and that each of them stores, is that byte in both. -/
 def testLinuxTaintFork (triple : String) : IO Unit := do
+  if triple == "x86_64" then testTaintOfMappings
   let program ← IO.FS.readBinFile s!"testsuite/bin/{triple}-linux-musl-libc-taintfork"
   let file := ByteArray.mk ((Array.range 16).map fun index => (0x40 + index).toUInt8)
   let kernel := (Bap.Linux.Kernel.empty.addFile "/test" program).addFile "/data" file

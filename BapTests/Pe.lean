@@ -96,8 +96,25 @@ private def fieldOf (data : ByteArray) (offset size : Nat) (big : Bool := false)
   (List.range size).foldl (init := 0) fun value index =>
     value + (data.get! (offset + (if big then size - 1 - index else index))).toNat * 256 ^ index
 
+/-- The names of the symbols of a file take no more than `namesLimit`, each as often as a symbol has it, and each ends in the string
+table: 64 symbols that each name a string of 64 KiB, 4 MiB of names of a file of 67 KiB, are refused, and 8 are read; a name that
+goes on past what the table says its size is isn't one. -/
+def runNames : IO Unit := do
+  let length := 2 ^ 16
+  let file (count : Nat) (tableSize : Nat := length + 5) : ByteArray :=
+    let symbol := appendNat (appendNat (appendNat (appendNat (appendNat (appendNat (appendNat ByteArray.empty 0 4) 4 4) 0 4) 1 2) 0x20 2) 2 1) 0 1
+    let symbols := (List.range count).foldl (fun bytes _ => bytes ++ symbol) (fixture.extract 0 372)
+    setField (symbols ++ appendNat ByteArray.empty tableSize 4 ++ ByteArray.mk (Array.replicate length 0x41) ++ ByteArray.mk #[0]) 80 4 count
+  assertEqual "PE symbols whose names are 8 times a string of 64 KiB are read" (some (List.replicate 8 length))
+    ((Pe.decode (file 8)).toOption.map (·.symbols.map (·.name.length)))
+  assertEqual "PE symbols whose names take more than the file is given are refused" (some namesTooLarge)
+    (match Pe.decode (file 64) with | .error message => some message | .ok _ => none)
+  assertEqual "a PE symbol name that doesn't end in the string table is refused" (some "unterminated string")
+    (match Pe.decode (file 8 100) with | .error message => some message | .ok _ => none)
+
 def run : IO Unit := do
   assertEqual "PE fixture size" 394 fixture.size
+  runNames
   -- Sections whose headers ask for more zeros than a host can give, all together, aren't made.
   let headers := fieldOf fixture 0x3c 4
   let table := headers + 24 + fieldOf fixture (headers + 20) 2

@@ -611,6 +611,8 @@ print("private def x86RestState : List (String × Nat × Nat) :=")
 state = [(f"ZMM{n}", 512, ZMM[n]) for n in range(10)] + [(f"K{n}", 64, K[n]) for n in sorted(K)] + [("RCX", 64, RCX), ("RDX", 64, RDX), ("RBX", 64, RBX)]
 state += [(f"TMM{n}", 8192, TMM[n]) for n in range(8)] + [("TILECFG", 512, CFG)]
 state += [(f"MM{n}", 64, MM[n]) for n in range(8)] + [("FS_BASE", 64, 0x7000), ("GS_BASE", 64, 0x9000), ("RSP", 64, 0x2000), ("FPU_TAG", 16, 0)]
+# the registers of MMX are those of x87 by their numbers, which an instruction of MMX reads them from
+state += [("FPU_STATUS", 16, 0)] + [(f"ST{n}", 80, (0xffff << 64) | MM[n]) for n in range(8)]
 state += [("R17", 64, rnd(64))] + [(name, 1, value) for name, value in sorted(FLAGS.items())]
 print("  [" + ",\n    ".join(f'("{n}", {w}, {v:#x})' for n, w, v in state) + "]")
 print("")

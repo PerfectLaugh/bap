@@ -170,16 +170,20 @@
 (defun lzcnt-op (y) (count-flags y (resize (word-width y) (clz y))))
 (defun tzcnt-op (y) (count-flags y (resize (word-width y) (clz (reverse-bits y)))))
 
+;; of a source of zero the destination isn't written, so that a register
+;; of 32 bits keeps the upper half of its base too, as an AMD has it
+(defun bs-set (rd r y) (when (non-zero y) (set-gpr rd r)))
+
 (defun BSF16rr (rd x y) (set-gpr rd (bsf-op x y)))
 (defun BSF16rm (rd x base scale index off seg) (set-gpr rd (bsf-op x (load-n 16 (ea base scale index off seg)))))
-(defun BSF32rr (rd x y) (set-gpr rd (bsf-op x y)))
-(defun BSF32rm (rd x base scale index off seg) (set-gpr rd (bsf-op x (load-n 32 (ea base scale index off seg)))))
+(defun BSF32rr (rd x y) (bs-set rd (bsf-op x y) y))
+(defun BSF32rm (rd x base scale index off seg) (let ((y (load-n 32 (ea base scale index off seg)))) (bs-set rd (bsf-op x y) y)))
 (defun BSF64rr (rd x y) (set-gpr rd (bsf-op x y)))
 (defun BSF64rm (rd x base scale index off seg) (set-gpr rd (bsf-op x (load-n 64 (ea base scale index off seg)))))
 (defun BSR16rr (rd x y) (set-gpr rd (bsr-op x y)))
 (defun BSR16rm (rd x base scale index off seg) (set-gpr rd (bsr-op x (load-n 16 (ea base scale index off seg)))))
-(defun BSR32rr (rd x y) (set-gpr rd (bsr-op x y)))
-(defun BSR32rm (rd x base scale index off seg) (set-gpr rd (bsr-op x (load-n 32 (ea base scale index off seg)))))
+(defun BSR32rr (rd x y) (bs-set rd (bsr-op x y) y))
+(defun BSR32rm (rd x base scale index off seg) (let ((y (load-n 32 (ea base scale index off seg)))) (bs-set rd (bsr-op x y) y)))
 (defun BSR64rr (rd x y) (set-gpr rd (bsr-op x y)))
 (defun BSR64rm (rd x base scale index off seg) (set-gpr rd (bsr-op x (load-n 64 (ea base scale index off seg)))))
 (defun POPCNT16rr (rd y) (set-gpr rd (popcnt-op y)))

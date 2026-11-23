@@ -124,6 +124,10 @@ parent has run a program since it made it, and then SIGCHLD, which is `none`. -/
 def exitSignalOf (table : TaskTable) (task : Entry) : Option Nat :=
   if (table.find? task.parent).any (·.selfExecId != task.parentExecId) then none else task.exitSignal
 
+/-- The processes that are children of a group, by their leaders, which are zombies or run. -/
+def childrenOf (table : TaskTable) (group : Nat) : List Nat :=
+  (table.tasks.filter fun task => task.tid == task.group && task.parent == group && task.group != group).map (·.tid)
+
 /-- The children of a group that is over go to `init`, as it can't wait for them, and send it SIGCHLD. -/
 def reparent (table : TaskTable) (group init : Nat) : TaskTable :=
   { table with tasks := table.tasks.map fun task =>

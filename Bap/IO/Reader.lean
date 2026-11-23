@@ -46,4 +46,24 @@ def cstring (data : ByteArray) (offset : Nat) : Except String String := do
         loop (index + 1) (Char.ofNat byte :: chars)
   loop 0 []
 
+/-- The first zero from `index` that is before `limit`, of the `fuel` bytes from there. -/
+def zeroFrom (data : ByteArray) (limit : Nat) : Nat → Nat → Option Nat
+  | 0, _ => none
+  | fuel + 1, index =>
+    if index < limit then
+      if data.get! index = 0 then some index else zeroFrom data limit fuel (index + 1)
+    else none
+
+/-- Where the string at `offset` ends: at its zero, which is before `stop` and in the input. Nothing is made to say so. -/
+def cstringEnd (data : ByteArray) (offset stop : Nat) : Option Nat :=
+  zeroFrom data (min stop data.size) (min stop data.size - offset) offset
+
+/-- The string at `offset` of a table that ends at `stop`: what `cstring` reads, of a string that ends in its table
+(`Bap.Proofs.IO.cstring_of_cstringIn`), and nothing of the input past the table is looked at. -/
+def cstringIn (data : ByteArray) (offset stop : Nat) : Except String String :=
+  match cstringEnd data offset stop with
+  | none => .error "unterminated string"
+  | some finish =>
+    .ok (String.ofList ((List.range (finish - offset)).map fun index => Char.ofNat (data.get! (offset + index)).toNat))
+
 end Bap.IO.Reader

@@ -94,8 +94,34 @@ def inCode (image : Image.Image) (address : Nat) : Bool :=
 /-- The variables of an expression, by name. -/
 def varsOf (expr : Expr) : List String := dedup (expr.vars.map Prod.fst)
 
+/-- What is left of a budget of `left` parts after those of an expression, of none left once it is spent: an expression that the
+executor made is shared, and what walks all of it walks each part as many times as it is reached, which of a few instructions that
+each double a value is more than can be walked. -/
+def sizeLeft (conditions : Bool) (left : Nat) (expr : Expr) : Nat :=
+  if left == 0 then 0 else
+  let left := left - 1
+  match expr with
+  | .app _ _ args => args.foldl (fun left arg => sizeLeft conditions left arg) left
+  | .extract _ _ value | .select _ value => sizeLeft conditions left value
+  | .concat first second => sizeLeft conditions (sizeLeft conditions left first) second
+  | .ite condition yes no =>
+    sizeLeft conditions (sizeLeft conditions (if conditions then sizeLeft conditions left condition else left) yes) no
+  | _ => left
+termination_by expr
+
+/-- How many parts an expression has, as far as `limit`: past it, `limit + 1`; without the conditions of its choices, of
+`conditions` false. It looks at no more than `limit + 1` parts. -/
+def sizeOf (limit : Nat) (expr : Expr) (conditions : Bool := true) : Nat :=
+  limit + 1 - sizeLeft conditions (limit + 1) expr
+
+/-- The most parts of an expression that is walked whole: of the target of a jump and of each condition of its path. -/
+def maxWalk : Nat := 4000
+
+/-- Whether an expression is small enough to walk whole. -/
+def walkable (expr : Expr) (limit : Nat := maxWalk) : Bool := sizeOf limit expr ≤ limit
+
 /-- The addresses that an expression reads of the initial memory. -/
-partial def selectsOf : Expr → List Expr
+def selectsOf : Expr → List Expr
   | .select _ address => address :: selectsOf address
   | .app _ _ args => args.flatMap selectsOf
   | .extract _ _ value => selectsOf value
@@ -116,10 +142,10 @@ def readsMapped (image : Image.Image) (σ : Proofs.Symbolic.Assignment) (expr : 
   (selectsOf expr).all fun address => (imageByte image (valueOf σ address)).isSome
 
 /-- Whether an expression has no input: no variable and no read of memory. -/
-partial def closed : Expr → Bool
+def closed : Expr → Bool
   | .var _ _ | .select _ _ => false
   | .const _ => true
-  | .app _ _ args => args.all closed
+  | .app _ _ args => args.attach.all fun ⟨arg, _⟩ => closed arg
   | .extract _ _ value => closed value
   | .concat left right => closed left && closed right
   | .ite condition yes no => closed condition && closed yes && closed no
@@ -127,8 +153,12 @@ partial def closed : Expr → Bool
 /-- What the executor leaves of constants that are cast, which it folds only of its operations: each closed part folded to its
 value, an `extract` of all the bits dropped, an `extract` of a `concat` of the part it is of and of an `extract` of what that is
 of, as a bit of a condition register that a lifter makes of its fields, and a sum, `or` or shift with zero, and a product with
-one, its other operand. -/
-partial def simplify (expr : Expr) : Expr :=
+one, its other operand. What is nested deeper than `fuel` is left as it is. -/
+def simplifyWithin (fuel : Nat) (expr : Expr) : Expr :=
+  match fuel with
+  | 0 => expr
+  | fuel + 1 =>
+  let simplify := simplifyWithin fuel
   let zeros : Proofs.Symbolic.Assignment := { var := fun _ _ => 0, memory := fun _ _ _ => 0 }
   let fold (expr : Expr) : Expr :=
     if closed expr then
@@ -168,10 +198,13 @@ partial def simplify (expr : Expr) : Expr :=
   | .select memory address => .select memory (simplify address)
   | _ => expr
 
+@[inherit_doc simplifyWithin]
+def simplify (expr : Expr) : Expr := simplifyWithin 100000 expr
+
 /-- Whether an expression has a part that is another. -/
-partial def hasPart (part : Expr) (expr : Expr) : Bool :=
+def hasPart (part : Expr) (expr : Expr) : Bool :=
   Expr.structuralEq part expr || match expr with
-    | .app _ _ args => args.any (hasPart part)
+    | .app _ _ args => args.attach.any fun ⟨arg, _⟩ => hasPart part arg
     | .extract _ _ value => hasPart part value
     | .concat left right => hasPart part left || hasPart part right
     | .ite condition yes no => hasPart part condition || hasPart part yes || hasPart part no
@@ -179,7 +212,7 @@ partial def hasPart (part : Expr) (expr : Expr) : Bool :=
     | _ => false
 
 /-- An expression with each of a part replaced by another. -/
-partial def replace (part value : Expr) (expr : Expr) : Expr :=
+def replace (part value : Expr) (expr : Expr) : Expr :=
   if Expr.structuralEq part expr then value else
   match expr with
   | .app name width args => .app name width (args.map (replace part value))
@@ -194,7 +227,7 @@ partial def replace (part value : Expr) (expr : Expr) : Expr :=
 /-- An address as `offset + scale * index`, of a constant offset and scale: what isn't a sum, a product or a shift by a
 constant is the index. What is scaled is the index whole, as what is added in it, e.g., the least case of a `switch` taken
 away, is of the index that its bound is of, and not of the offset of the table. -/
-partial def affine (expr : Expr) (scaled : Bool := false) : Nat × Nat × Expr :=
+def affine (expr : Expr) (scaled : Bool := false) : Nat × Nat × Expr :=
   match expr with
   | .extract high 0 value => if value.width == high + 1 then affine value scaled else (0, 1, expr)
   | .app "bvmul" _ [left, @Expr.const _ value] =>
@@ -219,11 +252,13 @@ partial def affine (expr : Expr) (scaled : Bool := false) : Nat × Nat × Expr :
     let (offset, scale, index) := affine left
     (offset + 2 ^ width - value.toNat, scale, index)
   | _ => (0, 1, expr)
+termination_by expr
+decreasing_by all_goals (simp_wf; omega)
 
 /-- The input and its value that give an index the value `index`: the index is the input, a part of it from bit 0, an
 extension of it, or it with a constant added, taken away or masked off, which isn't more than the mask. The input is what is
 none of these: a register, or what was read of memory, e.g., an argument on the stack. -/
-partial def invert (expr : Expr) (index : Nat) : Option (Expr × Nat) :=
+def invert (expr : Expr) (index : Nat) : Option (Expr × Nat) :=
   let modulus := 2 ^ expr.width
   if index ≥ modulus then none else
   match expr with
@@ -240,6 +275,8 @@ partial def invert (expr : Expr) (index : Nat) : Option (Expr × Nat) :=
   | .app "bvsub" _ [left, @Expr.const _ value] => invert left ((index + value.toNat) % modulus)
   | .app "bvand" _ [left, @Expr.const _ value] => if index &&& value.toNat == index then invert left index else none
   | _ => some (expr, index)
+termination_by expr
+decreasing_by all_goals (simp_wf; omega)
 
 /-- The index of the targets of a jump, of its reads of memory, or of the target itself if it reads none, and where the
 reads start, the least of their offsets. -/
@@ -265,11 +302,14 @@ def maxUnbounded : Nat := 512
 
 /-- The targets of a jump to `target` under the conditions of its path, as the index of it goes from 0: while the conditions
 that are of the variable of the index alone hold, or else while the targets are in the code, each in the code, and of the
-first read of the table. A table is of one variable, which the target has nothing else of. -/
+first read of the table. A table is of one variable, which the target has nothing else of. A target of more than `maxWalk` parts
+has no table, and a condition of more isn't one of it: a table is read of a few instructions, and what is walked for each entry
+is bounded so. -/
 def tableTargets (image : Image.Image) (target : Expr) (constraints : List Expr) (near : Nat × Nat := (0, 0)) :
     Option (Option Nat × Bool × List Nat) := do
+  if !walkable target then none
   let target := simplify target
-  let constraints := constraints.map simplify
+  let constraints := (constraints.filter (walkable ·)).map simplify
   let (table, index) ← indexOf target
   let (input, _) ← invert index 0
   -- of a value of the input, the target and the conditions that are of nothing else
@@ -349,8 +389,34 @@ def continuesTo (insn : Disasm.Insn) (next : Nat) : Symbolic.Outcome → Bool
   | .jump (@Expr.const _ value) => value.toNat == next
   | _ => false
 
+/-- Whether a memory has an address of more than `limit` parts, which a read of it would compare with its own, or is of choices
+nested deeper than `fuel`. -/
+def bigMemory (limit : Nat) : Nat → Symbolic.Memory → Bool
+  | 0, _ => true
+  | fuel + 1, memory =>
+    memory.cells.any (fun cell => !walkable cell.1 limit) || match memory.branch with
+      | some (condition, yes, no) => !walkable condition limit || bigMemory limit fuel yes || bigMemory limit fuel no
+      | none => false
+
+/-- A state between two instructions of a path with nothing in it too big to walk, or none: a value of more than `limit` parts,
+of a register or of a cell of memory, is a variable new to the path, named for the instruction `address` it was found after and
+for where it is; a condition of more is left out; and a state with a memory written at an address of more is given up. What the
+executor makes of an instruction is shared, so that a few instructions that each double a value, `add rax, rax`, make what has
+more parts than can be walked, which the comparisons of addresses, `simplify` and what reads a table of the target all do. -/
+def bounded (address : Nat) (state : Symbolic.State) (limit : Nat := 4 * maxWalk) : Option Symbolic.State :=
+  if state.memories.any (fun entry => bigMemory limit 8 entry.2) then none
+  else
+    let env := state.env.map fun (var, value) =>
+      if walkable value limit then (var, value) else (var, Expr.var s!"{var.name}#{var.index}@{address}" value.width)
+    let memories := state.memories.map fun (var, memory) =>
+      let (cells, _) := memory.cells.foldr (init := (([] : List (Expr × Expr)), 0)) fun (cellAddress, value) (cells, count) =>
+        if walkable value limit then ((cellAddress, value) :: cells, count)
+        else ((cellAddress, Expr.var s!"{var.name}#{count}@{address}" value.width) :: cells, count + 1)
+      (var, { memory with cells })
+    some { state with env, memories, constraints := state.constraints.filter (walkable · limit) }
+
 /-- The states and the targets of the indirect jump at the end of a path: what it does, run symbolically, of each way that goes
-through all of it. -/
+through all of it, each state between two instructions `bounded`. -/
 def pathTargets (path : List Disasm.Insn) (initial : Symbolic.State := {}) : List (Symbolic.State × Expr) :=
   let rec go : List Disasm.Insn → List Symbolic.State → List (Symbolic.State × Expr)
     | [], _ => []
@@ -365,7 +431,7 @@ def pathTargets (path : List Disasm.Insn) (initial : Symbolic.State := {}) : Lis
       let states := states.flatMap fun state =>
         match Symbolic.run insn.bil state 4000 with
         | .ok results => results.filterMap fun result =>
-          if continuesTo insn next.address result.outcome then some result.state else none
+          if continuesTo insn next.address result.outcome then bounded insn.address result.state else none
         | .error _ => []
       go rest (states.take 16)
   go path [initial]
@@ -434,7 +500,7 @@ def stubImport (slots : Std.HashMap Nat String) (graph : Graph) (entry : Nat) : 
   let jump ← path.getLast?
   if jump.flow != .indirectJump then none
   let targets := pathTargets path
-  targets.findSome? fun (_, target) => (slotOf (simplify target)).bind slots.get?
+  targets.findSome? fun (_, target) => if walkable target then (slotOf (simplify target)).bind slots.get? else none
 
 /-- The register that a call leaves the return address in, by its name in the semantics. -/
 def linkRegister : Image.Arch → Option String
@@ -485,9 +551,11 @@ def returnsBy (arch : Image.Arch) (insn : Disasm.Insn) : Bool :=
 into what it had too. The decoder doesn't decode what was had, so that this stops there rather than scanning all that is
 called again. -/
 def rescan (image : Image.Image) (disasm : Disasm.Disasm) (roots : List Nat) : IO Disasm.Disasm := do
-  let some base ← Project.Project.codeDisassembler image 0 | return disasm
-  let decoders ← (Project.Project.codeRegions image).filterMapM fun part => do
-    pure ((← Project.Project.codeDisassembler image part.2.addr).map (part.2, ·))
+  let code := Project.Project.codeRegions image
+  let runs := Project.Project.armRunsIn code image
+  let some base ← Project.Project.codeDisassemblerOf runs image 0 | return disasm
+  let decoders ← code.filterMapM fun part => do
+    pure ((← Project.Project.codeDisassemblerOf runs image part.2.addr).map (part.2, ·))
   let known : Std.HashSet Nat := disasm.instructions.foldl (init := {}) fun set insn => set.insert insn.address
   let whole := Disasm.Disassembler.ofRegions base decoders
   let fresh : Disasm.Disassembler := { whole with
@@ -505,14 +573,47 @@ say of. -/
 def mipsSlotted (arch : Image.Arch) (insn : Disasm.Insn) : Bool :=
   arch == .mips && !Target.LLVMLift.mipsCompactMnemonics.contains ((insn.asm.splitOn " ").headD "")
 
-/-- The edges of the flow of control, with those of the tables, and without the fall-through of calls of what doesn't return. -/
+mutual
+  /-- Whether a statement may end by running off its end. -/
+  def stmtFallsThrough : Bil.Stmt → Bool
+    | .move .. | .while .. => true
+    | .ifElse _ yes no => programFallsThrough yes || programFallsThrough no
+    | _ => false
+
+  /-- Whether a program may end by running off its end, rather than by a jump or a trap, by its shape alone. -/
+  def programFallsThrough : Bil.Program → Bool
+    | [] => true
+    | stmt :: rest => stmtFallsThrough stmt && programFallsThrough rest
+end
+
+mutual
+  def stmtJumps : Bil.Stmt → Bool
+    | .jmp _ => true
+    | .ifElse _ yes no => programJumps yes || programJumps no
+    | .while _ body => programJumps body
+    | _ => false
+
+  /-- Whether a program has a jump in it. -/
+  def programJumps : Bil.Program → Bool
+    | [] => false
+    | stmt :: rest => stmtJumps stmt || programJumps rest
+end
+
+/-- Whether a call is one of a condition, as ARM's `bleq`, a `bl` in an IT block of Thumb, PowerPC's `beql` and MIPS's `bgezal`
+are: what it does has the jump to what it calls, and a way past it. When the condition doesn't hold, control goes on to the next
+instruction whatever is called. -/
+def conditionalCall (insn : Disasm.Insn) : Bool :=
+  insn.flow == .call && programJumps insn.bil && programFallsThrough insn.bil
+
+/-- The edges of the flow of control, with those of the tables, and without the fall-through of calls of what doesn't return, but
+of the calls of a condition, which go on when it doesn't hold. -/
 def flowEdges (arch : Image.Arch) (disasm : Disasm.Disasm) (graph : Graph) (tables : List JumpTable)
     (hasDelaySlot : Disasm.Insn → Bool) (noReturn : Nat → Bool) : List (Nat × Nat) :=
   -- a call goes on after itself, or after its delay slot, which is of the size of the call: what the decoder says of a jump,
   -- and of a call of MIPS, but a compact one, which falls through to its slot
   let slotted (insn : Disasm.Insn) : Bool := hasDelaySlot insn || mipsSlotted arch insn
   let dead : Std.HashSet (Nat × Nat) := disasm.instructions.foldl (init := {}) fun set insn =>
-    if insn.flow == .call && insn.target.any noReturn then
+    if insn.flow == .call && insn.target.any noReturn && !conditionalCall insn then
       set.insert (if slotted insn then (insn.next, insn.next + insn.size) else (insn.address, insn.next))
     else set
   let kept := disasm.edges.filter fun edge => !dead.contains edge
@@ -695,7 +796,7 @@ def partition (project : Project.Project) (rounds : Nat := 8) (known : Nat → L
       !returnsBy image.arch insn
   let slotJumps := open_.filterMap fun insn =>
     (pathTargets (pathTo graph insn.address 8)).findSome? fun (_, target) =>
-      (slotOf (simplify target)).map fun slot => (insn.address, slot, slots[slot]?)
+      if walkable target then (slotOf (simplify target)).map fun slot => (insn.address, slot, slots[slot]?) else none
   let throughSlots : Std.HashSet Nat := slotJumps.foldl (init := {}) fun set jump => set.insert jump.1
   let unresolved := (open_.filter fun insn => !throughSlots.contains insn.address).map (·.address)
   let edges := flowEdges image.arch disasm graph tables hasDelaySlot (noReturn.contains ∘ canonical)

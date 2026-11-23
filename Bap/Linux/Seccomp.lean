@@ -244,8 +244,12 @@ private def serveCall (seccomp : Seccomp) (emu : Emu) (tid : Nat) (call : Call) 
     if flags &&& (1 ||| 2 ||| 4 ||| 16) != flags then return ← seccomp.fail emu 22
     match ← (readProgram emu architecture address).toBaseIO with
     | .error _ => seccomp.fail emu 14
-    | .ok program => if valid program then seccomp.install emu tid flags program else seccomp.fail emu 22
+    | .ok program =>
+      -- A thread in strict mode takes no filter, nor one with filters strict mode, as `seccomp_may_assign_mode` has it: `EINVAL`.
+      if !valid program || (← seccomp.state.get).strict.contains tid then seccomp.fail emu 22
+      else seccomp.install emu tid flags program
   let strict : IO (Option SyscallAction) := do
+    if (← seccomp.state.get).filters.contains tid then return ← seccomp.fail emu 22
     seccomp.state.modify fun state => { state with strict := state.strict.insert tid }
     succeed emu
   match call with

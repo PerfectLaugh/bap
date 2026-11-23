@@ -71,6 +71,16 @@ def showEncodings (target : Target) (encodings : List String) : IO Unit := do
       | .error error => firstLine (toString error)
     IO.println s!"{encoding}\t{decoded.size}\t{decoded.opcode}\t{(decoded.assembly.replace "\t" " ")}\t{lifted}"
 
+/-- The intrinsics that a program names, to this depth of what it nests. -/
+def specialsOf : Nat → List Bil.Stmt → List String
+  | 0, _ => []
+  | fuel + 1, program => program.flatMap fun stmt =>
+    match stmt with
+    | .special name => [name]
+    | .ifElse _ yes no => specialsOf fuel yes ++ specialsOf fuel no
+    | .while _ body => specialsOf fuel body
+    | _ => []
+
 def main (args : List String) : IO UInt32 := do
   if let name :: "--show" :: encodings := args then
     let some target := targets.lookup name
@@ -84,6 +94,8 @@ def main (args : List String) : IO UInt32 := do
   let some target := targets.lookup name
     | throw <| IO.userError s!"no target {name}"
   let mut tallies : Std.HashMap String Tally := {}
+  -- What the lifted programs name of intrinsics, each with an opcode that does, for what checks that each is served.
+  let mut specials : Std.HashMap String String := {}
   let mut undecoded := 0
   let mut lines := 0
   let handle ← IO.FS.Handle.mk path .read
@@ -98,7 +110,10 @@ def main (args : List String) : IO UInt32 := do
       let tally := tallies.getD decoded.opcode {}
       if tally.lifted + tally.failed < samples then
         let tally ← match (← (target.lift 0x1000 data).toBaseIO) with
-          | .ok _ => pure { tally with lifted := tally.lifted + 1 }
+          | .ok insn =>
+            for name in specialsOf 64 insn.bil do
+              if !specials.contains name then specials := specials.insert name decoded.opcode
+            pure { tally with lifted := tally.lifted + 1 }
           | .error error =>
             pure (if tally.failed = 0 then
               { tally with failed := 1, encoding := line.trimAscii.toString, error := firstLine (toString error) }
@@ -108,6 +123,8 @@ def main (args : List String) : IO UInt32 := do
         tallies := tallies.insert decoded.opcode tally
   for (opcode, tally) in tallies.toList do
     IO.println s!"{opcode}\t{tally.lifted}\t{tally.failed}\t{tally.encoding}\t{tally.error}"
+  for (name, opcode) in specials.toList do
+    IO.println s!"# special {name} {opcode}"
   IO.println s!"# lines {lines} undecoded {undecoded} opcodes {tallies.size}"
   return 0
 

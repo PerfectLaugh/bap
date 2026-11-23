@@ -81,14 +81,16 @@ def readiness (kernel : Kernel) (live completed : List Nat) (now pending file : 
         | .generated "io_uring" => { read := completed.contains opened.inode, write := true }
         | .file _ | .directory | .symlink _ | .generated _ | .console _ | .device _ => { read := true, write := true }
         | .pipe .. =>
-          if opened.flags &&& 3 == 0 then
-            let writers := kernel.pipeHeld opened.inode live true
-            -- With nothing to read and nothing that writes it, it is POLLHUP alone, which select takes as ready to read.
-            { read := kernel.pipeWaiting opened.inode > 0, hangup := !writers }
-          else
-            let readers := kernel.pipeHeld opened.inode live false
-            -- It has room once a page of it is free, which Linux, which keeps a pipe in pages, has as a free one.
-            { write := readers && kernel.pipeRoom opened.inode ≥ Kernel.pipeBuf, error := !readers }
+          -- As `pipe_poll` has it, of each way that it is open, which of a FIFO may be both.
+          let reading := opened.flags &&& 3 == 0 || opened.flags &&& 3 == 2
+          let writing := opened.flags &&& 3 != 0
+          let writers := kernel.pipeHeld opened.inode live true
+          let readers := kernel.pipeHeld opened.inode live false
+          -- With nothing to read and nothing that writes it, it is POLLHUP alone, which select takes as ready to read. It has room once
+          -- a page of it is free, which Linux, which keeps a pipe in pages, has as a free one, whether anything reads it or not: of
+          -- nothing that does, that is POLLERR with it.
+          { read := reading && kernel.pipeWaiting opened.inode > 0, hangup := reading && !writers
+            write := writing && kernel.pipeRoom opened.inode ≥ Kernel.pipeBuf, error := writing && !readers }
         | .socket socket =>
           if socket.listening then { read := !socket.pending.isEmpty }
           else if socket.type == 2 then { read := !socket.incoming.isEmpty, write := true }
@@ -101,7 +103,10 @@ def readiness (kernel : Kernel) (live completed : List Nat) (now pending file : 
               let gone := !kernel.socketAlive peer live
               let ended := socket.readShut || gone || other.any (·.writeShut)
               { read := !socket.incoming.isEmpty || ended, readHangup := ended, write := true
-                error := kernel.wasReset socket (kernel.socketAlive · live), hangup := gone || (ended && socket.writeShut) }
+                -- Shut both ways, by either end, as `unix_poll` has `SHUTDOWN_MASK`: what the other end shut to read is shut to
+                -- write here.
+                error := kernel.wasReset socket (kernel.socketAlive · live)
+                hangup := gone || (ended && (socket.writeShut || other.any (·.readShut))) }
         | .eventfd count _ => { read := count > 0, write := count < 2 ^ 64 - 2 }
         | .timerfd expiry _ => { read := expiry.any (· ≤ now) }
         | .signalfd mask => { read := mask &&& pending != 0 }
@@ -229,31 +234,43 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
   let eventSize := if architecture == .x86_64 || architecture == .i686 then 12 else 16
   let eventData := if eventSize == 12 then 4 else 8
   -- The descriptors of `poll`, with what each asks for: what is ready of each, how many are, and the files to watch.
-  let pollOnce (address count : Nat) : IO (Nat × List Nat) := do
+  let pollOnce (entries : ByteArray) (count : Nat) : IO (Nat × List Nat × List Nat) := do
     let mut readyCount := 0
     let mut files := []
+    let mut all := []
     for index in [0:count] do
-      let at_ := address + index * 8
-      let fd := (← number at_ 4)
-      let events ← number (at_ + 4) 2
+      let fd := numberOf big (entries.extract (index * 8) (index * 8 + 4))
+      let events := numberOf big (entries.extract (index * 8 + 4) (index * 8 + 6))
       let revents ← if fd ≥ 2 ^ 31 then pure 0 else
         match ← fileOf fd with
         | none => pure 0x20
         | some file =>
           files := file :: files
           pure (bits (← ready file) (if mips then 0 else 0x100) &&& (events ||| 0x8 ||| 0x10))
-      write emu (at_ + 6) (numberBytes big 2 revents)
+      all := revents :: all
       if revents != 0 then readyCount := readyCount + 1
-    pure (readyCount, files)
+    pure (readyCount, files, all.reverse)
   let poll (address count : Nat) (timeout : Option Nat) (back : Option (Nat × Nat × Nat) := none) (interrupted : Bool := false) :
       IO (Option SyscallAction) := do
+    -- As `do_sys_poll` has it: more descriptors than the process may have is `EINVAL`, and all of the array is read before any of it is
+    -- looked at, so that one that isn't all there is `EFAULT` with nothing written; what is ready of each is written once the call is
+    -- over, and not while it waits.
+    let count := count % 2 ^ 32
+    if count > min ((← poller.kernel.get).limitOf group 7).1 (2 ^ 20) then return ← fail einval
+    let entries ← if count == 0 then pure ByteArray.empty else read emu address (count * 8)
     let due ← deadline timeout
-    let (found, files) ← pollOnce address count
+    let (found, files, all) ← pollOnce entries count
     let waits := !(found > 0 || timeout == some 0 || due.any (· ≤ now))
-    if waits && interrupted then return ← interrupt
+    let give : IO Unit := do
+      for (revents, index) in all.zipIdx do write emu (address + index * 8 + 6) (numberBytes big 2 revents)
+    if waits && interrupted then
+      give
+      return ← interrupt
     giveBack timeout due back waits
     if waits then wait due files
-    else over found
+    else
+      give
+      over found
   -- The sets of `select`: what is ready of each, as sets that say only that, how many, and the files to watch.
   let select (count : Nat) (sets : List Nat) (timeout : Option Nat) (back : Option (Nat × Nat × Nat)) (interrupted : Bool := false) :
       IO (Option SyscallAction) := do
@@ -389,6 +406,29 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       | _ => pure ()
       let existing := items.find? fun item => item.fd == arg 2 && item.file == file
       let event : IO (Nat × Nat) := do pure (← number (arg 3) 4, ← number (arg 3 + eventData) 8)
+      -- `EPOLLEXCLUSIVE` is of `EPOLL_CTL_ADD` alone, of what isn't an epoll, with no events but those that `EPOLLEXCLUSIVE_OK_BITS`
+      -- has, and what was added with it isn't changed: `EINVAL`.
+      let exclusive := 0x10000000
+      let targetItems : Option (List EpollItem) := match kernel.inodes.get? target.inode with
+        | some { content := .epoll inner, .. } => some inner
+        | _ => none
+      if arg 1 == 1 || arg 1 == 3 then
+        let (events, _) ← event
+        if events &&& exclusive != 0 then
+          if arg 1 == 3 || targetItems.isSome || events &&& (2 ^ 32 - 1 - (0x1 ||| 0x4 ||| 0x8 ||| 0x10 ||| 0x20000000 ||| 0x80000000 ||| exclusive)) != 0 then
+            return ← fail einval
+      if arg 1 == 3 && existing.any (·.events &&& exclusive != 0) then return ← fail einval
+      -- An epoll that watches, as far as what it watches does, the one that it is added to, or is the fifth of a chain of them, would
+      -- close a loop: `ELOOP`, as `ep_loop_check` has it.
+      if arg 1 == 1 then
+        if let some inner := targetItems then
+          let rec reaches (items : List EpollItem) : Nat → Bool
+            | 0 => true
+            | depth + 1 => items.any fun item =>
+              match (kernel.openFiles.get? item.file).bind fun opened => kernel.inodes.get? opened.inode with
+              | some { number, content := .epoll deeper, .. } => number == epollNumber || reaches deeper depth
+              | _ => false
+          if reaches inner 4 then return ← fail 40
       let changed ← match arg 1, existing with
         | 1, none => do let (events, data) ← event; pure (items ++ [{ fd := arg 2, file, events, data }])
         | 1, some _ => return ← fail 17
@@ -430,6 +470,8 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       -- What it sets, which fails with `EINVAL` before its descriptor is looked at, of a time that Linux doesn't take.
       let (some every, some value) ← if setting then pure (← readSpan emu (arg 2) field, ← readSpan emu (arg 2 + 2 * field) field)
         else pure (some 0, some 0) | fail einval
+      -- Nor flags other than `TFD_TIMER_ABSTIME` and `TFD_TIMER_CANCEL_ON_SET`, as `do_timerfd_settime` has it.
+      if setting && arg 1 % 2 ^ 32 ≥ 4 then return ← fail einval
       let kernel ← poller.kernel.get
       let .ok (number_, _, inode) := kernel.objectOf group (arg 0) | return ← fail ebadf
       let .timerfd expiry interval := inode.content | return ← fail einval

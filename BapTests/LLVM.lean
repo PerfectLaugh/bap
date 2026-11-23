@@ -499,6 +499,10 @@ private def testThumbNarrow : IO Unit := do
   assertReg32 "tLSLri" "R0" 12 (← run [0x88, 0x00] [r "R1" 3, r "R0" 0])
   assertReg32 "tLSRri" "R0" 3 (← run [0x88, 0x08] [r "R1" 12, r "R0" 0])
   assertFlag "tLSRri carry" "CF" 1 (← run [0x88, 0x08] [r "R1" 2, r "R0" 0])
+  -- The carry of a modified immediate is its top bit when it is rotated: `orns r10, r0, #0x80000000`.
+  let orns ← run [0x70, 0xf0, 0x00, 0x4a] [r "R0" 0, r "R10" 0, bit "CF" 0]
+  assertReg32 "t2ORNri" "R10" 0x7fffffff orns
+  assertFlag "t2ORNri carry of the immediate" "CF" 1 orns
   assertReg32 "tASRri" "R0" 0xffffffff (← run [0x88, 0x10] [r "R1" 0xfffffffc, r "R0" 0])
   assertReg32 "tORR" "R0" 3 (← run [0x08, 0x43] [r "R0" 1, r "R1" 2])
   assertReg32 "tADC" "R0" 4 (← run [0x48, 0x41] [r "R0" 1, r "R1" 2, bit "CF" 1])
@@ -1373,8 +1377,14 @@ private def testX86Evex : IO Unit := do
   | _ => throw <| IO.userError "x86-32: no K2"
   -- a segment register has 16 bits: movl %eax, %gs in both modes
   let segment : Bap.Var := ⟨"GS", .imm 16, 0, false⟩
-  let moved64 ← execute (← Target.LLVMLift.decodeX86With x86 0 0 (bytes [0x8e, 0xe8])) [word "RAX" 0x12345678]
-  assertEqual "x86-64 mov to a segment" true ((Bil.lookup moved64.env segment) matches .ok (.bits _))
+  -- of a selector that a program of 64 bits has, its data segment; one that isn't its own is a general protection fault, and
+  -- the register stays unwritten
+  let moved64 ← execute (← Target.LLVMLift.decodeX86With x86 0 0 (bytes [0x8e, 0xe8])) [word "RAX" 0x1234002b]
+  match Bil.lookup moved64.env segment with
+  | .ok (.bits value) => assertEqual "x86-64 mov to a segment" 0x2b value.toNat
+  | _ => throw <| IO.userError "x86-64: no GS"
+  let refused ← execute (← Target.LLVMLift.decodeX86With x86 0 0 (bytes [0x8e, 0xe8])) [word "RAX" 0x12345678]
+  assertEqual "x86-64 mov of a selector that isn't the program's writes nothing" false ((Bil.lookup refused.env segment) matches .ok (.bits _))
   let movedGs ← execute (← Target.LLVMLift.decodeX8632With x8632 0 0 (bytes [0x8e, 0xe8]))
     [(⟨"EAX", .imm 32, 0, false⟩, .bits (BitVec.ofNat 32 0x12345678))]
   match Bil.lookup movedGs.env segment with
@@ -1597,7 +1607,8 @@ private def testX86Registers : IO Unit := do
   -- fld st(1), which needs ST0-ST7, the status word and the tag word
   let fld ← Target.LLVMLift.decodeX86With x86 0 0 (bytes [0xd9, 0xc1])
   assertEqual "fld st(1) is what it is" "fld st(1)" fld.asm
-  let pushed ← execute fld (stack ++ [short "FPU_STATUS" 0, short "FPU_TAG" 0xffff])
+  -- with two registers on the stack, as the tags say
+  let pushed ← execute fld (stack ++ [short "FPU_STATUS" 0, short "FPU_TAG" 0xfff0])
   let stValue (state : Bil.State) (name : String) : IO Nat :=
     match Bil.lookup state.env ⟨name, .imm 80, 0, false⟩ with
     | .ok (.bits value) => pure value.toNat
@@ -1605,13 +1616,20 @@ private def testX86Registers : IO Unit := do
   assertEqual "fld pushes" 1 (← stValue pushed "ST0")
   assertEqual "fld rotates" 0 (← stValue pushed "ST1")
   let pushed32 ← execute (← Target.LLVMLift.decodeX8632With x8632 0 0 (bytes [0xd9, 0xc1]))
-    (stack ++ [short "FPU_STATUS" 0, short "FPU_TAG" 0xffff])
+    (stack ++ [short "FPU_STATUS" 0, short "FPU_TAG" 0xfff0])
   assertEqual "32-bit fld pushes" 1 (← stValue pushed32 "ST0")
+  -- of a register that is empty, the stack underflows: the indefinite, with the invalid operation and the stack fault
+  let empty ← execute fld (stack ++ [short "FPU_STATUS" 0, short "FPU_TAG" 0xffff, short "FPU_CONTROL" 0x37f])
+  assertEqual "fld of an empty register pushes the indefinite" 0xffffc000000000000000 (← stValue empty "ST0")
+  match Bil.lookup empty.env ⟨"FPU_STATUS", .imm 16, 0, false⟩ with
+  | .ok (.bits value) => assertEqual "fld of an empty register is a stack fault, with the top moved" 0x3841 value.toNat
+  | _ => throw <| IO.userError "FPU_STATUS is not a register of 16 bits"
   let _ ← Target.LLVMLift.decodeX86With x86 0 0 (bytes [0xdd, 0x00])
   let _ ← Target.LLVMLift.decodeX86With x86 0 0 (bytes [0xdb, 0x28])
   -- the control word and MXCSR
   let m64 ← bytesAt (width := 64) 0x100 [0x7f, 0x03, 0, 0]
-  let loaded ← execute (← Target.LLVMLift.decodeX86With x86 0 0 (bytes [0xd9, 0x28])) [(memVar, .memory m64), word "RAX" 0x100]
+  let loaded ← execute (← Target.LLVMLift.decodeX86With x86 0 0 (bytes [0xd9, 0x28]))
+    [(memVar, .memory m64), word "RAX" 0x100, short "FPU_STATUS" 0]
   match Bil.lookup loaded.env ⟨"FPU_CONTROL", .imm 16, 0, false⟩ with
   | .ok (.bits value) => assertEqual "fldcw loads the control word" 0x37f value.toNat
   | _ => throw <| IO.userError "FPU_CONTROL is not a register of 16 bits"
@@ -1698,23 +1716,21 @@ private def testPowerPCFields : IO Unit := do
 /-- The status registers that the semantics name, with their widths, on the real encodings. -/
 private def testStatusRegisters : IO Unit := do
   let word64 (name : String) (value : Nat) := word name value
-  -- aarch64: mrs x0, daif and msr daifset, #2 and the banks of SP by SPSel
+  -- aarch64: what is of EL1, or that EL0 has only with SCTLR_EL1.UMA, which Linux doesn't set, is undefined where a program runs:
+  -- mrs x0, daif; msr daifset, #2; msr spsel, #0; msr pan, #1; msr uao, #1; mrs x0, spsel; mrs x0, sp_el0; and hlt #1
   let aarch64 ← Target.LLVMLift.aarch64Environment
   let decodeA (values : List Nat) := Target.LLVMLift.decodeAArch64With aarch64 0 0 (bytes values)
-  let daif (value : Nat) : Bap.Var × Value := (⟨"DAIF", .imm 4, 0, false⟩, .bits (BitVec.ofNat 4 value))
-  assertReg "mrs reads DAIF in its place" "X0" 0x2c0 (← execute (← decodeA [0x20, 0x42, 0x3b, 0xd5]) [daif 0xb])
-  let masked ← execute (← decodeA [0xdf, 0x42, 0x03, 0xd5]) [daif 0x1]
-  match Bil.lookup masked.env ⟨"DAIF", .imm 4, 0, false⟩ with
-  | .ok (.bits value) => assertEqual "msr daifset sets the bits of DAIF" 3 value.toNat
-  | _ => throw <| IO.userError "DAIF is not a register of 4 bits"
-  -- msr spsel, #0: from SP_EL1 to SP_EL0, R31 is SP
-  let banked ← execute (← decodeA [0xbf, 0x40, 0x00, 0xd5])
-    [bit "SPSel" 1, word64 "SP" 0x1000, word64 "SP_EL0" 0x2000, word64 "SP_EL1" 0]
-  assertReg "SP is banked" "SP" 0x2000 banked
-  assertReg "SP_EL1 has the old stack" "SP_EL1" 0x1000 banked
-  assertFlag "SPSel is a bit" "SPSel" 0 banked
-  -- msr pan, #1
-  assertFlag "PAN is a bit" "PAN" 1 (← execute (← decodeA [0x9f, 0x41, 0x00, 0xd5]) [])
+  for (name, values) in [("mrs x0, daif", [0x20, 0x42, 0x3b, 0xd5]), ("msr daif, x1", [0x21, 0x42, 0x1b, 0xd5]),
+      ("msr daifset, #2", [0xdf, 0x42, 0x03, 0xd5]), ("msr daifclr, #1", [0xff, 0x41, 0x03, 0xd5]),
+      ("msr spsel, #0", [0xbf, 0x40, 0x00, 0xd5]), ("msr pan, #1", [0x9f, 0x41, 0x00, 0xd5]), ("msr uao, #1", [0x7f, 0x41, 0x00, 0xd5]),
+      ("mrs x0, spsel", [0x00, 0x42, 0x38, 0xd5]), ("mrs x0, sp_el0", [0x00, 0x41, 0x38, 0xd5]), ("hlt #1", [0x20, 0x00, 0x40, 0xd4]),
+      -- and what authenticates pointers and isn't a hint, of a processor without it: pacga x0, x0, x1; pacia x0, x1; retaa
+      ("pacga x0, x0, x1", [0x00, 0x30, 0xc1, 0x9a]), ("pacia x0, x1", [0x20, 0x00, 0xc1, 0xda]), ("retaa", [0xff, 0x0b, 0x5f, 0xd6])] do
+    let insn ← decodeA values
+    assertTrue s!"{name} is undefined at EL0: {repr insn.bil}" (insn.bil matches [.special "undefined-instruction"])
+  -- The bits of FPCR and of FPSR that the processor doesn't have read as zero: msr fpcr, x0 and msr fpsr, x0 of ones
+  assertReg32 "msr writes the bits that FPCR has" "FPCR" 0x07c80000 (← execute (← decodeA [0x00, 0x44, 0x1b, 0xd5]) [word64 "X0" (2 ^ 64 - 1)])
+  assertReg32 "msr writes the bits that FPSR has" "FPSR" 0xf800009f (← execute (← decodeA [0x20, 0x44, 0x1b, 0xd5]) [word64 "X0" (2 ^ 64 - 1)])
   -- mrs x0, fpcr and msr fpsr, x0
   assertReg "mrs reads FPCR" "X0" 0x400000 (← execute (← decodeA [0x00, 0x44, 0x3b, 0xd5]) [word32 "FPCR" 0x400000])
   assertReg32 "msr writes FPSR" "FPSR" 0x8 (← execute (← decodeA [0x20, 0x44, 0x1b, 0xd5]) [word64 "X0" 0x8])
@@ -1985,8 +2001,8 @@ private def testX86EvexModel : IO Unit := do
       ("vaddps {rn-sae}", [0x62, 0xf1, 0x74, 0x18, 0x58, 0xd2], "fadd_rnx"), ("vaddps {rd-sae}", [0x62, 0xf1, 0x74, 0x38, 0x58, 0xd2], "fadd_rdn"),
       ("vaddps {ru-sae}", [0x62, 0xf1, 0x74, 0x58, 0x58, 0xd2], "fadd_rup"), ("vaddps {rz-sae}", [0x62, 0xf1, 0x74, 0x78, 0x58, 0xd2], "fadd_rtz"),
       ("vaddph", [0x62, 0xf5, 0x74, 0x48, 0x58, 0xd2], "fadd_rne_ieee754_binary_16"),
-      ("vcvtps2udq {rd-sae}", [0x62, 0xf1, 0x7c, 0x38, 0x79, 0xd2], "cast_uint_rdn"), ("vcvttps2udq", [0x62, 0xf1, 0x7c, 0x48, 0x78, 0xd2], "cast_uint_rtz"),
-      ("vcvtudq2ps", [0x62, 0xf1, 0x7f, 0x48, 0x7a, 0xd2], "cast_ufloat_rne"),
+      ("vcvtps2udq {rd-sae}", [0x62, 0xf1, 0x7c, 0x38, 0x79, 0xd2], "cast_int_rdn"), ("vcvttps2udq", [0x62, 0xf1, 0x7c, 0x48, 0x78, 0xd2], "cast_int_rtz"),
+      ("vcvtudq2ps", [0x62, 0xf1, 0x7f, 0x48, 0x7a, 0xd2], "cast_float_rne"),
       ("vcvtdq2ps {rd-sae}", [0x62, 0xf1, 0x7c, 0x38, 0x5b, 0xd2], "cast_sfloat_rdn"), ("vcvtps2dq {ru-sae}", [0x62, 0xf1, 0x7d, 0x58, 0x5b, 0xd2], "cast_sint_rup"),
       ("vcvtpd2ps {rz-sae}", [0x62, 0xf1, 0xfd, 0x78, 0x5a, 0xd2], "fconvert_rtz"), ("vcvtqq2pd {rd-sae}", [0x62, 0xf1, 0xfe, 0x38, 0xe6, 0xd2], "cast_sfloat_rdn"),
       ("vsqrtps {ru-sae}", [0x62, 0xf1, 0x7c, 0x58, 0x51, 0xd2], "fsqrt_rup"), ("vfmadd132ps {rd-sae}", [0x62, 0xf2, 0x75, 0x38, 0x98, 0xd2], "_rdn_"),
@@ -1997,9 +2013,13 @@ private def testX86EvexModel : IO Unit := do
   match Bil.lookup andn.env ⟨"RAX", .imm 64, 0, false⟩ with
   | .ok (.bits value) => assertEqual "andn from memory" ((evexRcx ^^^ 0xffffffff &&& 0xffffffff) &&& (evexM &&& 0xffffffff)) value.toNat
   | _ => throw <| IO.userError "andn: no RAX"
-  -- what has no semantics stays an error
-  let privileged ← (Target.LLVMLift.decodeX86With x86 0 0 (bytes [0x0f, 0x09])).toBaseIO
-  assertTrue "WBINVD has no semantics" (privileged matches .error _)
+  -- what has no semantics stays an error: an opcode that isn't one, as every one of x86 has its definition
+  let undefined ← (Primus.Semantics.liftWith x86 {} "NOSUCHOPCODE" []).toBaseIO
+  assertTrue "what has no definition is an error" (undefined matches .error _)
+  -- and what the processor of the machine hasn't is the invalid instruction of its own definition: pi2fw, of 3DNow!
+  assertTrue "PI2FW is an invalid instruction" (← intrinsicIn [0x0f, 0x0f, 0xc0, 0x0c] "__ud2")
+  -- and what is privileged is the general protection fault of its own definition
+  assertTrue "WBINVD is a general protection fault" (← intrinsicIn [0x0f, 0x09] "general-protection")
 
 /-- What the same instruction was lifted to before is only used where it can't depend on the address. -/
 private def testX86Memo : IO Unit := do
@@ -2121,9 +2141,17 @@ private def testHardware : IO Unit := do
   let lea ← execute (← decodeX8632 [0x67, 0x8d, 0x70, 0x10]) [word32 "EAX" 0xfff0, word32 "ESI" 0x10, word32 "EBX" 0xfff0]
   assertReg32 "LEA of a 16-bit address, the machine" "ESI" 0x10 lea
   -- an MMX register has 64 bits in the 32-bit mode too
+  -- and is the significand of the register of x87 of its number, which the instruction reads it from and leaves it in, with an
+  -- exponent of ones, the top of the stack at 0 and every tag valid
+  let st (index value : Nat) : Bap.Var × Bap.Value := wide 80 s!"ST{index}" value
   let pand ← execute (← decodeX8632 [0x0f, 0xdb, 0xca])
-    [wide 64 "MM1" 0xff00ff00ff00ff00, wide 64 "MM2" 0x0ff00ff00ff00ff0]
+    ([wide 16 "FPU_STATUS" 0x3800, wide 16 "FPU_TAG" 0xffff, st 2 0x3fff_ff00ff00ff00ff00, st 3 0x4000_0ff00ff00ff00ff0] ++
+      [0, 1, 4, 5, 6, 7].map (st · 0))
   assertWide 64 "PAND MM of the 32-bit mode" "MM1" 0x0f000f000f000f00 pand
+  assertWide 80 "PAND MM, the register of x87" "ST1" 0xffff_0f000f000f000f00 pand
+  assertWide 80 "PAND MM, its source" "ST2" 0x4000_0ff00ff00ff00ff0 pand
+  assertWide 16 "PAND MM, the top of the stack" "FPU_STATUS" 0 pand
+  assertWide 16 "PAND MM, the tags" "FPU_TAG" 0 pand
   -- the shifts by a register of NEON with a negative count: these aborted the process, as a shift of a wide lane by nearly 2^64
   let a64 ← Target.LLVMLift.aarch64Environment
   let decodeA64 (values : List Nat) := Target.LLVMLift.decodeAArch64With a64 0 0 (bytes values)
@@ -2232,6 +2260,17 @@ private def x86RestState : List (String × Nat × Nat) :=
     ("GS_BASE", 64, 0x9000),
     ("RSP", 64, 0x2000),
     ("FPU_TAG", 16, 0x0),
+    -- The registers of MMX are those of x87 by their numbers, which an instruction of MMX reads them from: as one before it left
+    -- them, with the top of the stack at 0 and exponents of ones.
+    ("FPU_STATUS", 16, 0x0),
+    ("ST0", 80, 0xffff4ea337d0fe4e6396),
+    ("ST1", 80, 0xffffa72a7dd42a1e2a52),
+    ("ST2", 80, 0xffffee95d0154c6ec863),
+    ("ST3", 80, 0xfffffcbdcf15d686fda6),
+    ("ST4", 80, 0xffffcdde808bb7332d60),
+    ("ST5", 80, 0xffff87b37ea789d4a476),
+    ("ST6", 80, 0xffff7b916dd970d9200f),
+    ("ST7", 80, 0xffff6c6eb263df472243),
     ("R17", 64, 0x10f743980c830116),
     ("AF", 1, 0x1),
     ("CF", 1, 0x1),

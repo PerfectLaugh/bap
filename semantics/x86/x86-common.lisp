@@ -62,7 +62,9 @@
    the next instruction. The address-size prefix makes its sum wrap in
    half of the size of an address."
   (let ((a (+ (if (= (symbol base) 'Nil) 0
-                (if (= (symbol base) 'RIP) (get-next-program-counter) base))
+                ;; EIP is RIP with the address-size prefix, whose sum is
+                ;; cut to 32 bits below as any other is
+                (if (logor (= (symbol base) 'RIP) (= (symbol base) 'EIP)) (get-next-program-counter) base))
               (if (= (symbol index) 'Nil) 0 (scaled-index scale index))
               off)))
     (if (x86-prefix 0x67) (short-address a) a)))
@@ -93,7 +95,21 @@
   (case (symbol seg)
     'FS FS_BASE
     'GS GS_BASE
-    0))
+    (null-segment-base seg)))
+
+;; In the 64-bit mode the prefixes of CS, DS, ES and SS are null, and one
+;; of them after a prefix of FS or GS doesn't take it away, where LLVM
+;; says the segment of the last prefix.
+(defun null-segment-base (seg)
+  (declare (context (bits 64)))
+  (if (= (symbol seg) 'Nil) 0
+    (prefix-segment-base)))
+(defun null-segment-base (seg)
+  (declare (context (bits 32)))
+  0)
+
+(defun prefix-segment-base ()
+  (if (x86-prefix 0x64) FS_BASE (if (x86-prefix 0x65) GS_BASE 0)))
 
 (defun ea (base scale index off seg)
   "(ea BASE SCALE INDEX OFF SEG) is the address of a memory operand,

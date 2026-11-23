@@ -1,0 +1,57 @@
+block: 128
+dcbz: 1
+time base: goes on 1 1
+time base upper: read
+time base written: signal 4 code 1 at a test 1
+vrsave: ffffffff
+version: read 1
+sprg3: 0
+xer: 7f 20040000
+float writes: 0 0 0 0 0 0
+bctar: 1
+dscr: 5
+darn: numbers 1 of a word 1 failed 1
+xsaddqpo: dc52f4af0df98bd7 a7ac50d7ad935c2d
+xssubqpo: 55c9d277c5e94cd4 b9692749227cdd47
+xsmulqpo: bf4687e9a71d4615 d0efb59e84dd1203
+xsdivqpo: 93f6b157832dab95 b9538804f70c288c
+xssqrtqpo: 5f907f2374b858a2 c1a08ca5d22dfb51
+xscvdpqp: e6ab4b5ba901af7b ec1e6b688fa0c6a7
+xscvqpdp: c3fc61007cdb041a 217e5aa9abe0290a
+xscvqpdpo: 6a3fdc34973152ba 217e5aa9abe0290a
+xscvsdqp: 82ec585113b73d40 0b2727e97dd33d5d
+xscvudqp: b7de52fab724083d c6016726323952e0
+xscvsqqp: 6fcceae8ad46d04b 7d1c03db66b698fe
+xscvuqqp: bc2e1322c343891a 0add49390eae1ed1
+xscvqpsdz: 5b2b20265633b6fe 217e5aa9abe0290a
+xscvqpudz: d9dc095676a1dc01 217e5aa9abe0290a
+xscvqpswz: 02d57cb90cf5afb6 217e5aa9abe0290a
+xscvqpuwz: ca4e2ae67655fdd1 217e5aa9abe0290a
+xscvqpsqz: c48922da0a6fc2d3 1c086161ced49ef8
+xscvqpuqz: bb37844a005a085d e79cccb6612ff3a1
+xsrqpi_away: c77adc08240b28a7 f7399aeff19318ef
+xsrqpi_current: 87768ba9e6f72516 061fcf1c56e0a65d
+xsrqpi_even: 87768ba9e6f72516 061fcf1c56e0a65d
+xsrqpi_zero: 9236da3681319a80 adff4e71102c9bf8
+xsrqpi_up: 58300aa17fde7761 061fcf1c56e0a65d
+xsrqpi_down: b4e08a34b78ca2b8 4dc0784a0aef7553
+xsrqpix_zero: 9236da3681319a80 adff4e71102c9bf8
+xsmaddqp: 0290f97ecc18ea1b 96cbab238f46aa2b
+xsmsubqp: 05b8ab74363870b9 8ea10ecd5c7768f9
+xsnmaddqp: 544874d629062038 96cbab238f46aa2b
+xsnmsubqp: 4cbe37342263f9f6 8ea10ecd5c7768f9
+xsmaddqpo: bd32f0f718eaf3fb 804c7017cadb255e
+xsmsubqpo: 2f3819ae6efe58f3 2c2b4902d3baf3f7
+xsnmaddqpo: ac20b1c3da3fe1bc 804c7017cadb255e
+xsnmsubqpo: a29cc7d50974c370 2c2b4902d3baf3f7
+vcipher: f150c31c339ea021 4ddbedaca16fb67d
+vcipherlast: 769740e6b5fcecc2 9dd7b4f659218db7
+vncipher: e81d9ff60d60ef30 2b7eca0ebdc30e17
+vncipherlast: 876220347939adc5 573383cd43bd6391
+vsbox: 26923b7b577c68dd 2b25b82d654df2c1
+mfmsr: signal 4 code 5 at a test 1
+mtmsr: signal 4 code 5 at a test 1
+rfid: signal 4 code 5 at a test 1
+tlbie: signal 4 code 5 at a test 1
+privileged register: signal 4 code 5 at a test 1
+no register: signal 4 code 1 at a test 1

@@ -104,9 +104,18 @@ theorem avxCode_anywhere (hc : Anywhere c c') {env : Environment} {name : String
 
 theorem x86Code_anywhere (hc : Anywhere c c') {globals avx : Environment} {opcode : Nat} {name : Option String} {operands : List SV} {p : Bil.Program}
     (h : x86Code globals avx c opcode name operands = .ok p) : x86Code globals avx c' opcode name operands = .ok p := by
+  unfold x86Code at h ⊢
   cases name with
-  | none => exact liftMCCode_anywhere hc h
-  | some name => exact avxCode_anywhere hc h
+  | none =>
+    simp only at h ⊢
+    cases hl : Primus.Semantics.liftMCCode globals c opcode operands with
+    | error e => rw [hl] at h; cases h
+    | ok q => rw [hl] at h; rw [liftMCCode_anywhere hc hl]; exact h
+  | some name =>
+    simp only at h ⊢
+    cases hl : avxCode avx c name operands with
+    | error e => rw [hl] at h; cases h
+    | ok q => rw [hl] at h; rw [avxCode_anywhere hc hl]; exact h
 
 /-- Two contexts of the same decoder. -/
 structure SameDecoder (c c' : Context) : Prop where

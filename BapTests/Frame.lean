@@ -50,7 +50,28 @@ private def moved : IO Unit := do
         signature.stackArguments
       assertEqual s!"{arch}: what {name} returns is used" (!["none", "calls", "novalue", "setter"].contains name) signature.returnsValue
 
+/-- A loop that doesn't settle in the rounds it is given leaves what it writes unknown, rather than as those rounds left it: of a
+chain of six registers, each of the one before, the last is still what it was after four rounds. -/
+def unsettledLoops : IO Unit := do
+  let some convention := ABI.convention .x86_64 64 | throw (IO.userError "no convention")
+  let context : Frame.Context := { arch := .x86_64, width := 64, convention, calleeSaved := Frame.calleeSaved .x86_64 64
+                                   volatile := Frame.volatileOf .x86_64 convention }
+  let r (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
+  let mem : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let c (value : Nat) : Bil.Exp := .int (BitVec.ofNat 64 value)
+  let names := ["R15", "R14", "R13", "R12", "R11", "R10"]
+  let chain : Bil.Program := (names.zip (names.drop 1)).map fun (to, from_) => Bil.Stmt.move (r to) (.var (r from_))
+  let program : Bil.Program :=
+    names.map (fun name => Bil.Stmt.move (r name) (c 1)) ++
+      [.move mem (.store (.var mem) (.bin .sub (.var (r "RSP")) (c 8)) (.var (r "R15")) .little 8),
+        .while (.var ⟨"ZF", .imm 1, 0, false⟩) (chain ++ [.move (r "R10") (c 7)])]
+  let ((state, _), _) := (Frame.exec context {} program).run {}
+  assertEqual "frame: what a loop that doesn't settle writes isn't known" ([] : List String)
+    (names.filter fun name => state.read (r name) != Frame.Value.top)
+  assertEqual "frame: nor are the slots after it" 0 state.slots.length
+
 def run : IO Unit := do
+  unsettledLoops
   for (arch, registers, stack, returnDelta) in targets do
     ofTarget arch fun signature frame => do
       let name := signature.name

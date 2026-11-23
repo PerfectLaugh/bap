@@ -476,6 +476,20 @@ private def clearTags (tracker : Tracker) (space address size : Nat) : IO Unit :
         | none => out
     else pages.fold (init := pages) clear
 
+/-- The pages of `size` bytes from `offset` of what is kept under `space` that have a tag, in order: of the pages of the range if
+they are fewer than all that have one, or else of those. -/
+private def keptPages (tracker : Tracker) (space offset size : Nat) : IO (List Nat) := do
+  if size == 0 then return []
+  let pages ← tracker.pages.get
+  let lowest := offset / 4096
+  let highest := (offset + size - 1) / 4096
+  if highest - lowest < pages.size then
+    pure ((List.range (highest - lowest + 1)).filterMap fun index =>
+      if pages.contains (space, lowest + index) then some (lowest + index) else none)
+  else
+    pure ((pages.fold (init := []) fun found key _ =>
+      if key.1 == space && lowest ≤ key.2 && key.2 ≤ highest then key.2 :: found else found).mergeSort (· ≤ ·))
+
 /-- What a thread that hasn't run yet has in its registers is what the last thread of its parent had. -/
 private def registersOf (tracker : Tracker) (thread : ThreadId) : IO (Std.HashMap String (Array Tag)) := do
   let registers ← tracker.registers.get
@@ -876,7 +890,7 @@ private partial def branchNode (frame : Frame) (inputs : List Input) (target : O
 
 end
 
-private partial def jumpsAlways : Bil.Program → Bool
+private def jumpsAlways : Bil.Program → Bool
   | [] => false
   | .jmp _ :: _ => true
   | _ :: rest => jumpsAlways rest
@@ -1102,16 +1116,39 @@ def mapped (tracker : Tracker) (address size space offset : Nat) (label : Option
       let id ← sourceNode tracker (.memory address) label (some offset) ByteArray.empty
       pure (some id)
     | none => pure none
-  for index in List.range size do
-    let tag ← rawTag tracker space (offset + index)
-    if tag.isNode then setTag tracker current (address + index) tag
-    else if let some id := source then setTag tracker current (address + index) (nodeTag id index)
+  match source with
+  | some id =>
+    -- every byte is of the source, or of what the file has there
+    for index in [0:size] do
+      let tag ← rawTag tracker space (offset + index)
+      setTag tracker current (address + index) (if tag.isNode then tag else nodeTag id index)
+  | none =>
+    -- by the pages of the file that have anything, of which most of a big mapping has none
+    for page in ← keptPages tracker space offset size do
+      let first := max offset (page * 4096)
+      let stop := min (offset + size) ((page + 1) * 4096)
+      for at_ in [first:stop] do
+        let tag ← rawTag tracker space at_
+        if tag.isNode then setTag tracker current (address + (at_ - offset)) tag
 
 /-- Bytes of memory are what a file has now, as a page of a private mapping that the process hasn't written is when the file changes:
-they have what the bytes of the file came from, and nothing where those have nothing. -/
+they have what the bytes of the file came from, and nothing where those have nothing: a piece at a time that is in a page of the
+file and of memory, of which one that has nothing in either is passed over. -/
 private def mirror (tracker : Tracker) (current address size space offset : Nat) : IO Unit := do
-  for index in List.range size do
-    setTag tracker current (address + index) (← rawTag tracker space (offset + index))
+  if (← tracker.pages.get).isEmpty then return
+  let mut done := 0
+  while done < size do
+    let source := offset + done
+    let target := address + done
+    let chunk := min (min (4096 - source % 4096) (4096 - target % 4096)) (size - done)
+    -- what the memory is kept under goes by the page, as a mapping does
+    let (targetSpace, targetAt) ← keyOf tracker current target
+    let pages ← tracker.pages.get
+    let has (kept at_ : Nat) : Bool := pages.contains (kept, at_ / 4096) || pages.contains (kept, (at_ + chunk - 1) / 4096)
+    if has space source || has targetSpace targetAt then
+      for index in [0:chunk] do
+        setRawTag tracker targetSpace (targetAt + index) (← rawTag tracker space (source + index))
+    done := done + chunk
 
 /-- What hears of memory that is a copy of a file's. What the call that runs changed of the file has what it came from there only when
 the call is over, as what it sent goes then. -/
@@ -1135,11 +1172,26 @@ def copySpace (tracker : Tracker) (fromSpace fromOffset toSpace toOffset size : 
         setRawTag tracker toSpace (toOffset + done + index) (← rawTag tracker fromSpace (at_ + index))
     done := done + chunk
 
-/-- The tags of bytes that the host moved go with them. -/
+/-- The tags of bytes that the host moved go with them: a piece at a time that is in a page where it was and where it is, of which
+one that has nothing in either is passed over, as most of a big mapping that moves is; and nothing is looked at while nothing
+has a tag. -/
 private def copied (tracker : Tracker) (from_ to size : Nat) : IO Unit := do
+  if (← tracker.pages.get).isEmpty then return
   let space ← Emu.spaceOf tracker.emu (← Emu.thread tracker.emu)
-  for index in List.range size do
-    setTag tracker space (to + index) (← tagAt tracker space (from_ + index))
+  let mut done := 0
+  while done < size do
+    let source := from_ + done
+    let target := to + done
+    let chunk := min (min (4096 - source % 4096) (4096 - target % 4096)) (size - done)
+    -- what they are kept under goes by the page, as a mapping does
+    let (sourceSpace, sourceAt) ← keyOf tracker space source
+    let (targetSpace, targetAt) ← keyOf tracker space target
+    let pages ← tracker.pages.get
+    let has (kept at_ : Nat) : Bool := pages.contains (kept, at_ / 4096) || pages.contains (kept, (at_ + chunk - 1) / 4096)
+    if has sourceSpace sourceAt || has targetSpace targetAt then
+      for index in [0:chunk] do
+        setRawTag tracker targetSpace (targetAt + index) (← rawTag tracker sourceSpace (sourceAt + index))
+    done := done + chunk
 
 /-- Bytes that came from outside any instruction: a source if a call that is one is in progress, and otherwise what nobody made. -/
 private def externalWrite (tracker : Tracker) (address size : Nat) (cleared : Bool) : IO Unit := do

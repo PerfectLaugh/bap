@@ -393,7 +393,9 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         succeed
       | 0x541B => int (if isSlave then terminal.waiting else terminal.output.size)
       | 0x5411 => int (if isSlave then terminal.output.size else 0)
-      | 0x540B | 0x5409 | 0x540A | 0x5425 => succeed
+      -- `TCFLSH` of a queue that there is, `TCIFLUSH`, `TCOFLUSH` or `TCIOFLUSH`: another is `EINVAL`.
+      | 0x540B => if arg 2 % 2 ^ 32 > 2 then fail 22 else succeed
+      | 0x5409 | 0x540A | 0x5425 => succeed
       | 0x80045430 => if isSlave then fail 25 else int terminal.index
       | 0x40045431 =>
         if isSlave then return ← fail 25

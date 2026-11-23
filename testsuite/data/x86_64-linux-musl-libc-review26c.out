@@ -1,0 +1,12 @@
+setuid: 0
+a signal of none to a process of root: Operation not permitted
+SIGUSR1 to it: Operation not permitted
+SIGCONT to it, which is of the same session: 0
+tgkill of it: Operation not permitted
+rt_sigqueueinfo of it: Operation not permitted
+a signal of none to itself: 0
+to its process group, of which it may send to itself: 0
+to every process, of which it may send to none: 0
+to a process that there isn't: No such process
+to a child of its own: 0
+root to a process of another user: 0

@@ -357,15 +357,15 @@
 (defun VGBBD (vd vb) (set$ vd (lanes64-1 gather-bytes vb)))
 
 ;; every N-th bit, from the first one, on the left of the register; N
-;; is 2 to 7, the other values are reserved
+;; is 2 to 7, and the form of another is invalid, an illegal instruction
 (defun gather-nth (v n i k r)
   (if (>= i 128) r
     (gather-nth v n (+ i n) (+ k 1)
                 (logor r (lshift (u64 (select (- 127 i) v)) (u64 (- 63 k)))))))
 (defun VGNB (rd vb n)
-  (set$ rd (if (< n 2)
-               (intrinsic 'vgnb-reserved vb n :result (word-width))
-             (zext (gather-nth vb n 0 0 (u64 0))))))
+  (if (< n 2)
+      (intrinsic 'undefined-instruction :aborts)
+    (set$ rd (zext (gather-nth vb n 0 0 (u64 0))))))
 
 ;; PERMUTATIONS
 
@@ -670,8 +670,9 @@
 
 ;; FLOATING-POINT OPERATIONS
 
-;; the estimates: the reciprocals are exact, rounded, as in FRES, the
-;; exponent and the logarithm are of the intrinsics
+;; the estimates: the reciprocals are exact, rounded, as in FRES, and the
+;; power of 2 and the logarithm of base 2 are rounded to the nearest too,
+;; which a machine serves (Bap.PowerPC): the ISA asks for less
 
 (defun refp (x)
   (let ((a (nj x)))
@@ -679,8 +680,8 @@
 (defun rsqrtefp (x)
   (let ((a (nj x)))
     (nj (pick (fp-nan a) (quiet32 a) (/. :rne 0x3f800000:32 (fsqrt :rne a))))))
-(defun exptefp (x) (intrinsic 'vexptefp (nj x) :result 32))
-(defun logefp (x) (intrinsic 'vlogefp (nj x) :result 32))
+(defun exptefp (x) (nj (intrinsic 'powerpc-exptefp (nj x) :result 32)))
+(defun logefp (x) (intrinsic 'powerpc-logefp (nj x) :result 32))
 (defun VREFP (vd vb) (set$ vd (lanes32-1 refp vb)))
 (defun VRSQRTEFP (vd vb) (set$ vd (lanes32-1 rsqrtefp vb)))
 (defun VEXPTEFP (vd vb) (set$ vd (lanes32-1 exptefp vb)))
@@ -698,14 +699,65 @@
 (defun VCTSXS (vd uim vb) (set$ vd (lanes32-e ctsxs uim vb)))
 (defun VCTUXS (vd uim vb) (set$ vd (lanes32-e ctuxs uim vb)))
 
-;; CRYPTOGRAPHY, the operations of AES are in no theory here, as in
-;; the other targets; the SHA-2 functions are by their definitions
+;; CRYPTOGRAPHY, the operations of AES by their definitions in FIPS 197:
+;; the state is the bytes of the vector, from the most significant one, a
+;; column after the other. The S-box and its inverse are tables of 256
+;; bytes, from the least significant byte of a constant; the SHA-2
+;; functions are by their definitions too
 
-(defun VCIPHER (vd va vb) (set$ vd (intrinsic 'vcipher va vb :result 128)))
-(defun VCIPHERLAST (vd va vb) (set$ vd (intrinsic 'vcipherlast va vb :result 128)))
-(defun VNCIPHER (vd va vb) (set$ vd (intrinsic 'vncipher va vb :result 128)))
-(defun VNCIPHERLAST (vd va vb) (set$ vd (intrinsic 'vncipherlast va vb :result 128)))
-(defun VSBOX (vd va) (set$ vd (intrinsic 'vsbox va :result 128)))
+(defun aes-sbox () 0x16bb54b00f2d99416842e6bf0d89a18cdf2855cee9871e9b948ed9691198f8e19e1dc186b95735610ef6034866b53e708a8bbd4b1f74dde8c6b4a61c2e2578ba08ae7a65eaf4566ca94ed58d6d37c8e779e4959162acd3c25c2406490a3a32e0db0b5ede14b8ee4688902a22dc4f816073195d643d7ea7c41744975fec130ccdd2f3ff1021dab6bcf5389d928f40a351a89f3c507f02f94585334d43fbaaefd0cf584c4a39becb6a5bb1fc20ed00d153842fe329b3d63b52a05a6e1b1a2c830975b227ebe28012079a059618c323c7041531d871f1e5a534ccf73f362693fdb7c072a49cafa2d4adf04759fa7dc982ca76abd7fe2b670130c56f6bf27b777c63:2048)
+(defun aes-inverse-sbox () 0x7d0c2155631469e126d677ba7e042b17619953833cbbebc8b0f52aae4d3be0a0ef9cc9939f7ae52d0d4ab519a97f51605fec8027591012b131c7078833a8dd1ff45acd78fec0db9a2079d2c64b3e56fc1bbe18aa0e62b76f89c5291d711af1476edf751ce837f9e28535ade72274ac9673e6b4f0cecff297eadc674f4111913a6b8a130103bdafc1020f3fca8f1e2cd00645b3b80558e4f70ad3bc8c00abd890849d8da75746155edab9edfd5048706c92b6655dcc5ca4d41698688664f6f87225d18b6d49a25b76b224d92866a12e084ec3fa420b954cee3d23c2a632947b54cbe9dec444438e3487ff2f9b8239e37cfbd7f3819ea340bf38a53630d56a0952:2048)
+(defun aes-lookup (table b)
+  (cast-low 8 (rshift table (cast-unsigned 2048 (concat b 0:3)))))
+(defun aes-sub (b) (aes-lookup (aes-sbox) b))
+(defun aes-inverse-sub (b) (aes-lookup (aes-inverse-sbox) b))
+(defun aes-byte (x i) (extract (- 127 (* 8 i)) (- 120 (* 8 i)) x))
+(defun aes-shift-rows (x)
+  (concat (aes-byte x 0) (aes-byte x 5) (aes-byte x 10) (aes-byte x 15)
+          (aes-byte x 4) (aes-byte x 9) (aes-byte x 14) (aes-byte x 3)
+          (aes-byte x 8) (aes-byte x 13) (aes-byte x 2) (aes-byte x 7)
+          (aes-byte x 12) (aes-byte x 1) (aes-byte x 6) (aes-byte x 11)))
+(defun aes-inverse-shift-rows (x)
+  (concat (aes-byte x 0) (aes-byte x 13) (aes-byte x 10) (aes-byte x 7)
+          (aes-byte x 4) (aes-byte x 1) (aes-byte x 14) (aes-byte x 11)
+          (aes-byte x 8) (aes-byte x 5) (aes-byte x 2) (aes-byte x 15)
+          (aes-byte x 12) (aes-byte x 9) (aes-byte x 6) (aes-byte x 3)))
+;; the products in GF(2^8) by 2, and by the other coefficients from it
+(defun aes-2 (b)
+  (logxor (lshift b 1:8) (logand (cast-signed 8 (msb b)) 0x1b:8)))
+(defun aes-3 (b) (logxor (aes-2 b) b))
+(defun aes-4 (b) (aes-2 (aes-2 b)))
+(defun aes-8 (b) (aes-2 (aes-4 b)))
+(defun aes-9 (b) (logxor (aes-8 b) b))
+(defun aes-11 (b) (logxor (aes-8 b) (aes-2 b) b))
+(defun aes-13 (b) (logxor (aes-8 b) (aes-4 b) b))
+(defun aes-14 (b) (logxor (aes-8 b) (aes-4 b) (aes-2 b)))
+(defun aes-mix-column (w)
+  (let ((a0 (extract 31 24 w)) (a1 (extract 23 16 w)) (a2 (extract 15 8 w)) (a3 (extract 7 0 w)))
+    (concat (logxor (aes-2 a0) (aes-3 a1) a2 a3)
+            (logxor a0 (aes-2 a1) (aes-3 a2) a3)
+            (logxor a0 a1 (aes-2 a2) (aes-3 a3))
+            (logxor (aes-3 a0) a1 a2 (aes-2 a3)))))
+(defun aes-inverse-mix-column (w)
+  (let ((a0 (extract 31 24 w)) (a1 (extract 23 16 w)) (a2 (extract 15 8 w)) (a3 (extract 7 0 w)))
+    (concat (logxor (aes-14 a0) (aes-11 a1) (aes-13 a2) (aes-9 a3))
+            (logxor (aes-9 a0) (aes-14 a1) (aes-11 a2) (aes-13 a3))
+            (logxor (aes-13 a0) (aes-9 a1) (aes-14 a2) (aes-11 a3))
+            (logxor (aes-11 a0) (aes-13 a1) (aes-9 a2) (aes-14 a3)))))
+(defun aes-sub-bytes (x) (lanes8-1 aes-sub x))
+(defun aes-inverse-sub-bytes (x) (lanes8-1 aes-inverse-sub x))
+
+(defun VCIPHER (vd va vb)
+  (let ((s (aes-shift-rows (aes-sub-bytes va))))
+    (set$ vd (logxor (lanes32-1 aes-mix-column s) vb))))
+(defun VCIPHERLAST (vd va vb)
+  (set$ vd (logxor (aes-shift-rows (aes-sub-bytes va)) vb)))
+(defun VNCIPHER (vd va vb)
+  (let ((s (logxor (aes-inverse-sub-bytes (aes-inverse-shift-rows va)) vb)))
+    (set$ vd (lanes32-1 aes-inverse-mix-column s))))
+(defun VNCIPHERLAST (vd va vb)
+  (set$ vd (logxor (aes-inverse-sub-bytes (aes-inverse-shift-rows va)) vb)))
+(defun VSBOX (vd va) (set$ vd (aes-sub-bytes va)))
 
 (defun rotr (x n) (rotate-right x (cast-unsigned (word-width x) (cast-unsigned 16 n))))
 (defun shr-n (x n) (rshift x (cast-unsigned (word-width x) (cast-unsigned 16 n))))
@@ -740,18 +792,18 @@
 
 ;;; THE VECTOR INSTRUCTIONS THAT ONLY LLVM'S FUTURE DEFINITIONS HAVE
 ;;
-;; They aren't in the published ISA 3.1, so they lift to intrinsics by
-;; their names, and nothing about them is checked.
+;; They aren't in the published ISA 3.1, and no processor has them: each
+;; is an illegal instruction, for which Linux sends SIGILL with ILL_ILLOPC.
 
-(defun VUCMPRHB (vt va vb) (set$ vt (intrinsic 'vucmprhb va vb :result 128)))
-(defun VUCMPRHH (vt va vb) (set$ vt (intrinsic 'vucmprhh va vb :result 128)))
-(defun VUCMPRHN (vt va vb) (set$ vt (intrinsic 'vucmprhn va vb :result 128)))
-(defun VUCMPRLB (vt va vb) (set$ vt (intrinsic 'vucmprlb va vb :result 128)))
-(defun VUCMPRLH (vt va vb) (set$ vt (intrinsic 'vucmprlh va vb :result 128)))
-(defun VUCMPRLN (vt va vb) (set$ vt (intrinsic 'vucmprln va vb :result 128)))
-(defun VUPKHSNTOB (vt vb) (set$ vt (intrinsic 'vupkhsntob vb :result 128)))
-(defun VUPKLSNTOB (vt vb) (set$ vt (intrinsic 'vupklsntob vb :result 128)))
-(defun VUPKINT4TOBF16 (vt vb uim) (set$ vt (intrinsic 'vupkint4tobf16 vb uim :result 128)))
-(defun VUPKINT8TOFP32 (vt vb uim) (set$ vt (intrinsic 'vupkint8tofp32 vb uim :result 128)))
-(defun VUPKINT4TOFP32 (vt vb uim) (set$ vt (intrinsic 'vupkint4tofp32 vb uim :result 128)))
-(defun VUPKINT8TOBF16 (vt vb uim) (set$ vt (intrinsic 'vupkint8tobf16 vb uim :result 128)))
+(defun VUCMPRHB (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun VUCMPRHH (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun VUCMPRHN (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun VUCMPRLB (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun VUCMPRLH (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun VUCMPRLN (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun VUPKHSNTOB (_ _) (intrinsic 'undefined-instruction :aborts))
+(defun VUPKLSNTOB (_ _) (intrinsic 'undefined-instruction :aborts))
+(defun VUPKINT4TOBF16 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun VUPKINT8TOFP32 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun VUPKINT4TOFP32 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun VUPKINT8TOBF16 (_ _ _) (intrinsic 'undefined-instruction :aborts))

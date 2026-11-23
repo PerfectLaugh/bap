@@ -73,10 +73,12 @@ lean_obj_res io_bytes(const std::vector<uint8_t> &bytes) {
 std::string targetFeatures(const Triple &triple, bool assembling) {
   if (triple.isRISCV())
     return assembling ? "+a,+d,+f,+m,+zba,+zbb,+zbs" : "+a,+c,+d,+f,+m,+zba,+zbb,+zbs";
+  // Of ARM, the multiprocessing extensions too, whose PLDW is what a prefetch for a write is on a Cortex-A, and the security
+  // extensions, whose SMC a user program has as an undefined instruction, which the semantics say, rather than as nothing.
   if (triple.getArch() == Triple::arm)
-    return "+hwdiv,+hwdiv-arm,+vfp4,+fp-armv8";
+    return "+hwdiv,+hwdiv-arm,+vfp4,+fp-armv8,+mp,+trustzone";
   if (triple.getArch() == Triple::thumb)
-    return "+thumb2,+hwdiv,+hwdiv-arm,+vfp4,+fp-armv8";
+    return "+thumb2,+hwdiv,+hwdiv-arm,+vfp4,+fp-armv8,+mp,+trustzone";
   if (triple.getArch() == Triple::aarch64)
     return "+v8.1a,+v8.2a,+v8.3a,+fullfp16,+aes,+sha2,+sha3,+sm4,+crc,+lse,+rdm,+dotprod,+fp16fml,"
            "+flagm,+rand,+pauth,+jsconv,+complxnum,+rcpc,+rcpc-immo,+fptoint,+sb,+predres,+ccdp,+sve,"
@@ -100,7 +102,7 @@ struct TargetContext {
   std::unique_ptr<MCInstrInfo> instructions;
   MCTargetOptions options;
 
-  explicit TargetContext(const char *name, bool assembling = false)
+  explicit TargetContext(const char *name, bool assembling = false, const char *more = "")
       : triple(Triple::normalize(name)) {
     std::string error;
     target = TargetRegistry::lookupTarget("", triple, error);
@@ -112,7 +114,7 @@ struct TargetContext {
     asmInfo.reset(target->createMCAsmInfo(*registers, triple, options));
     if (!asmInfo)
       throw std::runtime_error("unable to create assembler information");
-    subtarget.reset(target->createMCSubtargetInfo(triple, "", targetFeatures(triple, assembling)));
+    subtarget.reset(target->createMCSubtargetInfo(triple, "", targetFeatures(triple, assembling) + more));
     if (!subtarget)
       throw std::runtime_error("unable to create subtarget information");
     instructions.reset(target->createMCInstrInfo());
@@ -211,6 +213,73 @@ struct DecoderContext {
   // instructions of the block, decoded in turn, but not of any other decode, which a decoder made again starts clean for.
   uint64_t itNext = 0;
   unsigned itLeft = 0;
+  // The first condition and the mask of that block, and how many instructions it has.
+  unsigned itFirst = 0;
+  unsigned itMask = 0;
+  unsigned itCount = 0;
+
+  // The same decoder with the instructions of ARMv8, which `definedSoftFail` asks.
+  struct Later {
+    TargetContext context;
+    MCContext machineContext;
+    explicit Later(const char *triple)
+        : context(triple, false, ",+v8"),
+          machineContext(context.triple, *context.asmInfo, *context.registers, *context.subtarget) {}
+  };
+  std::unique_ptr<Later> later;
+
+  // Whether an instruction of ARM or Thumb that the decoder has as SoftFail, decoded but UNPREDICTABLE or deprecated by what
+  // LLVM knows, is one whose behaviour the architecture defines, and so one to run. Any other stays what didn't decode:
+  // - what ARMv8-A defines and ARMv7 had as UNPREDICTABLE, the stack pointer as an operand of T32 (`sub.w r10, r8, sp`,
+  //   `ldr.w r0, [r1, sp]`) or as the shifted register of A32: what a decoder of ARMv8 has as the same instruction with nothing
+  //   to say against it, in the same place of an IT block;
+  // - the pc as the register that an instruction of A32 shifts by an immediate (`and r10, r4, pc, lsr #2`), which reads as the
+  //   instruction's address plus 8, and is deprecated rather than UNPREDICTABLE, as it is where the register is shifted by a
+  //   register: the instruction with another register there is one that the decoder has nothing to say against.
+  bool definedSoftFail(const MCInst &instruction, const uint8_t *bytes, size_t size, uint64_t address) {
+    Triple::ArchType arch = context.triple.getArch();
+    if (arch != Triple::arm && arch != Triple::thumb)
+      return false;
+    unsigned opcode = instruction.getOpcode();
+    ArrayRef<uint8_t> input(bytes, size);
+    if (!later)
+      later = std::make_unique<Later>(context.triple.str().c_str());
+    std::unique_ptr<MCDisassembler> other(
+        context.target->createMCDisassembler(*later->context.subtarget, later->machineContext));
+    if (other) {
+      MCInst again;
+      uint64_t length = 0;
+      if (itLeft > 0) {
+        // An IT of the condition that this instruction has in its block, and of whether it is the last of it.
+        unsigned index = itCount - itLeft;
+        unsigned condition = index == 0 ? itFirst : (itFirst & 14) | ((itMask >> (4 - index)) & 1);
+        unsigned mask = itLeft == 1 ? 8 : ((condition & 1) << 3) | 4;
+        uint8_t it[2] = {static_cast<uint8_t>(condition << 4 | mask), 0xbf};
+        other->getInstruction(again, length, ArrayRef<uint8_t>(it, 2), address - 2, nulls());
+        again = MCInst();
+      }
+      if (other->getInstruction(again, length, input, address, nulls()) == MCDisassembler::Success &&
+          again.getOpcode() == opcode)
+        return true;
+    }
+    if (arch == Triple::arm && size >= 4 && (bytes[0] & 15) == 15) {
+      static const char *const shifted[] = {"ANDrsi", "EORrsi", "SUBrsi", "RSBrsi", "ADDrsi", "ADCrsi", "SBCrsi", "RSCrsi",
+                                            "ORRrsi", "BICrsi", "TSTrsi", "TEQrsi", "CMPrsi", "CMNzrsi", "MOVsi",  "MVNsi"};
+      StringRef name = context.instructions->getName(opcode);
+      bool listed = false;
+      for (const char *each : shifted)
+        listed = listed || name == each;
+      if (!listed)
+        return false;
+      uint8_t changed[4] = {static_cast<uint8_t>(bytes[0] & 0xf0), bytes[1], bytes[2], bytes[3]};
+      MCInst again;
+      uint64_t length = 0;
+      return decoder->getInstruction(again, length, ArrayRef<uint8_t>(changed, 4), address, nulls()) ==
+                 MCDisassembler::Success &&
+             again.getOpcode() == opcode;
+    }
+    return false;
+  }
 
   void beforeDecode(uint64_t address) {
     if (itLeft == 0 || address == itNext)
@@ -233,6 +302,9 @@ struct DecoderContext {
       // The mask's lowest bit that is set ends the block: as many instructions as there are bits above it.
       unsigned mask = bytes[0] & 15;
       itLeft = mask == 0 ? 0 : 4 - __builtin_ctz(mask);
+      itFirst = bytes[0] >> 4;
+      itMask = mask;
+      itCount = itLeft;
     } else if (itLeft > 0) {
       itLeft -= 1;
     }
@@ -272,7 +344,8 @@ Disassembly disassemble(const char *triple, const uint8_t *bytes, size_t size,
   ArrayRef<uint8_t> input(bytes, size);
   auto status = decoder->getInstruction(result.instruction, decodedSize, input, address,
                                         nulls());
-  if (status != MCDisassembler::Success) {
+  if (status != MCDisassembler::Success &&
+      !(status == MCDisassembler::SoftFail && cached.definedSoftFail(result.instruction, bytes, size, address))) {
     // What didn't decode may have left the decoder of Thumb in a block all the same, as an IT that it refuses does.
     cached.failedDecode();
     throw std::runtime_error("instruction decoding failed");

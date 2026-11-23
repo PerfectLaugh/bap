@@ -141,6 +141,10 @@ private def parseSegments (data : ByteArray) (header : Header) :
       parseProgramHeader data header (header.programOffset + index * header.programEntrySize)
     .ok (entries.filterMap id).unzip
 
+/-- Where a string table ends: after its size, or with the file of one whose size isn't known. -/
+private def stringsEnd (data : ByteArray) (strings : SectionHeader) : Nat :=
+  if strings.size = 0 then data.size else strings.offset + strings.size
+
 private def resolveSectionNames (data : ByteArray) (header : Header) (sections : List SectionHeader) :
     Except String (List Section) := do
   match sections with
@@ -151,8 +155,9 @@ private def resolveSectionNames (data : ByteArray) (header : Header) (sections :
     match sections[index]? with
     | none => .error "missing ELF section-name string table"
     | some strings =>
-      sections.mapM fun sh => do
-        let name ← IO.Reader.cstring data (strings.offset + sh.nameOffset)
+      -- each in its table, and all of no more than `namesLimit`: each header may name all of the table
+      Prod.fst <$> mapNamedM data (nameCost ·.name) (items := sections) fun sh => do
+        let name ← IO.Reader.cstringIn data (strings.offset + sh.nameOffset) (stringsEnd data strings)
         .ok ⟨name, sh.addr, sh.offset, sh.size, sh.flags, sh.kind⟩
 
 /-- The address of a symbol: bit 0 of an ARM function's value is the Thumb flag, not part of its address. -/
@@ -168,15 +173,21 @@ private def parseSymbol (data : ByteArray) (header : Header) (strings : SectionH
   if nameOffset = 0 then
     .ok none
   else
-    let name ← IO.Reader.cstring data (strings.offset + nameOffset)
+    let name ← IO.Reader.cstringIn data (strings.offset + nameOffset) (stringsEnd data strings)
     .ok (some ⟨name, codeAddress header.machine (info &&& 0xf) value, size, info &&& 0xf = 2, false,
       header.machine = 40 && info &&& 0xf = 2 && value % 2 = 1⟩)
 
+/-- What the name of a symbol that was read takes, if it has one. -/
+private def nameOfSymbol (symbol : Option Symbol) : Nat := nameCost ((symbol.map (·.name)).getD "")
+
+/-- The symbols of the symbol tables, whose names all together take no more than `namesLimit`, each as often as a symbol of a table
+has it: every entry of every table may name all of a string table, and every section header may be a symbol table of all of the
+file. -/
 private def parseSymbols (data : ByteArray) (header : Header) (sections : List SectionHeader) :
     Except String (List Symbol) := do
-  let symbols ← sections.foldlM (init := []) fun symbols sh => do
+  let (symbols, _) ← sections.foldlM (init := (([] : List (List Symbol)), 0)) fun (symbols, used) sh => do
     if sh.kind != 2 && sh.kind != 11 then
-      .ok symbols
+      .ok (symbols, used)
     else
       match sections[sh.link]? with
       | none => .error "missing ELF symbol string table"
@@ -184,10 +195,10 @@ private def parseSymbols (data : ByteArray) (header : Header) (sections : List S
         let entrySize := if sh.entrySize = 0 then (if header.is64 then 24 else 16) else sh.entrySize
         -- No more entries than the file has room for, and one, which reading fails at: a size of a table can be anything.
         let count := min (sh.size / entrySize) (data.size / entrySize + 1)
-        let parsed ← (List.range count).mapM fun index =>
+        let (parsed, used) ← mapNamedM data nameOfSymbol (items := List.range count) (used := used) fun index =>
           parseSymbol data header strings (sh.offset + index * entrySize)
-        .ok (symbols ++ parsed.filterMap id)
-  .ok symbols
+        .ok (parsed.filterMap id :: symbols, used)
+  .ok symbols.reverse.flatten
 
 private def architecture (machine : Nat) : Arch :=
   match machine with
@@ -224,7 +235,8 @@ private def rawSymbols (data : ByteArray) (header : Header) (sections : List Sec
   let read (symtab : SectionHeader) (symtabIndex : Nat) : Except String (List ElfLinker.Sym) := do
     let strings := sections[symtab.link]?
     let indices := (sections.find? fun sec => sec.kind == 18 && sec.link == symtabIndex).map (·.offset)
-    (List.range (min (symtab.size / entrySize) (data.size / entrySize + 1))).mapM fun index => do
+    let count := min (symtab.size / entrySize) (data.size / entrySize + 1)
+    (·.1.map Prod.fst) <$> mapNamedM data (·.2) (items := List.range count) fun index => do
       let offset := symtab.offset + index * entrySize
       let nameOffset ← IO.Reader.u32 data header.endian offset
       let info ← IO.Reader.get8 data (offset + if header.is64 then 4 else 12)
@@ -232,13 +244,17 @@ private def rawSymbols (data : ByteArray) (header : Header) (sections : List Sec
       let value ← word data header.endian header.is64 (offset + if header.is64 then 8 else 4)
       let size ← word data header.endian header.is64 (offset + if header.is64 then 16 else 8)
       let other ← IO.Reader.get8 data (offset + if header.is64 then 5 else 13)
-      let name := match strings with
-        | some table => (IO.Reader.cstring data (table.offset + nameOffset)).toOption.getD ""
-        | none => ""
+      -- of a name that doesn't end in its table, what was looked at for its end is what it took
+      let (name, cost) := match strings with
+        | some table =>
+          match IO.Reader.cstringIn data (table.offset + nameOffset) (stringsEnd data table) with
+          | .ok name => (name, nameCost name)
+          | .error _ => ("", stringsEnd data table - (table.offset + nameOffset) + 1)
+        | none => ("", 1)
       let extended := if shndx == 0xffff then
           indices.bind fun table => (IO.Reader.u32 data header.endian (table + index * 4)).toOption
         else none
-      .ok ⟨name, extended.getD shndx, extended.isSome, value, size, info % 16, info / 16, other⟩
+      .ok ((⟨name, extended.getD shndx, extended.isSome, value, size, info % 16, info / 16, other⟩ : ElfLinker.Sym), cost)
   let table := (sections.zipIdx.find? fun entry => entry.1.kind == 2).map fun entry =>
     (read entry.1 entry.2).toOption.getD []
   (table.getD []).toArray
@@ -513,8 +529,9 @@ private def dynamicSymbols (data : ByteArray) (header : Header) : Except String 
     match offsetOf headers data.size table 0, offsetOf headers data.size strings 0 with
     | some tableOffset, some stringsOffset =>
       let count ← dynamicSymbolCount data headers tags header.is64 header.endian header.machine
-      let strings : SectionHeader := ⟨0, 3, 0, strings, stringsOffset, 0, 0, 0, 0, 0⟩
-      let parsed ← (List.range (min count (data.size / max entrySize 1 + 1))).mapM fun index =>
+      -- of a table as long as `DT_STRSZ` says
+      let strings : SectionHeader := ⟨0, 3, 0, strings, stringsOffset, (tagValue tags 10).getD 0, 0, 0, 0, 0⟩
+      let (parsed, _) ← mapNamedM data nameOfSymbol (items := List.range (min count (data.size / max entrySize 1 + 1))) fun index =>
         parseSymbol data header strings (tableOffset + index * entrySize)
       .ok (parsed.filterMap id)
     | _, _ => .ok []

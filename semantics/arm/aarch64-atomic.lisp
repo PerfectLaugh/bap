@@ -277,9 +277,15 @@
 ;; 0 to its status register if so and 1 if not, and leaves no monitor. The
 ;; monitor doesn't see what writes to the address, since a thread is alone
 ;; until it is switched, when the emulator clears it, as Linux does with
-;; CLREX. The memory ordering has no effect on a single thread.
+;; CLREX. The memory ordering has no effect on a single thread. The address
+;; is the one that is translated, without the top byte, which Linux has
+;; ignored: a store through another tag than its load's is to the same.
 
-(defmacro LDXR* (ld rt rn) (prog (set EXCLUSIVE_MONITOR (+ rn 1)) (ld rt rn)))
+(defun a64-monitor (addr)
+  "what the monitor holds of an exclusive load from ADDR"
+  (+ (cast-signed 64 (extract 55 0 addr)) 1))
+
+(defmacro LDXR* (ld rt rn) (prog (set EXCLUSIVE_MONITOR (a64-monitor rn)) (ld rt rn)))
 (defun LDXRX (rt rn) (LDXR* ld-x rt rn))
 (defun LDXRW (rt rn) (LDXR* ld-w rt rn))
 (defun LDXRH (rt rn) (LDXR* ld-h rt rn))
@@ -304,7 +310,7 @@
 
 (defmacro STXR* (st rs rt rn)
   (prog
-     (if (= EXCLUSIVE_MONITOR (+ rn 1))
+     (if (= EXCLUSIVE_MONITOR (a64-monitor rn))
          (prog (st rt rn) (setw rs 0))
        (setw rs 1))
      (set EXCLUSIVE_MONITOR 0)))
@@ -317,14 +323,14 @@
 (defun STLXRH (rs rt rn) (STXR* st-h rs rt rn))
 (defun STLXRB (rs rt rn) (STXR* st-b rs rt rn))
 
-(defmacro LDXP* (ld r1 r2 rn size) (prog (set EXCLUSIVE_MONITOR (+ rn 1)) (LDST*pair ld r1 r2 rn size)))
+(defmacro LDXP* (ld r1 r2 rn size) (prog (set EXCLUSIVE_MONITOR (a64-monitor rn)) (LDST*pair ld r1 r2 rn size)))
 (defun LDXPX (r1 r2 rn) (LDXP* ld-x r1 r2 rn 8))
 (defun LDXPW (r1 r2 rn) (LDXP* ld-w r1 r2 rn 4))
 (defun LDAXPX (r1 r2 rn) (LDXP* ld-x r1 r2 rn 8))
 (defun LDAXPW (r1 r2 rn) (LDXP* ld-w r1 r2 rn 4))
 (defmacro STXP* (st rs r1 r2 rn size)
   (prog
-     (if (= EXCLUSIVE_MONITOR (+ rn 1))
+     (if (= EXCLUSIVE_MONITOR (a64-monitor rn))
          (prog (LDST*pair st r1 r2 rn size) (setw rs 0))
        (setw rs 1))
      (set EXCLUSIVE_MONITOR 0)))

@@ -127,4 +127,56 @@ def decryptBlock (key input : ByteArray) : Except String ByteArray := do
     let finalKey := expanded.extract 0 16
     .ok (byteArray (addRoundKey (substitute inverseSbox (inverseShiftRows (loop (rounds - 1) initial))) finalKey))
 
+/-! ## The rounds, as the instructions of AES-NI have them
+
+Each on a state of 128 bits as a number, whose byte `r + 4c` is row `r` of column `c`, as FIPS 197 lays it out and the manual of x86
+does. -/
+
+private def stateOf (value : Nat) : List UInt8 := (List.range 16).map fun index => UInt8.ofNat (value >>> (8 * index) % 256)
+
+private def ofState (state : List UInt8) : Nat := state.foldr (fun byte value => value * 256 + byte.toNat) 0
+
+private def shiftRows (state : List UInt8) : List UInt8 :=
+  (List.range 16).map fun index =>
+    let row := index % 4
+    let column := index / 4
+    state[row + 4 * ((column + row) % 4)]!
+
+private def mixColumns (state : List UInt8) : List UInt8 :=
+  (List.range 4).flatMap fun column =>
+    let offset := column * 4
+    let a0 := state[offset]!.toNat
+    let a1 := state[offset + 1]!.toNat
+    let a2 := state[offset + 2]!.toNat
+    let a3 := state[offset + 3]!.toNat
+    [
+      UInt8.ofNat (multiply a0 2 ^^^ multiply a1 3 ^^^ a2 ^^^ a3),
+      UInt8.ofNat (a0 ^^^ multiply a1 2 ^^^ multiply a2 3 ^^^ a3),
+      UInt8.ofNat (a0 ^^^ a1 ^^^ multiply a2 2 ^^^ multiply a3 3),
+      UInt8.ofNat (multiply a0 3 ^^^ a1 ^^^ a2 ^^^ multiply a3 2)
+    ]
+
+/-- `AESENC`, and `AESENCLAST` with `last`: ShiftRows, SubBytes, MixColumns unless it is the last round, and the round key. -/
+def encryptRound (last : Bool) (state key : Nat) : Nat :=
+  let state := substitute sbox (shiftRows (stateOf state))
+  ofState (if last then state else mixColumns state) ^^^ (key % 2 ^ 128)
+
+/-- `AESDEC`, and `AESDECLAST` with `last`: InvShiftRows, InvSubBytes, InvMixColumns unless it is the last round, and the round key. -/
+def decryptRound (last : Bool) (state key : Nat) : Nat :=
+  let state := substitute inverseSbox (inverseShiftRows (stateOf state))
+  ofState (if last then state else inverseMixColumns state) ^^^ (key % 2 ^ 128)
+
+/-- `AESIMC`: InvMixColumns of a round key. -/
+def inverseMix (key : Nat) : Nat := ofState (inverseMixColumns (stateOf key))
+
+/-- `AESKEYGENASSIST`: SubWord of the words 1 and 3 of a key, and each rotated with the round constant. -/
+def keygenAssist (key constant : Nat) : Nat :=
+  let word (index : Nat) : Nat := ofState (substitute sbox ((stateOf key).extract (4 * index) (4 * index + 4)))
+  let rotated (value : Nat) : Nat := ((value >>> 8) ||| (value <<< 24) % 2 ^ 32) ^^^ (constant % 256)
+  word 1 + rotated (word 1) * 2 ^ 32 + word 3 * 2 ^ 64 + rotated (word 3) * 2 ^ 96
+
+/-- The inverse of a byte in the field of AES, and 0 of 0: its power 254. -/
+def inverse (value : Nat) : Nat :=
+  (List.range 253).foldl (fun power _ => multiply power (value % 256)) (value % 256)
+
 end Bap.Crypto.AES

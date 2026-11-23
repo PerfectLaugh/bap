@@ -115,7 +115,32 @@ def bind (kernel : Kernel) (group fd : Nat) (base name : String) (alive : Nat �
         | some { content := .directory, .. } => .ok normal
         | _ => .error Errno.enoent
       | none => .error Errno.enoent
-  .ok ((kernel.bindPath key number).setSocket number { socket with name := some name })
+  let kernel := (kernel.bindPath key number).setSocket number { socket with name := some name }
+  -- A path is made as a file is: with what the mask of the process leaves of its mode, in a directory that is written then.
+  if abstractName name then .ok kernel
+  else
+    let kernel := kernel.touchDirectory key
+    match kernel.inodes.get? number with
+    | some inode =>
+      .ok { kernel with inodes := kernel.inodes.insert number { inode with mode := 0o140000 ||| (0o777 &&& (0o777 - (kernel.process group).umask)) } }
+    | none => .ok kernel
+
+/-- `bind` to no name, as one of the size of a family alone asks for, and what a socket with `SO_PASSCRED` and no name does as it
+connects or sends (`unix_autobind`): a name of its own of five digits of 16, which Linux takes at random and this takes the first
+free of. A socket that has a name keeps it. -/
+def autobindUnix (kernel : Kernel) (number : Nat) (alive : Nat → Bool) : Kernel :=
+  match kernel.socketAt number with
+  | some socket =>
+    if socket.name.isSome || socket.family != 1 then kernel
+    else
+      let nameOf (index : Nat) : String :=
+        let digits := Nat.toDigits 16 index
+        "\x00" ++ String.ofList (List.replicate (5 - digits.length) '0' ++ digits)
+      let free := (List.range 0x100000).find? fun index => !(kernel.paths.get? (nameOf index)).any alive
+      match free with
+      | some index => (kernel.bindPath (nameOf index) number).setSocket number { socket with name := some (nameOf index) }
+      | none => kernel
+  | none => kernel
 
 /-- The socket that a name is bound to. A path that isn't there is `ENOENT`, and one that isn't a socket can't be connected to. -/
 def socketNamed (kernel : Kernel) (base name : String) : Result Nat := do
@@ -129,17 +154,31 @@ def socketNamed (kernel : Kernel) (base name : String) : Result Nat := do
   | some number => if (kernel.socketAt number).isSome then .ok number else .error Errno.econnrefused
   | none => .error Errno.econnrefused
 
-/-- `listen`, of a stream or of sequenced packets. -/
-def listen (kernel : Kernel) (group fd : Nat) : Result Kernel := do
+/-- `listen`, of a stream or of sequenced packets, with as many connections waiting as `backlog` says, and one more. -/
+def listen (kernel : Kernel) (group fd : Nat) (backlog : Nat := 4096) : Result Kernel := do
   let (number, socket) ← socketOf kernel group fd
   if socket.type == 2 then .error Errno.eopnotsupp
   if socket.peer.isSome then .error Errno.einval
   -- No listens on an unbound socket, as `unix_listen` has it.
   if socket.name.isNone then .error Errno.einval
-  .ok (kernel.setSocket number { socket with listening := true, owner := group })
+  .ok (kernel.setSocket number { socket with listening := true, owner := group, backlog })
+
+/-- Whether a listener has as many connections waiting as it takes, so that another waits, or is `EAGAIN` of one that doesn't: more
+than its backlog, as `unix_recvq_full` has it. -/
+def backlogFull (kernel : Kernel) (target : Nat) : Bool :=
+  (kernel.socketAt target).any fun listener => listener.listening && listener.family == 1 && listener.pending.length > listener.backlog
+
+/-- A socket of datagrams whose peer is gone has none, as `unix_dgram_sendmsg` leaves it when it finds that out: the send that did is
+`ECONNREFUSED`, and the next has nowhere to go. -/
+def disconnectDead (kernel : Kernel) (group fd : Nat) (alive : Nat → Bool) : Kernel :=
+  match kernel.socketOf group fd with
+  | .ok (number, socket) =>
+    if socket.type == 2 && socket.family == 1 && socket.peer.any (!alive ·) then kernel.setSocket number { socket with peer := none }
+    else kernel
+  | .error _ => kernel
 
 /-- `connect` to the socket `target`. Of datagrams, it is where they go when a send doesn't say. Otherwise the listener has a new
-connection to accept, whose end there is connected already, as Linux has it when the backlog has room, which here it always has. -/
+connection to accept, whose end there is connected already, as Linux has it when the backlog has room: see `backlogFull`. -/
 def connect (kernel : Kernel) (group fd target : Nat) (alive : Nat → Bool) (serverName : Option String := none) : Result Kernel := do
   let (number, socket) ← socketOf kernel group fd
   let some listener := kernel.socketAt target | .error Errno.econnrefused
@@ -177,6 +216,12 @@ def send (kernel : Kernel) (group fd : Nat) (message : Message) (target : Option
   let (number, socket) ← socketOf kernel group fd
   if socket.writeShut then .error Errno.epipe
   let message := { message with sender := socket.name }
+  -- Who sends it, if either end asks, as `maybe_add_creds` has it.
+  let signed (receiver : Socket) (message : Message) : Message :=
+    if socket.passCredentials || receiver.passCredentials then
+      let credentials := (kernel.process group).credentials
+      { message with credentials := some (group, credentials.euid, credentials.egid) }
+    else message
   if socket.type == 2 then
     let destination ← match target, socket.peer with
       | some target, _ => .ok target
@@ -187,14 +232,15 @@ def send (kernel : Kernel) (group fd : Nat) (message : Message) (target : Option
     if !alive destination then .error Errno.econnrefused
     -- A socket that is connected takes datagrams only from the one that it is connected to.
     if receiver.peer.any (· != number) then .error Errno.eperm
-    .ok (kernel.setSocket destination { receiver with incoming := receiver.incoming.push message }, message.data.size)
+    .ok (kernel.setSocket destination { receiver with incoming := receiver.incoming.push (signed receiver message) }, message.data.size)
   else
     if target.isSome && socket.peer.isSome then .error Errno.eisconn
     let some peer := socket.peer | .error Errno.enotconn
     let some other := kernel.socketAt peer | .error Errno.econnreset
     if !alive peer || other.readShut then .error Errno.epipe
-    if message.data.size == 0 && message.rights.isEmpty && socket.type == 1 then .ok (kernel, 0) else
-    .ok (kernel.setSocket peer { other with incoming := other.incoming.push message }, message.data.size)
+    -- A stream of nothing queues nothing, whatever comes with it, as `unix_stream_sendmsg` has it.
+    if message.data.size == 0 && socket.type == 1 then .ok (kernel, 0) else
+    .ok (kernel.setSocket peer { other with incoming := other.incoming.push (signed other message) }, message.data.size)
 
 /-- What a receive got: the bytes, who sent them if it had a name, the open files that came with them, and how big the message was,
 which is more than the bytes when a datagram didn't fit. -/
@@ -203,10 +249,11 @@ structure Received where
   sender : Option String := none
   rights : List Nat := []
   size : Nat
+  credentials : Option (Nat × Nat × Nat) := none
 
 /-- `recv` and its kin: up to `count` bytes, or none if there is nothing yet and the other end may still send. A stream gives what has
-come in order, as far as the open files of a message that comes after the first: those come with the bytes that they came with. A
-message of the others comes whole, but for what doesn't fit, which is gone. At the end of a stream, it is nothing. With `peek` it stays. -/
+come in order, no further than a message that came with open files, which come with its first bytes, nor, of `SO_PASSCRED`, than
+those of one sender, as `unix_stream_read_generic` has it. A message of the others comes whole, but for what doesn't fit, which is gone. At the end of a stream, it is nothing. With `peek` it stays. -/
 def receive (kernel : Kernel) (group fd count : Nat) (peek : Bool) (alive : Nat → Bool) (all : Bool := false) :
     Result (Kernel × Option Received) := do
   let (number, socket) ← socketOf kernel group fd
@@ -215,7 +262,9 @@ def receive (kernel : Kernel) (group fd count : Nat) (peek : Bool) (alive : Nat 
       | some peer => !alive peer || (kernel.socketAt peer |>.any (·.writeShut))
       | none => false)
   -- `MSG_WAITALL` of a stream that may have more: all that it asks for, or it waits, as Linux has it of one that may wait.
-  if all && !peek && socket.type == 1 && !ended && (socket.incoming.foldl (· + ·.data.size) 0) < count then return (kernel, none)
+  -- What came with open files is as far as a read goes, however much it asks for.
+  if all && !peek && socket.type == 1 && !ended && (socket.incoming.foldl (· + ·.data.size) 0) < count &&
+      !socket.incoming.any (!·.rights.isEmpty) then return (kernel, none)
   if socket.incoming.isEmpty then
     if ended then return (kernel, some { data := ByteArray.empty, size := 0 })
     if socket.type != 2 && socket.peer.isNone then .error Errno.enotconn
@@ -224,24 +273,28 @@ def receive (kernel : Kernel) (group fd count : Nat) (peek : Bool) (alive : Nat 
     let message := socket.incoming[0]!
     let kept := if peek then socket.incoming else socket.incoming.extract 1 socket.incoming.size
     return (kernel.setSocket number { socket with incoming := kept },
-      some { data := message.data.extract 0 count, sender := message.sender, rights := message.rights, size := message.data.size })
+      some { data := message.data.extract 0 count, sender := message.sender, rights := message.rights, size := message.data.size
+             credentials := message.credentials })
   -- A stream, from as many messages as it takes.
   let mut data := ByteArray.empty
   let mut rights : List Nat := []
   let mut taken := 0
   let mut rest := socket.incoming
+  let credentials := (socket.incoming[0]?).bind (·.credentials)
   for message in socket.incoming do
     if data.size ≥ count then break
-    if taken > 0 && !message.rights.isEmpty then break
+    if taken > 0 && socket.passCredentials && message.credentials != credentials then break
     let piece := message.data.extract 0 (count - data.size)
     data := data ++ piece
-    if taken == 0 then rights := message.rights
+    rights := rights ++ message.rights
     taken := taken + 1
     rest := if piece.size < message.data.size then
         #[{ message with data := message.data.extract piece.size message.data.size, rights := [] }] ++ rest.extract 1 rest.size
       else rest.extract 1 rest.size
+    -- What came with open files is as far as it goes.
+    if !message.rights.isEmpty then break
   let incoming := if peek then socket.incoming else rest
-  .ok (kernel.setSocket number { socket with incoming }, some { data, rights, size := data.size })
+  .ok (kernel.setSocket number { socket with incoming }, some { data, rights, size := data.size, credentials })
 
 /-- `shutdown`: 0 for reading, 1 for writing, 2 for both. -/
 def shutdown (kernel : Kernel) (group fd how : Nat) : Result Kernel := do
@@ -381,10 +434,10 @@ def connectInet (kernel : Kernel) (group fd : Nat) (endpoint : Endpoint) (alive 
     | some listener => kernel.connect group fd listener alive (serverName := some target.name)
 
 /-- `listen` of a socket of the Internet, which has a port of its own if it had none. -/
-def listenInet (kernel : Kernel) (group fd : Nat) (alive : Nat → Bool) : Result Kernel := do
+def listenInet (kernel : Kernel) (group fd : Nat) (alive : Nat → Bool) (backlog : Nat := 4096) : Result Kernel := do
   let (number, socket) ← socketOf kernel group fd
   let (kernel, _) := kernel.autobind number socket alive
-  kernel.listen group fd
+  kernel.listen group fd backlog
 
 /-- A datagram of the Internet, to `endpoint` or to where the socket was connected. If nobody has that address, or the socket there is
 connected to another, it is gone, and it went. -/

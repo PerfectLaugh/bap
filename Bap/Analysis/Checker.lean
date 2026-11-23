@@ -136,7 +136,7 @@ structure Config where
 
 /-- The addresses of the loads and the stores of an expression, outside what a `let` binds and the choices of an `ite`, which
 only one of runs. -/
-partial def accessesOf : Bil.Exp → List Bil.Exp
+def accessesOf : Bil.Exp → List Bil.Exp
   | .load memory address _ _ => address :: accessesOf memory ++ accessesOf address
   | .store memory address value _ _ => address :: accessesOf memory ++ accessesOf address ++ accessesOf value
   | .bin _ left right => accessesOf left ++ accessesOf right
@@ -172,19 +172,7 @@ partial def instrument (width : Nat) (program : Bil.Program) (next : Nat := 0) :
 
 /-- How many parts an expression has, as far as `limit`: past it, `limit + 1`; without the conditions of its choices, of
 `conditions` false. -/
-partial def sizeOf (limit : Nat) (expr : Expr) (conditions : Bool := true) : Nat :=
-  -- what is left of the budget after the parts of an expression, of none left once it is spent
-  let rec go (left : Nat) (expr : Expr) : Nat :=
-    if left == 0 then 0 else
-    let left := left - 1
-    match expr with
-    | .app _ _ args => args.foldl go left
-    | .extract _ _ value | .select _ value => go left value
-    | .concat first second => go (go left first) second
-    | .ite condition yes no => go (go (if conditions then go left condition else left) yes) no
-    | _ => left
-  let left := go (limit + 1) expr
-  limit + 1 - left
+def sizeOf (limit : Nat) (expr : Expr) (conditions : Bool := true) : Nat := Partition.sizeOf limit expr conditions
 
 /-- What Z3 is given at most of a question, beyond which it isn't asked. -/
 def maxQuestion : Nat := 4000
@@ -211,18 +199,18 @@ def constOf (expr : Expr) : Option Nat :=
     | _ => none
 
 /-- Whether an expression has a choice in it, as a conditional move makes. -/
-partial def hasIte : Expr → Bool
+def hasIte : Expr → Bool
   | .ite .. => true
-  | .app _ _ args => args.any hasIte
+  | .app _ _ args => args.attach.any fun ⟨arg, _⟩ => hasIte arg
   | .extract _ _ value => hasIte value
   | .concat left right => hasIte left || hasIte right
   | .select _ address => hasIte address
   | _ => false
 
 /-- Whether an expression has a constant of `width` bits in the first page, as a comparison of a pointer with null has. -/
-partial def pageConstant (width : Nat) : Expr → Bool
+def pageConstant (width : Nat) : Expr → Bool
   | @Expr.const w value => w == width && value.toNat < 4096
-  | .app _ _ args => args.any (pageConstant width)
+  | .app _ _ args => args.attach.any fun ⟨arg, _⟩ => pageConstant width arg
   | .extract _ _ value | .select _ value => pageConstant width value
   | .concat left right => pageConstant width left || pageConstant width right
   | .ite condition yes no => pageConstant width condition || pageConstant width yes || pageConstant width no
@@ -334,7 +322,7 @@ def decided (before : Symbolic.State) (results : List Symbolic.Result) : List Sy
       some { result with state := { result.state with constraints := old ++ kept } }
 
 /-- The targets of a choice of targets, each with the conditions of its way. -/
-partial def armsOf : Expr → List (List Expr × Expr)
+def armsOf : Expr → List (List Expr × Expr)
   | .ite condition yes no =>
     (armsOf yes).map (fun (conditions, arm) => (Expr.eqOne condition :: conditions, arm)) ++
       (armsOf no).map fun (conditions, arm) => (Expr.eqZero condition :: conditions, arm)
@@ -383,10 +371,11 @@ def forgetMemory (function : Function) (fresh : String) (state : Symbolic.State)
               cells := if left then [] else memory.cells.filter fun (address, _) => stackAddress function.stack true address }) }
 
 /-- What a statement can write, at any depth, and whether it loops. -/
-partial def assigned : Bil.Stmt → List Bap.Var × Bool
+def assigned : Bil.Stmt → List Bap.Var × Bool
   | .move var _ => ([var], false)
   | .while _ body => ((body.map assigned).flatMap (·.1), true)
-  | .ifElse _ yes no => (((yes ++ no).map assigned).flatMap (·.1), ((yes ++ no).map assigned).any (·.2))
+  | .ifElse _ yes no =>
+    ((yes.map assigned).flatMap (·.1) ++ (no.map assigned).flatMap (·.1), (yes.map assigned).any (·.2) || (no.map assigned).any (·.2))
   | _ => ([], false)
 
 /-- The ways that each way of an instruction goes on to. -/

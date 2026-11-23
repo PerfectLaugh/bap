@@ -40,7 +40,7 @@ private def tableString (data : ByteArray) (header : Header) (offset : Nat) : Ex
     if offset ≥ stringsSize then
       .error "COFF name exceeds string table"
     else
-      IO.Reader.cstring data (header.stringsOffset + offset)
+      IO.Reader.cstringIn data (header.stringsOffset + offset) (header.stringsOffset + stringsSize)
 
 private def sectionName (data : ByteArray) (header : Header) (offset : Nat) : Except String String := do
   let first ← IO.Reader.get8 data offset
@@ -122,18 +122,20 @@ private def parseSymbol (data : ByteArray) (header : Header) (sections : List Se
   .ok ⟨name, address, 0, function, storageClass = 103, function && (header.machine == 0x1c2 || header.machine == 0x1c4)⟩
 
 /-- The symbols, with their indices, after those it has, one at a time: in an array, as so many of them are, which a list would copy
-for each. -/
-private def parseSymbols (data : ByteArray) (header : Header) (sections : List Section) :
+for each. Their names take `used` bytes so far, and no more than `namesLimit` all together, each as often as a symbol has it: every
+entry may name all of the string table. -/
+private def parseSymbols (data : ByteArray) (header : Header) (sections : List Section) (used : Nat) :
     Nat → Nat → Array (Nat × Symbol) → Except String (Array (Nat × Symbol))
   | _, 0, symbols => .ok symbols
   | index, remaining + 1, symbols => do
     let offset := header.symbolOffset + index * 18
     let symbol ← parseSymbol data header sections offset
+    let used ← countName data used symbol.name
     let auxiliaryCount ← IO.Reader.get8 data (offset + 17)
     if auxiliaryCount > remaining then
       .error "COFF auxiliary symbol exceeds symbol table"
     else
-      parseSymbols data header sections (index + auxiliaryCount + 1)
+      parseSymbols data header sections used (index + auxiliaryCount + 1)
         (remaining - auxiliaryCount) (symbols.push (index, symbol))
 
 private def writeNat (data : ByteArray) (offset size value : Nat) : Except String ByteArray :=
@@ -305,8 +307,10 @@ def withThumbBit (machine : Nat) (kind : RelocationKind) (flags symbol : Nat) : 
   if (machine == 0x01c0 || machine == 0x01c2 || machine == 0x01c4) && flags &&& 0x20000000 != 0 &&
       kind != .sectionRelative && symbol % 2 == 0 then symbol + 1 else symbol
 
+/-- Applies a relocation of a section: `find` gives the symbol of an index, which `symbolFinder` has of the symbols all at once,
+rather than of a search of them for each relocation. -/
 private def applyRelocation (data : ByteArray) (header : Header) (sections : List Section)
-    (symbols : List (Nat × Symbol)) (object : ObjectSection) (region : MemRegion) (index : Nat) :
+    (find : Nat → Option (Nat × Symbol)) (object : ObjectSection) (region : MemRegion) (index : Nat) :
     Except String MemRegion := do
   let offset := object.relocationOffset + index * 10
   let rva ← IO.Reader.u32 data .little offset
@@ -315,7 +319,7 @@ private def applyRelocation (data : ByteArray) (header : Header) (sections : Lis
   match relocationKind header.machine number with
   | none => .error s!"unsupported COFF relocation type {number} at {region.addr + rva}"
   | some kind =>
-    match symbols.find? fun entry => entry.1 = symbolIndex with
+    match find symbolIndex with
     | none => .error s!"COFF relocation references missing symbol {symbolIndex}"
     | some (_, symbol) =>
       let sectionNumber ← IO.Reader.u16 data .little (header.symbolOffset + symbolIndex * 18 + 12)
@@ -330,13 +334,20 @@ private def applyRelocation (data : ByteArray) (header : Header) (sections : Lis
 
 /-- Applies the relocations of a section, one failing leaving its place as it is and adding an error. -/
 private def applyRelocations (data : ByteArray) (header : Header) (sections : List Section)
-    (symbols : List (Nat × Symbol)) (object : ObjectSection) : ObjectSection × List String :=
+    (find : Nat → Option (Nat × Symbol)) (object : ObjectSection) : ObjectSection × List String :=
   let (region, errors) := (List.range object.relocationCount).foldl (init := (object.region, []))
     fun (region, errors) index =>
-      match applyRelocation data header sections symbols object region index with
+      match applyRelocation data header sections find object region index with
       | .ok next => (next, errors)
       | .error error => (region, error :: errors)
   ({ object with region := region }, errors.reverse)
+
+/-- The symbols by their indices, the first of the list that has each, as `List.find?` gives it. -/
+def symbolTable (symbols : List (Nat × Symbol)) : Std.HashMap Nat Symbol :=
+  symbols.foldl (init := {}) fun table (index, symbol) => if table.contains index then table else table.insert index symbol
+
+/-- The symbol of an index, of a table of them that is made once. -/
+def symbolFinder (table : Std.HashMap Nat Symbol) (index : Nat) : Option (Nat × Symbol) := table[index]?.map (index, ·)
 
 /-- Sections that do not occupy memory: `IMAGE_SCN_LNK_REMOVE`, `IMAGE_SCN_LNK_INFO`, `IMAGE_SCN_MEM_DISCARDABLE`. -/
 private def isDiscarded (flags : Nat) : Bool :=
@@ -415,6 +426,26 @@ private def zeroRegion (name : String) (start stop : Nat) (writable : Bool) : Li
       ⟨start, Bap.zeroBytes (stop - start), true, writable, false⟩)]
   else []
 
+/-- Whether the names of the sections, of those that are in the string table, take more than `namesLimit` all together, each as
+often as a section has it: every header may name all of the table. No name is made to say so. -/
+def sectionNamesExceed (data : ByteArray) : Bool :=
+  match parseHeader data with
+  | .error _ => false
+  | .ok header =>
+    let stringsSize := (IO.Reader.u32 data .little header.stringsOffset).toOption.getD 0
+    let stop := header.stringsOffset + stringsSize
+    let used := (List.range (min header.sectionCount (data.size / 40 + 1))).foldl (init := 0) fun used index =>
+      let at_ := header.sectionOffset + index * 40
+      if used > namesLimit data || (IO.Reader.get8 data at_).toOption != some '/'.toNat then used
+      else
+        let encoded := (fixedString data at_ 8).toOption.getD ""
+        match (encoded.drop 1).toNat? with
+        | some nameOffset =>
+          let start := header.stringsOffset + nameOffset
+          used + ((IO.Reader.cstringEnd data start stop).getD (max stop start)) - start + 1
+        | none => used
+    used > namesLimit data
+
 /-- What the sections of the file and its common symbols would take, as its headers say. `decodeReport` refuses what `exceeds` is
 of. -/
 def regionsSize (data : ByteArray) : Extent :=
@@ -449,16 +480,18 @@ externals in `EXTERNAL`. Upstream's COFF loader instead hides all but the execut
 same address, and applies no relocations; once the sections are laid out there is nothing left to hide. -/
 def decodeReport (data : ByteArray) : Except String (Image × List String) := do
   -- A header can say anything: what it asks for of the host is no more than a file is given, all together.
-  if exceeds data (regionsSize data) then throw "the regions of the COFF file are too large"
+  if exceeds data (regionsSize data) || sectionNamesExceed data then
+    throw (if exceeds data (regionsSize data) then "the regions of the COFF file are too large" else namesTooLarge)
   let header ← parseHeader data
   let parsed ← parseSections data header
   let placed := placeObjects 0 parsed
   let sections := placed.map fun object => object.info
   let word := (architecture header.machine).2 / 8
-  let parsedSymbols := (← parseSymbols data header sections 0 header.symbolCount #[]).toList
+  let parsedSymbols := (← parseSymbols data header sections 0 0 header.symbolCount #[]).toList
   -- A weak external is where its default is.
+  let parsedSymbol := symbolFinder (symbolTable parsedSymbols)
   let parsedSymbols := parsedSymbols.map fun (index, symbol) =>
-    match (weakDefault data header index).bind fun tag => parsedSymbols.find? (·.1 == tag) with
+    match (weakDefault data header index).bind parsedSymbol with
     | some (_, default) => (index, { symbol with addr := default.addr, isFunction := default.isFunction, thumb := default.thumb })
     | none => (index, symbol)
   let commonsStart := alignUp (placed.foldl (fun cursor object =>
@@ -466,8 +499,9 @@ def decodeReport (data : ByteArray) : Except String (Image × List String) := do
   let (commons, commonsEnd) := placeUndefined data header word (· != 0) id commonsStart parsedSymbols
   let externalsStart := alignUp commonsEnd word
   let (indexedSymbols, externalsEnd) := placeUndefined data header word (· == 0) (fun _ => word) externalsStart commons
+  let find := symbolFinder (symbolTable indexedSymbols)
   let relocated := placed.map fun object =>
-    if isMapped object then applyRelocations data header sections indexedSymbols object else (object, [])
+    if isMapped object then applyRelocations data header sections find object else (object, [])
   let mapped := (relocated.map Prod.fst).filter fun object => isMapped object && object.segment.size != 0
   let extra := zeroRegion "%common" commonsStart commonsEnd true ++ zeroRegion "EXTERNAL" externalsStart externalsEnd false
   let segments := mapped.map (fun object => object.segment) ++ extra.map Prod.fst

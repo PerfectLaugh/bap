@@ -100,7 +100,19 @@ private def fileOffset (segments : List Segment) (address : Nat) : Option Nat :=
   (segments.find? fun segment => segment.address ≤ address && address < segment.address + segment.fileSize).map
     fun segment => segment.offset + address - segment.address
 
-/-- The names of the libraries that it needs: its `DT_NEEDED`. -/
+/-- The entries of a dynamic section at `offset` of the file, of `size` bytes each, as a tag and a value: up to `count` of them, and no
+further than its `DT_NULL`, as `ld.so` walks it, or than the file has. -/
+private def dynamicEntries (data : ByteArray) (big : Bool) (size : Nat) : Nat → Nat → List (Nat × Nat)
+  | 0, _ => []
+  | count + 1, offset =>
+    if offset + size > data.size then []
+    else
+      let tag := field data big offset (size / 2)
+      if tag == 0 then []
+      else (tag, field data big (offset + size / 2) (size / 2)) :: dynamicEntries data big size count (offset + size)
+
+/-- The names of the libraries that it needs: its `DT_NEEDED`. What its `PT_DYNAMIC` says its size is counts for no more than the file
+has of it, and for nothing after its `DT_NULL`. -/
 def needed (data : ByteArray) : List String :=
   match parse data with
   | .error _ => []
@@ -109,12 +121,17 @@ def needed (data : ByteArray) : List String :=
     | none => []
     | some dynamic =>
       let size := program.bits / 4
-      let entries := (List.range (dynamic.2.2.1 / size)).map fun index =>
-        (field data program.big (dynamic.1 + index * size) (size / 2), field data program.big (dynamic.1 + index * size + size / 2) (size / 2))
+      let entries := dynamicEntries data program.big size (min dynamic.2.2.1 (data.size - dynamic.1) / size) dynamic.1
       let strings := (entries.find? (·.1 == 5)).bind fun entry => fileOffset program.segments entry.2
       match strings with
       | none => []
       | some table =>
         entries.filterMap fun entry => if entry.1 == 1 then some (text data (table + entry.2)) else none
+
+/-- Whether Linux refuses to load it at `base` in an address space that ends at `limit`, as `load_elf_binary` and `load_elf_interp`
+have it: a segment that has more in the file than in memory, or that is larger than the address space, or that would end past it. -/
+def Program.refused (program : Program) (base limit : Nat) : Bool :=
+  program.segments.any fun segment =>
+    segment.fileSize > segment.memorySize || segment.memorySize > limit || base + segment.address > limit - segment.memorySize
 
 end Bap.Linux.Elf

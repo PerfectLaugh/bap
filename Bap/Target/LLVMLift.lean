@@ -119,11 +119,16 @@ private def x86FloatRegister (name : String) : Option Primus.Semantics.Value :=
   | "MXCSR" | "EFLAGS" => some (.register name 32 32)
   | _ => none
 
+/-- The flags that the semantics name each by itself: the status flags, the direction and the interrupt flag, and those that only
+`POPF` writes of what a program may, the trap flag, the nested task, the resume flag, the alignment check and the identification. -/
+private def x86NamedFlags : List String :=
+  ["CF", "OF", "SF", "ZF", "AF", "PF", "DF", "IF", "TF", "NT", "RF", "AC", "ID"]
+
 /-- `Value.register` views the low bits of its base, so a high byte keeps its own name while it is
 lifted and `resolveAliases` turns it into bits 15 to 8 of the base afterwards. -/
 private def x86Register (name : String) : Primus.Semantics.Value :=
   let name := if name.isEmpty || name = "NoRegister" then "Nil" else name
-  if ["CF", "OF", "SF", "ZF", "AF", "PF", "DF", "IF"].contains name then
+  if x86NamedFlags.contains name then
     .register name 1 1
   else if (x86HighByteBase name).isSome then
     .register name 8 8
@@ -352,12 +357,12 @@ private def x86Globals : Primus.Semantics.Globals :=
     "EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP", "RIP",
     "AX", "BX", "CX", "DX", "SI", "DI", "BP", "SP",
     "AL", "BL", "CL", "DL", "SIL", "DIL", "BPL", "SPL", "AH", "BH", "CH", "DH",
-    "CF", "OF", "SF", "ZF", "AF", "PF", "DF", "IF", "FS_BASE", "GS_BASE"] ++ x86FloatNames ++ x86VectorNames 32
+    "CF", "OF", "SF", "ZF", "AF", "PF", "DF", "IF", "TF", "NT", "RF", "AC", "ID", "FS_BASE", "GS_BASE"] ++ x86FloatNames ++ x86VectorNames 32
   registers.map fun name => (name, x86Register name)
 
 private def x8632Register (name : String) : Primus.Semantics.Value :=
   let name := if name.isEmpty || name = "NoRegister" then "Nil" else name
-  if ["CF", "OF", "SF", "ZF", "AF", "PF", "DF", "IF"].contains name then
+  if x86NamedFlags.contains name then
     .register name 1 1
   else if (x8632HighByteBase name).isSome then
     .register name 8 8
@@ -377,7 +382,7 @@ private def x8632Register (name : String) : Primus.Semantics.Value :=
 private def x8632Globals : Primus.Semantics.Globals :=
   let registers := ["EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP", "EIP",
     "AX", "BX", "CX", "DX", "SI", "DI", "BP", "SP", "AL", "BL", "CL", "DL", "AH", "BH", "CH", "DH",
-    "CF", "OF", "SF", "ZF", "AF", "PF", "DF", "IF", "FS_BASE", "GS_BASE"] ++ x86FloatNames ++ x86VectorNames 8
+    "CF", "OF", "SF", "ZF", "AF", "PF", "DF", "IF", "TF", "NT", "RF", "AC", "ID", "FS_BASE", "GS_BASE"] ++ x86FloatNames ++ x86VectorNames 8
   registers.map fun name => (name, x8632Register name)
 
 private def riscvRegister (name : String) : Primus.Semantics.Value :=
@@ -483,6 +488,11 @@ private def powerpcNumbered (first : Char) (name : String) : Bool :=
   | letter :: digit :: digits => letter == first && (digit :: digits).all Char.isDigit
   | _ => false
 
+/-- The special purpose registers that the semantics name, besides the link, the count and the target address registers: the bytes
+that the string instructions move, which are of XER with the flags, VRSAVE, the data stream control register, the authority mask
+register and the program priority register. -/
+private def powerpcSpecialGlobals : List String := ["XER_COUNT", "VRSAVE", "DSCR", "AMR", "PPR"]
+
 private def powerpcRegister (name : String) : Primus.Semantics.Value :=
   let isConditionBit := (name.startsWith "CR" &&
     (name.endsWith "LT" || name.endsWith "GT" || name.endsWith "EQ" || name.endsWith "UN")) ||
@@ -505,7 +515,7 @@ private def powerpcGlobals : Primus.Semantics.Globals :=
     [s!"CR{n}LT", s!"CR{n}GT", s!"CR{n}EQ", s!"CR{n}UN"]
   let fields := (List.range 8).map fun n => s!"CR{n}"
   (registers ++ conditionFields ++ fields ++ powerpcFloatFlags ++ powerpcVectorGlobals ++
-    ["ZERO", "LR", "CTR", "TAR", "SO", "OV", "CA", "OV32", "CA32", "EXCLUSIVE_MONITOR"]).map
+    ["ZERO", "LR", "CTR", "TAR", "SO", "OV", "CA", "OV32", "CA32", "EXCLUSIVE_MONITOR"] ++ powerpcSpecialGlobals).map
     fun name => (name, powerpcRegister name)
 
 private def powerpc32Register (name : String) : Primus.Semantics.Value :=
@@ -531,7 +541,7 @@ private def powerpc32Globals : Primus.Semantics.Globals :=
     [s!"CR{n}LT", s!"CR{n}GT", s!"CR{n}EQ", s!"CR{n}UN"]
   let fields := (List.range 8).map fun n => s!"CR{n}"
   (registers ++ conditionFields ++ fields ++ powerpcFloatFlags ++ powerpcVectorGlobals ++
-    ["ZERO", "LR", "CTR", "TAR", "SO", "OV", "CA", "OV32", "CA32", "EXCLUSIVE_MONITOR"]).map
+    ["ZERO", "LR", "CTR", "TAR", "SO", "OV", "CA", "OV32", "CA32", "EXCLUSIVE_MONITOR"] ++ powerpcSpecialGlobals).map
     fun name => (name, powerpc32Register name)
 
 private def mipsRegisterName (name : String) : String :=
@@ -774,7 +784,7 @@ def x86Environment : IO Primus.Semantics.Environment := cached x86Cache (x86Envi
 private initialize x86AvxCache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
 /-- With AVX-512. It is loaded when an instruction first needs it, as most programs have none of them. -/
-def x86AvxEnvironment : IO Primus.Semantics.Environment := cached x86AvxCache (x86EnvironmentWith ["x86-avx512", "x86-amx", "x86-more"])
+def x86AvxEnvironment : IO Primus.Semantics.Environment := cached x86AvxCache (x86EnvironmentWith ["x86-avx512", "x86-amx", "x86-more", "x86-absent"])
 
 /-- The names that LLVM has for the formats of a floating point register, e.g., `F10_D`, which `fpr-name` of the
 semantics takes to the register. -/
@@ -925,7 +935,7 @@ def x8632Environment : IO Primus.Semantics.Environment := cached x8632Cache (x86
 private initialize x8632AvxCache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
 /-- With AVX-512, as `x86AvxEnvironment`. -/
-def x8632AvxEnvironment : IO Primus.Semantics.Environment := cached x8632AvxCache (x8632EnvironmentWith ["x86-avx512", "x86-amx", "x86-more"])
+def x8632AvxEnvironment : IO Primus.Semantics.Environment := cached x8632AvxCache (x8632EnvironmentWith ["x86-avx512", "x86-amx", "x86-more", "x86-absent"])
 
 private initialize riscv32Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
@@ -952,6 +962,22 @@ private def arm32Immediate (value : Int) : Primus.Semantics.Value :=
 private def arm32Operand : LLVM.Operand → Primus.Semantics.Value
   | .reg name => arm32Register name
   | .imm value => arm32Immediate value
+
+/-- Whether an instruction of A32 or T32 addresses memory by a base and an immediate offset: a load, a store or a preload. Of
+these LLVM has the offset `#-0`, a subtraction of zero (U = 0, imm = 0), as INT32_MIN, to tell it from `#0` when it prints: of T32 as
+the integer that it is, and of A32 as the same 32 bits without a sign. -/
+def armAddressesMemory (opcode : String) : Bool :=
+  ["LDR", "STR", "PLD", "PLI", "t2LDR", "t2STR", "t2PLD", "t2PLI", "VLDR", "VSTR"].any fun stem => opcode.startsWith stem
+
+/-- The operands of an instruction of A32 or T32 for its semantics: the offset `#-0` of an access to memory is zero, as
+`offset_addr = if add then R[n] + imm32 else R[n] - imm32` has it, rather than the INT32_MIN that stands for it. No operand of
+these instructions is INT32_MIN otherwise: their offsets are of 12 bits at most. -/
+def arm32Operands (decoded : LLVM.Decoded) : List Primus.Semantics.Value :=
+  let memory := armAddressesMemory decoded.opcode
+  decoded.operands.map fun operand =>
+    match operand with
+    | .imm value => if memory && (value == -2147483648 || value == 2147483648) then arm32Immediate 0 else arm32Immediate value
+    | operand => arm32Operand operand
 
 private initialize thumbCache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
@@ -1345,6 +1371,15 @@ def aarch64Undefined (word : Nat) : Bool :=
   let casp := word &&& 0xbfa07c00 == 0x08207c00
   (loadPair && field 0 5 == field 10 5) || (casp && (field 16 1 == 1 || field 0 1 == 1))
 
+/-- Of what LLVM doesn't decode of ARM, or of Thumb if `thumb`, of which `word` is then the first halfword, what the architecture has
+UNDEFINED where a program runs, so that it has `SIGILL` of Linux rather than nothing to run:
+- `HLT`, of ARMv8, which is UNDEFINED while halting isn't allowed, as it isn't to a program, and whose encodings ARMv7 has UNDEFINED
+  too: `cond 0001 0000 imm12 0111 imm4` of A32 with a condition that isn't 1111, and `1011 1010 10 imm6` of T32.
+More are to be added here as they are met. -/
+def armUndefined (thumb : Bool) (word : Nat) : Bool :=
+  if thumb then word &&& 0xffc0 == 0xba80
+  else word &&& 0x0ff000f0 == 0x01000070 && word >>> 28 != 15
+
 /-- Of the words that LLVM doesn't decode, one that MIPS before release 6 reserves, whose exception of a reserved instruction Linux raises
 `SIGILL` for: SPECIAL with the function 0x0e or 0x28, and the primary opcode 0x3b, which release 6 has as PCREL. More are to be added here
 as they are met. -/
@@ -1358,6 +1393,68 @@ def powerpcUndefined (word : Nat) : Bool := word >>> 26 % 64 == 0
 
 def decodeAArch64 (base address : Nat) (data : ByteArray) : IO Disasm.Insn := do
   decodeAArch64With (← aarch64Environment) base address data
+
+/-- Of the words of 32 bits that LLVM doesn't decode, one that RISC-V has illegal, for which Linux sends `SIGILL`
+(`do_trap_insn_illegal`):
+- an operation of the floating point of F or D that rounds, with a rounding mode in its `rm` field that is reserved, 5 or 6: the
+  fused multiply-adds, of the four major opcodes of them, and, of OP-FP, the additions, subtractions, multiplications and divisions,
+  the square roots, the conversions between the two formats, and those to and from the integers, of which RV32 has only the words;
+- one of the major opcode SYSTEM whose `funct3` is 0, the privileged instructions, or 4, the loads and stores of the hypervisor,
+  which a program has none of: `uret`, `mnret`, the `sfence` and `sinval` of the translations, the `hfence`, and the reserved ones.
+  `ecall` and `ebreak` decode, as do `sret`, `mret`, `dret`, `wfi` and `sfence.vma`, which the semantics define as illegal;
+- the word of all the bits, which the architecture has defined as illegal. -/
+def riscvUndefined (bits word : Nat) : Bool :=
+  let field (low size : Nat) : Nat := (word >>> low) % 2 ^ size
+  let (opcode, rm, format, rs2, function) := (field 0 7, field 12 3, field 25 2, field 20 5, field 27 5)
+  let fused := [0x43, 0x47, 0x4b, 0x4f].contains opcode
+  let rounds := opcode == 0x53 && (
+    -- fadd, fsub, fmul and fdiv
+    function < 4 ||
+    -- fsqrt
+    (function == 0x0b && rs2 == 0) ||
+    -- fcvt.s.d and fcvt.d.s, whose source is the other format
+    (function == 0x08 && rs2 < 2 && rs2 != format) ||
+    -- fcvt to and from w, wu, and of RV64 l and lu
+    ((function == 0x18 || function == 0x1a) && rs2 < (if bits == 64 then 4 else 2)))
+  ((fused || rounds) && format < 2 && (rm == 5 || rm == 6)) ||
+    (opcode == 0x73 && (field 12 3 == 0 || field 12 3 == 4)) ||
+    word == 0xffffffff
+
+/-- Of the words that LLVM doesn't decode, `RDHWR` of a hardware register other than 29, which it has only that one of: the
+instruction, of the opcode SPECIAL3 and the function 0x3b, with a select field that only release 6 has. The semantics have what
+Linux gives a program of each register (`RDHWR` of `mips.lisp`). -/
+def mipsDefined (variant : MipsVariant) (globals : Primus.Semantics.Environment) (address word : Nat) : Option (IO Disasm.Insn) :=
+  let field (low size : Nat) : Nat := (word >>> low) % 2 ^ size
+  let (target, register, select) := (field 16 5, field 11 5, field 6 3)
+  if field 26 6 == 0x1f && field 0 6 == 0x3b && field 21 5 == 0 && field 9 2 == 0 && (variant.release6 || select == 0) then some do
+    let context := wordContext variant.bits variant.endian address (address + 4)
+    let value : LLVM.Operand → Primus.Semantics.Value :=
+      if variant.bits == 64 then operand mipsRegister "RDHWR" else mips32Operand variant.release6
+    let bil ← Primus.Semantics.liftWith globals context "RDHWR"
+      ([.reg s!"${target}", .reg s!"HWR{register}", .imm (Int.ofNat select)].map value)
+    pure { address := address, size := 4, asm := s!"rdhwr ${target}, ${register}", flow := .normal, bil := bil }
+  else none
+
+/-- Of the words that LLVM doesn't decode, the branch to the target address register of PowerPC, `bctar` and `bctarl`, of the
+primary opcode 19 and the extended one 560, which it has only to assemble: on its condition, as `bcctr` is, of which it is the
+semantics, `gBCTAR` and `gBCTARL`. One that links is a call, and one that doesn't always go is a conditional jump. -/
+def powerpcDefined (variant : PowerPCVariant) (globals : Primus.Semantics.Environment) (address word : Nat) : Option (IO Disasm.Insn) :=
+  let field (low size : Nat) : Nat := (word >>> low) % 2 ^ size
+  let (options, bit, hint, links) := (field 21 5, field 16 5, field 11 2, word % 2 == 1)
+  if word &&& 0xfc00e7fe == 0x4c000460 then some do
+    let context := wordContext variant.bits variant.endian address (address + 4)
+    let register := if variant.bits == 64 then powerpcRegister else powerpc32Register
+    let immediate (value : Nat) : Primus.Semantics.Value := .bil variant.bits (.int (BitVec.ofNat variant.bits value))
+    let condition := s!"CR{bit / 4}" ++ ["LT", "GT", "EQ", "UN"][bit % 4]!
+    let bil ← Primus.Semantics.liftWith globals context (if links then "gBCTARL" else "gBCTAR")
+      [immediate options, register condition, immediate hint]
+    pure {
+      address := address
+      size := 4
+      asm := s!"{if links then "bctarl" else "bctar"} {options}, {bit}, {hint}"
+      flow := if links then .call else if options &&& 0x14 == 0x14 then .indirectJump else .conditionalJump
+      bil := resolveAliases (powerpcAliases variant.bits) bil }
+  else none
 
 /-- What the operands of the machine are to the semantics, which is a function of what the memo has for them. -/
 private def x86OperandValues (globals : Primus.Semantics.Environment) (opcode : Nat) (operands : List LLVM.MCOperand) :
@@ -1404,6 +1501,68 @@ def x86Prefixes (long : Bool) : List Nat → List Nat
     else if long && byte / 16 == 4 && (rest.head?.map x86LegacyPrefix).getD false then
       x86Prefixes long rest
     else []
+
+/-- Where the opcode of an instruction is, after its legacy prefixes and, in the 64-bit mode, a REX prefix. -/
+private def x86OpcodeAt (long : Bool) (bytes : ByteArray) : Nat :=
+  let rec skip (fuel index : Nat) : Nat :=
+    match fuel with
+    | 0 => index
+    | fuel + 1 => if index < bytes.size && x86LegacyPrefix (bytes.get! index).toNat then skip fuel (index + 1) else index
+  let index := skip 14 0
+  if long && index < bytes.size && (bytes.get! index).toNat / 16 == 4 then index + 1 else index
+
+/-- Encodings that the processors run and that LLVM's decoder hasn't, as the same bytes with the encoding that it has, which is the
+same instruction, and what it is called:
+- `/6` of the shifts, `c0`, `c1` and `d0` to `d3`, is `/4`, SHL, which the manuals call SAL there;
+- `/1` of `f6` and `f7` is `/0`, TEST;
+- `0f 18` to `0f 1e` with a ModRM that names no instruction are the hints that are reserved as NOPs, which is `0f 1f /0` of the same
+  operand.
+Tried only of what LLVM doesn't decode, so that the hints that are instructions, as `endbr64` or `cldemote`, stay those. -/
+def x86Alias (long : Bool) (bytes : ByteArray) : Option (ByteArray × String) :=
+  let at_ := x86OpcodeAt long bytes
+  if at_ + 1 ≥ bytes.size then none else
+  let opcode := (bytes.get! at_).toNat
+  let next := (bytes.get! (at_ + 1)).toNat
+  let withReg (index reg : Nat) : ByteArray :=
+    let modrm := (bytes.get! index).toNat
+    bytes.set! index (UInt8.ofNat (modrm - (modrm / 8 % 8) * 8 + reg * 8))
+  if [0xc0, 0xc1, 0xd0, 0xd1, 0xd2, 0xd3].contains opcode && next / 8 % 8 == 6 then some (withReg (at_ + 1) 4, "sal")
+  else if (opcode == 0xf6 || opcode == 0xf7) && next / 8 % 8 == 1 then some (withReg (at_ + 1) 0, "test")
+  else if opcode == 0x0f && 0x18 ≤ next && next ≤ 0x1e && at_ + 2 < bytes.size then
+    -- Of a register, which LLVM hasn't either, the NOP of the memory that a register names, which is as long.
+    let modrm := (bytes.get! (at_ + 2)).toNat
+    let canonical := if modrm / 64 == 3 then bytes.set! (at_ + 2) 0 else withReg (at_ + 2) 0
+    some (canonical.set! (at_ + 1) 0x1f, "nop")
+  else none
+
+/-- `INT1`, the byte `f1` after its prefixes, which LLVM's decoder hasn't: how long it is with them. -/
+def x86Int1 (long : Bool) (bytes : ByteArray) : Option Nat :=
+  let at_ := x86OpcodeAt long bytes
+  if at_ < bytes.size && (bytes.get! at_).toNat == 0xf1 then some (at_ + 1) else none
+
+/-- What the bytes at an address are if LLVM and the semantics make no instruction of them and they are `INT1`: the debug trap, which
+the machine raises of `int1`. The decoders of what runs (`Bap.Target.X86`, `Bap.Target.X8632`) fall back to this, and those here,
+which the proofs are of, are of what LLVM decodes. -/
+def x86Int1Insn (long : Bool) (base address : Nat) (data : ByteArray) : Option Disasm.Insn :=
+  (x86Int1 long (instructionBytes data (address - base))).map fun size =>
+    { address, size, asm := "int1", flow := .normal, bil := [.special "int1"] }
+
+/-- What LLVM decodes of the bytes of an x86 instruction, or of the encoding that it has for them (`x86Alias`). -/
+def x86Disassemble (triple : String) (bytes : ByteArray) (address : Nat) : IO LLVM.MCDecoded := do
+  try LLVM.disassembleMC triple bytes address
+  catch error =>
+    match x86Alias (triple == "x86_64") bytes with
+    | some (canonical, _) => LLVM.disassembleMC triple canonical address
+    | none => throw error
+
+/-- `sizeAt` of x86, with the encodings that LLVM's decoder hasn't (`x86Alias`, `x86Int1`). -/
+def x86SizeAt (triple : String) (base address : Nat) (data : ByteArray) : IO (Option Nat) := do
+  let bytes := instructionBytes data (address - base)
+  if let some size := x86Int1 (triple == "x86_64") bytes then return some size
+  try
+    pure (some (← x86Disassemble triple bytes address).size)
+  catch _ =>
+    pure none
 
 /-- The context of an x86 instruction, which `x86-prefix` can ask for its prefixes. -/
 private def x86Context (context : Primus.Semantics.Context) (long : Bool) (bytes : ByteArray) (size : Nat) :
@@ -1661,12 +1820,46 @@ private def avxCode (globals : Primus.Semantics.Environment) (context : Primus.S
         else
           .error undefined
 
+/-- The number of a register of MMX that an operand is. -/
+private def x86MmxOperand : Primus.Semantics.Value → Option Nat
+  | .register name 64 64 =>
+    match name.toList with
+    | ['M', 'M', digit] => if digit.isDigit && digit.toNat - 48 < 8 then some (digit.toNat - 48) else none
+    | _ => none
+  | _ => none
+
+/-- The code of an instruction of MMX with what it does to the state of x87, which its registers are in (the manual, volume 1, 9.2):
+`MM0` to `MM7` are the significands of the registers of x87 by their numbers, not by the stack. So, before it, the top of the stack
+is 0, where a register of the stack is the one of its number, every tag says valid, and the registers of MMX are read from there; and
+after it, the one that it wrote, its first operand if that is one, is in its register of x87 with an exponent of all ones. `EMMS`, with
+no register, isn't one of these. The variables `MM0` to `MM7` are what the instruction itself reads and writes. -/
+private def x86MmxState (operands : List Primus.Semantics.Value) (body : Bil.Program) : Bil.Program :=
+  if !operands.any (x86MmxOperand · |>.isSome) then body else
+  let st (index : Nat) : Bap.Var := ⟨s!"ST{index % 8}", .imm 80, 0, false⟩
+  let mm (index : Nat) : Bap.Var := ⟨s!"MM{index}", .imm 64, 0, false⟩
+  let kept (index : Nat) : Bap.Var := ⟨s!"mmx:st{index}", .imm 80, 0, true⟩
+  let status : Bap.Var := ⟨"FPU_STATUS", .imm 16, 0, false⟩
+  let tags : Bap.Var := ⟨"FPU_TAG", .imm 16, 0, false⟩
+  let top : Bil.Exp := .extract 13 11 (.var status)
+  -- With the top at `k`, the register of number `i` is `ST((i - k) mod 8)`.
+  let rotate (k : Nat) : Bil.Stmt :=
+    .ifElse (.bin .eq top (.int (BitVec.ofNat 3 k)))
+      ((List.range 8).map (fun index => .move (kept index) (.var (st index))) ++
+        (List.range 8).map fun index => .move (st index) (.var (kept ((index + 8 - k) % 8)))) []
+  let enter : Bil.Program := (List.range 7).map (fun k => rotate (k + 1)) ++
+    [.move status (.bin .and (.var status) (.int (BitVec.ofNat 16 0xc7ff))), .move tags (.int (BitVec.ofNat 16 0))] ++
+    (List.range 8).map fun index => .move (mm index) (.extract 63 0 (.var (st index)))
+  let leave : Bil.Program := match operands.head?.bind x86MmxOperand with
+    | some index => [.move (st index) (.concat (.int (BitVec.ofNat 16 0xffff)) (.var (mm index)))]
+    | none => []
+  enter ++ body ++ leave
+
 /-- The code of an x86 instruction: what its opcode is defined as, or, with the name of an opcode that isn't, what AVX-512 has. -/
 private def x86Code (globals avx : Primus.Semantics.Environment) (context : Primus.Semantics.Context) (opcode : Nat)
     (name : Option String) (operands : List Primus.Semantics.Value) : Except String Bil.Program :=
-  match name with
-  | none => Primus.Semantics.liftMCCode globals context opcode operands
-  | some name => avxCode avx context name operands
+  (match name with
+    | none => Primus.Semantics.liftMCCode globals context opcode operands
+    | some name => avxCode avx context name operands).map (x86MmxState operands)
 
 /-- The name of an opcode that its environment doesn't define. -/
 private def x86AvxName (triple : String) (globals : Primus.Semantics.Environment) (bytes : ByteArray) (address opcode : Nat) :
@@ -1746,7 +1939,7 @@ know the address is ever in the memo, which is the code at every address (`Bap.P
 def decodeX86Memo (memo : IO.Ref LiftMemo) (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : IO Disasm.Insn := do
   let bytes := instructionBytes data (address - base)
-  let decoded ← LLVM.disassembleMC "x86_64" bytes address
+  let decoded ← x86Disassemble "x86_64" bytes address
   let context := x86Context (semanticsContext address (address + decoded.size)) true bytes decoded.size
   let opcode := LLVM.mcOpcode decoded.instruction
   let machineOperands ← LLVM.mcOperands decoded.instruction
@@ -1772,7 +1965,7 @@ def decodeX86Loop (memo : IO.Ref LiftMemo) (globals : Primus.Semantics.Environme
 def decodeX86With (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : IO Disasm.Insn := do
   let bytes := instructionBytes data (address - base)
-  let decoded ← LLVM.disassembleMC "x86_64" bytes address
+  let decoded ← x86Disassemble "x86_64" bytes address
   let context := x86Context (semanticsContext address (address + decoded.size)) true bytes decoded.size
   let opcode := LLVM.mcOpcode decoded.instruction
   let machineOperands ← LLVM.mcOperands decoded.instruction
@@ -1793,7 +1986,7 @@ def decodeX86 (base address : Nat) (data : ByteArray) : IO Disasm.Insn := do
 def decodeX8632With (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : IO Disasm.Insn := do
   let bytes := instructionBytes data (address - base)
-  let decoded ← LLVM.disassembleMC "i386" bytes address
+  let decoded ← x86Disassemble "i386" bytes address
   let context := x86Context (arm32Context address (address + decoded.size)) false bytes decoded.size
   let opcode := LLVM.mcOpcode decoded.instruction
   let machineOperands ← LLVM.mcOperands decoded.instruction
@@ -1815,7 +2008,7 @@ def decodeX8632With (globals : Primus.Semantics.Environment) (base address : Nat
 def decodeX8632Memo (memo : IO.Ref LiftMemo) (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : IO Disasm.Insn := do
   let bytes := instructionBytes data (address - base)
-  let decoded ← LLVM.disassembleMC "i386" bytes address
+  let decoded ← x86Disassemble "i386" bytes address
   let context := x86Context (arm32Context address (address + decoded.size)) false bytes decoded.size
   let opcode := LLVM.mcOpcode decoded.instruction
   let machineOperands ← LLVM.mcOperands decoded.instruction
@@ -1963,7 +2156,7 @@ def decodeARM32With (globals : Primus.Semantics.Environment) (base address : Nat
     | some bil => pure bil
     | none =>
       resolveAliases armAliases <$>
-        Primus.Semantics.liftWith globals context decoded.opcode (decoded.operands.map arm32Operand)
+        Primus.Semantics.liftWith globals context decoded.opcode (arm32Operands decoded)
   pure {
     address := address
     size := decoded.size
@@ -1984,7 +2177,7 @@ private def liftThumb (globals : Primus.Semantics.Environment) (address : Nat) (
   | some bil => pure bil
   | none =>
     resolveAliases armAliases <$>
-      Primus.Semantics.liftWith globals context decoded.opcode (decoded.operands.map arm32Operand)
+      Primus.Semantics.liftWith globals context decoded.opcode (arm32Operands decoded)
 
 /-- The conditions of the instructions of an IT block, from the operands of the IT instruction as the architecture has
 them: the first has `firstcond`, and each next its top three bits and the next bit of the mask, down to the lowest bit

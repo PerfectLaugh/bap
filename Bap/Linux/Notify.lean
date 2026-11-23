@@ -136,6 +136,20 @@ private def changeOf (before after : Option Inode) : Nat :=
       else 0
   | _, _ => 0
 
+/-- Whether all that changed of an inode from one kernel to the other is its times, or nothing: not what it holds, nor whose it is, its
+mode or its attributes. -/
+private def timesOnly (before after : Option Inode) : Bool :=
+  match before, after with
+  | some old, some new =>
+    sameObject old new ||
+      (match old.content, new.content with
+        | .file data, .file data' => sameObject data data'
+        | _, _ => true) &&
+      old.mode == new.mode && old.details.uid == new.details.uid && old.details.gid == new.details.gid &&
+      old.details.attributes.length == new.details.attributes.length &&
+      (old.details.attributes.zip new.details.attributes).all (fun ((name, value), (name', value')) => name == name' && value.data == value'.data)
+  | _, _ => false
+
 /-- The path and the entries of a directory, from what was found of them before if the paths are those that they were found in. -/
 private def entriesOf (notifier : Notifier) (kernel : Kernel) (directory : Nat) : IO (Option String × List (String × Nat)) := do
   if let some (paths, path, entries) := (← notifier.entries.get).get? directory then
@@ -214,6 +228,11 @@ def after (notifier : Notifier) (kernelRef : IO.Ref Kernel) (group : Nat) (call 
       ((entriesBefore.getD directory []) ++ (entriesAfter.getD directory [])).map (·.2)).eraseDups
     for inode in candidates do
       let change := if inodesChanged then changeOf (before.inodes.get? inode) (after.inodes.get? inode) else 0
+      -- The times that a call that makes, removes or moves a name sets, of the directories and of what has a link more or less, aren't
+      -- said for themselves, as nothing of `fsnotify_change` is; nor is that a directory was read, which is said of the call.
+      let change := if pathsChanged && timesOnly (before.inodes.get? inode) (after.inodes.get? inode) then 0
+        else if call == .getdents && change == inAccess then 0
+        else change
       if change != 0 then kernel := say kernel inode change entriesAfter true
       -- A link more or less is said to the inode alone.
       else if pathsChanged && counts.getD inode 0 != counts'.getD inode 0 &&

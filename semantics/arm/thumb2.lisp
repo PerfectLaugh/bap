@@ -59,7 +59,7 @@
 (defun t2ORNrs (rd rn rm sh cnd _ s)
   (t2-logical logornot rd rn (shifted rm sh) (shifter-carry rm sh) cnd s))
 (defun t2ORNrr (rd rn rm cnd _ s) (t2-logical logornot rd rn rm CF cnd s))
-(defun t2ORNri (rd rn imm cnd _ s) (t2-logical logornot rd rn imm CF cnd s))
+(defun t2ORNri (rd rn imm cnd _ s) (t2-logical logornot rd rn imm (t2-imm-carry imm) cnd s))
 (defun t2MVNs (rd rm sh cnd _ s)
   (t2-logical second-not rd rm (shifted rm sh) (shifter-carry rm sh) cnd s))
 (defun t2MOVsi (rd rm sh cnd _ s)
@@ -201,8 +201,11 @@
 (defun t2SUBspImm (rd rn imm cnd _ s) (t2SUBri rd rn imm cnd _ s))
 (defun t2ADDspImm12 (rd rn imm cnd _) (t2ADDri12 rd rn imm cnd _))
 (defun t2SUBspImm12 (rd rn imm cnd _) (t2SUBri12 rd rn imm cnd _))
+;; of the pc it is ADR of `#-0`, which the decoder has as this
+;; subtraction of zero from the pc, that is aligned
 (defun t2SUBri12 (rd rn imm cnd _)
-  (when (condition-holds cnd) (set$ rd (- rn imm))))
+  (when (condition-holds cnd)
+    (set$ rd (- (if (is-pc rn) (logand (t2pc) (lnot 3)) rn) imm))))
 (defun tADDrSP (rd _ rm cnd _)
   (when (condition-holds cnd) (t2alu rd (+ SP (t2reg rm)))))
 (defun tADDspr (_ _ rm cnd _)
@@ -233,6 +236,17 @@
 (defun t2UDF (_) (intrinsic 'undefined-instruction :aborts))
 (defun tTRAP () (intrinsic 'undefined-instruction :aborts))
 (defun t__brkdiv0 () (intrinsic 'undefined-instruction :aborts))
+
+;; see SMC, RFE and SRS in arm-a32.lisp
+(defun t2SMC (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun t2RFEDB (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun t2RFEDBW (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun t2RFEIA (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun t2RFEIAW (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun t2SRSDB (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun t2SRSDB_UPD (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun t2SRSIA (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun t2SRSIA_UPD (_ _ _) (intrinsic 'undefined-instruction :aborts))
 
 ;; see SETEND in arm-a32.lisp
 (defun tSETEND (e) (SETEND e))
@@ -580,6 +594,8 @@
 (defun t2STREXD (rd rt rt2 rn cnd _)
   (when (condition-holds cnd) (a32-store-exclusive rd rn (a32-store-pair rt rt2 rn))))
 
+;; CPS has no effect in the user mode, of 16 bits too
+(defun tCPS (_ _) (empty))
 (defun t2CPS1p (_) (empty))
 (defun t2CPS2p (_ _) (empty))
 (defun t2CPS3p (_ _ _) (empty))

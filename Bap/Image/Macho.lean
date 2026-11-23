@@ -160,7 +160,7 @@ private def parseSymbol (data : ByteArray) (endian : Endian) (stringsOffset stri
   else if nameOffset ≥ stringsSize then
     .error "Mach-O symbol name exceeds string table"
   else
-    let name ← IO.Reader.cstring data (stringsOffset + nameOffset)
+    let name ← IO.Reader.cstringIn data (stringsOffset + nameOffset) (stringsOffset + stringsSize)
     let kind ← IO.Reader.get8 data (offset + 4)
     let sectionIndex ← IO.Reader.get8 data (offset + 5)
     let address ← IO.Reader.u64 data endian (offset + 8)
@@ -169,14 +169,16 @@ private def parseSymbol (data : ByteArray) (endian : Endian) (stringsOffset stri
       | none => false
     .ok (some ⟨name, address, 0, isFunction, kind &&& 0xe0 != 0, false⟩)
 
+/-- The symbols of the symbol tables, whose names all together take no more than `namesLimit`, each as often as a symbol has it:
+every entry may name all of the string table. -/
 private def parseSymbols (data : ByteArray) (header : Header) (state : ParseState) :
     Except String (List Symbol) :=
   let sections := state.sections.toList
-  Array.toList <$> state.symbolTables.foldlM (init := #[]) fun symbols table => do
-    let parsed ← (List.range table.count).mapM fun index =>
-      parseSymbol data header.endian table.stringsOffset table.stringsSize sections
-        (table.offset + index * 16)
-    .ok (symbols ++ parsed.filterMap id)
+  (·.1.toList) <$> state.symbolTables.foldlM (init := ((#[] : Array Symbol), 0)) fun (symbols, used) table => do
+    let (parsed, used) ← mapNamedM data (fun symbol => nameCost ((symbol.map (·.name)).getD "")) (items := List.range table.count)
+      (used := used) fun index =>
+        parseSymbol data header.endian table.stringsOffset table.stringsSize sections (table.offset + index * 16)
+    .ok (symbols ++ parsed.filterMap id, used)
 
 private def architecture (cpuType : Nat) : Arch :=
   match cpuType with

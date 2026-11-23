@@ -17,7 +17,11 @@ private def decodeMemo (memo : IO.Ref LLVMLift.LiftMemo) (globals : Primus.Seman
   try
     pure (.ok (← LLVMLift.decodeX8632Memo memo globals base address data))
   catch error =>
-    pure (.error (toString error))
+    -- What runs has `INT1`, the byte `f1`, which LLVM has no instruction for: the decoders of a project, which the proofs are of,
+    -- are of what LLVM decodes.
+    match LLVMLift.x86Int1Insn false base address data with
+    | some insn => pure (.ok insn)
+    | none => pure (.error (toString error))
 
 private def decodeLoop (memo : IO.Ref LLVMLift.LiftMemo) (globals : Primus.Semantics.Environment) (base : Nat)
     (address : Nat) (data : ByteArray) : IO (Except String Disasm.Insn) := do
@@ -31,12 +35,12 @@ what reads the code and doesn't run it. See `emulatorDisassembler`. -/
 def disassembler (base : Nat := 0) : IO Disasm.Disassembler := do
   let globals ← LLVMLift.x8632Environment
   let memo ← IO.mkRef {}
-  pure { name := "i386-llvm-primus", decode := decodeLoop memo globals base, sizeAt := LLVMLift.sizeAt "i386" base }
+  pure { name := "i386-llvm-primus", decode := decodeLoop memo globals base, sizeAt := LLVMLift.x86SizeAt "i386" base }
 
 /-- The decoder of what runs: an instruction is what the semantics lift, of which a repeated one is a round of it. -/
 def emulatorDisassembler (base : Nat := 0) : IO Disasm.Disassembler := do
   let globals ← LLVMLift.x8632Environment
   let memo ← IO.mkRef {}
-  pure { name := "i386-llvm-primus", decode := decodeMemo memo globals base, sizeAt := LLVMLift.sizeAt "i386" base }
+  pure { name := "i386-llvm-primus", decode := decodeMemo memo globals base, sizeAt := LLVMLift.x86SizeAt "i386" base }
 
 end Bap.Target.X8632

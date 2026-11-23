@@ -1,0 +1,49 @@
+int5: sig=11 code=128 addr=0 ip+0
+int1: sig=11 code=128 addr=0 ip+0
+int3: sig=5 code=128 addr=0 ip+1
+int3b: sig=5 code=128 addr=0 ip+1
+int4: sig=11 code=128 addr=0 ip+2
+icebp: sig=5 code=1 addr=ip ip+1
+int255: sig=11 code=128 addr=0 ip+0
+into: sig=11 code=128 addr=0 ip+9
+intono: ran
+cli: sig=11 code=128 addr=0 ip+0
+sti: sig=11 code=128 addr=0 ip+0
+inb: sig=11 code=128 addr=0 ip+0
+outb: sig=11 code=128 addr=0 ip+0
+inw: sig=11 code=128 addr=0 ip+0
+outl: sig=11 code=128 addr=0 ip+0
+insb: sig=11 code=128 addr=0 ip+0
+outsl: sig=11 code=128 addr=0 ip+0
+rdmsr: sig=11 code=128 addr=0 ip+0
+wrmsr: sig=11 code=128 addr=0 ip+0
+movcr: sig=11 code=128 addr=0 ip+0
+movtocr: sig=11 code=128 addr=0 ip+0
+movdr: sig=11 code=128 addr=0 ip+0
+movfromdr: sig=11 code=128 addr=0 ip+0
+iret: sig=11 code=128 addr=0 ip+0
+sysret: sig=11 code=128 addr=0 ip+0
+lgdt: sig=11 code=128 addr=0 ip+0
+lidt: sig=11 code=128 addr=0 ip+0
+ltr: sig=11 code=128 addr=0 ip+0
+lldt: sig=11 code=128 addr=0 ip+0
+invlpg: sig=11 code=128 addr=0 ip+0
+clts: sig=11 code=128 addr=0 ip+0
+rdpmc: sig=11 code=128 addr=0 ip+0
+vmcall: sig=4 code=2 addr=ip ip+0
+vmmcall: sig=4 code=2 addr=ip ip+0
+hlt: sig=11 code=128 addr=0 ip+0
+wbinvd: sig=11 code=128 addr=0 ip+0
+invd: sig=11 code=128 addr=0 ip+0
+lmsw: sig=11 code=128 addr=0 ip+0
+sysexit: sig=4 code=2 addr=ip ip+0
+ud2: sig=4 code=2 addr=ip ip+0
+xsetbv: sig=11 code=128 addr=0 ip+2
+vmxoff: sig=4 code=2 addr=ip ip+0
+int80 getpid: pid
+xgetbv 3 0
+smsw 80050033
+leavew esp+22 ebp 1
+enterw esp+e ebp 7777 1 pushed 12340007
+loopw 3 ffff0000
+xlat 1123

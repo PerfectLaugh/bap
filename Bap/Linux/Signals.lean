@@ -250,7 +250,7 @@ private def bitOf (signal : Nat) : Nat := 1 <<< (signal - 1)
 /-- The flags of a target that a context has, by where each is in its status word, and the bits of that word that are set whatever
 the flags are: of x86, bit 1 and the interrupt flag, and of ARM, the user mode. -/
 private def statusBits : Architecture → List (String × Nat) × Nat
-  | .x86_64 | .i686 => ([("CF", 0), ("PF", 2), ("AF", 4), ("ZF", 6), ("SF", 7), ("DF", 10), ("OF", 11)], 0x202)
+  | .x86_64 | .i686 => ([("CF", 0), ("PF", 2), ("AF", 4), ("ZF", 6), ("SF", 7), ("TF", 8), ("DF", 10), ("OF", 11)], 0x202)
   | .aarch64 => ([("NF", 31), ("ZF", 30), ("CF", 29), ("VF", 28)], 0)
   | .arm => ([("NF", 31), ("ZF", 30), ("CF", 29), ("VF", 28)], 0x10)
   | _ => ([], 0)
@@ -520,6 +520,12 @@ structure Signals where
   /-- The process group of a process, and the processes of a process group that aren't reaped, as the kernel has them, for `kill` of a group. -/
   pgidOf : IO.Ref (Nat → IO Nat)
   members : IO.Ref (Nat → IO (List Nat))
+  /-- Whether a process may send a signal to another, as Linux's `kill_ok_by_cred` has it of their users, of the capability, and
+  of SIGCONT in a session: the sender, the target and the signal. -/
+  permits : IO.Ref (Nat → Nat → Nat → IO Bool)
+  /-- How many signals may be queued for the user of a process, its `RLIMIT_SIGPENDING`, and whether another process is of that
+  user, whose queued signals count to it. -/
+  pendingLimit : IO.Ref (Nat → IO (Nat × (Nat → Bool)))
 
 namespace Signals
 
@@ -657,6 +663,61 @@ private def writeInfo (signals : Signals) (emu : Emu) (address : Nat) (info : Si
     int (base + 4) overrun
     write emu (address + base + 8) (encodeNumber emu word value)
 
+/-- Where the context of x86-64 has its pointer to the state of floating point, `fpregs` of its `mcontext_t`, and where that state is
+put: after the mask, where the libraries have room for it in a `ucontext_t`. Linux puts it elsewhere on the stack, and a handler
+finds it by the pointer. -/
+private def floatPointer : Nat := 40 + 23 * 8
+private def floatState : Nat := 424
+
+/-- The state of x87 and SSE of a thread as `FXSAVE` lays it out, by what gives a register of it of a width, which is what the frame of
+a signal of x86-64 has of it on a processor without `XSAVE`, as this one says it is, and what `PTRACE_GETFPREGS` gives: the control
+and status words, the tags, of a bit each, MXCSR and its mask, the registers of the stack from its top, and the 16 of SSE. -/
+def floatImageWith (value : Nat → String → IO Nat) : IO ByteArray := do
+  let little (bytes number : Nat) : ByteArray := ByteArray.mk ((List.range bytes).map fun index => (number >>> (8 * index)).toUInt8).toArray
+  let control ← value 16 "FPU_CONTROL"
+  let status ← value 16 "FPU_STATUS"
+  let tags ← value 16 "FPU_TAG"
+  let mxcsr ← value 32 "MXCSR"
+  let abridged := (List.range 8).foldl (fun out index => if (tags >>> (2 * index)) % 4 == 3 then out else out + 2 ^ index) 0
+  let mut image := little 2 control ++ little 2 status ++ little 2 abridged ++ little 18 0 ++ little 4 mxcsr ++ little 4 0xffff
+  for index in List.range 8 do
+    image := image ++ little 16 (← value 80 s!"ST{index}")
+  for index in List.range 16 do
+    image := image ++ little 16 ((← value 512 s!"ZMM{index}") % 2 ^ 128)
+  pure (image ++ ByteArray.mk (Array.replicate (512 - image.size) 0))
+
+/-- The state of x87 and SSE of a thread from what `floatImageWith` laid out, by what gives and what sets a register of it, as
+`sigreturn` restores it from the frame, which a handler may have changed; and with no image, as it was when the thread started, as
+`fpu__clear_user_states` has it of a context whose pointer is null. What a register of SSE has above its 128 bits is no part of it,
+and stays. -/
+def restoreFloatWith (value : Nat → String → IO Nat) (set : String → Nat → Nat → IO Unit) (image : Option ByteArray) : IO Unit := do
+  let field (image : ByteArray) (offset size : Nat) : Nat :=
+    (List.range size).foldl (fun out index => out + (image.get! (offset + index)).toNat * 256 ^ index) 0
+  match image with
+  | some image =>
+    set "FPU_CONTROL" 16 (field image 0 2)
+    set "FPU_STATUS" 16 (field image 2 2)
+    let abridged := field image 4 1
+    set "FPU_TAG" 16 ((List.range 8).foldl (fun out index => if (abridged >>> index) % 2 == 1 then out else out + 3 * 4 ^ index) 0)
+    set "MXCSR" 32 (field image 24 4 % 2 ^ 16)
+    for index in List.range 8 do set s!"ST{index}" 80 (field image (32 + 16 * index) 10)
+    for index in List.range 16 do
+      let high := (← value 512 s!"ZMM{index}") / 2 ^ 128
+      set s!"ZMM{index}" 512 (high * 2 ^ 128 + field image (160 + 16 * index) 16)
+  | none =>
+    set "FPU_CONTROL" 16 0x37f
+    set "FPU_STATUS" 16 0
+    set "FPU_TAG" 16 0xffff
+    set "MXCSR" 32 0x1f80
+    for index in List.range 8 do set s!"ST{index}" 80 0
+    for index in List.range 16 do set s!"ZMM{index}" 512 ((← value 512 s!"ZMM{index}") / 2 ^ 128 * 2 ^ 128)
+
+private def floatImage (emu : Emu) : IO ByteArray := floatImageWith fun width name => registerValue emu width name
+
+private def restoreFloat (emu : Emu) (image : Option ByteArray) : IO Unit :=
+  restoreFloatWith (fun width name => registerValue emu width name)
+    (fun name width value => setReg emu ⟨name, .imm width, 0, false⟩ (wordOfWidth width value)) image
+
 /-- The way back for a handler without a restorer: the page is put there the first time that it is wanted. -/
 private def returnAddress (signals : Signals) (emu : Emu) : IO Nat := do
   match lookupRegion (← emu.regions.get) signals.returnPage with
@@ -722,6 +783,12 @@ private def enterHandler (signals : Signals) (emu : Emu) (tid : Nat) (info : Sig
   write emu (contextAddress + layout.mask) (encodeMask signals emu oldMask (maskBytes architecture))
   if let some (at_, target) := layout.pointer then
     write emu (contextAddress + at_) (encodeNumber emu word (contextAddress + target))
+  -- Of x86-64, the state of floating point, which `sigreturn` goes back to as the handler left it there, and the flags of the
+  -- context: `UC_SIGCONTEXT_SS` and `UC_STRICT_RESTORE_SS`, as Linux says them of a program of 64 bits.
+  if architecture matches .x86_64 then
+    write emu (contextAddress + floatState) (← floatImage emu)
+    write emu (contextAddress + floatPointer) (encodeNumber emu 8 (contextAddress + floatState))
+    write emu contextAddress (encodeNumber emu 8 6)
   let (flagNames, always) := statusBits architecture
   let mut status := always
   for (name, bit) in flagNames do
@@ -731,7 +798,9 @@ private def enterHandler (signals : Signals) (emu : Emu) (tid : Nat) (info : Sig
   let numbers := signals.numbers
   let trap := match info.detail, architecture with
     | .fault address, .x86_64 | .fault address, .i686 =>
-      if info.signal == numbers.segv || info.signal == numbers.bus then
+      -- A general protection fault, as of an address that isn't canonical, is no page fault, and leaves where the last was.
+      if info.code == 0x80 then (13, 0, thread.trap.2.2)
+      else if info.signal == numbers.segv || info.signal == numbers.bus then
         (14, pageError, address)
       else (6, 0, thread.trap.2.2)
     | .fault address, .aarch64 => (0, 0, address)
@@ -945,6 +1014,17 @@ private def interrupt (signals : Signals) (emu : Emu) (tid : Nat) (restart : Boo
 again when it goes on, as a tracee does of a signal. -/
 def leaveCall (signals : Signals) (emu : Emu) (tid : Nat) : IO Unit := interrupt signals emu tid true (traced := true)
 
+/-- The signals that a thread blocks, and those set, as `PTRACE_GETSIGMASK` and `PTRACE_SETSIGMASK` have them: all but SIGKILL and
+SIGSTOP. -/
+def maskOf (signals : Signals) (tid : Nat) : IO Nat := do pure (← threadOf signals tid).mask
+
+def setMask (signals : Signals) (tid mask : Nat) : IO Unit :=
+  modifyThread signals tid fun state => { state with mask := blockable signals mask }
+
+/-- A thread that waits in a system call leaves it with `EINTR`, as a call does that Linux doesn't make again once its process was stopped
+and went on, whatever handlers it has. -/
+def breakCall (signals : Signals) (emu : Emu) (tid : Nat) : IO Unit := interrupt signals emu tid false
+
 /-- Whether a system call is one that waits for a signal, `pause` or `rt_sigsuspend`. -/
 def waitsForSignal (architecture : Architecture) (number : Nat) : Bool :=
   number == (callsOf architecture).suspend || (callsOf architecture).pause == some number
@@ -1035,6 +1115,17 @@ def send (signals : Signals) (emu : Emu) (tid : Option Nat) (group : Nat) (info 
   | some tid => sendToThread signals emu tid group info
   | none => sendToGroup signals emu group info
   (← signals.sent.get) emu
+
+/-- Whether one more signal can be queued for a process, as `__sigqueue_alloc` has it: those that are pending for its user, of all its
+processes, are fewer than its `RLIMIT_SIGPENDING`. -/
+def mayQueue (signals : Signals) (emu : Emu) (group : Nat) : IO Bool := do
+  let (limit, sameUser) ← (← signals.pendingLimit.get) group
+  let table ← signals.table.get
+  let tasks := (← emu.taskTable.get).tasks
+  let ofThreads := tasks.foldl (init := 0) fun total task =>
+    if sameUser task.group then total + (table.threads.getD task.tid {}).pending.length else total
+  let ofGroups := table.groupPending.fold (init := 0) fun total owner pending => if sameUser owner then total + pending.length else total
+  pure (ofThreads + ofGroups < limit)
 
 /-- Sends a signal to a thread that it can't keep from itself, as Linux has `force_sig_info_to_task` do for `SECCOMP_RET_TRAP`: if the
 thread blocks it or its process ignores it, the thread no longer blocks it and the process has the default action for it. -/
@@ -1239,7 +1330,10 @@ def faulted (signals : Signals) (emu : Emu) (fault : MemoryFault) (bus : Bool :=
     | .fetch => 16
     | .read => 0
   let (signal, name) := if bus then (numbers.bus, "SIGBUS") else (numbers.segv, "SIGSEGV")
-  let info : SignalInfo := ⟨signal, if bus then 2 else code, .fault fault.address⟩
+  -- An address of x86-64 that isn't canonical is a general protection fault rather than a page fault, of which Linux says
+  -- `SI_KERNEL` and no address.
+  let general := signals.architecture matches .x86_64 && !bus && fault.address ≥ 2 ^ 47 && fault.address < 2 ^ 64 - 2 ^ 47
+  let info : SignalInfo := if general then ⟨signal, 0x80, .fault 0⟩ else ⟨signal, if bus then 2 else code, .fault fault.address⟩
   let fail (why : String) : IO Bool := do
     signals.failures.modify (·.push (.unhandled tid fault.pc fault.address why))
     if bus then
@@ -1344,11 +1438,16 @@ def forked (signals : Signals) (emu : Emu) (parent child : Nat) : IO Unit := do
         if key.1 == parent then actions.insert (child, key.2) action else actions
       threads := table.threads.insert child { state with pending := [], alternate, waiting := none, waitingChild := none } }
 
-/-- `execve`: what had a handler goes back to the default, as the handler isn't there any more, and what was ignored stays so. -/
+/-- `execve`: what had a handler goes back to the default, as the handler isn't there any more, and what was ignored stays so, without
+the flags and the mask that it had. -/
 def executed (signals : Signals) (group tid : Nat) : IO Unit := do
   signals.table.modify fun table =>
     { table with
-      actions := table.actions.filter fun key action => key.1 != group || action.handler == 1 }
+      -- Of what stays ignored, the flags and the mask go too, as `flush_signal_handlers` has it.
+      actions := table.actions.fold (init := {}) fun actions key action =>
+        if key.1 != group then actions.insert key action
+        else if action.handler == 1 then actions.insert key { handler := 1 }
+        else actions }
   modifyThread signals tid fun state => { state with frames := [], alternate := noAlternate, suspended := none, waiting := none, waitingChild := none }
 
 private def readAction (signals : Signals) (emu : Emu) (address : Nat) : IO SignalAction := do
@@ -1402,6 +1501,7 @@ def leaveHandler (signals : Signals) (emu : Emu) : IO SyscallAction := do
     let slotValue (at_ : Nat) : IO Nat := do
       pure ((← readNumber emu (frame.context + at_) layout.slot) % 2 ^ width)
     let mut failed := false
+    let mut badSegment := false
     try
       for (name, offset) in layout.registers do
         setReg emu ⟨name, .imm width, 0, false⟩ (wordOfWidth width (← slotValue offset))
@@ -1417,6 +1517,19 @@ def leaveHandler (signals : Signals) (emu : Emu) : IO SyscallAction := do
         let cpsr ← readNumber emu (frame.context + at_) 4
         setReg emu ⟨"ISET", .imm 1, 0, false⟩ (wordOfWidth 1 ((cpsr >>> 5) &&& 1))
       let pc ← slotValue layout.pc
+      -- Of x86-64, the state of floating point is what the context points to, as the handler left it, or as a thread starts with if
+      -- it points to none.
+      if architecture matches .x86_64 then
+        let pointer ← readNumber emu (frame.context + floatPointer) 8
+        restoreFloat emu (← if pointer == 0 then pure none else (some ·) <$> read emu pointer 512)
+        -- The segments that it goes back with are those of the context, of which only a program's own can be gone back to: of any
+        -- other for its code, the return to it faults, as `iret` does, which is SIGSEGV of the kernel; and so of one for its stack if
+        -- the context says to take it as it is, `UC_STRICT_RESTORE_SS`, and otherwise that is put right, as `restore_sigcontext` has it.
+        let segments ← readNumber emu (frame.context + 40 + 18 * 8) 8
+        let flags ← readNumber emu frame.context 8
+        if segments % 2 ^ 16 ||| 3 != 0x33 || (flags &&& 4 != 0 && (segments >>> 48) ||| 3 != 0x2b) then badSegment := true
+      if architecture matches .i686 then
+        if (← readNumber emu (frame.context + 20 + 15 * 4) 4) % 2 ^ 16 ||| 3 != 0x23 then badSegment := true
       let mask ← readMask signals emu (frame.context + layout.mask) (maskBytes architecture)
       -- As Linux does, the alternate stack of the context, unless the stack it goes back to is on the one there is now, or its flags
       -- aren't taken.
@@ -1438,6 +1551,9 @@ def leaveHandler (signals : Signals) (emu : Emu) : IO SyscallAction := do
     if failed then
       kill emu (← currentTask emu).group (signals.numbers).segv
       return .returnValue 0
+    if badSegment then
+      signals.failures.modify (·.push (.sigreturn tid "its context has a code or a stack segment that isn't the program's"))
+      signals.force emu tid (← currentTask emu).group ⟨(signals.numbers).segv, 0x80, .fault 0⟩
     -- As a kernel does: what was loaded exclusively isn't held across this.
     if (Bil.lookup (← emu.state.get).env (exclusiveMonitor width)).toOption.isSome then
       setReg emu (exclusiveMonitor width) (wordOfWidth width 0)
@@ -1523,9 +1639,13 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
       -- What isn't there is `ESRCH` before a signal that isn't, as `check_kill_permission` has that of what is.
       if groups.isEmpty then return ← fail current numbers.esrch
       if signal != 0 && !valid signal then return ← fail current numbers.einval
+      -- Only to what it may send to, as `check_kill_permission` has it, of 0 too: `EPERM` of one process, and of a group if it may
+      -- send to none of it; of -1, which leaves out what it may not send to, nothing.
+      let allowed ← groups.filterM fun group => do (← signals.permits.get) task.group group signal
+      if allowed.isEmpty && target != 2 ^ 32 - 1 then return ← fail current numbers.eperm
       if signal != 0 then
         -- As any signal that is sent, which what waits to read one, of a `signalfd`, hears of.
-        for group in groups do signals.send current none group (← selfInfo current signal 0 0)
+        for group in allowed do signals.send current none group (← selfInfo current signal 0 0)
       syscallReturn current (.ok 0)
     else if number == calls.tkill || number == calls.tgkill then
       let (expected, target, signal) := if number == calls.tkill then (none, arg 0, arg 1) else (some (arg 0), arg 1, arg 2)
@@ -1538,6 +1658,7 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
       | some { status, group, .. } =>
         if expected.isSome && expected != some group then return ← fail current numbers.esrch
         if signal != 0 && !valid signal then return ← fail current numbers.einval
+        if !(← (← signals.permits.get) task.group group signal) then return ← fail current numbers.eperm
         if signal != 0 && status.isNone then signals.send current (some target) group (← selfInfo current signal (signedCode 6) 0)
         syscallReturn current (.ok 0)
       | none => fail current numbers.esrch
@@ -1556,7 +1677,12 @@ def serve (signals : Signals) (emu : Emu) : IO Unit := do
       match (← current.taskTable.get).present.find? (·.tid == target) with
       | some { group, .. } =>
         if signal != 0 && !valid signal then return ← fail current numbers.einval
-        if signal != 0 then signals.send current none group ⟨signal, code, .sent task.group 0 value⟩
+        if !(← (← signals.permits.get) task.group group signal) then return ← fail current numbers.eperm
+        -- What is given is what is delivered, as `copy_siginfo_from_user` has it: the pid and the uid that it says, not the sender's.
+        -- A signal of real time that the user of the target has no room to queue, by its `RLIMIT_SIGPENDING`, is `EAGAIN`, as
+        -- `__send_signal_locked` has it of what isn't `SI_USER`.
+        if signal ≥ 32 && code != 0 && !(← signals.mayQueue current group) then return ← fail current numbers.eagain
+        if signal != 0 then signals.send current none group ⟨signal, code, .sent (at_ base 4) (at_ (base + 4) 4) value⟩
         syscallReturn current (.ok 0)
       | none => fail current numbers.esrch
     else if number == calls.pending then

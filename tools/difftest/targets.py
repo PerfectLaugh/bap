@@ -475,7 +475,7 @@ class X8664(X86):
         self.lean_vars = [(n, 512 if n.startswith("ZMM") else w) for n, w in self.lean_vars]
 
     def aux_spec(self):
-        spec = {"MXCSR": (0x1F80, 32), "FPU_CONTROL": (0x37F, 16), "IF": (1, 1), "FS_BASE": (0, 64), "GS_BASE": (0, 64), "RIP": (0, 64), **EFLAGS_AUX}
+        spec = {"MXCSR": (0x1F80, 32), "FPU_CONTROL": (0x37F, 16), "IF": (1, 1), "FS_BASE": (0, 64), "GS_BASE": (0, 64), "RIP": (0, 64), **EFLAGS_AUX, **X87_AUX}
         for i in range(16, 32):
             spec[f"ZMM{i}"] = (0, 512)
         return spec
@@ -526,7 +526,7 @@ class X8632(X86):
         self.lean_vars = [(n, 512 if n.startswith("ZMM") else w) for n, w in self.lean_vars]
 
     def aux_spec(self):
-        return {"MXCSR": (0x1F80, 32), "FPU_CONTROL": (0x37F, 16), "IF": (1, 1), "FS_BASE": (0, 32), "GS_BASE": (0, 32), "EIP": (0, 32), **EFLAGS_AUX}
+        return {"MXCSR": (0x1F80, 32), "FPU_CONTROL": (0x37F, 16), "IF": (1, 1), "FS_BASE": (0, 32), "GS_BASE": (0, 32), "EIP": (0, 32), **EFLAGS_AUX, **X87_AUX}
 
     def shape(self, case, values, index, rng):
         x86_shape(case, values, index, "EAX", "EDX", "ECX")
@@ -552,8 +552,16 @@ class X8632(X86):
         return out
 
 
+# The registers of MMX are in those of x87, where an instruction of MMX reads them from: each run has them there, with the top of
+# the stack at 0 and an exponent of ones, as the instruction before it would have left them.
+X87_AUX = {"FPU_STATUS": (0, 16), "FPU_TAG": (0, 16), **{f"ST{i}": (0, 80) for i in range(8)}}
+
+
 def x86_shape(case, values, index, ax, dx, cx):
     """A division whose quotient fits on half of its runs, so a run isn't only of the fault."""
+    for i in range(8):
+        if f"MM{i}" in values:
+            values[f"ST{i}"] = (0xFFFF << 64) | values[f"MM{i}"]
     if case.opcode.startswith(("DIV", "IDIV")) and index % 2 == 0:
         values[dx] = 0
         values[ax] &= 0x7FFFFFFF

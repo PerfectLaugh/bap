@@ -228,15 +228,20 @@ private def sweeping : IO Unit := do
   let padded ← Disasm.Recursive.scanRegions one 17 0 [] { skip := fun address => if address < 4 then some 4 else none }
     [(0, 17)]
   assertEqual "a sweep doesn't decode padding" 4 ((padded.instructions.map (·.address)).head?.getD 0)
-  -- wbinvd, which is privileged and has no semantics, and ret
-  let evex := bytesOf [0x0f, 0x09, 0xc3]
-  let lifted := Disasm.Disassembler.ofRegions x86 [({ addr := 0, data := evex }, x86)]
-  match ← x86.decode 0 evex with
+  -- What decodes and has no semantics, and ret: every instruction of x86 has its own definition, so that the decoder here has
+  -- none for one, nop of a register, as a decoder without a definition would have of it.
+  let evex := bytesOf [0x0f, 0x1f, 0xc0, 0x00, 0xc3]
+  let without : Disasm.Disassembler := { x86 with
+    decode := fun address data => do
+      if address == 0 then pure (.error "Primus semantics has no definition for LLVM opcode NOSUCH") else x86.decode address data
+    sizeAt := fun address data => do if address == 0 then pure (some 4) else x86.sizeAt address data }
+  let lifted := Disasm.Disassembler.ofRegions without [({ addr := 0, data := evex }, without)]
+  match ← without.decode 0 evex with
   | .error error => assertTrue s!"no semantics is an error: {error}" (error.endsWith "" && !error.isEmpty)
   | .ok insn => throw <| IO.userError s!"what has no semantics lifted to {insn.asm}"
-  assertEqual "what has no semantics has its size" (some 2) (← x86.sizeAt 0 evex)
-  let past ← Disasm.Recursive.scanRegions lifted 3 0 [0] (plan fun _ => false) [(0, 3)]
-  assertEqual "a sweep goes on past what it can't lift" [2] (past.instructions.map (·.address))
+  assertEqual "what has no semantics has its size" (some 4) (← without.sizeAt 0 evex)
+  let past ← Disasm.Recursive.scanRegions lifted 5 0 [0] (plan fun _ => false) [(0, 5)]
+  assertEqual "a sweep goes on past what it can't lift" [4] (past.instructions.map (·.address))
   assertEqual "what it can't lift is an error of the scan" 1 past.errors.length
   -- `fxam` and `pcmpistri`, whose values are of conditional code, and x87 conversions by the rounding control at run time
   for (label, values) in [("fxam", [0xd9, 0xe5]), ("pcmpistri", [0x66, 0x0f, 0x3a, 0x63, 0xd9, 0x02]),
@@ -519,8 +524,31 @@ private def compiledMachines : IO Unit := do
     for program in ["frame", "frame2", "partition", "checker"] do
       assertEqual s!"{arch} {program}: nothing is flattened" [] (← flattenedOf s!"{arch}-linux-none-{program}")
 
+private unsafe def sameObjectImpl {α : Type} (left right : α) : Bool := ptrAddrUnsafe left == ptrAddrUnsafe right
+
+/-- Whether two things are one object. -/
+@[implemented_by sameObjectImpl] private def sameObject {α : Type} (_ _ : α) : Bool := false
+
+/-- The code of an image is of the bytes of its regions, not of others of the same: a section that is all of its region has the
+bytes of the region, the same object, so that what a header asks of zeros for a section, 3 GiB of them of a file of 1832 bytes, is
+there once and not once more for each that asks for the code. A section that is some of its region has that of it. -/
+private def sharedCode : IO Unit := do
+  let bytes := ByteArray.mk ((Array.range 64).map (·.toUInt8))
+  let image : Image.Image := {
+    arch := .x86_64, addrWidth := 64, endian := .little, entryPoint := 0x1000, data := ByteArray.empty
+    sections := [⟨".text", 0x1000, 0, 64, 6, 1⟩]
+    memory := Image.MemoryMap.add { addr := 0x1000, data := bytes, executable := true } () {} }
+  let some whole := (Project.codeRegions image).head? | throw (IO.userError "the image has no code")
+  assertEqual "the code of a section is its bytes" (0x1000, bytes.toList) (whole.2.addr, whole.2.data.toList)
+  assertTrue "the code of a section that is all of its region is the bytes of the region, not others of the same"
+    (sameObject whole.2.data bytes)
+  let part := { image with sections := [⟨".text", 0x1010, 0, 16, 6, 1⟩] }
+  assertEqual "the code of a section that is some of its region is that of it" [(0x1010, (bytes.extract 16 32).toList)]
+    ((Project.codeRegions part).map fun region => (region.2.addr, region.2.data.toList))
+
 def run : IO Unit := do
   SliceSpec.run
+  sharedCode
   targetSelection
   interworking
   withoutSections

@@ -74,11 +74,11 @@
 ;; the segment registers
 
 (defun MOV16rs (rd s) (set-gpr rd (cast-unsigned 16 s)))
-(defun MOV16sr (s x) (set$ s (cast-low 16 x)))
+(defun MOV16sr (s x) (x86-load-selector s x))
 (defun MOV32rs (rd s) (set-gpr rd (cast-unsigned 32 s)))
-(defun MOV32sr (s x) (set$ s (cast-low 16 x)))
+(defun MOV32sr (s x) (x86-load-selector s x))
 (defun MOV64rs (rd s) (set-gpr rd (cast-unsigned 64 s)))
-(defun MOV64sr (s x) (set$ s (cast-low 16 x)))
+(defun MOV64sr (s x) (x86-load-selector s x))
 (defun MOV16ms (base scale index off seg s) (store-n 16 (ea base scale index off seg) s))
 (defun MOV16sm (s base scale index off seg) (set$ s (load-n 16 (ea base scale index off seg))))
 
@@ -280,9 +280,32 @@
 (defun PUSHF16 () (push-n 16 (flags-word)))
 (defun PUSHF32 () (push-n 32 (flags-word)))
 (defun PUSHF64 () (push-n 64 (flags-word)))
-(defun POPF16 () (set EFLAGS (concat (cast-high 16 EFLAGS) (pop-n 16))))
-(defun POPF32 () (set EFLAGS (pop-n 32)))
-(defun POPF64 () (set EFLAGS (cast-low 32 (pop-n 64))))
+;; What a program may change of the flags: the status flags, TF, DF, NT, AC
+;; and ID. IF and IOPL are of the privilege of I/O, which it hasn't, VM,
+;; VIF and VIP aren't its own, and the reserved bits stay: none of those
+;; is written. RF is cleared, but by the form of 16 bits, which has
+;; nothing above them.
+(defun popf-low (x)
+  (set CF (extract 0 0 x))
+  (set PF (extract 2 2 x))
+  (set AF (extract 4 4 x))
+  (set ZF (extract 6 6 x))
+  (set SF (extract 7 7 x))
+  (set TF (extract 8 8 x))
+  (set DF (extract 10 10 x))
+  (set OF (extract 11 11 x))
+  (set NT (extract 14 14 x)))
+(defun popf-flags (x)
+  (popf-low x)
+  (set RF 0:1)
+  (set AC (extract 18 18 x))
+  (set ID (extract 21 21 x)))
+;; The trap flag is of what runs the program, which is told that it is
+;; set: the instruction after this one is followed by the debug trap.
+(defun popf-traps () (when TF (intrinsic 'trap-flag)))
+(defun POPF16 () (popf-low (pop-n 16)) (popf-traps))
+(defun POPF32 () (popf-flags (pop-n 32)) (popf-traps))
+(defun POPF64 () (popf-flags (cast-low 32 (pop-n 64))) (popf-traps))
 
 (defun LAHF ()
   (set AH (concat SF ZF 0:1 AF 0:1 PF 1:1 CF)))
@@ -306,45 +329,60 @@
     (push-n 32 ESI)
     (push-n 32 EDI)))
 
+;; With the operand-size prefix, LEAVE pops 16 bits to BP, and ENTER pushes
+;; and writes 16 bits, each leaving the rest of the frame pointer; the
+;; stack pointer is all of it either way.
 (defun LEAVE64 ()
   (declare (context (bits 64)))
   (set RSP RBP)
-  (set RBP (pop-n 64)))
+  (if (x86-prefix 0x66)
+      (set RBP (concat (cast-high 48 RBP) (pop-n 16)))
+    (set RBP (pop-n 64))))
 
 (defun LEAVE ()
   (declare (context (bits 32)))
   (set ESP EBP)
-  (set EBP (pop-n 32)))
+  (if (x86-prefix 0x66)
+      (set EBP (concat (cast-high 16 EBP) (pop-n 16)))
+    (set EBP (pop-n 32))))
 
 ;; ENTER: the nesting level is modulo 32, a level L pushes the L-1 frame
 ;; pointers above the old frame, and the new one
+(defun enter-push (wide x)
+  (if (x86-prefix 0x66) (push-n 16 (cast-low 16 x)) (push-n wide x)))
+
 (defun ENTER (size level)
   (declare (context (bits 64)))
-  (push-n 64 RBP)
+  (enter-push 64 RBP)
   (let ((frame RSP)
         (nesting (logand (cast-low 8 level) 31:8)))
     (when (non-zero nesting)
       (let ((i 1:8))
         (while (< i nesting)
-          (set RBP (- RBP 8))
-          (push-n 64 (load-n 64 RBP))
+          (if (x86-prefix 0x66)
+              (prog (set RBP (- RBP 2)) (push-n 16 (load-n 16 RBP)))
+            (prog (set RBP (- RBP 8)) (push-n 64 (load-n 64 RBP))))
           (set i (+ i 1:8))))
-      (push-n 64 frame))
-    (set RBP frame)
+      (enter-push 64 frame))
+    (if (x86-prefix 0x66)
+        (set RBP (concat (cast-high 48 RBP) (cast-low 16 frame)))
+      (set RBP frame))
     (set RSP (- RSP (cast-unsigned 64 (cast-low 16 size))))))
 
 (defun ENTER (size level)
   (declare (context (bits 32)))
-  (push-n 32 EBP)
+  (enter-push 32 EBP)
   (let ((frame ESP)
         (nesting (logand (cast-low 8 level) 31:8)))
     (when (non-zero nesting)
       (let ((i 1:8))
         (while (< i nesting)
-          (set EBP (- EBP 4))
-          (push-n 32 (load-n 32 EBP))
+          (if (x86-prefix 0x66)
+              (prog (set EBP (- EBP 2)) (push-n 16 (load-n 16 EBP)))
+            (prog (set EBP (- EBP 4)) (push-n 32 (load-n 32 EBP))))
           (set i (+ i 1:8))))
-      (push-n 32 frame))
-    (set EBP frame)
+      (enter-push 32 frame))
+    (if (x86-prefix 0x66)
+        (set EBP (concat (cast-high 16 EBP) (cast-low 16 frame)))
+      (set EBP frame))
     (set ESP (- ESP (cast-unsigned 32 (cast-low 16 size))))))
-

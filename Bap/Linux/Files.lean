@@ -12,7 +12,8 @@ A file has the times that a write, a truncation or `chmod` gave it, which `stat`
 another, or to a group that it isn't in. An extended attribute's name has a namespace, as `user.`, of at most 255 bytes, and its value
 at most 64 KiB. A file of `memfd_create` can have seals, which `fcntl` adds and `Kernel` keeps to. What goes from a file to another
 goes at most 1 MiB at a time, and from a pipe or a socket that has nothing yet, waits for it. Locks of files, of `flock` and of
-`fcntl`, are those of `Kernel.lockRange`, and one that something is in the way of waits for it to go, with no deadlock found. -/
+`fcntl`, are those of `Kernel.lockRange`, and one that something is in the way of waits for it to go, unless what holds that waits
+for a lock of the process that asks, which is `EDEADLK` of `F_SETLKW`. -/
 
 namespace Bap.Linux
 
@@ -211,6 +212,8 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
     | some inode =>
       if name.startsWith "trusted." && !credentials.capable Capability.sysAdmin then
         some (if writing then Errno.eperm else enodata)
+      -- `security.` is read by anyone and set with `CAP_SYS_ADMIN`, as `cap_inode_setxattr` has it.
+      else if name.startsWith "security." && writing && !credentials.capable Capability.sysAdmin then some Errno.eperm
       else if name.startsWith "user." then
         if !(inode.content matches .file _ | .directory) then some (if writing then Errno.eperm else enodata)
         else if !Kernel.permits inode credentials false (if writing then 2 else 4) then some Errno.eacces
@@ -305,7 +308,8 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         | .error errno => return ← fail errno
       fromResult (kernel.link group "/" source target false)
     | .linkat =>
-      -- AT_EMPTY_PATH of a descriptor, and AT_SYMLINK_FOLLOW.
+      -- AT_EMPTY_PATH of a descriptor, and AT_SYMLINK_FOLLOW: another flag is `EINVAL`, before anything is looked at.
+      if arg 4 % 2 ^ 32 &&& (2 ^ 32 - 1 - 0x1400) != 0 then return ← fail Errno.einval
       let target ← match ← pathAt (arg 2) (arg 3) with
         | .ok path => pure path
         | .error errno => return ← fail errno
@@ -399,11 +403,24 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
       -- What isn't a pipe and was opened to append is `EINVAL` to send to, as `do_splice_direct` has it, once both may be read and
       -- written.
       if appends (arg 0) && (kernel.openFileOf group (arg 1)).toOption.any (·.2.flags &&& 3 != 1) then return ← fail Errno.einval
+      -- Once both are open, the one to read and the other to write: a pipe isn't sent from, and of what isn't a file only to a pipe,
+      -- as `do_splice_read` and `splice_direct_to_actor` have it.
+      if let (.ok (_, input, source), .ok (_, output)) := (kernel.objectOf group (arg 1), kernel.openFileOf group (arg 0)) then
+        -- Of an offset, a pipe or a socket is `ESPIPE` first, as `transfer` has it.
+        if arg 2 == 0 && Kernel.reads input.flags && Kernel.writes output.flags then
+          if source.content matches .pipe .. then return ← fail Errno.einval
+          if !(source.content matches .file _) && (pipeOf (arg 0)).isNone then return ← fail Errno.einval
       let start ← offsetAt (arg 2) size
       transfer (arg 1) (arg 0) (arg 3) start none (kernel.nonblocking group (arg 1)) (moveOffset (arg 2) size start)
     | .splice =>
+      -- A flag that there isn't, past `SPLICE_F_GIFT`, is `EINVAL` before anything else.
+      if arg 5 % 2 ^ 32 > 0xf then return ← fail Errno.einval
       let (input, output) := (pipeOf (arg 0), pipeOf (arg 2))
       if input.isNone && output.isNone then return ← fail Errno.einval
+      -- A pipe to itself, once both ends are what they have to be, as `do_splice` has it.
+      if input.isSome && input == output then
+        if let (.ok (_, first), .ok (_, second)) := (kernel.openFileOf group (arg 0), kernel.openFileOf group (arg 2)) then
+          if Kernel.reads first.flags && Kernel.writes second.flags then return ← fail Errno.einval
       if (input.isSome && arg 1 != 0) || (output.isSome && arg 3 != 0) then return ← fail Errno.espipe
       -- And to what was opened to append, as `do_splice` has it.
       if output.isNone && appends (arg 2) then return ← fail Errno.einval
@@ -412,6 +429,7 @@ def serve (poller : Poller) (emu : Emu) (call : Call) (args : List Nat) : IO (Op
         moveOffset (arg 1) 8 from_ count
         moveOffset (arg 3) 8 to count
     | .tee =>
+      if arg 3 % 2 ^ 32 > 0xf then return ← fail Errno.einval
       -- What one pipe has, to another, which the first keeps.
       let (some input, some output) := (pipeOf (arg 0), pipeOf (arg 1)) | return ← fail Errno.einval
       if input == output then return ← fail Errno.einval
@@ -515,14 +533,36 @@ def serveLock (poller : Poller) (emu : Emu) (args : List Nat) : IO (Option Sysca
     let access := file.flags &&& 3
     if (type == 0 && access == 1) || (type == 1 && access == 0) then return ← fail Errno.ebadf
     let (next, conflict) := kernel.lockRange live file.inode owner first last (if type == 2 then none else some (type == 1))
+    -- The thread doesn't wait for a lock any more, unless it does again.
+    let tid ← thread emu
+    let next := { next with lockWaits := next.lockWaits.filter (·.1 != tid) }
     poller.kernel.set next
     match conflict with
     | none =>
       -- What waits may go on once something was let go of.
       if kernel.hadLock file.inode owner then poller.wake emu
       succeed
-    | some _ =>
-      if command == wait || command == 38 then pure (some (← poller.timers.waitUntil emu readySpace 0 none true))
+    | some blocking =>
+      if command == wait || command == 38 then
+        -- Of a lock of a process that a process holds, as `posix_locks_deadlock` has it: if what holds it waits, as far as that goes,
+        -- for a lock that this process holds, the wait would never end, which is `EDEADLK`. A wait counts while its thread still
+        -- waits where it said.
+        if let (.process holder, false) := (blocking.owner, ofd) then
+          let sites := (← poller.timers.state.get).sites
+          let waiting := (← emu.taskTable.get).futexes
+          let waits := next.lockWaits.filter fun (thread, _, site, _) =>
+            (sites.get? thread).any (·.next == site) && waiting.any fun waiter => waiter.thread == thread && waiter.space == readySpace
+          let rec reaches (from_ : List Nat) : Nat → Bool
+            | 0 => false
+            | fuel + 1 =>
+              from_.contains group ||
+                (let further := (waits.filter fun (_, waiter, _, _) => from_.contains waiter).map (·.2.2.2)
+                 !further.isEmpty && reaches further.eraseDups fuel)
+          if reaches [holder] 10 then
+            poller.timers.finish tid
+            return ← fail 35
+          poller.kernel.set { next with lockWaits := (tid, group, ← emu.nextPc.get, holder) :: waits }
+        pure (some (← poller.timers.waitUntil emu readySpace 0 none true))
       else fail Errno.eagain
   catch _ => fail Errno.efault
 

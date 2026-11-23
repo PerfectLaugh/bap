@@ -56,10 +56,12 @@ structure Target where
 private def targetOf : String → IO Target
   | "x86_64" => do
     let env ← Target.LLVMLift.x86Environment
-    pure ⟨"x86_64", fun address data => Target.LLVMLift.decodeX86With env address address data⟩
+    -- A repeated string instruction is lifted as one round of it that goes back to itself: what the machine runs of it is all of
+    -- its rounds, which is the loop (`Disasm.Insn.asLoop`).
+    pure ⟨"x86_64", fun address data => do pure (← Target.LLVMLift.decodeX86With env address address data).asLoop⟩
   | "i686" => do
     let env ← Target.LLVMLift.x8632Environment
-    pure ⟨"i386", fun address data => Target.LLVMLift.decodeX8632With env address address data⟩
+    pure ⟨"i386", fun address data => do pure (← Target.LLVMLift.decodeX8632With env address address data).asLoop⟩
   | "aarch64" => do
     let env ← Target.LLVMLift.aarch64Environment
     pure ⟨"aarch64", fun address data => Target.LLVMLift.decodeAArch64With env address address data⟩
@@ -235,7 +237,8 @@ private def serve (stdin stdout stderr : IO.FS.Stream) : IO Unit := do
           -- An intrinsic of floating point has a value, which `Bap.Float` computes, and any other has none.
           -- What is undefined where it runs, e.g., of SME out of its mode, is a trap, whose signal is compared, as of an instruction of
           -- no floating point.
-          let specials := (specialsOf 64 insn.bil).filter (· != "undefined-instruction")
+          -- So is the general protection fault of x86, of an operand that has to be aligned and isn't.
+          let specials := (specialsOf 64 insn.bil).filter fun name => name != "undefined-instruction" && name != "general-protection"
           let served := !specials.isEmpty && specials.all Bap.Float.serves
           let intrinsic := !served && ((reprStr insn.bil).splitOn "intrinsic:").length > 1
           stdout.putStrLn s!"D {id} {decoded.opcode} {hexOf insn.size 2} {if intrinsic then 1 else 0} {if insn.flow == .normal then 0 else 1} {insn.asm}"

@@ -105,7 +105,7 @@ private def symbolName (data : ByteArray) (header : Header) (offset : Nat) : Exc
     if nameOffset ≥ stringsSize then
       .error "PE symbol name exceeds string table"
     else
-      IO.Reader.cstring data (header.stringsOffset + nameOffset)
+      IO.Reader.cstringIn data (header.stringsOffset + nameOffset) (header.stringsOffset + stringsSize)
 
 private def parseSymbol (data : ByteArray) (header : Header) (sections : List Section)
     (offset : Nat) : Except String Symbol := do
@@ -121,18 +121,21 @@ private def parseSymbol (data : ByteArray) (header : Header) (sections : List Se
   let function := sectionIndex != 0 && symbolType &&& 0x30 = 0x20
   .ok ⟨name, address, 0, function, storageClass = 103, function && (header.machine == 0x1c2 || header.machine == 0x1c4)⟩
 
-/-- The symbols, after those it has, one at a time: in an array, as so many of them are, which a list would copy for each. -/
-private def parseSymbols (data : ByteArray) (header : Header) (sections : List Section) :
+/-- The symbols, after those it has, one at a time: in an array, as so many of them are, which a list would copy for each. Their
+names take `used` bytes so far, and no more than `namesLimit` all together, each as often as a symbol has it: every entry may name
+all of the string table. -/
+private def parseSymbols (data : ByteArray) (header : Header) (sections : List Section) (used : Nat) :
     Nat → Nat → Array Symbol → Except String (Array Symbol)
   | _, 0, symbols => .ok symbols
   | index, remaining + 1, symbols => do
     let offset := header.symbolOffset + index * 18
     let symbol ← parseSymbol data header sections offset
+    let used ← countName data used symbol.name
     let auxiliaryCount ← IO.Reader.get8 data (offset + 17)
     if auxiliaryCount > remaining then
       .error "PE auxiliary symbol exceeds symbol table"
     else
-      parseSymbols data header sections (index + auxiliaryCount + 1)
+      parseSymbols data header sections used (index + auxiliaryCount + 1)
         (remaining - auxiliaryCount) (symbols.push symbol)
 
 private def architecture (machine : Nat) : Arch :=
@@ -158,7 +161,7 @@ def regionsSize (data : ByteArray) : Extent :=
 def decodeRegions (data : ByteArray) : Except String Image := do
   let header ← parseHeader data
   let (sections, segments, regions) ← parseSections data header
-  let symbols := (← parseSymbols data header sections 0 header.symbolCount #[]).toList
+  let symbols := (← parseSymbols data header sections 0 0 header.symbolCount #[]).toList
   let memory := regions.foldl (fun memory region => MemoryMap.add region () memory) {}
   .ok {
     arch := architecture header.machine

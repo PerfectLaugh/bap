@@ -46,6 +46,8 @@
 #include <vector>
 
 #if defined(__linux__)
+#include <fcntl.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -2061,11 +2063,13 @@ static bool allZero(const uint8_t *bytes, size_t count) {
   return count == 0 || (bytes[0] == 0 && std::memcmp(bytes, bytes + 1, count - 1) == 0);
 }
 
-// Whether the host can give as many bytes as `size`, as an allocation of that many would map them, mapped and let go of at once.
+// Whether the host has as many addresses to give as `size`, as an allocation of that many would map them, mapped and let go of at once.
+// Only the addresses are asked for, and not that the host could give all the bytes: they are zeros that take memory of it as they are
+// written, as what a program reserves and never touches takes none, however much more than the host has it is.
 static bool reservable(size_t size) {
   if (size < (size_t{1} << 24)) return true;
 #if defined(__linux__)
-  void *mapped = mmap(nullptr, size + 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  void *mapped = mmap(nullptr, size + 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   if (mapped == MAP_FAILED) return false;
   munmap(mapped, size + 4096);
 #endif
@@ -2076,7 +2080,56 @@ extern "C" lean_obj_res bap_zero_bytes(b_lean_obj_arg sizeObject) {
   return lazyZeros(lean_usize_of_nat(sizeObject));
 }
 
-// `ByteArray.extract`, which for what is big copies only what isn't zeros into zeros that take no memory yet.
+#if defined(__linux__)
+// `PAGEMAP_SCAN` of Linux 6.7, by its own layout, as the headers that this is built with may be older than the kernel it runs on.
+struct ScanRegion { uint64_t start, end, categories; };
+struct ScanArguments {
+  uint64_t size, flags, start, end, walkEnd, vec, vecLength, maxPages, categoryInverted, categoryMask, categoryAnyOf, returnMask;
+};
+#endif
+
+// The parts of `from`..`from + size` that the host has pages for, which is all of it that may hold anything but zeros: what was never
+// touched of an allocation of zeros has none. They are asked of the kernel, which goes by its page tables and so takes no longer for
+// what was never touched, however much that is. false where the kernel doesn't say, and then all of it has to be looked through.
+static bool populated(const uint8_t *from, size_t size, std::vector<std::pair<size_t, size_t>> &ranges) {
+#if defined(__linux__)
+  static const int pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+  if (pagemap < 0) return false;
+  const uintptr_t page = static_cast<uintptr_t>(sysconf(_SC_PAGESIZE));
+  const uintptr_t first = reinterpret_cast<uintptr_t>(from);
+  const uintptr_t last = first + size;
+  // present, swapped, or of a file
+  const uint64_t some = (1u << 3) | (1u << 4) | (1u << 2);
+  ScanRegion found[128];
+  ScanArguments arguments;
+  std::memset(&arguments, 0, sizeof arguments);
+  arguments.size = sizeof arguments;
+  arguments.start = first / page * page;
+  arguments.end = (last + page - 1) / page * page;
+  arguments.vec = reinterpret_cast<uintptr_t>(found);
+  arguments.vecLength = 128;
+  arguments.categoryAnyOf = some;
+  arguments.returnMask = some;
+  while (arguments.start < arguments.end) {
+    const long count = ioctl(pagemap, _IOWR('f', 16, ScanArguments), &arguments);
+    if (count < 0) return false;
+    for (long index = 0; index != count; ++index) {
+      const uintptr_t low = std::max<uintptr_t>(found[index].start, first);
+      const uintptr_t high = std::min<uintptr_t>(found[index].end, last);
+      if (low < high) ranges.emplace_back(low - first, high - first);
+    }
+    if (arguments.walkEnd <= arguments.start) break;
+    arguments.start = arguments.walkEnd;
+  }
+  return true;
+#else
+  (void)from; (void)size; (void)ranges;
+  return false;
+#endif
+}
+
+// `ByteArray.extract`, which for what is big copies only what isn't zeros into zeros that take no memory yet, and looks for it only in
+// what the host has pages for, so that a piece of a mapping that was never written takes no longer the larger the mapping is.
 static lean_obj_res sliceBytes(b_lean_obj_arg dataObject, b_lean_obj_arg startObject, b_lean_obj_arg stopObject) {
   const size_t total = lean_sarray_size(dataObject);
   const size_t stop = lean_is_scalar(stopObject) ? std::min(lean_usize_of_nat(stopObject), total) : total;
@@ -2091,11 +2144,17 @@ static lean_obj_res sliceBytes(b_lean_obj_arg dataObject, b_lean_obj_arg startOb
   }
   lean_obj_res result = lazyZeros(size);
   uint8_t *to = lean_sarray_cptr(result);
-  for (size_t done = 0; done < size; done += 4096) {
-    const size_t count = std::min<size_t>(4096, size - done);
-    if (!allZero(from + done, count))
-      std::memcpy(to + done, from + done, count);
+  std::vector<std::pair<size_t, size_t>> ranges;
+  if (!populated(from, size, ranges)) {
+    ranges.clear();
+    ranges.emplace_back(0, size);
   }
+  for (const auto &range : ranges)
+    for (size_t done = range.first; done < range.second; done += 4096) {
+      const size_t count = std::min<size_t>(4096, range.second - done);
+      if (!allZero(from + done, count))
+        std::memcpy(to + done, from + done, count);
+    }
   return result;
 }
 

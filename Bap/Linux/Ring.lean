@@ -179,6 +179,22 @@ private def iovecs (rings : Rings) (emu : Emu) (address count : Nat) : IO (List 
   (List.range count).mapM fun index => do
     pure (← numberAt rings emu (address + 2 * word * index) word, ← numberAt rings emu (address + 2 * word * index + word) word)
 
+/-- What of `count` bytes at an address may be read, from the first: all, or those before the first page that can't be. -/
+private def readable (emu : Emu) (address count : Nat) : IO ByteArray := do
+  match ← (read emu address count).toBaseIO with
+  | .ok bytes => pure bytes
+  | .error _ =>
+    let mut out := ByteArray.empty
+    while out.size < count do
+      let size := min (4096 - (address + out.size) % 4096) (count - out.size)
+      match ← (read emu (address + out.size) size).toBaseIO with
+      | .ok bytes => out := out ++ bytes
+      | .error _ => break
+    pure out
+
+/-- `UIO_MAXIOV`, the most pieces that a read or a write of vectors has: more is `EINVAL`. -/
+def maxVectors : Nat := 1024
+
 /-- What a read or a write at an offset of a file of the process `group` gives, of pieces of memory, as a result of 64 bits. -/
 private def atOffset (rings : Rings) (emu : Emu) (group fd : Nat) (pieces : List (Nat × Nat)) (offset : Nat) (writing : Bool) :
     IO Nat := do
@@ -187,10 +203,14 @@ private def atOffset (rings : Rings) (emu : Emu) (group fd : Nat) (pieces : List
   for (address, length) in pieces do
     let kernel ← poller.kernel.get
     if writing then
-      match kernel.writeTo group fd (← read emu address length) (offset + done) with
+      -- What of it can be read, as `copy_from_user` gives up at the first page that can't: of none, `EFAULT`.
+      let bytes ← readable emu address length
+      if bytes.isEmpty && length > 0 then return if done > 0 then done else negative Errno.efault
+      match kernel.writeTo group fd bytes (offset + done) with
       | .ok (next, count) =>
         poller.kernel.set next
         done := done + count
+        if count < length then return done
       | .error errno => return if done > 0 then done else negative errno
     else
       match kernel.readFrom group fd length (offset + done) with
@@ -238,6 +258,8 @@ private def complete (architecture : Architecture) (ring : Uring) (data result :
 what has none, as a pipe, is as one at none; of a socket, only at 0, as Linux has it. -/
 private def perform (rings : Rings) (emu : Emu) (group : Nat) (ring : Uring) (entry : ByteArray) : IO (Option Nat) := do
   let poller := rings.poller
+  -- What was found wrong of it as it was submitted, a time that isn't in the memory of the process: see `serve`.
+  if entry.size > 64 then return some (negative Errno.efault)
   let take (offset size : Nat) : Nat := numberOf poller.architecture.big (entry.extract offset (offset + size))
   let (opcode, entryFlags, fd, offset, address, length, opFlags) :=
     (take 0 1, take 1 1, take 4 4, take 8 8, take 16 8, take 24 4, take 28 4)
@@ -259,6 +281,8 @@ private def perform (rings : Rings) (emu : Emu) (group : Nat) (ring : Uring) (en
     let writing := opcode == 2 || opcode == 23 || opcode == 5
     let vectored := opcode == 1 || opcode == 2
     if socket && offset != 0 && offset != 2 ^ 64 - 1 then pure (some (negative Errno.espipe))
+    -- More pieces than `UIO_MAXIOV`, as `import_iovec` has it, before any is looked at.
+    else if vectored && length > maxVectors then pure (some (negative Errno.einval))
     else if sequential then
       whenReady writing (system (match vectored, writing with
         | true, true => .writev | true, false => .readv | false, true => .write | false, false => .read) [fd, address, length])
@@ -342,7 +366,9 @@ private def attempt (rings : Rings) (emu : Emu) (group : Nat) (ring : Uring) (pe
           ring := complete architecture ring (numberOf big (cancelled.entry.extract 32 40)) (negative 125)
       | none => ring := complete architecture ring data (negative Errno.enoent)
       continue
-    match ← perform rings emu group ring item.entry with
+    -- What an entry can't read or write of the memory of the process is its own `EFAULT`, and the others go on.
+    let performed ← try perform rings emu group ring item.entry catch _ => pure (some (negative Errno.efault))
+    match performed with
     | none =>
       ring := { ring with pending := ring.pending ++ [item] }
       blocked := linked
@@ -355,8 +381,10 @@ private def attempt (rings : Rings) (emu : Emu) (group : Nat) (ring : Uring) (pe
         else if opcode == 1 || opcode == 2 then do
           let word := architecture.bits / 8
           let vectors := numberOf big (item.entry.extract 16 24)
-          let sizes ← (List.range (min length 1024)).mapM fun index => numberAt rings emu (vectors + index * 2 * word + word) word
-          pure (some (sizes.foldl (· + ·) 0))
+          try
+            let sizes ← (List.range (min length 1024)).mapM fun index => numberAt rings emu (vectors + index * 2 * word + word) word
+            pure (some (sizes.foldl (· + ·) 0))
+          catch _ => pure none
         else pure none
       cancelling := breaks && (result ≥ 2 ^ 63 || asked.any (result < ·))
   pure ring
@@ -459,12 +487,17 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
         (take 0 8, take 16 2, take 20 4, take 24 8, take 32 8, take 40 8, take 56 4, take 60 4)
       if ((← poller.kernel.get).openFileOf group fd).toOption.isNone then
         if done == 0 then return ← fail Errno.ebadf else break
+      -- More pieces than `UIO_MAXIOV` is `EINVAL` of the call, or what was submitted before it, as of what it doesn't know.
+      if (opcode == 7 || opcode == 8) && length > maxVectors then
+        if done == 0 then return ← fail Errno.einval else break
+      -- What it can't read or write of the memory of the process is the result of its event.
+      let faulting (action : IO Nat) : IO Nat := do try action catch _ => pure (negative Errno.efault)
       let result ← match opcode with
-        | 0 => atOffset rings emu group fd [(buffer, length)] offset false
-        | 1 => atOffset rings emu group fd [(buffer, length)] offset true
+        | 0 => faulting (atOffset rings emu group fd [(buffer, length)] offset false)
+        | 1 => faulting (atOffset rings emu group fd [(buffer, length)] offset true)
         | 2 | 3 | 6 => pure 0
-        | 7 => atOffset rings emu group fd (← iovecs rings emu buffer length) offset false
-        | 8 => atOffset rings emu group fd (← iovecs rings emu buffer length) offset true
+        | 7 => faulting do atOffset rings emu group fd (← iovecs rings emu buffer length) offset false
+        | 8 => faulting do atOffset rings emu group fd (← iovecs rings emu buffer length) offset true
         | _ => if done == 0 then return ← fail Errno.einval else break
       -- An error is the guest's own number of it, negative.
       let result := if result ≥ 2 ^ 63 then 2 ^ 64 - architecture.errno (2 ^ 64 - result) else result
@@ -502,7 +535,7 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
     let requested := arg 0
     let flags ← number (arg 1 + 8) 4
     -- `IORING_SETUP_CQSIZE` and `IORING_SETUP_CLAMP`, and those that only say how it is to run.
-    if flags &&& 0x3ffff - (8 ||| 16 ||| 128 ||| 256 ||| 512 ||| 4096 ||| 8192) != 0 then return ← fail Errno.einval
+    if flags - (flags &&& (8 ||| 16 ||| 128 ||| 256 ||| 512 ||| 4096 ||| 8192)) != 0 then return ← fail Errno.einval
     if requested == 0 || (requested > 32768 && flags &&& 16 == 0) then return ← fail Errno.einval
     let power (value : Nat) : Nat := (List.range 17).foldl (fun found bits => if found ≥ value then found else 2 ^ bits) 1
     let entries := power (min requested 32768)
@@ -570,8 +603,9 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
     let kernel ← poller.kernel.get
     let .ok (_, file) := kernel.openFileOf group (arg 0) | fail Errno.ebadf
     let some ring := (← rings.state.get).rings.find? (·.inode == file.inode) | fail Errno.eopnotsupp
-    let flags := arg 3
-    if flags &&& (8 ||| 16) != 0 then return ← fail Errno.einval
+    let flags := arg 3 % 2 ^ 32
+    -- `IORING_ENTER_EXT_ARG` and `IORING_ENTER_REGISTERED_RING` aren't here, and past `IORING_ENTER_NO_IOWAIT` there is none.
+    if flags &&& (8 ||| 16) != 0 || flags ≥ 0x100 then return ← fail Errno.einval
     if ring.sq == 0 || ring.cq == 0 || ring.sqes == 0 then return ← fail Errno.efault
     let mut ring ← attempt rings emu group ring ring.pending
     -- What was submitted: from the head that the kernel has to the tail that the program wrote.
@@ -589,7 +623,11 @@ partial def serve (rings : Rings) (emu : Emu) (call : Call) (args : List Nat) : 
     submitted ← submitted.mapM fun item => do
       if item.entry[0]! != 11 then return item
       let address := numberOf big (item.entry.extract 16 24)
-      let (seconds, nanoseconds) ← readTime emu address 8
+      -- Its time is read as it is submitted, as `io_timeout_prep` has it: one that isn't in the memory of the process is its `EFAULT`,
+      -- which an entry of no operation with a byte more says to `perform`; and it takes one time, `EINVAL` of another count.
+      let time ← (readTime emu address 8).toBaseIO
+      let .ok (seconds, nanoseconds) := time | return { item with entry := (item.entry.set! 0 255).push 1 }
+      if numberOf big (item.entry.extract 24 28) != 1 then return { item with entry := item.entry.set! 0 255 }
       if seconds < 0 || nanoseconds < 0 then return { item with entry := item.entry.set! 0 255 }
       let span := seconds.toNat * 1000000000 + nanoseconds.toNat
       let absolute := numberOf big (item.entry.extract 28 32) &&& 1 != 0

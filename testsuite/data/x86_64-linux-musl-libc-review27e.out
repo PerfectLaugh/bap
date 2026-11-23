@@ -1,0 +1,77 @@
+divz: sig=8 code=3 addr=ip ip+0 res=-7
+inv: sig=8 code=7 addr=ip ip+0 res=-7
+inex: sig=8 code=6 addr=ip ip+0 res=-7
+ovf: sig=8 code=4 addr=ip ip+0 res=-7
+unf: sig=8 code=5 addr=ip ip+0 res=-7
+masked: ran
+cvt: sig=8 code=7 addr=ip ip+0 res=-7
+x87divz: sig=8 code=3 addr=ip ip+0 res=-7
+sw 8084
+x87wait: sig=8 code=7 addr=ip ip+-2 res=-7
+x87inex: sig=8 code=6 addr=ip ip+0 res=-7
+x87under: sig=8 code=7 addr=ip ip+0 res=-7
+x87clex: ran
+paddb: sig=11 code=128
+addps: sig=11 code=128
+andps: sig=11 code=128
+pshufb: sig=11 code=128
+cmpps: sig=11 code=128
+sqrtpd: sig=11 code=128
+aesenc: sig=11 code=128
+pclmul: sig=11 code=128
+shufps: sig=11 code=128
+packsswb: sig=11 code=128
+pshufd: sig=11 code=128
+cvtdq2ps: sig=11 code=128
+ptest: sig=11 code=128
+pblendw: sig=11 code=128
+rcpps: sig=11 code=128
+pcmpistri: ran
+movdqu: ran
+lddqu: ran
+addss: ran
+movddup: ran
+pmovzxbw: ran
+cvtps2pd: ran
+vpaddb: ran
+vaddps: ran
+paddb ok: ran
+addps ok: ran
+steps: x=3 traps=6 codes=4 tf in the handler 0 in its frames 5
+ at +1
+ at +4
+ at +7
+ at +8
+ at +15
+ at +16
+steps that the handler ends: x=5 traps=3
+osxsave 3 avx 1
+xcr0 has x87 sse avx 7 0
+xsave area fits 1 avx at 0240 0100
+xsavec 1
+xsave xrstor 11111111111111114444444444444444 bv 6 in area 11111111111111114444444444444444
+xrstor sse 11111111111111110000000000000000
+xrstor init avx 11111111111111110000000000000000
+xsavec xrstor 11111111111111114444444444444444 compact 1 comp 6
+xsave words 1fa0 027f
+rdtscp aux small 1
+clzero ee0000ee
+bswap16 1122334455660000
+lretq 07
+open ok
+write 12
+writev 12
+fstat64 0 size 24 mode 100600
+stat64 0 size 24
+llseek 0 at 6
+readv 6 int 80
+
+lseek 0 read 5 hello
+close 0 unlink 0
+gettimeofday 0 plausible
+clock_gettime 0 plausible
+uname 0 Linux
+pipe 0 two
+getcwd absolute
+getuid32 same getpid same
+fstat64 of a bad descriptor -9, no call -38

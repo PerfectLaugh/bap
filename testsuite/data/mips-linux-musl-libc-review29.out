@@ -1,0 +1,25 @@
+add: signal 8 code 2 at a test 1
+addi: signal 8 code 2 at a test 1
+sub: signal 8 code 2 at a test 1
+add in a delay slot: signal 8 code 2 at a test 1
+no overflow: fffffffe 7ffeffff
+rdhwr: processor 0 step 32 resolution 2 thread pointer 1 count goes on 1
+rdhwr of 4: signal 4 code 128 at a test 0
+fir: has 13
+invalid cause: signal 8 code 7 at a test 1
+fcsr: 800
+division cause: signal 8 code 3 at a test 1
+fcsr: 400
+overflow cause: signal 8 code 4 at a test 1
+fcsr: 200
+underflow cause: signal 8 code 5 at a test 1
+fcsr: 100
+inexact cause: signal 8 code 6 at a test 1
+fcsr: 80
+cause that isn't enabled: no signal
+fcsr: 1f000
+eret: signal 4 code 128 at a test 0
+wait: signal 4 code 128 at a test 0
+cache: signal 4 code 128 at a test 0
+mfc2: signal 4 code 128 at a test 0
+sdbbp: signal 4 code 128 at a test 0

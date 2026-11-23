@@ -1,0 +1,125 @@
+mrs x0, daif: signal 4 code 1 at it 1
+msr daif, x1: signal 4 code 1 at it 1
+msr daifset, #2: signal 4 code 1 at it 1
+msr daifclr, #1: signal 4 code 1 at it 1
+msr spsel, #1: signal 4 code 1 at it 1
+mrs x0, spsel: signal 4 code 1 at it 1
+msr pan, #1: signal 4 code 1 at it 1
+msr uao, #1: signal 4 code 1 at it 1
+mrs x0, sp_el0: signal 4 code 1 at it 1
+hlt #1: signal 4 code 1 at it 1
+pacga x0, x0, x1: signal 4 code 1 at it 1
+pacia x0, x1: signal 4 code 1 at it 1
+autia x0, x1: signal 4 code 1 at it 1
+pacdza x0: signal 4 code 1 at it 1
+xpaci x0: signal 4 code 1 at it 1
+xpacd x0: signal 4 code 1 at it 1
+retaa: signal 4 code 1 at it 1
+braaz x0: signal 4 code 1 at it 1
+blraa x0, x1: signal 4 code 1 at it 1
+ldraa x1, [x0]: signal 4 code 1 at it 1
+paciasp: runs
+pacia1716: runs
+xpaclri: runs
+nop: runs
+fcvtzu v.4h #16: 8000 0000 ffe0 0002 0000 0000 0000 0000
+fcvtzs v.8h #16: 7fff 0000 7fff 0002 8000 7fff 8000 0000
+fcvtzu h #16: 8000 0000 0000 0000 0000 0000 0000 0000
+fcvtzs h #12: 0800 0000 0000 0000 0000 0000 0000 0000
+fcvtzu v.8h #15: 4000 0000 7ff0 0001 0000 ffff 0000 0000
+their fpsr: 11
+fcvtzs x, d, #10 of 7fefffffffffffff: 7fffffffffffffff fpsr 1
+fcvtzu w, d, #1: ffffffff fpsr 1
+fjcvtzs: 00000000 nzcv 0 fpsr 1
+fcvtzs x, d, #10 of c3e0000000000001: 8000000000000000 fpsr 1
+fcvtzu w, d, #1: 00000000 fpsr 1
+fjcvtzs: fffff800 nzcv 0 fpsr 1
+fcvtzs x, d, #10 of 41dfffffffc00000: 000001fffffffc00 fpsr 0
+fcvtzu w, d, #1: fffffffe fpsr 0
+fjcvtzs: 7fffffff nzcv 40000000 fpsr 0
+fcvtzs x, d, #10 of c1e0000000100000: fffffdfffffffe00 fpsr 0
+fcvtzu w, d, #1: 00000000 fpsr 1
+fjcvtzs: 80000000 nzcv 0 fpsr 10
+fcvtzs x, d, #10 of 3fe0000000000000: 0000000000000200 fpsr 0
+fcvtzu w, d, #1: 00000001 fpsr 0
+fjcvtzs: 00000000 nzcv 0 fpsr 10
+fcvtzs x, d, #10 of bfe0000000000000: fffffffffffffe00 fpsr 0
+fcvtzu w, d, #1: 00000000 fpsr 1
+fjcvtzs: 00000000 nzcv 0 fpsr 10
+fcvtzs x, d, #10 of 0000000000000001: 0000000000000000 fpsr 10
+fcvtzu w, d, #1: 00000000 fpsr 10
+fjcvtzs: 00000000 nzcv 0 fpsr 10
+fcvtzs x, d, #10 of 7ff0000000000000: 7fffffffffffffff fpsr 1
+fcvtzu w, d, #1: ffffffff fpsr 1
+fjcvtzs: 00000000 nzcv 0 fpsr 1
+fcvtzs x, d, #10 of 7ff4000000000000: 0000000000000000 fpsr 1
+fcvtzu w, d, #1: 00000000 fpsr 1
+fjcvtzs: 00000000 nzcv 0 fpsr 1
+fcvtzs x, d, #10 of 4059000000000000: 0000000000019000 fpsr 0
+fcvtzu w, d, #1: 000000c8 fpsr 0
+fjcvtzs: 00000064 nzcv 40000000 fpsr 0
+fcvtzs x, d, #10 of 8000000000000000: 0000000000000000 fpsr 0
+fcvtzu w, d, #1: 00000000 fpsr 0
+fjcvtzs: 00000000 nzcv 0 fpsr 0
+fcvtzs x, h, #40 of 3800: 0000008000000000 fpsr 0
+fcvtzs x, h, #40 of 0001: 0000000000010000 fpsr 0
+fcvtzs x, h, #40 of 3bff: 000000ffe0000000 fpsr 0
+fcvtzs x, h, #40 of 0200: 0000000002000000 fpsr 0
+fcvtzs x, h, #40 of b800: ffffff8000000000 fpsr 0
+fcvtzs x, h, #40 of 7bff: 00ffe00000000000 fpsr 0
+fcvtzs x, h, #40 of fbff: ff00200000000000 fpsr 0
+fcvtzs x, h, #40 of 7e00: 0000000000000000 fpsr 1
+fcvtzs v.2d: 0000000000000001 7fffffffffffffff fpsr 11
+fcvtnu v.4s: 0000000200000000 000001c000000000 fpsr 10
+fcvtzu d #64: ffffffffffffffff fpsr 1
+fcvtzs v.2d: 0000000000000000 fffffffffffffffe fpsr 1
+fcvtnu v.4s: 0000000000000000 0000000000000000 fpsr 1
+fcvtzu d #64: 0000000000000000 fpsr 1
+fcvtzs v.2d: 0000000000000000 7fffffffffffffff fpsr 11
+fcvtnu v.4s: 0000000200000000 ffffffff00000000 fpsr 11
+fcvtzu d #64: 8000060900000000 fpsr 0
+fpcr of ones: 7c80000
+fpsr of ones: f800009f
+frecpx d, fpcr 0: 4000000000000000 7ffc000000000000 fpsr 1
+frecpx s, fpcr 0: 7f0000003f800000 7fe0000080000000 fpsr 1
+frecpx h, fpcr 0: 7f0040007800f800 80007e00bc007800 fpsr 1
+fexpa d, fpcr 0: 7f0fa7c1819e90d8 00102c9a3e778061 fpsr 0
+fexpa s, fpcr 0: 40fd3e0c000164d2 007d3e0c3f800000 fpsr 0
+fexpa h, fpcr 0: 7fd403d400160000 040043d400f801c8 fpsr 0
+ftmad d #5, fpcr 0: 3fbfffff94687528 3fdffffed81b08d8 fpsr 10
+ftmad d #5, fpcr c00000: 3fbfffff94687527 3fdffffed81b08d7 fpsr 10
+ftmad d #5, fpcr 2000000: 3fbfffff94687528 3fdffffed81b08d8 fpsr 10
+ftmad s #2, fpcr 0: 3e088888bf355556 7fe0000040008889 fpsr 11
+ftmad s #2, fpcr c00000: 3e088888bf355555 7fe0000040008888 fpsr 11
+ftmad s #2, fpcr 2000000: 3e088888bf355556 7fc0000040008889 fpsr 11
+ftmad h #1, fpcr 0: bb55b400a9540000 7f003556b400b955 fpsr 11
+ftmad h #1, fpcr c00000: bb55b400a9540000 7f003555b400b955 fpsr 11
+ftmad h #1, fpcr 2000000: bb55b400a9540000 7e003556b400b955 fpsr 11
+fscale d, fpcr 0: 7ff0000000000000 0038000000000000 fpsr 14
+fscale d, fpcr c00000: 7fefffffffffffff 0038000000000000 fpsr 14
+fscale d, fpcr 2000000: 7ff0000000000000 0038000000000000 fpsr 14
+fscale d, fpcr 1000000: 7ff0000000000000 0000000000000000 fpsr 94
+fscale s, fpcr 0: 30c0000000800000 7f80000000000001 fpsr 14
+fscale s, fpcr c00000: 30c0000000800000 7f7fffff00000001 fpsr 14
+fscale s, fpcr 2000000: 30c0000000800000 7f80000000000001 fpsr 14
+fscale s, fpcr 1000000: 30c0000000000000 7f80000000000000 fpsr 9c
+fexpa, all of it: 28633d0a2a5db164 547758534ada41a8 ba47f01d10007e00
+PR_GET_TAGGED_ADDR_CTRL: 0
+uname at a tag: Bad address
+openat of a path at a tag: Bad address
+write of nothing at a tag: Bad address
+write of nothing: 0
+a store at a tag: 42
+an exclusive store at another tag: 0
+which stored: 43
+PR_SET_TAGGED_ADDR_CTRL of what isn't: Invalid argument
+PR_SET_TAGGED_ADDR_CTRL with more: Invalid argument
+PR_SET_TAGGED_ADDR_CTRL: 0
+PR_GET_TAGGED_ADDR_CTRL: 1
+uname at a tag: 0
+openat of a path at a tag: No such file or directory
+write of nothing at a tag: 0
+PR_GET_TAGGED_ADDR_CTRL of a child: 1
+uname at a tag of a child: 0
+PR_SET_TAGGED_ADDR_CTRL of none: 0
+uname at a tag: Bad address

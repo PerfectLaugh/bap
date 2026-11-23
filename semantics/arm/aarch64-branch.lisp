@@ -50,22 +50,23 @@
 (defun TBNZW (reg pos off) (TB** non-zero reg pos off))
 (defun TBNZX (reg pos off) (TB** non-zero reg pos off))
 
-;; The branches that authenticate their target: the authentication isn't
-;; modeled, see aarch64-special.lisp, so it succeeds and the target is the
-;; register. The target is read before LR is written, as it can be LR.
+;; The branches and the returns that authenticate their target are
+;; UNDEFINED, as the processor doesn't have the pointer authentication,
+;; see aarch64-special.lisp. The target of a call is read before LR is
+;; written, as it can be LR.
 
 (defun a64-call (target)
   (let ((pc target))
     (set LR (+ (get-program-counter) 4))
     (exec-addr pc)))
 
-(defun BRAA (rn _) (exec-addr rn))
-(defun BRAB (rn _) (exec-addr rn))
-(defun BRAAZ (rn) (exec-addr rn))
-(defun BRABZ (rn) (exec-addr rn))
-(defun BLRAA (rn _) (a64-call rn))
-(defun BLRAB (rn _) (a64-call rn))
-(defun BLRAAZ (rn) (a64-call rn))
-(defun BLRABZ (rn) (a64-call rn))
-(defun RETAA (lr) (exec-addr lr))
-(defun RETAB (lr) (exec-addr lr))
+(defun BRAA (_ _) (a64-no-pauth))
+(defun BRAB (_ _) (a64-no-pauth))
+(defun BRAAZ (_) (a64-no-pauth))
+(defun BRABZ (_) (a64-no-pauth))
+(defun BLRAA (_ _) (a64-no-pauth))
+(defun BLRAB (_ _) (a64-no-pauth))
+(defun BLRAAZ (_) (a64-no-pauth))
+(defun BLRABZ (_) (a64-no-pauth))
+(defun RETAA (_) (a64-no-pauth))
+(defun RETAB (_) (a64-no-pauth))

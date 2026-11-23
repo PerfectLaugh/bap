@@ -1,0 +1,35 @@
+#-0 of ARM: runs
+which loads: 84c8ed01 00000001 84c8ed5a 00000000 84c8ed5a 00000000 11223344 cafe0001 000000a7 11223344 00000000 00003344
+#-0 of Thumb: runs
+which loads: 84c8ed01 00000001 ffffed01 55667788 55667788 00000000 55667788 85caf005 55667788 00000000 85caf005 00000000 5566f00d 00000000 8000f3af 000000af 8000f3af 8000f3af 00000004 00000002
+the pc and sp that ARM shifts: runs
+off by: 00000000 00000000 00000000 00000000
+sp of Thumb: runs
+off by: 00000000 00000000 00000000 84c8ed01 00000000 00000063
+ARM 0xe7f001f0: signal 5 code 1 at it 1
+ARM udf #255: signal 4 code 1 at it 1
+ARM smc: signal 4 code 1 at it 1
+ARM hlt: signal 4 code 1 at it 1
+ARM vmrs fpsid: signal 4 code 1 at it 1
+ARM vmrs mvfr0: signal 4 code 1 at it 1
+ARM vmrs fpexc: signal 4 code 1 at it 1
+ARM vmsr fpexc: signal 4 code 1 at it 1
+ARM rfeia: signal 4 code 1 at it 1
+ARM srsdb: signal 4 code 1 at it 1
+ARM vmrs fpscr: runs
+ARM pldw: runs
+ARM cpsid: runs
+Thumb 0xde01: signal 5 code 1 at it 1
+Thumb 0xf7f0a000: signal 5 code 1 at it 1
+Thumb udf #255: signal 4 code 1 at it 1
+Thumb udf.w #1: signal 4 code 1 at it 1
+Thumb smc: signal 4 code 1 at it 1
+Thumb hlt: signal 4 code 1 at it 1
+Thumb blx pc: signal 4 code 1 at it 1
+Thumb vmrs fpexc: signal 4 code 1 at it 1
+Thumb rfeia: signal 4 code 1 at it 1
+Thumb srsdb: signal 4 code 1 at it 1
+Thumb cpsid, cpsie: runs
+Thumb pldw: runs
+vmaxnm, vminnm: runs
+which are: 3f800000 40000000 00000000 7fc00000 3f800000 40000000 80000000 7fc00000 3f800000 40000000 80000000 7fc00000

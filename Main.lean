@@ -114,12 +114,17 @@ private def runMachine (machine : Linux.Machine) (stop : Option (Nat × String))
   -- A program that ends first has nothing to go on from: what an earlier run left must not look like it.
   if let some (_, path) := stop then
     if ← System.FilePath.pathExists path then IO.FS.removeFile path
-  let fuel := match stop with
-    | some (count, _) => count
-    | none => 1000000000
-  let outcome ← machine.run (fuel := fuel) fun data => do
+  let output (data : ByteArray) : IO Unit := do
     stdout.write data
     stdout.flush
+  -- Without `--stop-after`, it runs for as long as it takes: a billion instructions at a time, each of which goes on from the last.
+  let rec forever (pieces : Nat) : IO Tasks.ScheduleOutcome := do
+    match pieces, ← machine.run (fuel := 1000000000) output with
+    | pieces + 1, .outOfFuel => forever pieces
+    | _, outcome => pure outcome
+  let outcome ← match stop with
+    | some (count, _) => machine.run (fuel := count) output
+    | none => forever (2 ^ 62)
   if stats then
     let rollbacks ← Emu.rollbackStats machine.emu
     (← IO.getStderr).putStrLn s!"rollbacks: {rollbacks.faults} faults, {rollbacks.restarts} restarts, {rollbacks.others} others; {rollbacks.patched} patched ({rollbacks.bytesRestored} bytes), {rollbacks.rebuilt} rebuilt"

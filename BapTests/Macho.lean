@@ -86,8 +86,26 @@ def runUnixThread : IO Unit := do
   | .error error => throw <| IO.userError s!"Mach-O of LC_UNIXTHREAD: {error}"
   | .ok image => assertEqual "Mach-O of LC_UNIXTHREAD starts at its rip" 0x100000100 image.entryPoint
 
+/-- The names of the symbols of a file take no more than `namesLimit`, each as often as a symbol has it, and each ends in the string
+table: 64 symbols that each name a string of 64 KiB are refused, and 8 are read. -/
+def runNames : IO Unit := do
+  let length := 2 ^ 16
+  let file (count : Nat) (tableSize : Nat := length + 2) : ByteArray :=
+    let command := [2, 24, 56, count, 56 + 16 * count, tableSize].foldl (fun bytes value => appendNat bytes value 4) ByteArray.empty
+    let header := [0xfeedfacf, 0x01000007, 3, 2, 1, command.size, 0, 0].foldl (fun bytes value => appendNat bytes value 4) ByteArray.empty
+    let symbol := appendNat (appendNat (appendNat (appendNat (appendNat ByteArray.empty 1 4) 0x0f 1) 0 1) 0 2) 0x1000 8
+    let symbols := (List.range count).foldl (fun bytes _ => bytes ++ symbol) (header ++ command)
+    symbols ++ ByteArray.mk #[0] ++ ByteArray.mk (Array.replicate length 0x41) ++ ByteArray.mk #[0]
+  assertEqual "Mach-O symbols whose names are 8 times a string of 64 KiB are read" (some (List.replicate 8 length))
+    ((Macho.decode (file 8)).toOption.map (·.symbols.map (·.name.length)))
+  assertEqual "Mach-O symbols whose names take more than the file is given are refused" (some namesTooLarge)
+    (match Macho.decode (file 64) with | .error message => some message | .ok _ => none)
+  assertEqual "a Mach-O symbol name that doesn't end in the string table is refused" (some "unterminated string")
+    (match Macho.decode (file 8 100) with | .error message => some message | .ok _ => none)
+
 def run : IO Unit := do
   assertEqual "Mach-O fixture size" 260 fixture.size
+  runNames
   -- A segment whose command asks for more zeros than a host can give isn't made.
   let big := fixture.get! 0 == 0xfe
   let (_, huge, found) := (List.range (fieldOf fixture 16 4 big)).foldl (init := (32, fixture, false)) fun (offset, data, found) _ =>

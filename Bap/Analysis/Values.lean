@@ -274,7 +274,7 @@ structure Machine where
   scratch : List String := []
 
 mutual
-  partial def eval (state : State) : Bil.Exp → Run Value
+  def eval (state : State) : Bil.Exp → Run Value
     | .int (width := width) value => pure (.const width value.toNat)
     | .var var => pure (state.read var)
     | .load _ address _ size => do
@@ -349,7 +349,7 @@ mutual
       | _, _ => pure .top
     | .unknown _ _ => pure .top
 
-  partial def store (machine : Machine) (state : State) : Bil.Exp → Run State
+  def store (machine : Machine) (state : State) : Bil.Exp → Run State
     | .store memory address value _ size => do
       let state ← store machine state memory
       let address ← eval state address
@@ -376,17 +376,21 @@ mutual
       let state := match stored with
         | .set (some base) _ _ _ _ => if base == stackPointer && !saves then { state with escaped := true } else state
         | _ => state
+      -- what a register held on entry points to may be what any other points to, or what is at a number, or where isn't known:
+      -- a store there leaves only the slots of the stack, which nothing on entry points into
+      let ofStack := state.slots.filter fun slot => slot.base == stackPointer
       match address with
       | .set (some base) _ lo hi _ =>
         let kept := state.slots.filter fun slot =>
-          slot.base != base || slot.offset + slot.size ≤ lo || hi + size ≤ slot.offset
+          if slot.base == base then slot.offset + slot.size ≤ lo || hi + size ≤ slot.offset
+          else base == stackPointer || slot.base == stackPointer
         if lo == hi then
           pure { state with slots := { base, offset := lo, size, value := stored } :: kept
                             written := if garbage then state.written else state.written.add base lo (lo + size) }
         else pure { state with slots := kept }
       -- a store that isn't known where is of any slot, once an address of the stack has left
-      | .top => pure (if state.escaped then { state with slots := [] } else state)
-      | _ => pure state
+      | .top => pure (if state.escaped then { state with slots := [] } else { state with slots := ofStack })
+      | _ => pure { state with slots := ofStack }
     | .var _ => pure state
     | .letIn var value body => do
       let value ← eval state value
@@ -395,21 +399,17 @@ mutual
 end
 
 /-- What a statement can write, at any depth. -/
-partial def assigned : Bil.Stmt → List Bap.Var
-  | .move var _ => [var]
-  | .while _ body => body.flatMap assigned
-  | .ifElse _ yes no => yes.flatMap assigned ++ no.flatMap assigned
-  | _ => []
+def assigned (stmt : Bil.Stmt) : List Bap.Var := Frame.stmtAssigned stmt
 
 mutual
-  partial def exec (machine : Machine) (state : State) : Bil.Program → Run State
+  def exec (machine : Machine) (state : State) : Bil.Program → Run State
     | [] => pure state
     | stmt :: rest => do
       let (state, jumped) ← execStmt machine state stmt
       if jumped then pure state else exec machine state rest
 
   /-- What a statement does, and whether it jumps, which leaves the instruction. -/
-  partial def execStmt (machine : Machine) (state : State) : Bil.Stmt → Run (State × Bool)
+  def execStmt (machine : Machine) (state : State) : Bil.Stmt → Run (State × Bool)
     | .move var value => do
       match var.typ with
       | .mem _ _ => pure (← store machine state value, false)
@@ -456,9 +456,32 @@ structure Context where
   /-- What registers hold on entry to each function, as MIPS's gp has `_gp` in code that isn't of PIC. -/
   entryRegisters : List (String × Nat) := []
 
+/-- What a call does after what it does itself, and after its delay slot if it has one, of the state `after` that: an address of
+the stack that it is given has left, and it clobbers what its convention doesn't keep. What it is given is in any register that
+what is called may read, those that a call doesn't keep: of its arguments, of where a result too big for registers goes, as x8 of
+AArch64, and of the conventions that pass in others, as those of i686 that pass in ecx and edx do; a call of the system
+(`system`), in the registers of its arguments. What a register that isn't the stack pointer pointed to on entry, it may write. -/
+def callEffects (context : Context) (system : Bool) (after : State) : State :=
+  let stack := context.stackPointer.name.str
+  let ofStack (value : Value) : Bool := match value with
+    | .set (some base) _ _ _ _ => base == stack
+    | _ => false
+  let given :=
+    if system then context.frame.convention.syscallArguments.any fun var => ofStack (after.read var)
+    else
+      (context.frame.convention.functionArguments ++ context.frame.convention.floatArguments).any (fun var =>
+        ofStack (after.read var)) ||
+      context.frame.volatile.any fun name => ofStack (after.read (⟨name, .imm context.frame.width, 0, false⟩ : Bap.Var))
+  let after := if given then { after with escaped := true } else after
+  -- and what has an address that has left may write there
+  let after := { after with slots := if after.escaped then [] else after.slots.filter fun slot => slot.base == stack }
+  context.frame.volatile.foldl (init := after) fun state (name : String) =>
+    state.write (⟨name, .imm context.frame.width, 0, false⟩ : Bap.Var) .top
+
 /-- What an instruction does: the stack pointer before it is as its frame has it, and a call clobbers what its convention doesn't
-keep. -/
-def step (context : Context) (insn : Disasm.Insn) (state : State) : Run State := do
+keep. A call of MIPS with a delay slot calls after its slot, which may give it what it is called with: the instruction after it
+is run with `slotOf` the call, and does what the call does after what it does itself. -/
+def step (context : Context) (insn : Disasm.Insn) (state : State) (slotOf : Option Disasm.Insn := none) : Run State := do
   let state := match context.deltas[insn.address]?, context.stackPointer.typ with
     | some delta, .imm width => state.write context.stackPointer (.set (some context.stackPointer.name.str) width delta delta 0)
     | _, _ => state
@@ -468,21 +491,9 @@ def step (context : Context) (insn : Disasm.Insn) (state : State) : Run State :=
   let after := { after with env := after.env.filter fun name _ => !name.startsWith "_" }
   let effects ← get
   let after := if effects.lost then { after with escaped := true } else after
-  if insn.flow != .call && !effects.special then return after
-  -- an address of the stack that a call is given has left: of a call of the system, in the registers of its arguments
-  let ofStack (value : Value) : Bool := match value with
-    | .set (some base) _ _ _ _ => base == stack
-    | _ => false
-  let given :=
-    if insn.flow == .call then
-      (context.frame.convention.functionArguments ++ context.frame.convention.floatArguments).any fun var =>
-        ofStack (after.read var)
-    else context.frame.convention.syscallArguments.any fun var => ofStack (after.read var)
-  let after := if given then { after with escaped := true } else after
-  -- and what has an address that has left may write there
-  let after := if after.escaped then { after with slots := [] } else after
-  return context.frame.volatile.foldl (init := after) fun state (name : String) =>
-    state.write (⟨name, .imm context.frame.width, 0, false⟩ : Bap.Var) .top
+  let delayed := insn.flow == .call && Partition.mipsSlotted context.frame.arch insn
+  let after := if (insn.flow == .call && !delayed) || effects.special then callEffects context (insn.flow != .call) after else after
+  return if slotOf.isSome then callEffects context false after else after
 
 /-- The accesses of a function, run over its flow to where nothing changes, with each bound widened to what isn't known when it
 has grown a few times. -/
@@ -507,12 +518,15 @@ def analyze (context : Context) (program : Frame.Program) (function : Partition.
   let mut joins : Std.HashMap Nat Nat := {}
   let mut accesses : Std.HashMap Nat (Array Access) := {}
   let mut fuel := 64 * instructions.size + 64
+  -- the delay slots of the calls of MIPS, which each call after
+  let slots : Std.HashMap Nat Disasm.Insn := instructions.fold (init := {}) fun table _ insn =>
+    if insn.flow == .call && Partition.mipsSlotted context.frame.arch insn then table.insert insn.next insn else table
   while next < work.size && fuel > 0 do
     fuel := fuel - 1
     let address := work[next]!
     next := next + 1
     let some insn := instructions[address]? | continue
-    let (after, seen) := (step context insn (states.getD address {})).run {}
+    let (after, seen) := (step context insn (states.getD address {}) slots[address]?).run {}
     -- what an instruction accesses is what it did of the last state it was run of, which has what the others had
     accesses := accesses.insert address seen.accesses
     for target in successors address do

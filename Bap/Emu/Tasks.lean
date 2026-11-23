@@ -145,6 +145,10 @@ private def initTask (table : TaskTable) (fallback : Nat) : Nat :=
 /-- All of the process has exited: its threads stop, its children go to the first process and it waits as a zombie. -/
 private def markExited (emu : Emu) (group status : Nat) : IO Unit := do
   let table ← emu.taskTable.get
+  for task in table.tasks do
+    if task.group == group && task.status.isNone then
+      for hook in ← emu.taskExiting.get do hook task.tid
+  let table ← emu.taskTable.get
   emu.taskTable.set (table.exitGroup group status (initTask table group))
   let current ← thread emu
   for task in table.tasks do
@@ -201,6 +205,8 @@ private def wakeThreads (emu : Emu) (threads : List ThreadId) : IO Unit :=
 writes 0 where `set_tid_address` says and wakes whoever waits there. -/
 def exitThread (emu : Emu) (code : Nat) : IO Unit := do
   let task ← currentTask emu
+  -- Before its `clearTid`, as `mm_release` has what a thread holds let go of first.
+  for hook in ← emu.taskExiting.get do hook task.tid
   -- Only of memory that another thread still has, as `mm_release` has it: what the last of it leaves is of no one.
   let shared := (← emu.taskTable.get).tasks.any fun other => other.space == task.space && other.tid != task.tid && other.status.isNone
   if let some address := task.clearTid then
@@ -219,12 +225,16 @@ def exitThread (emu : Emu) (code : Nat) : IO Unit := do
   emu.taskTable.set (table.exitTask (← thread emu) (exitedStatus code) (initTask table 0))
   emu.stopped.set true
   releaseVfork emu task.tid
-  -- The last of its process ends the process, which what hears of that hears of as of `exit_group`.
+  -- The last of its process ends the process, which what hears of that hears of as of `exit_group`: with the status of the last
+  -- thread to end, as Linux has it since 6.1 (`synchronize_group_exit`), rather than that of its leader, which ended before.
   let left ← emu.taskTable.get
   if let some leader := left.find? task.group then
-    if let some status := leader.status then
-      if left.alone leader then
-        if let some heard := ← emu.processExited.get then heard task.group status
+    if leader.status.isSome && left.alone leader then
+      let status := exitedStatus code
+      if leader.tid != task.tid then
+        emu.taskTable.set { left with tasks := left.tasks.map fun other =>
+          if other.tid == leader.tid then { other with status := some status } else other }
+      if let some heard := ← emu.processExited.get then heard task.group status
 
 /-- Where a thread blocks that waits for no address, as for a signal: no guest can wake it, as this isn't memory that it has. -/
 def noAddressWait (tid : Nat) : Nat := 2 ^ 64 - 8 * (tid + 1)
@@ -271,15 +281,21 @@ def kill (emu : Emu) (target signal : Nat) : IO Unit := do
     else throw <| IO.userError s!"no running Emu process {target}"
   | none => throw <| IO.userError s!"no running Emu process {target}"
 
-/-- Forgets the threads and the memory of what is no longer in the table. What runs stays until it switches away, since
-switching keeps the memory it leaves. -/
+/-- Forgets the threads and the memory of what is no longer in the table, and the memory of what is over. What runs stays until it
+switches away, since switching keeps the memory it leaves. -/
 def collectGone (emu : Emu) : IO Unit := do
   let current ← thread emu
   emu.taskTable.modify (·.sweep current)
   let table ← emu.taskTable.get
-  emu.threadsRef.modify (·.filter fun context => context.id == current || (table.find? context.id).isSome)
-  emu.processMemory.modify (·.filter fun space _ => table.tasks.any (·.space == space))
-  emu.parkedRegions.modify (·.filter fun space _ => table.tasks.any (·.space == space))
+  -- A process that is over and isn't reaped keeps its status and nothing else, as a zombie of Linux has neither memory nor registers:
+  -- the memory of a space goes with the last task that runs in it, and the registers of a thread with the thread. By sets, as there
+  -- may be as many zombies as a program has left.
+  let (running, spaces) := table.tasks.foldl (init := (({} : Std.HashSet Nat), ({} : Std.HashSet Nat))) fun (running, spaces) task =>
+    if task.status.isNone || task.tid == current then (running.insert task.tid, spaces.insert task.space) else (running, spaces)
+  if (← emu.threadsRef.get).any fun context => context.id != current && !running.contains context.id then
+    emu.threadsRef.modify (·.filter fun context => context.id == current || running.contains context.id)
+  emu.processMemory.modify (·.filter fun space _ => spaces.contains space)
+  emu.parkedRegions.modify (·.filter fun space _ => spaces.contains space)
 
 /-- What `waitpid` reports now, in the process that runs, without blocking. What it reports is gone from the table. -/
 def waitpid (emu : Emu) (target : Option Nat := none) : IO WaitResult := do
@@ -497,9 +513,13 @@ private def serveClone (emu : Emu) (flags signal stack parentTid threadPointer c
   let has (flag : Nat) : Bool := flags &&& flag != 0
   -- On i686 it is a `struct user_desc`, with the base at 4, as for `set_thread_area`.
   let threadBase ← if emu.config.syscallAbi == .x86_32 && has setTls then readWord32 emu (threadPointer + 4) else pure threadPointer
-  if flags ||| known != known then
+  -- A namespace of mounts or of users of its own with the same `fs_struct`, `EINVAL`, as `copy_process` has it before anything else.
+  if has 0x200 && (has 0x20000 || has 0x10000000) then
+    syscallReturn emu (.error einval)
+  else if flags ||| known != known then
     syscallReturn emu (.error (enosys emu))
-  else if has cloneThreadFlag && !has cloneVm then
+  -- Threads share their handlers, and what shares handlers shares memory, as `copy_process` has it.
+  else if (has cloneThreadFlag && !has 0x800) || (has 0x800 && !has cloneVm) then
     syscallReturn emu (.error einval)
   else
     let options : CloneOptions := {
@@ -530,8 +550,9 @@ private def serveClone (emu : Emu) (flags signal stack parentTid threadPointer c
     syscallReturn emu (.ok id)
 
 /-- `futex`, for the word at `address` of the space of the thread that runs, or, without `FUTEX_PRIVATE_FLAG`, of what `futexKey` says
-it is shared as. Waits and wakes, with masks, and requeues, which is what `pthread_join`, mutexes and condition variables use: no
-priority inheritance and no `FUTEX_WAKE_OP`. There is no clock, so a thread with a timeout times out when nothing else can run. -/
+it is shared as. Waits and wakes, with masks, and requeues, which is what `pthread_join`, mutexes and condition variables use, with
+`FUTEX_WAKE_OP` and the locks of `FUTEX_LOCK_PI`, in which nothing is inherited, as no thread has a priority here: not the requeues to
+those, nor `futex_waitv`. There is no clock, so a thread with a timeout times out when nothing else can run. -/
 private def serveFutex (emu : Emu) (address operation value timeout target compare : Nat) (wideTime : Bool) : IO SyscallAction := do
   let own := (← currentTask emu).space
   -- Where a word is to whoever else waits on it.
@@ -592,9 +613,119 @@ private def serveFutex (emu : Emu) (address operation value timeout target compa
     emu.taskTable.set table
     wakeThreads emu woken
     syscallReturn emu (.ok (woken.length + moved))
+  -- `FUTEX_WAKE_OP`: the word at `target` is changed as `compare` says, those that wait on the first word are woken, and, if what
+  -- the second held compares as `compare` says too, those that wait on it, as `futex_wake_op` has it.
+  let wakeOp : IO SyscallAction := do
+    if address % 4 != 0 || target % 4 != 0 then return ← syscallReturn emu (.error einval)
+    let encoded := compare % 2 ^ 32
+    let signed12 (value : Nat) : Int := if value ≥ 2 ^ 11 then (value : Int) - 2 ^ 12 else value
+    let (kind, test) := ((encoded >>> 28) % 8, (encoded >>> 24) % 16)
+    let argument := signed12 ((encoded >>> 12) % 2 ^ 12)
+    let against := signed12 (encoded % 2 ^ 12)
+    -- `FUTEX_OP_OPARG_SHIFT`: the argument is a bit.
+    let argument : Int := if encoded &&& 2 ^ 31 != 0 then ((1 <<< (argument.toNat % 32) : Nat) : Int) else argument
+    if kind > 4 || test > 5 then return ← syscallReturn emu (.error (enosys emu))
+    match ← (readWord32 emu target).toBaseIO with
+    | .error _ => syscallReturn emu (.error efault)
+    | .ok old =>
+      let operand := (argument % 2 ^ 32).toNat
+      let changed := match kind with
+        | 0 => operand
+        | 1 => (old + operand) % 2 ^ 32
+        | 2 => old ||| operand
+        | 3 => old &&& (2 ^ 32 - 1 - operand)
+        | _ => old ^^^ operand
+      if let .error _ ← (write emu target (word32 emu changed)).toBaseIO then return ← syscallReturn emu (.error efault)
+      let was : Int := if old ≥ 2 ^ 31 then (old : Int) - 2 ^ 32 else old
+      let holds := match test with
+        | 0 => was == against
+        | 1 => was != against
+        | 2 => was < against
+        | 3 => was ≥ against
+        | 4 => was ≤ against
+        | _ => was > against
+      let countOf (value : Nat) : Nat := if value % 2 ^ 32 == 0 || value % 2 ^ 32 ≥ 2 ^ 31 then 1 else value % 2 ^ 32
+      let (space, word) ← keyOf address
+      let (table, woken) := (← emu.taskTable.get).futexWake space word all (countOf value)
+      emu.taskTable.set table
+      wakeThreads emu woken
+      let more ← if holds then do
+          let (space, word) ← keyOf target
+          let (table, woken) := (← emu.taskTable.get).futexWake space word all (countOf timeout)
+          emu.taskTable.set table
+          wakeThreads emu woken
+          pure woken.length
+        else pure 0
+      syscallReturn emu (.ok (woken.length + more))
+  -- The futexes of priority inheritance, `FUTEX_LOCK_PI`, `FUTEX_LOCK_PI2`, `FUTEX_TRYLOCK_PI` and `FUTEX_UNLOCK_PI`: the word holds
+  -- the id of the thread that has the lock, with `FUTEX_WAITERS` if others wait for it in the kernel, which hands it to the first
+  -- of them when it is let go, as `futex_lock_pi` and `futex_unlock_pi` have it. No thread has a priority here to inherit. One that
+  -- waits for it does so where no `FUTEX_WAKE` finds it, by a bit that no mask of those has.
+  let waiters := 2 ^ 31
+  let died := 2 ^ 30
+  let handed := 2 ^ 32
+  let lockPi (wait : Bool) : IO SyscallAction := do
+    if address % 4 != 0 then return ← syscallReturn emu (.error einval)
+    let tid ← thread emu
+    let span ← if timeout == 0 || !wait then pure none else
+      match ← (readSpan emu timeout field).toBaseIO with
+      | .error _ => return ← syscallReturn emu (.error efault)
+      | .ok none => return ← syscallReturn emu (.error einval)
+      | .ok span => pure span
+    match ← (readWord32 emu address).toBaseIO with
+    | .error _ => syscallReturn emu (.error efault)
+    | .ok word =>
+      let owner := word % died
+      let (space, key) ← keyOf address
+      let queued := (← emu.taskTable.get).futexes.any fun waiter => waiter.space == space && waiter.address == key && waiter.bitset == handed
+      if owner == tid then syscallReturn emu (.error (if isMips emu then 45 else 35))
+      else if owner == 0 && !queued then
+        -- Nobody has it: it is this thread's, with what it said of an owner that died.
+        if let .error _ ← (write emu address (word32 emu (tid ||| (word &&& died)))).toBaseIO then return ← syscallReturn emu (.error efault)
+        syscallReturn emu (.ok 0)
+      else if !wait then syscallReturn emu (.error eagain)
+      -- An owner that isn't there is `ESRCH`, as `attach_to_pi_owner` has it.
+      else if owner != 0 && !(← emu.taskTable.get).tasks.any (fun task => task.tid == owner && task.status.isNone) then
+        syscallReturn emu (.error esrch)
+      else
+        if let .error _ ← (write emu address (word32 emu (word ||| waiters))).toBaseIO then return ← syscallReturn emu (.error efault)
+        -- To a time of the clock, which of `FUTEX_LOCK_PI` is that of the day, as all clocks here are one.
+        let deadline ← match span, ← emu.now.get with
+          | some span, some _ => pure (some span)
+          | _, _ => pure none
+        emu.taskTable.modify (·.futexWait { thread := tid, space, address := key, bitset := handed, timed := timeout != 0, deadline })
+        emu.stopped.set true
+        syscallReturn emu (.ok 0)
+  let unlockPi : IO SyscallAction := do
+    if address % 4 != 0 then return ← syscallReturn emu (.error einval)
+    let tid ← thread emu
+    match ← (readWord32 emu address).toBaseIO with
+    | .error _ => syscallReturn emu (.error efault)
+    | .ok word =>
+      -- Only the thread that has it lets it go.
+      if word % died != tid then return ← syscallReturn emu (.error 1)
+      let (space, key) ← keyOf address
+      let table ← emu.taskTable.get
+      let (waiting, rest) := table.futexes.partition fun waiter => waiter.space == space && waiter.address == key && waiter.bitset == handed
+      match waiting with
+      | [] =>
+        if let .error _ ← (write emu address (word32 emu 0)).toBaseIO then return ← syscallReturn emu (.error efault)
+        syscallReturn emu (.ok 0)
+      | next :: others =>
+        -- The first that waits has it, with the bit if others still wait.
+        if let .error _ ← (write emu address (word32 emu (next.thread ||| (if others.isEmpty then 0 else waiters)))).toBaseIO then
+          return ← syscallReturn emu (.error efault)
+        emu.taskTable.set { table with futexes := rest ++ others }
+        setSyscallResult emu next.thread (.ok 0)
+        wakeThreads emu [next.thread]
+        syscallReturn emu (.ok 0)
   -- `FUTEX_CLOCK_REALTIME` is of a wait to a time, which `FUTEX_WAIT` isn't.
-  if operation &&& 0x100 != 0 && command != 9 then return ← syscallReturn emu (.error (enosys emu))
+  if operation &&& 0x100 != 0 && command != 9 && command != 13 then return ← syscallReturn emu (.error (enosys emu))
   match command with
+  | 5 => wakeOp
+  | 6 | 13 => lockPi true
+  | 7 => unlockPi
+  | 8 => lockPi false
   | 0 => wait all
   | 1 => wake all
   | 3 => if address % 4 != 0 || target % 4 != 0 then syscallReturn emu (.error einval) else requeue
@@ -653,7 +784,9 @@ def mmapPlace (emu : Emu) (address pages flags : Nat) : IO (Except Nat (Nat × B
     return .ok (hint, true)
   return .ok (0, false)
 
-private def protectionOf (bits : Nat) : Primus.Protection := ⟨bits &&& 1 != 0, bits &&& 2 != 0, bits &&& 4 != 0⟩
+/-- What may be done with memory of the bits of `mmap` and `mprotect`. What may be written may be read, as the page tables of every
+target that Linux runs on here have it: there is no page that is only written. -/
+def protectionOf (bits : Nat) : Primus.Protection := ⟨bits &&& 3 != 0, bits &&& 2 != 0, bits &&& 4 != 0⟩
 
 /-- Places a mapping of `pages` of `data`: at `address` if it is fixed, over what was there, and anywhere else if not. -/
 def placeMapping (emu : Emu) (address : Nat) (fixed : Bool) (data : ByteArray) (bits : Nat) : IO Nat := do
@@ -676,8 +809,8 @@ private def serveMmap (emu : Emu) (address size bits flags : Nat) : IO SyscallAc
   let anonymous := flags &&& (if isMips emu then 0x800 else 0x20) != 0
   if !anonymous then
     syscallReturn emu (.error (enosys emu))
-  -- Of nothing, or neither shared nor private, as `do_mmap` has `MAP_TYPE`, `EINVAL`.
-  else if size == 0 || flags &&& 3 == 0 then
+  -- Of nothing, or neither shared nor private, or both, which only a file can be, as `do_mmap` has `MAP_TYPE`, `EINVAL`.
+  else if size == 0 || flags &&& 3 == 0 || flags &&& 3 == 3 then
     syscallReturn emu (.error einval)
   else
     let pages := (size + 4095) / 4096 * 4096
@@ -688,14 +821,38 @@ private def serveMmap (emu : Emu) (address size bits flags : Nat) : IO SyscallAc
         syscallReturn emu (.ok (← placeZeros emu start fixed pages bits))
       catch _ => syscallReturn emu (.error enomem)
 
+/-- `mprotect` of `size` bytes at `address` to the bits of `bits`, as `do_mprotect_pkey` has it, or its error: what doesn't start on a
+page, bits that there aren't, or both of `PROT_GROWSDOWN` and `PROT_GROWSUP`, are `EINVAL`, as either of them is where nothing is known
+to grow; of nothing, nothing; and of a range that isn't all mapped, what is mapped of it up to where it first isn't is changed, and
+then it is `ENOMEM`. -/
+def protectRange (emu : Emu) (address size bits : Nat) : IO (Except Nat Unit) := do
+  let grows := 0x01000000 ||| 0x02000000
+  if bits &&& grows == grows || address % 4096 != 0 then return .error einval
+  if size == 0 then return .ok ()
+  let pages := (size + 4095) / 4096 * 4096
+  if address + pages > 2 ^ (← wordWidth emu) then return .error enomem
+  -- `PROT_READ`, `PROT_WRITE`, `PROT_EXEC` and `PROT_SEM`, and what the architecture has besides: `PROT_BTI` and `PROT_MTE` of
+  -- AArch64, and `PROT_SAO` of PowerPC.
+  let known := 0xf ||| match emu.config.syscallAbi with
+    | .aarch64 => 0x30
+    | .powerpc | .powerpc64 => 0x10
+    | _ => 0
+  if bits ||| known ||| grows != known ||| grows || bits &&& grows != 0 then return .error einval
+  -- How far it is mapped from where it starts.
+  let touching := (← regionsTouching emu address pages).toArray.qsort fun left right => left.address < right.address
+  let covered := touching.foldl (init := address) fun position region =>
+    if region.address ≤ position then max position (region.address + region.data.size) else position
+  let covered := min covered (address + pages)
+  try
+    if covered > address then protect emu address (covered - address) (protectionOf bits)
+    pure (if covered < address + pages then .error enomem else .ok ())
+  catch _ => pure (.error enomem)
+
 /-- `mprotect`. -/
 private def serveProtect (emu : Emu) (address size bits : Nat) : IO SyscallAction := do
-  -- What doesn't start on a page is `EINVAL`, as `do_mprotect_pkey` has it.
-  if address % 4096 != 0 then return ← syscallReturn emu (.error einval)
-  try
-    protect emu address ((size + 4095) / 4096 * 4096) (protectionOf bits)
-    syscallReturn emu (.ok 0)
-  catch _ => syscallReturn emu (.error enomem)
+  match ← protectRange emu address size bits with
+  | .ok _ => syscallReturn emu (.ok 0)
+  | .error errno => syscallReturn emu (.error errno)
 
 /-- `madvise`, which is advice, but for what a program can tell, as `MADV_DONTNEED` is: what it had there reads as zeros from then on. -/
 private def serveAdvice (emu : Emu) (address size advice : Nat) : IO SyscallAction := do
@@ -712,8 +869,9 @@ private def serveAdvice (emu : Emu) (address size advice : Nat) : IO SyscallActi
 
 /-- The system calls of processes and of pthreads, as Linux has them, for programs that `runProcesses` runs: `fork`, `vfork`,
 which is `fork` as the standard allows, `clone`, `wait4`, `waitpid`, `exit`, `exit_group`, `getpid`, `getppid`, `gettid`,
-`sched_yield`, which goes on until the quantum ends, `futex`, `set_tid_address`, `set_robust_list`, which keeps nothing, so a
-mutex isn't released for a thread that dies with it, `rt_sigprocmask` and `rt_sigaction`, which change nothing here, as no signal
+`sched_yield`, which goes on until the quantum ends, `futex`, `set_tid_address`, `set_robust_list`, which keeps nothing here, so a
+mutex isn't released for a thread that dies with it, unless what hears that a task ends does it, as a Linux machine does by
+`taskExiting`, `rt_sigprocmask` and `rt_sigaction`, which change nothing here, as no signal
 is delivered by an emulator alone, `tgkill`, which ends the process, `mmap`, `munmap`, `mprotect`, `madvise` and `arch_prctl`. `clone3` and `rseq` say they aren't there, which libc falls back from.
 
 Parallel rounds can't serve them, since a worker has no table of threads to block in, and a call from one fails.
@@ -805,8 +963,11 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
       else if is calls.mmap || isSome calls.mmap2 then
         serveMmap current (arg 0) (arg 1) (arg 2) (arg 3)
       else if is calls.munmap then
-        unmap current (current.config.untag (arg 0)) ((arg 1 + 4095) / 4096 * 4096)
-        syscallReturn current (.ok 0)
+        -- What the host has no room to split is left, `ENOMEM`, as Linux has it of a mapping that it can't split.
+        try
+          unmap current (current.config.untag (arg 0)) ((arg 1 + 4095) / 4096 * 4096)
+          syscallReturn current (.ok 0)
+        catch _ => syscallReturn current (.error enomem)
       else if is calls.mprotect then
         serveProtect current (current.config.untag (arg 0)) (arg 1) (arg 2)
       else if is calls.madvise then

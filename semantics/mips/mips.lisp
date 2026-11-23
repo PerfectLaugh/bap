@@ -407,11 +407,55 @@
 (defun DMFC0 (_ _ _) (intrinsic 'undefined-instruction :aborts))
 (defun DMTC0 (_ _ _) (intrinsic 'undefined-instruction :aborts))
 
+;; and the other instructions of CP0, which are of the kernel: the returns
+;; from exceptions, the translations, the interrupt enable, the wait for an
+;; interrupt, and the cache operations
+(defun ERET () (intrinsic 'undefined-instruction :aborts))
+(defun DERET () (intrinsic 'undefined-instruction :aborts))
+(defun TLBP () (intrinsic 'undefined-instruction :aborts))
+(defun TLBR () (intrinsic 'undefined-instruction :aborts))
+(defun TLBWI () (intrinsic 'undefined-instruction :aborts))
+(defun TLBWR () (intrinsic 'undefined-instruction :aborts))
+(defun EI (_) (intrinsic 'undefined-instruction :aborts))
+(defun DI (_) (intrinsic 'undefined-instruction :aborts))
+(defun WAIT () (intrinsic 'undefined-instruction :aborts))
+(defun CACHE (_ _ _) (intrinsic 'undefined-instruction :aborts))
+
+;; CP2, which the processor doesn't have: the exception of a coprocessor that
+;; isn't usable is SIGILL of it too, in default_cu2_call
+(defun MFC2 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun MTC2 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMFC2 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun DMTC2 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun LWC2 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun SWC2 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun LDC2 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+(defun SDC2 (_ _ _) (intrinsic 'undefined-instruction :aborts))
+
+;; JALX goes to MIPS16e or microMIPS, and SDBBP to the debug mode of EJTAG,
+;; neither of which the processor has: they are reserved instructions
+(defun JALX (_) (intrinsic 'undefined-instruction :aborts))
+(defun SDBBP (_) (intrinsic 'undefined-instruction :aborts))
+
+;; RDHWR of the registers that Linux lets a program read, which it enables in
+;; HWREna (per_cpu_trap_init) and emulates where the processor doesn't have
+;; them (simulate_rdhwr of arch/mips/kernel/traps.c):
+;;   0, CPUNum: the processor that the program is on, of which there is one;
+;;   1, SYNCI_Step: the step of the addresses of SYNCI, the size of a line of
+;;     the caches, 32 bytes;
+;;   2, CC: the count, the low word of what a machine keeps of its cycles,
+;;     which serves the intrinsic mips_count: its hook writes the register;
+;;   3, CCRes: how many cycles the count takes to go on by one, 2;
+;;   29, UserLocal: the thread pointer.
+;; Any other is the exception of a reserved instruction, SIGILL.
 (defun RDHWR (rt hwr sel)
-  "reads the hardware register 29, UserLocal, e.g., the thread pointer
-   of Linux, the other hardware registers are not modeled"
-  (when (= (symbol hwr) 'HWR29)
-    (set$ rt USERLOCAL)))
+  (case (symbol hwr)
+    'HWR0 (set$ rt 0)
+    'HWR1 (set$ rt 32)
+    'HWR2 (set$ rt (sext32 (intrinsic 'mips_count :result 32)))
+    'HWR3 (set$ rt 2)
+    'HWR29 (set$ rt USERLOCAL)
+    (intrinsic 'undefined-instruction :aborts)))
 
 (defun J (target) (exec-addr (region target)))
 (defun JAL (target)
@@ -805,13 +849,22 @@
   (when (not (is-zero (logand (rshift x 12) (logor (rshift x 7) 0x20) 0x3f)))
     (intrinsic 'floating-point-exception :aborts)))
 
+;; FIR says what the FPU is, which is what the registers and the operations
+;; here are: the single and double formats, S and D, and the words, W, of
+;; all; the longs, L, and the registers of 64 bits, F64, of MIPS64 and of
+;; the Release 6; the paired singles, PS, of MIPS64 before it; and the NaNs
+;; of IEEE 754-2008, Has2008, of the Release 6. Its processor and its
+;; revision are zeros, as it is no processor that was made.
+(defun fir ()
+  (if (release6) 0x00f30000:32
+    (if (= (word-width) 64) 0x00770000:32 0x00130000:32)))
+
 (defun fcr-value (fs)
-  "the value of the control register FS. FIR says what the implementation
-   is, which isn't known here. FCR1 and FCR4 are of the Release 5, which
-   this doesn't model, and the manual leaves reading the others
+  "the value of the control register FS. FCR1 and FCR4 are of the Release
+   5, which this doesn't model, and the manual leaves reading the others
    unpredictable, of which a fault is one outcome"
   (case (symbol fs)
-    'FCR0 (intrinsic 'mips_cp1_fir :result 32)
+    'FCR0 (fir)
     'FCR25 (concat 0:24 FCC7 FCC6 FCC5 FCC4 FCC3 FCC2 FCC1 FCC0)
     'FCR26 (logand (fcsr-value) 0x0003f07c)
     'FCR28 (logor (logand (fcsr-value) 0x00000f83)

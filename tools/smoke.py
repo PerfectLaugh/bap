@@ -264,6 +264,9 @@ def write_corpus(path, encodings):
 
 BATCH_LINES = 4000
 BATCH_SECONDS = 10
+# The intrinsics that the lifted programs of a target name, each to an opcode that names it: `TARGET.specials.txt` of the work
+# directory has them, for what checks that each is served.
+SPECIALS = {}
 
 
 def smoke_batch(limit, target, path, samples):
@@ -277,6 +280,11 @@ def smoke_batch(limit, target, path, samples):
         raise SystemExit(f"bap-smoke {target} {path} exited {output.returncode}")
     tallies, totals = {}, (0, 0)
     for line in output.stdout.splitlines():
+        if line.startswith("# special "):
+            # an intrinsic that what lifted names, with an opcode that does
+            fields = line.split()
+            SPECIALS.setdefault(target, {}).setdefault(fields[2], fields[3])
+            continue
         if line.startswith("#"):
             fields = line.split()
             totals = (int(fields[2]), int(fields[4]))
@@ -355,6 +363,9 @@ def why(name):
 
 
 def report(target, recs, tallies, out, klass=None):
+    with open(os.path.join(out, target + ".specials.txt"), "w") as specials:
+        for name, opcode in sorted(SPECIALS.get(target, {}).items()):
+            specials.write(f"{name}\t{opcode}\n")
     names = {name for name, record in recs.items() if decodable(record)}
     reached = set(tallies)
     lifted = {name for name, tally in tallies.items() if tally[1] == 0}

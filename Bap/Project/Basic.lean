@@ -47,7 +47,9 @@ def mipsVariant (image : Image.Image) : Target.LLVMLift.MipsVariant :=
     release6 := Image.Elf.mipsRelease6 (Image.Elf.machineFlags image) }
 
 /-- The sections with instructions, as their ELF kind and flag, their Mach-O flags, also of `S_SYMBOL_STUBS`, whose kind is 8, or their PE flag
-`IMAGE_SCN_MEM_EXECUTE` tell, each with the name it goes by. A PE section has its `VirtualSize`, past which its region has only the padding of the file. -/
+`IMAGE_SCN_MEM_EXECUTE` tell, each with the name it goes by. A PE section has its `VirtualSize`, past which its region has only the padding of the file.
+A section that is all of its region has the bytes of the region, rather than its own of the same: zeros that a header asks for
+cost their size once. -/
 private def codeSections (image : Image.Image) : List (String × Image.MemRegion) :=
   (image.sections.filter fun part =>
     (part.kind == 1 && part.flags &&& 4 != 0) || (part.kind == 0 && part.flags &&& 0xa0000400 != 0 && part.size != 0) ||
@@ -55,7 +57,9 @@ private def codeSections (image : Image.Image) : List (String × Image.MemRegion
     (image.memory.entries.find? fun entry =>
       entry.1.executable && entry.1.addr ≤ part.addr && part.addr + part.size ≤ entry.1.maxAddr).map fun entry =>
         let offset := part.addr - entry.1.addr
-        (part.name, { entry.1 with addr := part.addr, data := entry.1.data.extract offset (offset + part.size) })
+        let data := if offset == 0 && part.size == entry.1.data.size then entry.1.data
+          else entry.1.data.extract offset (offset + part.size)
+        (part.name, { entry.1 with addr := part.addr, data })
 
 /-- The code of an image, each part with its name: its sections with instructions, or else its executable regions, or
 else the region of its entry point. -/
@@ -79,16 +83,19 @@ private def runsOf (regions : List Image.MemRegion) : List (Nat × Disasm.Interw
         | none => limit
       if start < stop then ⟨start, stop, kind⟩ :: runsOf regions rest else runsOf regions rest
 
-/-- The runs of an ARM image, in the order of their addresses. -/
-def armRuns (image : Image.Image) : Array Disasm.Interwork.Run :=
+/-- The runs of an ARM image whose code is `regions`, in the order of their addresses. -/
+def armRunsIn (regions : List (String × Image.MemRegion)) (image : Image.Image) : Array Disasm.Interwork.Run :=
   if image.arch != .arm then #[] else
   let symbols := (image.symbols.filterMap fun symbol =>
     (Disasm.Interwork.mappingKind symbol.name).map (symbol.addr, ·)).mergeSort fun left right => left.1 ≤ right.1
-  (runsOf ((codeRegions image).map Prod.snd) symbols).toArray
+  (runsOf (regions.map Prod.snd) symbols).toArray
+
+/-- The runs of an ARM image, in the order of their addresses. -/
+def armRuns (image : Image.Image) : Array Disasm.Interwork.Run := armRunsIn (codeRegions image) image
 
 /-- The disassembler of an image for the code of a part that starts at `base`. That of an ARM image goes over keys of
-addresses and states, of `Interwork`, with what the mapping symbols of the image say. -/
-def codeDisassembler (image : Image.Image) (base : Nat) : IO (Option Disasm.Disassembler) :=
+addresses and states, of `Interwork`, with what the mapping symbols of the image say, which `runs` are. -/
+def codeDisassemblerOf (runs : Array Disasm.Interwork.Run) (image : Image.Image) (base : Nat) : IO (Option Disasm.Disassembler) :=
   match image.arch, image.addrWidth with
   | .x86_64, _ => some <$> Target.X86.disassembler base
   | .x86, _ => some <$> Target.X8632.disassembler base
@@ -100,8 +107,13 @@ def codeDisassembler (image : Image.Image) (base : Nat) : IO (Option Disasm.Disa
   | .arm, _ => do
     let arm ← Target.ARM32.disassembler base
     let thumb ← Target.Thumb.disassembler base
-    pure (some (Disasm.Interwork.decoder (armRuns image) arm thumb))
+    pure (some (Disasm.Interwork.decoder runs arm thumb))
   | _, _ => pure none
+
+/-- The disassembler of an image for the code of a part that starts at `base`. That of an ARM image goes over keys of
+addresses and states, of `Interwork`, with what the mapping symbols of the image say. -/
+def codeDisassembler (image : Image.Image) (base : Nat) : IO (Option Disasm.Disassembler) :=
+  codeDisassemblerOf (if image.arch = .arm then armRuns image else #[]) image base
 
 /-- The number of a little- or big-endian word at `address`, of the first region with all of it. -/
 private def readWord (image : Image.Image) (address size : Nat) : Option Nat :=
@@ -204,8 +216,8 @@ def symbolStart (symbol : Image.Symbol) : Nat :=
 its loader run, as far as they are in code, each once. An image without a symbol table with sizes also has what its unwind
 tables say, and one without sections what its PLT says. An ARM image has the state in bit 0 of its entry point and of the
 words of its loader. -/
-def scanRoots (image : Image.Image) : List Nat :=
-  let regions := (codeRegions image).map Prod.snd
+def scanRootsIn (code : List (String × Image.MemRegion)) (image : Image.Image) : List Nat :=
+  let regions := code.map Prod.snd
   let symbols := (image.symbols.filter (·.isFunction)).map symbolStart
   let stubs := if image.sections.isEmpty then pltEntries image else []
   let unwound := if image.sections.any (·.name == ".symtab") then [] else unwindFunctions image
@@ -213,6 +225,9 @@ def scanRoots (image : Image.Image) : List Nat :=
   (candidates.foldl (init := (({} : Std.HashSet Nat), ([] : List Nat))) fun state address =>
     if state.1.contains address || !regions.any (·.contains address) then state
     else (state.1.insert address, address :: state.2)).2.reverse
+
+@[inherit_doc scanRootsIn]
+def scanRoots (image : Image.Image) : List Nat := scanRootsIn (codeRegions image) image
 
 /-- The addresses that the scan of an image starts at. -/
 def roots (image : Image.Image) : List Nat :=
@@ -235,11 +250,10 @@ targets of their jump tables in them, and not the padding between them. The link
 with no symbols, and its instructions all have one size and it has no padding but zeros, which a sweep skips, so all its
 code is swept. ARM has its constant pools among the instructions, so what is not a stub is swept where its mapping symbols
 say that it is code. -/
-def sweepRanges (image : Image.Image) : List (Nat × Nat) :=
-  let regions := codeRegions image
+def sweepRangesIn (regions : List (String × Image.MemRegion)) (image : Image.Image) : List (Nat × Nat) :=
   let stubs := regions.filter fun part => stubSections.contains part.1
   if image.arch = .arm then
-    (stubs.map fun part => (part.2.addr, part.2.maxAddr)) ++ (armRuns image).toList.filterMap fun run =>
+    (stubs.map fun part => (part.2.addr, part.2.maxAddr)) ++ (armRunsIn regions image).toList.filterMap fun run =>
       match run.kind with
       | .arm => some (run.start, run.stop)
       | .thumb => some (Disasm.Interwork.key run.start true, run.stop)
@@ -253,6 +267,9 @@ def sweepRanges (image : Image.Image) : List (Nat × Nat) :=
       else
         regions.map fun part => (part.2.addr, endOfData part.2)
     (stubs.map fun part => (part.2.addr, part.2.maxAddr)) ++ code
+
+@[inherit_doc sweepRangesIn]
+def sweepRanges (image : Image.Image) : List (Nat × Nat) := sweepRangesIn (codeRegions image) image
 
 /-- A byte of the code of an image. -/
 private def codeByte (regions : List Image.MemRegion) (address : Nat) : Option Nat :=
@@ -297,8 +314,8 @@ private def paddingOf (image : Image.Image) (regions : List Image.MemRegion) (ad
 
 /-- How the linear sweep of an image goes: instructions of x86 have many sizes, so after what doesn't decode it goes on at
 the end of padding, and the others are aligned, so it goes on at the next one. -/
-private def sweepPlan (image : Image.Image) : Disasm.Recursive.SweepPlan :=
-  let regions := (codeRegions image).map Prod.snd
+private def sweepPlan (code : List (String × Image.MemRegion)) (image : Image.Image) : Disasm.Recursive.SweepPlan :=
+  let regions := code.map Prod.snd
   let stride := match image.arch with
     | .x86 | .x86_64 => 1
     | .arm | .riscv => 2
@@ -311,17 +328,19 @@ private def sweepPlan (image : Image.Image) : Disasm.Recursive.SweepPlan :=
 
 /-- The recursive scan of all the code of an image, from all its roots and the `extra` ones, e.g., the targets of the jump
 tables that `Bap.Analysis.Partition` finds, which an ARM image has as keys of `Interwork`, and a linear sweep of what it didn't
-find, in `sweepRanges`. -/
+find, in `sweepRanges`. The code of the image is made once, of `codeRegions`, for all that goes by it: each making of it has the
+bytes of each section that isn't all of its region again. -/
 def scanImageWith (image : Image.Image) (extra : List Nat) : IO (Option Disasm.Disasm) := do
-  let regions := (codeRegions image).map Prod.snd
-  match regions, ← codeDisassembler image 0 with
+  let code := codeRegions image
+  let runs := armRunsIn code image
+  match code, ← codeDisassemblerOf runs image 0 with
   | [], _ | _, none => pure none
   | _, some base =>
-    let decoders ← (codeRegions image).filterMapM fun part => do
-      pure ((← codeDisassembler image part.2.addr).map (part.2, ·))
+    let decoders ← code.filterMapM fun part => do
+      pure ((← codeDisassemblerOf runs image part.2.addr).map (part.2, ·))
     let bytes := (decoders.map (·.1.size)).sum
     let disasm ← Disasm.Recursive.scanRegions (Disasm.Disassembler.ofRegions base decoders) bytes (entryOf image)
-      (scanRoots image ++ extra) (sweepPlan image) (sweepRanges image)
+      (scanRootsIn code image ++ extra) (sweepPlan code image) (sweepRangesIn code image)
     pure (some (if image.arch = .arm then Disasm.Interwork.unkey disasm else disasm))
 
 /-- The recursive scan of all the code of an image, from all its roots, and a linear sweep of what it didn't find, in

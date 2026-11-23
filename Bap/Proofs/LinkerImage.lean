@@ -300,23 +300,18 @@ theorem Logged.applyHi (hdata : data.size = env.gotOff) {st : LinkState} {site :
 theorem Logged.flush (hdata : data.size = env.gotOff) (hm : env.machine = 8) {st : LinkState} {lo : Int} {symbol : Nat}
     (hL : Logged env data hi st) (hlo : LoOf env data st.applied symbol lo) :
     Logged env data hi (stateOf (mipsFlush env lo symbol st)) ∧ st.applied <:+ (stateOf (mipsFlush env lo symbol st)).applied := by
-  have hrest : st.mipsPending.partition (fun entry => entry.1.rel.symbol == symbol) =
-      (st.mipsPending.filter fun entry => entry.1.rel.symbol == symbol,
-        st.mipsPending.filter fun entry => !(entry.1.rel.symbol == symbol)) := by
-    rw [List.partition_eq_filter_filter]
-    rfl
-  have hmid : Logged env data hi { st with mipsPending := st.mipsPending.filter (fun entry => !(entry.1.rel.symbol == symbol)) } :=
-    ⟨hL.size, hL.agree, hL.bounds, hL.fixed, fun entry he => hL.pending entry (List.mem_filter.mp he).1, hL.valid⟩
+  have hmid : Logged env data hi { st with mipsPending := st.mipsPending.without symbol } :=
+    ⟨hL.size, hL.agree, hL.bounds, hL.fixed, fun entry he => hL.pending entry (Pending.mem_without.mp he).1, hL.valid⟩
   let P : LinkState → Prop := fun cur => Logged env data hi cur ∧ st.applied <:+ cur.applied
-  have hloop : Preserves P (forIn (st.mipsPending.filter fun entry => entry.1.rel.symbol == symbol).reverse PUnit.unit
+  have hloop : Preserves P (forIn (st.mipsPending.ofSymbol symbol).reverse PUnit.unit
       fun entry _ => do
         mipsApplyHi env entry.1 ((entry.2 : Int) * 65536 + lo)
         pure (ForInStep.yield PUnit.unit)) := by
     apply Preserves.forIn
     intro entry hentry _
     refine Preserves.bind (fun cur hc => ?_) fun _ => Preserves.pure _
-    have he := List.mem_filter.mp (List.mem_reverse.mp hentry)
-    have hsym : entry.1.rel.symbol = symbol := by simpa using he.2
+    have he := Pending.mem_ofSymbol.mp (List.mem_reverse.mp hentry)
+    have hsym : entry.1.rel.symbol = symbol := he.2
     obtain ⟨ht, hok, older, ho, hst⟩ := hL.pending entry he.1
     have hA : AhlOf env data cur.applied entry.1 ((entry.2 : Int) * 65536 + lo) :=
       .inr ⟨older, lo, ho.trans hc.2, hsym ▸ hlo.mono hc.2, by rw [hst]⟩
@@ -326,7 +321,6 @@ theorem Logged.flush (hdata : data.size = env.gotOff) (hm : env.machine = 8) {st
   unfold mipsFlush
   have step : ∀ f : LinkState → LinkM Unit, ((get : LinkM LinkState) >>= f) st = f st st := fun _ => rfl
   rw [step]
-  simp only [hrest]
   exact hgoal
 
 end
@@ -351,7 +345,7 @@ theorem logInvariant (env : Env) (R : LinkState → Prop)
     unfold mipsFlush
     have step : ∀ f : LinkState → LinkM Unit, ((get : LinkM LinkState) >>= f) st = f st st := fun _ => rfl
     rw [step]
-    have hloop : Preserves R (forIn (st.mipsPending.partition fun entry => entry.1.rel.symbol == symbol).1.reverse PUnit.unit
+    have hloop : Preserves R (forIn (st.mipsPending.ofSymbol symbol).reverse PUnit.unit
         fun entry _ => do
           mipsApplyHi env entry.1 ((entry.2 : Int) * 65536 + lo)
           pure (ForInStep.yield PUnit.unit)) :=
@@ -407,7 +401,7 @@ theorem logged_invariant {env : Env} {data : ByteArray} {hi : Int → Option Int
     have hb' := hb
     simp only [inSection, Bool.and_eq_true, decide_eq_true_eq] at hb'
     refine ⟨h.size, h.agree, h.bounds, h.fixed, fun entry he => ?_, h.valid⟩
-    rcases List.mem_cons.mp he with rfl | he
+    rcases Pending.mem_push.mp he with rfl | he
     · refine ⟨ht, hok, state.applied, List.suffix_refl _, ?_⟩
       show _ &&& _ = _ &&& _
       rw [view_read hm ht _ hb'.1, h.read env.little (Nat.le_trans hb'.1 hok)]
@@ -461,7 +455,7 @@ theorem view_overlay {env : Env} {data : ByteArray} {site : Site} {log : List (S
 
 /-- The first pass stores nothing. -/
 def Prescanned (env : Env) (data : ByteArray) (st : LinkState) : Prop :=
-  st.applied = [] ∧ st.mipsPending = [] ∧ env.gotOff ≤ st.memory.size ∧ ∀ o, o < env.gotOff → st.memory.get! o = data.get! o
+  st.applied = [] ∧ st.mipsPending = ∅ ∧ env.gotOff ≤ st.memory.size ∧ ∀ o, o < env.gotOff → st.memory.get! o = data.get! o
 
 theorem prescanned_got (env : Env) (data : ByteArray) (value : Int) : Preserves (Prescanned env data) (gotEntry env value) := by
   intro st hs
@@ -496,7 +490,7 @@ theorem relocate_image {tables : Tables} {apply : Site → Outcome} (hh : handle
     refine ⟨c, fun o ho => ?_, ?_, rfl, ?_, ?_⟩
     · rw [a]; exact d o ho
     · rw [a]; intro w hw; cases hw
-    · rw [b]; intro _ he; cases he
+    · rw [b]; intro entry he; exact absurd he (Pending.not_mem_empty entry)
     · rw [a]; intro _ _ hs; cases (List.suffix_nil.mp hs)
   have hL : Logged env data (fun key => prescanned.riscvHi[key]?) final := by
     have h2 := preserves_foldl (I.applyOne tables rfl hh) tables.input.relocations _ hL0

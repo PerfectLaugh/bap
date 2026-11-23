@@ -77,7 +77,13 @@ def socketBytes (socket : Socket) : ByteArray :=
   let out := Wire.putList putMessage out socket.incoming.toList
   let out := Wire.putFlag (Wire.putFlag out socket.readShut) socket.writeShut
   let out := Wire.putOption Wire.putText (Wire.putNat (Wire.putNat out socket.owner) socket.family) socket.remote
-  Wire.putNat (Wire.putNat out socket.receiveTimeout) socket.sendTimeout
+  let out := Wire.putNat (Wire.putNat out socket.receiveTimeout) socket.sendTimeout
+  -- Its backlog, whether it asks who sends, and who sent each of what it has, of a process, a user and a group.
+  let out := Wire.putFlag (Wire.putNat out socket.backlog) socket.passCredentials
+  Wire.putList (Wire.putList Wire.putNat) out (socket.incoming.toList.map fun message =>
+    match message.credentials with
+    | some (pid, uid, gid) => [pid, uid, gid]
+    | none => [])
 
 /-- A socket from the bytes of its inode. -/
 def socketOfBytes (data : ByteArray) : Except String Socket := do
@@ -106,9 +112,19 @@ def socketOfBytes (data : ByteArray) : Except String Socket := do
     let (receiveTimeout, at_) ← Wire.getNat data at_
     let (sendTimeout, at_) ← Wire.getNat data at_
     pure (receiveTimeout, sendTimeout, at_)
+  -- What a socket had before it had a backlog and said who sent what.
+  let (backlog, passCredentials, senders, at_) ← if at_ == data.size then pure (4096, false, [], at_) else do
+    let (backlog, at_) ← Wire.getNat data at_
+    let (passCredentials, at_) ← Wire.getFlag data at_
+    let (senders, at_) ← Wire.getList (Wire.getList Wire.getNat) data at_
+    pure (backlog, passCredentials, senders, at_)
   Wire.expectEnd data at_
+  let incoming := incoming.zipIdx.map fun (message, index) =>
+    match senders[index]? with
+    | some [pid, uid, gid] => { message with credentials := some (pid, uid, gid) }
+    | _ => message
   pure { type, name, peer, listening, pending, waiting, incoming := incoming.toArray, readShut, writeShut, owner, family, remote,
-         receiveTimeout, sendTimeout }
+         receiveTimeout, sendTimeout, backlog, passCredentials }
 
 /-- Of a process, its process group, session, terminal, credentials and capabilities, limits and nice value, whether it ended, its root,
 the barriers it registered for, what it advised of its memory for a child, the names of its threads, its policy, its guards, its
@@ -189,7 +205,9 @@ def metaBytes (details : Meta) : ByteArray :=
       | .openFile id => (1, id)
       | .flock id => (2, id)
     [kind, owner, lock.start, lock.stop, if lock.exclusive then 1 else 0])
-  Wire.putText out details.name
+  let out := Wire.putText out details.name
+  -- The packets of a pipe, of one that has any.
+  if details.packets.isEmpty then out else Wire.putList Wire.putNat out details.packets
 
 /-- What `metaBytes` made; nothing at all is what an inode starts with. -/
 def metaOfBytes (data : ByteArray) : Except String Meta := do
@@ -201,6 +219,7 @@ def metaOfBytes (data : ByteArray) : Except String Meta := do
     .ok ((name, value), at_)) data at_
   let (locks, at_) ← Wire.getList (Wire.getList Wire.getNat) data at_
   let (name, at_) ← Wire.getText data at_
+  let (packets, at_) ← if at_ == data.size then pure ([], at_) else Wire.getList Wire.getNat data at_
   Wire.expectEnd data at_
   let locks ← locks.mapM fun fields => do
     let field (index : Nat) : Nat := fields.getD index 0
@@ -212,7 +231,7 @@ def metaOfBytes (data : ByteArray) : Except String Meta := do
     pure { owner, start := field 2, stop := field 3, exclusive := field 4 == 1 : FileLock }
   let number (index : Nat) : Nat := numbers.getD index 0
   pure { accessed := number 0, modified := number 1, changed := number 2, uid := number 3, gid := number 4, seals := number 5
-         changes := number 6, linkable := number 7 == 1, attributes, locks, name }
+         changes := number 6, linkable := number 7 == 1, attributes, locks, name, packets }
 
 /-- What is mounted, as bytes. -/
 def mountsBytes (mounts : List Mount) : ByteArray :=

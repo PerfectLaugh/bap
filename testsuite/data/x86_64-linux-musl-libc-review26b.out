@@ -1,0 +1,106 @@
+hangup: what was stopped while another ended: exited 3
+robust: a lock whose thread ended is EOWNERDEAD: 1
+robust: a lock whose process ended is EOWNERDEAD: 1
+robust: get_robust_list: 0
+robust: a list of a head of 24 bytes, which there is: 1
+robust: set_robust_list of another size: Invalid argument
+robust: get_robust_list of no thread: No such process
+robust: a lock of priority inheritance that was waited for: 0
+memory: what is mapped to be written is read: 1
+memory: what maps says of it: -w-p
+memory: mprotect to be written alone: 0
+memory: and it is read: 1
+memory: what maps says of it: -w-p
+memory: mprotect over a hole: Out of memory
+memory: what was before the hole is written: 0, and after it: 1
+memory: mprotect of bits that there aren't: Invalid argument
+memory: mprotect to grow both ways: Invalid argument
+memory: mprotect of nothing: 0
+memory: shared and private of no file: Invalid argument
+memory: shared that grows down: Invalid argument
+memory: a file at an offset past any: Value too large for data type
+memory: a file that grows down: Invalid argument
+memory: a mapping that grows down is written a word below it: 1, and 40 pages below: 1
+memory: and what was written is there: 2
+memory: mprotect of all that grew: 0
+memory: which isn't written then: 0
+memory: brk past RLIMIT_DATA stays: 1, and within it moves: 1
+memory: brk within RLIMIT_DATA: exited 0
+memory: reservations of 2^36 to 2^44 bytes that were made: 9
+memory: what was committed of 2^40 bytes, a piece of each 2^30: 17202
+memory: and unmapped: 0
+memory: an address that isn't canonical is read: 0, of the code 128 and at 0
+context: what a handler left of xmm5 in its context: deadbeef, and of mxcsr: 8000
+context: a return to no code segment: signal 11
+signals: what was queued is of pid 4242, with 9
+signals: rt_sigqueueinfo: 0
+signals: RLIMIT_SIGPENDING is finite: 1
+signals: no more than 20 are queued: 1, and then: Resource temporarily unavailable
+signals: and kill then: 0
+signals: within RLIMIT_SIGPENDING: exited 0
+signals: after execve it is ignored: 1, with the flags 0 and SIGUSR2 in its mask: 0
+signals: across execve: exited 0
+signals: epoll_wait across a stop and SIGCONT: -1 Interrupted system call
+tasks: PR_GET_DUMPABLE: 1
+tasks: PR_SET_DUMPABLE of 2: Invalid argument
+tasks: PR_SET_DUMPABLE of 0: 0
+tasks: PR_GET_DUMPABLE then: 0
+tasks: and of a child: 0
+tasks: dumpable: exited 0
+tasks: prctl of what there isn't: Invalid argument
+tasks: PR_SET_PDEATHSIG of no signal: Invalid argument
+tasks: PR_SET_PDEATHSIG: 0
+tasks: PR_GET_PDEATHSIG: 0
+tasks: which is 1
+tasks: PR_SET_CHILD_SUBREAPER: 0
+tasks: PR_GET_CHILD_SUBREAPER: 0
+tasks: which is 1
+tasks: a grandchild heard of its parent's end, and its parent is then this: y
+tasks: and it is waited for here: 1, exited 5
+tasks: a filter: 0
+tasks: strict mode after it: Invalid argument
+tasks: strict after a filter: exited 0
+tasks: clone of CLONE_SIGHAND without CLONE_VM: Invalid argument
+tasks: clone of CLONE_THREAD without CLONE_SIGHAND: Invalid argument
+tasks: clone of CLONE_NEWNS with CLONE_FS: Invalid argument
+tasks: a descriptor that a child of CLONE_FILES closed: Bad file descriptor
+tasks: and one that it didn't: 0
+tasks: a process whose first thread ended with 1 and whose last with 7: exited 7
+tasks: sched_getaffinity of a byte: Invalid argument
+tasks: sched_getaffinity of no room: Invalid argument
+tasks: sched_getaffinity of words gives some: 1
+tasks: clock_settime of CLOCK_MONOTONIC: Invalid argument
+tasks: clock_settime of no clock: Invalid argument
+tasks: timerfd_settime of flags that there aren't: Invalid argument
+tasks: timerfd_settime: 0
+tasks: FUTEX_WAKE_OP woke 1, and left 5
+tasks: FUTEX_WAKE_OP of none woke 0, and left 8
+tracing: a request of what isn't a tracee: No such process
+tracing: PTRACE_SEIZE with options that there aren't: I/O error
+tracing: PTRACE_SEIZE: 0
+tracing: PTRACE_INTERRUPT: 0
+tracing: interrupted: stopped 5 event 128
+tracing: PTRACE_SETOPTIONS of what there isn't: Invalid argument
+tracing: PTRACE_LISTEN at the stop of PTRACE_INTERRUPT: 0
+tracing: PTRACE_GETSIGMASK while it listens: No such process
+tracing: PTRACE_INTERRUPT again: 0
+tracing: interrupted again: stopped 5 event 128
+tracing: PTRACE_GETSIGMASK: 0
+tracing: a mask of 0
+tracing: PTRACE_GETSIGMASK of another size: Invalid argument
+tracing: PTRACE_SETREGS with no code segment: I/O error
+tracing: PTRACE_SETREGS with its own: 0
+tracing: PTRACE_GETFPREGS: 0
+tracing: its control word is 37f and its mxcsr 1f80
+tracing: the signal that stops it: stopped 19 event 0
+tracing: its group stop: stopped 19 event 128
+tracing: PTRACE_LISTEN: 0
+tracing: PTRACE_CONT of what listens: No such process
+tracing: what listens, of SIGCONT: stopped 5 event 128
+tracing: then SIGCONT itself: stopped 18 event 0
+tracing: the signal that stops it: stopped 19 event 0
+tracing: its group stop: stopped 19 event 128
+tracing: what was let go on, of SIGCONT: stopped 5 event 128
+tracing: then SIGCONT itself: stopped 18 event 0
+tracing: killed: signal 9
+loading: a program with a segment of 2^47 bytes: signal 11

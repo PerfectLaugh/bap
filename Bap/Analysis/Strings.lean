@@ -26,6 +26,43 @@ private def scanAscii (minimum : Nat) (next : Nat) (chars : List Char) (results 
     else
       scanAscii minimum (next + 1) [] (finish minimum 1 next chars results) rest
 
+/-! What runs of `scanAscii`, and of `scanUtf16` below, keeps the characters of a run newest first, so that a run costs its
+length rather than its square, which adding each at the end does: a megabyte of text without a byte that isn't printable is 10^12
+steps of that. What is proved of the scans is of them as they are written. -/
+
+private def finishReversed (minimum width : Nat) (next : Nat) (reversed : List Char) (results : List (Nat × String)) :=
+  if reversed.length ≥ minimum then (next - reversed.length * width, String.ofList reversed.reverse) :: results else results
+
+private theorem finishReversed_eq (minimum width next : Nat) (reversed : List Char) (results : List (Nat × String)) :
+    finishReversed minimum width next reversed results = finish minimum width next reversed.reverse results := by
+  simp [finishReversed, finish]
+
+private def scanAsciiReversed (minimum : Nat) (next : Nat) (reversed : List Char) (results : List (Nat × String)) :
+    List UInt8 → List (Nat × String)
+  | [] => (finishReversed minimum 1 next reversed results).reverse
+  | byte :: rest =>
+    if printable byte then
+      scanAsciiReversed minimum (next + 1) (Char.ofNat byte.toNat :: reversed) results rest
+    else
+      scanAsciiReversed minimum (next + 1) [] (finishReversed minimum 1 next reversed results) rest
+
+private theorem scanAsciiReversed_eq (minimum : Nat) (bytes : List UInt8) :
+    ∀ (next : Nat) (reversed : List Char) (results : List (Nat × String)),
+      scanAsciiReversed minimum next reversed results bytes = scanAscii minimum next reversed.reverse results bytes := by
+  induction bytes with
+  | nil => intro next reversed results; simp [scanAsciiReversed, scanAscii, finishReversed_eq]
+  | cons byte rest ih =>
+    intro next reversed results
+    simp only [scanAsciiReversed, scanAscii, finishReversed_eq, ih, List.reverse_cons, List.reverse_nil]
+
+private def scanAsciiFast (minimum : Nat) (next : Nat) (chars : List Char) (results : List (Nat × String))
+    (bytes : List UInt8) : List (Nat × String) :=
+  scanAsciiReversed minimum next chars.reverse results bytes
+
+@[csimp] private theorem scanAscii_eq_fast : @scanAscii = @scanAsciiFast := by
+  funext minimum next chars results bytes
+  simp [scanAsciiFast, scanAsciiReversed_eq]
+
 private def pairs : List UInt8 → List (UInt8 × UInt8)
   | first :: second :: rest => (first, second) :: pairs rest
   | _ => []
@@ -43,6 +80,34 @@ private def scanUtf16 (minimum : Nat) (little : Bool) (next : Nat) (chars : List
     match decodePair little first second with
     | some char => scanUtf16 minimum little (next + 2) (chars ++ [char]) results rest
     | none => scanUtf16 minimum little (next + 2) [] (finish minimum 2 next chars results) rest
+
+private def scanUtf16Reversed (minimum : Nat) (little : Bool) (next : Nat) (reversed : List Char)
+    (results : List (Nat × String)) : List (UInt8 × UInt8) → List (Nat × String)
+  | [] => (finishReversed minimum 2 next reversed results).reverse
+  | (first, second) :: rest =>
+    match decodePair little first second with
+    | some char => scanUtf16Reversed minimum little (next + 2) (char :: reversed) results rest
+    | none => scanUtf16Reversed minimum little (next + 2) [] (finishReversed minimum 2 next reversed results) rest
+
+private theorem scanUtf16Reversed_eq (minimum : Nat) (little : Bool) (units : List (UInt8 × UInt8)) :
+    ∀ (next : Nat) (reversed : List Char) (results : List (Nat × String)),
+      scanUtf16Reversed minimum little next reversed results units =
+        scanUtf16 minimum little next reversed.reverse results units := by
+  induction units with
+  | nil => intro next reversed results; simp [scanUtf16Reversed, scanUtf16, finishReversed_eq]
+  | cons unit rest ih =>
+    intro next reversed results
+    obtain ⟨first, second⟩ := unit
+    simp only [scanUtf16Reversed, scanUtf16, finishReversed_eq]
+    cases decodePair little first second <;> simp [ih]
+
+private def scanUtf16Fast (minimum : Nat) (little : Bool) (next : Nat) (chars : List Char)
+    (results : List (Nat × String)) (units : List (UInt8 × UInt8)) : List (Nat × String) :=
+  scanUtf16Reversed minimum little next chars.reverse results units
+
+@[csimp] private theorem scanUtf16_eq_fast : @scanUtf16 = @scanUtf16Fast := by
+  funext minimum little next chars results units
+  simp [scanUtf16Fast, scanUtf16Reversed_eq]
 
 /-- Whether `new` is the better reading of bytes that `old` reads too: the longer, or of the same length the one at an even
 address, where a string of 16-bit units is put. -/

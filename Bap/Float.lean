@@ -368,15 +368,34 @@ def chooseNaN (rules : NaNRules) (format : Format) (operands : List Nat) : Nat :
   -- Of two NaNs, x87 gives the one of the greater significand, and of the same, the one that isn't negative.
   let nans := (given.filter (isNaN format)).map (quiet format)
   let magnitude (bits : Nat) : Nat := bits % 2 ^ (format.width - 1)
+  -- But of one that signals and one that is quiet, the quiet one, whatever their significands are (table 4-7 of the manual).
+  let both := given.filter (isNaN format)
   let given := if format.explicit && nans.length ≥ 2 then
-      [nans.foldl (init := nans.headD 0) fun best bits =>
-        if magnitude bits > magnitude best || (magnitude bits == magnitude best && bits < best) then bits else best]
+      match both.filter (isSignaling format), both.filter (!isSignaling format ·) with
+      | [_], [calm] => [calm]
+      | _, _ =>
+        [nans.foldl (init := nans.headD 0) fun best bits =>
+          if magnitude bits > magnitude best || (magnitude bits == magnitude best && bits < best) then bits else best]
     else given
   match signaling, given.find? (isNaN format) with
   | some bits, _ | none, some bits => quiet format bits
   | none, none => positive
 
 private def bool (value : Bool) : Nat := if value then 1 else 0
+
+/-- To an integer of `width` bits that saturates, as two's complement: what is past it is the least or the greatest of it, and a
+NaN is 0, as the conversions of AVX10.2 have it (`VCVTTSD2SIS`, `VCVTPS2IBS`). -/
+private def saturated (format : Format) (mode : Mode) (signed : Bool) (width bits : Nat) : Nat :=
+  let highest := if signed then 2 ^ (width - 1) - 1 else 2 ^ width - 1
+  let lowest := if signed then 2 ^ (width - 1) else 0
+  match unpack format bits with
+  | .nan _ | .zero _ => 0
+  | .infinity negative => if negative then lowest else highest
+  | .finite negative m e =>
+    let magnitude := if e ≥ 0 then m <<< e.toNat else roundBits mode negative m (-e).toNat false
+    if negative then
+      if !signed then 0 else if magnitude ≥ 2 ^ (width - 1) then lowest else (2 ^ width - magnitude) % 2 ^ width
+    else min magnitude highest
 
 /-- An intrinsic by its name, on the bits of its operands, as its width and its bits. -/
 private def evaluateX86 (name : String) (inputs : List Nat) : Option (Nat × Nat) := do
@@ -407,6 +426,11 @@ private def evaluateX86 (name : String) (inputs : List Nat) : Option (Nat × Nat
     pure (last, convert (← formatOf first) (← formatOf last) (mode.getD .rne) x)
   | "cast_sint", [x] | "cast_int", [x] =>
     pure (last, toInteger (← formatOf first) (mode.getD .rtz) last x)
+  | "cast_sint_sat", [x] => pure (last, saturated (← formatOf first) (mode.getD .rtz) true last x)
+  | "cast_uint_sat", [x] => pure (last, saturated (← formatOf first) (mode.getD .rtz) false last x)
+  -- To a byte, in the low bits of what is as wide as the number.
+  | "cast_ibs", [x] => pure (last, saturated (← formatOf first) (mode.getD .rne) true 8 x)
+  | "cast_iubs", [x] => pure (last, saturated (← formatOf first) (mode.getD .rne) false 8 x)
   | "cast_sfloat", [x] => pure (last, ofSigned (← formatOf last) (mode.getD .rne) first x)
   | "cast_float", [x] => pure (last, ofUnsigned (← formatOf last) (mode.getD .rne) x)
   | "forder", [x, y] | "forders", [x, y] => test fun format => pure ((compare format x y).any (·.1))
@@ -509,7 +533,9 @@ private def sinCosSmall (precision : Nat) (x : Int) : Int × Int := Id.run do
 
 /-- `sin x` and `cos x`, of `x` brought to within `π / 4` of a multiple of `π / 2`. -/
 private def sinCosFixed (precision : Nat) (x : Int) : Int × Int :=
-  let half := piFixed (precision + 80) / 2
+  -- What an x87 takes away is of its own π, of 66 bits, `0x4000:C90FDAA22168C234C`, and not of π (the manual, volume 1, 8.3.8): the
+  -- sine of the nearest number to π is `-2^-64`, the difference of the two.
+  let half : Int := ((0xC90FDAA22168C234C * 2 ^ (precision + 80 - 67) : Nat) : Int)
   let wide := x * (2 ^ 80 : Nat)
   let quarter := (wide + half / 2).fdiv half
   let rest := (wide - quarter * half) / (2 ^ 80 : Nat)
@@ -722,10 +748,254 @@ private def sseEstimate (format : Format) (root : Bool) (bits : Nat) : Nat :=
       if top < format.lowest + format.fractionBits then packZero format negative
       else pack format .rtz negative kept (-(precision : Int))
 
+/-- Whether bits are a denormal of a format. -/
+def isDenormal (format : Format) (bits : Nat) : Bool :=
+  (bits >>> format.fieldBits) % 2 ^ format.exponentBits == 0 && bits % 2 ^ format.fieldBits != 0
+
+/-- A denormal as a zero of its sign. -/
+def flush (format : Format) (bits : Nat) : Nat :=
+  if isDenormal format bits then signBit format (bits >>> (format.width - 1) % 2 == 1) else bits
+
+/-! ## The operations of AVX-512, and `FSCALE`
+
+Each as the manual says it of a lane: `VSCALEF`, `VGETEXP`, `VGETMANT`, `VRNDSCALE`, `VREDUCE`, `VRANGE`, `VFPCLASS` and `VFIXUPIMM`, which
+are exact but for the first, and the estimates `VRCP14`, `VRSQRT14`, `VRCP28`, `VRSQRT28` and `VEXP2`, which are to within what the manual
+says of them, and no more than that is the same as a processor's. An immediate is the last operand. -/
+
+/-- What is of AVX-512 here, by its name without its rounding mode and formats. -/
+def vectorOperations : List String :=
+  ["fscalef", "fgetexp", "fgetmant", "frndscale", "freduce", "frange", "fpclass", "ffixupimm", "frcp14", "frsqrt14", "frcp28", "frsqrt28",
+    "fexp2", "fminmax"]
+
+private def isNegative (format : Format) (bits : Nat) : Bool := (bits >>> (format.width - 1)) % 2 == 1
+
+/-- The power of two that a number is for a scale: the integer towards zero of it, as `FSCALE` takes it, or below it by `floor`, as
+`VSCALEF` does. What is past any exponent of a format is as far as makes no difference. -/
+private def powerOf (floor negative : Bool) (m : Nat) (e : Int) : Int :=
+  if e + bitLength m > 24 then (if negative then -(2 ^ 24 : Nat) else (2 ^ 24 : Nat))
+  else
+    let magnitude : Nat := if e ≥ 0 then m <<< e.toNat else m >>> (-e).toNat
+    let whole := e ≥ 0 || m % 2 ^ (-e).toNat == 0
+    if negative then (if floor && !whole then -(magnitude : Int) - 1 else -(magnitude : Int)) else magnitude
+
+/-- `x 2 ^ ⌊y⌋`, or of x87 `x 2 ^ trunc y`, rounded once: `FSCALE` (table 3-31 of the manual) and `VSCALEF` have the same of what
+isn't a number. -/
+private def scale (floor : Bool) (rules : NaNRules) (format : Format) (mode : Mode) (x y : Nat) : Nat :=
+  match unpack format x, unpack format y with
+  | .nan _, _ | _, .nan _ => chooseNaN rules format [x, y]
+  | .zero _, .infinity false | .infinity _, .infinity true => defaultNaN format
+  | .zero _, _ | .infinity _, _ => x
+  | .finite negative _ _, .infinity false => packInfinity format negative
+  | .finite negative _ _, .infinity true => packZero format negative
+  | .finite _ _ _, .zero _ => x
+  | .finite negative m e, .finite down n f => pack format mode negative m (e + powerOf floor down n f)
+
+/-- Whether `m 2 ^ e`, of a mantissa that a format has all of, is past its largest number, and whether it loses bits below its
+smallest, which is to underflow: it is tiny then, as it is rounded to nothing more than it has. -/
+private def scaleRaises (format : Format) (m : Nat) (e : Int) : Bool × Bool :=
+  let overflow := e + bitLength m - 1 > (format.bias : Int)
+  let below := format.lowest - e
+  let lost := below > 0 && (below ≥ bitLength m || m % 2 ^ below.toNat != 0)
+  (overflow, lost)
+
+/-- The mode of an immediate of `VRNDSCALE` and `VREDUCE`: that of MXCSR, or the embedded one, with its bit 2, and else its low two bits. -/
+private def controlMode (mode : Mode) (control : Nat) : Mode :=
+  if control.testBit 2 then mode else
+    match control % 4 with
+    | 0 => .rne
+    | 1 => .rtn
+    | 2 => .rtp
+    | _ => .rtz
+
+/-- `VGETMANT`: the significand, in the interval that the low two bits of the immediate say, with the sign that its bits 2 and 3 say:
+`GetNormalizedMantissa` of the manual. -/
+private def mantissaOf (format : Format) (x control : Nat) : Nat :=
+  let negative := isNegative format x
+  let sign := negative && !control.testBit 2
+  let one := pack format .rne sign 1 0
+  match unpack format x with
+  | .nan _ => quiet format x
+  | .infinity _ => if negative && control.testBit 3 then defaultNaN format else one
+  | .zero _ => one
+  | .finite _ m e =>
+    if negative && control.testBit 3 then defaultNaN format else
+    let length := bitLength m
+    let top := e + length - 1
+    let half := match control % 4 with
+      | 0 => false
+      | 1 => top % 2 != 0
+      | 2 => true
+      | _ => length ≥ 2 && (m >>> (length - 2)) % 2 == 1
+    pack format .rne sign m (-((length : Int) - 1) - (if half then 1 else 0))
+
+/-- `VRNDSCALE`: to a multiple of `2 ^ -scale`, in a mode. -/
+private def roundScaled (format : Format) (mode : Mode) (scale : Nat) (x : Nat) : Nat :=
+  match unpack format x with
+  | .nan _ => quiet format x
+  | .infinity _ | .zero _ => x
+  | .finite negative m e =>
+    if e + scale ≥ 0 then x
+    else
+      let kept := roundBits mode negative m (-(e + scale)).toNat false
+      if kept == 0 then packZero format negative else pack format .rne negative kept (-(scale : Int))
+
+/-- `VREDUCE`: what `VRNDSCALE` takes away, which of an infinity is +0. -/
+private def reduce (format : Format) (mode : Mode) (scale : Nat) (x : Nat) : Nat :=
+  match unpack format x with
+  | .nan _ => quiet format x
+  | .infinity _ => packZero format false
+  | _ => sub format mode x (roundScaled format mode scale x)
+
+/-- `VRANGE`: the least or the greatest of two, or of their magnitudes, by the low two bits of the immediate, with the sign that its
+bits 2 and 3 say: `RangeDP` of the manual, and its tables 5-21 to 5-23 of what compares equal. -/
+private def range (format : Format) (x y control : Nat) : Nat :=
+  let calm (bits : Nat) : Bool := isNaN format bits && !isSignaling format bits
+  if isSignaling format x then quiet format x
+  else if isSignaling format y then quiet format y
+  else
+    let magnitude (bits : Nat) : Nat := bits % 2 ^ (format.width - 1)
+    let greatest := control.testBit 0
+    let absolute := control.testBit 1
+    let chosen :=
+      if calm y then x
+      else if calm x then y
+      else if magnitude x == magnitude y && isNegative format x != isNegative format y &&
+          (absolute || (match unpack format x with | .zero _ => true | _ => false)) then
+        -- Of opposite signs and the same magnitude, the negative one is the least.
+        if isNegative format x != greatest then x else y
+      else
+        let below := if absolute then (compare format (magnitude x) (magnitude y)).any fun order => order.1 || order.2
+          else (compare format x y).any fun order => order.1 || order.2
+        if below != greatest then x else y
+    let top := 2 ^ (format.width - 1)
+    match control >>> 2 % 4 with
+    | 0 => magnitude chosen + (if isNegative format x then top else 0)
+    | 1 => chosen
+    | 2 => magnitude chosen
+    | _ => magnitude chosen + top
+
+/-- `VFPCLASS`: whether a number is of a class that the immediate has the bit of: a quiet NaN, +0, -0, +∞, -∞, a denormal, what is
+finite and negative, and a signaling NaN. -/
+private def classIs (format : Format) (x control : Nat) : Bool :=
+  let negative := isNegative format x
+  let on (bit : Nat) : Bool := control.testBit bit
+  match unpack format x with
+  | .nan _ => if isSignaling format x then on 7 else on 0
+  | .zero _ => if negative then on 2 else on 1
+  | .infinity _ => if negative then on 4 else on 3
+  | .finite _ _ _ => (isDenormal format x && on 5) || (negative && on 6)
+
+/-- `VFIXUPIMM`: what the table has for the class of a number, in place of `old`, and the class: a quiet NaN 0, a signaling one 1, a
+zero 2, +1 3, -∞ 4, +∞ 5, what is negative 6 and what is positive 7. -/
+private def fixup (format : Format) (old x table : Nat) : Nat × Nat :=
+  let negative := isNegative format x
+  let token := match unpack format x with
+    | .nan _ => if isSignaling format x then 1 else 0
+    | .zero _ => 2
+    | .infinity _ => if negative then 4 else 5
+    | .finite _ _ _ => if x == pack format .rne false 1 0 then 3 else if negative then 6 else 7
+  let largest (negative : Bool) : Nat := bitsOf format negative (format.maxExponent - 1) (2 ^ format.fieldBits - 1)
+  let result := match (table >>> (4 * token)) % 16 with
+    | 0 => old
+    | 1 => x
+    | 2 => quiet format x
+    | 3 => defaultNaN format
+    | 4 => packInfinity format true
+    | 5 => packInfinity format false
+    | 6 => packInfinity format negative
+    | 7 => packZero format true
+    | 8 => packZero format false
+    | 9 => pack format .rne true 1 0
+    | 10 => pack format .rne false 1 0
+    | 11 => pack format .rne false 1 (-1)
+    | 12 => pack format .rne false 90 0
+    | 13 => pack format .rne false 0xC90FDAA22168C234C (-67)
+    | 14 => largest false
+    | _ => largest true
+  (result, token)
+
+/-- `VRCP14`, `VRSQRT14` and those of 28 bits: the reciprocal, or that of the root, to the nearest of `bits` bits, in a format. Of the
+reciprocals, what is too small to have one in the format is an infinity. -/
+private def estimate (format : Format) (root : Bool) (bits : Nat) (x : Nat) : Nat :=
+  match unpack format x with
+  | .nan _ => quiet format x
+  | .infinity negative => if root && negative then defaultNaN format else packZero format negative
+  | .zero negative => packInfinity format negative
+  | .finite negative m e =>
+    if root && negative then defaultNaN format
+    else
+      -- `q 2 ^ exponent` is the reciprocal, of 80 bits or more.
+      let (q, exponent) : Nat × Int :=
+        if root then
+          let (m, e) := if e % 2 != 0 then (2 * m, e - 1) else (m, e)
+          let length := bitLength m
+          (2 ^ (2 * length + 160) / Nat.sqrt (m <<< (2 * length + 160)), -(e / 2) - ((length : Int) + 80))
+        else (2 ^ (bitLength m + 80) / m, -e - (bitLength m : Int) - 80)
+      let shift := bitLength q - bits
+      pack format .rne negative (roundBits .rne false q shift false) (exponent + shift)
+
+/-- `VEXP2`: 2 to a number. -/
+private def powerOfTwo (format : Format) (mode : Mode) (x : Nat) : Nat :=
+  match unpack format x with
+  | .nan _ => quiet format x
+  | .infinity negative => if negative then packZero format false else x
+  | .zero _ => pack format .rne false 1 0
+  | .finite negative m e =>
+    let whole := powerOf true negative m e
+    if e + bitLength m > 24 then pack format mode false 1 whole
+    else
+      let precision := 192
+      let rest := toFixed precision negative m e - whole * (2 ^ precision : Nat)
+      if rest == 0 then pack format mode false 1 whole
+      else pack format mode false ((expFixed precision (fixedMul precision rest (ln2Fixed precision))).toNat * 2 + 1) (whole - precision - 1)
+
+/-- `VMINMAX` of AVX10.2: the minimum or the maximum of IEEE 754-2019, by bit 0 of the immediate, of the magnitudes by its bit 1, and
+of the numbers alone by its bit 4, where a NaN beside a number isn't the result; a signaling NaN is made quiet. -0 is below +0, and of
+equal magnitudes the negative one is. Bits 2 and 3 say the sign of what isn't a NaN, as of `VRANGE`. -/
+private def minMax (format : Format) (x y control : Nat) : Nat :=
+  let top := 2 ^ (format.width - 1)
+  let magnitude (bits : Nat) : Nat := bits % top
+  let nanX := isNaN format x
+  let nanY := isNaN format y
+  if nanX && nanY then quiet format x
+  else if nanX then (if control.testBit 4 then y else quiet format x)
+  else if nanY then (if control.testBit 4 then x else quiet format y)
+  else
+    let greatest := control.testBit 0
+    -- Whether x is below y: of the magnitudes first if it is by them, and of the numbers with -0 below +0 if those are equal.
+    let numbers : Bool := match compare format x y with
+      | some (less, equal) => if equal then isNegative format x && !isNegative format y else less
+      | none => false
+    let below : Bool :=
+      if control.testBit 1 then
+        match compare format (magnitude x) (magnitude y) with
+        | some (less, equal) => if equal then numbers else less
+        | none => false
+      else numbers
+    let chosen := if below != greatest then x else y
+    match control >>> 2 % 4 with
+    | 0 => magnitude chosen + (if isNegative format x then top else 0)
+    | 1 => chosen
+    | 2 => magnitude chosen
+    | _ => magnitude chosen + top
+
+/-- The operands of an operation with the denormals among them as zeros, as DAZ of MXCSR has them: of those that are numbers, and
+not of an immediate, a table, or what `VFIXUPIMM` keeps. -/
+def flushOperands (name : String) (format : Format) (inputs : List Nat) : List Nat :=
+  let numbers : Option (List Nat) := match (name.splitOn "_").headD "" with
+    | "fgetmant" | "frndscale" | "freduce" | "fpclass" => some [0]
+    | "frange" | "fminmax" => some [0, 1]
+    | "ffixupimm" => some [1]
+    | _ => none
+  match numbers with
+  | none => inputs.map (flush format)
+  | some numbers => (inputs.zip (List.range inputs.length)).map fun (bits, index) =>
+      if numbers.contains index then flush format bits else bits
+
 /-- An operation that this part serves, by its name without its rounding mode and formats. -/
 def specialOperations : List String :=
   ["f2xm1", "fsin", "fcos", "ftan", "fatan2", "fyl2x", "fyl2xp1", "fexponent", "fsignificand", "fprem", "fprem1", "fprem_status",
-    "fprem1_status", "frcp", "frsqrt", "frecpe", "frsqrte", "fbld", "fbstp"]
+    "fprem1_status", "frcp", "frsqrt", "frecpe", "frsqrte", "fbld", "fbstp", "fscale"] ++ vectorOperations
 
 /-- What an operation of these gives, if `name` is of one, as its width and its bits. -/
 def evaluateSpecial (rules : NaNRules) (name : String) (inputs : List Nat) : Option (Nat × Nat) := do
@@ -748,6 +1018,21 @@ def evaluateSpecial (rules : NaNRules) (name : String) (inputs : List Nat) : Opt
   | "fbstp", [x] => pure (width, toDecimal format mode x)
   | "fexponent", [x] => pure (width, extract format true x)
   | "fsignificand", [x] => pure (width, extract format false x)
+  | "fscale", [x, y] => pure (width, scale false .x86 format mode x y)
+  | "fscalef", [x, y] => pure (width, scale true rules format mode x y)
+  | "fgetexp", [x] => pure (width, extract format true x)
+  | "fgetmant", [x, control] => pure (width, mantissaOf format x control)
+  | "frndscale", [x, control] => pure (width, roundScaled format (controlMode mode control) (control >>> 4 % 16) x)
+  | "freduce", [x, control] => pure (width, reduce format (controlMode mode control) (control >>> 4 % 16) x)
+  | "frange", [x, y, control] => pure (width, range format x y control)
+  | "fminmax", [x, y, control] => pure (width, minMax format x y control)
+  | "fpclass", [x, control] => pure (width, bool (classIs format x control))
+  | "ffixupimm", [old, x, table, _] => pure (width, (fixup format old x table).1)
+  | "frcp14", [x] => pure (width, estimate format false 14 x)
+  | "frsqrt14", [x] => pure (width, estimate format true 14 x)
+  | "frcp28", [x] => pure (width, estimate format false 28 x)
+  | "frsqrt28", [x] => pure (width, estimate format true 28 x)
+  | "fexp2", [x] => pure (width, powerOfTwo format mode x)
   | "frcp", [x] => pure (width, sseEstimate format false x)
   | "frsqrt", [x] => pure (width, sseEstimate format true x)
   | "frecpe", [x] | "frsqrte", [x] =>
@@ -849,16 +1134,95 @@ def evaluateSpecial (rules : NaNRules) (name : String) (inputs : List Nat) : Opt
       | _, _ => pure (nan [y, x])
   | _, _ => none
 
+/-! The operations of SVE that aren't arithmetic of IEEE 754, which `evaluateArm` serves: `fpscale`, FPScale, and `fexpa`, FPExpA. -/
+
+/-- The operations that `evaluateArm` serves, by their names without their rounding modes and formats. -/
+def armOperations : List String := ["fpscale", "fexpa"]
+
+/-- FPExpCoefficient: the fraction of `2 ^ (i / 64)`, or of `2 ^ (i / 32)` of half precision, to the nearest, as the tables of the
+architecture have it, by the width of the format. -/
+def armExpCoefficients : Nat → List Nat
+  | 16 => [
+    0x0, 0x16, 0x2d, 0x45, 0x5d, 0x75, 0x8e, 0xa8,
+    0xc2, 0xdc, 0xf8, 0x114, 0x130, 0x14d, 0x16b, 0x189,
+    0x1a8, 0x1c8, 0x1e8, 0x209, 0x22b, 0x24e, 0x271, 0x295,
+    0x2ba, 0x2e0, 0x306, 0x32e, 0x356, 0x37f, 0x3a9, 0x3d4]
+  | 32 => [
+    0x0, 0x164d2, 0x2cd87, 0x43a29, 0x5aac3, 0x71f62, 0x8980f, 0xa14d5,
+    0xb95c2, 0xd1adf, 0xea43a, 0x1031dc, 0x11c3d3, 0x135a2b, 0x14f4f0, 0x16942d,
+    0x1837f0, 0x19e046, 0x1b8d3a, 0x1d3eda, 0x1ef532, 0x20b051, 0x227043, 0x243516,
+    0x25fed7, 0x27cd94, 0x29a15b, 0x2b7a3a, 0x2d583f, 0x2f3b79, 0x3123f6, 0x3311c4,
+    0x3504f3, 0x36fd92, 0x38fbaf, 0x3aff5b, 0x3d08a4, 0x3f179a, 0x412c4d, 0x4346cd,
+    0x45672a, 0x478d75, 0x49b9be, 0x4bec15, 0x4e248c, 0x506334, 0x52a81e, 0x54f35b,
+    0x5744fd, 0x599d16, 0x5bfbb8, 0x5e60f5, 0x60ccdf, 0x633f89, 0x65b907, 0x68396a,
+    0x6ac0c7, 0x6d4f30, 0x6fe4ba, 0x728177, 0x75257d, 0x77d0df, 0x7a83b3, 0x7d3e0c]
+  | 64 => [
+    0x0, 0x2c9a3e778061, 0x59b0d3158574, 0x874518759bc8,
+    0xb5586cf9890f, 0xe3ec32d3d1a2, 0x11301d0125b51, 0x1429aaea92de0,
+    0x172b83c7d517b, 0x1a35beb6fcb75, 0x1d4873168b9aa, 0x2063b88628cd6,
+    0x2387a6e756238, 0x26b4565e27cdd, 0x29e9df51fdee1, 0x2d285a6e4030b,
+    0x306fe0a31b715, 0x33c08b26416ff, 0x371a7373aa9cb, 0x3a7db34e59ff7,
+    0x3dea64c123422, 0x4160a21f72e2a, 0x44e086061892d, 0x486a2b5c13cd0,
+    0x4bfdad5362a27, 0x4f9b2769d2ca7, 0x5342b569d4f82, 0x56f4736b527da,
+    0x5ab07dd485429, 0x5e76f15ad2148, 0x6247eb03a5585, 0x6623882552225,
+    0x6a09e667f3bcd, 0x6dfb23c651a2f, 0x71f75e8ec5f74, 0x75feb564267c9,
+    0x7a11473eb0187, 0x7e2f336cf4e62, 0x82589994cce13, 0x868d99b4492ed,
+    0x8ace5422aa0db, 0x8f1ae99157736, 0x93737b0cdc5e5, 0x97d829fde4e50,
+    0x9c49182a3f090, 0xa0c667b5de565, 0xa5503b23e255d, 0xa9e6b5579fdbf,
+    0xae89f995ad3ad, 0xb33a2b84f15fb, 0xb7f76f2fb5e47, 0xbcc1e904bc1d2,
+    0xc199bdd85529c, 0xc67f12e57d14b, 0xcb720dcef9069, 0xd072d4a07897c,
+    0xd5818dcfba487, 0xda9e603db3285, 0xdfc97337b9b5f, 0xe502ee78b3ff6,
+    0xea4afa2a490da, 0xefa1bee615a27, 0xf50765b6e4540, 0xfa7c1819e90d8]
+  | _ => []
+
+/-- The name of an operation of `armOperations` as its operation, its rounding mode and its format. -/
+private def armOperation (name : String) : Option (String × Mode × Nat × Format) := do
+  let parts := name.splitOn "_"
+  let at_ ← parts.findIdx? (· == "ieee754")
+  let before := parts.take at_
+  let mode := before.getLast?.bind Mode.ofName
+  let operation := "_".intercalate (if mode.isSome then before.dropLast else before)
+  if !armOperations.contains operation then none
+  let width ← ((parts.drop (at_ + 2)).filterMap String.toNat?).head?
+  let format ← formatOf width
+  pure (operation, mode.getD .rne, width, format)
+
+/-- The scale of `fscale`, an integer of the width of the format with a sign, no further than where every number of the format, and
+of one of four more bits of exponent, has overflowed or is nothing: more than that changes nothing, and would be shifted by. -/
+private def armScale (format : Format) (width bits : Nat) : Int :=
+  let value : Int :=
+    if bits % 2 ^ width ≥ 2 ^ (width - 1) then ((bits % 2 ^ width : Nat) : Int) - ((2 ^ width : Nat) : Int) else ((bits % 2 ^ width : Nat) : Int)
+  let bound : Int := ((4 * format.maxExponent + 4 * format.fractionBits : Nat) : Int)
+  max (-bound) (min bound value)
+
+/-- What an operation of `armOperations` gives, if `name` is of one, as its width and its bits:
+- `fscale`, of a number and an integer: the number times two to the integer, rounded once, in the mode;
+- `fexpa`, of the bits of an integer: the exponent that is above its index, and the fraction that the table has for the index. -/
+def evaluateArm (rules : NaNRules) (name : String) (inputs : List Nat) : Option (Nat × Nat) := do
+  let (operation, mode, width, format) ← armOperation name
+  match operation, inputs with
+  | "fpscale", [x, scale] =>
+    match unpack format x with
+    | .nan _ => pure (width, chooseNaN rules format [x])
+    | .finite negative m e => pure (width, pack format mode negative m (e + armScale format width scale))
+    | _ => pure (width, x)
+  | "fexpa", [x] =>
+    let table := armExpCoefficients width
+    let index := x % table.length
+    let exponent := (x / table.length) % 2 ^ format.exponentBits
+    pure (width, exponent * 2 ^ format.fractionBits + table.getD index 0)
+  | _, _ => none
+
 /-- An intrinsic by its name, by the rules of an architecture for NaNs. The arithmetic is the same. A NaN that an operation makes
 out of nothing is the default of x86 there, and this says what it is here. -/
-def evaluateWith (rules : NaNRules) (name : String) (inputs : List Nat) : Option (Nat × Nat) := do
+private def evaluateBasic (rules : NaNRules) (name : String) (inputs : List Nat) : Option (Nat × Nat) := do
   if let some result := evaluateSpecial rules name inputs then return result
   let (width, bits) ← evaluateX86 name inputs
   let parts := name.splitOn "_"
   let widths := (parts.reverse.takeWhile fun part => part.toNat?.isSome).reverse.filterMap String.toNat?
   -- Of x86, what doesn't fit, after it is rounded, or isn't a number, is the integer indefinite: the top bit of a signed one, and all
   -- ones of an unsigned one, as `CVTSD2SI`, `FIST` and `VCVTSD2USI` give it.
-  if parts.headD "" == "cast" && ["sint", "int"].contains (parts.getD 1 "") && rules == .x86 then
+  if parts.headD "" == "cast" && ["sint", "int"].contains (parts.getD 1 "") && parts.getD 2 "" != "sat" && rules == .x86 then
     if let (some source, some target, [input]) := (widths.head?, widths.getLast?, inputs) then
       if let some format := formatOf source then
         let signed := parts.getD 1 "" == "sint"
@@ -872,7 +1236,7 @@ def evaluateWith (rules : NaNRules) (name : String) (inputs : List Nat) : Option
           let fits := if signed then (if negative then magnitude ≤ 2 ^ (target - 1) else magnitude < 2 ^ (target - 1))
             else (!negative || magnitude == 0) && magnitude < 2 ^ target
           if !fits then return (target, indefinite)
-  if parts.headD "" == "cast" && ["sint", "int"].contains (parts.getD 1 "") && rules.saturating then
+  if parts.headD "" == "cast" && ["sint", "int"].contains (parts.getD 1 "") && parts.getD 2 "" != "sat" && rules.saturating then
     if let (some source, some target, [input]) := (widths.head?, widths.getLast?, inputs) then
       if let some format := formatOf source then
         let signed := parts.getD 1 "" == "sint"
@@ -906,8 +1270,6 @@ def evaluateWith (rules : NaNRules) (name : String) (inputs : List Nat) : Option
     else pure (width, bits)
   | none => pure (width, bits)
 
-/-- By the rules of x86. -/
-def evaluate : String → List Nat → Option (Nat × Nat) := evaluateWith .x86
 
 /-- The exceptions of IEEE 754 that an operation raises. -/
 structure Raised where
@@ -919,14 +1281,6 @@ structure Raised where
   /-- Of what x86 alone says: that an operand is a denormal. -/
   denormal : Bool := false
   deriving DecidableEq, Repr
-
-/-- Whether bits are a denormal of a format. -/
-def isDenormal (format : Format) (bits : Nat) : Bool :=
-  (bits >>> format.fieldBits) % 2 ^ format.exponentBits == 0 && bits % 2 ^ format.fieldBits != 0
-
-/-- A denormal as a zero of its sign. -/
-def flush (format : Format) (bits : Nat) : Nat :=
-  if isDenormal format bits then signBit format (bits >>> (format.width - 1) % 2 == 1) else bits
 
 /-- The formats of the operands and of the result of what is named, where they are floating point. -/
 def formatsOf (name : String) : Option Format × Option Format :=
@@ -940,10 +1294,15 @@ def formatsOf (name : String) : Option Format × Option Format :=
     match parts.headD "" with
     | "fadd" | "fsub" | "fmul" | "fdiv" | "fsqrt" | "fmad" | "fmadh" | "fround" | "froundq" | "fconvert" => (first, last)
     | "frecpe" | "frsqrte" | "frcp" | "frsqrt" => (first, last)
+    -- Of `fpscale`, FPScale of SVE, the scale is an integer, which isn't flushed as a denormal is; the result is of the format.
+    | "fpscale" => (none, last)
+    | "fscalef" | "fgetexp" | "fgetmant" | "frndscale" | "freduce" | "frange" | "fminmax" | "ffixupimm" | "frcp14" | "frsqrt14" | "frcp28"
+    | "frsqrt28" | "fexp2" => (first, last)
+    | "fpclass" => (first, none)
     | "forder" | "forders" | "fgt" | "fge" | "feq" => (first, none)
     | "cast" =>
       match parts.getD 1 "" with
-      | "sint" | "int" => (first, none)
+      | "sint" | "int" | "ibs" | "iubs" => (first, none)
       | _ => (none, last)
     | _ => (none, none)
 
@@ -991,6 +1350,27 @@ private def tiny (format : Format) : Number → Bool
   | .finite _ mantissa exponent => exponent + Nat.log2 mantissa < 1 - (format.bias : Int)
   | _ => false
 
+/-- Whether what an operation gives is tiny, below the smallest normal number of its format once it is rounded with no end to its
+exponents: what the flush to zero of MXCSR makes a zero, exact or not, as a processor has it. -/
+def isTiny (rules : NaNRules) (name : String) (inputs : List Nat) : Bool :=
+  let parts := name.splitOn "_"
+  match parts.findIdx? (· == "ieee754") with
+  | none => false
+  | some at_ =>
+    let before := parts.take at_
+    let mode := (before.getLast?.bind Mode.ofName).getD .rne
+    let widths := (parts.drop (at_ + 2)).filterMap String.toNat?
+    match widths.head?.bind formatOf, widths.getLast?.bind formatOf with
+    | some source, some target =>
+      if inputs.any (isNaN source) then false
+      else if before.headD "" == "fscalef" then
+        match inputs.map (unpack source) with
+        | [.finite _ m e, .finite negative n f] =>
+          e + powerOf true negative n f + bitLength m - 1 < 1 - (source.bias : Int)
+        | _ => false
+      else (unboundedResult (before.headD "") source target (if rules.tininessBefore then .rtz else mode) inputs).any (tiny target)
+    | _, _ => false
+
 /-- A number of a sign, `m * 2 ^ e`, rounded to an integer in a mode: its magnitude, and whether it wasn't one already. -/
 private def roundToInteger (negative : Bool) (m : Nat) (e : Int) (mode : Mode) : Nat × Bool :=
   if e ≥ 0 then (m <<< e.toNat, false)
@@ -1007,6 +1387,29 @@ private def roundToInteger (negative : Bool) (m : Nat) (e : Int) (mode : Mode) :
       | .rtn => negative && rest != 0
       | .rod => rest != 0 && kept % 2 == 0
     (if up then kept + 1 else kept, rest != 0)
+
+/-- What an operation of `armOperations` that gave `result` raises, if `name` is of one: `fexpa` nothing, and `fscale` invalid of a
+signaling NaN, and of a number, overflow if it is past the format with no end to its exponents, inexact if the result isn't it, and
+underflow if it is tiny before it is rounded, as ARM has that, and inexact. -/
+def raisedArm (name : String) (inputs : List Nat) (result : Nat) : Option Raised := do
+  let (operation, mode, width, format) ← armOperation name
+  match operation, inputs with
+  | "fpscale", [x, scale] =>
+    if isSignaling format x then return { invalid := true }
+    match unpack format x with
+    | .finite negative m e =>
+      let exponent := e + armScale format width scale
+      let wide := widened format
+      let overflow := beyond format (unpack wide (pack wide mode negative m exponent))
+      let exact := match unpack format result with
+        | .finite _ m' e' =>
+          let low := min exponent e'
+          m * 2 ^ (exponent - low).toNat == m' * 2 ^ (e' - low).toNat
+        | _ => false
+      let inexact := !exact || overflow
+      some { overflow, inexact, underflow := inexact && tiny format (.finite negative m exponent) }
+    | _ => some {}
+  | _, _ => some {}
 
 /-- What an operation of these raises, if `name` is of one. -/
 def raisedSpecial (name : String) (inputs : List Nat) (result : Nat) : Option Raised := do
@@ -1032,7 +1435,62 @@ def raisedSpecial (name : String) (inputs : List Nat) (result : Nat) : Option Ra
       | .finite _ m e => e < 0 && m % 2 ^ (-e).toNat != 0
       | _ => false
     some { invalid, inexact := inexact && !invalid }
-  | "frcp" | "frsqrt" => some {}
+  | "frcp" | "frsqrt" | "frcp14" | "frsqrt14" | "frcp28" | "frsqrt28" | "fpclass" => some {}
+  | "fscale" | "fscalef" =>
+    -- Of AVX-512, only the first operand is said to be a denormal.
+    let said := if operation == "fscale" then denormal else isDenormal format (inputs.headD 0)
+    if signaling then return { invalid := true }
+    if anyNaN then return {}
+    if resultNaN then return { invalid := true }
+    match inputs.map (unpack format) with
+    | [.finite _ m e, .finite negative n f] =>
+      let (overflow, underflow) := scaleRaises format m (e + powerOf (operation == "fscalef") negative n f)
+      some { overflow, underflow, inexact := overflow || underflow, denormal := said }
+    | _ => some { denormal := said }
+  | "fgetexp" =>
+    let first := inputs.headD 0
+    some { invalid := signaling, divideByZero := (match unpack format first with | .zero _ => true | _ => false),
+           denormal := isDenormal format first }
+  | "fgetmant" =>
+    let first := inputs.headD 0
+    some { invalid := isSignaling format first || (resultNaN && !isNaN format first), denormal := isDenormal format first && !resultNaN }
+  | "frndscale" =>
+    let first := inputs.headD 0
+    some { invalid := isSignaling format first,
+           inexact := !isNaN format first && result != first && !(inputs.getD 1 0).testBit 3 }
+  | "freduce" =>
+    let first := inputs.headD 0
+    let control := inputs.getD 1 0
+    let rounded := roundScaled format (controlMode (mode.getD .rne) control) (control >>> 4 % 16) first
+    let up := sub format .rtp first rounded
+    let down := sub format .rtn first rounded
+    let finite := match unpack format first with | .finite .. => true | _ => false
+    some { invalid := isSignaling format first,
+           inexact := finite && !control.testBit 3 && up != down && up % 2 ^ (format.width - 1) != 0 }
+  | "fminmax" =>
+    let x := inputs.headD 0
+    let y := inputs.getD 1 0
+    some { invalid := isSignaling format x || isSignaling format y,
+           denormal := (isDenormal format x || isDenormal format y) && !isNaN format x && !isNaN format y }
+  | "frange" =>
+    let x := inputs.headD 0
+    let y := inputs.getD 1 0
+    let calm (bits : Nat) : Bool := isNaN format bits && !isSignaling format bits
+    if isSignaling format x || isSignaling format y then return { invalid := true }
+    some { denormal := (isDenormal format x && !calm y) || (isDenormal format y && !calm x) }
+  | "ffixupimm" =>
+    match inputs with
+    | [old, x, table, control] =>
+      let token := (fixup format old x table).2
+      let on (bit : Nat) : Bool := control.testBit bit
+      some { divideByZero := (token == 2 && on 0) || (token == 3 && on 2),
+             invalid := (token == 2 && on 1) || (token == 3 && on 3) || (token == 1 && on 4) || (token == 4 && on 5) ||
+               (token == 6 && on 6) || (token == 5 && on 7) }
+    | _ => some {}
+  | "fexp2" =>
+    let first := inputs.headD 0
+    let finite := match unpack format first, unpack format result with | .finite .., .finite .. => true | _, _ => false
+    some { invalid := isSignaling format first, inexact := finite }
   | "frecpe" | "frsqrte" =>
     let input := inputs.headD 0
     let negative := (input >>> (format.width - 1)) % 2 == 1
@@ -1068,7 +1526,7 @@ def raisedSpecial (name : String) (inputs : List Nat) (result : Nat) : Option Ra
 
 /-- What an operation that gave `result` raises. Whether a result was rounded is whether rounding up and down come to
 something else, which takes evaluating it twice, so that `known` says not to when `inexact` won't change anything. -/
-def raisedBy (rules : NaNRules) (name : String) (inputs : List Nat) (result : Nat) (known : Bool := false) : Raised := Id.run do
+private def raisedBasic (rules : NaNRules) (name : String) (inputs : List Nat) (result : Nat) (known : Bool := false) : Raised := Id.run do
   if let some raised := raisedSpecial name inputs result then return raised
   let parts := name.splitOn "_"
   let some at_ := parts.findIdx? (· == "ieee754") | return {}
@@ -1094,7 +1552,7 @@ def raisedBy (rules : NaNRules) (name : String) (inputs : List Nat) (result : Na
   let some source := formatOf first | return {}
   let rounded := if !known then true else false
   let differs : Bool :=
-    match evaluateWith rules (withMode name "rtp") inputs, evaluateWith rules (withMode name "rtn") inputs with
+    match evaluateBasic rules (withMode name "rtp") inputs, evaluateBasic rules (withMode name "rtn") inputs with
     | some up, some down =>
       -- Exactly nothing has the sign of the mode.
       let zero (bits : Nat) := match formatOf last with
@@ -1104,6 +1562,20 @@ def raisedBy (rules : NaNRules) (name : String) (inputs : List Nat) (result : Na
     | _, _ => false
   match operation with
   | "cast_sfloat" | "cast_float" => return { inexact := rounded && differs }
+  | "cast_sint_sat" | "cast_uint_sat" | "cast_ibs" | "cast_iubs" =>
+    -- What saturates is invalid of what it saturated, and of a NaN, and otherwise inexact of what isn't an integer.
+    let signed := operation == "cast_sint_sat" || operation == "cast_ibs"
+    let bits := if operation == "cast_ibs" || operation == "cast_iubs" then 8 else last
+    let some input := inputs.head? | return {}
+    let mode := (before.getLast?.bind Mode.ofName).getD .rtz
+    match unpack source input with
+    | .nan _ | .infinity _ => return { invalid := true }
+    | .zero _ => return {}
+    | .finite negative m e =>
+      let (integer, notExact) := roundToInteger negative m e mode
+      let invalid := if negative && integer != 0 then !signed || integer > 2 ^ (bits - 1)
+        else integer ≥ (if signed then 2 ^ (bits - 1) else 2 ^ bits)
+      return { invalid, inexact := !invalid && notExact, denormal := isDenormal source input }
   | "cast_sint" | "cast_int" =>
     -- Of the integer that it rounds to in its mode, as x86 and RISC-V have it: out of range is invalid, whatever is given for it, and
     -- otherwise what isn't an integer is inexact, also of what saturates.
@@ -1165,6 +1637,71 @@ def raisedBy (rules : NaNRules) (name : String) (inputs : List Nat) (result : Na
     return { inexact, overflow, underflow := inexact && tinyResult.any (tiny target), denormal }
   | _ => return {}
 
+/-! ## What is several operations
+
+The complex products of AVX512-FP16, `VFMULCPH`, `VFCMULCPH`, `VFMADDCPH` and `VFCMADDCPH`, of a real and an imaginary half in 32 bits,
+and the dot product of AVX10.2, `VDPPHPS`: each is the multiplications and the fused ones that the manual writes it as, rounded at
+each, and raises what any of them does. -/
+
+private def Mode.tag : Mode → String
+  | .rne => "rne" | .rna => "rna" | .rtz => "rtz" | .rtp => "rtp" | .rtn => "rtn" | .rod => "rod"
+
+/-- The steps of such an operation, each the name of an intrinsic, its operands and what it gives, and what the last of them come to. -/
+private def compound (rules : NaNRules) (name : String) (inputs : List Nat) : Option (Nat × Nat × List (String × List Nat × Nat)) := do
+  let parts := name.splitOn "_"
+  let at_ ← parts.findIdx? (· == "ieee754")
+  let before := parts.take at_
+  let mode := (before.getLast?.bind Mode.ofName).getD .rne
+  let half ← formatOf 16
+  let step (operation : String) (width : String) (operands : List Nat) : Option (String × List Nat × Nat) := do
+    let name := s!"{operation}_{mode.tag}_ieee754_binary_{width}"
+    pure (name, operands, (← evaluateBasic rules name operands).2)
+  let low (value : Nat) : Nat := value % 2 ^ 16
+  let high (value : Nat) : Nat := value / 2 ^ 16 % 2 ^ 16
+  match before.headD "", inputs with
+  | "fmulc", [x, y] | "fcmulc", [x, y] | "fmaddc", [_, x, y] | "fcmaddc", [_, x, y] =>
+    let conjugate := before.headD "" == "fcmulc" || before.headD "" == "fcmaddc"
+    let (a, b, c, d) := (low x, high x, low y, high y)
+    -- The real part is `a c ∓ b d` and the imaginary one `b c ± a d`, each from what it is added to, if anything.
+    let first ← match inputs with
+      | [sum, _, _] => step "fmad" "16" [a, c, low sum]
+      | _ => step "fmul" "16" [a, c]
+    let second ← match inputs with
+      | [sum, _, _] => step "fmad" "16" [b, c, high sum]
+      | _ => step "fmul" "16" [b, c]
+    let real ← step "fmad" "16" [if conjugate then b else negate half b, d, first.2.2]
+    let imaginary ← step "fmad" "16" [if conjugate then negate half a else a, d, second.2.2]
+    pure (32, real.2.2 + imaginary.2.2 * 2 ^ 16, [first, second, real, imaginary])
+  | "dpph", [sum, x, y] =>
+    let wide (value : Nat) : Option (String × List Nat × Nat) := step "fconvert" "16_32" [value]
+    let (a, b, c, d) := (← wide (high x), ← wide (high y), ← wide (low x), ← wide (low y))
+    let odd ← step "fmad" "32" [a.2.2, b.2.2, sum]
+    let even ← step "fmad" "32" [c.2.2, d.2.2, odd.2.2]
+    pure (32, even.2.2, [a, b, c, d, odd, even])
+  | _, _ => none
+
+/-- An intrinsic by its name, by the rules of an architecture for NaNs: its width and its bits. -/
+def evaluateWith (rules : NaNRules) (name : String) (inputs : List Nat) : Option (Nat × Nat) :=
+  if let some result := evaluateArm rules name inputs then some result else
+  match compound rules name inputs with
+  | some (width, bits, _) => some (width, bits)
+  | none => evaluateBasic rules name inputs
+
+/-- By the rules of x86. -/
+def evaluate : String → List Nat → Option (Nat × Nat) := evaluateWith .x86
+
+/-- What an operation that gave `result` raises: see `raisedBasic`, which this is of each step of what is several operations. -/
+def raisedBy (rules : NaNRules) (name : String) (inputs : List Nat) (result : Nat) (known : Bool := false) : Raised :=
+  if let some raised := raisedArm name inputs result then raised else
+  match compound rules name inputs with
+  | some (_, _, steps) =>
+    steps.foldl (init := {}) fun raised (step, operands, value) =>
+      let more := raisedBasic rules step operands value
+      { invalid := raised.invalid || more.invalid, divideByZero := raised.divideByZero || more.divideByZero,
+        overflow := raised.overflow || more.overflow, underflow := raised.underflow || more.underflow,
+        inexact := raised.inexact || more.inexact, denormal := raised.denormal || more.denormal }
+  | none => raisedBasic rules name inputs result known
+
 /-- Of PowerPC, which invalid operation an intrinsic was, as the bits of FPSCR that say so, numbered from the least significant one:
 VXSNAN 24 of a signaling NaN, VXISI 23 of ∞ - ∞, VXIDI 22 of ∞ / ∞, VXZDZ 21 of 0 / 0, VXIMZ 20 of ∞ × 0, VXVC 19 of an ordered
 comparison of a NaN, VXSQRT 9 of the root of what is negative, and VXCVI 8 of a conversion to an integer that can't be. -/
@@ -1223,8 +1760,13 @@ def narrowPrecision (format : Format) (mode : Mode) (precision : Nat) (bits : Na
   match unpack format bits with
   | .finite negative m e =>
     let length := bitLength m
-    if length ≤ precision then bits
-    else pack format .rne negative (roundBits mode negative m (length - precision) false) (e + (length - precision))
+    -- Below the smallest normal number, the last bit that the precision has is where it is of that number.
+    let lowest := format.lowest + ((format.fractionBits + 1 - precision : Nat) : Int)
+    let shift := max ((length : Int) - precision) (lowest - e)
+    if shift ≤ 0 then bits
+    else
+      let kept := roundBits mode negative m shift.toNat false
+      if kept == 0 then packZero format negative else pack format .rne negative kept (e + shift)
   | _ => bits
 
 /-- Whether `evaluate` knows an operation of this name. -/
@@ -1236,8 +1778,8 @@ def serves (name : String) : Bool :=
     let before := parts.take at_
     let before := if (before.getLast?.bind Mode.ofName).isSome then before.dropLast else before
     ["fadd", "fsub", "fmul", "fdiv", "fsqrt", "fmad", "fmadh", "fround", "froundq", "fconvert", "cast_sint", "cast_int", "cast_sfloat",
-      "cast_float",
+      "cast_float", "cast_sint_sat", "cast_uint_sat", "cast_ibs", "cast_iubs", "fmulc", "fcmulc", "fmaddc", "fcmaddc", "dpph",
       "forder", "forders", "fgt", "fge", "feq", "is_nan", "is_inf", "is_fzero"].contains ("_".intercalate before) ||
-      specialOperations.contains ("_".intercalate before)
+      specialOperations.contains ("_".intercalate before) || armOperations.contains ("_".intercalate before)
 
 end Bap.Float

@@ -48,8 +48,11 @@
 ;;   the alignment checks.
 ;; - MOVPRFX is the move it is on its own. That it combines with the next
 ;;   instruction is only a hint to an implementation.
-;; - The tables of FEXPA and FTMAD and the estimates of FRECPE, FRSQRTE,
-;;   and FRECPX and the scaling of FSCALE are intrinsics named after them.
+;; - The table of FEXPA, the estimates of FRECPE and FRSQRTE and the
+;;   scaling of FSCALE are intrinsics named after them, fexpa, frecpe,
+;;   frsqrte and fpscale, which Bap/Float.lean serves. FRECPX is on the
+;;   bits, as of the scalars, and FTMAD is the fused multiply-add of the
+;;   coefficient of its table, which is here.
 
 (defparameter *sve-vl* 128)
 
@@ -353,7 +356,7 @@
     'revw (sve-rev 32 a)
     'frintx (a64-frint 'x a)
     'frinti (a64-frint 'x a)
-    'frecpx (sve-fintrinsic 'frecpx a)
+    'frecpx (a64-frecpx a)
     'frecpe (sve-fintrinsic 'frecpe a)
     'frsqrte (sve-fintrinsic 'frsqrte a)
     'fexpa (sve-fintrinsic 'fexpa a)
@@ -387,9 +390,11 @@
                        (word-width a))
     'fsubr (a64-fop2 'fsub b a)
     'fdivr (a64-fop2 'fdiv b a)
-    'fscale (intrinsic (symbol-concat 'fscale 'rne 'ieee754_binary
+    ;; FPScale: A times two to the integer B, rounded once, by the
+    ;; intrinsic fpscale; a denormal that FZ flushes is a zero of it
+    'fscale (intrinsic (symbol-concat 'fpscale 'rne 'ieee754_binary
                                       (a64-fsize-symbol a) :sep '_)
-                       a b :result (word-width a))
+                       (a64-fz-input a) b :result (word-width a))
     'ftsmul (sve-ftsmul a b)
     'ftssel (sve-ftssel a b)
     (a64-op2 op a b)))
@@ -814,11 +819,40 @@
   (set$ zda (sve-fcmlai/p es zda (lnot (cast-unsigned (sve-pl) 0)) zn zm idx rot
                           (- (/ (sve-lanes es) 2) 1))))
 
-;; FTMAD's table is an intrinsic, of the two operands and the index
+;; FTMAD is FPTrigMAdd: the coefficient of the index plus the product of
+;; the first operand and the magnitude of the second, fused, where the
+;; sign of the second chooses the half of the table, of the series of the
+;; sine or of the cosine. The tables are FPTrigMAddCoefficient.
+(defun sve-ftmad-coefficient (es x)
+  "the coefficient X, 0 to 15, of the format of ES bits"
+  (case es
+    16 (cast-low 16
+         (case x
+           0 0x3c00 1 0xb155 2 0x2030 3 0x0000 4 0x0000 5 0x0000 6 0x0000 7 0x0000
+           8 0x3c00 9 0xb800 10 0x293a 11 0x0000 12 0x0000 13 0x0000 14 0x0000 15 0x0000
+           0))
+    32 (cast-low 32
+         (case x
+           0 0x3f800000 1 0xbe2aaaab 2 0x3c088886 3 0xb95008b9
+           4 0x36369d6d 5 0x00000000 6 0x00000000 7 0x00000000
+           8 0x3f800000 9 0xbf000000 10 0x3d2aaaa6 11 0xbab60705
+           12 0x37cd37cc 13 0x00000000 14 0x00000000 15 0x00000000
+           0))
+    (cast-low 64
+      (case x
+        0 0x3ff0000000000000 1 0xbfc5555555555543 2 0x3f8111111110f30c 3 0xbf2a01a019b92fc6
+        4 0x3ec71de351f3d22b 5 0xbe5ae5e2b60f7b91 6 0x3de5d8408868552f 7 0x0000000000000000
+        8 0x3ff0000000000000 9 0xbfe0000000000000 10 0x3fa5555555555536 11 0xbf56c16c16c13a0b
+        12 0x3efa01a019b1e8d8 13 0xbe927e4f7282f468 14 0x3e21ee96d2641b13 15 0xbda8f76380fbb401
+        0))))
+
 (defun sve-ftmad/i (es zdn zm imm i)
   (let ((a (a64-lane zdn es i))
-        (r (intrinsic (symbol-concat 'ftmad 'ieee754_binary (a64-fsize-symbol a) :sep '_)
-                      a (a64-lane zm es i) (cast-low 8 imm) :result es)))
+        (b (a64-lane zm es i))
+        (c (fp-select (msb b)
+                      (sve-ftmad-coefficient es (+ imm 8))
+                      (sve-ftmad-coefficient es imm)))
+        (r (a64-muladd c a (fp-abs b))))
     (if (= i 0) r (concat r (sve-ftmad/i es zdn zm imm (- i 1))))))
 
 (defun sve-ftmad (es zdn zm imm)

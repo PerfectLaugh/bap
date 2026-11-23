@@ -9,8 +9,10 @@
 ;;
 ;; The operations go by the rounding mode, FZ and DN of FPCR and raise the
 ;; flags of FPSR where something serves their intrinsics, and otherwise round
-;; to nearest with ties to even, which is what it resets to. AHP is ignored. The
-;; helpers are in arm-float.lisp.
+;; to nearest with ties to even, which is what it resets to. AHP is ignored, and
+;; QC of FPSR is only what a program writes there: the saturating instructions
+;; of the vectors, which the lanes of SVE share and which don't set it there,
+;; don't set it. The helpers are in arm-float.lisp.
 
 (defun fp-compare (x y) (set-nzcv (fp-nzcv x y)))
 ;; of FCMPE and FCCMPE, which raise invalid of a quiet NaN too
@@ -71,13 +73,15 @@
   (let ((r (intrinsic (symbol-concat 'fmad 'rne 'ieee754_binary
                                      (a64-fsize-symbol a) :sep '_)
                       x y a :result (word-width a))))
-    (fp-select (a64-is-snan a) (a64-quiet-nan a)
-      (fp-select (a64-is-snan x) (a64-quiet-nan x)
-        (fp-select (a64-is-snan y) (a64-quiet-nan y)
-          (fp-select (is-nan a)
-                     (fp-select (a64-inf-times-zero x y) (a64-default-nan a) a)
-            (fp-select (is-nan x) x
-              (fp-select (is-nan y) y r))))))))
+    ;; a NaN is the default one if FPCR says DN, of the lanes too
+    (a64-dn
+     (fp-select (a64-is-snan a) (a64-quiet-nan a)
+       (fp-select (a64-is-snan x) (a64-quiet-nan x)
+         (fp-select (a64-is-snan y) (a64-quiet-nan y)
+           (fp-select (is-nan a)
+                      (fp-select (a64-inf-times-zero x y) (a64-default-nan a) a)
+             (fp-select (is-nan x) x
+               (fp-select (is-nan y) y r)))))))))
 
 (defun FMADDSrrr (rd rn rm ra) (setd rd (a64-muladd ra rn rm)))
 (defun FMADDDrrr (rd rn rm ra) (setd rd (a64-muladd ra rn rm)))
@@ -267,11 +271,53 @@
 (defun FCVTZUUXHr (rd rn) (set$ rd (a64-fcvt-to false 'z 64 rn)))
 
 
-;; the conversions of the fixed-point numbers with FBITS fractional bits,
-;; whose scaling by a power of two is exact, so they round once
+;; The conversions to the fixed-point numbers with FBITS fractional bits
+;; are FPToFixed toward zero, on the bits: the scaling by a power of two
+;; is on the exponent, as no format has 2^FBITS times each of its numbers
+;; (2^16 isn't a half at all), so that it rounds once and raises only what
+;; the conversion does. The number is COEF times 2^(EXPN - bias - F), of
+;; a denormal too, whose exponent is that of the least normal number.
+;; It is invalid (IOC) of a NaN, an infinity and what doesn't fit the
+;; integer once it is truncated, and else inexact (IXC) of what is lost;
+;; a denormal that FZ, or FZ16 of a half, flushes is a zero, which is
+;; IDC of what isn't a half, as FPUnpack has it.
 (defun a64-fcvt-fixed (signed bits a fbits)
   "converts A times 2^FBITS to the integer of BITS, toward zero"
-  (a64-fcvt-to signed 'z bits (*. :rne a (a64-fpow2 a fbits))))
+  (let ((e (a64-fexp-bits a))
+        (f (a64-frac-bits a))
+        (x (a64-fz a))
+        (flushed (logand (not (= x a)) (if (= (word-width a) 16) 0:1 1:1)))
+        (bias (fp-bias e))
+        (raw (fp-exponent x e f))
+        (frac (cast-unsigned 64 (cast-low f x)))
+        (special (= raw (- (lshift (cast-unsigned 64 1) e) 1)))
+        (nan (logand special (non-zero frac)))
+        (coef (fp-select (is-zero raw) frac (logor frac (lshift (cast-unsigned 64 1) f))))
+        (expn (+ (fp-select (is-zero raw) (cast-unsigned 64 1) raw) (cast-unsigned 64 fbits)))
+        (point (+ bias (cast-unsigned 64 f)))
+        (whole (>= expn point))
+        (down (- point expn))
+        (mag (fp-select whole (lshift coef (- expn point))
+               (fp-select (> down 63) (cast-unsigned 64 0) (rshift coef down))))
+        (lost (logand (not whole)
+                      (fp-select (> down 63) (non-zero coef)
+                                 (non-zero (lshift coef (- 64 down))))))
+        (top (lshift (cast-unsigned 64 1) (- bits 1)))
+        (big (logand (not (is-zero raw)) (>= expn (+ bias (cast-unsigned 64 bits)))))
+        (bad (logor special big
+                    (if signed
+                        (fp-select (msb x) (> mag top) (>= mag top))
+                      (logand (msb x) (non-zero mag)))))
+        (r (if signed
+               (fp-select bad (fp-select (msb x) top (- top 1))
+                          (fp-select (msb x) (neg mag) mag))
+             (fp-select (msb x) (cast-unsigned 64 0)
+                        (fp-select bad (- (lshift (cast-unsigned 64 1) bits) 1) mag)))))
+    (set FPSR (logor FPSR
+                     (cast-unsigned 32 bad)
+                     (lshift (cast-unsigned 32 (logand (not bad) lost)) 4)
+                     (lshift (cast-unsigned 32 flushed) 7)))
+    (cast-low bits (fp-select nan (cast-unsigned 64 0) r))))
 
 (defun a64-cvtf-fixed (signed bits x fbits)
   "converts the integer X over 2^FBITS to the float of BITS"
@@ -574,9 +620,9 @@
     r))
 
 (defun a64-fcvt-int (signed mode a)
-  "converts A to the integer of its size, rounded by MODE"
-  (fp-to-int signed (word-width a) (if (= mode 'z) a (a64-frint mode a))
-             (a64-fexp-bits a) (a64-frac-bits a)))
+  "converts A to the integer of its size, rounded by MODE, with what
+   the conversion raises, as of the general registers"
+  (a64-fcvt-to signed mode (word-width a) a))
 
 (defun a64-fpow2 (a n)
   "2^N in the format of A"
@@ -668,8 +714,8 @@
     'facgt (a64-fcmp (logand (a64-ordered a b) (fp-less-signaling (fp-abs b) (fp-abs a))) a)
     'scvtf-fixed (a64-fixed-to-fp true a b)
     'ucvtf-fixed (a64-fixed-to-fp false a b)
-    'fcvtzs-fixed (a64-fcvt-int true 'z (*. :rne a (a64-fpow2 a b)))
-    'fcvtzu-fixed (a64-fcvt-int false 'z (*. :rne a (a64-fpow2 a b)))
+    'fcvtzs-fixed (a64-fcvt-fixed true (word-width a) a b)
+    'fcvtzu-fixed (a64-fcvt-fixed false (word-width a) a b)
     a))
 
 (defun a64-fop3 (op d a b)
@@ -1179,13 +1225,13 @@
 (defun UCVTFUWHri (rd rn) (setd rd (cast-float :rne 16 (cast-low 32 rn))))
 (defun UCVTFUXHri (rd rn) (setd rd (cast-float :rne 16 (cast-low 64 rn))))
 
-;; The fixed-point conversions of the halves go through double
-;; precision, as neither 2^FBITS nor the integer before its scaling has
-;; to fit a half. A half is exact in double precision, and so is its
-;; product with 2^FBITS, so FCVTZS and FCVTZU round once.
+;; The fixed-point conversions from the integers to the halves go through
+;; double precision, as neither 2^FBITS nor the integer before its scaling
+;; has to fit a half. Those of the halves to the integers are on the bits,
+;; as of the other formats.
 
 (defun a64-fcvt-fixed-h (signed bits a fbits)
-  (a64-fcvt-fixed signed bits (fconvert :rne 64 a) fbits))
+  (a64-fcvt-fixed signed bits a fbits))
 
 ;; An integer of up to 53 significant bits is exact in double precision,
 ;; and so is its quotient by 2^FBITS, so that only the conversion to the
@@ -1264,7 +1310,10 @@
         (e (a64-fexp-bits a))
         (expn (extract (+ e f -1) f a))
         (nan (logand (is-zero (lnot expn)) (not (is-zero (cast-low f a))))))
-    (fp-select nan (a64-quiet-nan a)
+    ;; FPProcessNaN: invalid (IOC) of a signaling NaN, and the default
+    ;; NaN if FPCR says DN
+    (set FPSR (logor FPSR (cast-unsigned 32 (a64-is-snan a))))
+    (fp-select nan (a64-dn (a64-quiet-nan a))
       (concat (msb a)
               (a64-sel (is-zero expn) (lshift (lnot (a64-zero expn)) 1) (lnot expn))
               (cast-unsigned f 0)))))
@@ -1303,7 +1352,8 @@
 ;; FJCVTZS is FPToFixedJS on the bits: the double truncated, modulo 2^32,
 ;; 0 of a NaN and of an infinity, with Z set when the conversion is exact
 ;; and in the range of the integers of 32 bits and it isn't of -0.0, and
-;; with N, C and V clear. A shift of more than 63 bits is 0.
+;; with N, C and V clear. A shift of more than 63 bits is 0. What isn't
+;; in the range once truncated is invalid, and else what is lost inexact.
 
 (defun FJCVTZS (rd rn)
   (let ((expn (fp-exponent rn 11 52))
@@ -1318,10 +1368,15 @@
                 (a64-sel whole (cast-low 1 0)
                   (non-zero (lshift coef (- 64 (- 1075 expn)))))))
         (in-range (logor (< expn 1054)
-                         (logand (msb rn) (= expn 1054) (is-zero frac))))
+                         (logand (msb rn) (= expn 1054) (= mag 0x80000000))))
         (negative-zero (logand (msb rn) (is-zero (cast-low 63 rn)))))
     (setw rd (a64-sel special (cast-unsigned 64 0)
                (a64-sel (msb rn) (neg mag) mag)))
+    ;; invalid (IOC) of a NaN, an infinity and what isn't in the range,
+    ;; and else inexact (IXC) of what is lost
+    (set FPSR (logor FPSR
+                     (cast-unsigned 32 (logor special (not in-range)))
+                     (lshift (cast-unsigned 32 (logand (not special) in-range lost)) 4)))
     (set-nzcv (lshift (cast-unsigned 4
                         (logand (not special) (not lost) in-range (not negative-zero)))
                       2))))

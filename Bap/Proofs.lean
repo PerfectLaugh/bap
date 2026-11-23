@@ -97,6 +97,13 @@ These aren't trusted, but a theorem says nothing where they fail.
 15. **The reader of SMT scripts on concrete text** (Bap/Proofs/SmtReader.lean:4): deliberately tested and not `decide`d, for the time it would take. Its laws are proved.
 16. **`BapTests` as a whole, for what its comparisons go beyond the theorems**: goldens of real binaries and the comparisons with upstream's output. Anything a theorem also says, as `propagateConstants` against its specification, is only a check that the two stay connected.
 
+17. **The 38 `partial def`s of `Bap/`.** The kernel has a `partial def` as an `opaque` constant of an inhabited type, which nothing can unfold: no theorem is about any of them, none makes a theorem say more than it does, and that each ends and does what its comment says is only tested. Every other definition of `Bap/` is total. They are:
+   - **The static analyses that the theorems aren't about**, each a walk of BIL, of expressions of the symbolic executor or of the ways of a function, tested by `BapTests/Checker.lean`, `Flattening.lean` and `Project.lean`: Bap/Analysis/Cff.lean (5: `assignmentIn`, `storedRegister`, `copiedRegister`, `comparesWith`, `branches`), Bap/Analysis/StateMachine.lean (6: `expCompares`, `stmtCompares`, `complemented`, `evalHeld`, `storeLine`, `stmtLine`), Bap/Analysis/Flattening.lean (2: `choices`, `runMachine`), Bap/Analysis/Checker.lean (2: `instrument`, `explore`), Bap/Analysis/Journal.lean (2: `jumps`, `linkOf`), Bap/Analysis/Validate.lean (1: `readsUnassigned`). `Partition`, `Frame` and `Values` have none.
+   - **The dynamic taint**, which follows a run in `IO` (`testLinuxTaint` and its kin in BapTests/Emu.lean): Bap/Analysis/DynamicTaint.lean (5: `evaluate`, `perform`, `iterate`, `branchNode`, `walkFrom`).
+   - **A transformation of BIL that no theorem is of**: Bap/Bil/Transform.lean (6: `certainLoads`, `allLoads`, `stmtLoads`, `reuseLoads`, `shareLoadsIn`, `shareLoads`), tested by BapTests/Transform.lean. What is proved of `Bap.Bil.Transform` is of its other definitions.
+   - **Loops in `IO` of the machines**, which go on as long as a guest or a worker does and are under item 3: Bap/Linux/Machine.lean (2: `kernelCall`, `fromHost`), Bap/Linux/Library.lean (2: `Machine.unloadLibrary`, `Machine.runInitializers`), Bap/Linux/Signals.lean (1: `deliver`), Bap/Linux/Ring.lean (1: `serve`), Bap/Linux/SysV.lean (1: `serve`), Bap/Primus/Lifted.lean (1: `compileWorker`).
+   - **The reader of the signature of a JNI method**: Bap/Emu/Jni.lean (1: `argumentKinds`), tested by BapTests/Jni.lean.
+
 Constant propagation with only what can be read (`propagateConstants_unrestricted`) and the x86 memo (`x86MemoStep_sound`, `apply_anywhere`) were on this list until they were proved. -/
 
 namespace Bap.Proofs

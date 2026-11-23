@@ -73,6 +73,8 @@ structure Message where
   data : ByteArray
   sender : Option String := none
   rights : List Nat := []
+  /-- Who sent it, the process, the user and the group, if either end had `SO_PASSCRED` then, as `maybe_add_creds` has it. -/
+  credentials : Option (Nat × Nat × Nat) := none
   deriving Inhabited
 
 /-- A socket of the Unix domain. -/
@@ -102,6 +104,10 @@ structure Socket where
   /-- `SO_RCVTIMEO` and `SO_SNDTIMEO`, in nanoseconds, of which 0 is none: how long a receive or a send that waits waits. -/
   receiveTimeout : Nat := 0
   sendTimeout : Nat := 0
+  /-- What `listen` said: one more than this many connections wait to be accepted at most, as `unix_recvq_full` has it. -/
+  backlog : Nat := 0
+  /-- `SO_PASSCRED`: what it receives says who sent it, as `SCM_CREDENTIALS`. -/
+  passCredentials : Bool := false
 
 /-- What an epoll instance watches of a descriptor: the descriptor that it was given, its open file, which is what is watched, the
 events that it asks for, the data that it gives back with them, and if it was told of and has been ready since, the events that it
@@ -176,6 +182,9 @@ structure Meta where
   changes : Nat := 0
   name : String := ""
   linkable : Bool := false
+  /-- Of a pipe that was written in packets, as an end of `O_DIRECT` writes it: what it holds that hasn't been read, in order, each as
+  twice its bytes, and one more of a packet, which a read doesn't go past and takes all of; and of one that never was, nothing. -/
+  packets : List Nat := []
 
 /-- A watch of `inotify_add_watch`: its number, the inode that it watches, and what it is to hear of. -/
 structure Watch where
@@ -238,6 +247,18 @@ structure Inode where
 /-- An inode that was written at a time, and so changed then. -/
 def Inode.written (inode : Inode) (clock : Nat) : Inode :=
   { inode with details := { inode.details with modified := clock, changed := clock } }
+
+/-- An inode that was read at a time, as Linux has it of a mount with `relatime`, which is what it mounts with: the time that it
+was last read is that one if what it had wasn't after when it was last written or changed, or is a day old. -/
+def Inode.readAt (inode : Inode) (clock : Nat) : Inode :=
+  let details := inode.details
+  if details.accessed ≤ details.modified || details.accessed ≤ details.changed || details.accessed + 86400 * 1000000000 ≤ clock then
+    { inode with details := { details with accessed := clock } }
+  else inode
+
+/-- An inode whose links changed at a time, or what else of it isn't what it holds. -/
+def Inode.changedAt (inode : Inode) (clock : Nat) : Inode :=
+  { inode with details := { inode.details with changed := clock } }
 
 /-- Of a file that `memfd_create` makes, which can have seals: this is among them, which `F_GET_SEALS` doesn't say. -/
 def sealable : Nat := 2 ^ 31
@@ -667,6 +688,10 @@ structure Kernel where
   mounts : List Mount := []
   /-- What SysV IPC has. -/
   ipc : Ipc := {}
+  /-- The threads that wait in `F_SETLKW` for a lock that a process holds: the thread, its process, where its call is, and the process
+  that holds what is in its way, by which a wait that would never end is found (`posix_locks_deadlock`). It is said again each time
+  that a call waits, so that a checkpoint needn't hold it. -/
+  lockWaits : List (Nat × Nat × Nat × Nat) := []
 
 /-- A result, or the number of an error. -/
 abbrev Result (α : Type) := Except Nat α
@@ -794,6 +819,20 @@ def bindPath (kernel : Kernel) (path : String) (number : Nat) : Kernel :=
 def unbindPath (kernel : Kernel) (path : String) : Kernel :=
   match kernel.paths.get? path with
   | some number => { kernel.countName path number false with paths := kernel.paths.erase path }
+  | none => kernel
+
+/-- The directory that a path of the tree is in was written now, as it is when a name is made in it, removed from it or moved, by any
+of the calls that do so (`inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir))` of each). -/
+def touchDirectory (kernel : Kernel) (path : String) : Kernel :=
+  if !path.startsWith "/" || path == "/" then kernel
+  else match (kernel.paths.get? (Path.parent path)).bind kernel.inodes.get? with
+    | some directory => { kernel with inodes := kernel.inodes.insert directory.number (directory.written kernel.clock) }
+    | none => kernel
+
+/-- An inode changed now: its links, as a name of it was made, removed or moved. -/
+def touchInode (kernel : Kernel) (number : Nat) : Kernel :=
+  match kernel.inodes.get? number with
+  | some inode => { kernel with inodes := kernel.inodes.insert number (inode.changedAt kernel.clock) }
   | none => kernel
 
 /-- With `links` as the names of `paths` have them, as a checkpoint leaves them out. -/
@@ -1166,6 +1205,8 @@ def limitOf (kernel : Kernel) (group resource : Nat) : Nat × Nat :=
     | 4 => (0, unlimited)
     | 8 => (8 * 1024 * 1024, 8 * 1024 * 1024)
     | 13 | 14 => (0, 0)
+    -- `RLIMIT_SIGPENDING`: half of the threads that the memory of the machine has room for, as `fork_init` has it, of 2 GiB.
+    | 11 => (8191, 8191)
     | _ => (unlimited, unlimited)
 
 /-- The open file of a descriptor of a process, with its id, or `EBADF`. -/
@@ -1203,6 +1244,7 @@ def oNofollow : Nat := 0x20000
 def oCloexec : Nat := 0x80000
 def oNonblock : Nat := 0x800
 def oPath : Nat := 0x200000
+def oDirect : Nat := 0x4000
 
 private def has (flags flag : Nat) : Bool := flags &&& flag != 0
 
@@ -1345,8 +1387,9 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
       if kernel.readOnlyVia via normal then .error erofs
       if !kernel.mayChangeIn credentials normal then .error Errno.eacces
       let process := kernel.process group
-      .ok (addInode kernel normal (.file ByteArray.empty) (0o100000 ||| (mode &&& 0o7777 &&& (0o7777 - process.umask)))
-        process.credentials)
+      let (kernel, number) := addInode kernel normal (.file ByteArray.empty) (0o100000 ||| (mode &&& 0o7777 &&& (0o7777 - process.umask)))
+        process.credentials
+      .ok (kernel.touchDirectory normal, number)
   let inode ← inodeOf kernel number
   -- What was there is opened as `may_open` has it: to read, to write, or to empty it, which writes. What was made just now is opened however it is asked to be. A directory to write is `EISDIR` first.
   let accessMode := flags &&& 3
@@ -1377,8 +1420,10 @@ def openPath (kernel : Kernel) (group : Nat) (base path : String) (flags mode : 
       if has flags oDirectory then .error Errno.enotdir
       .ok kernel
     -- `/dev/pts/N`: `Bap.Linux.Tty` says whether it may be opened.
+    -- A whiteout is of the device 0, 0, which there is none of.
+    | .device 7 => .error Errno.enxio
     | .ptySlave _ | .device _ => if has flags oDirectory then .error Errno.enotdir else .ok kernel
-    -- What has no path is opened through `/proc/PID/fd/N`: a pipe to read or write it, as a FIFO is.
+    -- A FIFO, and what has no path and is opened through `/proc/PID/fd/N`: a pipe to read or write it.
     | .pipe .. => if has flags oDirectory then .error Errno.enotdir else .ok kernel
     -- An anonymous inode lets no one open it.
     | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .inotify .. => .error Errno.eacces
@@ -1399,17 +1444,45 @@ def randomBytes (start count : Nat) : ByteArray := Id.run do
     out := out.push ((start + index) * 167 + 13).toUInt8
   pure out
 
+/-- Of the packets of a pipe, as `Meta.packets` has them, what a read of `count` bytes takes: how many bytes it reads, how many more
+are gone with them, of a packet that it didn't read all of, and what is left. -/
+def takePackets : List Nat → Nat → Nat × Nat × List Nat
+  | [], _ => (0, 0, [])
+  | entry :: rest, count =>
+    let size := entry / 2
+    if entry % 2 == 1 then (min size count, size - min size count, rest)
+    else if count < size then (count, 0, 2 * (size - count) :: rest)
+    else if count == size then (size, 0, rest)
+    else
+      let (taken, gone, left) := takePackets rest (count - size)
+      (size + taken, gone, left)
+
+/-- The packets of a pipe that holds `held` bytes with `count` more written: as packets of `PIPE_BUF` at most, of an end of `O_DIRECT`,
+and otherwise with what was written last, if packets are kept at all. -/
+def addPackets (packets : List Nat) (held count : Nat) (direct : Bool) : List Nat :=
+  if count == 0 then packets
+  else if direct then
+    let before := if packets.isEmpty && held > 0 then [2 * held] else packets
+    before ++ (List.range ((count + 4095) / 4096)).map fun index => 2 * min 4096 (count - 4096 * index) + 1
+  else if packets.isEmpty then []
+  else match packets.getLast? with
+    | some last => if last % 2 == 0 then packets.dropLast ++ [last + 2 * count] else packets ++ [2 * count]
+    | none => []
+
 /-- `read`, at the offset of the file, which moves. Of a pipe, what is first in it, which goes. -/
 def read (kernel : Kernel) (group fd count : Nat) : Result (Kernel × ByteArray) := do
   let (id, file) ← openFileOf kernel group fd
   if !reads file.flags then .error Errno.ebadf
   let inode ← inodeOf kernel file.inode
   if let .pipe buffer head consumed capacity := inode.content then
-    let bytes := buffer.extract head (head + count)
-    let next := head + bytes.size
-    let content := if next * 2 ≥ buffer.size then Content.pipe (buffer.extract next buffer.size) 0 (consumed + bytes.size) capacity
-      else .pipe buffer next (consumed + bytes.size) capacity
-    return ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content } }, bytes)
+    -- Of packets, as `pipe_read` has `PIPE_BUF_FLAG_PACKET`: no further than the first, and what of it isn't read is gone.
+    let (taken, gone, packets) := takePackets inode.details.packets count
+    let bytes := if inode.details.packets.isEmpty then buffer.extract head (head + count) else buffer.extract head (head + taken)
+    let next := head + bytes.size + gone
+    let content := if next * 2 ≥ buffer.size then Content.pipe (buffer.extract next buffer.size) 0 (consumed + bytes.size + gone) capacity
+      else .pipe buffer next (consumed + bytes.size + gone) capacity
+    return ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content, details := { inode.details with packets } } },
+      bytes)
   -- What a device gives: nothing of `null`, zeros of `zero` and `full`, and of `random`, bytes that are the same each time.
   if let .device kind := inode.content then
     let bytes := match kind with
@@ -1421,6 +1494,8 @@ def read (kernel : Kernel) (group fd count : Nat) : Result (Kernel × ByteArray)
     | .file data | .console data => .ok data
     | .directory => .error Errno.eisdir
     | .symlink _ | .generated _ | .pipe .. | .socket _ | .eventfd .. | .timerfd .. | .signalfd _ | .epoll _ | .ptyMaster _ | .ptySlave _ | .device _ | .inotify .. | .mqueue .. => .error Errno.einval
+  -- What would end past 2^63 bytes is `EINVAL`, as `rw_verify_area` has it.
+  if negativeOffset (file.offset + count) && inode.content matches .file _ then .error Errno.einval
   let bytes := readAt data file.offset count
   .ok ({ kernel with openFiles := kernel.openFiles.insert id { file with offset := file.offset + bytes.size } }, bytes)
 
@@ -1480,12 +1555,15 @@ def write (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Result (Kerne
   | .device _ => .ok (kernel, bytes.size)
   | .pipe buffer head consumed capacity =>
     let bytes := bytes.extract 0 (capacity - (buffer.size - head))
-    .ok ({ kernel with inodes := kernel.inodes.insert file.inode { inode with content := .pipe (buffer ++ bytes) head consumed capacity } },
-      bytes.size)
+    let packets := addPackets inode.details.packets (buffer.size - head) bytes.size (has file.flags oDirect)
+    let written : Inode := { inode with content := .pipe (buffer ++ bytes) head consumed capacity, details := { inode.details with packets } }
+    .ok ({ kernel with inodes := kernel.inodes.insert file.inode written }, bytes.size)
   | .file data =>
     let offset := if has file.flags oAppend then data.size else file.offset
     let bytes := bytes.extract 0 (← kernel.sizeLimited group offset bytes.size)
     if let some errno := inode.writeRefused data.size offset bytes.size then .error errno
+    -- Of nothing, nothing is written, nor when: `generic_write_checks` is done with it.
+    if bytes.isEmpty then return (kernel, 0)
     .ok ({ kernel with
       inodes := kernel.inodes.insert file.inode ({ inode with content := .file (writeAt data offset bytes) }.written kernel.clock)
       openFiles := kernel.openFiles.insert id { file with offset := offset + bytes.size } }, bytes.size)
@@ -1535,6 +1613,7 @@ def writeKnown (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Kernel :
       | some { content := .file data, .. } => (false, some data.size)
       | _ => (false, none)
     if isConsole then { kernel with output := kernel.output ++ bytes }
+    else if bytes.isEmpty then kernel
     else
       let offset := if has file.flags oAppend then size.getD 0 else file.offset
       let clock := kernel.clock
@@ -1543,7 +1622,9 @@ def writeKnown (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) : Kernel :
         inodes := kernel.inodes.alter number (·.map fun inode =>
           match inode with
           | inode@{ content := .file data, .. } => { inode with content := .file (writeInto data offset bytes) }.written clock
-          | inode@{ content := .pipe buffer head consumed capacity, .. } => { inode with content := .pipe (buffer ++ bytes) head consumed capacity }
+          | inode@{ content := .pipe buffer head consumed capacity, .. } =>
+            let packets := addPackets inode.details.packets (buffer.size - head) bytes.size (has file.flags oDirect)
+            { inode with content := .pipe (buffer ++ bytes) head consumed capacity, details := { inode.details with packets } }
           | other => other) }
 
 /-- Where `pwrite` writes in a file of `size` bytes: at `offset`, or at its end if it was opened to append, as Linux has it, which
@@ -1590,6 +1671,7 @@ def writeKnownAt (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset 
   | .error _ => kernel
   | .ok (_, file) =>
     let clock := kernel.clock
+    if bytes.isEmpty then kernel else
     { kernel with inodes := kernel.inodes.alter file.inode (·.map fun inode =>
         match inode with
         | inode@{ content := .file data, .. } =>
@@ -1609,6 +1691,7 @@ def writeTo (kernel : Kernel) (group fd : Nat) (bytes : ByteArray) (offset : Nat
     let offset := if append then pwriteOffset file data.size offset else offset
     let bytes := bytes.extract 0 (← kernel.sizeLimited group offset bytes.size)
     if let some errno := inode.writeRefused data.size offset bytes.size then .error errno
+    if bytes.isEmpty then return (kernel, 0)
     .ok ({ kernel with inodes := kernel.inodes.insert file.inode ({ inode with content := .file (writeAt data offset bytes) }.written kernel.clock) },
       bytes.size)
   -- As `write` has it: `full` has no room, and the others of memory take all of it.
@@ -1676,7 +1759,7 @@ def pipe (kernel : Kernel) (group flags : Nat) : Kernel × Nat × Nat :=
   let number := kernel.nextInode
   let reading := kernel.nextOpenFile
   let writing := reading + 1
-  let kept := flags &&& oNonblock
+  let kept := flags &&& (oNonblock ||| oDirect)
   let kernel := { kernel with
     inodes := kernel.inodes.insert number
       { number, content := .pipe ByteArray.empty 0 0 pipeCapacity, mode := 0o10600, details := kernel.madeBy (kernel.process group).credentials }
@@ -1757,8 +1840,11 @@ def heldFiles (kernel : Kernel) (groups : List Nat) : Std.HashSet Nat := Id.run 
 
 /-- Whether one of these processes holds an open file of an inode, as `heldFiles` has it, and that opened to write, or not. -/
 def pipeHeld (kernel : Kernel) (number : Nat) (groups : List Nat) (toWrite : Bool) : Bool :=
+  -- A FIFO that is open to read and write is held for both.
+  let isPipe := kernel.inodes.get? number matches some { content := .pipe .., .. }
   (kernel.heldFiles groups).fold (init := false) fun found id =>
-    found || (kernel.openFiles.get? id).any fun file => file.inode == number && writable file.flags == toWrite
+    found || (kernel.openFiles.get? id).any fun file =>
+      file.inode == number && (if toWrite then writable file.flags else file.flags &&& 3 == 0 || file.flags &&& 3 == 2 && isPipe)
 
 /-- Whether one of these processes holds an open file of an inode, as `heldFiles` has it. -/
 def inodeHeld (kernel : Kernel) (groups : List Nat) (number : Nat) : Bool :=
@@ -1847,7 +1933,7 @@ def getFlags (kernel : Kernel) (group fd : Nat) : Result Nat := do
 /-- `fcntl` with `F_SETFL`, of which only `O_APPEND` and `O_NONBLOCK` can change. -/
 def setFlags (kernel : Kernel) (group fd flags : Nat) : Result Kernel := do
   let (id, file) ← openFileOf kernel group fd
-  let changing := 0x400 ||| 0x800
+  let changing := 0x400 ||| 0x800 ||| oDirect
   let kept := file.flags - (file.flags &&& changing)
   .ok { kernel with openFiles := kernel.openFiles.insert id { file with flags := kept ||| (flags &&& changing) } }
 
@@ -1876,6 +1962,7 @@ private def deviceOf (kernel : Kernel) : Content → Nat × Nat
     | 3 => (1, 8)
     | 6 => (1, 9)
     | 4 => (5, 0)
+    | 7 => (0, 0)
     | _ => (5, 2)
   | .console _ => (5, 1)
   | .ptyMaster _ => (5, 2)
@@ -1988,6 +2075,8 @@ def directoryEntries (kernel : Kernel) (group fd : Nat) : Result (Nat × Nat × 
       | some { content := .pipe .., .. } => 1
       | some { content := .generated _, .. } => 8
       | some { content := .socket _, .. } => 12
+      -- A device of characters, as those of `/dev` and a whiteout are.
+      | some { content := .device _, .. } | some { content := .ptySlave _, .. } | some { content := .ptyMaster _, .. } => 2
       | some _ | none => 0
     let parentNumber := (kernel.paths.get? (Path.parent path)).getD inode.number
     let all := [(inode.number, 4, "."), (parentNumber, 4, "..")] ++
@@ -2017,7 +2106,11 @@ def advance (kernel : Kernel) (id start count : Nat) (all : Array (Nat × Nat ×
   | some file =>
     let cursors := if count > 0 && start + count > 2 then kernel.cursors.insert id (all.getD (start + count - 1) (0, 0, "")).2.2
       else kernel.cursors
-    { kernel with openFiles := kernel.openFiles.insert id { file with offset := start + count }, cursors }
+    -- A directory that is read was read now, whatever was left of it, as `iterate_dir` has `file_accessed`.
+    let inodes := match kernel.inodes.get? file.inode with
+      | some inode => kernel.inodes.insert file.inode (inode.readAt kernel.clock)
+      | none => kernel.inodes
+    { kernel with openFiles := kernel.openFiles.insert id { file with offset := start + count }, cursors, inodes }
   | none => kernel
 
 /-- `mkdir`. -/
@@ -2030,7 +2123,8 @@ def mkdir (kernel : Kernel) (group : Nat) (base path : String) (mode : Nat) : Re
   if kernel.readOnlyVia via normal then .error erofs
   if !kernel.mayChangeIn process.credentials normal then .error Errno.eacces
   -- Of its mode, only what Linux's `vfs_mkdir` keeps, the permissions and the sticky bit: setgid comes of a parent that has it.
-  .ok (addInode kernel normal .directory (0o40000 ||| (mode &&& 0o1777 &&& (0o7777 - process.umask))) process.credentials).1
+  .ok ((addInode kernel normal .directory (0o40000 ||| (mode &&& 0o1777 &&& (0o7777 - process.umask))) process.credentials).1.touchDirectory
+    normal)
 
 /-- `unlink`, and `rmdir` with `directory`. What is open stays open: its inode is still there. A slash at the end is of a directory,
 and the link that it may be isn't followed: `ENOTDIR` of anything else. Of a path that ends in `.`, `rmdir` is `EINVAL`, and in `..`,
@@ -2061,8 +2155,11 @@ def remove (kernel : Kernel) (group : Nat) (base path : String) (directory : Boo
     | _, false => if Path.ending path == .slash then .error Errno.enotdir
     if ofProc normal then .error Errno.eperm
     if kernel.readOnlyVia via normal then .error erofs
+    -- The directory was written, and what has a link less changed, as `vfs_unlink` and `vfs_rmdir` have it.
+    let kernel := kernel.touchDirectory normal
     .ok { kernel.unbindPath normal with
-      inodes := kernel.inodes.insert number { inode with details := { inode.details with name := normal ++ " (deleted)" } } }
+      inodes := kernel.inodes.insert number
+        { inode with details := { inode.details with name := normal ++ " (deleted)", changed := kernel.clock } } }
 
 /-- The working directories and roots of the processes, after `move` gave the paths of the tree new ones: those that were there are
 where they were moved to. -/
@@ -2117,7 +2214,10 @@ def rename (kernel : Kernel) (group : Nat) (base source target : String) : Resul
   if kernel.readOnlyVia fromVia from_ || kernel.readOnlyVia toVia to_ then .error erofs
   -- What isn't a directory has nothing under it: its own path is all that moves.
   if !((← inodeOf kernel number).content matches .directory) then
-    return (kernel.unbindPath from_).bindPath to_ number
+    let kernel := ((((kernel.unbindPath from_).bindPath to_ number).touchDirectory from_).touchDirectory to_).touchInode number
+    return match existing with
+      | some other => kernel.touchInode other
+      | none => kernel
   let move (path : String) : String :=
     if path == from_ then to_
     else if path.startsWith (from_ ++ "/") then to_ ++ (path.drop from_.length).toString
@@ -2129,7 +2229,9 @@ def rename (kernel : Kernel) (group : Nat) (base source target : String) : Resul
   let kernel := match existing with
     | some other => kernel.countName to_ other false
     | none => kernel
-  .ok { ((kernel.countName from_ number false).countName to_ number true).movePlaces move with paths := moved }
+  let kernel := { ((kernel.countName from_ number false).countName to_ number true).movePlaces move with paths := moved }
+  -- Both directories were written, and what moved changed, as `simple_rename_timestamp` has it.
+  .ok (((kernel.touchDirectory from_).touchDirectory to_).touchInode number)
 
 /-- Another path of an inode, as `linkat` of `AT_EMPTY_PATH` gives one to what a descriptor is open on. -/
 def linkInode (kernel : Kernel) (group : Nat) (number : Nat) (base target : String) (sourceMount : Option String := none) :
@@ -2150,8 +2252,9 @@ def linkInode (kernel : Kernel) (group : Nat) (number : Nat) (base target : Stri
     if at_ != kernel.mountIdOf via normal then .error Errno.exdev
   -- A file that has no name gets none, unless it is one of `O_TMPFILE` that may.
   if inode.content matches .file _ && kernel.links.getD number 0 == 0 && !inode.details.linkable then .error Errno.enoent
-  .ok { kernel.bindPath normal number with
-    inodes := kernel.inodes.insert number { inode with details := { inode.details with changed := kernel.clock, linkable := false } } }
+  .ok ({ kernel.bindPath normal number with
+    inodes := kernel.inodes.insert number { inode with details := { inode.details with changed := kernel.clock, linkable := false } }
+    }.touchDirectory normal)
 
 /-- `link`: another path of the inode of `source`, which isn't a directory, followed through a link at its end if `follow`. -/
 def link (kernel : Kernel) (group : Nat) (base source target : String) (follow : Bool) : Result Kernel := do
@@ -2168,7 +2271,12 @@ def renameWith (kernel : Kernel) (group : Nat) (base source target : String) (fl
   let some number := found | .error Errno.enoent
   let (to_, existing, toVia) ← kernel.resolveVia base target (follow := false) (mounted := false) (exact := true)
   if flags &&& 1 != 0 && existing.isSome then .error Errno.eexist
-  if flags &&& 2 == 0 then return ← kernel.rename group base source target
+  if flags &&& 2 == 0 then
+    let moved ← kernel.rename group base source target
+    -- `RENAME_WHITEOUT` leaves a whiteout where it was, a device of 0, 0 that nobody may do anything with, which anyone may
+    -- make, as `vfs_mknod` has it of a whiteout, unless nothing moved.
+    if flags &&& 4 == 0 || moved.paths.contains from_ then return moved
+    return (addInode moved from_ (.device 7) 0o20000 (kernel.process group).credentials).1
   let some other := existing | .error Errno.enoent
   -- Each goes where the other was.
   let credentials := (kernel.process group).credentials
@@ -2184,7 +2292,9 @@ def renameWith (kernel : Kernel) (group : Nat) (base source target : String) (fl
     else if path.startsWith (to_ ++ "/") then from_ ++ (path.drop to_.length).toString
     else path
   let kernel := (((kernel.countName from_ number false).countName to_ other false).countName from_ other true).countName to_ number true
-  .ok { kernel.movePlaces swap with paths := kernel.paths.fold (init := {}) fun paths path number => paths.insert (swap path) number }
+  let kernel := { kernel.movePlaces swap with
+    paths := kernel.paths.fold (init := {}) fun paths path number => paths.insert (swap path) number }
+  .ok ((((kernel.touchDirectory from_).touchDirectory to_).touchInode number).touchInode other)
 
 /-- The devices of `/dev` and what is around them: `null`, `zero`, `full`, `random`, `urandom`, `tty` and `ptmx`, `console` for the
 console if there is one, the directories `pts` and `shm`, and `stdin`, `stdout`, `stderr` and `fd` of `/proc/self/fd`. Nothing replaces
@@ -2212,7 +2322,59 @@ def symlink (kernel : Kernel) (group : Nat) (base target path : String) : Result
   let credentials := (kernel.process group).credentials
   searchError kernel credentials normal
   if !kernel.mayChangeIn credentials normal then .error Errno.eacces
-  .ok (addInode kernel normal (.symlink target) 0o120777 credentials).1
+  .ok ((addInode kernel normal (.symlink target) 0o120777 credentials).1.touchDirectory normal)
+
+/-- `mknod`: a file, a FIFO or a socket at a path where nothing is, or a device of memory, `/dev/null` and its kin by their numbers,
+which takes `CAP_MKNOD`, as any device does but a whiteout; another device is `EPERM`, as it is of a user namespace, which has no others. A
+directory is `EPERM`, and a type that there isn't `EINVAL`. -/
+def mknod (kernel : Kernel) (group : Nat) (base path : String) (mode device : Nat) : Result Kernel := do
+  let type := mode &&& 0o170000
+  let process := kernel.process group
+  let credentials := process.credentials
+  -- The device, as `MKDEV` has it for a call: of 12 bits its major, and its minor around them.
+  let (major, minor) := ((device >>> 8) &&& 0xfff, (device &&& 0xff) ||| ((device >>> 12) &&& 0xfff00))
+  let content ← match type with
+    | 0 | 0o100000 => .ok (Content.file ByteArray.empty)
+    | 0o10000 => .ok (Content.pipe ByteArray.empty 0 0 pipeCapacity)
+    | 0o140000 => .ok (Content.socket { type := 1, owner := group })
+    | 0o20000 | 0o60000 =>
+      -- A whiteout, the device of characters 0, 0, is anyone's to make.
+      if type == 0o20000 && major == 0 && minor == 0 then .ok (Content.device 7)
+      else if !credentials.capable 27 then .error Errno.eperm
+      else match type, major, minor with
+        | 0o20000, 1, 3 => .ok (Content.device 0)
+        | 0o20000, 1, 5 => .ok (Content.device 1)
+        | 0o20000, 1, 7 => .ok (Content.device 2)
+        | 0o20000, 1, 8 => .ok (Content.device 3)
+        | 0o20000, 1, 9 => .ok (Content.device 6)
+        | 0o20000, 0, 0 => .ok (Content.device 7)
+        | _, _, _ => .error Errno.eperm
+    | 0o40000 => .error Errno.eperm
+    | _ => .error Errno.einval
+  let (normal, found, via) ← kernel.resolveVia base path (follow := false) (exact := true)
+  searchError kernel credentials normal
+  if found.isSome then .error Errno.eexist
+  if Path.ending path == .slash then .error Errno.enoent
+  if !parentIsDirectory kernel normal || ofProc normal then .error Errno.enoent
+  if kernel.readOnlyVia via normal then .error erofs
+  if !kernel.mayChangeIn credentials normal then .error Errno.eacces
+  let type := if type == 0 then 0o100000 else type
+  .ok ((addInode kernel normal content (type ||| (mode &&& 0o7777 &&& (0o7777 - process.umask))) credentials).1.touchDirectory normal)
+
+/-- `close_range`: the descriptors of a process from `first` to `last` are closed, or of `CLOSE_RANGE_CLOEXEC`, 4, closed by
+`execve`. Each process has its own descriptors here, so that `CLOSE_RANGE_UNSHARE`, 2, has nothing to do. -/
+def closeRange (kernel : Kernel) (group first last flags : Nat) : Result Kernel := do
+  if flags - (flags &&& 6) != 0 || first > last then .error Errno.einval
+  let process := kernel.process group
+  let within := process.descriptors.toList.filter fun (fd, _) => first ≤ fd && fd ≤ last
+  if flags &&& 4 != 0 then
+    let descriptors := within.foldl (init := process.descriptors) fun descriptors (fd, descriptor) =>
+      descriptors.insert fd { descriptor with closeOnExec := true }
+    .ok (kernel.setProcess group { process with descriptors })
+  else
+    let descriptors := within.foldl (init := process.descriptors) fun descriptors (fd, _) => descriptors.erase fd
+    .ok (within.foldl (init := kernel.setProcess group { process with descriptors }) fun kernel (_, descriptor) =>
+      kernel.releaseLocks group descriptor.openFile)
 
 /-- `readlink`. -/
 def readlink (kernel : Kernel) (base path : String) (searching : Option Credentials := none) : Result String := do
@@ -2807,11 +2969,9 @@ def mipsStat64 (value : Kernel.Stat) (big : Bool) : ByteArray :=
 
 /-- What `statfs` says of the file system that all files are on, a tmpfs of 4 GiB with all of it free. Its type, block size and the three at the end of it are of the word, so that `statfs` and `statfs64` of a 64-bit system
 are the same. MIPS has its fields in another order. -/
-def statfs (wide big mips : Bool) : ByteArray :=
+def statfs (wide big mips : Bool) (tmpfs : Nat := 0x01021994) (blocks : Nat := 1048576) : ByteArray :=
   let get := field big
   let word := if wide then get 8 else get 4
-  let tmpfs := 0x01021994
-  let blocks := 1048576
   if mips then
     word tmpfs ++ word 4096 ++ word 4096 ++ (if wide then bytesOf 0 0 else bytesOf 4 0) ++ get 8 blocks ++ get 8 blocks ++
       get 8 blocks ++ get 8 blocks ++ get 8 blocks ++ bytesOf 8 0 ++ word 255 ++ word 0 ++ bytesOf (if wide then 40 else 20) 0

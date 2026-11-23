@@ -1,0 +1,375 @@
+xsrqpxp even: 02cee6f2b0cee3a2 83a7bd88d6837b31 rounded up 0
+xsrqpxp zero: a2fcfd4b3967eb6e 83a7bd88d6837b31 rounded up 0
+xsrqpxp up: ad3ae3190dce4b3e 83a7bd88d6837b31 rounded up 0
+xsrqpxp down: efbe8112329615f6 83a7bd88d6837b31 rounded up 0
+xsrqpxp away: 24098a2854dca4e6 83a7bd88d6837b31 rounded up 0
+xsrqpxp current: d838eefac1714220 83a7bd88d6837b31 rounded up 0
+xvcvbf16spn: 00b018d5a0ff24f2 83a7bd88d6837b31 rounded up 0
+xvcvspbf16: b15b0ca955e89500 83a7bd88d6837b31 rounded up 0
+vlogefp: b5d5b9eee28f3773 83a7bd88d6837b31 rounded up 0
+vexptefp: 2ad8fee2afb0fbb2 83a7bd88d6837b31 rounded up 0
+xxgenpcvbm 0: 86189d76b56cd228 c2866dd3a11679c8 rounded up 0
+xxgenpcvbm 1: dd3636294df26dfc c2866dd3a11679c8 rounded up 0
+xxgenpcvbm 2: 27afb746b71e479b c2866dd3a11679c8 rounded up 0
+xxgenpcvbm 3: 4ed6bbef907ecc18 c2866dd3a11679c8 rounded up 0
+xxgenpcvhm 0: 4ab5bf69061d6f7f c2866dd3a11679c8 rounded up 0
+xxgenpcvhm 1: 313f1b7005207a38 c2866dd3a11679c8 rounded up 0
+xxgenpcvhm 2: e8f2bf455af2d349 c2866dd3a11679c8 rounded up 0
+xxgenpcvhm 3: f8b98ddf597401af c2866dd3a11679c8 rounded up 0
+xxgenpcvwm 0: f020ea73332ea433 c2866dd3a11679c8 rounded up 0
+xxgenpcvwm 1: 01ff45467e9e6d4e c2866dd3a11679c8 rounded up 0
+xxgenpcvwm 2: fb89c786085d8320 c2866dd3a11679c8 rounded up 0
+xxgenpcvwm 3: 1d39fcecfd43afa9 c2866dd3a11679c8 rounded up 0
+xxgenpcvdm 0: ba92cd62083a15d7 c2866dd3a11679c8 rounded up 0
+xxgenpcvdm 1: 2c2d39080f4828eb c2866dd3a11679c8 rounded up 0
+xxgenpcvdm 2: d00f019ecae9fd52 c2866dd3a11679c8 rounded up 0
+xxgenpcvdm 3: 79386aa1c88835fa c2866dd3a11679c8 rounded up 0
+xvi4ger8: 766cce9be2d31afa 83a7bd88d6837b31 rounded up 0
+xvi4ger8pp: c0915b2bdcfef8d2 83a7bd88d6837b31 rounded up 0
+xvi8ger4: e0c5022f014e6078 83a7bd88d6837b31 rounded up 0
+xvi8ger4pp: 909ed0c59e23c1d1 83a7bd88d6837b31 rounded up 0
+xvi8ger4spp: f1941213f46bfcb8 83a7bd88d6837b31 rounded up 0
+xvi16ger2: 4cb3766e72ba175b 83a7bd88d6837b31 rounded up 0
+xvi16ger2s: 5471ef1ebe1e65cd 83a7bd88d6837b31 rounded up 0
+xvi16ger2pp: ee7214cf990b3717 83a7bd88d6837b31 rounded up 0
+xvi16ger2spp: 2ee678270f5361b1 83a7bd88d6837b31 rounded up 0
+xvf16ger2: 7b6524a34786f81d 83a7bd88d6837b31 rounded up 0
+xvf16ger2pp: 032bab00b1cf3c29 83a7bd88d6837b31 rounded up 0
+xvf16ger2pn: 9eecd8c0b98af928 83a7bd88d6837b31 rounded up 0
+xvf16ger2np: 2bb5ea38405752d0 83a7bd88d6837b31 rounded up 0
+xvf16ger2nn: fa79049315c7b914 83a7bd88d6837b31 rounded up 0
+xvbf16ger2: 2e3a39eb830c99c7 83a7bd88d6837b31 rounded up 0
+xvbf16ger2pp: edf5b17436b6a558 83a7bd88d6837b31 rounded up 0
+xvbf16ger2pn: c153f391df30d776 83a7bd88d6837b31 rounded up 0
+xvbf16ger2np: fa35e1395a9d844c 83a7bd88d6837b31 rounded up 0
+xvbf16ger2nn: b396d5985e037434 83a7bd88d6837b31 rounded up 0
+xvf32ger: 0d57dd8d07e2e8c0 83a7bd88d6837b31 rounded up 0
+xvf32gerpp: bb9e684c8dd0d5a2 83a7bd88d6837b31 rounded up 0
+xvf32gerpn: ca57505fd11030ba 83a7bd88d6837b31 rounded up 0
+xvf32gernp: aee9912c28c1edf5 83a7bd88d6837b31 rounded up 0
+xvf32gernn: e0839c8e46dd2486 83a7bd88d6837b31 rounded up 0
+xvf64ger: c376ee3b39036b21 83a7bd88d6837b31 rounded up 0
+xvf64gerpp: bf2ed374f1bb8f8e 83a7bd88d6837b31 rounded up 0
+xvf64gerpn: 97a8e38eb861c3ed 83a7bd88d6837b31 rounded up 0
+xvf64gernp: 8253f3edf8cb3521 83a7bd88d6837b31 rounded up 0
+xvf64gernn: 56dc9ce0887eaadc 83a7bd88d6837b31 rounded up 0
+pmxvi4ger8: a45e24c8de3a3ce5 c2866dd3a11679c8 rounded up 0
+pmxvi4ger8pp: de00608ac9a2242c c2866dd3a11679c8 rounded up 0
+pmxvi8ger4: 003dda6dbb0c7193 c2866dd3a11679c8 rounded up 0
+pmxvi8ger4pp: d652bbe1a30cd8d7 c2866dd3a11679c8 rounded up 0
+pmxvi8ger4spp: 48c024e8e7439c24 c2866dd3a11679c8 rounded up 0
+pmxvi16ger2: 7c6a9f7ed81641f3 c2866dd3a11679c8 rounded up 0
+pmxvi16ger2s: 4175e3fa880d64ef c2866dd3a11679c8 rounded up 0
+pmxvi16ger2pp: a4e2f9a73fc6b484 c2866dd3a11679c8 rounded up 0
+pmxvi16ger2spp: ea302f071a9129bc c2866dd3a11679c8 rounded up 0
+pmxvf16ger2: 0f98e9a79224a555 c2866dd3a11679c8 rounded up 0
+pmxvf16ger2pp: e78d26746706135d c2866dd3a11679c8 rounded up 0
+pmxvf16ger2pn: 805ecc6f5918e01a c2866dd3a11679c8 rounded up 0
+pmxvf16ger2np: a9db5fa5c54e62d7 c2866dd3a11679c8 rounded up 0
+pmxvf16ger2nn: 77b5ffbdbbb7fb3c c2866dd3a11679c8 rounded up 0
+pmxvbf16ger2: d9bbb5691868c6fb c2866dd3a11679c8 rounded up 0
+pmxvbf16ger2pp: cf6fb1d4feedca7d c2866dd3a11679c8 rounded up 0
+pmxvbf16ger2pn: a157864c5874d15b c2866dd3a11679c8 rounded up 0
+pmxvbf16ger2np: fe44bbbfdccfb662 c2866dd3a11679c8 rounded up 0
+pmxvbf16ger2nn: efb1532ad68bc063 c2866dd3a11679c8 rounded up 0
+pmxvf32ger: c33dab3601770783 c2866dd3a11679c8 rounded up 0
+pmxvf32gerpp: 75479cc8184d382b c2866dd3a11679c8 rounded up 0
+pmxvf32gerpn: 91bff88fcd6ecbef c2866dd3a11679c8 rounded up 0
+pmxvf32gernp: 0fd323e399eaa6d2 c2866dd3a11679c8 rounded up 0
+pmxvf32gernn: b6c2837cd1ea465a c2866dd3a11679c8 rounded up 0
+pmxvf64ger: 4306653309ba4fb6 c2866dd3a11679c8 rounded up 0
+pmxvf64gerpp: 7e41a4e041308883 c2866dd3a11679c8 rounded up 0
+pmxvf64gerpn: 9b33713cf0747d32 c2866dd3a11679c8 rounded up 0
+pmxvf64gernp: d2077ddb3f3aad35 c2866dd3a11679c8 rounded up 0
+pmxvf64gernn: 8bee327c85987fc4 c2866dd3a11679c8 rounded up 0
+xxsetaccz: ba098914d4fd5738 22d85e0701f1b4f1 rounded up 0
+lwat 0: 70e7a20c87ed1e09 6b5a6cbfba58e1f0 rounded up 0
+ldat 0: 85c1d5f10f3ab086 6b5a6cbfba58e1f0 rounded up 0
+lwat 1: 1c58b93fd03ebfa7 6b5a6cbfba58e1f0 rounded up 0
+ldat 1: 86ffefd7a92843a6 6b5a6cbfba58e1f0 rounded up 0
+lwat 2: ca531162b1fcf6c6 6b5a6cbfba58e1f0 rounded up 0
+ldat 2: 8799890538e89c3e 6b5a6cbfba58e1f0 rounded up 0
+lwat 3: 6bbd4f667cbabc87 6b5a6cbfba58e1f0 rounded up 0
+ldat 3: 2678efb035a7f90c 6b5a6cbfba58e1f0 rounded up 0
+lwat 4: 391d1937323ae9c1 6b5a6cbfba58e1f0 rounded up 0
+ldat 4: a7f3429b5f6f8c6f 6b5a6cbfba58e1f0 rounded up 0
+lwat 5: 04130be7b0d3cb06 6b5a6cbfba58e1f0 rounded up 0
+ldat 5: 7e3fc495c9981ac7 6b5a6cbfba58e1f0 rounded up 0
+lwat 6: 27c356c4846ac23d 6b5a6cbfba58e1f0 rounded up 0
+ldat 6: 52f266635b4feb64 6b5a6cbfba58e1f0 rounded up 0
+lwat 7: b35965fea7fa4c45 6b5a6cbfba58e1f0 rounded up 0
+ldat 7: 197a215ad2c126ac 6b5a6cbfba58e1f0 rounded up 0
+lwat 8: f8faa419bcd76fdd 6b5a6cbfba58e1f0 rounded up 0
+ldat 8: 50acdfde0bb8e6b6 6b5a6cbfba58e1f0 rounded up 0
+lwat 16: ef8b6a6bca9c9556 6b5a6cbfba58e1f0 rounded up 0
+ldat 16: a23949caa9c7d834 6b5a6cbfba58e1f0 rounded up 0
+lwat 24: eca295d24d909c60 6b5a6cbfba58e1f0 rounded up 0
+ldat 24: 89c54561fba70f53 6b5a6cbfba58e1f0 rounded up 0
+lwat 28: 12963af352113f8d 6b5a6cbfba58e1f0 rounded up 0
+ldat 28: 075e10e14f854c42 6b5a6cbfba58e1f0 rounded up 0
+stwat 0: bc18d672a4045f48 6b5a6cbfba58e1f0 rounded up 0
+stdat 0: ba0970bff95abae9 6b5a6cbfba58e1f0 rounded up 0
+stwat 1: 32df1b9bb1591ba1 6b5a6cbfba58e1f0 rounded up 0
+stdat 1: 5c450033add37fd5 6b5a6cbfba58e1f0 rounded up 0
+stwat 2: 93d3e64af3bd99b5 6b5a6cbfba58e1f0 rounded up 0
+stdat 2: 7cfeb1a7112ec045 6b5a6cbfba58e1f0 rounded up 0
+stwat 3: 59282c164eab225d 6b5a6cbfba58e1f0 rounded up 0
+stdat 3: 1cb39597a1cce04a 6b5a6cbfba58e1f0 rounded up 0
+stwat 4: fca7878ee483f75f 6b5a6cbfba58e1f0 rounded up 0
+stdat 4: eeba4f6a79efe2c2 6b5a6cbfba58e1f0 rounded up 0
+stwat 5: 4ba99d0388b0b40c 6b5a6cbfba58e1f0 rounded up 0
+stdat 5: 5b6ae95e31129634 6b5a6cbfba58e1f0 rounded up 0
+stwat 6: b633345eb75248b2 6b5a6cbfba58e1f0 rounded up 0
+stdat 6: ceba7cb7d6a77cb9 6b5a6cbfba58e1f0 rounded up 0
+stwat 7: 17c924a22e2e66f9 6b5a6cbfba58e1f0 rounded up 0
+stdat 7: 7c1ab22e0109788d 6b5a6cbfba58e1f0 rounded up 0
+stwat 24: d83f835da906f7a8 6b5a6cbfba58e1f0 rounded up 0
+stdat 24: 645c149456071f71 6b5a6cbfba58e1f0 rounded up 0
+dadd: fc5d4185ab67e5e8 74093c94573b955d rounded up 8
+daddq: b743d2cc7cc8159c 130958e3973bdbc7 rounded up 6
+dadd.: 502e14bcb7520068 b0cc60d31293cb4a rounded up 1
+daddq.: 61c15470f223881f 8c3fd11040a73827 rounded up 1
+dsub: 5c4df67ce743f927 303eed3edeb2335f rounded up 8
+dsubq: 6fd340a6e6c0f217 7d4268fb91780dcf rounded up 5
+dsub.: 1e27ae942e7f71fa 5273fa44d04d43ce rounded up 1
+dsubq.: 5c8487a99eb2f976 e3af2610ee4b2aba rounded up 0
+dmul: 948a27bcc019ea77 bbfb0553b40d7916 rounded up 2
+dmulq: 3eba42725725acc4 f927c371e5f7f11c rounded up 4
+dmul.: f3863ccf0f959b15 2da1ae6ae5b3bab5 rounded up 1
+dmulq.: a51ab0651e22d89a 51db85c98b2e2699 rounded up 0
+ddiv: 631a1c3afe658b93 fd4e30b0d28c87ef rounded up 4
+ddivq: 48840b8d8a5079dd 49dfb81fb592f099 rounded up 6
+ddiv.: 1f39c21656d9b106 24777cc21b1eec9e rounded up 1
+ddivq.: 80baef529a745837 d8ee5de3fb92b59d rounded up 0
+dqua 0: df5fbeb9ef00157e 12d6ee42491db65c rounded up 0
+dquaq 0: c905f6c347f9ce17 401dae438d861e07 rounded up 0
+drrnd 0: 978ded7dc36466b1 d503ff5593f99ba3 rounded up 1
+drrndq 0: 72ae007c2089c144 b5c0d3afbc0aabe8 rounded up 1
+drintx 0 0: c1a0cad46b75daf9 dd8bb7faf48495f3 rounded up 0
+drintn 0 0: 6e6fc854e4dafd48 c7098e3093509f44 rounded up 0
+drintxq 0 0: db03b48854265a1e 6ccc3cc0d4775f06 rounded up 0
+drintnq 0 0: 3ac00a88ff221ca1 ea8966c336f96809 rounded up 0
+drintx 1 0: e829a145146b17a5 72e0c9550ebd3fbd rounded up 0
+drintn 1 0: 0a884c2e40dbffe9 47c57019b6ea1b86 rounded up 0
+drintxq 1 0: 895db5c7bcb7fe97 4822753c55b0e7b9 rounded up 3
+drintnq 1 0: 269d82fd971433a5 e074c3ae7e93b82d rounded up 0
+dqua 1: a2cafca2cd104930 97d843da717502cd rounded up 0
+dquaq 1: fa10a3713d131a04 d551a28f7c6ad6a6 rounded up 0
+drrnd 1: 20c3620025926d87 b7827bf9da5b0e62 rounded up 0
+drrndq 1: 30b7d230b35b296f 13ef9217fc062ba8 rounded up 0
+drintx 0 1: fb855c6f02d3848e bb4e6eb2caafbc69 rounded up 0
+drintn 0 1: 94aaf4e151c32aba bbb5b56f629ae87d rounded up 0
+drintxq 0 1: b419f5ec84aba6cc 413d94a1801e7b4c rounded up 0
+drintnq 0 1: 46d481f330e0588e 4c79f443ad803162 rounded up 0
+drintx 1 1: 054a6ed9a0f756f8 33e2f10ce74e3ea9 rounded up 0
+drintn 1 1: 470818052c45b252 5b3cd922a72ea607 rounded up 0
+drintxq 1 1: 0ce3556191051c84 7fb54f41062b9b46 rounded up 0
+drintnq 1 1: 7ae67b22daf30de2 e1ed6277afd70bed rounded up 0
+dqua 2: e2e39f88d8f75289 fb46fa3030d0d596 rounded up 0
+dquaq 2: 0449f78b05effbfd ca256e5d447b13b7 rounded up 0
+drrnd 2: eb47b8042073b1bf fd43d4931f88228f rounded up 1
+drrndq 2: f794b9c097bde018 28b8b15e56d3d86b rounded up 1
+drintx 0 2: b04528b6aa1eb74c cd82b25c84269529 rounded up 0
+drintn 0 2: eb7e9d017ef07e1b 96c481402a574c4a rounded up 0
+drintxq 0 2: 42dc08db25dce906 8d193454050bc8e5 rounded up 0
+drintnq 0 2: d55615f9eb1baab0 e245c480c01674e4 rounded up 0
+drintx 1 2: d7886069cc0f6144 576191dd3c000a76 rounded up 5
+drintn 1 2: a70d06aa0f79a989 578132fd37353781 rounded up 0
+drintxq 1 2: 5ce499787ace7975 d60504cd8a41fe75 rounded up 4
+drintnq 1 2: e52756ec8eb29eb3 a0f00d7845abfd94 rounded up 0
+dqua 3: 875228ca84a0252f ada435e9cb60fdae rounded up 2
+dquaq 3: 36dbc6b2b98eff7a a712746fa3543093 rounded up 1
+drrnd 3: 47aaee5d632bdebd c512c213977b534f rounded up 0
+drrndq 3: 265fdb5f9dab6c90 1d26bc08bdc4ca3f rounded up 1
+drintx 0 3: d24ed0d83d4d4420 e46ec90e9dd22d02 rounded up 2
+drintn 0 3: e007e7baf3d218ec 04ad025e51ecd716 rounded up 0
+drintxq 0 3: 3e81882179af1443 0a134f0b85b0eb5a rounded up 0
+drintnq 0 3: dad1f211cae6c141 7a8642c3aa84bee7 rounded up 0
+drintx 1 3: 101f01ee04a2fbf7 854a1a885aa4dd48 rounded up 0
+drintn 1 3: b33c4e81c002030c a8671a5ede919c02 rounded up 0
+drintxq 1 3: a11245ee636b6ef8 f35c58d00d5bf675 rounded up 0
+drintnq 1 3: 8ec16b193a4f6ac3 9b520a1ee76845c8 rounded up 0
+dquai 0 0: 2312d573c6dddc65 58d909913c9a2d7b rounded up 0
+dquaiq 0 0: 34c46006f60f21b6 2765df1a18e5270f rounded up 0
+dquai 3 1: 42f154aea2ad8fac e008aecd20147e7c rounded up 0
+dquaiq 3 1: 45b5da7ba373ade6 b4faaa45baeb3282 rounded up 0
+dquai -5 2: 511465671882d18a 1c1efc34f4a310d9 rounded up 1
+dquaiq -5 2: 836c364f185a8e5d 11060005bdc6edc3 rounded up 0
+dquai 15 3: 9de1d325e4853123 b18b33ea4f887dda rounded up 3
+dquaiq 15 3: fc5513af048874ee 1d928b98e731e094 rounded up 1
+dquai -16 3: c5ab3e0d1a2658d6 23d14b6eb6abad59 rounded up 0
+dquaiq -16 3: c4eca0e1c29d9ae5 463a31b4401927ad rounded up 0
+dquai 2 0: 9e7b97ab985dd26a 716fefb4a5bb378a rounded up 0
+dquaiq 2 0: 809db75f9f323c72 6b7dd7e833c522ea rounded up 1
+dcmpo: 7b5eb1f0ae70e6cd 45505e30d79793f4 rounded up 0
+dcmpoq: debba475c83d573b f104df8068bfa6c1 rounded up 0
+dcmpu: ac6d9ac8fb86fe50 c9ad04346313045b rounded up 0
+dcmpuq: a025d52e978b9607 112174fd00ab0402 rounded up 0
+dtstex: 5c9445afce4c3ba5 9083c744937bab2c rounded up 0
+dtstexq: 01c86eeb61f41d93 a41423889f6511f9 rounded up 0
+dtstsf: 1dd6699729b4a7ff b39fc094bba37ae0 rounded up 0
+dtstsfq: 42d9f2ab8cf1cd0d af3f242cb6959f76 rounded up 0
+dtstsfi 0: a253bbf1bac2e886 98da05cb0bac5173 rounded up 0
+dtstsfiq 0: 08e0095d3e2d696a ebd21ee6b5418a73 rounded up 0
+dtstsfi 1: 6ce3d3773f05a594 cfdfeb564b6ab4b9 rounded up 0
+dtstsfiq 1: cc7edec58ffc83fc 1065d84672e15a68 rounded up 0
+dtstsfi 7: eaef99cdcaae7ed1 5e2c20d73843f4d9 rounded up 0
+dtstsfiq 7: 0871c39384317b4b 3a986a145ffee868 rounded up 0
+dtstsfi 16: b6c1b637589fb13c 9a4a3b420d58ebd2 rounded up 0
+dtstsfiq 16: 69b21c929d965af1 ced78d80d822e1e5 rounded up 0
+dtstsfi 34: 1358cd58d0023336 9a4a3b420d58ebd2 rounded up 0
+dtstsfiq 34: f00bfa83ed508a71 d3d3f75322af5776 rounded up 0
+dtstsfi 63: c20d906d7208475d 9a4a3b420d58ebd2 rounded up 0
+dtstsfiq 63: dc03c8c5bf2b753d 4ec268c8cf7a4d6a rounded up 0
+dtstdc 63: 35a0bee58ab983f7 2e1af64fc07f91be rounded up 0
+dtstdcq 63: 5793cc6d51fdb709 f0eace5417d5576a rounded up 0
+dtstdg 63: 949a56b2c38a393f 1b2f9861511a60cd rounded up 0
+dtstdgq 63: a226ad4503276724 58e2aa0fdb7aefd5 rounded up 0
+dtstdc 32: c912264fc611312b c3266dd3af0799c8 rounded up 0
+dtstdcq 32: 675212f9abac1439 989a966c23721362 rounded up 0
+dtstdg 32: 1b58df14e6964065 87a5e747b9660482 rounded up 0
+dtstdgq 32: 224e998cc7d555a8 95d279eb0108f71c rounded up 0
+dtstdc 16: 7b0b490a67bb3e54 ff934558c500073f rounded up 0
+dtstdcq 16: f2bc607c62deb999 ba8ad604ee68ab5c rounded up 0
+dtstdg 16: a85ca09fc7ed8847 c3066dd3adcdf9c8 rounded up 0
+dtstdgq 16: b1998eb0bdb7f2c1 003ff769b9d6fe87 rounded up 0
+dtstdc 8: 3447d2f0a441f5fa 7a2d6d19f9a83b62 rounded up 0
+dtstdcq 8: cb886b4400a499d1 62276517f87e917c rounded up 0
+dtstdg 8: 0e9760b05e707550 4fb2f39c48164c02 rounded up 0
+dtstdgq 8: d218f9c89dbf8ae3 bf764d55f3d7fb74 rounded up 0
+dtstdc 4: 52eb79911e6775e3 6e95744ea55ffe46 rounded up 0
+dtstdcq 4: 56d2adf6bf4f9021 7e5d89d8abefbeb7 rounded up 0
+dtstdg 4: 0bd4d629ab4dcf48 eee00ceb77adb5ac rounded up 0
+dtstdgq 4: e000b7e3bfd4307b d2f6dc65250e02df rounded up 0
+dtstdc 2: ed59e6bc32ea9a3f 9078caf0ae22aa5a rounded up 0
+dtstdcq 2: b2ffa1827dfe8506 372a2976f4a02254 rounded up 0
+dtstdg 2: cb06e11f9ea549a1 4205480a17dbcfeb rounded up 0
+dtstdgq 2: f9aaf3eb4fa5a8ce 78d752e4749b6ca2 rounded up 0
+dtstdc 1: f8d5367d745f612f d810a1070b6e44c1 rounded up 0
+dtstdcq 1: 07ce315f188bd73d cc5711cedbd4f98b rounded up 0
+dtstdg 1: 48fdfe22c01cba0f 74f308462ece323f rounded up 0
+dtstdgq 1: 66f19c9ac58a68cb efd4dfe0e0e5a3df rounded up 0
+dtstdc 21: 299f7db149acd795 dde328c607c40cb5 rounded up 0
+dtstdcq 21: b87e658765566c50 26892390d48c99f4 rounded up 0
+dtstdg 21: fc7c72ed72be3c41 9e5568f80acf9bb2 rounded up 0
+dtstdgq 21: 2756e3494806412d c312daa92670d06f rounded up 0
+diex: 2c46d2a7d974013f 83a7bd88d6837b31 rounded up 0
+diexq: 8ee62bac13238bfb 83a7bd88d6837b31 rounded up 0
+dxex: 3e2b38cd799f48bc 83a7bd88d6837b31 rounded up 0
+dxexq: 4cd146986d6a8e9e 83a7bd88d6837b31 rounded up 0
+dctdp: 53c97cd7b0c24ff3 891f0e70908f0027 rounded up 0
+drsp: e06c9011fd52a20d 672ad0d02cf888cd rounded up 5
+dctqpq: 1af07a07905c2f5a e0188d3dcf69e5a7 rounded up 0
+drdpq: d42ed886b0ff3c14 0e3ec04cacb83652 rounded up 8
+dcffix: 3dfa77acdd0af4ba 4f75f186b37f46c7 rounded up 5
+dcffixq: 8daf0c52d8b864a9 4d56cb174b51fbf2 rounded up 0
+dctfix: 07a34267f20a0c00 9144a9e4616ada40 rounded up 6
+dctfixq: f199dfb52c86f5c4 a415fb414a488836 rounded up 2
+dcffixqq: a57b5b3cb82dfaa0 b408689e04326942 rounded up 0
+dctfixqq: 1a545594265bfaeb c262de8ae1b0d4d3 rounded up 1
+dscli 0: b90d4f6fcacd282f 3f9708de9f6b2910 rounded up 0
+dscri 0: 9b3ecf1ae013139b 3f9708de9f6b2910 rounded up 0
+dscliq 0: 1f3dac0d0dcec655 3f9708de9f6b2910 rounded up 0
+dscriq 0: 7f3785c08bc8ec31 3f9708de9f6b2910 rounded up 0
+dscli 1: b37c018d3ad747c4 3f9708de9f6b2910 rounded up 0
+dscri 1: f739201be4057ade 3f9708de9f6b2910 rounded up 0
+dscliq 1: 74238cc86712b5ce 3f9708de9f6b2910 rounded up 0
+dscriq 1: 15fd49ba1e50c903 3f9708de9f6b2910 rounded up 0
+dscli 5: 2d1af67f349212ed 3f9708de9f6b2910 rounded up 0
+dscri 5: 5deb53715f3d2e04 3f9708de9f6b2910 rounded up 0
+dscliq 5: 125a7ac2f0f2e3e3 3f9708de9f6b2910 rounded up 0
+dscriq 5: 8685025a4719aeb6 3f9708de9f6b2910 rounded up 0
+dscli 15: 400e937c313ed4ea 3f9708de9f6b2910 rounded up 0
+dscri 15: 01bd851a5d5ecab6 3f9708de9f6b2910 rounded up 0
+dscliq 15: 1b6ec1cfa45c612a 3f9708de9f6b2910 rounded up 0
+dscriq 15: fcdabd658eededcd 3f9708de9f6b2910 rounded up 0
+dscli 16: 78df4f9c57d59dea 3f9708de9f6b2910 rounded up 0
+dscri 16: 34fbbf78bf79f593 3f9708de9f6b2910 rounded up 0
+dscliq 16: 0ba8ff6570100b99 3f9708de9f6b2910 rounded up 0
+dscriq 16: 0d92dd986ede77e2 3f9708de9f6b2910 rounded up 0
+dscli 17: 97ff460da0b0d119 3f9708de9f6b2910 rounded up 0
+dscri 17: 486e22883c1fe1e4 3f9708de9f6b2910 rounded up 0
+dscliq 17: 23b8338f89820a18 3f9708de9f6b2910 rounded up 0
+dscriq 17: e69992b37f3fddf1 3f9708de9f6b2910 rounded up 0
+dscli 33: d80459e1620de737 3f9708de9f6b2910 rounded up 0
+dscri 33: b0fb7f9fdce666a9 3f9708de9f6b2910 rounded up 0
+dscliq 33: cb63a3742cda6c0e 3f9708de9f6b2910 rounded up 0
+dscriq 33: 19afe6c9a20f3426 3f9708de9f6b2910 rounded up 0
+dscli 34: 3b4af724c22ce891 3f9708de9f6b2910 rounded up 0
+dscri 34: f47a033247827c5a 3f9708de9f6b2910 rounded up 0
+dscliq 34: 619b2a1504c085ef 3f9708de9f6b2910 rounded up 0
+dscriq 34: 7f4bfad45eb87947 3f9708de9f6b2910 rounded up 0
+dscli 35: fed1d2a280e5215a 3f9708de9f6b2910 rounded up 0
+dscri 35: 176ddc088cb233c9 3f9708de9f6b2910 rounded up 0
+dscliq 35: 97d0502ff29e7d83 3f9708de9f6b2910 rounded up 0
+dscriq 35: 7030231a7ea3af8f 3f9708de9f6b2910 rounded up 0
+dscli 63: ab5b74e3d488a72f 3f9708de9f6b2910 rounded up 0
+dscri 63: 8b791548c7661282 3f9708de9f6b2910 rounded up 0
+dscliq 63: 5b6b8b89b22658a9 3f9708de9f6b2910 rounded up 0
+dscriq 63: ea34828b6ba3d9ea 3f9708de9f6b2910 rounded up 0
+ddedpd 0: 9079e538066cee0a 83a7bd88d6837b31 rounded up 0
+ddedpdq 0: c6d52d96e5b8e386 83a7bd88d6837b31 rounded up 0
+ddedpd 1: 1208d8753418ad2c 83a7bd88d6837b31 rounded up 0
+ddedpdq 1: 56809eed40cb13c5 83a7bd88d6837b31 rounded up 0
+ddedpd 2: e3b0f51f479f1985 83a7bd88d6837b31 rounded up 0
+ddedpdq 2: 3c240b49d2106385 83a7bd88d6837b31 rounded up 0
+ddedpd 3: 748544750a321020 83a7bd88d6837b31 rounded up 0
+ddedpdq 3: dc03e6aba9ceb305 83a7bd88d6837b31 rounded up 0
+denbcd 0: 039f9c313f94cce5 479019d8a6c7f951 rounded up 0
+denbcdq 0: 72d30a1fc652f492 479019d8a6c7f951 rounded up 0
+denbcd 1: 299b23cc618345ff 7878209393642dca rounded up 0
+denbcdq 1: 42f467c499242292 a1b3ed72926207df rounded up 0
+bcdadd. 0: b45f2582d7cc2b67 2f0ba6c1f81c650f rounded up 0
+bcdsub. 0: 7a70ca670ebc9763 2f0ba6c1f81c650f rounded up 0
+bcds. 0: 7eea629cc8463f96 2f0ba6c1f81c650f rounded up 0
+bcdsr. 0: 7160528b654bfc63 2f0ba6c1f81c650f rounded up 0
+bcdtrunc. 0: c59f5e5945e2f003 2f0ba6c1f81c650f rounded up 0
+bcdcfn. 0: 02b8335a0da5da1f 83a7bd88d6837b31 rounded up 0
+bcdcfsq. 0: 122b80b515aab84e 83a7bd88d6837b31 rounded up 0
+bcdcfz. 0: dcedf4c29848c22f 83a7bd88d6837b31 rounded up 0
+bcdctz. 0: 72dc4b7ce42cf3e1 83a7bd88d6837b31 rounded up 0
+bcdsetsgn. 0: b80f387e1a258c60 83a7bd88d6837b31 rounded up 0
+bcdadd. 1: b316df0ecc333a84 2f0ba6c1f81c650f rounded up 0
+bcdsub. 1: c24476045f9a51f7 2f0ba6c1f81c650f rounded up 0
+bcds. 1: 7d77521c7fd39a05 2f0ba6c1f81c650f rounded up 0
+bcdsr. 1: b3e5fee7baa2004c 2f0ba6c1f81c650f rounded up 0
+bcdtrunc. 1: 6f192870cfaaad32 2f0ba6c1f81c650f rounded up 0
+bcdcfn. 1: 8a083aea67b7323a 83a7bd88d6837b31 rounded up 0
+bcdcfsq. 1: da97d01dba6e3609 83a7bd88d6837b31 rounded up 0
+bcdcfz. 1: 57a3711c62f568a4 83a7bd88d6837b31 rounded up 0
+bcdctz. 1: 35f2fb58a2e9d1a4 83a7bd88d6837b31 rounded up 0
+bcdsetsgn. 1: f3c6172c6fd37105 83a7bd88d6837b31 rounded up 0
+bcdus.: 673bc3ee01f83dd4 2f0ba6c1f81c650f rounded up 0
+bcdutrunc.: 7e5ab84645c05fae 2f0ba6c1f81c650f rounded up 0
+bcdcpsgn.: fa7690ccdf97f8d3 83a7bd88d6837b31 rounded up 0
+bcdctn.: 8d4087d88b23b44a 83a7bd88d6837b31 rounded up 0
+bcdctsq.: f55857ff40d79de0 83a7bd88d6837b31 rounded up 0
+amr: 0 123456789abcdef
+ctrl: 1 fedcba9876543210
+ppr: c000000000000 10000000000000
+ppr of no priority: 0 c000000000000
+copy and cp_abort: 1 fedcba9876543210
+hashst and hashchk: 1 2
+hashchk of another: signal 4 code 2 at the instruction
+paste.: signal 7 code 3 at the address
+scv: signal 4 code 1 at the instruction
+tbegin.: signal 4 code 1 at the instruction
+tend.: signal 4 code 1 at the instruction
+tabort.: signal 4 code 1 at the instruction
+rfebb: signal 4 code 1 at the instruction
+clrbhrb: signal 4 code 1 at the instruction
+mfbhrbe: signal 4 code 1 at the instruction
+mtspr of ctrl: signal 4 code 1 at the instruction
+mtspr of uamor: signal 4 code 5 at the instruction
+hashstp: signal 4 code 5 at the instruction
+lwat of a function that isn't: signal 4 code 1 at the instruction
+lxvkq of a reserved value: signal 4 code 1 at the instruction
+xxaes192encp: signal 4 code 1 at the instruction
+lxvrl: signal 4 code 1 at the instruction
+stxvrl: signal 4 code 1 at the instruction
+vucmprhb: signal 4 code 1 at the instruction
+xxgfmul128xts: signal 4 code 1 at the instruction
+xxssumudm: signal 4 code 1 at the instruction
+vupkhsntob: signal 4 code 1 at the instruction
+lxvpb32x: signal 4 code 1 at the instruction
+xsaddadduqm: signal 4 code 1 at the instruction

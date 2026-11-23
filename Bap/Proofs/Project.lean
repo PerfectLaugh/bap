@@ -1308,7 +1308,7 @@ theorem mem_scanRoots_iff (image : Bap.Image.Image) (address : Nat) :
         (if image.sections.isEmpty then Bap.Project.Project.pltEntries image else []) ++
         (if image.sections.any (·.name == ".symtab") then [] else Bap.Project.Project.unwindFunctions image))) ∧
       ((Bap.Project.Project.codeRegions image).map Prod.snd).any (·.contains address) = true := by
-  simp only [Bap.Project.Project.scanRoots]
+  simp only [Bap.Project.Project.scanRoots, Bap.Project.Project.scanRootsIn]
   generalize ((Bap.Project.Project.codeRegions image).map Prod.snd) = regions
   generalize (image.entryPoint :: ((image.symbols.filter (·.isFunction)).map Bap.Project.Project.symbolStart ++
     Bap.Project.Project.initFunctions image ++
@@ -1449,7 +1449,7 @@ theorem codeDisassembler_mips (image : Bap.Image.Image) (base : Nat) (h : image.
       fun d => d.name = s!"{(Project.mipsVariant image).triple}-llvm-primus" := by
     unfold Bap.Target.MIPS.disassembler
     exact Bap.Proofs.Disasm.Holds.bind (Bap.Proofs.Disasm.Holds.true _) fun _ _ _ => Bap.Proofs.Disasm.Holds.pure rfl
-  unfold Project.codeDisassembler
+  unfold Project.codeDisassembler Project.codeDisassemblerOf
   simp only [h]
   intro s r s' he d hd
   subst hd
@@ -1474,7 +1474,7 @@ theorem codeDisassembler_powerpc (image : Bap.Image.Image) (base : Nat) (h : ima
       fun d => d.name = s!"{(Project.powerpcVariant image).triple}-llvm-primus" := by
     unfold Bap.Target.PowerPC.disassembler
     exact Bap.Proofs.Disasm.Holds.bind (Bap.Proofs.Disasm.Holds.true _) fun _ _ _ => Bap.Proofs.Disasm.Holds.pure rfl
-  unfold Project.codeDisassembler
+  unfold Project.codeDisassembler Project.codeDisassemblerOf
   simp only [h]
   intro s r s' he d hd
   subst hd

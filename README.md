@@ -71,8 +71,11 @@ elsewhere), and `smoke.py` counts the opcodes of each target that decode and lif
 
 ## What is proved
 
-`Bap/Proofs/` and the modules next to the code hold about 6,200 theorems checked by the Lean kernel, with no `sorry`,
-`native_decide` or `partial def` in `Bap/`, and only the axioms `propext`, `Classical.choice` and `Quot.sound`. For example:
+`Bap/Proofs/` and the modules next to the code hold about 6,200 theorems checked by the Lean kernel, with no `sorry` or
+`native_decide` in `Bap/`, and only the axioms `propext`, `Classical.choice` and `Quot.sound`. There are 38 `partial def`s in
+`Bap/`, in 15 files: some of the static analyses, the dynamic taint, `Bil/Transform.lean`, loops of the machines in `IO` and a
+reader of JNI signatures. The kernel can't unfold one, so no theorem is about any of them, and they are only tested (item 17 of
+`Bap/Proofs.lean` lists them). For example:
 
 - Lifting through the real, lazily compiled environment means what the Lisp source says (`thunked_instruction_means_source`).
 - A JIT-compiled range ends as its blocks do one at a time in the interpreter (`lowerGraph_correct`), given the C++'s stated obligations.
